@@ -366,7 +366,9 @@ pub fn dispatch_character_mail_routes(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
-                let mut offers = crate::services::lp_store::get_corp_lp_offers(snap, corp_id);
+                let mut offers = crate::services::lp_store::get_corp_lp_offers_with_sde(
+                    &ctx.sde, snap, corp_id,
+                );
                 offers.sort_by_key(|o| o.offer_id);
                 let out: Vec<Value> = offers
                     .into_iter()

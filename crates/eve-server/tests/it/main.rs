@@ -396,3 +396,6 @@ mod notify_real_emitters_batch7_part3;
 mod notify_real_emitters_batch7_part4;
 mod rpc_lp_store_and_travel_closure;
 mod client_bug_reporting_suite;
+mod pi_and_evermarks_remediation;
+mod esi_market_industry_pi_part2;
+mod quasar_daily_goals_remediation;

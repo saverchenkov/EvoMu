@@ -520,10 +520,17 @@ async fn test_p1_simulation_unlinked_route_and_capacity_overflow() {
     assert!(vol_stored <= 12_000.0 + 1e-3, "stored volume does not exceed 12,000 m3");
 
     // Part 4: factory simulation halts and conserves inputs when destination storage is full
+    let water_schem = ctx
+        .sde
+        .planet_schematics
+        .iter()
+        .find(|(_, s)| s.types.iter().any(|t| !t.is_input && t.type_id == WATER_P1_TYPE))
+        .map(|(&id, _)| id)
+        .expect("Water P1 schematic in SDE");
     let mut fac_net = PiColonyNetworkState {
         pins: vec![
             PiPinState { pin_id: 501, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 3_000)]), ..Default::default() },
-            PiPinState { pin_id: 502, type_id: GAS_BASIC_FACILITY_TYPE_ID, schematic_id: Some(66), ..Default::default() },
+            PiPinState { pin_id: 502, type_id: GAS_BASIC_FACILITY_TYPE_ID, schematic_id: Some(water_schem), ..Default::default() },
             PiPinState { pin_id: 503, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_199_999)]), ..Default::default() },
         ],
         links: vec![

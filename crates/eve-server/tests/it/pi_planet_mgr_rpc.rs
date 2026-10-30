@@ -110,6 +110,14 @@ async fn test_pi_planet_mgr_rpc() {
         seed_cargo(snap, GAS_CC_TYPE, char_id, ship_id, 1);
     });
 
+    let water_schem = ctx
+        .sde
+        .planet_schematics
+        .iter()
+        .find(|(_, s)| s.types.iter().any(|t| !t.is_input && t.type_id == WATER_P1_TYPE))
+        .map(|(&id, _)| i64::from(id))
+        .expect("Water P1 schematic in SDE");
+
     // 1. Setup full colony network on JITA_PLANET_ID
     let update_cmds = vec![
         PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(101), PyRep::Integer(GAS_CC_TYPE as i64), PyRep::Real(0.10), PyRep::Real(0.10)]),
@@ -120,7 +128,7 @@ async fn test_pi_planet_mgr_rpc() {
         PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(101), PyRep::Integer(102), PyRep::Integer(0)]),
         PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(102), PyRep::Integer(103), PyRep::Integer(0)]),
         PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(103), PyRep::Integer(104), PyRep::Integer(0)]),
-        PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(65)]),
+        PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(water_schem)]),
         PyRep::Tuple(vec![PyRep::Integer(10), PyRep::Integer(102), PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64), PyRep::Real(0.02), PyRep::Integer(3)]),
     ];
     let net_rep = ctx
@@ -198,7 +206,7 @@ async fn test_pi_planet_mgr_rpc() {
         .await
         .expect("GetPin Processor");
     assert_eq!(get_i64(&pin_proc, "pinID"), Some(proc_pin_id));
-    assert_eq!(get_i64(&pin_proc, "schematicID"), Some(65));
+    assert_eq!(get_i64(&pin_proc, "schematicID"), Some(water_schem));
     assert_eq!(get_i64(&pin_proc, "cycleTimeSeconds"), Some(1800));
 
     let pin_lp = ctx
@@ -338,14 +346,21 @@ async fn test_parity_gap_remediations() {
     });
 
     // 5. Remediate BF-PI-SIMULATION-SPLIT-INPUT-MINT-02:
-    // Multi-pin split inputs: Schematic 66 requires 3,000 units of Aqueous Liquids P0.
+    // Multi-pin split inputs: Water schematic requires 3,000 units of Aqueous Liquids P0.
     // We split 3,000 across two storage pins: 1,200 in Pin 301, 1,800 in Pin 302.
     // Both pins have routes to Processor Pin 303.
+    let water_schem = ctx
+        .sde
+        .planet_schematics
+        .iter()
+        .find(|(_, s)| s.types.iter().any(|t| !t.is_input && t.type_id == WATER_P1_TYPE))
+        .map(|(&id, _)| id)
+        .expect("Water P1 schematic in SDE");
     let mut net = PiColonyNetworkState {
         pins: vec![
             PiPinState { pin_id: 301, type_id: GAS_STORAGE_TYPE, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_200)]), ..Default::default() },
             PiPinState { pin_id: 302, type_id: GAS_STORAGE_TYPE, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_800)]), ..Default::default() },
-            PiPinState { pin_id: 303, type_id: GAS_PROC_TYPE, schematic_id: Some(66), ..Default::default() },
+            PiPinState { pin_id: 303, type_id: GAS_PROC_TYPE, schematic_id: Some(water_schem), ..Default::default() },
             PiPinState { pin_id: 304, type_id: GAS_LP_TYPE, contents: HashMap::new(), ..Default::default() },
         ],
         links: vec![
@@ -370,7 +385,7 @@ async fn test_parity_gap_remediations() {
         extracted_commodities: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 3_000)]),
     };
 
-    // Run simulation: 1,800 seconds (1 cycle of schematic 66)
+    // Run simulation: 1,800 seconds (1 cycle of Water schematic)
     let (ext, proc) = advance_colony_simulation(&ctx, &mut col, &mut net, 1800, 1800);
     assert_eq!(ext, 0);
     assert_eq!(proc, 20, "1 cycle executed producing 20 Water P1");
@@ -386,7 +401,7 @@ async fn test_parity_gap_remediations() {
             PiPinState { pin_id: 401, type_id: GAS_STORAGE_TYPE, contents: HashMap::new(), ..Default::default() },
             // Isolated unconnected pin has 50,000 commodities
             PiPinState { pin_id: 402, type_id: GAS_STORAGE_TYPE, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 50_000)]), ..Default::default() },
-            PiPinState { pin_id: 403, type_id: GAS_PROC_TYPE, schematic_id: Some(66), ..Default::default() },
+            PiPinState { pin_id: 403, type_id: GAS_PROC_TYPE, schematic_id: Some(water_schem), ..Default::default() },
             PiPinState { pin_id: 404, type_id: GAS_LP_TYPE, contents: HashMap::new(), ..Default::default() },
         ],
         links: vec![

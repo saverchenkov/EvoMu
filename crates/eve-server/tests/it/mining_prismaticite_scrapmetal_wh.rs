@@ -363,8 +363,9 @@ async fn test_mining_prismaticite_reprocessing_and_unrefined_mineral_reactions()
             tatara_id,
             make_structure(tatara_id, 35835, corp_id, ls_sys, "Lowsec Reaction Athanor"),
         );
-        // Fit Biochemical Reactor (45539) first -> must fail with CompositeReactorRequired!
+        // Fit Biochemical Reactor (45539) + Cloning Center (35894) first -> must fail with CompositeReactorRequired!
         snap.items.insert(reactor_iid, make_item(reactor_iid, 45539, corp_id, tatara_id, InventoryFlag::ServiceSlot0, 1, true));
+        snap.items.insert(reactor_iid + 10, make_item(reactor_iid + 10, 35894, corp_id, tatara_id, InventoryFlag::ServiceSlot1, 1, true));
         snap.items.insert(formula_iid, make_item(formula_iid, 90274, char_id, tatara_id, InventoryFlag::Hangar, 1, true));
         snap.items.insert(102_000_812, make_item(102_000_812, 90307, char_id, tatara_id, InventoryFlag::Hangar, 200, false));
         snap.items.insert(102_000_813, make_item(102_000_813, 16634, char_id, tatara_id, InventoryFlag::Hangar, 200, false));

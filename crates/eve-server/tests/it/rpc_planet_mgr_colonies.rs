@@ -148,6 +148,18 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
     };
     let first_p0_tid = get_i64(&res_list[0], "resourceTypeID").expect("first P0 typeID") as TypeId;
 
+    let p1_schem_id = ctx
+        .sde
+        .planet_schematics
+        .iter()
+        .find(|(_, s)| {
+            s.cycle_time == 1800
+                && s.pins.contains(&GAS_BASIC_FACILITY_TYPE_ID)
+                && s.types.iter().any(|t| t.is_input && t.type_id == first_p0_tid)
+        })
+        .map(|(&id, _)| i64::from(id))
+        .expect("P1 schematic for first_p0_tid on GAS_BASIC_FACILITY_TYPE_ID");
+
     // 1. UserUpdateNetwork: build full colony network
     let update_commands = vec![
         cmd_pin(101, GAS_COMMAND_CENTER_TYPE_ID, 0.10, 0.10),
@@ -159,7 +171,7 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
         cmd_link(102, 103),
         cmd_link(103, 104),
         cmd_upgrade_link(102, 103, 1),
-        cmd_schematic(103, 65),
+        cmd_schematic(103, p1_schem_id),
         cmd_route(501, &[102, 103], first_p0_tid, 3_000),
         cmd_extractor_program(102, first_p0_tid, 0.02, 3),
     ];
@@ -207,7 +219,7 @@ async fn test_planet_mgr_colony_queries_and_network_updates() {
     let pin_proc = rpc(&ctx, &mut sess, "planetMgr", "GetPin", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(proc_pin_id)])
         .await
         .expect("GetPin Processor");
-    assert_eq!(get_i64(&pin_proc, "schematicID"), Some(65));
+    assert_eq!(get_i64(&pin_proc, "schematicID"), Some(p1_schem_id));
     assert_eq!(get_i64(&pin_proc, "cycleTimeSeconds"), Some(1800));
 
     let missing_pin = rpc(&ctx, &mut sess, "planetMgr", "GetPin", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(999_999)])

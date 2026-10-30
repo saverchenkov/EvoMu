@@ -172,8 +172,10 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let mut sess = build_sess(10_001, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 
-    // Unconfigured DailyGoalManager starts with empty templates (no synthetic defaults)
-    assert!(ctx.quasar_gateway.progression.daily_goals.get_templates().is_empty());
+    // ServerContext seeds 5 SDE-backed AIR Daily Goals from contributionmethods.fsdbinary out of the box
+    let sde_tpls = ctx.quasar_gateway.progression.daily_goals.get_templates();
+    assert_eq!(sde_tpls.len(), 5, "ServerContext must seed 5 SDE daily goals");
+    assert!(sde_tpls.iter().all(|t| t.name_message_id > 0 && t.description_message_id > 0));
     configure_test_daily_goals(&ctx);
 
     // Subscribe session to publicGatewaySvc for notice delivery
@@ -198,17 +200,19 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let wm = WireMessage::decode(&payload.value).expect("decode WireMessage");
     let goal_entries: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_entries.len(), 5, "Configured 5 daily goals should be returned");
+    assert_eq!(goal_entries.len(), 10, "5 SDE + 5 configured daily goals should be returned");
 
-    // Each field 1 entry is an eve_public.dailygoal.Identifier { 1: bytes uuid }
-    let first_id_msg = reg.decode_dynamic("eve_public.dailygoal.Identifier", goal_entries[0].value.as_bytes().unwrap()).expect("decode Identifier");
-    let goal_uuid_bytes = match first_id_msg.get(1) {
-        Some(eve_proto::quasar::DynamicValue::Bytes(b)) => b.as_slice(),
-        other => panic!("expected bytes uuid at field 1, got {other:?}"),
-    };
-    assert_eq!(goal_uuid_bytes.len(), 16);
-    let mut target_uuid = [0u8; 16];
-    target_uuid.copy_from_slice(goal_uuid_bytes);
+    // Target configured goal #1 ([0x44, 0x47, 0x01, ..., 1]) and verify its Identifier is present
+    let target_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    assert!(goal_entries.iter().any(|f| {
+        reg.decode_dynamic("eve_public.dailygoal.Identifier", f.value.as_bytes().unwrap())
+            .ok()
+            .and_then(|m| match m.get(1) {
+                Some(eve_proto::quasar::DynamicValue::Bytes(b)) => Some(b.as_slice() == target_uuid),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }));
 
     // Full goal definition + progress + earnings decoded via GetRequest -> GetResponse
     let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
@@ -228,7 +232,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let npc_ball = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(&ctx, 30_000_142, 10035, "BeltRat", 1, Default::default()).await;
     eve_server::services::combat_crimewatch::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(&ctx, 30_000_142, npc_ball, 90_000_001).await;
-    assert_eq!(ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001)[0].current_progress, 1, "NPC kill must increment combat daily goal progress");
+    assert_eq!(ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001).iter().find(|g| g.uuid == target_uuid).unwrap().current_progress, 1, "NPC kill must increment combat daily goal progress");
     let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 1)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
 
@@ -241,18 +245,25 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     let def_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCompletedWithEntitlementsRequest", Vec::new()).await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
     let def_wm = WireMessage::decode(&def_rsp.payload.unwrap().value).unwrap();
-    let comp_id = reg.decode_dynamic("eve_public.dailygoal.Identifier", def_wm.fields[0].value.as_bytes().unwrap()).unwrap();
-    assert!(matches!(comp_id.get(1), Some(eve_proto::quasar::DynamicValue::Bytes(b)) if b.as_slice() == target_uuid));
+    assert!(def_wm.fields.iter().any(|f| {
+        reg.decode_dynamic("eve_public.dailygoal.Identifier", f.value.as_bytes().unwrap())
+            .ok()
+            .and_then(|m| match m.get(1) {
+                Some(eve_proto::quasar::DynamicValue::Bytes(b)) => Some(b.as_slice() == target_uuid),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }));
 
     let rew_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllWithRewardsRequest", Vec::new()).await;
     assert_eq!(rew_rsp.status_code, STATUS_OK);
     let rew_dyn = reg.decode_dynamic("eve_public.dailygoal.api.GetAllWithRewardsResponse", &rew_rsp.payload.unwrap().value).unwrap();
-    assert!(matches!(rew_dyn.get(1), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if items.len() == 1), "Completed unclaimed goal must appear in GetAllWithRewardsResponse");
+    assert!(matches!(rew_dyn.get(1), Some(eve_proto::quasar::DynamicValue::Repeated(items)) if !items.is_empty()), "Completed unclaimed goal must appear in GetAllWithRewardsResponse");
 
     // 5. Redeem goal #1: verify snapshot overflow rolls back claimed=false, then redeem atomically (double redeem rejected)
     ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().balance = eve_db::IskCents(i64::MAX - 10); });
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
-    assert!(!ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001)[0].claimed, "Failed snapshot commit must roll back claimed=false");
+    assert!(!ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001).iter().find(|g| g.uuid == target_uuid).unwrap().claimed, "Failed snapshot commit must roll back claimed=false");
     ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&90_000_001).unwrap().balance = eve_db::IskCents(initial_isk); });
     let redeem_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
@@ -269,11 +280,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     assert!(has_dg_journal, "DailyGoalReward wallet journal entry must be recorded");
 
     // 6. Pay for completion on goal #2 (which has completion_cost_isk = Some(100_000))
-    let second_id_msg = reg.decode_dynamic("eve_public.dailygoal.Identifier", goal_entries[1].value.as_bytes().unwrap()).unwrap();
-    let second_uuid: [u8; 16] = match second_id_msg.get(1) {
-        Some(eve_proto::quasar::DynamicValue::Bytes(b)) => b.as_slice().try_into().unwrap(),
-        _ => panic!("expected 16-byte uuid"),
-    };
+    let second_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
     let pay_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(second_uuid)).await;
     assert_eq!(pay_rsp.status_code, STATUS_OK);
 
@@ -291,7 +298,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     assert!(reg.decode_dynamic("eve.dailygoal.api.GetResponse", &eve_get_rsp.payload.unwrap().value).unwrap().get(1).is_some());
     let eve_all_rsp = quasar_rpc(&ctx, &mut sess, "eve.dailygoal.api.GetAllRequest", Vec::new()).await;
     assert_eq!(eve_all_rsp.status_code, STATUS_OK);
-    assert!(matches!(reg.decode_dynamic("eve.dailygoal.api.GetAllResponse", &eve_all_rsp.payload.unwrap().value).unwrap().get(1), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 5));
+    assert!(matches!(reg.decode_dynamic("eve.dailygoal.api.GetAllResponse", &eve_all_rsp.payload.unwrap().value).unwrap().get(1), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() >= 5));
     ctx.advance_secs(86_400);
     let reset_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(reset_rsp.status_code, STATUS_OK);

@@ -86,6 +86,7 @@ fn make_legacy_op(method: &str, path_pattern: &str, op_id: &str, scope: Option<&
         operation_id: op_id.to_string(),
         tags: vec!["Legacy".to_string()],
         required_scopes: scope.into_iter().map(ToString::to_string).collect(),
+        required_roles: Vec::new(),
         parameters: Vec::new(),
         responses,
     }

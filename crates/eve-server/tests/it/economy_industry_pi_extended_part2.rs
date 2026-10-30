@@ -334,8 +334,8 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
                     PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(101), PyRep::Integer(5)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(102), PyRep::Integer(3060), PyRep::Real(0.11), PyRep::Real(0.11)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(103), PyRep::Integer(2492), PyRep::Real(0.12), PyRep::Real(0.12)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(104), PyRep::Integer(2493), PyRep::Real(0.13), PyRep::Real(0.13)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(105), PyRep::Integer(2494), PyRep::Real(0.14), PyRep::Real(0.14)]),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(104), PyRep::Integer(2494), PyRep::Real(0.13), PyRep::Real(0.13)]),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(105), PyRep::Integer(2482), PyRep::Real(0.14), PyRep::Real(0.14)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(106), PyRep::Integer(2541), PyRep::Real(0.15), PyRep::Real(0.15)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(107), PyRep::Integer(2543), PyRep::Real(0.16), PyRep::Real(0.16)]),
                 ]),
@@ -462,6 +462,18 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
     assert!(ovl_c0 < sep_c0);
 
     // 2. Schematic input/output routing across Basic (P0->P1), Advanced (P1->P2), and High-Tech (P3->P4)
+    let find_schem = |out_tid: TypeId| -> i64 {
+        ctx.sde
+            .planet_schematics
+            .iter()
+            .find(|(_, s)| s.types.iter().any(|t| !t.is_input && t.type_id == out_tid))
+            .map(|(&id, _)| i64::from(id))
+            .unwrap_or_else(|| panic!("missing SDE schematic for output {out_tid}"))
+    };
+    let water_schem = find_schem(3645);
+    let biocells_schem = find_schem(9832);
+    let nanofactory_schem = find_schem(2875);
+
     let non_fac_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -470,7 +482,7 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
             "UserUpdateNetwork",
             &[
                 PyRep::Integer(JITA_PLANET_ID),
-                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(store_id), PyRep::Integer(66)])]),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(store_id), PyRep::Integer(water_schem)])]),
             ],
             &kw,
             None,
@@ -487,9 +499,9 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         &[
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::List(vec![
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(basic_id), PyRep::Integer(66)]),
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(adv_id), PyRep::Integer(83)]),
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(htech_id), PyRep::Integer(119)]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(basic_id), PyRep::Integer(water_schem)]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(adv_id), PyRep::Integer(biocells_schem)]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(htech_id), PyRep::Integer(nanofactory_schem)]),
             ]),
         ],
         &kw,
@@ -498,15 +510,27 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
     .await
     .expect("Install P1, P2, and P4 schematics");
 
+    let nano_inputs: Vec<(TypeId, u64)> = ctx
+        .sde
+        .planet_schematics
+        .get(&(nanofactory_schem as u32))
+        .expect("Nano-Factory schematic in SDE")
+        .types
+        .iter()
+        .filter(|t| t.is_input)
+        .map(|t| (t.type_id, t.quantity))
+        .collect();
+    assert!(!nano_inputs.is_empty());
+
     ctx.db.with_mut_snapshot(|snap| {
         let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 5);
         if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == store_id) {
             pin.contents.insert(2268, 6_000);
             pin.contents.insert(3645, 80);
             pin.contents.insert(2390, 80);
-            pin.contents.insert(2349, 12);
-            pin.contents.insert(2358, 12);
-            pin.contents.insert(2367, 12);
+            for &(in_tid, in_qty) in &nano_inputs {
+                pin.contents.insert(in_tid, in_qty * 2);
+            }
         }
         eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
         if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
@@ -520,6 +544,29 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         .expect("GetColony without routes");
     assert_eq!(col_unrouted.dict_get("simulatedProcessedQuantity"), Some(&PyRep::Integer(0)));
 
+    let mut route_cmds = vec![
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(basic_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(basic_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(adv_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(adv_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(htech_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(htech_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(basic_id)]), PyRep::Integer(2268), PyRep::Integer(3_000)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(2), PyRep::List(vec![PyRep::Integer(basic_id), PyRep::Integer(pad_id)]), PyRep::Integer(3645), PyRep::Integer(20)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(3), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(3645), PyRep::Integer(40)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(4), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(2390), PyRep::Integer(40)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(5), PyRep::List(vec![PyRep::Integer(adv_id), PyRep::Integer(pad_id)]), PyRep::Integer(9832), PyRep::Integer(5)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(9), PyRep::List(vec![PyRep::Integer(htech_id), PyRep::Integer(pad_id)]), PyRep::Integer(2875), PyRep::Integer(1)]),
+    ];
+    for (idx, &(in_tid, in_qty)) in nano_inputs.iter().enumerate() {
+        route_cmds.push(PyRep::Tuple(vec![
+            PyRep::Integer(6),
+            PyRep::Integer(10 + idx as i64),
+            PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]),
+            PyRep::Integer(i64::from(in_tid)),
+            PyRep::Integer(in_qty as i64),
+        ]));
+    }
     ctx.dispatch_rpc(
         &mut sess,
         "planetMgr",
@@ -527,23 +574,7 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         "UserUpdateNetwork",
         &[
             PyRep::Integer(JITA_PLANET_ID),
-            PyRep::List(vec![
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(basic_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(basic_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(adv_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(adv_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(htech_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(htech_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(basic_id)]), PyRep::Integer(2268), PyRep::Integer(3_000)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(2), PyRep::List(vec![PyRep::Integer(basic_id), PyRep::Integer(pad_id)]), PyRep::Integer(3645), PyRep::Integer(20)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(3), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(3645), PyRep::Integer(40)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(4), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(2390), PyRep::Integer(40)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(5), PyRep::List(vec![PyRep::Integer(adv_id), PyRep::Integer(pad_id)]), PyRep::Integer(9832), PyRep::Integer(5)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(6), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]), PyRep::Integer(2349), PyRep::Integer(6)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(7), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]), PyRep::Integer(2358), PyRep::Integer(6)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(8), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]), PyRep::Integer(2367), PyRep::Integer(6)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(9), PyRep::List(vec![PyRep::Integer(htech_id), PyRep::Integer(pad_id)]), PyRep::Integer(2875), PyRep::Integer(1)]),
-            ]),
+            PyRep::List(route_cmds),
         ],
         &kw,
         None,
@@ -926,39 +957,129 @@ async fn test_wallet_evermarks_and_item_trader() {
     sess.station_id = Some(60_015_169);
     sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
 
-    let req = eve_proto::quasar::envelopes::EvePublicRequest {
-        issued: Some(eve_proto::quasar::types::GoogleTimestamp {
-            seconds: ctx.now_unix() as i64,
-            nanos: 0,
-        }),
-        correlation_uuid: b"corr-seq-job01".to_vec(),
-        payload: Some(eve_proto::quasar::types::GoogleAny {
-            type_url: format!(
-                "{}eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
-                eve_proto::quasar::TYPE_GOOGLEAPIS_PREFIX
-            ),
-            value: Vec::new(),
-        }),
-        external_origin: "eve-client".into(),
-        application_instance_uuid: b"app-instance-001".to_vec(),
-        authoritative_context: None,
-        trace_context: None,
+    use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
+    let mk_quasar_req = |corr: &[u8], type_name: &str, payload: Vec<u8>| {
+        eve_proto::quasar::envelopes::EvePublicRequest {
+            issued: Some(eve_proto::quasar::types::GoogleTimestamp {
+                seconds: ctx.now_unix() as i64,
+                nanos: 0,
+            }),
+            correlation_uuid: corr.to_vec(),
+            payload: Some(eve_proto::quasar::types::GoogleAny {
+                type_url: format!("{}{type_name}", eve_proto::quasar::TYPE_GOOGLEAPIS_PREFIX),
+                value: payload,
+            }),
+            external_origin: "eve-client".into(),
+            application_instance_uuid: b"app-instance-001".to_vec(),
+            authoritative_context: None,
+            trace_context: None,
+        }
     };
-    let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, ctx.now_unix());
-    assert_eq!(rsp.status_code, 200, "SKINR sequencing job status: {}", rsp.status_message);
-    ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, ctx.now_unix());
 
+    // Empty SKINR InitiateRequest must NOT mint free EverMarks
+    let empty_req = mk_quasar_req(
+        b"corr-seq-empty",
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        Vec::new(),
+    );
+    let empty_rsp = ctx.quasar_gateway.handle_public_request(&sess, &empty_req, None, false, ctx.now_unix());
+    assert_eq!(empty_rsp.status_code, 200);
+    assert_eq!(get_lp(&ctx, &mut sess, paragon_corp_id).await, mission_em);
+
+    // Activate a real SDE SKINR coating component item & initiate validated SKINR sequencing jobs
+    let skinr_cat = eve_server::services::quasar_cosmetics_skinr::SkinrStaticCatalog::load(&ctx.sde);
+    let coating_comp = skinr_cat
+        .components
+        .values()
+        .find(|c| !c.is_pattern() && !c.associated_types.is_empty() && !c.disallowed_slots.contains(&1))
+        .expect("SDE SKINR coating component");
+    let (coating_item_type_id, _) = coating_comp.associated_types[0];
+    let coating_item_id = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = IskCents::from_isk(1_000_000);
+        }
+        seed_item(snap, coating_item_type_id, char_id, 60_015_169, InventoryFlag::Hangar, 2, false, false, None)
+    });
+    let mut seq_item = Vec::new();
+    encode_varint_field(1, coating_item_id as u64, &mut seq_item);
+    let mut item_outer = Vec::new();
+    encode_bytes_field(1, &seq_item, &mut item_outer);
+    let mut consume_req = Vec::new();
+    encode_bytes_field(1, &item_outer, &mut consume_req);
+    encode_varint_field(2, 2, &mut consume_req);
+    let consume_rsp = ctx.quasar_gateway.handle_public_request(
+        &sess,
+        &mk_quasar_req(b"corr-consume-01", "eve_public.cosmetic.ship.skin.thirdparty.component.license.item.api.ConsumeRequest", consume_req),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_eq!(consume_rsp.status_code, 200, "Consume coating item: {}", consume_rsp.status_message);
+
+    let build_skinr_init = |design_name: &str| {
+        let mut seq_comp = Vec::new();
+        encode_varint_field(1, coating_comp.component_id as u64, &mut seq_comp);
+        let mut coat_cfg = Vec::new();
+        encode_bytes_field(1, &seq_comp, &mut coat_cfg);
+        let mut cfg_outer = Vec::new();
+        encode_bytes_field(1, &coat_cfg, &mut cfg_outer);
+        let mut seq_slot = Vec::new();
+        encode_varint_field(1, 1, &mut seq_slot);
+        let mut slot_msg = Vec::new();
+        encode_bytes_field(1, &seq_slot, &mut slot_msg);
+        encode_bytes_field(2, &cfg_outer, &mut slot_msg);
+        let mut seq_hull = Vec::new();
+        encode_varint_field(1, 587, &mut seq_hull); // Rifter
+        let mut layout = Vec::new();
+        encode_bytes_field(1, &slot_msg, &mut layout);
+        encode_bytes_field(2, &seq_hull, &mut layout);
+        encode_varint_field(3, 1, &mut layout);
+        let mut init_req = Vec::new();
+        encode_string_field(1, design_name, &mut init_req);
+        encode_string_field(2, "Paragon Line", &mut init_req);
+        encode_bytes_field(3, &layout, &mut init_req);
+        encode_varint_field(5, 1, &mut init_req);
+        init_req
+    };
+
+    let rsp1 = ctx.quasar_gateway.handle_public_request(
+        &sess,
+        &mk_quasar_req(b"corr-seq-job01", "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", build_skinr_init("Valkyrie I")),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_eq!(rsp1.status_code, 200, "SKINR sequencing job status: {}", rsp1.status_message);
+    assert_eq!(get_lp(&ctx, &mut sess, paragon_corp_id).await, mission_em + 500);
+
+    let rsp2 = ctx.quasar_gateway.handle_public_request(
+        &sess,
+        &mk_quasar_req(b"corr-seq-job02", "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", build_skinr_init("Valkyrie II")),
+        None,
+        false,
+        ctx.now_unix(),
+    );
+    assert_eq!(rsp2.status_code, 200);
     let em_earned = get_lp(&ctx, &mut sess, paragon_corp_id).await;
     assert_eq!(em_earned, mission_em + 1_000);
 
-    crate::common::seed_test_lp_store_offers(&ctx);
+    // Query Paragon V24 SDE EverMarks Ship Cosmetic Emblem catalog without synthetic seeding
+    let paragon_offers = ctx
+        .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(paragon_corp_id)], &kw, None)
+        .await
+        .expect("Paragon SDE EverMarks offers");
+    let PyRep::List(offer_list) = paragon_offers else { panic!("Expected List of Paragon offers") };
+    assert!(offer_list.len() > 800, "Expected >800 V24 SDE Paragon ship emblem offers, got {}", offer_list.len());
+    let rifter_emblem_offer_id = 600_000 + 72_964;
+    assert!(offer_list.iter().any(|o| o.dict_get("offerID") == Some(&PyRep::Integer(rifter_emblem_offer_id)) && o.dict_get("typeID") == Some(&PyRep::Integer(72964)) && o.dict_get("lpCost") == Some(&PyRep::Integer(750))));
+
     let take_emblem = ctx
         .dispatch_rpc(
             &mut sess,
             "LPStoreMgr",
             None,
             "TakeOfferForCharacter",
-            &[PyRep::Integer(paragon_corp_id), PyRep::Integer(6001), PyRep::Integer(1)],
+            &[PyRep::Integer(paragon_corp_id), PyRep::Integer(rifter_emblem_offer_id), PyRep::Integer(1)],
             &kw,
             None,
         )

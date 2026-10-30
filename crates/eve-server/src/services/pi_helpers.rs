@@ -623,7 +623,13 @@ pub fn advance_colony_simulation(
     for pin_idx in 0..net.pins.len() {
         let pin = &net.pins[pin_idx];
         let Some(schem_id) = pin.schematic_id else { continue };
-        let (cyc_secs, inputs, out_tid, out_qty) = pi_schematic_recipe(schem_id, default_p0);
+        let Some(schem_info) = ctx.sde.planet_schematics.get(&schem_id) else { continue };
+        if !schem_info.pins.is_empty() && !schem_info.pins.contains(&pin.type_id) {
+            continue;
+        }
+        let Some((cyc_secs, inputs, out_tid, out_qty)) = pi_schematic_recipe(&ctx.sde, schem_id) else {
+            continue;
+        };
         let pin_id = pin.pin_id;
         let all_inputs_routed = inputs.iter().all(|&(in_tid, _)| {
             net.routes.iter().any(|r| {

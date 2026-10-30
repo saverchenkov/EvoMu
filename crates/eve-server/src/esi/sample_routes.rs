@@ -435,6 +435,7 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/characters/{character_id}/mail/{mail_id}")
             | ("DELETE", "/characters/{character_id}/mail/{mail_id}")
             | ("GET", "/markets/groups")
+            | ("GET", "/markets/groups/{market_group_id}")
             | ("GET", "/universe/schematics/{schematic_id}")
             | ("GET", "/route/{origin}/{destination}")
             | ("GET", "/characters/{character_id}/search")
@@ -522,6 +523,10 @@ pub fn is_operation_implemented(method: &str, path_pattern: &str) -> bool {
             | ("GET", "/characters/{character_id}/opportunities")
             | ("GET", "/characters/{character_id}/planets")
             | ("GET", "/characters/{character_id}/planets/{planet_id}")
+            | ("GET", "/corporation/{corporation_id}/mining/extractions")
+            | ("GET", "/corporation/{corporation_id}/mining/observers")
+            | ("GET", "/corporation/{corporation_id}/mining/observers/{observer_id}")
+            | ("GET", "/corporations/{corporation_id}/customs_offices")
     )
 }
 

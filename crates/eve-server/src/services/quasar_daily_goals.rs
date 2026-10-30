@@ -1,16 +1,15 @@
-//! `quasar_daily_goals` — V24.01 Quasar Daily Goals Service (`feat:quasar.dailygoal`, `Q-4`).
+//! `quasar_daily_goals` — V24.01 Quasar Daily Goals Service (`feat:quasar.dailygoal`, `feat:pve.daily-goals`, `Q-4`).
 //!
 //! Implements live backend semantics for the EVE Online V24 AIR Daily Goals system:
+//! - SDE-backed daily goal seeding from `res:/staticdata/contributionmethods.fsdbinary` and `res:/localizationfsd/localization_fsd_en-us.pickle`.
 //! - Daily goal rotation, progress tracking, and reward redemption (ISK, SP).
 //! - Request handlers for `eve_public.dailygoal.api` and `eve.dailygoal.api`.
 //! - Real-time notice publication (`CurrentGoalsNotice`, `ProgressedNotice`, `CompletedNotice`, `RedeemedNotice`).
 //! - Live wallet/skill-point persistence in `WorldRepository`.
 //!
-//! V24 AIR Daily Goal definitions are server-authored (not stored in client `.fsdbinary` static files,
-//! though their contribution method types correspond to `res:/staticdata/contributionmethods.fsdbinary`
-//! and career paths correspond to `res:/staticdata/careerpaths.fsdbinary`) and are registered via the
-//! persisted operator API ([`DailyGoalManager::configure_template`] / [`DailyGoalManager::set_templates`])
-//! stored in `WorldStateSnapshot.quasar_state_blobs["quasar_daily_goals"]`.
+//! `WorldStateSnapshot.quasar_state_blobs["quasar_daily_goals"]` persists template overrides and per-character daily goal progress across restarts.
+
+// parity: feat:pve.daily-goals
 
 #![forbid(unsafe_code)]
 
@@ -32,7 +31,7 @@ use std::sync::{Arc, RwLock};
 /// `eve_public.dailygoal.ContributionConfiguration`:
 /// - `1`: Kill NPC (`DestroyNPC`, titleID `665455`, progressDescriptionID `696260`)
 /// - `2`: Mine Ore (`MineAsteroid`, titleID `665390`, progressDescriptionID `696245`)
-/// - `3`: Scan Signature (`ScanSignature`, titleID `665400`, progressDescriptionID `696251`)
+/// - `3`: Scan Signature (`ScanSignature`, titleID `665435`, progressDescriptionID `696251`)
 /// - `4`: Space Jump (`JumpStargate`, titleID `665465`, progressDescriptionID `696262`)
 /// - `5`: Manufacture Item (`ManufactureItem`, titleID `665394`, progressDescriptionID `696246`)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -68,7 +67,7 @@ impl DailyGoalTemplate {
         match self.category {
             1 => 665_455, // DestroyNPC.titleID
             2 => 665_390, // MineAsteroid.titleID
-            3 => 665_400, // ScanSignature.titleID
+            3 => 665_435, // ScanSignature.titleID
             4 => 665_465, // JumpStargate.titleID
             5 => 665_394, // ManufactureItem.titleID
             _ => 582_520, // Enforcer careerPath nameID
@@ -194,9 +193,84 @@ fn ensure_character_daily_goals_with_templates(
     changed
 }
 
+pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGoalTemplate> {
+    let methods = sde.contribution_methods().unwrap_or_default();
+    let specs: [(&str, u32, u32, u64, i64, f64, Option<i64>, Option<i64>, u32, u32, u32); 5] = [
+        ("DestroyNPC", 1, 3, 25, 500_000, 5_000.0, None, Some(2_500), 665_455, 696_260, 665_456),
+        ("MineAsteroid", 2, 2, 2_000, 500_000, 5_000.0, Some(100_000), Some(2_500), 665_390, 696_245, 665_395),
+        ("ScanSignature", 3, 1, 5, 500_000, 5_000.0, None, Some(2_500), 665_435, 696_251, 665_401),
+        ("JumpStargate", 4, 4, 10, 500_000, 5_000.0, None, Some(2_500), 665_465, 696_262, 665_466),
+        ("ManufactureItem", 5, 2, 1, 500_000, 5_000.0, None, Some(2_500), 665_394, 696_246, 665_412),
+    ];
+    specs
+        .into_iter()
+        .map(
+            |(
+                method_key,
+                category,
+                career,
+                target,
+                isk_reward,
+                sp_reward,
+                completion_cost_isk,
+                completion_cost_evermarks,
+                fb_title_id,
+                fb_prog_desc_id,
+                fb_desc_id,
+            )| {
+                let m = methods.get(method_key);
+                let title_id = m
+                    .and_then(|v| v.get("titleID"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .filter(|&v| v > 0)
+                    .unwrap_or(fb_title_id);
+                let prog_desc_id = m
+                    .and_then(|v| v.get("progressDescriptionID"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .filter(|&v| v > 0)
+                    .unwrap_or(fb_prog_desc_id);
+                let desc_id = m
+                    .and_then(|v| v.get("descriptionID"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .filter(|&v| v > 0)
+                    .unwrap_or(fb_desc_id);
+                let mut uuid = [0u8; 16];
+                uuid[0..5].copy_from_slice(b"SDEDG");
+                uuid[15] = category as u8;
+                DailyGoalTemplate {
+                    uuid,
+                    name_message: method_key.to_string(),
+                    description_message: format!("{method_key}_daily"),
+                    category,
+                    career,
+                    target,
+                    isk_reward,
+                    sp_reward,
+                    completion_cost_isk,
+                    completion_cost_evermarks,
+                    name_message_id: title_id,
+                    description_message_id: prog_desc_id,
+                    help_text_message_id: desc_id,
+                    assigner_corporation_id: 1_000_419,
+                }
+            },
+        )
+        .collect()
+}
+
 impl DailyGoalManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let store = db
+        Self::new_with_sde(db, None)
+    }
+
+    pub fn new_with_sde(
+        db: Option<Arc<WorldRepository>>,
+        sde: Option<Arc<eve_sde::SdeRegistry>>,
+    ) -> Self {
+        let mut store = db
             .as_ref()
             .map(|d| {
                 d.with_snapshot(|s| {
@@ -228,6 +302,12 @@ impl DailyGoalManager {
                 })
             })
             .unwrap_or_default();
+
+        if store.templates.is_empty() {
+            if let Some(ref sde_reg) = sde {
+                store.templates = build_sde_daily_goal_templates(sde_reg);
+            }
+        }
 
         let mut character_goals = store.character_goals;
         for goals in character_goals.values_mut() {

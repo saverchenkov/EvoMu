@@ -628,6 +628,29 @@ impl EsiRouter {
                         true,
                     );
                 };
+                let mut required_role_mask = eve_db::corp_roles::ROLE_DIRECTOR;
+                for role_name in &op.required_roles {
+                    required_role_mask |= match role_name.as_str() {
+                        "Director" => eve_db::corp_roles::ROLE_DIRECTOR,
+                        "Accountant" => eve_db::corp_roles::ROLE_ACCOUNTANT,
+                        "Junior_Accountant" => eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+                        "Trader" => eve_db::corp_roles::ROLE_TRADER,
+                        "Factory_Manager" => eve_db::corp_roles::ROLE_FACTORY_MANAGER,
+                        "Station_Manager" => eve_db::corp_roles::ROLE_STATION_MANAGER,
+                        _ => 0,
+                    };
+                }
+                if matches!(
+                    (op.method.as_str(), op.path_pattern.as_str()),
+                    ("GET", "/corporations/{corporation_id}/orders")
+                        | ("GET", "/corporations/{corporation_id}/orders/history")
+                ) {
+                    required_role_mask |= eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT;
+                } else if (op.method.as_str(), op.path_pattern.as_str())
+                    == ("GET", "/corporations/{corporation_id}/customs_offices")
+                {
+                    required_role_mask |= eve_db::corp_roles::ROLE_STATION_MANAGER;
+                }
                 let (char_corp, has_corp_role) = self.ctx.db.with_snapshot(|snap| {
                     let c_corp = snap
                         .characters
@@ -643,7 +666,7 @@ impl EsiRouter {
                                     .get(&claims.character_id)
                                     .copied()
                                     .unwrap_or(0)
-                                    & eve_db::corp_roles::ROLE_DIRECTOR)
+                                    & required_role_mask)
                                     != 0
                         })
                         .unwrap_or(false)
@@ -652,7 +675,7 @@ impl EsiRouter {
                             .get(&(path_corp_id, claims.character_id))
                             .map(|r| {
                                 ((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
-                                    & eve_db::corp_roles::ROLE_DIRECTOR)
+                                    & required_role_mask)
                                     != 0
                             })
                             .unwrap_or(false);
@@ -666,8 +689,8 @@ impl EsiRouter {
                         compat_date,
                         403,
                         format!(
-                            "Token character {} lacks required corporation director/CEO role for corporation {}",
-                            claims.character_id, path_corp_id
+                            "Token character {} lacks required corporation role for {} {}",
+                            claims.character_id, op.method, op.path_pattern
                         ),
                         true,
                     );
