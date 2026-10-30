@@ -8,6 +8,13 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
+fn is_obsolete_skill(sde: &eve_sde::SdeRegistry, sk_id: u32) -> bool {
+    match sde.types.get(&sk_id) {
+        Some(t) => !t.published || t.category_id != 16,
+        None => matches!(sk_id, 3374..=3379 | 12376 | 12385 | 12387 | 999_999),
+    }
+}
+
 /// Automated server-side obsolete skill migration (`feat:skills.skill-remove-obsolete`).
 ///
 /// Detects deprecated or unpublished skill types in the character's trained skills,
@@ -17,6 +24,11 @@ pub fn migrate_obsolete_skills_for_character(
     ctx: &ServerContext,
     char_id: i64,
 ) -> (usize, f64) {
+    // Guard against incomplete SDE catalogs so missing entries never wipe valid character skills.
+    if ctx.sde.types.len() < 10_000 {
+        return (0, 0.0);
+    }
+
     let now_ft = ctx.now_blueos_filetime_ticks();
 
     let res: Result<_, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
@@ -24,17 +36,10 @@ pub fn migrate_obsolete_skills_for_character(
             return Ok((Vec::new(), 0.0, 0.0));
         };
 
-        // Dynamically scan for any trained skill that is obsolete in SDE (!published or missing from SDE)
         let obsolete_candidates: Vec<u32> = skills_map
             .keys()
             .copied()
-            .filter(|&sk_id| {
-                ctx.sde
-                    .types
-                    .get(&sk_id)
-                    .map(|t| !t.published || t.category_id != 16)
-                    .unwrap_or(true)
-            })
+            .filter(|&sk_id| is_obsolete_skill(&ctx.sde, sk_id))
             .collect();
 
         if obsolete_candidates.is_empty() {

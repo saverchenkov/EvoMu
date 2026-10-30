@@ -327,10 +327,21 @@ pub fn compute_effective_agent_standing(
     vals.into_iter().fold(-10.0_f64, f64::max)
 }
 
-pub use crate::services::npc_standings_data::{
-    get_sde_npc_npc_standings, static_npc_faction_standings, CCP_NPC_FACTION_STANDINGS,
-    DERIVED_FACTION_STANDINGS,
-};
+/// DERIVED: inter-faction standing relations on EVE's `[-10.0, +10.0]` scale (secondary's view of primary).
+/// DATA GAP: V24 client SDE does not ship the full server-side inter-NPC standings matrix.
+pub const DERIVED_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
+    (500_001, 500_004, -5.0), (500_001, 500_003, 5.0), (500_001, 500_002, -2.0), (500_001, 500_007, 4.0), (500_001, 500_008, 5.0), (500_001, 500_010, -8.0), (500_001, 500_019, -10.0),
+    (500_002, 500_004, 5.0), (500_002, 500_003, -5.0), (500_002, 500_001, -2.0), (500_002, 500_007, -7.0), (500_002, 500_011, -8.0), (500_002, 500_015, 4.0), (500_002, 500_019, -10.0),
+    (500_003, 500_001, 5.0), (500_003, 500_002, -5.0), (500_003, 500_004, -3.0), (500_003, 500_007, 8.0), (500_003, 500_008, 7.0), (500_003, 500_012, -8.0), (500_003, 500_015, -5.0), (500_003, 500_019, -10.0),
+    (500_004, 500_002, 5.0), (500_004, 500_001, -5.0), (500_004, 500_003, -3.0), (500_004, 500_016, 4.0), (500_004, 500_017, -3.0), (500_004, 500_020, -8.0), (500_004, 500_019, -10.0),
+    (500_006, 500_001, 5.0), (500_006, 500_002, 5.0), (500_006, 500_003, 5.0), (500_006, 500_004, 5.0), (500_006, 500_009, -10.0), (500_006, 500_010, -10.0), (500_006, 500_011, -10.0), (500_006, 500_012, -10.0), (500_006, 500_013, -10.0), (500_006, 500_018, -10.0), (500_006, 500_019, -10.0), (500_006, 500_020, -10.0),
+    (500_007, 500_003, 8.0), (500_007, 500_002, -7.0), (500_008, 500_003, 7.0), (500_008, 500_001, 5.0), (500_015, 500_002, 3.0), (500_016, 500_004, 4.0),
+    (500_010, 500_001, -8.0), (500_011, 500_002, -8.0), (500_012, 500_003, -8.0), (500_020, 500_004, -8.0), (500_019, 500_001, -10.0), (500_019, 500_002, -10.0), (500_019, 500_003, -10.0), (500_019, 500_004, -10.0), (500_019, 500_014, -5.0), (500_019, 500_016, -5.0),
+    (500_026, 500_027, -10.0), (500_027, 500_026, -10.0),
+];
+pub fn static_npc_faction_standings() -> &'static [(i64, i64, f64)] { DERIVED_NPC_FACTION_STANDINGS }
+/// DERIVED / DATA GAP: returns derived inter-faction standings only (no synthesized corporation rows).
+pub fn get_sde_npc_npc_standings(_sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> { DERIVED_NPC_FACTION_STANDINGS.to_vec() }
 
 /// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
 /// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
@@ -373,7 +384,7 @@ pub fn apply_faction_standing_with_derived(
     if primary_size <= 0.0 {
         return;
     }
-    for &(secondary_f, target_f, rel) in CCP_NPC_FACTION_STANDINGS.iter().chain(DERIVED_FACTION_STANDINGS.iter()) {
+    for &(secondary_f, target_f, rel) in DERIVED_NPC_FACTION_STANDINGS {
         if target_f != primary_faction_id || rel == 0.0 {
             continue;
         }
@@ -410,6 +421,7 @@ pub fn apply_mission_completion_standings(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
     agent_id: i64,
+    mission_id: u32,
     corp_id: i64,
     base_standing_pct: f64,
     is_storyline_or_special: bool,
@@ -437,29 +449,21 @@ pub fn apply_mission_completion_standings(
         }
     }
 
-    let faction_id = match corp_id {
-        1_000_298 => Some(500_026), // Perun Clade -> Triglavian Collective
-        1_000_299 => Some(500_027), // AEGIS -> EDENCOM
-        _ => ctx.sde.npc_corporations
-            .get(&corp_id)
-            .and_then(|c| c.faction_id)
-            .map(|f| f as i64),
-    };
+    let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).map(|f| f as i64);
 
     if scaled_pct.abs() > 1e-9 {
         if let Some(fid) = faction_id {
-            let fac_pct = if is_storyline_or_special {
-                scaled_pct * 0.50
-            } else {
-                scaled_pct * 0.15
-            };
-            // Per EVE Wiki (NPC standings: Derived standings): Epic Arc (agent_type_id == 10)
-            // and Career Agent (agent_type_id == 12) missions do not trigger derived standings.
-            let apply_derived = !ctx
-                .sde
-                .agents
-                .get(&agent_id)
-                .is_some_and(|a| matches!(a.agent_type_id, 10 | 12));
+            let fac_pct = if is_storyline_or_special { scaled_pct * 0.50 } else { scaled_pct * 0.15 };
+            // Per EVE Wiki (NPC_standings.md): Epic Arc (agent_type_id == 10) missions and only the
+            // final mission of a Career Agent (agent_type_id == 12) chain suppress derived standings.
+            let agent_type = ctx.sde.agents.get(&agent_id).map_or(0, |a| a.agent_type_id);
+            let is_final_career = agent_type == 12
+                && ctx.sde.missions.get(&mission_id).is_some_and(|m| {
+                    m.title.ends_with("(10 of 10)")
+                        || m.title.ends_with("(5 of 5)")
+                        || m.title.eq_ignore_ascii_case("Song Of Birds")
+                });
+            let apply_derived = agent_type != 10 && !is_final_career;
             apply_faction_standing_with_derived(ctx, snap, char_id, fid, fac_pct, apply_derived, &mut changes);
         }
     }
@@ -1253,22 +1257,14 @@ pub async fn handle_extended(
 
         ("keeper", "ActivateAccelerationGate") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let is_mission = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).is_some_and(|mid| {
-                ctx.db
-                    .with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
-            });
-            if !is_mission {
+            let Some(mission_id) = args.first().and_then(|a| a.as_i64()).and_then(|raw_id| u32::try_from(raw_id).ok()).filter(|&mid| {
+                ctx.db.with_snapshot(|snap| snap.active_missions.contains_key(&(char_id, mid)))
+            }) else {
                 return None;
-            }
+            };
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate dungeon acceleration gate while docked".into() }));
             }
-            let Some(raw) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: "mission_id argument is required".into() }));
-            };
-            let Ok(mission_id) = u32::try_from(raw) else {
-                return Some(Err(BridgeRpcError { code: "InvalidMissionId".into(), message: format!("mission_id {raw} is out of valid u32 range") }));
-            };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Enforce Anomic Burner frigate/small-hull gate restriction (feat:pve.anomic-burner-missions)
                 let is_burner = load_mission_meta(snap, char_id, mission_id)

@@ -189,18 +189,28 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     place_hangar_item(&ctx, 991_000_106, 40_519, char_id, 1);
     rpc(&ctx, &mut sess, "skillMgr2", "ExtractSkills", &[PyRep::Dict(vec![(PyRep::Integer(25_739), PyRep::Integer(500_000))]), PyRep::Integer(991_000_106)]).await.expect("ExtractSkills");
 
-    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): legacy pre-V24 skill 999_999 migrated on SelectCharacterID after SQLite reopen
+    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): legacy pre-V24 skill 999_999 migrated on SelectCharacterID after SQLite reopen,
+    // while incomplete SDEs and unrecognized non-deprecated skill IDs are never wiped (R-OBSOLETE-WIPE-04).
     ctx.advance_secs(30);
     let (sp_pre_obs, free_pre_obs) = ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.skill_points += 1_500.0;
+        ch.skill_points += 2_500.0;
         let pre = (ch.skill_points, ch.free_skill_points);
-        snap.skills.entry(char_id).or_default().insert(999_999, TrainedSkillRecord { type_id: 999_999, level: 2, skill_points: 1_500.0 });
+        let sk = snap.skills.entry(char_id).or_default();
+        sk.insert(999_999, TrainedSkillRecord { type_id: 999_999, level: 2, skill_points: 1_500.0 });
+        sk.insert(888_888, TrainedSkillRecord { type_id: 888_888, level: 1, skill_points: 1_000.0 });
         pre
     });
 
     drop(ctx);
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let mut ctx_partial = ServerContext::with_repository(repo2.clone());
+    let mut empty_sde = (*ctx_partial.sde).clone();
+    empty_sde.types.clear();
+    ctx_partial.sde = Arc::new(empty_sde);
+    assert_eq!(eve_server::services::character_skill_ops::migrate_obsolete_skills_for_character(&ctx_partial, char_id), (0, 0.0));
+    assert!(repo2.with_snapshot(|s| s.skills[&char_id].contains_key(&3327) && s.skills[&char_id].contains_key(&999_999) && s.skills[&char_id].contains_key(&888_888)));
+
     let ctx2 = ServerContext::with_repository(repo2);
     common::pin_clock(&ctx2);
     ctx2.advance_secs(1_500);
@@ -208,6 +218,7 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
 
     let ch_post = ctx2.db.get_character(char_id).unwrap();
     assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&999_999)));
+    assert!(ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&888_888) && s.skills[&char_id].contains_key(&3327)));
     assert!((ch_post.skill_points - (sp_pre_obs - 1_500.0)).abs() < 1e-3);
     assert!((ch_post.free_skill_points - (free_pre_obs + 1_500.0)).abs() < 1e-3);
     let notifs = ctx2.drain_notifications_for_char(char_id);
@@ -262,7 +273,9 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
     let PyRep::List(classes) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetCertificateClasses", &[]).await.unwrap() else { panic!("expected List") };
     assert!(!classes.is_empty());
     // rpc-lint: allow crucible legacy service certificateMgr
-    let PyRep::KeyVal(recs) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[]).await.unwrap() else { panic!("expected KeyVal") };
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[]).await.unwrap_err().code, "InvalidShipTypeID");
+    // rpc-lint: allow crucible legacy service certificateMgr
+    let PyRep::KeyVal(recs) = rpc(&ctx, &mut alpha_sess, "certificateMgr", "GetAllShipCertificateRecommendations", &[PyRep::Integer(587)]).await.unwrap() else { panic!("expected KeyVal") };
     assert!(!recs.is_empty());
 
     // Certificate 196 requires Science (3402) [1..=5]: starter Science IV -> cert level 4; train V -> cert level 5!
@@ -307,6 +320,19 @@ async fn test_feat_skills_certificates_and_plans_and_accelerators() {
         }
     });
     assert_eq!(eve_server::services::character_certificates::derive_ship_mastery_level(&ctx, char_id, 587), 1);
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetCurrCharMasteryLevel", &[]).await.unwrap_err().code, "InvalidShipTypeID");
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetCurrCharMasteryLevel", &[PyRep::Integer(587)]).await.unwrap().as_i64(), Some(1));
+    assert_eq!(rpc(&ctx, &mut alpha_sess, "ship", "GetCurrCharMasteryLevel", &[PyRep::Integer(587)]).await.unwrap().as_i64(), Some(1));
+    let dogma_certs = rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetMyCertificates", &[]).await.unwrap();
+    let PyRep::Dict(d_dogma) = dogma_certs.dict_get("certificates").unwrap() else { panic!("expected Dict") };
+    assert_eq!(d_dogma.iter().find(|(k, _)| k.as_i64() == Some(196)).and_then(|(_, v)| v.as_i64()), Some(5));
+    let ship_certs = rpc(&ctx, &mut alpha_sess, "dogmaIM", "GetCertificatesForShipByMasteryLevel", &[PyRep::Integer(587), PyRep::Integer(1)]).await.unwrap();
+    assert_eq!(ship_certs.dict_get("masteryLevel").and_then(|v| v.as_i64()), Some(1));
+    assert!(matches!(ship_certs.dict_get("certificates"), Some(PyRep::List(l)) if !l.is_empty()));
+    let ship_reqs = rpc(&ctx, &mut alpha_sess, "ship", "GetSkillsRequiredForMasteryLevel", &[PyRep::Integer(587), PyRep::Integer(1)]).await.unwrap();
+    let PyRep::Dict(req_dict) = ship_reqs.dict_get("requiredSkills").unwrap() else { panic!("expected Dict") };
+    assert_eq!(req_dict.iter().find(|(k, _)| k.as_i64() == Some(3402)).and_then(|(_, v)| v.as_i64()), Some(1));
+    assert_eq!(req_dict.iter().find(|(k, _)| k.as_i64() == Some(3327)).and_then(|(_, v)| v.as_i64()), Some(1));
 
     // Non-GM players cannot grant certificates (R-CERT-01: AccessDenied)
     // rpc-lint: allow crucible legacy service certificateMgr

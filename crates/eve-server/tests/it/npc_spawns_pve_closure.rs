@@ -367,25 +367,28 @@ async fn test_belt_rats_clone_soldier_mordu_and_officer_spawns() {
     assert!(with_combat_runtime(&ctx, |rt| rt.npc_entities.values().any(|n| n.solar_system_id == low_sys && n.archetype == "CloneSoldier")), "Clone Soldier must respawn after 20m cooldown");
 
     // 4. True Null-Sec (`30_001_269` H-PA29, `-0.241` sec): Named Guristas Officer (`group 564`) + `meta_group 5` Officer module drop
+    // Isolate in a fresh ServerContext so HashMap iteration order across prior systems cannot shift RNG draws
+    let ctx4 = ServerContext::new();
+    common::pin_clock(&ctx4);
     let null_sys = 30_001_269u32;
-    let null_belt = ctx.sde.celestials_in_system(null_sys).into_iter().find(|c| c.group_id == 9).unwrap();
-    let (mut null_sess, null_guns) = setup_space_pilot(&ctx, 7104, "other", "other-secret", 90_000_002, null_sys, 910_004, 54733, 54754, 54783, 920_300, null_belt.position + DVec3::new(4_000.0, 0.0, 0.0)).await;
-    let null_beyonce = bind_beyonce(&ctx, &mut null_sess, null_sys).await;
+    let null_belt = ctx4.sde.celestials_in_system(null_sys).into_iter().find(|c| c.group_id == 9).unwrap();
+    let (mut null_sess, null_guns) = setup_space_pilot(&ctx4, 7104, "other", "other-secret", 90_000_002, null_sys, 910_004, 54733, 54754, 54783, 920_300, null_belt.position + DVec3::new(4_000.0, 0.0, 0.0)).await;
+    let null_beyonce = bind_beyonce(&ctx4, &mut null_sess, null_sys).await;
     // Seed 1_603_003 yields 6 consecutive draws < 0.10, guaranteeing the null-sec Officer spawn roll (0.10) hits
     let officer_seed = 1_603_003u64;
-    ctx.set_mechanic_rng_seed(Some(officer_seed));
-    tick_background_cluster(&ctx).await;
+    ctx4.set_mechanic_rng_seed(Some(officer_seed));
+    tick_background_cluster(&ctx4).await;
 
-    let (off_bid, off_tid) = with_combat_runtime(&ctx, |rt| {
-        let off = rt.npc_entities.values().find(|n| n.solar_system_id == null_sys && ctx.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 564)).expect("Named Guristas Officer (group 564) spawned in null-sec");
+    let (off_bid, off_tid) = with_combat_runtime(&ctx4, |rt| {
+        let off = rt.npc_entities.values().find(|n| n.solar_system_id == null_sys && ctx4.sde.types.get(&n.type_id).is_some_and(|t| t.group_id == 564)).expect("Named Guristas Officer (group 564) spawned in null-sec");
         (off.ball_id, off.type_id)
     });
-    assert!(ctx.sde.types[&off_tid].default_attributes.get(&481).copied().unwrap_or(0.0) >= 1_000_000.0);
-    warp_lock_and_destroy_via_rpc(&ctx, &mut null_sess, null_beyonce, null_sys, 910_004, &null_guns, off_bid, Some(null_belt.celestial_id as i64), 35).await;
+    assert!(ctx4.sde.types[&off_tid].default_attributes.get(&481).copied().unwrap_or(0.0) >= 1_000_000.0);
+    warp_lock_and_destroy_via_rpc(&ctx4, &mut null_sess, null_beyonce, null_sys, 910_004, &null_guns, off_bid, Some(null_belt.celestial_id as i64), 35).await;
 
-    let has_officer_mod = ctx.db.with_snapshot(|snap| {
-        let wrecks: Vec<i64> = snap.items.values().filter(|i| i.location_id == null_sys as i64 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186)).map(|i| i.item_id).collect();
-        snap.items.values().any(|i| wrecks.contains(&i.location_id) && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.meta_group_id == Some(5)))
+    let has_officer_mod = ctx4.db.with_snapshot(|snap| {
+        let wrecks: Vec<i64> = snap.items.values().filter(|i| i.location_id == null_sys as i64 && ctx4.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186)).map(|i| i.item_id).collect();
+        snap.items.values().any(|i| wrecks.contains(&i.location_id) && ctx4.sde.types.get(&i.type_id).is_some_and(|t| t.meta_group_id == Some(5)))
     });
     assert!(has_officer_mod, "Destroyed Null-Sec Officer must drop authentic SDE Officer module (meta_group 5)");
 }

@@ -387,6 +387,17 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     .await
     .expect_err("Triglavian reprocessing gate (3.0) must reject 2.99 standing");
     assert_eq!(err_trig_reproc.code, "StandingTooLowForStationService");
+    let err_trig_clone = rpc(
+        &ctx,
+        &mut s1,
+        "corpStationMgr",
+        "DoStandingCheckForStationService",
+        &[PyRep::Integer(24), PyRep::Integer(STATION_KINO_PERUN)],
+    )
+    .await
+    .expect_err("Triglavian jump clone gate (3.0) must reject 2.99 standing");
+    assert_eq!(err_trig_clone.code, "StandingTooLowForStationService");
+    assert!(!eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, STATION_JITA, 4));
 
     // At 3.00 boundary: Reprocessing (16) and Jump Clone Facility (24) both succeed
     ctx.db.with_mut_snapshot(|snap| {

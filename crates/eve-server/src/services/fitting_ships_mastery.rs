@@ -800,50 +800,47 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             ])))
         }
 
-        ("dogmaIM", "GetMyCertificates")
-        | ("dogmaIM", "GetCertificatesForShipByMasteryLevel")
-        | ("dogmaIM", "GetCurrCharMasteryLevel")
-        | ("dogmaIM", "GetSkillsRequiredForMasteryLevel")
-        | ("ship", "GetCurrCharMasteryLevel")
-        | ("ship", "GetSkillsRequiredForMasteryLevel") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+        ("dogmaIM", "GetMyCertificates") => Some(
+            crate::services::character_certificates::get_my_certificates_pyrep(ctx, session),
+        ),
+
+        ("dogmaIM", "GetCurrCharMasteryLevel") | ("ship", "GetCurrCharMasteryLevel") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(ship_type_id) = args.first().and_then(|a| a.as_i64()).and_then(|v| TypeId::try_from(v).ok()).filter(|&tid| tid > 0 && ctx.sde.types.contains_key(&tid)) else {
+                return Some(Err(BridgeRpcError::user_error("InvalidShipTypeID")));
             };
-            let ship_type_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .map(|v| v as TypeId)
-                .unwrap_or(587);
-            let req_mastery_level = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .unwrap_or(1)
-                .clamp(1, 5) as u8;
-            let mut hull_skills: Vec<u32> = vec![3392, 3426, 3449]; // Mechanics, CPU Management, Power Grid Management
-            if let Some(t) = ctx.sde.types.get(&ship_type_id) {
-                for &sk_attr in &[182u16, 183, 184] {
-                    if let Some(&sk_tid) = t.default_attributes.get(&sk_attr) {
-                        if sk_tid > 0.0 && !hull_skills.contains(&(sk_tid as u32)) {
-                            hull_skills.push(sk_tid as u32);
-                        }
-                    }
-                }
-            }
-            let trained_levels = ctx.character_skill_levels(char_id);
-            let min_trained = hull_skills
-                .iter()
-                .map(|&sk| trained_levels.get(&sk).copied().unwrap_or(0))
-                .min()
-                .unwrap_or(0)
-                .min(5);
-            let skills_for_tier: Vec<(PyRep, PyRep)> = hull_skills
-                .iter()
-                .map(|&sk| (PyRep::Integer(sk as i64), PyRep::Integer(req_mastery_level as i64)))
-                .collect();
+            let level = crate::services::character_certificates::derive_ship_mastery_level(ctx, char_id, ship_type_id);
+            Some(Ok(PyRep::Integer(level as i64)))
+        }
+
+        ("dogmaIM", "GetCertificatesForShipByMasteryLevel") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(ship_type_id) = args.first().and_then(|a| a.as_i64()).and_then(|v| TypeId::try_from(v).ok()).filter(|&tid| tid > 0 && ctx.sde.types.contains_key(&tid)) else {
+                return Some(Err(BridgeRpcError::user_error("InvalidShipTypeID")));
+            };
+            let req_mastery_level = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8;
+            let (cids, _) = crate::services::character_certificates::ship_mastery_tier_requirements(ctx, ship_type_id, req_mastery_level);
+            let mastery_level = crate::services::character_certificates::derive_ship_mastery_level(ctx, char_id, ship_type_id);
             Some(Ok(PyRep::keyval([
                 ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
-                ("masteryLevel", PyRep::Integer(min_trained as i64)),
+                ("masteryLevel", PyRep::Integer(mastery_level as i64)),
+                ("requestedMasteryLevel", PyRep::Integer(req_mastery_level as i64)),
+                ("certificates", PyRep::List(cids.into_iter().map(|c| PyRep::Integer(c as i64)).collect())),
+            ])))
+        }
+
+        ("dogmaIM", "GetSkillsRequiredForMasteryLevel") | ("ship", "GetSkillsRequiredForMasteryLevel") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(ship_type_id) = args.first().and_then(|a| a.as_i64()).and_then(|v| TypeId::try_from(v).ok()).filter(|&tid| tid > 0 && ctx.sde.types.contains_key(&tid)) else {
+                return Some(Err(BridgeRpcError::user_error("InvalidShipTypeID")));
+            };
+            let req_mastery_level = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8;
+            let (_, req_skills) = crate::services::character_certificates::ship_mastery_tier_requirements(ctx, ship_type_id, req_mastery_level);
+            let mastery_level = crate::services::character_certificates::derive_ship_mastery_level(ctx, char_id, ship_type_id);
+            let skills_for_tier = req_skills.into_iter().map(|(sk, lvl)| (PyRep::Integer(sk as i64), PyRep::Integer(lvl as i64))).collect();
+            Some(Ok(PyRep::keyval([
+                ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
+                ("masteryLevel", PyRep::Integer(mastery_level as i64)),
                 ("requestedMasteryLevel", PyRep::Integer(req_mastery_level as i64)),
                 ("requiredSkills", PyRep::Dict(skills_for_tier)),
             ])))
