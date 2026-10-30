@@ -236,8 +236,11 @@ impl Ballpark {
             .collect()
     }
 
-    /// Resolves elastic collision bounce physics (`Destiny::Ball::Collision`, `SP-4`, `feat:navigation.collision-bumping`),
-    /// separates overlapping objects, knocks aligning ships off alignment, and broadcasts `SetBallPosition`/`SetBallVelocity`.
+    /// Resolves momentum-conserving collision deflection physics (`Destiny::Ball::Collision`, `SP-4`,
+    /// `feat:navigation.collision-bumping`, restitution `0.8`) across dynamic ships and static hulls
+    /// (stations, stargates, Upwell structures, celestials, asteroids), separates overlapping spheres
+    /// with zero interpenetration, resets aligning ships to `WarpPhase::Aligning`, and broadcasts
+    /// `SetBallPosition`/`SetBallVelocity`.
     pub(crate) fn step_collision_bumping(&mut self) {
         let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
         let mut collision_events = Vec::new();
@@ -246,13 +249,26 @@ impl Ballpark {
 
         for i in 0..ball_keys.len() {
             let id_a = ball_keys[i];
+            let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
+            let is_station_or_struct_a =
+                matches!(group_a, 15 | 1404..=1410 | 1657 | 2016 | 2017);
             let is_static_a = self.is_static_ball(id_a)
-                || matches!(self.balls[&id_a].mode, MovementMode::Miniball);
+                || matches!(self.balls[&id_a].mode, MovementMode::Miniball)
+                || is_station_or_struct_a;
 
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
+                let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
+                // Star (`group 6` - stellar corona warp-in radius up to 513,100 km around system origin)
+                // and Asteroid Belt (`group 9` - empty spatial warp-in marker; asteroids are `group 25`).
+                if matches!(group_a, 6 | 9) || matches!(group_b, 6 | 9) {
+                    continue;
+                }
+                let is_station_or_struct_b =
+                    matches!(group_b, 15 | 1404..=1410 | 1657 | 2016 | 2017);
                 let is_static_b = self.is_static_ball(id_b)
-                    || matches!(self.balls[&id_b].mode, MovementMode::Miniball);
+                    || matches!(self.balls[&id_b].mode, MovementMode::Miniball)
+                    || is_station_or_struct_b;
 
                 if is_static_a && is_static_b {
                     continue;
@@ -274,40 +290,48 @@ impl Ballpark {
                 ) {
                     continue;
                 }
-                let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
-                let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                if matches!(
-                    group_a,
-                    6 | 7 | 8 | 9 | 10 | 15 | 1404..=1410 | 1657 | 2016 | 2017
-                ) || matches!(
-                    group_b,
-                    6 | 7 | 8 | 9 | 10 | 15 | 1404..=1410 | 1657 | 2016 | 2017
-                ) {
-                    continue;
-                }
                 if self.combat_states.get(&id_a).is_some_and(|cs| {
                     let mut c = cs.clone();
                     c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0 || c.is_cloaked
+                    c.gate_cloak_remaining_ticks > 0
+                        || c.undock_invulnerable_remaining_ticks > 0
+                        || c.is_cloaked
                 }) || self.combat_states.get(&id_b).is_some_and(|cs| {
                     let mut c = cs.clone();
                     c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0 || c.is_cloaked
+                    c.gate_cloak_remaining_ticks > 0
+                        || c.undock_invulnerable_remaining_ticks > 0
+                        || c.is_cloaked
                 }) {
                     continue;
                 }
 
+                // NPC stations (`group 15`) and Upwell structures (`1404..=1410 | 1657 | 2016 | 2017`)
+                // have outer SDE visual radii up to 150 km while their docking ring sits at 2,000 m,
+                // and stargates (`group 10`) have jump activation rings at ~3,532 m; collide against
+                // their inner core hull (`1,000 m` / `2,500 m`) so 0 m warp-ins and docking/jumping work.
                 let (pos_a, rad_a, mass_a, vel_a) = {
                     let b = &self.balls[&id_a];
-                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
+                    let r = if is_station_or_struct_a {
+                        b.radius.min(1_000.0)
+                    } else if group_a == 10 {
+                        b.radius.min(2_500.0)
+                    } else {
+                        b.radius
+                    };
+                    (b.position, r, b.mass.max(1.0), b.velocity)
                 };
                 let (pos_b, rad_b, mass_b, vel_b) = {
                     let b = &self.balls[&id_b];
-                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
+                    let r = if is_station_or_struct_b {
+                        b.radius.min(1_000.0)
+                    } else if group_b == 10 {
+                        b.radius.min(2_500.0)
+                    } else {
+                        b.radius
+                    };
+                    (b.position, r, b.mass.max(1.0), b.velocity)
                 };
-                if rad_a > 50_000.0 || rad_b > 50_000.0 {
-                    continue;
-                }
 
                 let delta = pos_a - pos_b;
                 let dist = delta.length();

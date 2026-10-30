@@ -187,14 +187,22 @@ async fn handle_cmd_warp_to_stuff(
         });
     }
     let default_min_range = if is_autopilot { 15_000.0 } else { 0.0 };
-    let min_range = raw_min_range
-        .or_else(|| {
-            kwargs
-                .get("minRange")
-                .or_else(|| kwargs.get("warpInDistance"))
-                .or_else(|| kwargs.get("range"))
-                .and_then(|v| v.as_f64())
-        })
+    let candidate_min_range = raw_min_range.or_else(|| {
+        kwargs
+            .get("minRange")
+            .or_else(|| kwargs.get("warpInDistance"))
+            .or_else(|| kwargs.get("range"))
+            .and_then(|v| v.as_f64())
+    });
+    if let Some(r) = candidate_min_range {
+        if !r.is_finite() {
+            return Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "Warp range must be finite".into(),
+            });
+        }
+    }
+    let min_range = candidate_min_range
         .unwrap_or(default_min_range)
         .clamp(0.0, 100_000.0);
     tracing::info!(

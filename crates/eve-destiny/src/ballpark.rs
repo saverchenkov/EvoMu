@@ -702,11 +702,10 @@ impl Ballpark {
         if self.is_immobile_structure_or_static(ball_id) {
             return Err("StructureCannotNavigate: Static or Upwell structure balls cannot micro jump".into());
         }
-        if self.is_ball_scrambled(ball_id)
-            || self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_mwd_mjd_disabled)
+        if self
+            .combat_states
+            .get(&ball_id)
+            .is_some_and(|cs| cs.is_mwd_mjd_disabled)
         {
             return Err("WarpScrambled: Cannot activate micro jump drive while warp scrambled".into());
         }
@@ -769,11 +768,10 @@ impl Ballpark {
         if self.is_immobile_structure_or_static(ball_id) {
             return Err("StructureCannotNavigate: Static or Upwell structure balls cannot activate micro jump field".into());
         }
-        if self.is_ball_scrambled(ball_id)
-            || self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_mwd_mjd_disabled)
+        if self
+            .combat_states
+            .get(&ball_id)
+            .is_some_and(|cs| cs.is_mwd_mjd_disabled)
         {
             return Err(
                 "WarpScrambled: Cannot activate micro jump field generator while warp scrambled"
@@ -809,9 +807,6 @@ impl Ballpark {
                         .get(&other_id)
                         .map(|cs| cs.disallow_assistance)
                         .unwrap_or(false);
-                if self.is_ball_scrambled(other_id) && !is_bastioned_marauder {
-                    return None;
-                }
                 if let Some(cs) = self.combat_states.get(&other_id) {
                     let mut c = cs.clone();
                     c.sync_action_breaks();

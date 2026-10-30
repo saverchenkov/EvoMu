@@ -352,17 +352,17 @@ async fn fitting_capacity_cargo_expanders_drone_upgrades_and_wubble_probe() {
 
     rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71053)]).await.expect("launch Stasis Webification Probe");
 
-    // After 1s (before 3s arming delay), velocity is unchanged
+    // After 1s (before 2s SDE arming delay), velocity is unchanged
     let _ = sys.tick().await;
     let (_, mid_ball) = sys.get_ball_snapshot(81042).await.unwrap().unwrap();
-    assert!((mid_ball.max_velocity - base_sabre_vel).abs() < 1e-3, "Wubble probe must not web before 3s arming delay");
+    assert!((mid_ball.max_velocity - base_sabre_vel).abs() < 1e-3, "Wubble probe must not web before 2s arming delay");
 
-    // After 3s total, probe detonates and applies -30% velocity debuff (0.70x) for 30s
-    for _ in 0..3 {
+    // After 2s total, probe detonates and applies -20% velocity debuff (0.80x from SDE speedFactor=-20) for 30s
+    for _ in 0..2 {
         let _ = sys.tick().await;
     }
     let (_, webbed_ball) = sys.get_ball_snapshot(81042).await.unwrap().unwrap();
-    assert!((webbed_ball.max_velocity - base_sabre_vel * 0.70).abs() < 1.0, "Detonated Wubble probe must apply -30% velocity debuff");
+    assert!((webbed_ball.max_velocity - base_sabre_vel * 0.80).abs() < 1.0, "Detonated Wubble probe must apply -20% velocity debuff");
 
     // After 31 more ticks, 30s debuff expires and restores original max_velocity
     for _ in 0..31 {

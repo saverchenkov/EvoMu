@@ -213,11 +213,10 @@ pub fn resolve_warp_landing_point(
 }
 
 /// `warpVectorMgr.UseVector(itemID)` (`feat:navigation.warp-vector`):
-/// Supports both:
-/// 1. Consumable Warp Vector Data items in ship cargo (`group_id == 4599`, e.g. `77825` `Jovian Symbolic Navigator`),
-///    validating proximity to the system star (`attr 5432`), applying the directional vector delta
-///    `(attr 5429, attr 5430, attr 5431)` with `>= 150 km` minimum warp distance, and consuming 1 unit.
-/// 2. Local rigid warp vector beacon entities in space within `100 km`.
+/// Validates consumable Warp Vector Data items in ship cargo (`group_id == 4599`, e.g. `77825`
+/// `Jovian Symbolic Navigator`), checking proximity to the system star (`attr 5432`), applying the
+/// star-centered directional vector delta `(attr 5429, attr 5430, attr 5431)` with `>= 150 km`
+/// minimum warp distance, and atomically reserving 1 unit + 300s per-character cooldown.
 pub async fn handle_use_warp_vector(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -298,9 +297,31 @@ pub async fn handle_use_warp_vector(
             message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
         })?;
 
-    // Check if `target_id` is an inventory item (consumable Warp Vector Data `group 4599` in ship cargo).
-    let cargo_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&target_id).cloned());
-    if let Some(vec_item) = cargo_item_opt {
+    // `warpVectorMgr.UseVector(itemID)` only accepts an owned Warp Vector Data item (`group 4599`) in active ship cargo.
+    let star_opt = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 6);
+    let star_pos = star_opt.as_ref().map(|c| c.position).unwrap_or(DVec3::ZERO);
+    let has_star = star_opt.is_some();
+    let sys_radius_opt = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.radius)
+        .filter(|&r| r > 0.0);
+    let now_unix = ctx.now_unix_secs();
+
+    // Atomically validate the cargo item, cooldown, star proximity, and >= 150 km vector distance,
+    // and reserve 1 unit + 300s per-character cooldown before awaiting `set_movement_mode`.
+    let (dest_pos, dist_m, remaining_qty, prev_item, prev_cd_until) = ctx.db.with_mut_snapshot(|snap| {
+        let Some(vec_item) = snap.items.get(&target_id).cloned() else {
+            return Err(BridgeRpcError {
+                code: "InvalidVectorItem".into(),
+                message: format!("Warp vector item {target_id} not found in active ship {ship_id} cargo"),
+            });
+        };
         if vec_item.owner_id != char_id
             || vec_item.location_id != ship_id
             || vec_item.flag != InventoryFlag::Cargo
@@ -308,9 +329,7 @@ pub async fn handle_use_warp_vector(
         {
             return Err(BridgeRpcError {
                 code: "InvalidVectorItem".into(),
-                message: format!(
-                    "Warp vector item {target_id} must be in active ship {ship_id} cargo"
-                ),
+                message: format!("Warp vector item {target_id} must be in active ship {ship_id} cargo"),
             });
         }
         let mod_t = ctx.sde.types.get(&vec_item.type_id).ok_or_else(|| BridgeRpcError {
@@ -327,20 +346,18 @@ pub async fn handle_use_warp_vector(
             });
         }
 
-        let now_unix = ctx.now_unix_secs();
-        let cd_until: u64 = ctx.db.with_snapshot(|snap| {
-            snap.service_state_blobs
-                .get("warp_vector_cooldown_until")
-                .and_then(|s| serde_json::from_str::<HashMap<i64, u64>>(s).ok())
-                .and_then(|m| m.get(&char_id).copied())
-                .unwrap_or(0)
-        });
-        if cd_until > now_unix {
+        let mut cd_map: HashMap<i64, u64> = snap
+            .service_state_blobs
+            .get("warp_vector_cooldown_until")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let prev_cd = cd_map.get(&char_id).copied();
+        if prev_cd.unwrap_or(0) > now_unix {
             return Err(BridgeRpcError {
                 code: "WarpVectorCooldown".into(),
                 message: format!(
                     "Warp vector reactivation cooldown active for {} s",
-                    cd_until - now_unix
+                    prev_cd.unwrap_or(0) - now_unix
                 ),
             });
         }
@@ -351,13 +368,7 @@ pub async fn handle_use_warp_vector(
             .copied()
             .or_else(|| mod_t.default_attributes.get(&5432).copied())
             .unwrap_or(1_496_000_000_000.0);
-        let star_opt = ctx
-            .sde
-            .celestials_in_system(sys_id)
-            .into_iter()
-            .find(|c| c.group_id == 6);
-        let star_pos = star_opt.as_ref().map(|c| c.position).unwrap_or(DVec3::ZERO);
-        if star_opt.is_some() {
+        if has_star {
             let star_dist = ship_ball.position.distance(star_pos);
             if star_dist > max_star_dist {
                 return Err(BridgeRpcError {
@@ -396,13 +407,7 @@ pub async fn handle_use_warp_vector(
             });
         }
         let mut dest_pos = star_pos + delta;
-        if let Some(sys_radius) = ctx
-            .sde
-            .solar_systems
-            .get(&sys_id)
-            .map(|s| s.radius)
-            .filter(|&r| r > 0.0)
-        {
+        if let Some(sys_radius) = sys_radius_opt {
             let rel = dest_pos - star_pos;
             if rel.length() > sys_radius {
                 dest_pos = star_pos + rel.normalize_or_zero() * sys_radius;
@@ -419,149 +424,49 @@ pub async fn handle_use_warp_vector(
             });
         }
 
-        let warp_speed =
-            crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ship_ball.type_id);
-        let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
-        sys_handle
-            .set_movement_mode(ship_id, warp_mode)
-            .await
-            .map_err(|e| BridgeRpcError {
-                code: "WarpFailed".into(),
-                message: e,
-            })?;
+        cd_map.insert(char_id, now_unix.saturating_add(WARP_VECTOR_COOLDOWN_SECS));
+        if let Ok(json) = serde_json::to_string(&cd_map) {
+            snap.service_state_blobs
+                .insert("warp_vector_cooldown_until".into(), json);
+        }
+        let mut rem = 0;
+        if let Some(it) = snap.items.get_mut(&target_id) {
+            it.quantity = (it.quantity - 1).max(0);
+            it.version += 1;
+            rem = it.quantity;
+        }
+        if rem == 0 {
+            snap.items.remove(&target_id);
+        }
+        Ok((dest_pos, dist_m, rem, vec_item, prev_cd))
+    })?;
 
-        let remaining_qty = ctx.db.with_mut_snapshot(|snap| {
+    let warp_speed =
+        crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ship_ball.type_id);
+    let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
+    if let Err(e) = sys_handle.set_movement_mode(ship_id, warp_mode).await {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(target_id, prev_item);
             let mut cd_map: HashMap<i64, u64> = snap
                 .service_state_blobs
                 .get("warp_vector_cooldown_until")
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
-            cd_map.insert(char_id, now_unix.saturating_add(WARP_VECTOR_COOLDOWN_SECS));
+            if let Some(old_cd) = prev_cd_until {
+                cd_map.insert(char_id, old_cd);
+            } else {
+                cd_map.remove(&char_id);
+            }
             if let Ok(json) = serde_json::to_string(&cd_map) {
                 snap.service_state_blobs
                     .insert("warp_vector_cooldown_until".into(), json);
             }
-            let mut rem = 0;
-            if let Some(it) = snap.items.get_mut(&target_id) {
-                it.quantity = (it.quantity - 1).max(0);
-                it.version += 1;
-                rem = it.quantity;
-            }
-            if rem == 0 {
-                snap.items.remove(&target_id);
-            }
-            rem
         });
-
-        ctx.active_warps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(ship_id, char_id);
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnWarpStarted",
-            "charid",
-            vec![
-                PyRep::Integer(ship_id),
-                PyRep::Integer(ship_ball.type_id as i64),
-            ],
-        );
-
-        return Ok(PyRep::keyval([
-            ("shipID", PyRep::Integer(ship_id)),
-            ("vectorItemID", PyRep::Integer(target_id)),
-            ("itemID", PyRep::Integer(target_id)),
-            ("consumed", PyRep::Bool(true)),
-            ("remainingQuantity", PyRep::Integer(remaining_qty as i64)),
-            ("distanceMeters", PyRep::Real(dist_m)),
-            ("warpSpeedAuPerSec", PyRep::Real(warp_speed)),
-            (
-                "destination",
-                PyRep::Tuple(vec![
-                    PyRep::Real(dest_pos.x),
-                    PyRep::Real(dest_pos.y),
-                    PyRep::Real(dest_pos.z),
-                ]),
-            ),
-        ]));
-    }
-
-    // Fallback: Space warp vector beacon entity within 100 km (`sov_services.rs` legacy beacon path).
-    let (_, target_ball) = sys_handle
-        .get_ball_snapshot(target_id)
-        .await
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyQueryFailed".into(),
+        return Err(BridgeRpcError {
+            code: "WarpFailed".into(),
             message: e,
-        })?
-        .ok_or_else(|| BridgeRpcError {
-            code: "VectorItemNotFound".into(),
-            message: format!("Warp vector entity {target_id} is not in space in solar system {sys_id}"),
-        })?;
-
-    if ctx
-        .sde
-        .types
-        .get(&target_ball.type_id)
-        .is_some_and(|t| t.category_id == 6)
-    {
-        return Err(BridgeRpcError {
-            code: "InvalidVectorTarget".into(),
-            message: format!("Entity {target_id} is a ship, not a valid warp vector celestial"),
         });
     }
-
-    let dist = (target_ball.position - ship_ball.position).length();
-    const MAX_VECTOR_PROXIMITY_M: f64 = 100_000.0;
-    if dist > MAX_VECTOR_PROXIMITY_M {
-        return Err(BridgeRpcError {
-            code: "TargetNotInRange".into(),
-            message: format!(
-                "Warp vector entity {target_id} is out of activation range ({dist:.1} m > {MAX_VECTOR_PROXIMITY_M:.1} m)"
-            ),
-        });
-    }
-
-    const MAX_VECTOR_DISPLACEMENT_M: f64 = 100_000.0;
-    let explicit_vec = match args.get(1) {
-        Some(PyRep::Tuple(seq) | PyRep::List(seq)) if seq.len() >= 3 => {
-            let v = DVec3::new(
-                seq[0].as_f64().unwrap_or(0.0),
-                seq[1].as_f64().unwrap_or(0.0),
-                seq[2].as_f64().unwrap_or(0.0),
-            );
-            if !v.is_finite() {
-                return Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "Vector coordinates must be finite".into(),
-                });
-            }
-            Some(v)
-        }
-        _ => None,
-    };
-
-    let dest_pos = if let Some(v) = explicit_vec.filter(|v| v.length() > 1e-6) {
-        if v.length() > MAX_VECTOR_DISPLACEMENT_M {
-            ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
-        } else if v.length() >= 1_000.0 {
-            ship_ball.position + v
-        } else {
-            ship_ball.position + v.normalize() * MAX_VECTOR_DISPLACEMENT_M
-        }
-    } else {
-        let delta = target_ball.position - ship_ball.position;
-        if delta.length() > 1.0 {
-            target_ball.position + delta.normalize() * MAX_VECTOR_DISPLACEMENT_M
-        } else {
-            target_ball.position + DVec3::new(MAX_VECTOR_DISPLACEMENT_M, 0.0, 0.0)
-        }
-    };
-
-    let warp_speed =
-        crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ship_ball.type_id);
-    let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
-    let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
 
     ctx.active_warps
         .lock()
@@ -580,6 +485,11 @@ pub async fn handle_use_warp_vector(
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),
         ("vectorItemID", PyRep::Integer(target_id)),
+        ("itemID", PyRep::Integer(target_id)),
+        ("consumed", PyRep::Bool(true)),
+        ("remainingQuantity", PyRep::Integer(remaining_qty as i64)),
+        ("distanceMeters", PyRep::Real(dist_m)),
+        ("warpSpeedAuPerSec", PyRep::Real(warp_speed)),
         (
             "destination",
             PyRep::Tuple(vec![

@@ -702,11 +702,7 @@ pub(crate) async fn handle_module_cycles(
                 }
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        if cs.is_mwd_mjd_disabled
-                            || (is_mjd
-                                && (cs.is_warp_scrambled()
-                                    || sys.is_ball_scrambled(ship_id).await.unwrap_or(false)))
-                        {
+                        if cs.is_mwd_mjd_disabled {
                             return Some(Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Microwarpdrive or Micro Jump Drive while warp scrambled".into() }));
                         }
                     }

@@ -481,10 +481,11 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     let (_, cap_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     assert!((cap_ball.position.x - (cap_origin.x + 250_000.0)).abs() < 5_000.0);
 
-    // 2. Warp Scrambler Propulsion Shutoff vs Warp Disruptor & Afterburner (`feat:navigation.warp-scramble-propulsion-shutoff`)
+    // 2. Warp Scrambler Propulsion Shutoff vs Warp Disruptor, Bubble, WCS, & Afterburner (`feat:navigation.warp-scramble-propulsion-shutoff`)
     let mwd_id: i64 = 75_011;
     let ab_id: i64 = 75_012;
     let mid_spool_mjd_id: i64 = 75_013;
+    let wcs_id: i64 = 75_014;
     let disruptor_id: i64 = 75_021;
     let scrambler_id: i64 = 75_022;
 
@@ -496,10 +497,11 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     give_item(&ctx, mwd_id, 5_975, char_mjd, ship_mjd, InventoryFlag::MedSlot0, 1);
     give_item(&ctx, ab_id, 12_058, char_mjd, ship_mjd, InventoryFlag::MedSlot1, 1);
     give_item(&ctx, mid_spool_mjd_id, 33_915, char_mjd, ship_mjd, InventoryFlag::MedSlot2, 1);
+    give_item(&ctx, wcs_id, 10_998, char_mjd, ship_mjd, InventoryFlag::LoSlot0, 1); // Warp Core Stabilizer I (+2 core strength)
     give_item(&ctx, disruptor_id, 3_242, char_scram, ship_scram, InventoryFlag::MedSlot0, 1);
     give_item(&ctx, scrambler_id, 448, char_scram, ship_scram, InventoryFlag::MedSlot1, 1);
     ctx.db.with_mut_snapshot(|snap| {
-        for &mid in &[mwd_id, ab_id, mid_spool_mjd_id, disruptor_id, scrambler_id] {
+        for &mid in &[mwd_id, ab_id, mid_spool_mjd_id, wcs_id, disruptor_id, scrambler_id] {
             snap.module_online_states.insert(mid, true);
         }
     });
@@ -520,14 +522,53 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     let (_, mwd_on_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     assert!(mwd_on_ball.max_velocity > base_vel * 4.0);
 
+    // 2a. Warp Disruptor keeps MWD active AND allows MJD activation, 12s spool (skill lvl 0), and 100 km jump
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(disruptor_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
     ]).await.unwrap();
     assert!(sys.is_ball_scrambled(ship_mjd).await.unwrap());
     let (_, under_disruptor_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     assert!(under_disruptor_ball.max_velocity > base_vel * 4.0);
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Deactivate", vec![PyRep::Integer(mwd_id)]).await.unwrap();
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
+    for _ in 0..12 {
+        sys.set_capacitor(ship_mjd, 10_000.0).await.unwrap();
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let (_, disruptor_jumped_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
+    assert!(
+        disruptor_jumped_ball.position.distance(scram_arena) > 95_000.0,
+        "MJD must complete 100 km jump under Warp Disruptor: got {:?}",
+        disruptor_jumped_ball.position
+    );
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Deactivate", vec![PyRep::Integer(disruptor_id)]).await.unwrap();
+    ctx.advance_secs(200);
 
+    // 2b. Interdiction bubble allows MJD activation, 12s spool, and 100 km jump out of bubble
+    let bubble_pos = scram_arena + DVec3::new(200_000.0, 0.0, 0.0);
+    sys.set_ball_position(ship_mjd, bubble_pos).await;
+    sys.add_warp_bubble(980_101, bubble_pos, 20_000.0).await.unwrap();
+    assert!(sys.is_ball_scrambled(ship_mjd).await.unwrap());
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
+    for _ in 0..12 {
+        sys.set_capacitor(ship_mjd, 10_000.0).await.unwrap();
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let (_, bubble_jumped_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
+    assert!(
+        bubble_jumped_ball.position.distance(bubble_pos) > 95_000.0,
+        "MJD must complete 100 km jump inside an interdiction bubble: got {:?}",
+        bubble_jumped_ball.position
+    );
+    sys.remove_warp_bubble(980_101).await.unwrap();
+
+    // Reset ship back to scram_arena and verify Warp Scrambler shuts down MWD, preserves AB,
+    // and blocks/aborts MJD even when a Warp Core Stabilizer (+2 core strength) is active!
+    sys.set_ball_position(ship_mjd, scram_arena).await;
+    sys.add_target_lock(ship_scram, eve_destiny::TargetLock {
+        target_id: ship_mjd, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(100_000.0),
+    }).await.unwrap();
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id)]).await.unwrap();
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(scrambler_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
     ]).await.unwrap();
@@ -547,14 +588,25 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Deactivate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Deactivate", vec![PyRep::Integer(scrambler_id)]).await.unwrap();
 
+    // Activate Warp Core Stabilizer I (+2 core strength -> total 3 > 2 scram points) and verify scrambler STILL blocks & aborts MJD!
+    ctx.advance_secs(200);
+    rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(wcs_id)]).await.unwrap();
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
     sys.step_manual(3.0).await.unwrap();
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(scrambler_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
     ]).await.unwrap();
-    for _ in 0..8 {
+    let cs_wcs_scram = sys.get_combat_state(ship_mjd).await.unwrap().unwrap();
+    assert!(!cs_wcs_scram.is_warp_scrambled(), "WCS (+2) overcomes 2 scram points for warping");
+    assert!(cs_wcs_scram.is_mwd_mjd_disabled, "Scrambler still sets is_mwd_mjd_disabled with WCS active");
+    for _ in 0..10 {
         sys.step_manual(1.0).await.unwrap();
     }
     let (_, aborted_mjd_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     assert!(aborted_mjd_ball.position.distance(scram_arena) < 5_000.0);
+    ctx.advance_secs(200);
+    assert_eq!(
+        rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap_err().code,
+        "WarpScrambled"
+    );
 }

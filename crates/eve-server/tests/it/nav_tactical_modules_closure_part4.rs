@@ -1,7 +1,6 @@
-//! End-to-End Integration Tests closing Nosferatu, Grappler, Mutadaptive RAR,
-//! and Blockade Runner parity rows (Part 4):
+//! End-to-End Integration Tests closing Nosferatu, Grappler, and Mutadaptive RAR parity rows (Part 4):
 //! `feat:modules.energy-nosferatu-relative-capacitor`, `feat:modules.stasis-grappler-mechanics`,
-//! `feat:modules.mutadaptive-remote-armor-repairer`, and `feat:ships.blockade-runner-cargo-scan-immunity`.
+//! and `feat:modules.mutadaptive-remote-armor-repairer`.
 
 use crate::modules_advanced_tactical::*;
 use eve_db::InventoryFlag;
@@ -11,12 +10,11 @@ use eve_server::services::combat_npc_police::scan_and_enforce_highsec_contraband
 
 #[tokio::test]
 async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runner() {
-    // parity: feat:modules.energy-nosferatu-relative-capacitor, feat:modules.stasis-grappler-mechanics, feat:modules.mutadaptive-remote-armor-repairer, feat:ships.blockade-runner-cargo-scan-immunity
+    // parity: feat:modules.energy-nosferatu-relative-capacitor, feat:modules.stasis-grappler-mechanics, feat:modules.mutadaptive-remote-armor-repairer
     eve_testkit::attest(&[
         "feat:modules.energy-nosferatu-relative-capacitor",
         "feat:modules.stasis-grappler-mechanics",
         "feat:modules.mutadaptive-remote-armor-repairer",
-        "feat:ships.blockade-runner-cargo-scan-immunity",
     ]);
 
     let ctx = build_ctx();
@@ -203,7 +201,7 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     assert!((a_tgt2_c1 - 1_784.0).abs() < 1.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(77_021)]).await.unwrap();
 
-    // 4. Blockade Runner Cargo Scan Immunity, Ship Scanner Visibility, & NPC Customs Contraband (`feat:ships.blockade-runner-cargo-scan-immunity`)
+    // 4. Blockade Runner Cargo Scan Immunity, Ship Scanner Visibility, & NPC Customs Contraband (pending V24 live message)
     let cargo_scanner_id: i64 = 77_031;
     let ship_scanner_id: i64 = 77_032;
     give_item(&ctx, cargo_scanner_id, 2_038, char_src, ship_src, InventoryFlag::MedSlot0, 1); // Cargo Scanner II

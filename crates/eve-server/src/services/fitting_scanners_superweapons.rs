@@ -547,7 +547,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             if let Err(e) = scanner_range_check(ctx, sys, ship_id, target_id, mod_state, 126).await {
                 return Some(Err(e));
             }
-            // parity: feat:ships.blockade-runner-cargo-scan-immunity
+            // Blockade Runners (`group 1202`, `cargoScanResistance` attr `188` >= 1.0) return an empty cargo scan result
             let is_cargo_scan_immune = {
                 let target_tid = ctx
                     .db
@@ -583,7 +583,6 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     ("moduleID", PyRep::Integer(module_id)),
                     ("targetID", PyRep::Integer(target_id)),
                     ("cargoScanImmune", PyRep::Bool(true)),
-                    ("message", PyRep::String("ShipImmuneToCargoScan".into())),
                     ("totalScannedQuantity", PyRep::Integer(0)),
                     ("scannedItems", PyRep::List(Vec::new())),
                 ])));

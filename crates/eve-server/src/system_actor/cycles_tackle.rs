@@ -97,17 +97,19 @@ pub(crate) fn reconcile_tackle_and_bubbles(
         }
     }
 
-    // 4. Immediately shut down any active MWD or MJD cycle on scrambled targets (or MJD spool on any bubble/point-scrambled ship)
+    // 4. Immediately shut down any active MWD or MJD cycle on MWD/MJD-disabled targets (Warp Scrambler / Scripted HIC WDFG / ESS field)
     let mut idx = 0;
     while idx < active_module_cycles.len() {
         let ship_id = active_module_cycles[idx].ship_id;
-        let is_target_scrambled = ballpark.is_ball_scrambled(ship_id)
-            || ballpark.combat_states.get(&ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
-        let stop_mwd_or_mjd = active_module_cycles[idx].is_mwd_or_mjd
-            && mwd_disabled_targets.contains(&ship_id);
-        let stop_mjd_from_scram = active_module_cycles[idx].mjd_jump_distance_m.is_some()
-            && is_target_scrambled;
-        if stop_mwd_or_mjd || stop_mjd_from_scram {
+        let mjd_or_mwd_disabled = mwd_disabled_targets.contains(&ship_id)
+            || ballpark
+                .combat_states
+                .get(&ship_id)
+                .is_some_and(|cs| cs.is_mwd_mjd_disabled);
+        let stop_mwd_or_mjd = (active_module_cycles[idx].is_mwd_or_mjd
+            || active_module_cycles[idx].mjd_jump_distance_m.is_some())
+            && mjd_or_mwd_disabled;
+        if stop_mwd_or_mjd {
             let shut_down = active_module_cycles.remove(idx);
             cleanup_removed_module_cycle(ballpark, &shut_down, &None);
         } else {
@@ -237,15 +239,13 @@ pub(crate) fn handle_add_module_cycle(
     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
         cs.undock_invulnerable_remaining_ticks = 0;
     }
-    if cycle.is_mwd_or_mjd {
+    if cycle.is_mwd_or_mjd || cycle.mjd_jump_distance_m.is_some() {
         let disabled = ballpark
             .combat_states
             .get(&cycle.ship_id)
-            .is_some_and(|cs| cs.is_mwd_mjd_disabled)
-            || (cycle.mjd_jump_distance_m.is_some()
-                && ballpark.is_ball_scrambled(cycle.ship_id));
+            .is_some_and(|cs| cs.is_mwd_mjd_disabled);
         if disabled {
-            return Err("WarpScrambled: Propulsion module disabled by warp scrambler or warp disruption bubble".to_string());
+            return Err("WarpScrambled: Propulsion module disabled by warp scrambler".to_string());
         }
     }
     // Remove any existing cycle for this (ship_id, module_id) before re-adding

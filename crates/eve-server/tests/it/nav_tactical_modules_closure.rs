@@ -29,24 +29,14 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, true);
 
     // 1. Route waypoints via real V24 surfaces (`charMgr` + ESI `/v2/ui/autopilot/waypoint/` + `beyonce`)
-    let init_settings = rpc(&ctx, &mut sess, "charMgr", "GetCharacterSettings", vec![])
-        .await
-        .expect("GetCharacterSettings initial");
+    let init_settings = rpc(&ctx, &mut sess, "charMgr", "GetCharacterSettings", vec![]).await.expect("GetCharacterSettings initial");
     assert_eq!(init_settings, PyRep::Dict(Vec::new()));
 
     // Invalid destination ID rejected on charMgr.SaveCharacterSetting("waypoints", ...)
-    let bad_wp = rpc(
-        &ctx,
-        &mut sess,
-        "charMgr",
-        "SaveCharacterSetting",
-        vec![
-            PyRep::String("waypoints".into()),
-            PyRep::List(vec![PyRep::Integer(999_999_999)]),
-        ],
-    )
-    .await
-    .unwrap_err();
+    let bad_wp = rpc(&ctx, &mut sess, "charMgr", "SaveCharacterSetting", vec![
+        PyRep::String("waypoints".into()),
+        PyRep::List(vec![PyRep::Integer(999_999_999)]),
+    ]).await.unwrap_err();
     assert_eq!(bad_wp.code, "InvalidDestination");
 
     // Pick a Jita stargate jump destination so we can test live autopilot warp + jump arrival advancement
@@ -60,34 +50,19 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     let dest_sys_id = jita_jump.to_solar_system_id;
 
     // SaveCharacterSetting("waypoints", ...) persists to DB & survives fresh session reconnect
-    rpc(
-        &ctx,
-        &mut sess,
-        "charMgr",
-        "SaveCharacterSetting",
-        vec![
-            PyRep::String("waypoints".into()),
-            PyRep::List(vec![
-                PyRep::Integer(dest_sys_id as i64),
-                PyRep::Integer(JITA_STATION),
-            ]),
-        ],
-    )
-    .await
-    .expect("SaveCharacterSetting waypoints");
+    rpc(&ctx, &mut sess, "charMgr", "SaveCharacterSetting", vec![
+        PyRep::String("waypoints".into()),
+        PyRep::List(vec![PyRep::Integer(dest_sys_id as i64), PyRep::Integer(JITA_STATION)]),
+    ]).await.expect("SaveCharacterSetting waypoints");
 
     let mut reconnect_sess = SessionState::new(994_001);
     reconnect_sess.user_id = sess.user_id;
     reconnect_sess.character_id = Some(char_id);
     let reconnect_settings = rpc(&ctx, &mut reconnect_sess, "charMgr", "GetCharacterSettings", vec![])
-        .await
-        .expect("GetCharacterSettings on reconnected session");
+        .await.expect("GetCharacterSettings on reconnected session");
     assert_eq!(
         reconnect_settings.dict_get("waypoints"),
-        Some(&PyRep::List(vec![
-            PyRep::Integer(dest_sys_id as i64),
-            PyRep::Integer(JITA_STATION),
-        ]))
+        Some(&PyRep::List(vec![PyRep::Integer(dest_sys_id as i64), PyRep::Integer(JITA_STATION)]))
     );
 
     // Undock in Jita and verify beyonce.CmdWarpToStuffAutopilot uses 15 km default landing perimeter
@@ -274,33 +249,33 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     let vec_item_id: i64 = 74_001;
     give_item(&ctx, vec_item_id, 77_825, char_id, ship_id, InventoryFlag::Cargo, 2);
 
-    // Out of star proximity (> 1,496,000,000,000 m = 10 AU) -> rejected
+    // Non-inventory space ball IDs (e.g., stargate or container ball) are rejected with InvalidVectorItem (no beacon fallback)
     let far_from_star = star_cel.position + DVec3::new(2_000_000_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_id, ship_id, 587, jita_sys, far_from_star).await;
-    let out_of_range_err = rpc(
-        &ctx,
-        &mut sess,
-        "warpVectorMgr",
-        "UseVector",
-        vec![PyRep::Integer(vec_item_id)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(out_of_range_err.code, "WarpVectorTooFarFromStar");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(jita_jump.stargate_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "InvalidVectorItem"
+    );
+
+    // Out of star proximity (> 1,496,000,000,000 m = 10 AU) -> rejected
+    assert_eq!(
+        rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "WarpVectorTooFarFromStar"
+    );
 
     // Place ship at a non-zero 3D offset from star so star_pos + delta != ship_pos + delta!
     let near_star = star_cel.position + DVec3::new(500_000_000.0, 250_000_000.0, -100_000_000.0);
     let sys = ctx.systems.get_or_spawn(jita_sys);
     sys.set_ball_position(ship_id, near_star).await;
-    let vec_res = rpc(
-        &ctx,
-        &mut sess,
-        "warpVectorMgr",
-        "UseVector",
-        vec![PyRep::Integer(vec_item_id)],
-    )
-    .await
-    .expect("UseVector with cargo Warp Vector Data");
+    let vec_res = rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+        .await
+        .expect("UseVector with cargo Warp Vector Data");
     assert_eq!(vec_res.dict_get("consumed"), Some(&PyRep::Bool(true)));
     assert_eq!(vec_res.dict_get("remainingQuantity"), Some(&PyRep::Integer(1)));
     let expected_vec_dest = star_cel.position + DVec3::new(220_000_000_000.0, -140_000_000_000.0, 0.0);
@@ -320,26 +295,27 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     // 300s per-character cooldown enforced on immediate 2nd activation, clears after 301s
     sys.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
     sys.set_ball_position(ship_id, near_star).await;
-    let cd_err = rpc(
-        &ctx,
-        &mut sess,
-        "warpVectorMgr",
-        "UseVector",
-        vec![PyRep::Integer(vec_item_id)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(cd_err.code, "WarpVectorCooldown");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "WarpVectorCooldown"
+    );
     ctx.advance_secs(301);
-    rpc(
-        &ctx,
-        &mut sess,
-        "warpVectorMgr",
-        "UseVector",
-        vec![PyRep::Integer(vec_item_id)],
-    )
-    .await
-    .expect("UseVector succeeds after 300s cooldown");
+    // Vector destination < 150,000 m from ship is rejected without consuming item
+    sys.set_ball_position(ship_id, expected_vec_dest - DVec3::new(100_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "WarpDistanceTooShort"
+    );
+    sys.set_ball_position(ship_id, near_star).await;
+    rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+        .await
+        .expect("UseVector succeeds after 300s cooldown");
 
     // 3. Server-Tick Sub-Tick Align Rounding (`feat:navigation.align-server-tick-rounding`)
     // Exact align time = ln(4) * inertia * mass / 1e6 = 3.200000 s -> ceil(3.2) = 4 ticks!
@@ -471,6 +447,62 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
         panic!("Expected ship B to remain in Aligning warp phase after bump");
     }
 
+    // 1b. Ship-vs-Station, Ship-vs-Upwell Structure, Ship-vs-Stargate, and Ship-vs-Planet static hull collision bumping
+    let station_pos = ctx.sde.stations[&JITA_STATION].position;
+    let (_, sta_ball) = sys.get_ball_snapshot(JITA_STATION).await.unwrap().unwrap();
+    let struct_id: i64 = 1_040_000_001;
+    let struct_pos = [90_000_000_000.0, 0.0, 0.0];
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            struct_id,
+            UpwellStructureRecord {
+                structure_id: struct_id, type_id: 35832, owner_corp_id: 1_000_125, solar_system_id: jita_sys,
+                name: "Test Astrahus".into(), position: struct_pos, state: "ShieldVulnerable".into(),
+                quantum_core_installed: true, fuel_blocks: 500, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0,
+                hull_hp: 1_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    eve_server::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(&ctx, jita_sys, struct_id).await;
+    let (_, struct_ball) = sys.get_ball_snapshot(struct_id).await.unwrap().unwrap();
+    let gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == jita_sys).expect("Jita gate");
+    let (_, gate_ball) = sys.get_ball_snapshot(gate.stargate_id).await.unwrap().unwrap();
+    let planet = ctx
+        .sde
+        .celestials_in_system(jita_sys)
+        .into_iter()
+        .find(|c| c.group_id == 7 && c.radius > 0.0)
+        .expect("Jita planet");
+    for (static_id, static_pos, core_rad, label) in [
+        (JITA_STATION, station_pos, sta_ball.radius.min(1_000.0), "NPC station"),
+        (struct_id, DVec3::from_array(struct_pos), struct_ball.radius.min(1_000.0), "Upwell structure"),
+        (gate.stargate_id, gate.position, gate_ball.radius.min(2_500.0), "stargate"),
+        (planet.celestial_id, planet.position, planet.radius, "planet"),
+    ] {
+        let mut cs_coll = ctx.build_ship_combat_state(char_a, ship_a, 640);
+        cs_coll.undock_invulnerable_remaining_ticks = 0;
+        sys.spawn_ball_with_meta(
+            Ball {
+                id: ship_a, type_id: 640, position: static_pos + DVec3::new(core_rad - 50.0, 0.0, 0.0),
+                velocity: DVec3::new(-500.0, 0.0, 0.0), max_velocity: 500.0, inertia: 0.5,
+                mass: 10_000_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+            },
+            cs_coll,
+            ctx.build_ship_slim_meta(char_a, 640),
+        ).await.unwrap();
+        let tick_s = sys.step_manual(1.0).await.unwrap();
+        let (_, post_s) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
+        assert!(
+            post_s.position.distance(static_pos) >= core_rad + post_s.radius - 1e-3,
+            "Ship must not interpenetrate {label} hull"
+        );
+        assert!(post_s.velocity.x > 0.0, "Ship must bounce off {label} hull");
+        assert!(tick_s.events.iter().any(|e| matches!(e, DestinyEvent::Collision { ball_a, ball_b } if (*ball_a == ship_a && *ball_b == static_id) || (*ball_a == static_id && *ball_b == ship_a))));
+    }
+    let (_, post_struct) = sys.get_ball_snapshot(struct_id).await.unwrap().unwrap();
+    assert!(post_struct.position.distance(DVec3::from_array(struct_pos)) < 1e-6, "Anchored Upwell structure must remain stationary");
+
     // 2. Celestial, Stargate, Station, & Upwell Structure Warp Landing Points (`feat:navigation.warp-landing-points`)
     let b_jita = ctx
         .bind_object(&mut sess_a, "beyonce", jita_sys as i64)
@@ -480,18 +512,19 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     cs_warp.max_capacitor = 100_000.0;
     sys.set_combat_state(ship_a, cs_warp).await.unwrap();
 
-    // 2a. Planet (group 7) at 0m -> radius + 2,500 m; at 50km -> radius + 52,500 m; <150km effective -> WarpDistanceTooShort
-    let planet = ctx
-        .sde
-        .celestials_in_system(jita_sys)
-        .into_iter()
-        .find(|c| c.group_id == 7 && c.radius > 0.0)
-        .expect("Jita planet");
+    // 2a. Planet (group 7) at 0m -> radius + 2,500 m; at 50km -> radius + 52,500 m; <150km effective -> WarpDistanceTooShort; NaN/Inf -> InvalidArgument
     sys.spawn_ball(Ball {
         id: ship_a, type_id: 640, position: planet.position - DVec3::new(planet.radius + 500_000_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 0.1, mass: 1_000_000.0, radius: 100.0,
         speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await.unwrap();
+    for bad_range in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let nan_err = ctx.dispatch_rpc(
+            &mut sess_a, "beyonce", Some(b_jita), "CmdWarpToStuff",
+            &[PyRep::String("item".into()), PyRep::Integer(planet.celestial_id), PyRep::Real(bad_range)], &kw, None,
+        ).await.unwrap_err();
+        assert_eq!(nan_err.code, "InvalidArgument", "Non-finite warp range {bad_range} must be rejected");
+    }
     ctx.dispatch_rpc(
         &mut sess_a, "beyonce", Some(b_jita), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(planet.celestial_id), PyRep::Real(0.0)], &kw, None,
@@ -572,20 +605,6 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     let MovementMode::Warp { destination: dest_sta, .. } = w_sta.mode else { panic!("Expected Warp"); };
     assert!((dest_sta.distance(station_pos) - 2_000.0).abs() < 10.0, "NPC station landing must be at 2,000m docking ring");
 
-    let struct_id: i64 = 1_040_000_001;
-    let struct_pos = [90_000_000_000.0, 0.0, 0.0];
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(
-            struct_id,
-            UpwellStructureRecord {
-                structure_id: struct_id, type_id: 35832, owner_corp_id: 1_000_125, solar_system_id: jita_sys,
-                name: "Test Astrahus".into(), position: struct_pos, state: "ShieldVulnerable".into(),
-                quantum_core_installed: true, fuel_blocks: 500, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0,
-                hull_hp: 1_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
-                self_destruct_at_unix: None,
-            },
-        );
-    });
     sys.spawn_ball(Ball {
         id: ship_a, type_id: 640, position: DVec3::from_array(struct_pos) - DVec3::new(10_000_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 0.1, mass: 1_000_000.0, radius: 100.0,
