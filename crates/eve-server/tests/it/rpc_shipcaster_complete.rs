@@ -188,8 +188,11 @@ async fn test_starter_shipcaster_travel_complete() {
     let starter_launcher_id: i64 = 105_000_117;
 
     // Verify all 12 SDE starter schools (school_id 11..=22) map to canonical empire FW HQs
+    // and that production ServerContext state initializes directly from starter_launchers_from_sde
     let sde_starters = starter_launchers_from_sde(&ctx.sde);
     assert_eq!(sde_starters.len(), 12, "All 12 empire starter school systems must have Rookie Shipcasters");
+    let runtime_starters = with_misc_state(&ctx, |st| st.starter_launchers.clone());
+    assert_eq!(runtime_starters, sde_starters, "Production runtime starter_launchers must match starter_launchers_from_sde");
     let expected_hq_by_school: [(i64, u32, u32); 12] = [
         (105_000_111, 30003489, 30002974), // Chaven -> Mehatoor
         (105_000_112, 30005042, 30002974), // Sehmy -> Mehatoor
