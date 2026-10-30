@@ -124,11 +124,11 @@ async fn test_emergency_hull_energizer_and_overheat_burnout_state() {
     assert_eq!(active_res, [0.05, 0.05, 0.05, 0.05], "Active EHE must grant 95% hull resistance");
 
     let (em_res, exp_res, kin_res, therm_res) = ctx.db.with_snapshot(|snap| {
-        let sh = snap.items.get(&ship_id);
-        let em = sh.and_then(|s| s.dynamic_attributes.get(&113).copied()).unwrap_or(0.0);
-        let exp = sh.and_then(|s| s.dynamic_attributes.get(&111).copied()).unwrap_or(0.0);
-        let kin = sh.and_then(|s| s.dynamic_attributes.get(&109).copied()).unwrap_or(0.0);
-        let therm = sh.and_then(|s| s.dynamic_attributes.get(&110).copied()).unwrap_or(0.0);
+        let tr = snap.transient_item_attributes.get(&ship_id);
+        let em = tr.and_then(|s| s.get(&113).copied()).unwrap_or(0.0);
+        let exp = tr.and_then(|s| s.get(&111).copied()).unwrap_or(0.0);
+        let kin = tr.and_then(|s| s.get(&109).copied()).unwrap_or(0.0);
+        let therm = tr.and_then(|s| s.get(&110).copied()).unwrap_or(0.0);
         (em, exp, kin, therm)
     });
     assert_eq!(em_res, 0.05, "Ship EM hull resonance attribute must be 0.05");

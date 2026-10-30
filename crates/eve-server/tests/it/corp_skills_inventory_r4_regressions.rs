@@ -634,14 +634,16 @@ async fn r4_177_178_179_182_184_185_186_187_skills_corp_ammo_agents_and_killcoun
                 ch.standings.insert(rnd_agent_id, 8.0);
                 ch.standings.insert(rnd_agent.corporation_id as i64, 8.0);
             }
-            snap.skills.entry(ceo_id).or_default().insert(
-                skill_tid,
-                TrainedSkillRecord {
-                    type_id: skill_tid,
-                    level: 5,
-                    skill_points: 256_000.0,
-                },
-            );
+            for sid in [3402, 3392, skill_tid] {
+                snap.skills.entry(ceo_id).or_default().insert(
+                    sid,
+                    TrainedSkillRecord {
+                        type_id: sid,
+                        level: 5,
+                        skill_points: 256_000.0,
+                    },
+                );
+            }
         });
         let mut rnd_sess = make_session(ceo_id, corp_id, rnd_sta, rnd_sys, ship_id);
         ctx.dispatch_rpc(
