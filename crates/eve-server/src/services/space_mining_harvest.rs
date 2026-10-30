@@ -353,3 +353,185 @@ pub fn tick_all_ice_belt_respawns_sync(ctx: &ServerContext) {
         tick_ice_belt_respawn_sync(ctx, sys_id);
     }
 }
+
+pub const WORMHOLE_GUARD_TYPE_IDS: &[eve_sde::TypeId] = &[30209, 30210, 30211, 30200, 30203, 30196];
+
+pub fn build_wormhole_guard_wave(
+    next_entity_id: &mut i64,
+    centre: [f64; 3],
+    guards: &[(eve_sde::TypeId, u32)],
+    out: &mut Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    let total: u32 = guards.iter().map(|&(_, c)| c).sum();
+    let mut idx: u32 = 0;
+    for &(npc_tid, count) in guards {
+        for _ in 0..count {
+            *next_entity_id += 1;
+            let angle = (idx as f64) * std::f64::consts::TAU / (total.max(1) as f64);
+            idx += 1;
+            out.push((
+                *next_entity_id,
+                npc_tid,
+                glam::DVec3::new(centre[0] + angle.cos() * 4_500.0, centre[1] + 500.0, centre[2] + angle.sin() * 4_500.0),
+            ));
+        }
+    }
+}
+
+pub async fn spawn_wormhole_ore_guards(
+    ctx: &ServerContext,
+    sys_id: u32,
+    guard_waves: Vec<(i64, eve_sde::TypeId, glam::DVec3)>,
+) {
+    if guard_waves.is_empty() {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    for (gid, npc_tid, gpos) in guard_waves {
+        let npc_rec = ctx.sde.types.get(&npc_tid);
+        let npc_rad = npc_rec.map(|t| t.radius.max(25.0)).unwrap_or(45.0);
+        let npc_mass = npc_rec.map(|t| t.mass.max(10_000.0)).unwrap_or(1_200_000.0);
+        let max_vel = npc_rec
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY))
+            .copied()
+            .unwrap_or(320.0);
+        // DERIVED: Sleeper NPC types lack dogma attr 70 (agility) in SDE; default 1.0 matches space_destiny.rs.
+        let inertia = npc_rec
+            .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
+            .copied()
+            .unwrap_or(1.0);
+        let ball = eve_destiny::Ball {
+            id: gid, type_id: npc_tid, position: gpos, velocity: glam::DVec3::ZERO,
+            max_velocity: max_vel, inertia, mass: npc_mass, radius: npc_rad,
+            speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+        };
+        let _ = handle.spawn_ball_with_combat(ball, ctx.build_type_combat_state(npc_tid)).await;
+    }
+}
+
+pub async fn respawn_wormhole_ore_guards_if_missing(
+    ctx: &ServerContext,
+    sys_id: u32,
+    sites: &[([f64; 3], &'static crate::services::mining_sites::WormholeOreSiteDef)],
+) {
+    if sites.is_empty() {
+        return;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let existing = handle.list_balls().await.unwrap_or_default();
+    if existing.iter().any(|b| WORMHOLE_GUARD_TYPE_IDS.contains(&b.type_id)) {
+        return;
+    }
+    let waves = ctx.db.with_mut_snapshot(|snap| {
+        let mut out = Vec::new();
+        let anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_default();
+        for &(fallback_centre, def) in sites {
+            let centre = anoms
+                .iter()
+                .find(|a| a.name == def.dungeon_name)
+                .map(|a| a.position)
+                .unwrap_or(fallback_centre);
+            build_wormhole_guard_wave(&mut snap.next_entity_id, centre, def.guards, &mut out);
+        }
+        out
+    });
+    spawn_wormhole_ore_guards(ctx, sys_id, waves).await;
+}
+
+pub async fn spawn_seeded_site_entities(
+    ctx: &ServerContext,
+    sys_id: u32,
+    newly_spawned: Vec<(i64, u32, u64, f64, f64, glam::DVec3)>,
+    guard_waves: Vec<(i64, u32, glam::DVec3)>,
+) {
+    if !newly_spawned.is_empty() {
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        for (aid, tid, units, uvol, rad, pos) in newly_spawned {
+            let ball = eve_destiny::Ball {
+                id: aid,
+                type_id: tid,
+                position: pos,
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 50_000.0,
+                radius: rad,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            };
+            let st = crate::system_actor::AsteroidState {
+                asteroid_id: aid,
+                belt_id: 0,
+                type_id: tid,
+                initial_units: units,
+                remaining_units: units,
+                unit_volume: uvol,
+                depleted: false,
+                respawn_at_tick: None,
+            };
+            let _ = handle.spawn_asteroid(st, ball).await;
+        }
+    }
+    spawn_wormhole_ore_guards(ctx, sys_id, guard_waves).await;
+}
+
+/// Phased Asteroid Field site lifecycle (`feat:mining.phased-asteroid-field-lifecycle`, `feat:mining.mobile-phase-anchor`).
+#[derive(Debug, Clone)]
+pub struct PhasedAsteroidFieldState {
+    pub signature_id: String,
+    pub solar_system_id: u32,
+    pub progress: f64,
+    pub beacon_spawned: bool,
+    pub collapsed: bool,
+    pub phased_in: bool,
+    pub mobile_phase_anchor_energy: u32,
+}
+
+impl PhasedAsteroidFieldState {
+    pub fn new(signature_id: String, solar_system_id: u32) -> Self {
+        Self {
+            signature_id,
+            solar_system_id,
+            progress: 0.1,
+            beacon_spawned: false,
+            collapsed: false,
+            phased_in: false,
+            mobile_phase_anchor_energy: 0,
+        }
+    }
+
+    pub fn advance_fracture(&mut self, delta_progress: f64) {
+        self.progress = (self.progress + delta_progress).min(1.0);
+        if self.progress >= 0.5 {
+            self.beacon_spawned = true;
+        }
+        if self.progress >= 1.0 {
+            self.collapsed = true;
+            self.phased_in = false;
+        }
+    }
+
+    pub fn connect_industrial_command_ship(&mut self, ship_type_id: eve_sde::TypeId) -> bool {
+        let energy = match ship_type_id {
+            28352 => 100, // Rorqual
+            28606 => 50,  // Orca
+            42244 => 35,  // Porpoise
+            _ => 0,
+        };
+        self.mobile_phase_anchor_energy += energy;
+        if self.mobile_phase_anchor_energy >= 100 && !self.collapsed {
+            self.phased_in = true;
+        }
+        self.phased_in
+    }
+
+    pub fn mining_efficiency(&self) -> f64 {
+        if self.collapsed {
+            0.0
+        } else if self.phased_in {
+            1.0
+        } else {
+            0.10
+        }
+    }
+}

@@ -396,13 +396,15 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
-    let cases: &[(u32, u8, &[&str], &[&str], &[u32])] = &[
+    let cases: &[(u32, u8, &[&str], &[&str], usize, i64, &[(u32, usize)])] = &[
         (
             31_000_007, // C1
             1,
             &["Ordinary Perimeter Deposit", "Common Perimeter Deposit"],
             &["Unexceptional Frontier Deposit", "Exceptional Core Deposit"],
-            &[30209],
+            31,
+            3_280_000,
+            &[(30209, 8), (30210, 2)],
         ),
         (
             31_000_880, // C3
@@ -414,7 +416,9 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
                 "Average Frontier Deposit",
             ],
             &["Exceptional Core Deposit", "Infrequent Core Deposit"],
-            &[30209, 30210],
+            51,
+            6_039_999,
+            &[(30209, 13), (30210, 4), (30211, 1), (30200, 1)],
         ),
         (
             31_001_880, // C5
@@ -426,7 +430,9 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
                 "Infrequent Core Deposit",
             ],
             &["Ordinary Perimeter Deposit", "Common Perimeter Deposit"],
-            &[30210, 30200],
+            111,
+            8_527_999,
+            &[(30209, 5), (30210, 2), (30211, 1), (30200, 1), (30203, 2), (30196, 1)],
         ),
         (
             31_002_367, // C6
@@ -436,7 +442,9 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
                 "Infrequent Core Deposit",
             ],
             &["Ordinary Perimeter Deposit", "Common Perimeter Deposit", "Unexceptional Frontier Deposit"],
-            &[30200],
+            91,
+            5_768_000,
+            &[(30203, 2), (30196, 1)],
         ),
         (
             31_002_580, // C13 Shattered
@@ -450,19 +458,21 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
                 "Infrequent Core Deposit",
             ],
             &[],
-            &[30209, 30210, 30200],
+            142,
+            11_807_999,
+            &[(30209, 13), (30210, 4), (30211, 1), (30200, 1), (30203, 2), (30196, 1)],
         ),
     ];
 
-    for &(sys_id, expected_class, expected_sites, forbidden_sites, expected_guard_types) in cases {
+    for &(sys_id, expected_class, expected_sites, forbidden_sites, expected_rocks, expected_units, expected_guards) in cases {
         let sys = ctx.sde.solar_systems.get(&sys_id).expect("Wormhole system in SDE");
         assert_eq!(sys.wormhole_class_id, Some(i32::from(expected_class)));
 
         eve_server::router::dispatch::seed_system_mining_sites_from_sde(&ctx, sys_id).await;
-        // Second call must be idempotent
+        // Second call in same session must be idempotent for both asteroids and Sleeper guards
         eve_server::router::dispatch::seed_system_mining_sites_from_sde(&ctx, sys_id).await;
 
-        let (anom_names, sig_names, ast_types) = ctx.db.with_snapshot(|snap| {
+        let (anom_names, sig_names, ast_types, ast_count, gas_count, total_units) = ctx.db.with_snapshot(|snap| {
             let anoms = snap.cosmic_anomalies.get(&sys_id).cloned().unwrap_or_default();
             let an_names: Vec<String> = anoms
                 .iter()
@@ -479,13 +489,21 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
                         .collect()
                 })
                 .unwrap_or_default();
-            let a_tids: HashSet<u32> = snap
+            let sys_asts: Vec<_> = snap
                 .asteroids
                 .values()
                 .filter(|a| a.solar_system_id == sys_id)
-                .map(|a| a.type_id)
+                .filter(|a| ctx.sde.types.get(&a.type_id).is_some_and(|t| t.group_id != 711))
                 .collect();
-            (an_names, s_names, a_tids)
+            let g_count = snap
+                .asteroids
+                .values()
+                .filter(|a| a.solar_system_id == sys_id)
+                .filter(|a| ctx.sde.types.get(&a.type_id).is_some_and(|t| t.group_id == 711))
+                .count();
+            let a_tids: HashSet<u32> = sys_asts.iter().map(|a| a.type_id).collect();
+            let units_sum: i64 = sys_asts.iter().map(|a| a.quantity).sum();
+            (an_names, s_names, a_tids, sys_asts.len(), g_count, units_sum)
         });
 
         assert_eq!(
@@ -493,6 +511,9 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
             expected_sites.len(),
             "C{expected_class} system {sys_id} anomaly count mismatch: {anom_names:?}"
         );
+        assert_eq!(gas_count, 2, "C{expected_class} system {sys_id} Barren Perimeter Reservoir gas cloud count mismatch");
+        assert_eq!(ast_count, expected_rocks, "C{expected_class} system {sys_id} SDE rock count mismatch");
+        assert_eq!(total_units, expected_units, "C{expected_class} system {sys_id} wiki ore unit total mismatch");
         for &site_name in expected_sites {
             assert!(anom_names.iter().any(|n| n == site_name), "Missing {site_name} in C{expected_class} {sys_id}");
             assert!(sig_names.iter().any(|n| n == site_name), "Missing OreAnomaly signature {site_name}");
@@ -502,29 +523,48 @@ async fn test_mining_wormhole_ore_sites_and_sleeper_guards() {
         }
 
         // Verify spawned asteroids span Highsec (Pyroxeres 46686), Lowsec (Kernite 46683 / Omber 46684),
-        // and Nullsec (Bistot 46676 / Arkonor 46678 / Gneiss 46679) ore families.
-        assert!(ast_types.contains(&46686), "Wormhole ore sites in {sys_id} must include Highsec-tier Pyroxeres");
+        // and Nullsec (Bistot 46676 / Arkonor 46678 / Gneiss 46679) IV-Grade ore families.
+        assert!(ast_types.contains(&46686), "Wormhole ore sites in {sys_id} must include IV-Grade Pyroxeres (46686)");
         assert!(
-            ast_types.contains(&46683) || ast_types.contains(&46684),
-            "Wormhole ore sites in {sys_id} must include Lowsec-tier Kernite/Omber"
+            ast_types.contains(&46683) && ast_types.contains(&46684),
+            "Wormhole ore sites in {sys_id} must include IV-Grade Kernite (46683) and Omber (46684)"
         );
         assert!(
-            ast_types.contains(&46676) || ast_types.contains(&46678) || ast_types.contains(&46679),
-            "Wormhole ore sites in {sys_id} must include Nullsec-tier Bistot/Arkonor/Gneiss"
+            ast_types.contains(&46676) && ast_types.contains(&46678) && ast_types.contains(&46679),
+            "Wormhole ore sites in {sys_id} must include IV-Grade Bistot/Arkonor/Gneiss"
         );
 
-        // Verify Sleeper guard NPCs are spawned in the system ballpark
+        // Verify exact Sleeper guard waves and SDE dogma max_velocity / inertia attributes
         let handle = ctx.systems.get_or_spawn(sys_id);
-        let ball_types: Vec<u32> = handle
-            .list_balls()
-            .await
-            .expect("list_balls")
-            .into_iter()
-            .map(|b| b.type_id)
-            .collect();
-        for &npc_tid in expected_guard_types {
-            let count = ball_types.iter().filter(|&&t| t == npc_tid).count();
-            assert!(count >= 3, "Expected Sleeper guard NPCs of type {npc_tid} in C{expected_class} {sys_id} (got {count})");
+        let balls = handle.list_balls().await.expect("list_balls");
+        for &(npc_tid, expected_count) in expected_guards {
+            let matching: Vec<_> = balls.iter().filter(|b| b.type_id == npc_tid).collect();
+            assert_eq!(
+                matching.len(),
+                expected_count,
+                "Expected {expected_count} Sleeper guard NPCs of type {npc_tid} in C{expected_class} {sys_id} (got {})",
+                matching.len()
+            );
+            let sde_max_vel = ctx.sde.types[&npc_tid]
+                .default_attributes
+                .get(&eve_sde::attr_ids::MAX_VELOCITY)
+                .copied()
+                .expect("Sleeper NPC maxVelocity in SDE");
+            for b in matching {
+                assert_eq!(b.max_velocity, sde_max_vel, "Sleeper NPC {npc_tid} must use SDE maxVelocity");
+                assert_eq!(b.inertia, 1.0, "Sleeper NPC {npc_tid} must use canonical agility fallback 1.0");
+            }
         }
     }
+
+    // Verify server restart respawns Sleeper guards even when `already_seeded` is true in persisted DB
+    let restarted_ctx = ServerContext::with_sde_and_repository(
+        std::sync::Arc::clone(&ctx.sde),
+        std::sync::Arc::clone(&ctx.db),
+    );
+    crate::common::pin_clock(&restarted_ctx);
+    eve_server::router::dispatch::seed_system_mining_sites_from_sde(&restarted_ctx, 31_000_007).await;
+    let restarted_balls = restarted_ctx.systems.get_or_spawn(31_000_007).list_balls().await.expect("list_balls after restart");
+    assert_eq!(restarted_balls.iter().filter(|b| b.type_id == 30209).count(), 8);
+    assert_eq!(restarted_balls.iter().filter(|b| b.type_id == 30210).count(), 2);
 }

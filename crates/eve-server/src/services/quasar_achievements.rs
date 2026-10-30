@@ -11,8 +11,9 @@
 
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_PRECONDITION_FAILED,
 };
-use eve_db::{IskCents, WorldRepository};
+use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, sha256_hex, DynamicValue, GoogleAny,
     GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
@@ -94,14 +95,18 @@ fn build_definitions_from_sde(
         .load_cfsd_nested("res:/staticdata/achievementevents.fsdbinary")
         .unwrap_or_default();
 
-    let count = achs.len();
-    let mut ids: Vec<u32> = achs.keys().copied().collect();
-    ids.sort();
+    let mut ids: Vec<u32> = achs
+        .values()
+        .filter(|info| info.is_enabled)
+        .map(|info| info.achievement_id)
+        .collect();
+    ids.sort_unstable();
+    let count = ids.len();
     let hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
 
     let mut defs = Vec::with_capacity(ids.len());
     for id in ids {
-        let Some(info) = achs.get(&id) else {
+        let Some(info) = achs.get(&id).filter(|info| info.is_enabled) else {
             continue;
         };
         let conditions: Vec<AchievementConditionDef> = info
@@ -131,37 +136,18 @@ fn build_definitions_from_sde(
         // DATA GAP: Career category assignment, score points, milestone tiers, and ISK/SP rewards
         // are server-authored CDN Checkpoint data in V24 and not present in local client FSD
         // (`achievements.static` + `achievementevents.fsdbinary`).
-        let cat_id = match id {
-            2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
-            9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
-            12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
-            _ => 4, // Soldier / Career / Social
-        };
-        let score = match target {
-            1 => 10,
-            2..=10 => 25,
-            11..=100 => 50,
-            _ => 100,
-        };
-        let milestone_targets = if target > 2 {
-            vec![1, target / 2, target]
-        } else if target == 2 {
-            vec![1, 2]
-        } else {
-            vec![1]
-        };
         defs.push(AchievementDef {
             id,
-            category_id: cat_id,
+            category_id: 0,
             name: info.name.clone(),
             description: info.description.clone(),
             notification_text: info.notification_text.clone(),
             target,
-            score,
-            milestone_targets,
+            score: 0,
+            milestone_targets: Vec::new(),
             conditions,
-            reward_isk: (score as i64) * 10_000,
-            reward_sp: (score as i64) * 25,
+            reward_isk: 0,
+            reward_sp: 0,
         });
     }
     (defs, count, hash)
@@ -566,13 +552,13 @@ impl AchievementManager {
         db: &WorldRepository,
         filter: &RewardClaimFilter,
     ) -> u32 {
+        // DATA GAP: Achievement reward payouts require server CDN checkpoint definitions;
+        // never mint fabricated ISK, free SP, or wallet journal entries.
         let mut map = self
             .character_achievements
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let mut total_claimed = 0u32;
-        let mut total_isk = 0i64;
-        let mut total_sp = 0i64;
         let mut taken: Vec<(u32, u32)> = Vec::new();
         {
             let Some(list) = map.get_mut(&character_id) else {
@@ -618,8 +604,6 @@ impl AchievementManager {
                 let count = matched_count.min(a.unclaimed_reward_count);
                 if count > 0 {
                     total_claimed += count;
-                    total_isk += (count as i64) * a.def.reward_isk;
-                    total_sp += (count as i64) * a.def.reward_sp;
                     taken.push((a.def.id, count));
                     a.unclaimed_reward_count -= count;
                 }
@@ -627,43 +611,26 @@ impl AchievementManager {
         }
 
         if total_claimed > 0 {
-            let json_state = match serde_json::to_string(&*map) {
-                Ok(j) => j,
-                Err(_) => {
-                    if let Some(list) = map.get_mut(&character_id) {
-                        for (ach_id, count) in taken {
-                            if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
-                                a.unclaimed_reward_count = a.unclaimed_reward_count.saturating_add(count);
-                            }
+            let Ok(json_state) = serde_json::to_string(&*map) else {
+                if let Some(list) = map.get_mut(&character_id) {
+                    for (ach_id, count) in taken {
+                        if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
+                            a.unclaimed_reward_count = a.unclaimed_reward_count.saturating_add(count);
                         }
                     }
-                    return 0;
                 }
+                return 0;
             };
 
-            let isk_cents = IskCents::from_isk(total_isk);
-            let credited = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
-                let ch = snap.characters.get_mut(&(character_id as i64)).ok_or(())?;
-                let new_bal = ch.balance.checked_add(isk_cents).ok_or(())?;
-                ch.balance = new_bal;
-                ch.free_skill_points += total_sp as f64;
-                let balance_after = ch.balance;
+            let persisted = db
+                .try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                    snap.quasar_state_blobs
+                        .insert(ACHIEVEMENTS_STATE_KEY.to_string(), json_state);
+                    Ok(())
+                })
+                .is_ok();
 
-                snap.next_entity_id += 1;
-                let entry_id = snap.next_entity_id;
-                snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                    entry_id,
-                    character_id: character_id as i64,
-                    entry_type: "achievement_reward".to_string(),
-                    amount: isk_cents,
-                    balance_after,
-                    reason: "AIR achievement rewards claimed".to_string(),
-                });
-                snap.quasar_state_blobs.insert(ACHIEVEMENTS_STATE_KEY.to_string(), json_state);
-                Ok(())
-            }).is_ok();
-
-            if !credited {
+            if !persisted {
                 if let Some(list) = map.get_mut(&character_id) {
                     for (ach_id, count) in taken {
                         if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
@@ -801,6 +768,43 @@ pub(crate) fn emit_achievement_notices(
     }
 }
 
+pub(crate) fn extract_u32_ident(val: &DynamicValue) -> Option<u32> {
+    match val {
+        DynamicValue::Uint32(u) => Some(*u),
+        DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+        DynamicValue::Int32(i) => u32::try_from(*i).ok(),
+        DynamicValue::Int64(i) => u32::try_from(*i).ok(),
+        DynamicValue::Message(m) => m.get(1).and_then(|inner| match inner {
+            DynamicValue::Uint32(u) => Some(*u),
+            DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+            DynamicValue::Int32(i) => u32::try_from(*i).ok(),
+            DynamicValue::Int64(i) => u32::try_from(*i).ok(),
+            DynamicValue::Bytes(b) if b.len() >= 4 => {
+                let mut arr = [0u8; 4];
+                arr.copy_from_slice(&b[b.len() - 4..]);
+                Some(u32::from_be_bytes(arr))
+            }
+            _ => None,
+        }),
+        DynamicValue::Bytes(b) if b.len() >= 4 => {
+            let mut arr = [0u8; 4];
+            arr.copy_from_slice(&b[b.len() - 4..]);
+            Some(u32::from_be_bytes(arr))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_u64_val(val: &DynamicValue) -> Option<u64> {
+    match val {
+        DynamicValue::Uint64(u) => Some(*u),
+        DynamicValue::Uint32(u) => Some(u64::from(*u)),
+        DynamicValue::Int64(i) => u64::try_from(*i).ok(),
+        DynamicValue::Int32(i) => u64::try_from(*i).ok(),
+        _ => None,
+    }
+}
+
 pub fn register_achievement_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -814,23 +818,7 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let aid_opt = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                });
+            let aid_opt = dyn_msg.get(1).and_then(extract_u32_ident);
             let aid = match aid_opt {
                 Some(id) if id > 0 => {
                     if !mgr.definitions.iter().any(|d| d.id == id) {
@@ -891,21 +879,7 @@ pub fn register_achievement_handlers(
             };
             let cat_id = dyn_msg
                 .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                })
+                .and_then(extract_u32_ident)
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = mgr.category_score(cid, cat_id);
@@ -941,24 +915,13 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let target_cid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => Some(*u as u32),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Int64(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Int64(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .filter(|id| *id > 0)
-                .unwrap_or(cid);
+            let target_cid = match dyn_msg.get(1) {
+                None => cid,
+                Some(DynamicValue::Message(m)) if m.get(1).is_none() => cid,
+                Some(v) => extract_u32_ident(v)
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid character identifier".into()))?,
+            };
 
             let score = mgr_sc.total_character_score(target_cid);
             let mut out = Vec::new();
@@ -1026,76 +989,50 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.reward.api.ClaimRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
+            let Some(_cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let extract_ident_u32 = |val: &DynamicValue| -> Option<u32> {
-                match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|inner| match inner {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                }
             };
             let mut filter = RewardClaimFilter::default();
             if let Some(DynamicValue::Message(src)) = dyn_msg.get(1) {
-                filter.achievement_id = src.get(1).and_then(extract_ident_u32).filter(|&v| v > 0);
-                filter.milestone_id = src.get(2).and_then(extract_ident_u32).filter(|&v| v > 0);
-            } else if let Some(DynamicValue::Message(src)) = dyn_msg.get(2) {
-                filter.category_id = src.get(1).and_then(extract_ident_u32).filter(|&v| v > 0);
-                filter.milestone_id = src.get(2).and_then(extract_ident_u32).filter(|&v| v > 0);
-            }
-            if let Some(DynamicValue::Message(sel)) = dyn_msg.get(4) {
-                let mut uuids = Vec::new();
-                let extract_uuid = |item: &DynamicValue| -> Option<[u8; 16]> {
-                    let DynamicValue::Message(id_msg) = item else {
-                        return None;
-                    };
-                    let DynamicValue::Bytes(b) = id_msg.get(1)? else {
-                        return None;
-                    };
-                    if b.len() == 16 {
-                        let mut arr = [0u8; 16];
-                        arr.copy_from_slice(b);
-                        Some(arr)
-                    } else {
-                        None
-                    }
-                };
-                match sel.get(1) {
-                    Some(DynamicValue::Repeated(items)) => {
-                        for item in items {
-                            if let Some(u) = extract_uuid(item) {
-                                uuids.push(u);
-                            }
-                        }
-                    }
-                    Some(single) => {
-                        if let Some(u) = extract_uuid(single) {
-                            uuids.push(u);
-                        }
-                    }
-                    None => {}
+                if let Some(v) = src.get(1) {
+                    filter.achievement_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement identifier".into()))?,
+                    );
                 }
-                filter.selected_reward_uuids = Some(uuids);
+                if let Some(v) = src.get(2) {
+                    filter.milestone_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid milestone identifier".into()))?,
+                    );
+                }
+            } else if let Some(DynamicValue::Message(src)) = dyn_msg.get(2) {
+                if let Some(v) = src.get(1) {
+                    filter.category_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid category identifier".into()))?,
+                    );
+                }
+                if let Some(v) = src.get(2) {
+                    filter.milestone_id = Some(
+                        extract_u32_ident(v)
+                            .filter(|&id| id > 0)
+                            .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid milestone identifier".into()))?,
+                    );
+                }
             }
-            let _ = mgr.claim_rewards_filtered(cid, &db_claim, &filter);
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.reward.api.ClaimResponse"
-                ),
-                value: Vec::new(),
-            })
+            // DATA GAP: Achievement reward payouts require server CDN checkpoint definitions
+            // (not shipped in local client FSD `achievements.static`). Fail closed without
+            // minting ISK, free SP, or wallet journal entries.
+            let _ = (&mgr, &db_claim, &filter);
+            Err((
+                STATUS_PRECONDITION_FAILED,
+                "DATA GAP: Achievement reward payouts require server CDN checkpoint definitions"
+                    .into(),
+            ))
         }),
     );
 
@@ -1162,21 +1099,7 @@ pub fn register_achievement_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let cat_id = dyn_msg
                 .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                })
+                .and_then(extract_u32_ident)
                 .filter(|&id| id > 0)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
             let score = ctx
@@ -1293,24 +1216,13 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let target_cid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Uint64(u) => Some(*u as u32),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Int64(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Uint64(u) => Some(*u as u32),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Int64(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .filter(|id| *id > 0)
-                .unwrap_or(cid);
+            let target_cid = match dyn_msg.get(1) {
+                None => cid,
+                Some(DynamicValue::Message(m)) if m.get(1).is_none() => cid,
+                Some(v) => extract_u32_ident(v)
+                    .filter(|&id| id > 0)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid character identifier".into()))?,
+            };
             let score = mgr.total_character_score(target_cid);
             let mut out = Vec::new();
             encode_varint_field(1, score as u64, &mut out);

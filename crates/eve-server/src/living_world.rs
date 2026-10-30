@@ -952,12 +952,14 @@ impl LivingWorldDirector {
                     let gate_pos = sde
                         .stargates()
                         .values()
-                        .find(|g| g.from_solar_system_id == next_sys && g.to_solar_system_id == prev_sys)
+                        .filter(|g| g.from_solar_system_id == next_sys && g.to_solar_system_id == prev_sys)
+                        .min_by_key(|g| g.stargate_id)
                         .map(|g| g.position)
                         .or_else(|| {
                             sde.stargates()
                                 .values()
-                                .find(|g| g.from_solar_system_id == next_sys)
+                                .filter(|g| g.from_solar_system_id == next_sys)
+                                .min_by_key(|g| g.stargate_id)
                                 .map(|g| g.position)
                         })
                         .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
@@ -1003,7 +1005,8 @@ impl LivingWorldDirector {
             let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
             if let Some(existing) = convoys
                 .values()
-                .find(|c| c.archetype == NpcArchetype::MiningOp && c.current_system_id == solar_system_id)
+                .filter(|c| c.archetype == NpcArchetype::MiningOp && c.current_system_id == solar_system_id)
+                .min_by_key(|c| c.convoy_id)
             {
                 return existing.convoy_id;
             }
@@ -1011,7 +1014,7 @@ impl LivingWorldDirector {
         let dest_station_id = sde
             .solar_systems
             .get(&solar_system_id)
-            .and_then(|sys| sys.stations.first().map(|st| st.station_id))
+            .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
             .unwrap_or(60_003_760);
         let convoy_id = 800_100_000 + (solar_system_id as i64 % 100_000);
         let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
@@ -1056,13 +1059,14 @@ impl LivingWorldDirector {
         let next_sys = sde
             .stargates()
             .values()
-            .find(|g| g.from_solar_system_id == solar_system_id)
+            .filter(|g| g.from_solar_system_id == solar_system_id)
+            .min_by_key(|g| g.stargate_id)
             .map(|g| g.to_solar_system_id)
             .unwrap_or(30_000_144);
         let dest_station_id = sde
             .solar_systems
             .get(&next_sys)
-            .and_then(|sys| sys.stations.first().map(|st| st.station_id))
+            .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
             .unwrap_or(60_003_760);
         let hauler_tid = hauler_type_for_system(sde, solar_system_id);
         // DERIVED: Primary regional mineral cargo (Tritanium type_id 34, SDE volume 0.01 m3) scaled to hauler cargo hold
@@ -1113,7 +1117,7 @@ impl LivingWorldDirector {
         db: &WorldRepository,
         sde: &eve_sde::SdeRegistry,
     ) -> Vec<(i64, Result<NpcMiningStepResult, String>)> {
-        let active_ids: Vec<i64> = {
+        let mut active_ids: Vec<i64> = {
             let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
             convoys
                 .values()
@@ -1121,6 +1125,7 @@ impl LivingWorldDirector {
                 .map(|c| c.convoy_id)
                 .collect()
         };
+        active_ids.sort_unstable();
         let mut results = Vec::new();
         for cid in active_ids {
             let res = self.step_npc_mining_op(cid, systems, db, sde).await;
@@ -1136,7 +1141,7 @@ impl LivingWorldDirector {
         db: &WorldRepository,
         sde: &eve_sde::SdeRegistry,
     ) -> Vec<(i64, Result<ConvoyStepStatus, String>)> {
-        let active_ids: Vec<i64> = {
+        let mut active_ids: Vec<i64> = {
             let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
             let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
             routes
@@ -1156,6 +1161,7 @@ impl LivingWorldDirector {
                 })
                 .collect()
         };
+        active_ids.sort_unstable();
         let mut results = Vec::new();
         for cid in active_ids {
             let res = self.step_hauler_convoy(cid, systems, db, sde).await;

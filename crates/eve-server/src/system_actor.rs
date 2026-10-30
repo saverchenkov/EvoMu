@@ -268,12 +268,15 @@ impl SystemRegistry {
     }
 
     pub fn active_system_handles(&self) -> Vec<(SolarSystemId, SystemHandle)> {
-        self.systems
+        let mut handles: Vec<(SolarSystemId, SystemHandle)> = self
+            .systems
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(&id, h)| (id, h.clone()))
-            .collect()
+            .collect();
+        handles.sort_by_key(|(id, _)| *id);
+        handles
     }
 
     /// Records that PvE special-site ball `ball_id` has been spawned in `solar_system_id`.

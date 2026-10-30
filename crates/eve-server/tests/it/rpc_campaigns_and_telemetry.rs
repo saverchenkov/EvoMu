@@ -559,13 +559,24 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(unknown_track.code, "CommunityTrackInstanceNotFound");
 
-    // Template 1 ("Vanguard Nemesis Event", goal 100, tale_templates [466..=485]) in community_track_templates.fsdbinary
-    let track_attrs = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)])
+    // Template 1 ("Vanguard Nemesis Event", goal 100, tale_templates [466..=485]) is not pre-populated as active
+    let unactivated_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)])
         .await
-        .expect("get_instance_attributes_public for SDE template 1");
+        .expect_err("unactivated template ID 1 must not be treated as an active instance");
+    // rpc-lint: allow error code check
+    assert_eq!(unactivated_err.code, "CommunityTrackInstanceNotFound");
+
+    let inst = ctx.quasar_gateway.progression.extra.activate_community_track(1).expect("activate template 1");
+    assert_ne!(inst.track_id, 1, "active track instance ID must differ from template_id");
+    assert_eq!(inst.template_id, 1);
+    let tid = i64::from(inst.track_id);
+
+    let track_attrs = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)])
+        .await
+        .expect("get_instance_attributes_public for activated instance");
     assert_eq!(track_attrs, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
 
-    // Starting/completing Vanguard Nemesis tale 466 advances track 1; unrelated tale 99999 does not
+    // Completing (stopping) Vanguard Nemesis tale 466 advances track once (+1, not +2); starting alone does not advance it
     sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
     let encode_tale_req = |spawn_tpl: u64, sys_id: Option<u64>| -> Vec<u8> {
         let (mut req, mut tpl_id) = (Vec::new(), Vec::new());
@@ -579,40 +590,41 @@ async fn test_milestones_and_community_tracks() {
         req
     };
     assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", encode_tale_req(99_999, Some(30_000_142))).await.status_code, 200);
-    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
     assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.tale.api.StartTaleRequest", encode_tale_req(466, Some(30_000_142))).await.status_code, 200);
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(0)]));
     assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.tale.api.StopTalesRequest", encode_tale_req(466, None)).await.status_code, 200);
-    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2)]));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1)]));
 
-    // Advance community track 1 via Quasar eve.communitytrack.api.AddProgressRequest (+43 -> 45, then +105 clamped to SDE goal 100)
+    // Advance community track instance via Quasar eve.communitytrack.api.AddProgressRequest (+43 -> 44, then +105 clamped to SDE goal 100)
     for delta in [43_u64, 105_u64] {
         let (mut add_pb, mut id_pb) = (Vec::new(), Vec::new());
-        eve_proto::quasar::encode_varint_field(1, 1, &mut id_pb);
+        eve_proto::quasar::encode_varint_field(1, inst.track_id as u64, &mut id_pb);
         eve_proto::quasar::encode_bytes_field(1, &id_pb, &mut add_pb);
         eve_proto::quasar::encode_varint_field(2, delta, &mut add_pb);
         assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.AddProgressRequest", add_pb).await.status_code, 200);
         if delta == 43 {
-            assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(45)]));
+            assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.unwrap(), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(44)]));
         }
     }
     sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
-    let clamped_attrs = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)])
+    let clamped_attrs = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)])
         .await
         .expect("get_instance_attributes_public clamped to SDE goal");
     assert_eq!(clamped_attrs, PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
 
-    // Stopping track 1 marks it inactive -> get_instance_attributes_public rejects it; restarting restores it
+    // Stopping track instance marks it inactive -> get_instance_attributes_public rejects it; restarting restores it
     sess.role |= eve_machonet::service_roles::ROLE_ADMIN;
     let (mut tid_pb, mut track_id_req) = (Vec::new(), Vec::new());
-    eve_proto::quasar::encode_varint_field(1, 1, &mut tid_pb);
+    eve_proto::quasar::encode_varint_field(1, inst.track_id as u64, &mut tid_pb);
     eve_proto::quasar::encode_bytes_field(1, &tid_pb, &mut track_id_req);
     assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StopRequest", track_id_req.clone()).await.status_code, 200);
-    let stopped_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.expect_err("inactive track must fail");
+    let stopped_err = rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect_err("inactive track must fail");
     // rpc-lint: allow error code check
     assert_eq!(stopped_err.code, "CommunityTrackInstanceNotFound");
     assert_eq!(crate::quasar_progression_complete::quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.StartRequest", track_id_req).await.status_code, 200);
     sess.role &= !eve_machonet::service_roles::ROLE_ADMIN;
-    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(1)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
+    assert_eq!(rpc(&ctx, &mut sess, "communityTrackMgr", "get_instance_attributes_public", &[PyRep::Integer(tid)]).await.expect("restarted track"), PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)]));
 
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
     let denied = rpc(

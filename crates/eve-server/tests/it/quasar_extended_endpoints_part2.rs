@@ -99,8 +99,10 @@ async fn quasar_community_track_definitions_and_instances() {
     assert_eq!(inst_fd.package, "eve_public.communitytrack.instance");
     assert_eq!(inst_fd.messages.len(), 2);
 
+    let inst = ctx.quasar_gateway.progression.extra.activate_community_track(1).expect("activate track template 1");
+    assert_ne!(inst.track_id, 1);
     let (mut req_body, mut id_bytes) = (Vec::new(), Vec::new());
-    encode_varint_field(1, 1, &mut id_bytes);
+    encode_varint_field(1, inst.track_id as u64, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut req_body);
 
     let rsp = quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", req_body, b"corr-ctrack-01").await;

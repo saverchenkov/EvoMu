@@ -568,25 +568,26 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(unclaim_rsp.status_code, STATUS_OK);
     assert_eq!(unclaim_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.reward.api.GetUnclaimedResponse");
 
-    // 7. Claim reward: ClaimRequest -> V24 ClaimResponse
-    let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", vec![]).await;
-    assert_eq!(claim_rsp.status_code, STATUS_OK, "ClaimRequest failed: {}", claim_rsp.status_message);
-    assert_eq!(claim_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.reward.api.ClaimResponse");
-
-    // Verify WalletJournalEntry created for character
-    let has_journal = ctx.db.with_snapshot(|snap| {
-        snap.wallet_journal.iter().any(|j| j.character_id == cid as i64 && j.entry_type == "achievement_reward")
+    // 7. Claim reward: ClaimRequest fails closed with DATA GAP (no ISK/SP minted)
+    let (bal_before, sp_before) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&(cid as i64)).unwrap();
+        (ch.balance, ch.free_skill_points)
     });
-    assert!(has_journal, "Expected WalletJournalEntry for claimed achievement reward");
+    let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", vec![]).await;
+    assert_eq!(claim_rsp.status_code, eve_server::quasar_gateway::STATUS_PRECONDITION_FAILED);
+
+    let (bal_after, sp_after, has_journal) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&(cid as i64)).unwrap();
+        (ch.balance, ch.free_skill_points, snap.wallet_journal.iter().any(|j| j.character_id == cid as i64 && j.entry_type == "achievement_reward"))
+    });
+    assert_eq!(bal_after, bal_before);
+    assert_eq!(sp_after, sp_before);
+    assert!(!has_journal, "ClaimRequest must not write achievement_reward journal entry");
 
     // 8. Admin CompleteRequest -> completes achievement 2
     let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2)).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK, "CompleteRequest failed: {}", comp_rsp.status_message);
     assert_eq!(comp_rsp.payload.as_ref().unwrap().normalized_type_name(), "google.protobuf.Empty");
-
-    // Claim rewards unlocked by CompleteRequest so unclaimed_reward_count returns to 0
-    let claim2_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", vec![]).await;
-    assert_eq!(claim2_rsp.status_code, STATUS_OK);
 
     flush_pending_notices(&ctx);
     let comp_notices = drain_notices(&mut notice_rx);

@@ -365,16 +365,14 @@ async fn quasar_achievement_category_endpoints_and_notices() {
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
 
-    // 3. Category isolation and reset testing
-    // Advance progress on achievement 9 (Category 1: Navigation / Exploration)
+    // 3. Category isolation and reset testing (DATA GAP: SDE achievements have category_id = 0 without CDN checkpoints)
+    ctx.quasar_gateway.progression.achievements.set_category_score(90_000_003, 1, 25);
     let rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(9, 5), b"p1").await;
     assert_eq!(rsp1.status_code, STATUS_OK);
-
-    // Advance progress on achievement 2 (Category 2: Industry / Mining)
     let rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(2, 10), b"p2").await;
     assert_eq!(rsp2.status_code, STATUS_OK);
 
-    // Reset Category 1
+    // Reset Category 1 score and emit category milestone notice
     let mut cat_id1 = Vec::new();
     encode_bytes_field(1, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut cat_id1);
     let mut reset_body1 = Vec::new();
@@ -388,18 +386,23 @@ async fn quasar_achievement_category_endpoints_and_notices() {
     )
     .await;
     assert_eq!(rsp_reset1.status_code, STATUS_OK);
+    eve_server::services::quasar_achievements::publish_achievement_category_milestone_notice(
+        &ctx.quasar_gateway,
+        90_000_003,
+        1,
+        101,
+    );
 
-    // Assert Category 1 achievement progress is reset to 0
+    // Uncategorized SDE achievements (category_id = 0) retain progress when Category 1 is reset
     let ach1_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(9), b"g1-after").await;
     assert_eq!(ach1_after.status_code, STATUS_OK);
     let dyn_ach1 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach1_after.payload.unwrap().value).unwrap();
-    assert_eq!(dyn_ach1.get(3), Some(&DynamicValue::Uint64(0)), "Category 1 progress must be reset to 0");
+    assert_eq!(dyn_ach1.get(3), Some(&DynamicValue::Uint64(5)), "Uncategorized SDE achievement 9 must remain intact");
 
-    // Assert Category 2 achievement progress remains intact (10)
     let ach2_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(2), b"g2-after").await;
     assert_eq!(ach2_after.status_code, STATUS_OK);
     let dyn_ach2 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach2_after.payload.unwrap().value).unwrap();
-    assert_eq!(dyn_ach2.get(3), Some(&DynamicValue::Uint64(10)), "Category 2 progress must remain intact");
+    assert_eq!(dyn_ach2.get(3), Some(&DynamicValue::Uint64(10)), "Uncategorized SDE achievement 2 must remain intact");
 
     // Negative assertions: missing category_id returns 400 (STATUS_BAD_REQUEST)
     let bad_get = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", Vec::new(), b"bad-get").await;
@@ -413,6 +416,8 @@ async fn quasar_achievement_category_endpoints_and_notices() {
     encode_bytes_field(1, &cat_id1, &mut cat1_req);
     let cat1_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", cat1_req, b"corr-cat1").await;
     assert_eq!(cat1_rsp.status_code, STATUS_OK);
+    let dyn_cat1 = reg.decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat1_rsp.payload.unwrap().value).unwrap();
+    assert_eq!(dyn_cat1.get(1), Some(&DynamicValue::Uint32(0)), "Category 1 score must be 0 after reset");
 
     let received = drain_notices(&mut stream_rx);
     assert!(received.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("achievement.category.api.ProgressedNotice")).unwrap_or(false)));
@@ -541,6 +546,12 @@ async fn quasar_achievement_milestones_rewards_and_events() {
     .await;
     assert_eq!(get_ver.status_code, STATUS_OK);
 
+    eve_server::services::quasar_achievements::publish_achievement_milestone_reached_notice(
+        &ctx.quasar_gateway,
+        90_000_004,
+        2,
+        1,
+    );
     let ver_resp = quasar_rpc(
         &ctx,
         &mut sess,

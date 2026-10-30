@@ -14,7 +14,8 @@
 
 use crate::quasar_gateway::NoticeScope;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 
 /// Prefix of the 16-byte goal UUID used for goals backed by the corporation project ledger.
@@ -172,4 +173,127 @@ pub fn tale_lifecycle(started: bool, tale_id: u64, template_id: u64, solar_syste
 /// either notice, so tale lifecycle is broadcast to every subscribed session.
 pub fn tale_scope() -> NoticeScope {
     NoticeScope::Broadcast
+}
+
+fn format_opportunity_id_value(v: &DynamicValue) -> String {
+    match v {
+        DynamicValue::String(s) => s.clone(),
+        DynamicValue::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
+        DynamicValue::Uint64(u) => u.to_string(),
+        DynamicValue::Int64(i) => i.to_string(),
+        DynamicValue::Uint32(u) => u.to_string(),
+        DynamicValue::Int32(i) => i.to_string(),
+        DynamicValue::Bool(b) => b.to_string(),
+        DynamicValue::Enum(e) => e.to_string(),
+        DynamicValue::Message(m) => m
+            .fields
+            .iter()
+            .map(|(k, fv)| format!("{k}={}", format_opportunity_id_value(fv)))
+            .collect::<Vec<_>>()
+            .join(","),
+        DynamicValue::Repeated(items) => items
+            .iter()
+            .map(format_opportunity_id_value)
+            .collect::<Vec<_>>()
+            .join(","),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Consumes client-published `eve_public.opportunity.api.{Viewed,Tracked,Untracked,Completed,Discovered}`
+/// events from `publicGatewaySvc.PublishEvent` / `PublishEventPayload`, updates live achievement/goal
+/// progression state, and queues progression notices to the character's subscribed session.
+pub fn handle_opportunity_event(
+    manager: &crate::services::quasar_progression::ProgressionManagers,
+    descriptors: &eve_proto::quasar::QuasarDescriptorRegistry,
+    session: &eve_machonet::SessionState,
+    any: &GoogleAny,
+    now_unix: u64,
+) {
+    let event_name = eve_proto::quasar::QuasarDescriptorRegistry::normalize_type_name(&any.type_url);
+    if !matches!(
+        event_name,
+        "eve_public.opportunity.api.Viewed"
+            | "eve_public.opportunity.api.Tracked"
+            | "eve_public.opportunity.api.Untracked"
+            | "eve_public.opportunity.api.Completed"
+            | "eve_public.opportunity.api.Discovered"
+    ) {
+        return;
+    }
+    let Some(cid) = session.character_id.and_then(|c| u32::try_from(c).ok()).filter(|&c| c > 0) else {
+        return;
+    };
+    let Ok(dyn_msg) = descriptors.decode_dynamic(&any.type_url, &any.value) else { return };
+    let mut delta = 1u64;
+    let opp_key = if event_name.ends_with(".Discovered") {
+        let Some(DynamicValue::Message(disc_opp)) = dyn_msg.get(1) else { return };
+        if let Some(amt) = disc_opp.get(2).and_then(|v| match v {
+            DynamicValue::Uint64(u) if *u > 0 => Some(*u),
+            DynamicValue::Int64(i) if *i > 0 => u64::try_from(*i).ok(),
+            _ => None,
+        }) {
+            delta = amt;
+        }
+        let tag = match disc_opp.get(1) {
+            Some(DynamicValue::Message(m)) => match m.get(1) {
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.clone(),
+                Some(DynamicValue::Uint64(v)) if *v > 0 => v.to_string(),
+                Some(DynamicValue::Int64(v)) if *v > 0 => v.to_string(),
+                _ => String::new(),
+            },
+            Some(DynamicValue::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        if tag.is_empty() { return; }
+        format!("discovered:{tag}")
+    } else {
+        if let Some(DynamicValue::Message(ch_msg)) = dyn_msg.get(1) {
+            let req_cid = match ch_msg.get(1) {
+                Some(DynamicValue::Uint64(v)) => u32::try_from(*v).ok(),
+                Some(DynamicValue::Int64(v)) if *v > 0 => u32::try_from(*v).ok(),
+                Some(DynamicValue::Uint32(v)) => Some(*v),
+                Some(DynamicValue::Int32(v)) if *v > 0 => u32::try_from(*v).ok(),
+                _ => None,
+            };
+            if req_cid.filter(|&c| c > 0).is_some_and(|rc| rc != cid) { return; }
+        }
+        let Some(DynamicValue::Message(opp_msg)) = dyn_msg.get(2) else { return };
+        let Some(variant_num) = (1u32..=8).find(|&f| opp_msg.get(f).is_some()) else { return };
+        let Some(variant_val) = opp_msg.get(variant_num) else { return };
+        let id_str = format_opportunity_id_value(variant_val);
+        if id_str.is_empty() { return; }
+        format!("v{variant_num}:{id_str}")
+    };
+    if let Some((ach, done, ms)) = manager.achievements.add_progress(cid, 102, delta, now_unix) {
+        manager.achievements.save_to_db();
+        let cat_score = manager.achievements.category_score(cid, ach.def.category_id);
+        crate::services::quasar_achievements::emit_achievement_notices(cid, ach.def.id, ach.def.category_id, ach.progress, cat_score, done, &ms, now_unix);
+    }
+    if let Some(ref db) = manager.extra.db {
+        db.with_mut_snapshot(|snap| {
+            let mut state: serde_json::Value = snap.quasar_state_blobs.get("quasar_opportunities").and_then(|j| serde_json::from_str(j).ok()).unwrap_or_else(|| serde_json::json!({}));
+            if !state.is_object() { state = serde_json::json!({}); }
+            if let Some(obj) = state.as_object_mut() {
+                let ch_entry = obj.entry(cid.to_string()).or_insert_with(|| serde_json::json!({"tracked": [], "history": []}));
+                if event_name.ends_with(".Tracked") {
+                    if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
+                        if !arr.iter().any(|x| x.as_str() == Some(&opp_key)) {
+                            if arr.len() >= 256 { arr.remove(0); }
+                            arr.push(serde_json::Value::String(opp_key.clone()));
+                        }
+                    }
+                } else if event_name.ends_with(".Untracked") {
+                    if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
+                        arr.retain(|x| x.as_str() != Some(&opp_key));
+                    }
+                }
+                if let Some(hist) = ch_entry.get_mut("history").and_then(|v| v.as_array_mut()) {
+                    if hist.len() >= 256 { hist.remove(0); }
+                    hist.push(serde_json::json!({"event": event_name, "key": opp_key}));
+                }
+            }
+            snap.quasar_state_blobs.insert("quasar_opportunities".into(), state.to_string());
+        });
+    }
 }

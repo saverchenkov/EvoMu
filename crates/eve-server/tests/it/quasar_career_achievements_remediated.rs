@@ -8,7 +8,7 @@ use eve_proto::quasar::{
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_OK, STATUS_PRECONDITION_FAILED};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
@@ -368,12 +368,20 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let mut sess = build_sess(&ctx, 41_003, 90_000_012, 98_000_001);
     let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
 
-    // 0. Verify parsed authentic SDE achievement attributes (localized names, multi-condition targets, and event bindings)
+    // 0. Verify parsed authentic SDE achievement attributes (60 enabled; 8 disabled excluded)
     let ach_defs = &ctx.quasar_gateway.progression.achievements.definitions;
-    assert_eq!(ach_defs.len(), 68, "Must load 68 authentic SDE achievements");
+    assert_eq!(ach_defs.len(), 60, "Must load 60 enabled SDE achievements (8 disabled excluded)");
+    for disabled_id in [3u32, 4, 14, 37, 51, 54, 56, 65] {
+        assert!(!ach_defs.iter().any(|d| d.id == disabled_id), "Disabled SDE achievement {disabled_id} must be excluded");
+    }
     let ach2 = ach_defs.iter().find(|d| d.id == 2).expect("SDE achievement 2");
     assert_eq!(ach2.name, "Mine Ore", "SDE achievement 2 localized name must be 'Mine Ore'");
     assert_eq!(ach2.target, 3, "SDE achievement 2 authentic target condition must be 3");
+    assert_eq!(ach2.category_id, 0, "DATA GAP: category_id must not be fabricated");
+    assert_eq!(ach2.score, 0, "DATA GAP: score must not be fabricated");
+    assert!(ach2.milestone_targets.is_empty(), "DATA GAP: intermediate milestones must not be fabricated");
+    assert_eq!(ach2.reward_isk, 0, "DATA GAP: reward_isk must not be fabricated");
+    assert_eq!(ach2.reward_sp, 0, "DATA GAP: reward_sp must not be fabricated");
     assert!(!ach2.description.is_empty(), "SDE achievement 2 description must be resolved from localization pickle");
 
     let ach60 = ach_defs.iter().find(|d| d.id == 60).expect("SDE achievement 60");
@@ -402,7 +410,7 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert_eq!(ach60_done.progress, 2, "Zooming out satisfies condition 1 (2/2)");
     assert!(ach60_done.completed, "Achievement 60 completes once both conditions are met");
 
-    // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 68 and CRC32 IEEE
+    // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 60 (enabled SDE count) and CRC32 IEEE
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new(), b"cdn-01").await;
     assert_eq!(cdn_rsp.status_code, STATUS_OK);
     let cdn_payload = cdn_rsp.payload.expect("cdn payload");
@@ -413,20 +421,20 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let cp_wm = WireMessage::decode(cp_field.value.as_bytes().expect("cp bytes")).expect("decode Checkpoint");
 
     let url_str = cp_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_str().ok().flatten()).expect("url");
-    assert!(url_str.contains("v24.1.68") || url_str.contains("achievements"), "URL must reference achievement definitions: {url_str}");
+    assert!(url_str.contains("v24.1.60") && url_str.contains("achievements"), "URL must reference 60 enabled achievement definitions: {url_str}");
 
     let spec_field = cp_wm.fields.iter().find(|f| f.field_number == 2).expect("spec field");
     let spec_wm = WireMessage::decode(spec_field.value.as_bytes().expect("spec bytes")).expect("decode spec");
     assert_eq!(spec_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(24), "Major 24");
     assert_eq!(spec_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1), "Minor 1");
-    assert_eq!(spec_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(68), "Patch 68 (68 real SDE achievements)");
+    assert_eq!(spec_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(60), "Patch 60 (60 enabled SDE achievements)");
 
     let crc_field = cp_wm.fields.iter().find(|f| f.field_number == 3).expect("crc field");
     let crc_wm = WireMessage::decode(crc_field.value.as_bytes().expect("crc bytes")).expect("decode crc");
     let crc_val = crc_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).expect("crc val");
     assert!(crc_val > 0, "CRC32 checksum must be non-zero");
 
-    // 2. eve_public.achievement.api.GetRequest -> GetResponse (V24 oneof completion)
+    // 2. eve_public.achievement.api.GetRequest -> GetResponse (V24 oneof completion) + disabled achievement excluded
     let make_ident_req = |id: u32| -> Vec<u8> {
         let mut req_body = Vec::new();
         let mut id_bytes = Vec::new();
@@ -436,6 +444,9 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
         encode_bytes_field(1, &id_bytes, &mut req_body);
         req_body
     };
+
+    let disabled_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ident_req(3), b"ach-disabled").await;
+    assert_eq!(disabled_rsp.status_code, STATUS_NOT_FOUND, "Disabled SDE achievement 3 must return NOT_FOUND");
 
     let req_ach2 = make_ident_req(2);
     let get_rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", req_ach2.clone(), b"ach-01").await;
@@ -462,92 +473,58 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert!(wm_get2.fields.iter().any(|f| f.field_number == 1), "completed_date timestamp must be present");
     assert!(wm_get2.fields.iter().all(|f| f.field_number != 2), "not_completed must NOT be emitted when completed_date is set (oneof completion)");
     assert_eq!(wm_get2.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(ach2.target), "progress must equal target");
-    assert!(wm_get2.fields.iter().any(|f| f.field_number == 5), "reached_milestones must be populated");
+    assert!(wm_get2.fields.iter().all(|f| f.field_number != 5), "DATA GAP: no fabricated intermediate milestones emitted");
     let dyn_get2 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &get_payload2.value).expect("decode completed GetResponse dynamic");
     assert!(dyn_get2.get(1).is_some(), "completed_date must decode cleanly via descriptor");
     assert!(dyn_get2.get(2).is_none(), "not_completed must be None in oneof completion");
 
-    // 3. eve_public.achievement.category.api.GetRequest -> GetResponse (score + reached_milestones)
-    let cat_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", make_ident_req(ach2.category_id), b"cat-01").await;
+    // 3. eve_public.achievement.category.api.GetRequest -> GetResponse (0 score without CDN checkpoint)
+    let cat_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.category.api.GetRequest", make_ident_req(1), b"cat-01").await;
     assert_eq!(cat_rsp.status_code, STATUS_OK);
     let cat_payload = cat_rsp.payload.expect("cat payload");
     let dyn_cat = reg.decode_dynamic("eve_public.achievement.category.api.GetResponse", &cat_payload.value).expect("decode category GetResponse");
-    assert!(matches!(dyn_cat.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(s)) if *s == ach2.score));
-    assert!(matches!(dyn_cat.get(2), Some(eve_proto::quasar::DynamicValue::Repeated(ms)) if !ms.is_empty()), "category reached_milestones must be populated when score >= 10");
+    assert!(matches!(dyn_cat.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(0))));
 
-    // 4. eve_public.achievement.reward.api.GetUnclaimedRequest & targeted ClaimRequest
+    // 4. eve_public.achievement.reward.api.GetUnclaimedRequest & ClaimRequest fail-closed DATA GAP (no ISK/SP minted)
+    let (bal_before, sp_before) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_012).unwrap();
+        (ch.balance, ch.free_skill_points)
+    });
     let uncl_rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"ach-04").await;
     assert_eq!(uncl_rsp1.status_code, STATUS_OK);
-    let uncl_payload1 = uncl_rsp1.payload.expect("uncl_payload1");
-    let dyn_uncl1 = reg.decode_dynamic("eve_public.achievement.reward.api.GetUnclaimedResponse", &uncl_payload1.value).expect("decode GetUnclaimedResponse");
-    let rewards_list = match dyn_uncl1.get(1) {
-        Some(eve_proto::quasar::DynamicValue::Repeated(items)) => items,
-        other => panic!("Expected repeated Reward entries, got {other:?}"),
-    };
-    let expected_unclaimed = ach2.milestone_targets.len() + ach12.milestone_targets.len() + ach60.milestone_targets.len();
-    assert_eq!(rewards_list.len(), expected_unclaimed, "GetUnclaimedResponse must emit one V24 Reward per unclaimed milestone");
+    let wm_uncl1 = WireMessage::decode(&uncl_rsp1.payload.unwrap().value).expect("decode GetUnclaimedResponse");
+    assert!(wm_uncl1.fields.is_empty(), "DATA GAP: no fabricated milestone rewards emitted");
 
-    // Targeted ClaimRequest for achievement_source = ach 2 with all_rewards = true (field 3 = 1)
-    let mut src_ach2 = Vec::new();
-    encode_uuid_ident_test(1, 2, &mut src_ach2);
-    let mut claim_ach2_req = Vec::new();
-    encode_bytes_field(1, &src_ach2, &mut claim_ach2_req);
-    encode_varint_field(3, 1, &mut claim_ach2_req);
-
-    let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", claim_ach2_req, b"ach-05").await;
-    assert_eq!(claim_rsp.status_code, STATUS_OK);
-    assert_eq!(claim_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.reward.api.ClaimResponse");
-
-    // Verify ach 2 was claimed while ach 12 & ach 60 remain unclaimed
-    let uncl_rsp_mid = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"ach-05b").await;
-    assert_eq!(uncl_rsp_mid.status_code, STATUS_OK);
-    let dyn_uncl_mid = reg.decode_dynamic("eve_public.achievement.reward.api.GetUnclaimedResponse", &uncl_rsp_mid.payload.unwrap().value).expect("decode mid GetUnclaimedResponse");
-    let mid_rewards = match dyn_uncl_mid.get(1) {
-        Some(eve_proto::quasar::DynamicValue::Repeated(items)) => items,
-        other => panic!("Expected remaining unclaimed rewards for ach 12 & 60, got {other:?}"),
-    };
-    assert_eq!(mid_rewards.len(), ach12.milestone_targets.len() + ach60.milestone_targets.len());
-
-    // Claim remaining rewards via all_rewards = true (field 3 = 1)
     let mut claim_all_req = Vec::new();
     encode_varint_field(3, 1, &mut claim_all_req);
     let claim_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", claim_all_req, b"ach-05c").await;
-    assert_eq!(claim_all_rsp.status_code, STATUS_OK);
+    assert_eq!(claim_all_rsp.status_code, STATUS_PRECONDITION_FAILED, "ClaimRequest must fail closed with PRECONDITION_FAILED until CDN checkpoint data exists");
 
-    let uncl_rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"ach-06").await;
-    assert_eq!(uncl_rsp2.status_code, STATUS_OK);
-    let wm_uncl2 = WireMessage::decode(&uncl_rsp2.payload.unwrap().value).expect("decode GetUnclaimedResponse");
-    assert!(wm_uncl2.fields.is_empty(), "No unclaimed rewards should remain after claiming all");
-
-    let has_journal = ctx.db.with_snapshot(|snap| {
-        snap.wallet_journal.iter().any(|j| j.character_id == 90_000_012 && j.entry_type == "achievement_reward")
+    let (bal_after, sp_after, has_journal) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_012).unwrap();
+        let j = snap.wallet_journal.iter().any(|j| j.character_id == 90_000_012 && j.entry_type == "achievement_reward");
+        (ch.balance, ch.free_skill_points, j)
     });
-    assert!(has_journal, "Expected WalletJournalEntry for claimed achievement reward");
+    assert_eq!(bal_after, bal_before, "ClaimRequest must not mint ISK");
+    assert_eq!(sp_after, sp_before, "ClaimRequest must not grant free SP");
+    assert!(!has_journal, "ClaimRequest must not write achievement_reward wallet journal entries");
 
-    // 5. eve_public.achievement.showcase.api.GetCharacterScoreRequest -> GetCharacterScoreResponse
-    let expected_total_score = (ach2.score + ach12.score + ach60.score) as u64;
+    // 5. eve_public.achievement.showcase.api.GetCharacterScoreRequest -> 0 without CDN checkpoint + negative input rejection
     let score_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), b"ach-07").await;
     assert_eq!(score_rsp.status_code, STATUS_OK);
-    let score_payload = score_rsp.payload.expect("score_payload");
-    let dyn_score = reg.decode_dynamic("eve_public.achievement.showcase.api.GetCharacterScoreResponse", &score_payload.value).expect("decode GetCharacterScoreResponse");
-    assert!(matches!(dyn_score.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(s)) if *s as u64 == expected_total_score));
+    let dyn_score = reg.decode_dynamic("eve_public.achievement.showcase.api.GetCharacterScoreResponse", &score_rsp.payload.unwrap().value).expect("decode GetCharacterScoreResponse");
+    assert!(matches!(dyn_score.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(0))));
 
-    // Cross-character showcase score query
-    let mut other_sess = build_sess(&ctx, 41_004, 90_000_013, 98_000_001);
-    let mut char_ident = Vec::new();
-    encode_varint_field(1, 90_000_012, &mut char_ident);
-    let mut cross_req = Vec::new();
-    encode_bytes_field(1, &char_ident, &mut cross_req);
-    let cross_rsp = quasar_rpc(&ctx, &mut other_sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", cross_req, b"ach-08").await;
-    assert_eq!(cross_rsp.status_code, STATUS_OK);
-    let dyn_cross = reg.decode_dynamic("eve_public.achievement.showcase.api.GetCharacterScoreResponse", &cross_rsp.payload.unwrap().value).expect("decode cross GetCharacterScoreResponse");
-    assert!(matches!(dyn_cross.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(s)) if *s as u64 == expected_total_score));
-}
+    // Invalid / zero DynamicValue inputs must be rejected with STATUS_BAD_REQUEST
+    let mut zero_char_ident = Vec::new();
+    encode_varint_field(1, 0, &mut zero_char_ident);
+    let mut zero_score_req = Vec::new();
+    encode_bytes_field(1, &zero_char_ident, &mut zero_score_req);
+    let zero_score_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", zero_score_req, b"ach-neg-01").await;
+    assert_eq!(zero_score_rsp.status_code, STATUS_BAD_REQUEST, "Zero character_id in GetCharacterScoreRequest must return BAD_REQUEST");
 
-fn encode_uuid_ident_test(field_no: u32, id: u32, out: &mut Vec<u8>) {
-    let mut uuid = [0u8; 16];
-    uuid[12..16].copy_from_slice(&id.to_be_bytes());
-    let mut ident = Vec::new();
-    encode_bytes_field(1, &uuid, &mut ident);
-    encode_bytes_field(field_no, &ident, out);
+    let mut zero_delta_req = Vec::new();
+    encode_varint_field(2, 0, &mut zero_delta_req);
+    let zero_delta_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", zero_delta_req, b"ach-neg-02").await;
+    assert_eq!(zero_delta_rsp.status_code, STATUS_BAD_REQUEST, "Zero progress_delta in AddProgressRequest must return BAD_REQUEST");
 }
