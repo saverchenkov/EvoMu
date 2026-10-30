@@ -212,6 +212,24 @@ async fn test_crimewatch_highsec_criminal_movement_and_wormhole_exemption() {
     crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("Select Pilot 1");
     let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.expect("GetSystemScanMgr");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.entry(sys_id).or_default().push(eve_db::CosmicSignatureRecord {
+            signature_id: "JMM-142".into(),
+            solar_system_id: sys_id,
+            sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole (K162)".into(),
+            position: [149_597_870_700.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            wormhole_type_id: Some(26_272),
+            destination_system_id: Some(31_000_005),
+            created_unix: ctx.now_unix(),
+            lifetime_seconds: 86_400,
+            max_mass_kg: 2_000_000_000.0,
+            remaining_mass_kg: 2_000_000_000.0,
+            max_jump_mass_kg: 375_000_000.0,
+            collapsed: false,
+        });
+    });
     let (wh_sig_id, wh_pos) = ctx.db.with_snapshot(|snap| {
         let sig = snap.cosmic_signatures[&sys_id].iter().find(|s| s.sig_group == "Wormhole").unwrap();
         (sig.signature_id.clone(), sig.position)

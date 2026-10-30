@@ -137,6 +137,39 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub async fn set_ball_wormhole_stages(
+        &self,
+        ball_id: BallId,
+        wormhole_age: i64,
+        wormhole_size: f64,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::SetBallWormholeStages {
+                ball_id,
+                wormhole_age,
+                wormhole_size,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
+    pub async fn get_ball_slim_item(
+        &self,
+        ball_id: BallId,
+    ) -> Result<Option<eve_proto::PyRep>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::GetBallSlimItem { ball_id, reply: tx })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await
+            .map_err(|_| "Solar system reply dropped".to_string())
+    }
+
     pub async fn spawn_asteroid(
         &self,
         asteroid: AsteroidState,

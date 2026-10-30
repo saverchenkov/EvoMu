@@ -358,7 +358,9 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
 
     // Entry filament inside Pochven fails
     ctx.advance_secs(905);
-    let _ = ctx.systems.get_or_spawn(border_dest).set_ball_position(ship_id, safe_spot).await;
+    let border_handle = ctx.systems.get_or_spawn(border_dest);
+    let _ = border_handle.set_ball_position(ship_id, safe_spot).await;
+    let _ = border_handle.set_speed_fraction(ship_id, 0.5).await;
     let entry_inside_err = ctx
         .dispatch_rpc(&mut sess, "randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(border_fil_id)], &kw, None)
         .await
@@ -377,7 +379,9 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
 
     // Cladistic-5 'Krai Veles' Filament (56072) -> lands in Krai Veles (non-home when standing < 6.0)
     ctx.advance_secs(905);
-    let _ = ctx.systems.get_or_spawn(prox_dest).set_ball_position(ship_id, safe_spot).await;
+    let prox_handle = ctx.systems.get_or_spawn(prox_dest);
+    let _ = prox_handle.set_ball_position(ship_id, safe_spot).await;
+    let _ = prox_handle.set_speed_fraction(ship_id, 0.5).await;
     let krai_rep = ctx
         .dispatch_rpc(&mut sess, "randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(krai_fil_id)], &kw, None)
         .await
@@ -389,7 +393,9 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
 
     // Glorification-1 'Devana' Filament (56065) -> lands in Triglavian Minor Victory system (not trade hubs)
     ctx.advance_secs(905);
-    let _ = ctx.systems.get_or_spawn(krai_sys).set_ball_position(ship_id, safe_spot).await;
+    let krai_handle = ctx.systems.get_or_spawn(krai_sys);
+    let _ = krai_handle.set_ball_position(ship_id, safe_spot).await;
+    let _ = krai_handle.set_speed_fraction(ship_id, 0.5).await;
     let devana_rep = ctx
         .dispatch_rpc(&mut sess, "randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(devana_fil_id)], &kw, None)
         .await
@@ -403,7 +409,9 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
 
     // Home-5 filament with standing >= 6.0 succeeds into one of the 3 SDE Pochven home systems
     ctx.advance_secs(905);
-    let _ = ctx.systems.get_or_spawn(devana_dest).set_ball_position(ship_id, safe_spot).await;
+    let devana_handle = ctx.systems.get_or_spawn(devana_dest);
+    let _ = devana_handle.set_ball_position(ship_id, safe_spot).await;
+    let _ = devana_handle.set_speed_fraction(ship_id, 0.5).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.insert(500_026, 6.5);
     });

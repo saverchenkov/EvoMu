@@ -510,25 +510,46 @@ async fn test_wormhole_restrictions_and_buckets() {
         });
     });
 
-    // Live query via wormholeMgr.GetWormholePolarization:
+    // Live query via wormholeMgr.GetWormholePolarization (returns None when unpolarized):
     let pol_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "wormholeMgr",
             None,
             "GetWormholePolarization",
-            &[PyRep::String(wh_info_sig)],
+            &[PyRep::String(wh_info_sig.clone())],
             &kw,
             None,
         )
         .await
         .expect("wormholeMgr.GetWormholePolarization");
-    let PyRep::KeyVal(pkv) = pol_rep else { panic!("Expected KeyVal from GetWormholePolarization") };
-    assert_eq!(pkv.get("signatureID"), Some(&PyRep::String("WH-QUERY-1".into())));
-    assert!(pkv.contains_key("lifetimeStage"));
-    assert!(pkv.contains_key("massStage"));
-    assert_eq!(pkv.get("destinationClass"), Some(&PyRep::String("Thera".into())));
-    assert_eq!(pkv.get("maxShipSize"), Some(&PyRep::String("Large".into())));
-    assert_eq!(pkv.get("lifetimeBucket"), Some(&PyRep::String("<1 day".into())));
-    assert_eq!(pkv.get("massStabilityBucket"), Some(&PyRep::String("<50%".into())));
+    assert_eq!(pol_rep, PyRep::None);
+
+    // Live query of wormhole stage/bucket metadata via scanMgr.GetSystemScanMgr:
+    let scan_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "GetSystemScanMgr",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("scanMgr.GetSystemScanMgr");
+    let sig_kv = scan_rep
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l.iter().find(|item| item.dict_get("signatureID") == Some(&PyRep::String("WH-QUERY-1".into()))),
+            _ => None,
+        })
+        .expect("WH-QUERY-1 in GetSystemScanMgr");
+    assert_eq!(sig_kv.dict_get("signatureID"), Some(&PyRep::String("WH-QUERY-1".into())));
+    assert!(sig_kv.dict_get("lifetimeStage").is_some());
+    assert!(sig_kv.dict_get("massStage").is_some());
+    assert_eq!(sig_kv.dict_get("destinationClass"), Some(&PyRep::String("Thera".into())));
+    assert_eq!(sig_kv.dict_get("maxShipSize"), Some(&PyRep::String("Large".into())));
+    assert_eq!(sig_kv.dict_get("lifetimeBucket"), Some(&PyRep::String("<1 day".into())));
+    assert_eq!(sig_kv.dict_get("massStabilityBucket"), Some(&PyRep::String("<50%".into())));
 }

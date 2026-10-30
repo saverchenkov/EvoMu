@@ -605,92 +605,49 @@ pub(super) async fn handle_scanning_and_wormholes(
                     }
                     None
                 });
-                let Some((wh, entrance_wh_id, exit_wh_id)) = wh_match else {
+                let Some((wh, entrance_wh_id, _exit_wh_id)) = wh_match else {
                     return Some(Err(BridgeRpcError {
                         code: "WormholeNotFound".into(),
                         message: format!("Wormhole not found in system {sys_id}"),
                     }));
                 };
-                let buckets = crate::services::space_destiny::space_cyno_filaments::derive_wormhole_buckets(&wh, now_unix, &ctx.sde);
-                let (mass_stage, _wh_size, life_stage, _wh_age, is_collapsed) =
-                    crate::services::space_destiny::compute_wormhole_stages(&wh, now_unix);
-                let elapsed = now_unix.saturating_sub(wh.created_unix);
                 let dest_sys = wh.destination_system_id.unwrap_or(31_000_005) as i64;
                 let pol_key = arg_int_opt.unwrap_or(entrance_wh_id);
-                let rem_pol = ctx.db.with_snapshot(|snap| {
+                let exp_unix = ctx.db.with_snapshot(|snap| {
                     snap.wh_polarizations
                         .get(&(char_id, pol_key))
                         .or_else(|| snap.wh_polarizations.get(&(char_id, dest_sys)))
                         .copied()
                         .unwrap_or(0)
-                        .saturating_sub(now_unix)
                 });
-                return Some(Ok(PyRep::keyval([
-                    ("signatureID", PyRep::String(wh.signature_id)),
-                    ("entranceWormholeID", PyRep::Integer(entrance_wh_id)),
-                    ("exitWormholeID", PyRep::Integer(exit_wh_id)),
-                    (
-                        "wormholeTypeID",
-                        wh.wormhole_type_id
-                            .map(|t| PyRep::Integer(t as i64))
-                            .unwrap_or(PyRep::None),
-                    ),
-                    ("totalLifespanSeconds", PyRep::Integer(wh.lifetime_seconds as i64)),
-                    ("elapsedSeconds", PyRep::Integer(elapsed as i64)),
-                    ("lifetimeStage", PyRep::String(life_stage.into())),
-                    ("massStage", PyRep::String(mass_stage.into())),
-                    ("remainingMassKg", PyRep::Real(wh.remaining_mass_kg)),
-                    ("maxJumpMassKg", PyRep::Real(wh.max_jump_mass_kg)),
-                    ("destinationSystemID", PyRep::Integer(dest_sys)),
-                    ("destinationClass", PyRep::String(buckets.destination_class.into())),
-                    ("maxShipSize", PyRep::String(buckets.max_ship_size.into())),
-                    ("lifetimeBucket", PyRep::String(buckets.lifetime_bucket.into())),
-                    ("massStabilityBucket", PyRep::String(buckets.mass_stability_bucket.into())),
-                    ("lifetimeDescription", PyRep::String(buckets.lifetime_description.into())),
-                    (
-                        "massStabilityDescription",
-                        PyRep::String(buckets.mass_stability_description.into()),
-                    ),
-                    ("collapsed", PyRep::Bool(is_collapsed)),
-                    ("isPolarized", PyRep::Bool(rem_pol > 0)),
-                    ("remainingSeconds", PyRep::Integer(rem_pol as i64)),
-                ])));
+                if exp_unix > now_unix {
+                    let end_ft = crate::sp6_lifecycle::unix_to_filetime(exp_unix);
+                    let duration_ticks = 300_i64 * 10_000_000;
+                    return Some(Ok(PyRep::Tuple(vec![
+                        PyRep::Integer(end_ft),
+                        PyRep::Integer(duration_ticks),
+                    ])));
+                }
+                return Some(Ok(PyRep::None));
             }
 
             let target_sys = arg_int_opt.unwrap_or(31_000_005);
-            let remaining = ctx.db.with_snapshot(|snap| {
+            let exp_unix = ctx.db.with_snapshot(|snap| {
                 snap.wh_polarizations
                     .get(&(char_id, target_sys))
                     .copied()
                     .unwrap_or(0)
-                    .saturating_sub(now_unix)
             });
-            let is_polarized = remaining > 0;
-            let sys_u32 = target_sys as u32;
-            let (wh_class, is_thera, is_shattered, _) =
-                crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, sys_u32);
-            let is_wh = wh_class > 0 && wh_class != 25;
-            let allows_capitals = !is_wh || ((5..=6).contains(&wh_class) && !is_shattered);
-            let statics: Vec<Vec<PyRep>> =
-                crate::services::wormhole_lifecycle_ops::statics_for_system_sde(&ctx.sde, sys_u32)
-                    .into_iter()
-                    .map(|(name, code, cls)| {
-                        vec![PyRep::String(name), PyRep::String(code), PyRep::Integer(cls)]
-                    })
-                    .collect();
-
-            Some(Ok(PyRep::keyval([
-                ("destinationSystemID", PyRep::Integer(target_sys)),
-                ("systemID", PyRep::Integer(target_sys)),
-                ("isPolarized", PyRep::Bool(is_polarized)),
-                ("remainingSeconds", PyRep::Integer(remaining as i64)),
-                ("wormholeClass", PyRep::Integer(wh_class as i64)),
-                ("isThera", PyRep::Bool(is_thera)),
-                ("isShattered", PyRep::Bool(is_shattered)),
-                ("delayedLocal", PyRep::Bool(wh_class > 0)),
-                ("allowsCapitalShips", PyRep::Bool(allows_capitals)),
-                ("statics", PyRep::rowset(vec!["name", "code", "targetClassOrSec"], statics)),
-            ])))
+            if exp_unix > now_unix {
+                let end_ft = crate::sp6_lifecycle::unix_to_filetime(exp_unix);
+                let duration_ticks = 300_i64 * 10_000_000;
+                Some(Ok(PyRep::Tuple(vec![
+                    PyRep::Integer(end_ft),
+                    PyRep::Integer(duration_ticks),
+                ])))
+            } else {
+                Some(Ok(PyRep::None))
+            }
         }
 
         // =====================================================================

@@ -367,7 +367,9 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
 
     let wh48_ent = wormhole_item_id_for_signature(decay_sys, "WST-DEC-48H");
     let wh48_ext = wormhole_exit_item_id_for_signature(decay_dest, "WST-DEC-48H");
-    for (bsys, bid) in [(decay_sys, wh48_ent), (decay_dest, wh48_ext)] {
+    let wh16_ent = wormhole_item_id_for_signature(decay_sys, "WND-DEC-16H");
+    assert!(wh48_ent >= 40_000_000 && wh16_ent >= 40_000_000);
+    for (bsys, bid) in [(decay_sys, wh48_ent), (decay_sys, wh16_ent), (decay_dest, wh48_ext)] {
         let _ = ctx
             .systems
             .get_or_spawn(bsys)
@@ -386,51 +388,63 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
             .await;
     }
 
-    // At t = +1h: 48h (47h rem >24h) & 36h (35h rem >24h); 24h (23h rem 4h-24h) & 16h (15h rem 4h-24h)
+    // At t = +1h: step SystemActor tick and verify SlimItem (wormholeAge/wormholeSize) + GetWormholePolarization (None when unpolarized)
     ctx.advance_secs(3_600);
-    let info_48_early = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::String("WST-DEC-48H".into())], &kw, None)
+    let _ = ctx.systems.get_or_spawn(decay_sys).step_manual(1.0).await;
+    let pol_unpol = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::Integer(wh48_ent)], &kw, None)
         .await
-        .expect("GetWormholePolarization 48H early");
-    assert_eq!(info_48_early.dict_get("totalLifespanSeconds").and_then(|v| v.as_i64()), Some(48 * 3_600));
+        .expect("GetWormholePolarization unpolarized");
+    assert_eq!(pol_unpol, PyRep::None);
+
+    let slim_48_early = ctx.systems.get_or_spawn(decay_sys).get_ball_slim_item(wh48_ent).await.unwrap().expect("slim 48h");
+    let slim_16_early = ctx.systems.get_or_spawn(decay_sys).get_ball_slim_item(wh16_ent).await.unwrap().expect("slim 16h");
+    assert_eq!(slim_48_early.dict_get("wormholeAge"), Some(&PyRep::Integer(1)));
+    assert_eq!(slim_48_early.dict_get("wormholeSize"), Some(&PyRep::Real(1.0)));
+    assert_eq!(slim_16_early.dict_get("wormholeAge"), Some(&PyRep::Integer(1)));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for s in snap.cosmic_signatures.get_mut(&decay_sys).into_iter().flatten() {
+            s.signal_strength = 1.0;
+        }
+    });
+    let scan_early = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(decay_sys as i64)], &kw, None)
+        .await
+        .expect("GetSystemScanMgr early");
+    let PyRep::List(early_sigs) = scan_early.dict_get("signatures").unwrap() else { panic!() };
+    let find_sig_desc = |sigs: &[PyRep], sid: &str| -> Option<String> {
+        sigs.iter()
+            .find(|s| s.dict_get("signatureID") == Some(&PyRep::String(sid.into())))
+            .and_then(|s| s.dict_get("lifetimeDescription"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
     assert_eq!(
-        info_48_early.dict_get("lifetimeDescription").and_then(|v| v.as_str()),
+        find_sig_desc(early_sigs, "WST-DEC-48H").as_deref(),
         Some("This wormhole is beginning to decay, and probably won't last another day")
     );
-
-    let info_36_early = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::String("WND-DEC-36H".into())], &kw, None)
-        .await
-        .expect("GetWormholePolarization 36H early");
     assert_eq!(
-        info_36_early.dict_get("lifetimeDescription").and_then(|v| v.as_str()),
+        find_sig_desc(early_sigs, "WND-DEC-36H").as_deref(),
         Some("This wormhole is beginning to decay, and probably won't last another day")
     );
-
-    let info_24_early = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::String("WND-DEC-24H".into())], &kw, None)
-        .await
-        .expect("GetWormholePolarization 24H early");
     assert_eq!(
-        info_24_early.dict_get("lifetimeDescription").and_then(|v| v.as_str()),
+        find_sig_desc(early_sigs, "WND-DEC-24H").as_deref(),
+        Some("This wormhole is not yet beginning to decay")
+    );
+    assert_eq!(
+        find_sig_desc(early_sigs, "WND-DEC-16H").as_deref(),
         Some("This wormhole is not yet beginning to decay")
     );
 
-    let info_16_early = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::String("WND-DEC-16H".into())], &kw, None)
-        .await
-        .expect("GetWormholePolarization 16H early");
-    assert_eq!(
-        info_16_early.dict_get("lifetimeDescription").and_then(|v| v.as_str()),
-        Some("This wormhole is not yet beginning to decay")
-    );
-
-    // Advance +13h (total +14h): 16h wormhole has 2h remaining (<4h -> reaching end of natural lifetime)
+    // Advance +13h (total +14h): 16h wormhole has 2h remaining (<4h -> reaching end of natural lifetime, wormholeAge = 2)
     // and both 16h (2h remaining) and 24h (10h remaining) are now <15h remaining lifetime, so their
     // destination K162 signatures & exit balls materialize on the SystemActor tick without any ship transit,
     // while 36h (22h remaining) and 48h (34h remaining) remain unmaterialized (>= 15h).
     ctx.advance_secs(13 * 3_600);
     let _ = ctx.systems.get_or_spawn(decay_sys).step_manual(1.0).await;
+    let slim_16_eol = ctx.systems.get_or_spawn(decay_sys).get_ball_slim_item(wh16_ent).await.unwrap().expect("slim 16h eol");
+    assert_eq!(slim_16_eol.dict_get("wormholeAge"), Some(&PyRep::Integer(2)));
     ctx.db.with_snapshot(|snap| {
         assert!(
             is_k162_materialized_in_snap(snap, decay_dest, "WND-DEC-16H"),
@@ -454,12 +468,13 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
         ctx.systems.get_or_spawn(decay_dest).get_ball_snapshot(k16_exit_id).await.unwrap().is_some(),
         "Destination exit wormhole ball must spawn when remaining lifetime drops below 15h"
     );
-    let info_16_eol = ctx
-        .dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::String("WND-DEC-16H".into())], &kw, None)
+    let scan_eol = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(decay_sys as i64)], &kw, None)
         .await
-        .expect("GetWormholePolarization 16H <4h");
+        .expect("GetSystemScanMgr eol");
+    let PyRep::List(eol_sigs) = scan_eol.dict_get("signatures").unwrap() else { panic!() };
     assert_eq!(
-        info_16_eol.dict_get("lifetimeDescription").and_then(|v| v.as_str()),
+        find_sig_desc(eol_sigs, "WND-DEC-16H").as_deref(),
         Some("This wormhole is reaching the end of its natural lifetime")
     );
 
@@ -510,8 +525,9 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(list) = snap.cosmic_signatures.get_mut(&mass_sys) {
-            if let Some(w) = list.iter_mut().find(|w| w.signature_id == c3_static_sig) {
-                w.remaining_mass_kg = 5_000_000.0;
+            if let Some(w) = list.iter_mut().find(|w| !w.collapsed && w.signature_id == c3_static_sig) {
+                w.created_unix = ctx.now_unix();
+                w.remaining_mass_kg = 11_300_000.0;
             }
         }
     });
@@ -627,36 +643,35 @@ async fn test_k162_materializes_below_15h_remaining_lifetime_without_transit() {
             .unwrap_or_default()
     });
     assert_eq!(k162_recs.len(), 1, "K162 signature must materialize once when remaining < 15h without ship transit");
-    let exit_ball = ctx
-        .systems
-        .get_or_spawn(dest_sys)
-        .get_ball_snapshot(exit_wh_id)
-        .await
-        .unwrap()
-        .expect("Destination exit wormhole ball must materialize when remaining < 15h");
+    let exit_ball = ctx.systems.get_or_spawn(dest_sys).get_ball_snapshot(exit_wh_id).await.unwrap().expect("Destination exit wormhole ball must materialize when remaining < 15h");
     assert_eq!(exit_ball.1.position, DVec3::from_array(k162_recs[0].position));
 
     // Verify materialized K162 signature is probeable in dest_sys without any ship having jumped through
-    let mut sess = setup_pilot_in_space(
-        &ctx,
-        920_002,
-        90_000_001,
-        dest_sys,
-        610_000_002,
-        621,
-        DVec3::from_array(k162_recs[0].position) + DVec3::new(10_000.0, 0.0, 0.0),
-        11_300_000.0,
-    )
-    .await;
-    let scan_rows = common::probe_scan(
-        &ctx,
-        &mut sess,
-        DVec3::from_array(k162_recs[0].position),
-        0.25 * 149_597_870_700.0,
-    )
-    .await;
-    let strength = common::scan_row_field(&scan_rows, &k162_sig_id, "signalStrength")
-        .as_f64()
-        .unwrap_or(0.0);
+    let mut sess = setup_pilot_in_space(&ctx, 920_002, 90_000_001, dest_sys, 610_000_002, 621, DVec3::from_array(k162_recs[0].position) + DVec3::new(10_000.0, 0.0, 0.0), 11_300_000.0).await;
+    let scan_rows = common::probe_scan(&ctx, &mut sess, DVec3::from_array(k162_recs[0].position), 0.25 * 149_597_870_700.0).await;
+    let strength = common::scan_row_field(&scan_rows, &k162_sig_id, "signalStrength").as_f64().unwrap_or(0.0);
     assert!(strength >= 1.0, "Auto-materialized K162 signature must be probeable to 1.0, got {strength}");
+
+    // Negative test (R-073441-01): warping to a C2 system's Z647 (30671) static lands within normal warp-in range (NOT +80 km)
+    let c2_sys = ctx.sde.solar_systems.values().find(|s| s.wormhole_class_id == Some(2)).unwrap().solar_system_id;
+    let c2_wh_pos = DVec3::new(2.0 * 149_597_870_700.0, 0.0, 0.0);
+    let c2_wh_id = wormhole_item_id_for_signature(c2_sys, "WST-C2Z");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.insert(c2_sys, vec![CosmicSignatureRecord {
+            signature_id: "WST-C2Z".into(), solar_system_id: c2_sys, sig_group: "Wormhole".into(),
+            type_name: "Wormhole Z647".into(), position: c2_wh_pos.to_array(), signal_strength: 1.0,
+            wormhole_type_id: Some(30_671), destination_system_id: Some(31_000_007),
+            created_unix: ctx.now_unix(), lifetime_seconds: 57_600, max_mass_kg: 1_000_000_000.0,
+            remaining_mass_kg: 1_000_000_000.0, max_jump_mass_kg: 20_000_000.0, collapsed: false,
+        }]);
+    });
+    let _ = ctx.systems.get_or_spawn(c2_sys).spawn_ball(Ball {
+        id: c2_wh_id, type_id: 30_671, position: c2_wh_pos, velocity: DVec3::ZERO,
+        max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1500.0, speed_fraction: 0.0, mode: MovementMode::Rigid,
+    }).await;
+    let mut c2_sess = setup_pilot_in_space(&ctx, 920_003, 90_000_001, c2_sys, 610_000_003, 587, DVec3::ZERO, 1_200_000.0).await;
+    ctx.dispatch_rpc(&mut c2_sess, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(c2_wh_id), PyRep::Real(0.0)], &HashMap::new(), None).await.expect("CmdWarpToStuff C2 Z647");
+    let (_, ship_b) = ctx.systems.get_or_spawn(c2_sys).get_ball_snapshot(610_000_003).await.unwrap().unwrap();
+    let MovementMode::Warp { destination, .. } = ship_b.mode else { panic!("Expected Warp mode") };
+    assert!((destination - c2_wh_pos).length() < 10_000.0, "C2 Z647 static must warp within normal range, got offset {}", (destination - c2_wh_pos).length());
 }

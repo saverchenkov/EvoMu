@@ -291,7 +291,7 @@ pub fn is_drifter_wormhole(sde: &eve_sde::SdeRegistry, sig: &CosmicSignatureReco
         || (14..=18).contains(&dest_c)
         || matches!(
             sig.wormhole_type_id,
-            Some(34_494 | 35_650..=35_654 | 30_671..=30_676)
+            Some(34_494 | 35_650..=35_654)
         )
         || sig.type_name.contains("Unidentified Wormhole")
 }
@@ -932,7 +932,7 @@ pub(crate) fn static_wormhole_template(
             out.push(wst);
         }
         if seq == 0 {
-            if sys_id == 31_001_886 || (system_spawn_hash(sys_id, 0x11) % 100) < 35 {
+            if (system_spawn_hash(sys_id, 0x11) % 100) < 35 {
                 let wnd_cls = [1, 2, 3, 4, 5, 6, 7, 8, 9][((sys_id as usize) + 5) % 9];
                 let wnd_tid = lookup_wormhole_type_for_origin_and_target(
                     &ctx.sde,
@@ -993,7 +993,7 @@ pub(crate) fn static_wormhole_template(
     } else {
         // K-space wormholes: probabilistic wandering, rare Thera K162, and proximity-only Pochven C729 (`<= 5.0 LY`)
         let mut out = Vec::new();
-        if seq > 0 || sys_id == 30_000_142 || (system_spawn_hash(sys_id, 0x44) % 100) < 8 {
+        if seq > 0 || (system_spawn_hash(sys_id, 0x44) % 100) < 8 {
             let sig_prefix = if seq == 0 { "JMM" } else { "STA" };
             let mut wh = make_wh_sig(
                 format!("{sig_prefix}-{}", 100 + ((sys_id + seq * 37) % 900)),
@@ -1019,7 +1019,7 @@ pub(crate) fn static_wormhole_template(
                     &ctx.sde, sys_id, 5.0, 0,
                 )
             {
-                if sys_id == 30_000_142 || (system_spawn_hash(sys_id, 0x55) % 100) < 35 {
+                if (system_spawn_hash(sys_id, 0x55) % 100) < 35 {
                     out.push(build_wh_from_type(
                         &ctx.sde,
                         format!("PKW-{}", 500 + ((sys_id + 41) % 400)),

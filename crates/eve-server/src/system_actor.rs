@@ -494,6 +494,33 @@ impl SystemRegistry {
                                 let changed = ballpark.change_slim_item(ball_id, slim_meta);
                                 let _ = reply.send(changed);
                             }
+                            SystemCommand::SetBallWormholeStages {
+                                ball_id,
+                                wormhole_age,
+                                wormhole_size,
+                                reply,
+                            } => {
+                                let changed = ballpark.set_ball_wormhole_stages(
+                                    ball_id,
+                                    wormhole_age,
+                                    wormhole_size,
+                                );
+                                let _ = reply.send(changed);
+                            }
+                            SystemCommand::GetBallSlimItem { ball_id, reply } => {
+                                let slim = ballpark.balls.get(&ball_id).map(|b| {
+                                    let meta = eve_destiny::wire::resolve_slim_item_meta(
+                                        Some(&ballpark),
+                                        b,
+                                    );
+                                    eve_destiny::wire::encode_slim_item_with_park(
+                                        Some(&ballpark),
+                                        b,
+                                        &meta,
+                                    )
+                                });
+                                let _ = reply.send(slim);
+                            }
                             SystemCommand::SpawnAsteroid { asteroid, ball, reply } => {
                                 let ball_id = asteroid.asteroid_id;
                                 if asteroids.contains_key(&ball_id) {

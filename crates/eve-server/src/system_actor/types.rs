@@ -206,6 +206,16 @@ pub enum SystemCommand {
         slim_meta: SlimItemMeta,
         reply: oneshot::Sender<bool>,
     },
+    SetBallWormholeStages {
+        ball_id: BallId,
+        wormhole_age: i64,
+        wormhole_size: f64,
+        reply: oneshot::Sender<bool>,
+    },
+    GetBallSlimItem {
+        ball_id: BallId,
+        reply: oneshot::Sender<Option<eve_proto::PyRep>>,
+    },
     SpawnAsteroid {
         asteroid: AsteroidState,
         ball: Ball,

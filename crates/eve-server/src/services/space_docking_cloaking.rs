@@ -82,18 +82,8 @@ pub fn derive_wormhole_buckets_raw(
         Some(8) => "Low-Sec",
         Some(9..=11) => "Null-Sec",
         _ => {
-            let sec = sde
-                .solar_systems
-                .get(&dest_sys)
-                .map(|s| s.security_status)
-                .unwrap_or(0.0);
-            if sec >= 0.45 {
-                "High-Sec"
-            } else if sec > 0.0 {
-                "Low-Sec"
-            } else {
-                "Null-Sec"
-            }
+            let sec = sde.solar_systems.get(&dest_sys).map(|s| s.security_status).unwrap_or(0.0);
+            if sec >= 0.45 { "High-Sec" } else if sec > 0.0 { "Low-Sec" } else { "Null-Sec" }
         }
     };
 
@@ -113,11 +103,7 @@ pub fn derive_wormhole_buckets_raw(
     // DERIVED: Lifetime stage bucket intervals derived from elapsed time
     let elapsed = now_unix.saturating_sub(created_unix);
     let remaining_seconds = lifetime_seconds.saturating_sub(elapsed);
-    let lifetime_bucket = if collapsed
-        || lifetime_seconds == 0
-        || elapsed >= lifetime_seconds
-        || remaining_seconds == 0
-    {
+    let lifetime_bucket = if collapsed || lifetime_seconds == 0 || elapsed >= lifetime_seconds || remaining_seconds == 0 {
         "expired"
     } else if remaining_seconds < 3_600 {
         "<1h"
@@ -137,28 +123,14 @@ pub fn derive_wormhole_buckets_raw(
     };
 
     // DERIVED: Mass stability bucket threshold derived from mass ratio
-    let mass_ratio = if max_mass_kg > 0.0 {
-        remaining_mass_kg / max_mass_kg
+    let mass_ratio = if max_mass_kg > 0.0 { remaining_mass_kg / max_mass_kg } else { 0.0 };
+    let (mass_stability_bucket, mass_stability_description) = if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
+        ("<10%", "This wormhole has had its stability critically disrupted")
+    } else if mass_ratio < 0.50 {
+        ("<50%", "This wormhole has had its stability reduced by ships passing through it")
     } else {
-        0.0
+        (">50%", "This wormhole has not yet had its stability significantly disrupted")
     };
-    let (mass_stability_bucket, mass_stability_description) =
-        if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
-            (
-                "<10%",
-                "This wormhole has had its stability critically disrupted",
-            )
-        } else if mass_ratio < 0.50 {
-            (
-                "<50%",
-                "This wormhole has had its stability reduced by ships passing through it",
-            )
-        } else {
-            (
-                ">50%",
-                "This wormhole has not yet had its stability significantly disrupted",
-            )
-        };
 
     WormholeBuckets {
         destination_class: dest_class,
@@ -188,14 +160,24 @@ pub async fn ensure_system_signatures_and_anomalies(
         .db
         .try_with_mut_snapshot(|snap| {
             let mut freshly_seeded_drifter: Option<Vec<CosmicSignatureRecord>> = None;
+            let was_non_empty = snap
+                .cosmic_signatures
+                .get(&sys_id)
+                .is_some_and(|existing| !existing.is_empty());
             let needs_seed = match snap.cosmic_signatures.get(&sys_id) {
                 None => true,
                 Some(existing) => {
                     !existing.is_empty()
-                        && existing.iter().all(|s| s.signature_id.starts_with("K162-"))
+                        && existing.iter().all(|s| {
+                            s.collapsed
+                                || s.signature_id.starts_with("K162-")
+                                || (s.lifetime_seconds > 0
+                                    && now_unix >= s.created_unix.saturating_add(s.lifetime_seconds))
+                        })
                 }
             };
             let list = snap.cosmic_signatures.entry(sys_id).or_default();
+            let mut reseeded_sigs: Vec<CosmicSignatureRecord> = Vec::new();
             if needs_seed {
                 let mut v = static_wormhole_template(ctx, sys_id, now_unix, 0);
                 if is_drifter_sys {
@@ -244,6 +226,9 @@ pub async fn ensure_system_signatures_and_anomalies(
                         ),
                     ]);
                 }
+                if was_non_empty {
+                    reseeded_sigs = v.clone();
+                }
                 list.extend(v);
             }
 
@@ -280,7 +265,8 @@ pub async fn ensure_system_signatures_and_anomalies(
                     }
                 }
             }
-            added_sigs = spawned_replacements.clone();
+            added_sigs = reseeded_sigs;
+            added_sigs.extend(spawned_replacements.clone());
             list.extend(spawned_replacements);
             let sigs_clone = list.clone();
 
@@ -411,6 +397,10 @@ pub async fn ensure_system_signatures_and_anomalies(
                     })
                     .await;
             }
+            let (_, wh_size, _, wh_age, _) = compute_wormhole_stages(sig, now_unix);
+            let _ = sys_handle
+                .set_ball_wormhole_stages(wh_item_id, wh_age, wh_size)
+                .await;
             if is_pochven_wormhole(&ctx.sde, sig) {
                 if is_pochven_sys && sig.signal_strength >= 1.0 {
                     let _ = super::space_pochven_wormholes::open_pochven_wormhole_and_spawn_guards(
@@ -651,6 +641,36 @@ pub async fn collapse_expired_wormholes_in_system(
     now_unix: u64,
 ) {
     sweep_expired_wormholes(ctx, Some(sys_id), now_unix).await;
+    let stage_updates: Vec<(i64, i64, f64)> = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_signatures
+            .get(&sys_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|s| s.sig_group == "Wormhole" && !s.collapsed)
+                    .map(|s| {
+                        let ball_id = if s.signature_id.starts_with("K162-") {
+                            wormhole_exit_item_id_for_signature(
+                                sys_id,
+                                s.signature_id.trim_start_matches("K162-"),
+                            )
+                        } else {
+                            wormhole_item_id_for_signature(sys_id, &s.signature_id)
+                        };
+                        let (_, wh_size, _, wh_age, _) = compute_wormhole_stages(s, now_unix);
+                        (ball_id, wh_age, wh_size)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    if !stage_updates.is_empty() {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for (ball_id, wh_age, wh_size) in stage_updates {
+            let _ = sys_handle
+                .set_ball_wormhole_stages(ball_id, wh_age, wh_size)
+                .await;
+        }
+    }
 }
 
 /// Background cluster wormhole expiry sweep:
@@ -875,7 +895,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 });
             };
             let next_seq = sigs.len() as u32 + 1;
-            let Some(wh_idx) = sigs.iter().position(|s| {
+            let matches_wh = |s: &CosmicSignatureRecord| {
                 s.sig_group == "Wormhole"
                     && if let Some(ref pid) = target_parent_sig_id {
                         s.signature_id == *pid
@@ -884,7 +904,12 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                             || wh_arg_i64
                                 == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id))
                     }
-            }) else {
+            };
+            let Some(wh_idx) = sigs
+                .iter()
+                .position(|s| !s.collapsed && matches_wh(s))
+                .or_else(|| sigs.iter().position(matches_wh))
+            else {
                 return Err(BridgeRpcError {
                     code: "WormholeNotFound".into(),
                     message: format!("Wormhole not found in system {old_sys}"),

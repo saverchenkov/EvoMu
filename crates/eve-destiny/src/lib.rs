@@ -977,6 +977,8 @@ pub struct Ballpark {
     pub formation_states: BTreeMap<BallId, FormationState>,
     #[serde(default)]
     pub ball_harmonics: BTreeMap<BallId, i32>,
+    #[serde(default)]
+    pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
 }
 
 impl Ballpark {
