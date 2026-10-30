@@ -87,6 +87,23 @@ pub fn set_room_disallow_mwd(ctx: &ServerContext, room_id: i64, disallow: bool) 
     })
 }
 
+pub fn get_dungeon_or_room_mwd_override(
+    ctx: &ServerContext,
+    dungeon_id: i64,
+    room_id_opt: Option<i64>,
+) -> Option<bool> {
+    with_dungeon_editor_store(ctx, |store| {
+        if let Some(rid) = room_id_opt {
+            if let Some(rooms) = store.rooms_by_dungeon.get(&dungeon_id) {
+                if let Some(r) = rooms.iter().find(|r| r.room_id == rid) {
+                    return Some(r.disallow_mwd);
+                }
+            }
+        }
+        store.dungeon_disallow_mwd.get(&dungeon_id).copied()
+    })
+}
+
 pub fn is_dungeon_or_room_mwd_disallowed(
     ctx: &ServerContext,
     dungeon_id: i64,

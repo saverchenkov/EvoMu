@@ -506,10 +506,13 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
 
     let mut n1: Vec<(String, Vec<PyRep>)> = sess.drain_notifications();
     n1.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    let gate1_inst_id = gate1.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    let gate1_room_id = gate1.dict_get("roomID").and_then(|v| v.as_i64()).unwrap();
     let enter_room_1 = n1.iter().find(|(ev, _)| ev == "OnEnteringDungeonRoom").expect("OnEnteringDungeonRoom emitted");
     assert_eq!(enter_room_1.1.len(), 5);
     assert_eq!(enter_room_1.1[0].as_i64(), Some(dsg_did));
-    assert_eq!(enter_room_1.1[1].as_i64(), Some(1));
+    assert_eq!(enter_room_1.1[1].as_i64(), Some(gate1_room_id));
+    assert_eq!(enter_room_1.1[3].as_i64(), Some(gate1_inst_id));
     let dist_entered = n1.iter().find(|(ev, _)| ev == "OnDistributionDungeonEntered").expect("OnDistributionDungeonEntered emitted");
     assert_eq!(dist_entered.1.len(), 1);
     assert!(!n1.iter().any(|(ev, _)| ev == "OnEscalatingPathDungeonEntered"));
@@ -541,8 +544,11 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
         .expect("Activate Room 1 -> Room 2 gate");
     let mut n2 = sess.drain_notifications();
     n2.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
+    let gate2_inst_id = gate2.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    let gate2_room_id = gate2.dict_get("roomID").and_then(|v| v.as_i64()).unwrap();
     let enter_room_2 = n2.iter().find(|(ev, _)| ev == "OnEnteringDungeonRoom").expect("OnEnteringDungeonRoom Room 2");
-    assert_eq!(enter_room_2.1[1].as_i64(), Some(2));
+    assert_eq!(enter_room_2.1[1].as_i64(), Some(gate2_room_id));
+    assert_eq!(enter_room_2.1[3].as_i64(), Some(gate2_inst_id));
 
     // 3. Warping out of the dungeon pocket to Jita 4-4 emits OnExitingDungeon(dungeonID) at warp start
     let _ = sess.drain_notifications();
@@ -626,10 +632,11 @@ async fn test_dungeon_and_escalation_room_entry_completion_and_exit_notification
 
     let mut n_esc = sess.drain_notifications();
     n_esc.extend(ctx.drain_notifications_for_char(PILOT_1).into_iter().map(|n| (n.event, n.args)));
-    assert!(
-        n_esc.iter().any(|(ev, _)| ev == "OnEnteringDungeonRoom"),
-        "Landing in escalation pocket must emit OnEnteringDungeonRoom"
-    );
+    let enter_esc_room = n_esc
+        .iter()
+        .find(|(ev, _)| ev == "OnEnteringDungeonRoom")
+        .expect("Landing in escalation pocket must emit OnEnteringDungeonRoom");
+    assert_eq!(enter_esc_room.1[3].as_i64(), Some(esc.instance_id));
     let esc_entered = n_esc
         .iter()
         .find(|(ev, _)| ev == "OnEscalatingPathDungeonEntered")

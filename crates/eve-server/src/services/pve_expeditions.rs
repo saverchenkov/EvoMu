@@ -666,12 +666,14 @@ pub async fn validate_and_advance_pve_site_room(
                         s.cleared,
                         s.created_unix,
                         s.lifetime_seconds,
+                        s.expedition_instance_id,
                     )
                 })
         });
-        if let Some((did, cat, dname, spos, cw, tw, clr, cu, ls)) = info {
+        if let Some((did, cat, dname, spos, cw, tw, clr, cu, ls, exp_inst)) = info {
             let life = if ls == 0 { 86_400 } else { ls };
             let exp_ft = ((cu.saturating_add(life) as i64) + 11_644_473_600) * 10_000_000;
+            let fallback_room_id = i64::from(did.max(1)) * 100 + i64::from(cw);
             crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications(
                 ctx,
                 char_id,
@@ -679,6 +681,8 @@ pub async fn validate_and_advance_pve_site_room(
                 &cat,
                 &dname,
                 i64::from(did),
+                exp_inst.unwrap_or(fallback_room_id),
+                fallback_room_id,
                 spos,
                 cw,
                 tw,
@@ -728,6 +732,7 @@ pub fn enter_combat_anomaly_site(
         site.lifetime_seconds
     };
     let exp_ft = ((site.created_unix.saturating_add(life) as i64) + 11_644_473_600) * 10_000_000;
+    let fallback_room_id = i64::from(site.dungeon_id.max(1)) * 100 + i64::from(site.current_wave);
     crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications(
         ctx,
         char_id,
@@ -735,6 +740,8 @@ pub fn enter_combat_anomaly_site(
         &site.site_category,
         &site.dungeon_name,
         i64::from(site.dungeon_id),
+        site.expedition_instance_id.unwrap_or(fallback_room_id),
+        fallback_room_id,
         site.position,
         site.current_wave,
         site.total_waves,

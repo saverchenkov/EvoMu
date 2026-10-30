@@ -1,6 +1,6 @@
-//! Integration tests for Naturally Seeded SDE Deadspace Pocket Rules, Data-Driven MWD
+//! Integration tests for Naturally Seeded Deadspace Pocket Rules, Data-Driven MWD
 //! Disallowance, and Multi-Room Dungeon Triggers (`OnApproach`, `OnKill`, `OnLoot`, `CompleteDungeon`)
-//! without any GM-spawned room fixtures (`feat:pve.deadspace-pocket-rules`, `feat:pve.dungeon-system`).
+//! using the `DERIVED` 2-room placeholder template until real SDE room/trigger data is imported.
 
 #![forbid(unsafe_code)]
 
@@ -140,9 +140,6 @@ async fn step_until_warp_landed(ctx: &ServerContext, sess: &mut SessionState, sy
 // ============================================================================
 #[tokio::test]
 async fn test_deadspace_pocket_rules_and_mwd_restriction() {
-    // parity: feat:pve.deadspace-pocket-rules
-    eve_testkit::attest(&["feat:pve.deadspace-pocket-rules"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -327,7 +324,7 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
         .expect("Activate Room 1 -> Room 2 gate");
     assert_eq!(gate2_res.dict_get("disallowMWD"), Some(&PyRep::Bool(true)));
 
-    // 4. In inner Room 2 (disallowMWD == true): MWD refused with ModuleNotAllowedInDeadspace, Afterburner allowed
+    // 4. In inner Room 2 (disallowMWD == true from SDE archetype 51): MWD refused, Afterburner allowed
     let mwd_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -341,6 +338,45 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
         .await
         .expect_err("MWD must be refused in MWD-disallowed deadspace room");
     assert_eq!(mwd_err.code, "ModuleNotAllowedInDeadspace");
+
+    // 4b. Editing dungeon/room MWD flag dynamically changes live MWD outcome in Room 2
+    eve_server::services::pve_dungeon_editor::set_dungeon_disallow_mwd(&ctx, 98, false);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("MWD must be allowed in Room 2 after setting disallowMWD = false");
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Deactivate",
+            &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
+            &kw,
+            None,
+        )
+        .await;
+    eve_server::services::pve_dungeon_editor::set_dungeon_disallow_mwd(&ctx, 98, true);
+    let dyn_mwd_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("MWD must be refused again after setting disallowMWD = true");
+    assert_eq!(dyn_mwd_err.code, "ModuleNotAllowedInDeadspace");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(mwd_id, false);
@@ -379,9 +415,6 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
 // ============================================================================
 #[tokio::test]
 async fn test_dungeon_system_rooms_triggers_and_despawn_on_completion() {
-    // parity: feat:pve.dungeon-system
-    eve_testkit::attest(&["feat:pve.dungeon-system"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

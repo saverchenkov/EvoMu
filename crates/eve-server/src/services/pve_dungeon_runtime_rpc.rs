@@ -188,6 +188,8 @@ pub async fn try_activate_dungeon_runtime_gate(
         &category,
         &dungeon_name,
         i64::from(dungeon_id),
+        instance_id,
+        room_id,
         dest_pos,
         room_index as u8,
         total_rooms.max(1) as u8,
@@ -531,11 +533,6 @@ pub(crate) fn build_sde_deadspace_rooms(
         i64::from(dungeon_id),
         Some(i64::from(dungeon_id) * 100 + 1),
     );
-    let r2_mwd_editor = crate::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(
-        ctx,
-        i64::from(dungeon_id),
-        Some(i64::from(dungeon_id) * 100 + 2),
-    );
     let r1_pos = if has_entry_gate {
         [base_pos[0] + 600_000.0, base_pos[1], base_pos[2]]
     } else {
@@ -617,7 +614,7 @@ pub(crate) fn build_sde_deadspace_rooms(
             position: r2_pos,
             gate_destination_pos: [r2_pos[0] - 10_000.0, r2_pos[1], r2_pos[2]],
             gated: true,
-            disallow_mwd: Some(r2_mwd_editor || true),
+            disallow_mwd: None,
             gate_ball_id: None,
             gate_locked: false,
             objects: vec![DungeonRuntimeObject {

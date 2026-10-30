@@ -219,14 +219,14 @@ fn is_pocket_mwd_disallowed(
     if let Some(flag) = room.disallow_mwd {
         return flag;
     }
-    if inst.disallow_mwd {
-        return true;
-    }
-    if crate::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(
+    if let Some(flag) = crate::services::pve_dungeon_editor::get_dungeon_or_room_mwd_override(
         ctx,
         inst.dungeon_id as i64,
         Some(room.room_id),
     ) {
+        return flag;
+    }
+    if inst.disallow_mwd {
         return true;
     }
     ctx.sde
@@ -243,20 +243,25 @@ pub fn check_deadspace_mwd_allowed(
     sys_id: SolarSystemId,
     ship_pos: [f64; 3],
 ) -> Result<(), BridgeRpcError> {
-    let runtime_disallowed = has_dungeon_runtime_store(ctx)
-        && with_dungeon_runtime_store(ctx, |store| {
-            store.instances.values().any(|inst| {
-                !inst.completed
-                    && !inst.despawned
-                    && inst.solar_system_id == sys_id
-                    && inst.rooms.iter().any(|r| {
-                        dist3(ship_pos, r.position) <= POCKET_RADIUS_M
-                            && is_pocket_mwd_disallowed(ctx, inst, r)
-                    })
+    if has_dungeon_runtime_store(ctx) {
+        let matched_room = with_dungeon_runtime_store(ctx, |store| {
+            store.instances.values().find_map(|inst| {
+                if inst.completed || inst.despawned || inst.solar_system_id != sys_id {
+                    return None;
+                }
+                inst.rooms
+                    .iter()
+                    .find(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
+                    .map(|r| (inst.clone(), r.clone()))
             })
         });
-    if runtime_disallowed {
-        return Err(BridgeRpcError::user_error("ModuleNotAllowedInDeadspace"));
+        if let Some((inst, r)) = matched_room {
+            return if is_pocket_mwd_disallowed(ctx, &inst, &r) {
+                Err(BridgeRpcError::user_error("ModuleNotAllowedInDeadspace"))
+            } else {
+                Ok(())
+            };
+        }
     }
 
     let editor_disallowed = crate::services::pve_dungeon_editor::with_dungeon_editor_store(ctx, |ed| {
@@ -283,15 +288,17 @@ pub fn check_deadspace_mwd_allowed(
             sites.iter().any(|s| {
                 !s.cleared
                     && dist3(ship_pos, s.position) <= POCKET_RADIUS_M
-                    && (crate::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(
+                    && crate::services::pve_dungeon_editor::get_dungeon_or_room_mwd_override(
                         ctx,
                         s.dungeon_id as i64,
                         None,
-                    ) || ctx
-                        .sde
-                        .dungeons
-                        .get(&s.dungeon_id)
-                        .is_some_and(|d| d.archetype_id == Some(51)))
+                    )
+                    .unwrap_or_else(|| {
+                        ctx.sde
+                            .dungeons
+                            .get(&s.dungeon_id)
+                            .is_some_and(|d| d.archetype_id == Some(51))
+                    })
             })
         })
     });
@@ -534,6 +541,7 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
                 inst.category.clone(),
                 inst.dungeon_name.clone(),
                 room.room_index,
+                room.room_id,
                 room.position,
                 inst.rooms.len(),
                 inst.created_unix,
@@ -541,18 +549,21 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
         })
     });
 
-    if let Some((inst_id, dungeon_id, category, dungeon_name, room_idx, room_pos, total_rooms, created_unix)) =
+    if let Some((inst_id, dungeon_id, category, dungeon_name, room_idx, room_id, room_pos, total_rooms, created_unix)) =
         runtime_entry
     {
+        let mut esc_instance_id = None;
         if matches!(category.as_str(), "Expedition" | "Escalation") {
             with_pve_exploration_reg(ctx, |reg| {
                 if let Some(list) = reg.escalations_by_char.get_mut(&char_id) {
                     for esc in list.iter_mut() {
                         if esc.destination_solar_system_id == sys_id
                             && esc.expedition_dungeon_id == dungeon_id
-                            && !esc.dungeons_entered.contains(&dungeon_id)
                         {
-                            esc.dungeons_entered.push(dungeon_id);
+                            esc_instance_id = Some(esc.instance_id);
+                            if !esc.dungeons_entered.contains(&dungeon_id) {
+                                esc.dungeons_entered.push(dungeon_id);
+                            }
                         }
                     }
                 }
@@ -567,6 +578,8 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
             &category,
             &dungeon_name,
             i64::from(dungeon_id),
+            esc_instance_id.unwrap_or(inst_id),
+            room_id,
             room_pos,
             room_idx as u8,
             total_rooms.max(1) as u8,
@@ -611,11 +624,12 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
         found
     });
 
-    if let Some((did, category, dungeon_name, site_pos, cur_wave, total_waves, created_unix, lifetime_sec, _)) =
+    if let Some((did, category, dungeon_name, site_pos, cur_wave, total_waves, created_unix, lifetime_sec, exp_inst_opt)) =
         site_entry
     {
         let life = if lifetime_sec == 0 { 86_400 } else { lifetime_sec };
         let expiry_ft = unix_to_filetime_ticks(created_unix.saturating_add(life));
+        let fallback_room_id = i64::from(did.max(1)) * 100 + i64::from(cur_wave);
         emit_dungeon_progression_notifications(
             ctx,
             char_id,
@@ -623,6 +637,8 @@ pub async fn on_warp_landed_at_dungeon_pocket_if_present(
             &category,
             &dungeon_name,
             i64::from(did),
+            exp_inst_opt.unwrap_or(fallback_room_id),
+            fallback_room_id,
             site_pos,
             cur_wave,
             total_waves,

@@ -1189,7 +1189,7 @@ pub async fn handle_pve_exploration(
             ])))
         }
 
-        // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches, feat:pve.deadspace-pocket-rules
+        // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
         ("keeper", "ActivateAccelerationGate")
         | ("beyonce", "ActivateAccelerationGate")
         | ("keeper", "EnterNextDungeonRoom") => {

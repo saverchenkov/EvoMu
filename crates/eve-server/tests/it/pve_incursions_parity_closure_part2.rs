@@ -407,3 +407,130 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
     assert_eq!(bal_after_c, bal_before_c, "Hard-capped pilot wallet balance must remain unchanged");
     assert_eq!(lp_after_c, lp_before_c, "Hard-capped pilot CONCORD LP must remain unchanged");
 }
+
+#[tokio::test]
+async fn test_incursion_boss_killed_before_final_wave_escorts_completes_on_last_escort() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (cid, sys_id, site_id, boss_bid, pos) = with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.values().next().expect("seeded incursion");
+        let site = inc.sites.iter().find(|s| s.tier == "Vanguard").expect("Vanguard site");
+        (inc.constellation_id, site.solar_system_id, site.site_id.clone(), site.boss_npc_ball_id, site.position)
+    });
+    let (pilot_id, _) = spawn_fleet_pilot_on_grid(&ctx, 80, sys_id, pos).await;
+
+    // Advance Wave 1 -> Wave 2 -> Wave 3 (final wave) so boss and final-wave escorts are both active
+    for _ in 0..2 {
+        let escorts: Vec<i64> = with_pve_special_reg(&ctx, |reg| {
+            reg.incursions[&cid]
+                .sites
+                .iter()
+                .find(|s| s.site_id == site_id)
+                .unwrap()
+                .escort_spawns
+                .iter()
+                .filter(|e| !e.destroyed)
+                .map(|e| e.npc_ball_id)
+                .collect()
+        });
+        for eid in escorts {
+            let _ = on_incursion_boss_destroyed(&ctx, sys_id, eid, Some(pilot_id)).await;
+        }
+    }
+
+    let final_escorts: Vec<i64> = with_pve_special_reg(&ctx, |reg| {
+        let w = reg.incursion_site_waves.get(&site_id).unwrap();
+        assert_eq!(w.current_wave, w.total_waves);
+        reg.incursions[&cid]
+            .sites
+            .iter()
+            .find(|s| s.site_id == site_id)
+            .unwrap()
+            .escort_spawns
+            .iter()
+            .filter(|e| !e.destroyed)
+            .map(|e| e.npc_ball_id)
+            .collect()
+    });
+    assert!(!final_escorts.is_empty());
+
+    // Kill boss BEFORE final-wave escorts: must record boss_destroyed=true without soft-locking
+    let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(boss_bid).await;
+    let err = on_incursion_boss_destroyed(&ctx, sys_id, boss_bid, Some(pilot_id))
+        .await
+        .expect("site matched")
+        .expect_err("site must not complete while final-wave escorts remain");
+    assert_eq!(err.code, "IncursionSiteNpcsRemaining");
+
+    let boss_flag = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&cid]
+            .sites
+            .iter()
+            .find(|s| s.site_id == site_id)
+            .unwrap()
+            .boss_destroyed
+    });
+    assert!(boss_flag, "boss_destroyed must be recorded when boss dies on final wave");
+
+    // Killing the remaining final-wave escorts must complete the site on the last escort kill
+    let mut completion = None;
+    for eid in final_escorts {
+        let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(eid).await;
+        if let Some(res) = on_incursion_boss_destroyed(&ctx, sys_id, eid, Some(pilot_id)).await {
+            completion = Some(res.expect("site completion on last escort kill"));
+        }
+    }
+    let done = completion.expect("site must complete when last final-wave escort dies");
+    assert_eq!(done.site_id, site_id);
+}
+
+#[tokio::test]
+async fn test_incursion_hq_sites_5171_and_5175_have_disjoint_npc_ball_ids() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (cid, hq_sys_id, site_5171_id, site_5175_id, pos_5171) = with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.values().next().expect("seeded incursion");
+        let s5171 = inc.sites.iter().find(|s| s.dungeon_id == 5171).expect("HQ site 5171");
+        let s5175 = inc.sites.iter().find(|s| s.dungeon_id == 5175).expect("HQ site 5175");
+        assert_eq!(s5171.solar_system_id, s5175.solar_system_id);
+        (
+            inc.constellation_id,
+            s5171.solar_system_id,
+            s5171.site_id.clone(),
+            s5175.site_id.clone(),
+            s5171.position,
+        )
+    });
+
+    let (pilot_id, _) = spawn_fleet_pilot_on_grid(&ctx, 81, hq_sys_id, pos_5171).await;
+    let boss_5171 = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &site_5171_id).await;
+    let _ = ctx.systems.get_or_spawn(hq_sys_id).remove_ball(boss_5171).await;
+    let res_5171 = on_incursion_boss_destroyed(&ctx, hq_sys_id, boss_5171, Some(pilot_id))
+        .await
+        .expect("site 5171 matched")
+        .expect("site 5171 completed");
+    assert_eq!(res_5171.site_id, site_5171_id);
+
+    // Verify site 5175 in the same HQ system was untouched and has completely disjoint NPC ball IDs
+    with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&cid];
+        let s5171 = inc.sites.iter().find(|s| s.site_id == site_5171_id).unwrap();
+        let s5175 = inc.sites.iter().find(|s| s.site_id == site_5175_id).unwrap();
+        assert_eq!(s5171.completed_count, 1);
+        assert_eq!(s5175.completed_count, 0);
+        assert!(!s5175.boss_destroyed);
+        assert!(s5175.escort_spawns.iter().all(|e| !e.destroyed));
+
+        let ids_5171: std::collections::HashSet<i64> = std::iter::once(s5171.boss_npc_ball_id)
+            .chain(s5171.escort_spawns.iter().map(|e| e.npc_ball_id))
+            .collect();
+        let ids_5175: std::collections::HashSet<i64> = std::iter::once(s5175.boss_npc_ball_id)
+            .chain(s5175.escort_spawns.iter().map(|e| e.npc_ball_id))
+            .collect();
+        assert!(ids_5171.is_disjoint(&ids_5175), "HQ sites 5171 and 5175 must have disjoint NPC ball IDs");
+    });
+}

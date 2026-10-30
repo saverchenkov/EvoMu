@@ -219,7 +219,8 @@ pub fn make_incursion_site(
     locked_until_low_influence: bool,
     position: DVec3,
 ) -> IncursionSiteEntry {
-    let boss_npc_ball_id = 1_896_000_000 + ((const_id % 10_000) as i64) * 100 + (dungeon_id as i64);
+    let boss_npc_ball_id =
+        1_896_000_000 + ((const_id % 10_000) as i64) * 100_000_000 + ((dungeon_id % 10_000) as i64) * 10_000;
     let (boss_type_id, escort_spawns) = get_sansha_encounter_composition(boss_npc_ball_id, dungeon_id, tier);
     IncursionSiteEntry {
         site_id: format!("INC-{const_id}-{dungeon_id}"),
@@ -1088,25 +1089,41 @@ pub async fn on_incursion_boss_destroyed_core(
                 if site.solar_system_id == solar_system_id && site.boss_npc_ball_id == npc_ball_id {
                     let locked = site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned);
                     if locked {
-                        return Some((site.site_id.clone(), true, false, false));
+                        return Some((site.site_id.clone(), true, false, false, None));
                     }
-                    let waves_pending = reg
+                    let earlier_waves_pending = reg
                         .incursion_site_waves
                         .get(&site.site_id)
-                        .is_some_and(|w| w.current_wave < w.total_waves)
-                        || site.escort_spawns.iter().any(|e| !e.destroyed);
-                    if waves_pending {
-                        return Some((site.site_id.clone(), false, false, true));
+                        .is_some_and(|w| w.current_wave < w.total_waves);
+                    if earlier_waves_pending {
+                        return Some((site.site_id.clone(), false, false, true, None));
                     }
                     site.boss_destroyed = true;
                     site.killer_char_id = killer_char_id;
                     site.killer_fleet_id = killer_fleet_id;
-                    return Some((site.site_id.clone(), false, false, false));
+                    if site.escort_spawns.iter().any(|e| !e.destroyed) {
+                        return Some((site.site_id.clone(), false, false, true, None));
+                    }
+                    return Some((site.site_id.clone(), false, false, false, killer_char_id));
                 }
                 for esc in &mut site.escort_spawns {
                     if site.solar_system_id == solar_system_id && esc.npc_ball_id == npc_ball_id {
                         esc.destroyed = true;
-                        return Some((site.site_id.clone(), false, true, false));
+                        let waves_done = reg
+                            .incursion_site_waves
+                            .get(&site.site_id)
+                            .is_none_or(|w| w.current_wave >= w.total_waves);
+                        let all_escorts_dead = site.escort_spawns.iter().all(|e| e.destroyed);
+                        if site.boss_destroyed && waves_done && all_escorts_dead {
+                            return Some((
+                                site.site_id.clone(),
+                                false,
+                                false,
+                                false,
+                                site.killer_char_id.or(killer_char_id),
+                            ));
+                        }
+                        return Some((site.site_id.clone(), false, true, false, None));
                     }
                 }
             }
@@ -1114,7 +1131,7 @@ pub async fn on_incursion_boss_destroyed_core(
         None
     });
 
-    let (site_id, is_locked, is_escort, waves_pending) = site_found?;
+    let (site_id, is_locked, is_escort, waves_pending, completion_killer_opt) = site_found?;
     if is_locked {
         return Some(Err(rpc_err(
             "MothershipSiteLocked",
@@ -1145,7 +1162,7 @@ pub async fn on_incursion_boss_destroyed_core(
             sde,
             solar_system_id,
             &site_id,
-            killer_char_id,
+            completion_killer_opt.or(killer_char_id),
         )
         .await,
     )

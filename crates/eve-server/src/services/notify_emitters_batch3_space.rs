@@ -340,13 +340,14 @@ pub fn emit_dungeon_progression_notifications(
     category: &str,
     archetype: &str,
     dungeon_id: i64,
+    instance_id: i64,
+    room_id: i64,
     room_pos: [f64; 3],
     current_wave: u8,
     total_waves: u8,
     completed_now: bool,
     expiry_ft: i64,
 ) {
-    let instance_id = dungeon_id.max(1) * 100 + i64::from(current_wave);
     let values_dict = PyRep::Dict(vec![
         (
             PyRep::String("currentWave".into()),
@@ -367,7 +368,7 @@ pub fn emit_dungeon_progression_notifications(
         "charid",
         vec![
             PyRep::Integer(dungeon_id),
-            PyRep::Integer(i64::from(current_wave)),
+            PyRep::Integer(room_id),
             PyRep::Tuple(vec![
                 PyRep::Real(room_pos[0]),
                 PyRep::Real(room_pos[1]),
