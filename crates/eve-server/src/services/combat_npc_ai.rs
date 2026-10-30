@@ -655,8 +655,14 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     cw.states.get(&cid).map(|st| st.is_criminal(now_unix))
                 }).unwrap_or(false);
                 let is_criminal = is_low_sec_criminal || has_criminal_flag;
-                let pilot_is_pirate = war_faction_id
-                    .is_some_and(crate::services::security_mgr::is_pirate_militia_faction);
+                let pilot_is_campaign_pirate = crate::services::security_mgr::is_pilot_aligned_with_insurgency_pirate(
+                    ctx, solar_system_id, cid,
+                );
+                let pilot_is_same_pirate = if npc.faction_id != 0 {
+                    war_faction_id == Some(i64::from(npc.faction_id))
+                } else {
+                    pilot_is_campaign_pirate
+                };
 
                 let owner_active_ship_id = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).map(|c| c.active_ship_id)
@@ -668,19 +674,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let should_skip = if is_pirate {
                     false
                 } else if is_insurgency_pirate {
-                    let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(
-                        ctx,
-                        solar_system_id,
-                    );
-                    c_stage < 2 || pilot_is_pirate
+                    let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, solar_system_id);
+                    c_stage < 2 || pilot_is_same_pirate
                 } else if is_insurgency_enforcer {
-                    let s_stage = crate::services::security_mgr::insurgency_system_suppression_stage(
-                        ctx,
-                        solar_system_id,
-                    );
-                    s_stage < 3 || !pilot_is_pirate
+                    let s_stage = crate::services::security_mgr::insurgency_system_suppression_stage(ctx, solar_system_id);
+                    s_stage < 3 || !pilot_is_campaign_pirate
                 } else if is_ci_sentry {
-                    !pilot_is_pirate && !is_criminal
+                    !pilot_is_campaign_pirate && !is_criminal
                 } else if is_navy {
                     standing > -5.0 && !is_criminal
                 } else if is_police {

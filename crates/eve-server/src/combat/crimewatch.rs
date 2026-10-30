@@ -331,20 +331,12 @@ impl CrimeWatchDirector {
     pub fn handle_criminal_remote_assistance(
         &mut self,
         helper_char_id: i64,
-        beneficiary_char_id: i64,
+        _beneficiary_char_id: i64,
         helper_ship_id: i64,
         sys_id: u32,
         sys_sec: f64,
         now_unix: u64,
     ) -> AggressionEvaluation {
-        self.aggression_mgr.record_aggression(
-            helper_char_id,
-            beneficiary_char_id,
-            sys_id,
-            false,
-            false,
-            now_unix,
-        );
         let st = self.get_or_create(helper_char_id);
         st.weapon_timer_until_unix = now_unix.saturating_add(60);
         st.pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -359,7 +351,7 @@ impl CrimeWatchDirector {
                 _ => concord_response_delay_sec(sys_sec),
             };
             let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
-            st.pending_concord_arrival = Some((sys_id, arrival_unix, helper_ship_id, beneficiary_char_id));
+            st.pending_concord_arrival = Some((sys_id, arrival_unix, helper_ship_id, 0));
             AggressionEvaluation::CriminalFlagTriggered {
                 concord_delay_sec: delay_sec,
                 arrival_unix,
@@ -587,22 +579,26 @@ impl CrimeWatchDirector {
             )
             .await;
 
-            // 3. Grant 30-day private Kill Right (0 fee until made public) to victim
-            let kill_right_id = ctx.db.with_mut_snapshot(|snap| {
-                snap.next_entity_id += 1;
-                let kr_id = snap.next_entity_id;
-                snap.kill_rights.insert(
-                    kr_id,
-                    KillRightRecord {
-                        kill_right_id: kr_id,
-                        owner_id: victim_char_id,
-                        target_id: criminal_char_id,
-                        activation_fee: IskCents(0),
-                        is_active_suspect: false,
-                    },
-                );
-                kr_id
-            });
+            // 3. Grant 30-day private Kill Right (0 fee until made public) to victim (not granted for remote criminal assistance)
+            let kill_right_id = if victim_char_id > 0 {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.next_entity_id += 1;
+                    let kr_id = snap.next_entity_id;
+                    snap.kill_rights.insert(
+                        kr_id,
+                        KillRightRecord {
+                            kill_right_id: kr_id,
+                            owner_id: victim_char_id,
+                            target_id: criminal_char_id,
+                            activation_fee: IskCents(0),
+                            is_active_suspect: false,
+                        },
+                    );
+                    kr_id
+                })
+            } else {
+                0
+            };
 
             reports.push(ConcordExecutionReport {
                 criminal_char_id,

@@ -1162,22 +1162,37 @@ async fn sync_insurgency_system_npcs(
     let enforcer_offset = DVec3::new(-12_000.0, 0.0, 4_000.0);
 
     if !idle_roamers.is_empty() {
-        let mut moved_positions = Vec::new();
+        let mut arrived_positions = Vec::new();
         {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             for (bid, is_pir, cur_anchor) in idle_roamers {
                 let offset = if is_pir { pirate_offset } else { enforcer_offset };
+                let Some((cur_pos, is_warping)) = bp
+                    .balls
+                    .get(&bid)
+                    .map(|b| (b.position, matches!(b.mode, eve_destiny::MovementMode::Warp { .. })))
+                else {
+                    continue;
+                };
+                if is_warping {
+                    continue;
+                }
+                let anchor_pos = if cur_pos.distance(cur_anchor) > 15_000.0 {
+                    arrived_positions.push((bid, cur_pos));
+                    cur_pos
+                } else {
+                    cur_anchor
+                };
                 let cur_idx = waypoints
                     .iter()
-                    .position(|w| (*w + offset).distance(cur_anchor) < 5_000.0)
+                    .position(|w| (*w + offset).distance(anchor_pos) < 15_000.0)
                     .unwrap_or(0);
                 let next_idx = (cur_idx + 1) % waypoints.len();
-                let follow_idx = (next_idx + 1) % waypoints.len();
                 let next_pos = waypoints[next_idx] + offset;
-                let follow_pos = waypoints[follow_idx] + offset;
-                if bp.set_ball_position(bid, next_pos) {
-                    let _ = bp.goto_point(bid, follow_pos);
-                    moved_positions.push((bid, next_pos));
+                if cur_pos.distance(next_pos) >= 150_000.0 {
+                    let _ = bp.set_mode(bid, eve_destiny::MovementMode::new_warp(cur_pos, next_pos, 3.0));
+                } else {
+                    let _ = bp.goto_point(bid, next_pos);
                 }
             }
             crate::system_actor::sync_ball_positions(
@@ -1186,9 +1201,9 @@ async fn sync_insurgency_system_npcs(
                 &sys_handle.scrambled_balls,
             );
         }
-        if !moved_positions.is_empty() {
+        if !arrived_positions.is_empty() {
             with_mut_combat_runtime(ctx, |rt| {
-                for (bid, pos) in moved_positions {
+                for (bid, pos) in arrived_positions {
                     if let Some(npc) = rt.npc_entities.get_mut(&bid) {
                         npc.spawn_position = pos;
                     }

@@ -296,6 +296,7 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
                 }
                 prev.max(c.corruption_points.get(sys).copied().map(insurgency_stage).unwrap_or(0))
             });
+            ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).system_corruption_stages.insert(*sys, 0);
             crate::services::security_mgr::sync_corruption_security_status_change(ctx, *sys, prev_c, 0);
             ctx.notify(
                 NotificationTarget::SolarSystem(*sys),
@@ -369,26 +370,27 @@ pub fn insurgency_system_corruption_stage(ctx: &ServerContext, sys_id: u32) -> u
 /// Advances corruption points in a system and updates corruption stage (1..5).
 pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32, points: i64) -> (i64, u8) {
     let now = ctx.now_unix();
-    let (pts, old_stage, stage, pirate_faction, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
+    let (old_pts, pts, old_stage, stage, pirate_faction, campaign_active, in_active_phase) = with_insurgency_runtime(ctx, |rt| {
         let Some(c) = rt.campaigns.get_mut(&campaign_id) else {
-            return (0, 0, 0, FACTION_GURISTAS, false, false);
+            return (0, 0, 0, 0, FACTION_GURISTAS, false, false);
         };
         let active = now < c.winddown_end_unix;
         let in_act = now >= c.forecasting_end_unix && now < c.active_end_unix;
         let p = c.corruption_points.entry(sys_id).or_insert(0);
-        let prev_stage = insurgency_stage(*p);
+        let prev_pts = *p;
+        let prev_stage = insurgency_stage(prev_pts);
         let s_stage = insurgency_stage(c.suppression_points.get(&sys_id).copied().unwrap_or(0));
         let eff_pts = if s_stage >= 3 && points > 0 { ((points as f64) * 0.70).round() as i64 } else { points };
-        let new_pts = (*p + eff_pts).max(0);
-        *p = if s_stage >= 5 && prev_stage < 5 { new_pts.min((*p).max(800)) } else { new_pts };
-        let s = insurgency_stage(*p);
-        (*p, prev_stage, s, c.pirate_faction_id, active, in_act)
+        let new_pts = (prev_pts + eff_pts).max(0);
+        *p = if s_stage >= 5 && prev_stage < 5 { new_pts.min(prev_pts.max(800)) } else { new_pts };
+        (prev_pts, *p, prev_stage, insurgency_stage(*p), c.pirate_faction_id, active, in_act)
     });
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(sys_id).or_default().insurgency_corruption_stage = stage;
         crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
     });
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).system_corruption_stages.insert(sys_id, stage);
     crate::services::security_mgr::sync_corruption_security_status_change(ctx, sys_id, old_stage, stage);
 
     if in_active_phase && stage >= 3 && old_stage < 3 {
@@ -398,18 +400,11 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 
     // Broadcast Quasar IncreasedNotice when corruption increases, or SetNotice when adjusted downwards
-    let old_pts = (pts - points).max(0);
     if campaign_active && pts != old_pts {
-        let (notice_type, q_payload) = if points > 0 && pts > old_pts {
-            (
-                "eve_public.pirate.corruption.api.IncreasedNotice",
-                encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64),
-            )
+        let (notice_type, q_payload) = if pts > old_pts {
+            ("eve_public.pirate.corruption.api.IncreasedNotice", encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64))
         } else {
-            (
-                "eve_public.pirate.corruption.api.SetNotice",
-                encode_pirate_progress_notice(sys_id, pts as u64, 1000),
-            )
+            ("eve_public.pirate.corruption.api.SetNotice", encode_pirate_progress_notice(sys_id, pts as u64, 1000))
         };
         let _ = ctx.quasar_gateway.publish_notice(
             NoticeScope::SolarSystem(sys_id),

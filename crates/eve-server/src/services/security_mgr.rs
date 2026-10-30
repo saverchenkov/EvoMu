@@ -162,7 +162,40 @@ pub fn sync_corruption_security_status_change(
     crate::services::combat_crimewatch::crimewatch_timers::update_system_security_status(ctx, sys_id, new_sec);
 }
 
-/// Published Corruption Stage 1–5 PvP loot drop probability (`0.50` base + `0.075 * stage` for pirate militia killers).
+/// Returns true if `char_id` is enlisted in the pirate militia leading the active/winddown insurgency in `sys_id`
+/// (falling back to any pirate militia faction only if `sys_id` has no covering campaign record in `snap`).
+pub fn is_pilot_aligned_with_insurgency_pirate_in_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    now: u64,
+    sys_id: u32,
+    char_id: i64,
+) -> bool {
+    let Some(wf) = snap.characters.get(&char_id).and_then(|c| c.war_faction_id) else {
+        return false;
+    };
+    if !is_pirate_militia_faction(wf) {
+        return false;
+    }
+    let mut any_covering = false;
+    let mut matches_pirate = false;
+    for c in snap.insurgency_runtime.campaigns.values() {
+        if c.systems.contains(&sys_id) && now >= c.forecasting_end_unix && now < c.winddown_end_unix {
+            any_covering = true;
+            if c.pirate_faction_id == wf {
+                matches_pirate = true;
+            }
+        }
+    }
+    if any_covering { matches_pirate } else { true }
+}
+
+/// Returns true if `char_id` is aligned with the leading pirate faction of the active insurgency in `sys_id`.
+pub fn is_pilot_aligned_with_insurgency_pirate(ctx: &ServerContext, sys_id: u32, char_id: i64) -> bool {
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| is_pilot_aligned_with_insurgency_pirate_in_snap(snap, now, sys_id, char_id))
+}
+
+/// Published Corruption Stage 1–5 PvP loot drop probability (`0.50` base + `0.075 * stage` for aligned pirate militia killers).
 pub fn insurgency_pvp_loot_drop_threshold(
     ctx: &ServerContext,
     sys_id: u32,
@@ -183,20 +216,14 @@ pub fn insurgency_pvp_loot_drop_threshold(
     if c_stage == 0 {
         return base;
     }
-    let attacker_pirate = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&attacker_char_id)
-            .and_then(|c| c.war_faction_id)
-            .is_some_and(is_pirate_militia_faction)
-    });
-    if attacker_pirate {
+    if is_pilot_aligned_with_insurgency_pirate(ctx, sys_id, attacker_char_id) {
         (base + 0.075 * f64::from(c_stage.min(5))).clamp(0.0, 1.0)
     } else {
         base
     }
 }
 
-/// Published Corruption Stage 4–5 `+2.0 AU/s` warp speed bonus for pirate militia members in `sys_id`.
+/// Published Corruption Stage 4–5 `+2.0 AU/s` warp speed bonus for aligned pirate militia members in `sys_id`.
 pub fn insurgency_pirate_warp_bonus_au_s(ctx: &ServerContext, char_id: i64, sys_id: u32) -> f64 {
     if char_id <= 0 {
         return 0.0;
@@ -205,13 +232,7 @@ pub fn insurgency_pirate_warp_bonus_au_s(ctx: &ServerContext, char_id: i64, sys_
     if c_stage < 4 {
         return 0.0;
     }
-    let is_pirate = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .and_then(|c| c.war_faction_id)
-            .is_some_and(is_pirate_militia_faction)
-    });
-    if is_pirate { 2.0 } else { 0.0 }
+    if is_pilot_aligned_with_insurgency_pirate(ctx, sys_id, char_id) { 2.0 } else { 0.0 }
 }
 
 /// Published Suppression Stage 1–5 `+5%/stage` multiplier for NPC bounties and security status gain (`1.05..=1.25`).

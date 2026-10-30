@@ -228,8 +228,11 @@ pub async fn handle_weapons(
                             let safety = with_combat_runtime(ctx, |rt| {
                                 rt.safety_levels.get(&char_id).copied().unwrap_or(SafetyLevel::Red)
                             });
-                            let would_be_criminal = !is_mobile_struct && (sys_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target));
-                            let would_be_suspect = (is_mobile_struct && sys_sec > 0.0) || (sys_sec > 0.0 && sys_sec < 0.45 && !is_pod_target);
+                            let concord_suppressed = !is_pod_target
+                                && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+                            let would_be_criminal = !is_mobile_struct
+                                && ((sys_sec >= 0.45 && !concord_suppressed) || (sys_sec > 0.0 && is_pod_target));
+                            let would_be_suspect = !would_be_criminal && sys_sec > 0.0;
                             if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
                                 return Some(Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel")));
                             }
@@ -247,10 +250,12 @@ pub async fn handle_weapons(
                             ctx.notify(NotificationTarget::Character(vc), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                         }
                         let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, vc, now_unix).is_none()).unwrap_or(true);
+                        let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                            cw.system_corruption_stages.insert(sys_id, c_stage);
                             let effective_sec = if is_mobile_struct { sys_sec.min(0.40) } else { sys_sec };
-                            let _ = cw.handle_combat_aggression(char_id, vc, ship_id, sys_id, effective_sec, is_legal, now_unix);
+                            let _ = cw.handle_combat_aggression_with_pod(char_id, vc, ship_id, sys_id, effective_sec, is_legal, is_pod_target, now_unix);
                             if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && is_pod_target {
                                 let st = cw.get_or_create(char_id);
                                 st.criminal_flag_until_unix = now_unix.saturating_add(900);

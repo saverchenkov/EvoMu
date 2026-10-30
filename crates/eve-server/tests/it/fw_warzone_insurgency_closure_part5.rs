@@ -1,8 +1,7 @@
 //! Part 5 of FW & Insurgency closure tests:
 //! - Published per-stage Corruption (1–5) & Suppression (1–5) mechanics, `securityMgr.get_modified_systems`
 //!   (LAWLESS Stage 5 + manual overrides), documented insurgency sites, roaming Pirate/Enforcer NPCs,
-//!   Counter-Insurgency Sentry Guns (`79507`), non-retroactive Stage 5 corruption cap, and post-campaign persistence
-//!   (`feat:fw.corruption-suppression-effects`).
+//!   Counter-Insurgency Sentry Guns (`79507`), non-retroactive Stage 5 corruption cap, and post-campaign persistence.
 //! - Battlefield capture speed scaling by Advantage, combat-capable wave NPCs, Social skill standing scaling (`0` vs `5`),
 //!   time-on-grid ranked 30-pilot standing cap, and VP/Advantage shifts (`feat:fw.battlefield-capture-rules`).
 
@@ -56,9 +55,6 @@ fn fast_forward_secs(ctx: &ServerContext, secs: u64) {
 
 #[tokio::test]
 async fn test_corruption_and_suppression_per_stage_effects() {
-    // parity: feat:fw.corruption-suppression-effects
-    eve_testkit::attest(&["feat:fw.corruption-suppression-effects"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
@@ -449,9 +445,6 @@ async fn test_battlefield_capture_social_standing_and_advantage_rules() {
 
 #[tokio::test]
 async fn test_insurgency_live_gameplay_and_highsec_stage5() {
-    // parity: feat:fw.corruption-suppression-effects
-    eve_testkit::attest(&["feat:fw.corruption-suppression-effects"]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (_enemy_sys, front_sys, _cmd_sys, _rear_sys) = setup_warzone_chain(&ctx);
@@ -477,11 +470,14 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         &ctx, 87_002, "demo2", "demo2-secret", pir_cid, 98_000_072, None,
         front_sys, pir_ship, 621, DVec3::new(1_000.0, 0.0, 0.0), 0,
     ).await;
+    let mut _s_helper = register_online_pilot(
+        &ctx, 87_003, "demo3", "demo3-secret", helper_cid, 98_000_077, None,
+        hs_sys, helper_ship, 621, DVec3::ZERO, 0,
+    ).await;
     ctx.db.with_mut_snapshot(|s| {
         let base_ch = s.characters[&emp_cid].clone();
         for (cid, sid, sys, name) in [
             (vic_cid, vic_ship, front_sys, "Insurgency Victim"),
-            (helper_cid, helper_ship, hs_sys, "Highsec Helper"),
             (crim_cid, crim_ship, hs_sys, "Highsec Criminal"),
         ] {
             let mut ch = base_ch.clone();
@@ -559,22 +555,11 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
 
     // 2. Live `+2.0 AU/s` Pirate warp speed via `beyonce.CmdWarpToStuff` at Corruption Stage 4+:
     let base_pir_warp = compute_ship_warp_speed_au_s(&ctx, 621);
-    let warp_dest_id = ctx
-        .sde
-        .celestials_in_system(front_sys)
-        .into_iter()
+    let warp_dest_id = ctx.sde.celestials_in_system(front_sys).into_iter()
         .find(|c| c.position.distance(DVec3::new(1_000.0, 0.0, 0.0)) >= 200_000.0)
-        .expect("celestial >= 200 km from pirate ship")
-        .celestial_id;
-    let _ = rpc_call(
-        &ctx,
-        &mut s_pir,
-        "beyonce",
-        "CmdWarpToStuff",
-        &[PyRep::String("item".into()), PyRep::Integer(warp_dest_id), PyRep::Real(0.0)],
-    )
-    .await
-    .expect("CmdWarpToStuff in Stage 5 system");
+        .expect("celestial >= 200 km from pirate ship").celestial_id;
+    let _ = rpc_call(&ctx, &mut s_pir, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(warp_dest_id), PyRep::Real(0.0)])
+        .await.expect("CmdWarpToStuff in Stage 5 system");
     let (_, pir_ball_after) = sys_h.get_ball_snapshot(pir_ship).await.unwrap().unwrap();
     match pir_ball_after.mode {
         eve_destiny::MovementMode::Warp { warp_speed_au_s, .. } => {
@@ -584,7 +569,8 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
     }
 
     // 3. Live Highsec Stage 5 Criminal Assist (`Corruption_and_Suppression.md:55`):
-    //    Direct ship attack in Highsec Stage 5 suppresses CONCORD, whereas assisting a Criminal still triggers CONCORD!
+    //    Direct ship attack in Highsec Stage 5 suppresses CONCORD, whereas assisting a Criminal triggers CONCORD
+    //    without granting a Limited Engagement or Kill Right to the assisted criminal!
     let (_hs_pts, hs_stage) = add_system_corruption(&ctx, camp_id, hs_sys, 1_000);
     assert_eq!(hs_stage, 5);
     assert!(is_concord_suppressed_in_system(&ctx, hs_sys), "Highsec Stage 5 suppresses CONCORD for direct ship attacks");
@@ -592,6 +578,7 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         cw.get_or_create(crim_cid).criminal_flag_until_unix = now_u + 900;
     }
+    ctx.drain_notifications_for_char(helper_cid);
     eve_server::services::combat_crimewatch::evaluate_and_record_remote_assistance(
         &ctx, helper_cid, helper_ship, hs_sys, crim_cid,
     ).expect("remote assist evaluation");
@@ -600,8 +587,17 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         let st = cw.get_or_create(helper_cid);
         (st.is_criminal(now_u), st.pending_concord_arrival.is_some())
     };
-    assert!(helper_is_crim, "Assisting a criminal in Highsec Stage 5 grants Criminal flag");
-    assert!(concord_scheduled, "Assisting a criminal in Highsec Stage 5 still triggers CONCORD response");
+    assert!(helper_is_crim && concord_scheduled, "Criminal assist grants Criminal flag + CONCORD");
+    let assist_notes = ctx.drain_notifications_for_char(helper_cid);
+    assert!(
+        assist_notes.iter().any(|n| n.event == "OnSystemCriminalFlagUpdates"
+            && n.args == vec![PyRep::List(vec![]), PyRep::List(vec![]), PyRep::List(vec![PyRep::Integer(helper_cid)])]),
+        "OnSystemCriminalFlagUpdates must emit helper_cid in new_criminals (3rd slice)"
+    );
+    assert!(!with_combat_runtime(&ctx, |rt| rt.has_limited_engagement_with(helper_cid, crim_cid, now_u) || rt.has_limited_engagement_with(crim_cid, helper_cid, now_u)));
+    fast_forward_secs(&ctx, 25);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(ctx.db.with_snapshot(|s| !s.kill_rights.values().any(|kr| kr.owner_id == crim_cid && kr.target_id == helper_cid)));
 
     // 4. Live Suppression Stage 4 `+10%` Warp Scrambler optimal range (`7500m -> 8250m`) via `dogmaIM.Activate`:
     let scram_id = 60_000_071i64;
@@ -612,18 +608,9 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         });
     });
     ctx.invalidate_ship_fitting(emp_ship);
-    let _ = sys_h
-        .add_target_lock(
-            emp_ship,
-            eve_destiny::TargetLock {
-                target_id: vic_ship,
-                lock_time_ms: 0.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: Some(50_000.0),
-            },
-        )
-        .await;
+    let _ = sys_h.add_target_lock(emp_ship, eve_destiny::TargetLock {
+        target_id: vic_ship, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0),
+    }).await;
     let (_s3_pts, s3_stage) = add_system_suppression(&ctx, camp_id, front_sys, 600);
     assert_eq!(s3_stage, 3);
     let err_s3 = rpc_call(
@@ -639,6 +626,10 @@ async fn test_insurgency_live_gameplay_and_highsec_stage5() {
         &[PyRep::Integer(scram_id), PyRep::String("warpScrambler".into()), PyRep::Integer(vic_ship)],
     ).await;
     assert!(ok_s4.is_ok(), "8,000 m succeeds within +10% (8,250 m) Warp Scrambler range at Suppression Stage 4: {ok_s4:?}");
+    for _ in 0..3 {
+        let _ = sys_h.step_manual(1.0).await.unwrap();
+    }
+    assert!(sys_h.get_combat_state(vic_ship).await.unwrap().unwrap().warp_scramble_strength > 0, "Scram stays active across 1 Hz ticks at 8,000 m");
 
     // 5. Live Suppression Stage 5 Empire FW LP (`1.20x`) & NPC Bounty/Security Status (`1.25x`):
     let (_s5_pts, s5_stage) = add_system_suppression(&ctx, camp_id, front_sys, 200);

@@ -32,6 +32,9 @@ pub async fn evaluate_faction_police_response(
     char_id: i64,
     ship_id: i64,
 ) -> (bool, bool, bool) {
+    if crate::services::combat_npc_police::is_faction_police_suppressed(ctx, solar_system_id) {
+        return (false, true, false);
+    }
     let sys_sec = ctx
         .sde
         .solar_systems
@@ -1179,8 +1182,12 @@ pub fn evaluate_and_record_pvp_aggression(
         let effective_sec = if is_unanchored_jetcan { sys_sec.min(0.40) } else { sys_sec };
         if !is_legal {
             let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&attacker_char_id).copied().unwrap_or(SafetyLevel::Red));
-            let would_be_criminal = effective_sec >= 0.45 || (sys_sec > 0.0 && is_pod_target)
-                || is_anchored_cont || (is_secure_cont && sys_sec >= 0.45);
+            let concord_suppressed = !is_pod_target
+                && crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+            let would_be_criminal = (effective_sec >= 0.45 && !concord_suppressed)
+                || (sys_sec > 0.0 && is_pod_target)
+                || is_anchored_cont
+                || (is_secure_cont && sys_sec >= 0.45);
             let would_be_suspect = !would_be_criminal && effective_sec > 0.0;
             if safety == SafetyLevel::Green && (would_be_criminal || would_be_suspect) {
                 return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
@@ -1189,8 +1196,10 @@ pub fn evaluate_and_record_pvp_aggression(
                 return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
             }
         }
+        let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
         {
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+            cw.system_corruption_stages.insert(sys_id, c_stage);
             let _ = cw.handle_combat_aggression_with_pod(attacker_char_id, vcid, attacker_ship_id, sys_id, effective_sec, is_legal, is_pod_target, now_unix);
             cw.get_or_create(attacker_char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
             cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -1266,7 +1275,10 @@ pub fn evaluate_and_record_remote_assistance(
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);
         drop(cw);
-        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[helper_char_id], &[], &[]);
+        emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
+        if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
+            let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[], &[helper_char_id]);
+        }
     } else if ben_suspect && sys_sec > 0.0 {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(helper_char_id);
@@ -1274,7 +1286,10 @@ pub fn evaluate_and_record_remote_assistance(
         st.pvp_timer_until_unix = now_unix.saturating_add(900);
         st.suspect_flag_until_unix = now_unix.saturating_add(900);
         drop(cw);
-        let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
+        emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
+        if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
+            let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
+        }
     }
     if !ben_le_partners.is_empty() {
         {
