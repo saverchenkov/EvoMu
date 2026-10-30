@@ -313,14 +313,18 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     assert_eq!(anom_add[0], PyRep::Integer(sys_lowsec as i64));
     assert!(matches!(&anom_add[1], PyRep::Dict(d) if !d.is_empty() && d[0].1.dict_get("instanceID").is_some()));
 
+    ctx.db.with_mut_snapshot(|s| { let mut d = s.cosmic_signatures[&sys_lowsec][0].clone(); d.signature_id = "STA-100".into(); if let Some(wh) = eve_server::services::space_destiny::build_static_replacement_wormhole(&ctx, sys_lowsec, &d, ctx.now_unix(), 1) { s.cosmic_signatures.get_mut(&sys_lowsec).unwrap().push(wh); } });
     ctx.advance_secs(90_000);
     rpc(&ctx, &mut sess_a, "scanMgr", "GetSignatures", &[PyRep::Integer(sys_lowsec as i64)]).await.expect("GetSignatures");
     let exp_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let sig_upd = find_notif(&exp_notifs, "OnSignalTrackerSignatureUpdate");
     assert_eq!(sig_upd[0], PyRep::Integer(sys_lowsec as i64));
     let PyRep::Dict(ref sig_dict) = sig_upd[1] else { panic!("expected dict") };
-    assert!(!sig_dict.is_empty() && sig_dict[0].1.dict_get("targetID").is_some());
-    let sig_kv = &sig_dict[0].1;
+    let sig_kv = sig_dict
+        .iter()
+        .map(|(_, v)| v)
+        .find(|v| v.dict_get("targetID").is_some())
+        .expect("expected added signature with targetID");
     let dev = sig_kv.dict_get("deviation").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!(dev > 0.0, "unscanned signature must report positive deviation");
     let reported_pos = match sig_kv.dict_get("position") {

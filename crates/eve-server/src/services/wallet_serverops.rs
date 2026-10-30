@@ -251,8 +251,9 @@ fn run_daily_downtime_and_jobs_inner(ctx: &ServerContext, force_abyssal_evac: bo
     let evacuated_abyssal = if is_1100_utc_window || force_abyssal_evac { crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx) } else { 0 };
     crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
     // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn, plan:SP-7
-    let (npc_wrecks_cleaned, mission_npcs_respawned) = crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
-
+    let (npc_wrecks_cleaned, mission_npcs_respawned) =
+        crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
+    crate::services::wormhole_pve_escalations::process_wormhole_sites_on_downtime(ctx);
     let (replenished_asteroids, expired_order_list, expired_contracts, sov_decayed) =
         ctx.db.with_mut_snapshot(|snap| {
             let mut ast_count = 0_i64;

@@ -185,16 +185,16 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
 
     // 1. Data Site (DAT-30000142) and Relic Site (REL-30000142) hackable containers from the seeded sites
     ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
-    ensure_system_pve_sites_seeded(&ctx, 31_000_001).await;
+    ensure_system_pve_sites_seeded(&ctx, 31_000_007).await;
     let site_cans = |sys: u32, sid: &str| with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system[&sys].iter().find(|s| s.site_id == sid).map(|s| s.hackable_can_ids.clone()).unwrap()
     });
     let data_cans = site_cans(30_000_142, "DAT-30000142");
     let (data_can_id, relic_can_id) = (data_cans[0], site_cans(30_000_142, "REL-30000142")[0]);
 
-    // Verify Wormhole Data/Relic sites (31000001) spawn Sleeper NPC guards
+    // Verify Wormhole Data/Relic sites (31000007, J105443 C1) spawn Sleeper NPC guards
     let wh_guarded = with_pve_exploration_reg(&ctx, |reg| {
-        reg.sites_by_system[&31_000_001].iter().any(|s| matches!(s.site_category.as_str(), "Data" | "Relic") && s.npc_guards_spawned)
+        reg.sites_by_system[&31_000_007].iter().any(|s| matches!(s.site_category.as_str(), "Data" | "Relic") && s.npc_guards_spawned)
     });
     assert!(wh_guarded, "Wormhole Unsecured Data / Forgotten Relic sites must spawn Sleeper NPC guards");
 
@@ -465,20 +465,20 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
         .expect("Traverse Sleeper Cache passage after stabilizing rift");
     assert_eq!(passage_ok.dict_get("currentWave").and_then(|v| v.as_i64()), Some(2));
 
-    // 3. Wormhole Sleeper Combat Sites (`31_000_005` C5 Core Citadel): wave triggers & Blue Loot (30746 Ancient Coordinates Database)
+    // 3. Wormhole Sleeper Combat Sites (`31_001_883` J172943 C5 Core Citadel): wave triggers & Blue Loot (30746 Ancient Coordinates Database)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.solar_system_id = 31_000_005;
+            ch.solar_system_id = 31_001_883;
         }
     });
-    sess.solar_system_id = Some(31_000_005);
+    sess.solar_system_id = Some(31_001_883);
     let wh_anoms = ctx
         .dispatch_rpc(
             &mut sess,
             "scanSvc",
             None,
             "GetCombatAnomalyInstances",
-            &[PyRep::Integer(31_000_005)],
+            &[PyRep::Integer(31_001_883)],
             &kw,
             None,
         )
@@ -499,7 +499,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
 
     let mut blue_loot_dropped = false;
     for _ in 0..4 {
-        clear_site_wave_npcs(&ctx, 31_000_005, &wh_site_id).await;
+        clear_site_wave_npcs(&ctx, 31_001_883, &wh_site_id).await;
         let step = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(wh_site_id.clone()), PyRep::Bool(true)], &kw, None).await.expect("Advance C5 Sleeper wave");
         if step.dict_get("completed").and_then(|v| v.as_bool()) == Some(true) {
             if let Some(PyRep::List(loot)) = step.dict_get("droppedLoot") {

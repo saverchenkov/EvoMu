@@ -431,8 +431,10 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         }
 
         let wh_pol = rpc(&ctx2, &mut sess2, "wormholeMgr", "GetWormholePolarization", &[PyRep::Integer(31_000_005)]).await;
-        assert_eq!(wh_pol.dict_get("isPolarized"), Some(&PyRep::Bool(true)));
-        assert_eq!(wh_pol.dict_get("remainingSeconds"), Some(&PyRep::Integer(270)));
+        let PyRep::Tuple(wh_pol_tuple) = wh_pol else { panic!("expected 2-tuple from GetWormholePolarization") };
+        assert_eq!(wh_pol_tuple.len(), 2);
+        assert!(wh_pol_tuple[0].as_i64().unwrap() > 0);
+        assert_eq!(wh_pol_tuple[1], PyRep::Integer(300 * 10_000_000));
 
         let sec_tx = rpc(&ctx2, &mut sess2, "crimewatch", "GetSecurityStatusTransactions", &[]).await;
         assert!(format!("{sec_tx:?}").contains("Clone Soldier Security Tag"));
@@ -475,7 +477,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         assert_eq!(items[3], PyRep::Integer(0), "safety level does not expire");
 
         let wh_pol = rpc(&ctx3, &mut sess3, "wormholeMgr", "GetWormholePolarization", &[PyRep::Integer(31_000_005)]).await;
-        assert_eq!(wh_pol.dict_get("isPolarized"), Some(&PyRep::Bool(false)));
+        assert_eq!(wh_pol, PyRep::None);
 
         // Undock and verify persisted StructureDockingAccessDenied & ZarzakhGateLocked via RPC dispatch
         rpc(&ctx3, &mut sess3, "stationSvc", "Undock", &[]).await;

@@ -921,6 +921,28 @@ async fn test_so6_cosmic_signatures_generation_and_probing_math() {
         .expect("GetSignatures");
     assert!(is_rowset(&sigs_rep));
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures
+            .entry(30_000_142)
+            .or_default()
+            .push(eve_db::CosmicSignatureRecord {
+                signature_id: "JMM-142".into(),
+                solar_system_id: 30_000_142,
+                sig_group: "Wormhole".into(),
+                type_name: "Unstable Wormhole (K162)".into(),
+                position: [149_597_870_700.0, 0.0, 0.0],
+                signal_strength: 0.0,
+                wormhole_type_id: Some(26_272),
+                destination_system_id: Some(31_000_400),
+                created_unix: ctx.now_unix(),
+                lifetime_seconds: 86_400,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            });
+    });
+
     let (wh_sig_id, wh_pos) = ctx.db.with_snapshot(|snap| {
         let sig = snap.cosmic_signatures[&30_000_142]
             .iter()
@@ -1030,6 +1052,28 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
         .await
         .expect("GetSignatures");
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures
+            .entry(30_000_142)
+            .or_default()
+            .push(eve_db::CosmicSignatureRecord {
+                signature_id: "JMM-142".into(),
+                solar_system_id: 30_000_142,
+                sig_group: "Wormhole".into(),
+                type_name: "Unstable Wormhole (K162)".into(),
+                position: [149_597_870_700.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(26_272),
+                destination_system_id: Some(31_000_005),
+                created_unix: ctx.now_unix(),
+                lifetime_seconds: 86_400,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            });
+    });
+
     let wh_sig_id = ctx.db.with_snapshot(|snap| {
         snap.cosmic_signatures[&30_000_142]
             .iter()
@@ -1052,7 +1096,7 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
         )
         .await
         .expect("GetWormholePolarization fresh");
-    assert!(is_keyval(&info1));
+    assert_eq!(info1, PyRep::None);
 
     // 2. Mass stage tracking: Destabilized (40%) and Critical (5%)
     ctx.db
@@ -1065,32 +1109,31 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
                 .find(|s| s.signature_id == wh_sig_id)
                 .unwrap();
             wh.remaining_mass_kg = 800_000_000.0; // 40% -> Destabilized
+            wh.signal_strength = 1.0;
             Ok::<(), std::convert::Infallible>(())
         })
         .unwrap();
 
-    let info_destab = ctx
+    let scan_destab = ctx
         .dispatch_rpc(
             &mut sess,
-            "wormholeMgr",
+            "scanMgr",
             None,
-            "GetWormholePolarization",
-            &[PyRep::String(wh_sig_id.clone())],
+            "GetSystemScanMgr",
+            &[PyRep::Integer(30_000_142)],
             &kw,
             None,
         )
         .await
-        .expect("GetWormholePolarization destab");
-    if let PyRep::KeyVal(entries) = &info_destab {
-        let mass_stage = entries
-            .iter()
-            .find(|(k, _)| k.as_str() == "massStage")
-            .unwrap()
-            .1
-            .as_str()
-            .unwrap();
-        assert_eq!(mass_stage, "Destabilized");
-    }
+        .expect("GetSystemScanMgr destab");
+    let sig_destab = scan_destab
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l.iter().find(|item| item.dict_get("signatureID") == Some(&PyRep::String(wh_sig_id.clone()))),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(sig_destab.dict_get("massStage"), Some(&PyRep::String("Destabilized".into())));
 
     ctx.db
         .try_with_mut_snapshot(|snap| {
@@ -1106,28 +1149,26 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
         })
         .unwrap();
 
-    let info_crit = ctx
+    let scan_crit = ctx
         .dispatch_rpc(
             &mut sess,
-            "wormholeMgr",
+            "scanMgr",
             None,
-            "GetWormholePolarization",
-            &[PyRep::String(wh_sig_id.clone())],
+            "GetSystemScanMgr",
+            &[PyRep::Integer(30_000_142)],
             &kw,
             None,
         )
         .await
-        .expect("GetWormholePolarization crit");
-    if let PyRep::KeyVal(entries) = &info_crit {
-        let mass_stage = entries
-            .iter()
-            .find(|(k, _)| k.as_str() == "massStage")
-            .unwrap()
-            .1
-            .as_str()
-            .unwrap();
-        assert_eq!(mass_stage, "Critical");
-    }
+        .expect("GetSystemScanMgr crit");
+    let sig_crit = scan_crit
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l.iter().find(|item| item.dict_get("signatureID") == Some(&PyRep::String(wh_sig_id.clone()))),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(sig_crit.dict_get("massStage"), Some(&PyRep::String("Critical".into())));
 
     // 3. Lifetime stage tracking: EOL (remaining < 25%) and Expired
     ctx.db
@@ -1139,31 +1180,31 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
                 .iter_mut()
                 .find(|s| s.signature_id == wh_sig_id)
                 .unwrap();
-            wh.created_unix = ctx.now_unix().saturating_sub(70_000); // 70k / 86.4k elapsed -> EOL
+            wh.created_unix = ctx.now_unix().saturating_sub(75_000); // 75k / 86.4k elapsed -> <4h remaining -> EOL
             Ok::<(), std::convert::Infallible>(())
         })
         .unwrap();
 
-    let info_eol = ctx
+    let scan_eol = ctx
         .dispatch_rpc(
             &mut sess,
-            "wormholeMgr",
+            "scanMgr",
             None,
-            "GetWormholePolarization",
-            &[PyRep::String(wh_sig_id.clone())],
+            "GetSystemScanMgr",
+            &[PyRep::Integer(30_000_142)],
             &kw,
             None,
         )
         .await
-        .expect("GetWormholePolarization EOL");
-    if let PyRep::KeyVal(entries) = &info_eol {
-        let life_stage = entries
-            .iter()
-            .find(|(k, _)| k.as_str() == "lifetimeStage")
-            .unwrap()
-            .1
-            .as_str()
-            .unwrap();
+        .expect("GetSystemScanMgr EOL");
+    if let Some(sig_eol) = scan_eol
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l.iter().find(|item| item.dict_get("signatureID") == Some(&PyRep::String(wh_sig_id.clone()))),
+            _ => None,
+        })
+    {
+        let life_stage = sig_eol.dict_get("lifetimeStage").unwrap().as_str().unwrap();
         assert_eq!(life_stage, "ReachingEndOfLifetime");
     }
 

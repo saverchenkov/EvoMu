@@ -43,6 +43,7 @@ async fn test_wormhole_restrictions_and_buckets() {
     )
     .await
     .expect("SelectCharacterID");
+    ctx.advance_secs(12);
 
     // -------------------------------------------------------------------------
     // 1. Cynosural Field in Wormhole Space can be lit per feat:modules.cyno-lighting-rules
@@ -510,25 +511,158 @@ async fn test_wormhole_restrictions_and_buckets() {
         });
     });
 
-    // Live query via wormholeMgr.GetWormholePolarization:
+    // Live query via wormholeMgr.GetWormholePolarization (returns None when unpolarized):
     let pol_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "wormholeMgr",
             None,
             "GetWormholePolarization",
-            &[PyRep::String(wh_info_sig)],
+            &[PyRep::String(wh_info_sig.clone())],
             &kw,
             None,
         )
         .await
         .expect("wormholeMgr.GetWormholePolarization");
-    let PyRep::KeyVal(pkv) = pol_rep else { panic!("Expected KeyVal from GetWormholePolarization") };
-    assert_eq!(pkv.get("signatureID"), Some(&PyRep::String("WH-QUERY-1".into())));
-    assert!(pkv.contains_key("lifetimeStage"));
-    assert!(pkv.contains_key("massStage"));
-    assert_eq!(pkv.get("destinationClass"), Some(&PyRep::String("Thera".into())));
-    assert_eq!(pkv.get("maxShipSize"), Some(&PyRep::String("Large".into())));
-    assert_eq!(pkv.get("lifetimeBucket"), Some(&PyRep::String("<1 day".into())));
-    assert_eq!(pkv.get("massStabilityBucket"), Some(&PyRep::String("<50%".into())));
+    assert_eq!(pol_rep, PyRep::None);
+
+    // Live query of wormhole stage/bucket metadata via scanMgr.GetSystemScanMgr:
+    let scan_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "GetSystemScanMgr",
+            &[PyRep::Integer(30_000_142)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("scanMgr.GetSystemScanMgr");
+    let sig_kv = scan_rep
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l.iter().find(|item| item.dict_get("signatureID") == Some(&PyRep::String("WH-QUERY-1".into()))),
+            _ => None,
+        })
+        .expect("WH-QUERY-1 in GetSystemScanMgr");
+    assert_eq!(sig_kv.dict_get("signatureID"), Some(&PyRep::String("WH-QUERY-1".into())));
+    assert!(sig_kv.dict_get("lifetimeStage").is_some());
+    assert!(sig_kv.dict_get("massStage").is_some());
+    assert_eq!(sig_kv.dict_get("destinationClass"), Some(&PyRep::String("Thera".into())));
+    assert_eq!(sig_kv.dict_get("maxShipSize"), Some(&PyRep::String("Large".into())));
+    assert_eq!(sig_kv.dict_get("lifetimeBucket"), Some(&PyRep::String("<1 day".into())));
+    assert_eq!(sig_kv.dict_get("massStabilityBucket"), Some(&PyRep::String("<50%".into())));
+}
+
+// parity: feat:navigation.wormhole-jump, feat:navigation.wormhole-lifetime, feat:navigation.wormhole-statics
+#[tokio::test]
+async fn test_wormhole_expired_static_jump_commits_collapse_and_replacement_balls() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    let mut sess = SessionState::new(902);
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(90_000_001)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    ctx.advance_secs(12);
+
+    let c5_sys: u32 = 31_001_886;
+    let ship_id = 600_000_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = c5_sys;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    sess.solar_system_id = Some(c5_sys);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    // Seed C5 static wormhole and spawn its ball via GetSystemScanMgr
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(c5_sys as i64)], &kw, None)
+        .await
+        .expect("GetSystemScanMgr");
+
+    let (static_sig_id, static_wh_type_id, static_pos) = ctx.db.with_mut_snapshot(|snap| {
+        let now_u = ctx.now_unix();
+        let sig = snap
+            .cosmic_signatures
+            .get_mut(&c5_sys)
+            .unwrap()
+            .iter_mut()
+            .find(|s| s.sig_group == "Wormhole" && s.signature_id.starts_with("WST-"))
+            .expect("C5 static wormhole");
+        // Expire the static wormhole without running any tick
+        sig.created_unix = now_u.saturating_sub(sig.lifetime_seconds + 10);
+        (sig.signature_id.clone(), sig.wormhole_type_id, sig.position)
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(c5_sys);
+    let old_wh_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(c5_sys, &static_sig_id);
+    assert!(sys_handle.get_ball_snapshot(old_wh_id).await.unwrap().is_some());
+
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(static_pos[0] + 200.0, static_pos[1], static_pos[2]),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // Jump at expired static before any tick: must return WormholeCollapsed AND commit collapse + replacement
+    let err = ctx
+        .dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(old_wh_id)], &kw, None)
+        .await
+        .expect_err("Jumping into expired static must fail with WormholeCollapsed");
+    assert_eq!(err.code, "WormholeCollapsed");
+
+    let rep_sig = ctx.db.with_snapshot(|snap| {
+        let sigs = &snap.cosmic_signatures[&c5_sys];
+        let orig = sigs.iter().find(|s| s.signature_id == static_sig_id).unwrap();
+        assert!(orig.collapsed, "Expired static signature must be committed as collapsed");
+        sigs.iter()
+            .find(|s| {
+                s.sig_group == "Wormhole"
+                    && s.signature_id != static_sig_id
+                    && !s.collapsed
+                    && s.wormhole_type_id == static_wh_type_id
+            })
+            .cloned()
+            .expect("Replacement static signature record must exist")
+    });
+
+    // Balls must match records: old ball removed, replacement ball spawned
+    assert!(
+        sys_handle.get_ball_snapshot(old_wh_id).await.unwrap().is_none(),
+        "Collapsed wormhole ball must be removed"
+    );
+    let rep_wh_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(c5_sys, &rep_sig.signature_id);
+    let (_, rep_ball) = sys_handle
+        .get_ball_snapshot(rep_wh_id)
+        .await
+        .unwrap()
+        .expect("Replacement wormhole ball must be spawned");
+    assert_eq!(Some(rep_ball.type_id), rep_sig.wormhole_type_id);
 }

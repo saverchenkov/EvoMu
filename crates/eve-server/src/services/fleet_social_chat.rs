@@ -1154,6 +1154,7 @@ fn is_delayed_local_channel(chan_id: &str) -> bool {
         || (30_000_140..=30_000_141).contains(&sys_id)
         || sys_id == 30_002_086
         || sys_id == 30_100_000
+        || crate::services::wormhole_lifecycle_ops::system_wormhole_profile(sys_id).0 > 0
 }
 
 fn parse_channel_system_id(chan_id: &str) -> Option<u32> {

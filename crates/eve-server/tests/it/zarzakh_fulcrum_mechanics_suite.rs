@@ -456,7 +456,7 @@ async fn test_pochven_mechanics_and_restrictions() {
     });
 
     // 3. Wormhole spawning with guard NPCs
-    let static_whs = eve_server::services::space_destiny::space_pochven_wormholes::pochven_static_wormholes(pochven_sys, 0, ctx.now_unix());
+    let static_whs = eve_server::services::space_destiny::space_pochven_wormholes::pochven_static_wormholes(&ctx.sde, pochven_sys, 0, ctx.now_unix());
     assert!(!static_whs.is_empty(), "Pochven system has static wormholes");
     let wh_sig = &static_whs[0];
     let wh_item_id = 100_000_209_i64;

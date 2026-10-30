@@ -554,156 +554,100 @@ pub(super) async fn handle_scanning_and_wormholes(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             let now_unix = ctx.now_unix();
+            let arg_str_opt = args.first().and_then(|a| a.as_str());
+            let arg_int_opt = args.first().and_then(|a| a.as_i64());
 
-            // If arg 0 is a signature ID string, return full wormhole status + polarization + system rules
-            if let Some(sig_id) = args.first().and_then(|a| a.as_str()) {
+            // Match either a signature ID string (`WST-101` or `K162-WST-101`) or a wormhole ball ID (`>= 40_000_000`).
+            if arg_str_opt.is_some() || arg_int_opt.is_some_and(|id| id >= 40_000_000) {
                 let _ = ensure_system_signatures(ctx, sys_id).await;
-                let wh_opt = ctx.db.with_snapshot(|snap| {
-                    snap.cosmic_signatures.get(&sys_id).and_then(|list| {
-                        list.iter()
-                            .find(|s| s.signature_id == sig_id && s.sig_group == "Wormhole")
-                            .cloned()
-                    })
+                let wh_match = ctx.db.with_snapshot(|snap| {
+                    if let Some(list) = snap.cosmic_signatures.get(&sys_id) {
+                        if let Some(s) = list.iter().find(|s| {
+                            s.sig_group == "Wormhole"
+                                && (arg_str_opt.is_some_and(|sid| {
+                                    s.signature_id == sid || s.signature_id == format!("K162-{sid}")
+                                }) || arg_int_opt.is_some_and(|bid| {
+                                    crate::services::space_destiny::wormhole_item_id_for_signature(
+                                        sys_id,
+                                        &s.signature_id,
+                                    ) == bid
+                                }))
+                        }) {
+                            let ent_id = crate::services::space_destiny::wormhole_item_id_for_signature(
+                                sys_id,
+                                &s.signature_id,
+                            );
+                            let dest = s.destination_system_id.unwrap_or(31_000_005);
+                            let ex_id = crate::services::space_destiny::wormhole_exit_item_id_for_signature(
+                                dest,
+                                &s.signature_id,
+                            );
+                            return Some((s.clone(), ent_id, ex_id));
+                        }
+                    }
+                    if let Some(bid) = arg_int_opt {
+                        for (&psys, list) in &snap.cosmic_signatures {
+                            if let Some(s) = list.iter().find(|s| {
+                                s.sig_group == "Wormhole"
+                                    && s.destination_system_id == Some(sys_id)
+                                    && crate::services::space_destiny::wormhole_exit_item_id_for_signature(
+                                        sys_id,
+                                        &s.signature_id,
+                                    ) == bid
+                            }) {
+                                let ent_id = crate::services::space_destiny::wormhole_item_id_for_signature(
+                                    psys,
+                                    &s.signature_id,
+                                );
+                                return Some((s.clone(), ent_id, bid));
+                            }
+                        }
+                    }
+                    None
                 });
-                let Some(wh) = wh_opt else {
+                let Some((wh, entrance_wh_id, _exit_wh_id)) = wh_match else {
                     return Some(Err(BridgeRpcError {
                         code: "WormholeNotFound".into(),
-                        message: format!("Wormhole signature {sig_id} not found in system {sys_id}"),
+                        message: format!("Wormhole not found in system {sys_id}"),
                     }));
                 };
-                let buckets = crate::services::space_destiny::space_cyno_filaments::derive_wormhole_buckets(&wh, now_unix, &ctx.sde);
-                let elapsed = now_unix.saturating_sub(wh.created_unix);
-                let lifetime_pct = if elapsed >= wh.lifetime_seconds {
-                    0.0
-                } else {
-                    (wh.lifetime_seconds - elapsed) as f64 / wh.lifetime_seconds as f64
-                };
-                let lifetime_stage = if lifetime_pct <= 0.0 {
-                    "Collapsed_Expired"
-                } else if lifetime_pct < 0.25 {
-                    "ReachingEndOfLifetime"
-                } else {
-                    "Healthy"
-                };
-                let mass_pct = if wh.max_mass_kg > 0.0 {
-                    wh.remaining_mass_kg / wh.max_mass_kg
-                } else {
-                    0.0
-                };
-                let mass_stage = if wh.remaining_mass_kg <= 0.0 {
-                    "Collapsed_Exhausted"
-                } else if mass_pct < 0.10 {
-                    "Critical"
-                } else if mass_pct < 0.50 {
-                    "Destabilized"
-                } else {
-                    "Stable"
-                };
-                let is_collapsed = wh.collapsed || lifetime_pct <= 0.0 || wh.remaining_mass_kg <= 0.0;
                 let dest_sys = wh.destination_system_id.unwrap_or(31_000_005) as i64;
-                let entrance_wh_id =
-                    crate::services::space_destiny::wormhole_item_id_for_signature(sys_id, &wh.signature_id);
-                let exit_wh_id =
-                    crate::services::space_destiny::wormhole_exit_item_id_for_signature(
-                        dest_sys as u32,
-                        &wh.signature_id,
-                    );
-                let rem_pol = ctx.db.with_snapshot(|snap| {
+                let pol_key = arg_int_opt.unwrap_or(entrance_wh_id);
+                let exp_unix = ctx.db.with_snapshot(|snap| {
                     snap.wh_polarizations
-                        .get(&(char_id, dest_sys))
+                        .get(&(char_id, pol_key))
+                        .or_else(|| snap.wh_polarizations.get(&(char_id, dest_sys)))
                         .copied()
                         .unwrap_or(0)
-                        .saturating_sub(now_unix)
                 });
-                return Some(Ok(PyRep::keyval([
-                    ("signatureID", PyRep::String(wh.signature_id)),
-                    ("entranceWormholeID", PyRep::Integer(entrance_wh_id)),
-                    ("exitWormholeID", PyRep::Integer(exit_wh_id)),
-                    (
-                        "wormholeTypeID",
-                        wh.wormhole_type_id
-                            .map(|t| PyRep::Integer(t as i64))
-                            .unwrap_or(PyRep::None),
-                    ),
-                    ("totalLifespanSeconds", PyRep::Integer(wh.lifetime_seconds as i64)),
-                    ("elapsedSeconds", PyRep::Integer(elapsed as i64)),
-                    ("lifetimeStage", PyRep::String(lifetime_stage.into())),
-                    ("massStage", PyRep::String(mass_stage.into())),
-                    ("remainingMassKg", PyRep::Real(wh.remaining_mass_kg)),
-                    ("maxJumpMassKg", PyRep::Real(wh.max_jump_mass_kg)),
-                    ("destinationSystemID", PyRep::Integer(dest_sys)),
-                    ("destinationClass", PyRep::String(buckets.destination_class.into())),
-                    ("maxShipSize", PyRep::String(buckets.max_ship_size.into())),
-                    ("lifetimeBucket", PyRep::String(buckets.lifetime_bucket.into())),
-                    ("massStabilityBucket", PyRep::String(buckets.mass_stability_bucket.into())),
-                    ("lifetimeDescription", PyRep::String(buckets.lifetime_description.into())),
-                    (
-                        "massStabilityDescription",
-                        PyRep::String(buckets.mass_stability_description.into()),
-                    ),
-                    ("collapsed", PyRep::Bool(is_collapsed)),
-                    ("isPolarized", PyRep::Bool(rem_pol > 0)),
-                    ("remainingSeconds", PyRep::Integer(rem_pol as i64)),
-                ])));
+                if exp_unix > now_unix {
+                    let end_ft = crate::sp6_lifecycle::unix_to_filetime(exp_unix);
+                    let duration_ticks = 300_i64 * 10_000_000;
+                    return Some(Ok(PyRep::Tuple(vec![
+                        PyRep::Integer(end_ft),
+                        PyRep::Integer(duration_ticks),
+                    ])));
+                }
+                return Some(Ok(PyRep::None));
             }
 
-            let target_sys = args.first().and_then(|a| a.as_i64()).unwrap_or(31_000_005);
-            let remaining = ctx.db.with_snapshot(|snap| {
+            let target_sys = arg_int_opt.unwrap_or(31_000_005);
+            let exp_unix = ctx.db.with_snapshot(|snap| {
                 snap.wh_polarizations
                     .get(&(char_id, target_sys))
                     .copied()
                     .unwrap_or(0)
-                    .saturating_sub(now_unix)
             });
-            let is_polarized = remaining > 0;
-            let sys_u32 = target_sys as u32;
-            let is_wh = (31_000_000..=31_002_605).contains(&sys_u32);
-            let is_thera = sys_u32 == 31_000_005;
-            let is_shattered = is_thera || (is_wh && (sys_u32 % 10 == 0));
-            let wh_class = if is_thera {
-                12
-            } else if is_wh {
-                ((sys_u32 - 31_000_000) % 6) + 1
+            if exp_unix > now_unix {
+                let end_ft = crate::sp6_lifecycle::unix_to_filetime(exp_unix);
+                let duration_ticks = 300_i64 * 10_000_000;
+                Some(Ok(PyRep::Tuple(vec![
+                    PyRep::Integer(end_ft),
+                    PyRep::Integer(duration_ticks),
+                ])))
             } else {
-                0
-            };
-            let allows_capitals = !is_wh || (wh_class >= 5 && !is_shattered);
-            let statics = if is_thera {
-                vec![
-                    vec![PyRep::String("HighSec".into()), PyRep::String("HS-Static".into()), PyRep::Integer(10_000_000)],
-                    vec![PyRep::String("LowSec".into()), PyRep::String("LS-Static".into()), PyRep::Integer(10_000_000)],
-                    vec![PyRep::String("NullSec".into()), PyRep::String("NS-Static".into()), PyRep::Integer(10_000_000)],
-                ]
-            } else if is_wh {
-                let code = match wh_class {
-                    1 => "H296",
-                    2 => "C247",
-                    3 => "D845",
-                    4 => "E175",
-                    5 => "H900",
-                    _ => "V898",
-                };
-                vec![vec![
-                    PyRep::String(format!("C{wh_class}-Static")),
-                    PyRep::String(code.into()),
-                    PyRep::Integer(wh_class as i64),
-                ]]
-            } else {
-                vec![vec![PyRep::String("Wandering".into()), PyRep::String("Unknown".into()), PyRep::Integer(0)]]
-            };
-
-            Some(Ok(PyRep::keyval([
-                ("destinationSystemID", PyRep::Integer(target_sys)),
-                ("systemID", PyRep::Integer(target_sys)),
-                ("isPolarized", PyRep::Bool(is_polarized)),
-                ("remainingSeconds", PyRep::Integer(remaining as i64)),
-                ("wormholeClass", PyRep::Integer(wh_class as i64)),
-                ("isThera", PyRep::Bool(is_thera)),
-                ("isShattered", PyRep::Bool(is_shattered)),
-                ("delayedLocal", PyRep::Bool(is_wh)),
-                ("allowsCapitalShips", PyRep::Bool(allows_capitals)),
-                ("statics", PyRep::rowset(vec!["name", "code", "targetClassOrSec"], statics)),
-            ])))
+                Some(Ok(PyRep::None))
+            }
         }
 
         // =====================================================================

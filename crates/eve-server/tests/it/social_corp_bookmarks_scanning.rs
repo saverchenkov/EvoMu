@@ -267,6 +267,27 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
 
     // 3. Probe Scan Math via real V24 scanMgr.RequestScans(probes_dict):
     // First test partial 2-probe wide-range scan (trilateration cap 0.49, deviation > 0.0), then 8-probe pinpoint to 100% (deviation == 0.0)
+    ctx.db.with_mut_snapshot(|snap| {
+        let sigs = snap.cosmic_signatures.entry(30_000_142).or_default();
+        if !sigs.iter().any(|s| s.sig_group == "Wormhole") {
+            sigs.push(eve_db::CosmicSignatureRecord {
+                signature_id: "JMM-142".into(),
+                solar_system_id: 30_000_142,
+                sig_group: "Wormhole".into(),
+                type_name: "Unstable Wormhole (K162)".into(),
+                position: [149_597_870_700.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(26_272),
+                destination_system_id: Some(31_000_005),
+                created_unix: ctx.now_unix(),
+                lifetime_seconds: 86_400,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            });
+        }
+    });
     let (wh_sig_id, wh_pos) = ctx.db.with_snapshot(|snap| {
         let sig = snap.cosmic_signatures[&30_000_142].iter().find(|s| s.sig_group == "Wormhole").unwrap();
         (sig.signature_id.clone(), sig.position)

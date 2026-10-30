@@ -132,6 +132,7 @@ pub fn deposit_mined_ore_and_record_ledger_with_waste(
             }
         });
         dispatch_mining_gameplay_events(ctx, char_id, mined_units, sys_id, ore_type_id);
+        crate::services::wormhole_pve_escalations::on_asteroid_mined_in_system(ctx, sys_id, char_id);
     }
 }
 

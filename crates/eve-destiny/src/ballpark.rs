@@ -43,6 +43,7 @@ impl Ballpark {
             miniball_states: BTreeMap::new(),
             formation_states: BTreeMap::new(),
             ball_harmonics: BTreeMap::new(),
+            ball_wormhole_stages: BTreeMap::new(),
         }
     }
 
@@ -118,6 +119,25 @@ impl Ballpark {
         }
         self.set_ball_slim_meta(ball_id, meta);
         self.emit_event(Some(ball_id), DestinyEvent::OnSlimItemChange { ball_id });
+        true
+    }
+
+    /// Sets or updates `wormholeAge` and `wormholeSize` on a wormhole ball's slim item,
+    /// emitting `OnSlimItemChange` when the stage values change.
+    pub fn set_ball_wormhole_stages(
+        &mut self,
+        ball_id: BallId,
+        wormhole_age: i64,
+        wormhole_size: f64,
+    ) -> bool {
+        let next = (wormhole_age, wormhole_size);
+        if self.ball_wormhole_stages.get(&ball_id) == Some(&next) {
+            return false;
+        }
+        self.ball_wormhole_stages.insert(ball_id, next);
+        if self.balls.contains_key(&ball_id) {
+            self.emit_event(Some(ball_id), DestinyEvent::OnSlimItemChange { ball_id });
+        }
         true
     }
 

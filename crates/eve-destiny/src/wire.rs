@@ -631,12 +631,31 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     )
 }
 
-/// Builds a `foo.SlimItem` `PyRep::Object` (state = plain dict) for a `Ball` using [`SlimItemMeta`].
-pub fn encode_slim_item_with_meta(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
+/// Builds a `foo.SlimItem` dict for a `Ball`, including `Ballpark`-level wormhole stage attributes
+/// (`wormholeAge`, `wormholeSize`) when present.
+pub fn slim_item_dict_with_park(park: Option<&Ballpark>, ball: &Ball, meta: &SlimItemMeta) -> PyRep {
+    let mut rep = slim_item_dict(ball, meta);
+    if let (Some((age, size)), PyRep::Dict(entries)) = (
+        park.and_then(|p| p.ball_wormhole_stages.get(&ball.id)),
+        &mut rep,
+    ) {
+        entries.push((PyRep::String("wormholeAge".into()), PyRep::Integer(*age)));
+        entries.push((PyRep::String("wormholeSize".into()), PyRep::Real(*size)));
+    }
+    rep
+}
+
+/// Builds a `foo.SlimItem` `PyRep::Object` (state = plain dict) for a `Ball` using [`SlimItemMeta`] and [`Ballpark`].
+pub fn encode_slim_item_with_park(park: Option<&Ballpark>, ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     PyRep::Object {
         type_name: "foo.SlimItem".into(),
-        args: Box::new(slim_item_dict(ball, meta)),
+        args: Box::new(slim_item_dict_with_park(park, ball, meta)),
     }
+}
+
+/// Builds a `foo.SlimItem` `PyRep::Object` (state = plain dict) for a `Ball` using [`SlimItemMeta`].
+pub fn encode_slim_item_with_meta(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
+    encode_slim_item_with_park(None, ball, meta)
 }
 
 /// Builds a `foo.SlimItem` `PyRep::Object` for a `Ball`.
@@ -688,7 +707,7 @@ pub fn encode_set_state_payload(park: &Ballpark, observer_ball_id: BallId) -> Py
     let mut damage_dict = Vec::with_capacity(visible.len());
     for ball in &visible {
         let meta = resolve_slim_item_meta(Some(park), ball);
-        slims.push(encode_slim_item_with_meta(ball, &meta));
+        slims.push(encode_slim_item_with_park(Some(park), ball, &meta));
         if !park.is_static_ball(ball.id) {
             let dmg = encode_damage_state_tuple(park.combat_states.get(&ball.id), stamp);
             damage_dict.push((PyRep::Integer(ball.id), dmg));
@@ -788,7 +807,7 @@ fn encode_ball_extra_list(balls: &[&Ball], park: Option<&Ballpark>, stamp: u32) 
         .iter()
         .map(|ball| {
             let meta = resolve_slim_item_meta(park, ball);
-            let slim = slim_item_dict(ball, &meta);
+            let slim = slim_item_dict_with_park(park, ball, &meta);
             let dmg = encode_damage_state_tuple(
                 park.and_then(|p| p.combat_states.get(&ball.id)),
                 stamp,
@@ -801,7 +820,7 @@ fn encode_ball_extra_list(balls: &[&Ball], park: Option<&Ballpark>, stamp: u32) 
 /// Encodes an `AddBall` `DoDestinyUpdate` action tuple `(stamp, ("AddBall", (extra_data, is_global)))`.
 pub fn encode_add_ball_action(stamp: u32, ball: &Ball, park: Option<&Ballpark>) -> PyRep {
     let meta = resolve_slim_item_meta(park, ball);
-    let slim = encode_slim_item_with_meta(ball, &meta);
+    let slim = encode_slim_item_with_park(park, ball, &meta);
     let dmg = encode_damage_state_tuple(
         park.and_then(|p| p.combat_states.get(&ball.id)),
         stamp,
@@ -827,7 +846,7 @@ pub fn encode_add_balls_action(stamp: u32, balls: &[&Ball], park: Option<&Ballpa
     let mut damage = Vec::with_capacity(balls.len());
     for ball in balls {
         let meta = resolve_slim_item_meta(park, ball);
-        slims.push(encode_slim_item_with_meta(ball, &meta));
+        slims.push(encode_slim_item_with_park(park, ball, &meta));
         damage.push((
             PyRep::Integer(ball.id),
             encode_damage_state_tuple(park.and_then(|p| p.combat_states.get(&ball.id)), stamp),
@@ -1170,8 +1189,8 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
         ]),
         DestinyEvent::OnSlimItemChange { ball_id } => {
             let slim = park
-                .and_then(|p| p.balls.get(ball_id).map(|b| (b, resolve_slim_item_meta(Some(p), b))))
-                .map(|(b, m)| encode_slim_item_with_meta(b, &m))
+                .and_then(|p| p.balls.get(ball_id).map(|b| (p, b, resolve_slim_item_meta(Some(p), b))))
+                .map(|(p, b, m)| encode_slim_item_with_park(Some(p), b, &m))
                 .unwrap_or_else(|| PyRep::keyval([("itemID", PyRep::Integer(*ball_id))]));
             PyRep::Tuple(vec![
                 PyRep::String("OnSlimItemChange".into()),

@@ -481,43 +481,12 @@ async fn handle_random_jump_filament(
         if !is_exit && (old_reg == 10_000_070 || old_sys == 30_100_000 || old_sys >= 31_000_000) {
             return Err(BridgeRpcError::user_error("PochvenEntryFilamentDisallowedOrigin"));
         }
-        // DERIVED: Pochven filament destination pools and K-space exit destinations (feat:navigation.pochven-filaments)
-        let mut candidates = match fil_type_id {
-            // DERIVED: Empire K-space exit destinations from Devana / Proving filaments
-            56_065..=56_067 => vec![30_000_142, 30_002_187, 30_002_510, 30_002_659, 30_000_144, 30_002_768],
-            56_068..=56_069 => vec![30_000_144, 30_001_363, 30_002_187, 30_002_768, 30_003_494, 30_005_004],
-            // DERIVED: Pochven Border systems pool
-            56_070..=56_071 => vec![30_000_157, 30_000_192, 30_001_372, 30_001_445, 30_002_079, 30_002_737, 30_005_005, 30_010_141, 30_031_392],
-            // DERIVED: Pochven Internal systems pool
-            56_072..=56_073 => vec![30_000_206, 30_001_381, 30_002_652, 30_002_702, 30_002_797, 30_003_046, 30_005_029, 30_020_141, 30_045_329],
-            // DERIVED: Pochven Clade systems pool
-            56_074..=56_075 => vec![30_000_021, 30_001_413, 30_002_225, 30_002_411, 30_002_770, 30_003_495, 30_003_504, 30_040_141, 30_045_328],
-            // DERIVED: Pochven Clade Extraction pool
-            56_076..=56_077 => vec![30_000_192, 30_010_141, 30_040_141, 30_045_328, 30_001_381, 30_020_141],
-            // DERIVED: Pochven General systems pool
-            56_078..=56_079 => vec![
-                30_000_157, 30_001_445, 30_002_079, 30_002_737, 30_005_005, 30_031_392,
-                30_000_021, 30_001_413, 30_002_225, 30_002_411, 30_002_770, 30_003_495,
-                30_000_206, 30_002_652, 30_002_797, 30_003_046, 30_005_029, 30_045_329,
-            ],
-            // DERIVED: Pochven Clade Home systems pool (Kino 30001372, Archee 30003504, Niarja 30002702)
-            56_080..=56_081 => vec![30_001_372, 30_003_504, 30_002_702],
-            _ => vec![30_000_192],
-        };
-        let trig_standing = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0));
-        // DERIVED: Pochven Triglavian Clade Home Systems in region 10000070
-        let is_home = |sid: u32| {
-            ctx.sde.solar_systems.get(&sid).is_some_and(|sys| {
-                sys.region_id == 10_000_070 && matches!(sys.name.as_str(), "Kino" | "Niarja" | "Archee")
-            })
-        };
-        if trig_standing < 6.0 {
-            if matches!(fil_type_id, 56_080..=56_081) {
-                return Err(BridgeRpcError::user_error("SystemCheck_JumpFailed_StandingsTooLow"));
-            }
-            candidates.retain(|&s| !is_home(s));
-        }
-        candidates
+        crate::services::space_destiny::space_pochven_wormholes::resolve_pochven_filament_candidates(
+            ctx,
+            fil_type_id,
+            old_sys,
+            char_id,
+        )?
     } else {
         ctx.sde.solar_systems.iter().filter(|(&sid, s)| {
             sid != old_sys && s.security_status < 0.0 && sid < 31_000_000

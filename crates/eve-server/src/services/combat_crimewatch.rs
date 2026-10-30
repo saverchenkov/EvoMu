@@ -374,6 +374,7 @@ pub struct CombatRuntimeState {
     pub bounty_credited_balls: std::collections::HashSet<i64>,
     pub destroyed_npc_cache: HashMap<i64, ExtendedNpcEntity>,
     pub ci_sentry_deployed_systems: std::collections::HashSet<u32>,
+    pub npc_scrambled_ships: HashMap<u32, std::collections::HashSet<i64>>,
 }
 
 #[derive(Debug, Clone)]

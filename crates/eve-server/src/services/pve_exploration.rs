@@ -8,7 +8,6 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_hacking_sites::handle_pve_hacking;
-use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
@@ -84,6 +83,20 @@ pub struct PveSiteInstance {
     /// In-space acceleration gate ball for DED complexes (`keeper.ActivateAccelerationGate(gate_item_id)`).
     #[serde(default)]
     pub gate_ball_id: Option<i64>,
+    #[serde(default)]
+    pub activated_at_downtime: Option<u64>,
+    #[serde(default)]
+    pub dread_escalation_triggers: u8,
+    #[serde(default)]
+    pub carrier_escalation_triggers: u8,
+    #[serde(default)]
+    pub active_escalation_capitals: Vec<crate::services::wormhole_pve_escalations::ActiveCapitalEscalationEntry>,
+    #[serde(default)]
+    pub is_shattered_resource_site: bool,
+    #[serde(default)]
+    pub delayed_wave_triggered: bool,
+    #[serde(default)]
+    pub relay_spawned: bool,
 }
 
 pub use crate::services::pve_expeditions::EscalatingPathEntry;
@@ -176,6 +189,14 @@ pub struct PveExplorationRegistry {
     pub structure_char_failures: HashMap<(CharacterId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
+    #[serde(default)]
+    pub downtime_counter: u64,
+    #[serde(default)]
+    pub active_relays: HashMap<i64, crate::services::wormhole_pve_escalations::DecloakedRelayInfo>,
+    #[serde(default)]
+    pub sentry_last_fire_unix: HashMap<i64, f64>,
+    #[serde(default)]
+    pub sentry_last_fire_sim_s: HashMap<i64, f64>,
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
 const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
@@ -253,10 +274,11 @@ pub fn advance_pve_exploration_clock(ctx: &ServerContext, delta_sec: u64) {
 
 // parity: feat:pve.wormhole-sites
 pub fn wormhole_class_for_system(solar_system_id: SolarSystemId) -> Option<u8> {
-    if !(31_000_000..32_000_000).contains(&solar_system_id) {
-        return None;
+    let wh_c = crate::services::wormhole_lifecycle_ops::system_wormhole_profile(solar_system_id).0;
+    match wh_c {
+        1..=6 | 12..=18 => Some(wh_c),
+        _ => None,
     }
-    Some(((solar_system_id - 31_000_001) % 6) as u8 + 1)
 }
 
 pub use crate::services::pve_exploration_seeding::{
@@ -264,82 +286,9 @@ pub use crate::services::pve_exploration_seeding::{
     ensure_system_pve_sites_seeded, pirate_faction_for_system, PirateFaction,
 };
 pub use crate::services::pve_exploration_sites::ded_ship_restriction_for_rating;
-
-pub async fn drop_site_loot_into_space_core(
-    db: &std::sync::Arc<eve_db::WorldRepository>,
-    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
-    solar_system_id: SolarSystemId,
-    char_id: CharacterId,
-    pos: [f64; 3],
-    type_id: TypeId,
-    quantity: i64,
-) -> i64 {
-    let now_unix = db.clock().now_unix_secs();
-    let item_id = with_pve_exploration_reg_db(db, now_unix, |reg| 1_880_000_000 + next_pve_seq(reg));
-    let container_type_id: TypeId = 3293; // Cargo Container
-    let container_id = db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let cid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, cid, now_unix, false);
-        snap.items.insert(
-            cid,
-            InventoryItemRecord {
-                item_id: cid,
-                type_id: container_type_id,
-                owner_id: char_id,
-                location_id: solar_system_id as i64,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.item_positions.insert(cid, pos);
-        snap.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id: char_id,
-                location_id: cid,
-                flag: InventoryFlag::Cargo,
-                quantity: quantity as i32,
-                singleton: false,
-                ..Default::default()
-            },
-        );
-        cid
-    });
-
-    let sys_handle = systems.get_or_spawn(solar_system_id);
-    let _ = sys_handle
-        .spawn_ball(eve_destiny::Ball {
-            id: container_id,
-            type_id: container_type_id,
-            position: glam::DVec3::from_array(pos),
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 50_000.0,
-            radius: 30.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        })
-        .await;
-
-    item_id
-}
-
-pub async fn drop_site_loot_into_space(
-    ctx: &ServerContext,
-    solar_system_id: SolarSystemId,
-    char_id: CharacterId,
-    pos: [f64; 3],
-    type_id: TypeId,
-    quantity: i64,
-) -> i64 {
-    drop_site_loot_into_space_core(&ctx.db, &ctx.systems, solar_system_id, char_id, pos, type_id, quantity).await
-}
+pub use crate::services::wormhole_pve_escalations::{
+    drop_site_loot_into_space, drop_site_loot_into_space_core,
+};
 
 /// Authoritative real in-space NPC destruction hook for PvE exploration sites (`feat:pve.escalations`,
 /// `feat:pve.expeditions`, `feat:pve.ded-complexes`, `feat:pve.wormhole-sites`).
@@ -468,6 +417,22 @@ pub async fn handle_pve_site_npc_destruction_core(
         });
         (None, None, None)
     } else {
+        let has_unhacked_cans = matches!(site_category.as_str(), "Data" | "Relic")
+            && with_pve_exploration_reg_db(db, now_unix, |reg| {
+                let hacked = &reg.hacked_containers;
+                reg.sites_by_system
+                    .get(&solar_system_id)
+                    .and_then(|l| l.iter().find(|s| s.site_id == site_id))
+                    .is_some_and(|s| {
+                        !s.hackable_can_ids.is_empty()
+                            && s.hackable_can_ids
+                                .iter()
+                                .any(|cid| !hacked.contains(&(solar_system_id, *cid)))
+                    })
+            });
+        if has_unhacked_cans {
+            return (None, None, None);
+        }
         with_pve_exploration_reg_db(db, now_unix, |reg| {
             if let Some(site) = reg
                 .sites_by_system
@@ -505,6 +470,13 @@ pub async fn handle_pve_site_npc_destruction_core(
             // Site-completion Blue Loot from SDE group 880 "Sleeper Components" (class-scaled pick).
             if let Some((blue_tid, _)) = crate::services::pve_exploration_sites::sleeper_blue_loot_for_class(sde, wh_c) {
                 drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, blue_tid, (wh_c as i64) * 3).await;
+            }
+            if matches!(wh_c, 5 | 6)
+                && matches!(site_category.as_str(), "WormholeCombat" | "Data" | "Relic")
+            {
+                let _ = crate::services::wormhole_pve_escalations::spawn_decloaked_transmission_relay_core(
+                    systems, db, sde, combat_ephemeral, solar_system_id, &site_id, pos,
+                ).await;
             }
         } else if site_category == "CombatAnomaly" || site_category == "CombatSignature" {
             let (cmd_tid, _) = crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(sde, solar_system_id);
@@ -920,6 +892,20 @@ pub async fn advance_site_wave_or_complete(
         for (l_tid, l_qty, l_name) in loot_specs {
             let item_id = drop_site_loot_into_space(ctx, solar_system_id, char_id, pos, l_tid, l_qty).await;
             dropped_loot_items.push((item_id, l_tid, l_qty, l_name));
+        }
+
+        if let Some(5 | 6) = wh_class {
+            if matches!(site_category.as_str(), "WormholeCombat" | "Data" | "Relic") {
+                let _ = crate::services::wormhole_pve_escalations::spawn_decloaked_transmission_relay_core(
+                    &ctx.systems,
+                    &ctx.db,
+                    &ctx.sde,
+                    &ctx.combat_ephemeral,
+                    solar_system_id,
+                    site_id,
+                    pos,
+                ).await;
+            }
         }
 
         let should_escalate = matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")

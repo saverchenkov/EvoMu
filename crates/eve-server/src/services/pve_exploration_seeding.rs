@@ -252,6 +252,9 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     if already_seeded {
         return;
     }
+    if crate::services::wormhole_pve_escalations::seed_special_wormhole_pve_sites(ctx, solar_system_id).await {
+        return;
+    }
 
     let true_sec = ctx
         .sde
@@ -450,13 +453,23 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             can_ids.push(cid);
             cans_to_insert.push(make_can_record(cid, can_tid, solar_system_id));
         }
-        let guard_balls = if has_guards {
-            build_wave_npc_balls(&ctx.sde, solar_system_id, did, 1, pos, wh_class.or(Some(3)))
+        let guard_ids: Vec<i64> = if let (true, Some(wh_c)) = (has_guards, wh_class) {
+            crate::services::pve_exploration_sites::spawn_sleeper_wave_in_system(
+                ctx,
+                solar_system_id,
+                wh_c,
+                1,
+                DVec3::from_array(pos),
+            )
+            .await
+        } else if has_guards {
+            let guard_balls = build_wave_npc_balls(&ctx.sde, solar_system_id, did, 1, pos, Some(3));
+            let ids = guard_balls.iter().map(|b| b.id).collect();
+            balls_to_spawn.extend(guard_balls);
+            ids
         } else {
             Vec::new()
         };
-        let guard_ids: Vec<i64> = guard_balls.iter().map(|b| b.id).collect();
-        balls_to_spawn.extend(guard_balls);
 
         let is_ghost = cat == "Ghost";
         let ghost_detonate_after_sec = if is_ghost { 90 } else { 0 };

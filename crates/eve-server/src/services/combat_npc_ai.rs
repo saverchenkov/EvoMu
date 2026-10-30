@@ -4,6 +4,7 @@
 
 use super::*;
 use eve_destiny::{Ball, MovementMode};
+use std::collections::HashSet;
 use tracing::info;
 
 /// Derives NPC behavioral archetype dynamically from the NPC's `type_id` and `group_id` / `category_id`
@@ -19,7 +20,13 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
     let meta_group_id = sde_type.and_then(|t| t.meta_group_id);
     let meta_level = sde_type.and_then(|t| t.meta_level).unwrap_or(0);
 
-    // 1. Pochven Hypnosian Sleepers
+    // 1. Pochven Hypnosian Sleepers & Decloaked Transmission Relay / Sleeper Sentry Towers
+    if npc_type_id == 41_589 {
+        return "TransmissionRelay";
+    }
+    if crate::services::wormhole_pve_escalations::is_sleeper_sentry_type(npc_type_id) {
+        return "SleeperSentry";
+    }
     if type_name.contains("Hypnosian") || npc_type_id == 56680 || (56319..=56327).contains(&npc_type_id) {
         return "PochvenHypnosianSleeper";
     }
@@ -171,7 +178,11 @@ pub async fn spawn_specialized_npc_entity(
 ) -> i64 {
     let sde_derived = derive_npc_archetype(ctx, npc_type_id);
     let archetype = if !archetype_hint.is_empty()
-        && (sde_derived == "Pirate" || matches!(archetype_hint, "FactionPolice" | "Police" | "CounterInsurgencySentry"))
+        && (sde_derived == "Pirate"
+            || matches!(
+                archetype_hint,
+                "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry"
+            ))
     {
         archetype_hint
     } else {
@@ -182,174 +193,16 @@ pub async fn spawn_specialized_npc_entity(
         snap.next_entity_id += 1;
         snap.next_entity_id
     });
-    let sde_type = ctx.sde.types.get(&npc_type_id);
-    let attr = |aid: u16| -> Option<f64> {
-        sde_type.and_then(|t| t.default_attributes.get(&aid).copied())
-    };
-    let max_vel = attr(37).unwrap_or(350.0);
-    let opt_range = attr(54).unwrap_or(15_000.0).max(5_000.0);
-    let orb_range = (opt_range * 0.6).clamp(2_500.0, 20_000.0);
-    let bounty = match archetype {
-        "Sleeper" => 0.0, // Sleepers pay 0 direct bounty and drop blue loot (`feat:npc.sleepers`)
-        _ => attr(481).unwrap_or(0.0),
-    };
-    let resolved_faction_id = sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
-        "Navy" | "FactionPolice" | "Police" => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_001 },
-        "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
-        "RogueDrone" => 500_008,
-        "EDENCOM" => 500_027,
-        "Drifter" => 500_024,
-        "Triglavian" => 500_026,
-        "CloneSoldier" => if (500_001..=500_030).contains(&spawn_group_id) {
-            spawn_group_id
-        } else {
-            crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
-        },
-        _ => if (500_001..=500_030).contains(&spawn_group_id) {
-            spawn_group_id
-        } else {
-            crate::combat::npc_ai::regional_pirate_faction_id(ctx, solar_system_id)
-        },
-    });
-    let dmg_mult = attr(64).unwrap_or(2.0).max(1.0);
-    let raw_em = attr(114).unwrap_or(0.0);
-    let raw_exp = attr(116).unwrap_or(0.0);
-    let raw_kin = attr(117).unwrap_or(0.0);
-    let raw_thm = attr(118).unwrap_or(0.0);
-    let damage_vector = if raw_em + raw_exp + raw_kin + raw_thm > 0.0 {
-        DamageVector {
-            em: raw_em * dmg_mult,
-            explosive: raw_exp * dmg_mult,
-            kinetic: raw_kin * dmg_mult,
-            thermal: raw_thm * dmg_mult,
-        }
-    } else {
-        match archetype {
-            "Triglavian" => DamageVector::new(0.0, 75.0, 0.0, 75.0),
-            "EDENCOM" => DamageVector::new(60.0, 0.0, 60.0, 0.0),
-            "Drifter" | "Sleeper" | "IncursionSansha" => DamageVector::new(50.0, 50.0, 50.0, 50.0),
-            "CloneSoldier" | "Pirate" | "BeltRat" | "Officer" => {
-                crate::combat::npc_ai::faction_damage_vector(resolved_faction_id, 100.0)
-            }
-            _ => DamageVector::new(25.0, 25.0, 25.0, 25.0),
-        }
-    };
-
-    // Clone Soldier tier security tag mapping from SDE group 1206 (`Security Tags`, `feat:npc.clone-soldier-spawns`)
-    let tag_drop = if archetype == "CloneSoldier" {
-        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        let tier_str = if name.contains("Trainer") { "Trainer" } else if name.contains("Recruiter") { "Recruiter" } else if name.contains("Transporter") { "Transporter" } else { "Negotiator" };
-        ctx.sde.types.values().find(|t| t.group_id == 1206 && t.name.contains("Clone Soldier") && t.name.contains(tier_str)).map(|t| t.type_id)
-    } else {
-        None
-    };
-
-    let (web_factor, web_range, scram_str, scram_range) = if archetype == "CloneSoldier" {
-        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        if name.contains("Transporter") {
-            (attr(20).unwrap_or(-60.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
-        } else if name.contains("Negotiator") {
-            (0.0, 0.0, attr(105).unwrap_or(2.0).max(2.0), attr(103).unwrap_or(24_000.0))
-        } else {
-            (attr(20).unwrap_or(0.0), attr(514).unwrap_or(10_000.0), 0.0, 0.0)
-        }
-    } else if npc_type_id == 79_507 {
-        (0.0, 0.0, 0.0, 0.0)
-    } else {
-        (attr(20).unwrap_or(-50.0), attr(514).or_else(|| attr(580)).unwrap_or(10_000.0), attr(105).unwrap_or(2.0), attr(103).or_else(|| attr(582)).unwrap_or(20_000.0))
-    };
-
-    let mut cs = ctx.build_type_combat_state(npc_type_id);
-    if cs.max_structure_hp <= 0.0 {
-        cs.max_shield_hp = 2_000.0;
-        cs.shield_hp = 2_000.0;
-        cs.max_armor_hp = 2_000.0;
-        cs.armor_hp = 2_000.0;
-        cs.max_structure_hp = 2_000.0;
-        cs.structure_hp = 2_000.0;
-    }
-    if archetype == "PochvenHypnosianSleeper" {
-        let name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
-        if name.contains("Aroused") || npc_type_id == 56680 || (56319..=56327).contains(&npc_type_id) {
-            cs.max_shield_hp = 5_000.0;
-            cs.shield_hp = 5_000.0;
-        }
-    }
-    let _ = sys_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ball_id,
-                type_id: npc_type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: max_vel,
-                inertia: 2.0,
-                mass: 1_500_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            cs,
-        )
-        .await;
-
-    let wh_class = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .and_then(|s| {
-            ctx.sde
-                .constellations
-                .get(&s.constellation_id)
-                .and_then(|c| c.wormhole_class_id)
-                .or_else(|| {
-                    ctx.sde
-                        .regions
-                        .get(&s.region_id)
-                        .and_then(|r| r.wormhole_class_id)
-                })
-        })
-        .unwrap_or(3) as u8;
-
-    let entity = ExtendedNpcEntity {
-        ball_id,
-        type_id: npc_type_id,
-        faction_id: resolved_faction_id,
-        archetype: archetype.to_string(),
+    let (ball, cs, entity) = crate::services::wormhole_pve_seeding::build_specialized_npc_components(
+        ctx,
         solar_system_id,
+        ball_id,
+        npc_type_id,
+        archetype,
         spawn_group_id,
-        target_id: None,
-        aggression_threat: HashMap::new(),
-        threat_table: HashMap::new(),
-        bounty_isk: bounty,
-        optimal_range: opt_range,
-        orbit_range: orb_range,
-        damage_vector,
-        entropic_cycles: 0,
-        drifter_overshield_hp: if archetype == "Drifter" && sde_type.is_none_or(|t| t.group_id != 1956) { 4_000.0 } else { 0.0 },
-        drifter_doomsday_fired: false,
-        web_speed_factor: web_factor,
-        web_range,
-        scram_strength: scram_str,
-        scram_range,
-        neut_amount: attr(97).unwrap_or(120.0),
-        ecm_jammed: false,
-        remote_shield_rep: if matches!(archetype, "Sleeper" | "IncursionSansha") {
-            250.0
-        } else {
-            attr(68).unwrap_or(0.0)
-        },
-        remote_armor_rep: if matches!(archetype, "Sleeper" | "Triglavian" | "IncursionSansha") {
-            250.0
-        } else {
-            attr(84).unwrap_or(0.0)
-        },
-        remote_rep_range: 25_000.0,
-        tag_drop_type_id: tag_drop,
-        spawn_position: pos,
-        sleeper_wh_class: wh_class,
-        custom_cargo_loot: None,
-    };
+        pos,
+    );
+    let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
     with_mut_combat_runtime(ctx, |rt| {
         rt.npc_entities.insert(ball_id, entity);
     });
@@ -454,13 +307,20 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         .map(|(&id, b)| (id, b.clone()))
         .collect();
 
-    let npc_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
-        rt.npc_entities
+    let (npc_ids, prev_npc_scram_targets): (Vec<i64>, HashSet<i64>) = with_mut_combat_runtime(ctx, |rt| {
+        let ids = rt
+            .npc_entities
             .values()
             .filter(|n| n.solar_system_id == solar_system_id)
             .map(|n| n.ball_id)
-            .collect()
+            .collect();
+        let prev = rt
+            .npc_scrambled_ships
+            .remove(&solar_system_id)
+            .unwrap_or_default();
+        (ids, prev)
     });
+    let mut active_npc_scram_targets: HashSet<i64> = HashSet::new();
 
     for nid in npc_ids {
         let Some(mut npc) = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
@@ -486,6 +346,19 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 target_id = ?npc.target_id,
                 "NPC behavior decision execution tick"
             );
+        }
+
+        if npc.archetype == "TransmissionRelay"
+            || npc.type_id == 41_589
+            || matches!(npc_ball.mode, MovementMode::Warp { .. })
+        {
+            if matches!(npc_ball.mode, MovementMode::Warp { .. }) && npc.target_id.is_some() {
+                npc.target_id = None;
+                with_mut_combat_runtime(ctx, |rt| {
+                    rt.npc_entities.insert(nid, npc);
+                });
+            }
+            continue;
         }
 
         // 0. Sleeper spawn leash (`feat:npc.sleeper-capacitor-immunity-and-leash`):
@@ -534,13 +407,22 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         for (&tid, &threat) in &npc.threat_table {
             npc.aggression_threat.entry(tid).or_insert(threat);
         }
-        // Prune any targets in `aggression_threat` / `threat_table` that are no longer on grid (> 150 km),
+        // Prune any targets in `aggression_threat` / `threat_table` that are no longer on grid (> 150 km, or > 250 km for sentries),
         // warped out (`MovementMode::Warp`), lost lock (`is_cloaked`), or destroyed (`structure_hp <= 0.0`).
-        let leash_m = if npc.type_id == 79_507 { npc.optimal_range.max(500_000.0) } else { 150_000.0 };
-        let aggro_m = if npc.type_id == 79_507 { npc.optimal_range.max(500_000.0) } else { 75_000.0 };
+        let max_engage_range = if npc.type_id == 79_507 {
+            npc.optimal_range.max(500_000.0)
+        } else if npc.archetype == "SleeperSentry" {
+            npc.optimal_range.max(250_000.0)
+        } else {
+            150_000.0
+        };
         let valid_target = |tid: i64| -> bool {
-            let Some(tb) = ball_map.get(&tid) else { return false; };
-            if tb.position.distance(npc_ball.position) > leash_m || matches!(tb.mode, MovementMode::Warp { .. }) {
+            let Some(tb) = ball_map.get(&tid) else {
+                return false;
+            };
+            if tb.position.distance(npc_ball.position) > max_engage_range
+                || matches!(tb.mode, MovementMode::Warp { .. })
+            {
                 return false;
             }
             let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
@@ -569,7 +451,16 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 continue;
             }
             let dist = npc_ball.position.distance(cand_ball.position);
-            if dist > aggro_m {
+            let max_acquire_range = if npc.type_id == 79_507 {
+                npc.optimal_range.max(500_000.0)
+            } else if npc.archetype == "SleeperSentry" {
+                npc.optimal_range.max(250_000.0)
+            } else if npc.archetype == "Drifter" {
+                npc.optimal_range.max(100_000.0)
+            } else {
+                75_000.0
+            };
+            if dist > max_acquire_range {
                 continue;
             }
             // Standings and security status check (`feat:npc.npc-standings-aggression`, `feat:npc.navy-npc`, `F-01`):
@@ -785,6 +676,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 true
             };
             if can_scram && npc.scram_strength > 0.0 && dist <= npc.scram_range {
+                active_npc_scram_targets.insert(target_id);
                 st.base_scramble_strengths.insert(target_id, npc.scram_strength as i32);
                 if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
                     tcs.warp_scramble_strength =
@@ -865,7 +757,27 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else if npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507 {
                 crate::services::security_mgr::apply_counter_insurgency_sentry_ewar(&ctx.sde, &mut bp, target_id, target_ball.radius, dist);
             }
-            bp.apply_damage_to_ball(target_id, cycle_dmg);
+            let can_fire = if npc.archetype == "SleeperSentry" {
+                let interval_s = ctx
+                    .sde
+                    .types
+                    .get(&npc.type_id)
+                    .and_then(|t| t.default_attributes.get(&51).copied())
+                    .unwrap_or(15_000.0)
+                    / 1000.0;
+                dist <= npc.optimal_range
+                    && crate::services::wormhole_pve_escalations::can_sentry_fire_and_record(
+                        ctx,
+                        nid,
+                        interval_s,
+                        st.sim_elapsed_secs,
+                    )
+            } else {
+                true
+            };
+            if can_fire {
+                bp.apply_damage_to_ball(target_id, cycle_dmg);
+            }
             crate::system_actor::sync_ball_positions(
                 &bp,
                 &sys_handle.ball_positions,
@@ -883,6 +795,37 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
         with_mut_combat_runtime(ctx, |rt| {
             rt.npc_entities.insert(nid, npc);
+        });
+    }
+
+    if prev_npc_scram_targets
+        .iter()
+        .any(|tid| !active_npc_scram_targets.contains(tid))
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *st_guard;
+        for tid in prev_npc_scram_targets {
+            if !active_npc_scram_targets.contains(&tid) {
+                st.base_scramble_strengths.remove(&tid);
+            }
+        }
+        crate::system_actor::reconcile_tackle_and_bubbles(
+            &mut bp,
+            &mut st.active_module_cycles,
+            &st.base_scramble_strengths,
+            &st.base_core_strengths,
+        );
+        crate::system_actor::sync_ball_positions(
+            &bp,
+            &sys_handle.ball_positions,
+            &sys_handle.scrambled_balls,
+        );
+    }
+    if !active_npc_scram_targets.is_empty() {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.npc_scrambled_ships
+                .insert(solar_system_id, active_npc_scram_targets);
         });
     }
 }
@@ -909,8 +852,11 @@ pub fn record_npc_threat_event(
     let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
     let role_mult = if is_ewar { 1.5 } else if is_logistics { 1.3 } else { 1.0 };
     let delta = (damage_dealt.max(if is_ewar || is_logistics { 120.0 } else { 0.0 }) + sig_weight) * role_mult;
-    with_mut_combat_runtime(ctx, |rt| {
+    let relay_sys_opt = with_mut_combat_runtime(ctx, |rt| {
         if let Some(npc) = rt.npc_entities.get_mut(&npc_ball_id) {
+            if npc.archetype == "TransmissionRelay" || npc.type_id == 41_589 {
+                return Some(npc.solar_system_id);
+            }
             if npc.archetype == "Drifter" && npc.drifter_overshield_hp > 0.0 && damage_dealt > 0.0 {
                 npc.drifter_overshield_hp = (npc.drifter_overshield_hp - damage_dealt).max(0.0);
             }
@@ -918,7 +864,15 @@ pub fn record_npc_threat_event(
             *entry += delta;
             npc.threat_table.insert(attacker_ball_id, *entry);
         }
+        None
     });
+    if let Some(relay_sys) = relay_sys_opt {
+        let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(
+            ctx,
+            relay_sys,
+            npc_ball_id,
+        );
+    }
 }
 
 pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
@@ -962,6 +916,13 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     let effective_custom_loot = custom_loot.or_else(|| {
         convoy_opt.as_ref().map(|c| (c.cargo_type_id, c.cargo_quantity as i64))
     });
+    if npc_type_id == Some(41_589) || archetype == "TransmissionRelay" {
+        let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(
+            ctx,
+            solar_system_id,
+            npc_ball_id,
+        );
+    }
     if convoy_opt.is_some() {
         ctx.living_world.mark_convoy_destroyed(npc_ball_id);
     }
@@ -1040,6 +1001,13 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         "PochvenHypnosianSleeper" => {
             if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == "Interstellar Navigation Logs") {
                 if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
+            }
+        }
+        "Drifter" if npc_type_id == Some(37_473) => {
+            for &tid in &[30_747_u32, 30_744_u32, 30_259_u32] {
+                if ctx.sde.types.contains_key(&tid) && !dropped_types.contains(&tid) {
                     dropped_types.push(tid);
                 }
             }

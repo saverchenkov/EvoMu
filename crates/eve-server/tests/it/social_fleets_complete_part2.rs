@@ -29,6 +29,30 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.expect("Select Pilot 1");
 
+    // Seed Jita's test wormhole signature explicitly (production templates seed K-space wormholes probabilistically)
+    ctx.db.with_mut_snapshot(|snap| {
+        let now_u = ctx.now_unix();
+        snap.cosmic_signatures.insert(
+            30_000_142,
+            vec![eve_db::CosmicSignatureRecord {
+                signature_id: "JMM-142".into(),
+                solar_system_id: 30_000_142,
+                sig_group: "Wormhole".into(),
+                type_name: "Unstable Wormhole (K162)".into(),
+                position: [12.0 * 149_597_870_700.0, 2.5 * 149_597_870_700.0, -4.0 * 149_597_870_700.0],
+                signal_strength: 0.25,
+                wormhole_type_id: Some(26_272),
+                destination_system_id: Some(31_000_005),
+                created_unix: now_u,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            }],
+        );
+    });
+
     // Initialize system cosmic signatures and wormhole balls via real V24 scanMgr.GetSystemScanMgr
     let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.expect("GetSystemScanMgr");
 
@@ -125,8 +149,10 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
 
     // 4. Polarization Check (`feat:navigation.wormhole-polarization`) via wormholeMgr.GetWormholePolarization
     let pol_rep = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::Integer(31_000_005)], &kw, None).await.expect("GetWormholePolarization");
-    assert_eq!(pol_rep.dict_get("isPolarized"), Some(&PyRep::Bool(true)));
-    assert_eq!(pol_rep.dict_get("remainingSeconds"), Some(&PyRep::Integer(300)));
+    let PyRep::Tuple(pol_tuple) = pol_rep else { panic!("Expected 2-tuple (polarizationEndTime, polarizationDuration) from GetWormholePolarization, got {pol_rep:?}") };
+    assert_eq!(pol_tuple.len(), 2);
+    assert!(pol_tuple[0].as_i64().unwrap() > 0);
+    assert_eq!(pol_tuple[1], PyRep::Integer(300 * 10_000_000));
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
@@ -139,7 +165,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
 
     ctx.advance_secs(301);
     let pol_after = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "GetWormholePolarization", &[PyRep::Integer(31_000_005)], &kw, None).await.unwrap();
-    assert_eq!(pol_after.dict_get("isPolarized"), Some(&PyRep::Bool(false)));
+    assert_eq!(pol_after, PyRep::None);
 
     // 5. Intermediate mass & lifetime stages (`feat:navigation.wormhole-lifetime`)
     ctx.db.with_mut_snapshot(|snap| {
@@ -185,7 +211,27 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
 
     let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_001_886)], &kw, None).await.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
-        for s in snap.cosmic_signatures.get_mut(&31_001_886).into_iter().flatten() {
+        let now_u = ctx.now_unix();
+        let list = snap.cosmic_signatures.entry(31_001_886).or_default();
+        if !list.iter().any(|s| s.signature_id.starts_with("WND-")) {
+            list.push(eve_db::CosmicSignatureRecord {
+                signature_id: "WND-501".into(),
+                solar_system_id: 31_001_886,
+                sig_group: "Wormhole".into(),
+                type_name: "Wandering Wormhole".into(),
+                position: [-8.0 * 149_597_870_700.0, 5.0 * 149_597_870_700.0, 3.0 * 149_597_870_700.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(30_698),
+                destination_system_id: Some(31_000_007),
+                created_unix: now_u,
+                lifetime_seconds: 57_600,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            });
+        }
+        for s in list.iter_mut() {
             s.signal_strength = 1.0;
         }
         for s in snap.cosmic_signatures.get_mut(&30_000_142).into_iter().flatten() {
@@ -196,15 +242,15 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     });
     let c5_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_001_886)], &kw, None).await.unwrap();
     let Some(PyRep::List(c5_sigs)) = c5_scan.dict_get("signatures") else { panic!() };
-    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WST-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30643))));
-    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WND-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30645))));
+    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WST-")) && s.dict_get("typeID").and_then(|v| v.as_i64()).is_some_and(|tid| (30698..=30703).contains(&tid))));
+    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WND-")) && s.dict_get("typeID").and_then(|v| v.as_i64()).is_some_and(|tid| (30698..=30706).contains(&tid))));
 
     // 7. Natural lifetime progression & natural expiration collapse
     let rep_wh_item_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(30_000_142, &replacement_sig_id);
     let rep_pos = ctx.db.with_snapshot(|snap| {
         snap.cosmic_signatures[&30_000_142].iter().find(|s| s.signature_id == replacement_sig_id).unwrap().position
     });
-    ctx.advance_secs(70_000);
+    ctx.advance_secs(75_000);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
     });

@@ -221,57 +221,47 @@ impl ServerContext {
                 step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(), step_cd_w.clone(),
             );
             Box::pin(async move {
-                if let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map)) = (
+                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map)) = (
                     sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(),
-                ) {
-                    let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map);
-                    for (tid, killer_opt) in destroyed_balls {
-                        if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
-                            let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;
-                            let acid = killer_opt.and_then(|kid| {
-                                s.characters.get(&kid).map(|c| c.character_id)
-                                    .or_else(|| s.characters.values().find(|c| c.active_ship_id == kid).map(|c| c.character_id))
-                            }).unwrap_or(0);
-                            let pos = s.item_positions.get(&tid).copied().unwrap_or([0.0; 3]);
-                            Some((vc.character_id, acid, pos))
-                        }) {
-                            let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, vcid, tid, acid, glam::DVec3::from_array(pos), ctx.now_unix());
-                        }
+                ) else { return; };
+                let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map);
+                for (tid, killer_opt) in destroyed_balls {
+                    let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
+                    if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
+                        let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;
+                        let acid = killer_opt.and_then(|kid| {
+                            s.characters.get(&kid).map(|c| c.character_id).or_else(|| s.characters.values().find(|c| c.active_ship_id == kid).map(|c| c.character_id))
+                        }).unwrap_or(0);
+                        Some((vc.character_id, acid, s.item_positions.get(&tid).copied().unwrap_or([0.0; 3])))
+                    }) {
+                        let _ = crate::combat::death_pipeline::execute_death_pipeline_sync(&ctx, sys_id, vcid, tid, acid, glam::DVec3::from_array(pos), ctx.now_unix());
                     }
-                    crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
-                    crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
-                    crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
                 }
+                crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
+                crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+                crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
+                crate::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, sys_id, dt).await;
             })
         }));
         let persisted_notifications = db.with_snapshot(|snap| {
-            let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap
-                .owner_notes
-                .values()
+            let mut list: Vec<crate::router::cache_notifications::NotificationRecord> = snap.owner_notes.values()
                 .filter(|n| n.character_id == -79)
                 .filter_map(|n| serde_json::from_str(&n.note).ok())
                 .collect();
             list.sort_by_key(|r| r.notification_id);
             list
         });
-
         let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if db.is_ephemeral_in_memory() {
             db.with_mut_snapshot(|snap| {
-                let corp_floor = 98_100_000 + (instance_id as i64) * 10_000;
-                let al_floor = 99_000_000 + (instance_id as i64) * 1_000;
-                snap.next_corporation_id = snap.next_corporation_id.max(corp_floor);
-                snap.next_alliance_id = snap.next_alliance_id.max(al_floor);
+                snap.next_corporation_id = snap.next_corporation_id.max(98_100_000 + (instance_id as i64) * 10_000);
+                snap.next_alliance_id = snap.next_alliance_id.max(99_000_000 + (instance_id as i64) * 1_000);
             });
         }
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db));
-        let cluster_misc =
-            crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
+        let cluster_misc = crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
         let persisted_global_config: HashMap<String, eve_proto::PyRep> = db.with_snapshot(|snap| {
-            snap.service_state_blobs
-                .get("macho_global_config")
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default()
+            snap.service_state_blobs.get("macho_global_config").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
         });
         let ctx = Self {
             instance_id,
@@ -329,8 +319,7 @@ impl ServerContext {
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.clear();
             for item in snap.items.values_mut() {
-                if item.dynamic_attributes.contains_key(&2114) { continue; }
-                if ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6) {
+                if !item.dynamic_attributes.contains_key(&2114) && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6) {
                     for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] { item.dynamic_attributes.remove(&aid); }
                 }
             }
@@ -1337,12 +1326,9 @@ impl ServerContext {
 
     pub fn has_fleet_extras_for(&self, fleet_id: i64) -> bool {
         let ex = self.fleet_extras.lock().unwrap();
-        ex.target_tags.contains_key(&fleet_id)
-            || ex.watchlist.contains_key(&fleet_id)
-            || ex.options.contains_key(&fleet_id)
-            || ex.wing_squad_hierarchy.contains_key(&fleet_id)
-            || ex.fleet_names.contains_key(&fleet_id)
-            || ex.max_sizes.contains_key(&fleet_id)
+        ex.target_tags.contains_key(&fleet_id) || ex.watchlist.contains_key(&fleet_id)
+            || ex.options.contains_key(&fleet_id) || ex.wing_squad_hierarchy.contains_key(&fleet_id)
+            || ex.fleet_names.contains_key(&fleet_id) || ex.max_sizes.contains_key(&fleet_id)
             || ex.invite_details.keys().any(|&(fid, _)| fid == fleet_id)
             || ex.invite_timestamps.keys().any(|&(fid, _)| fid == fleet_id)
     }

@@ -166,10 +166,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
 
                 // Zero-Point Mass Entangler (`49099`, `group_id == 2008`, `feat:modules.zero-point-mass-entangler`)
                 if mod_type.group_id == 2008 {
-                    if ship_group_id != 894 {
+                    if !matches!(ship_group_id, 894 | 4902) && fit.ship.type_id != 89_607 {
                         return Some(Err(BridgeRpcError {
                             code: "InvalidShipGroup".into(),
-                            message: "Zero-Point Mass Entangler can only be activated on Heavy Interdiction Cruisers (894)".into(),
+                            message: "Zero-Point Mass Entangler can only be activated on Heavy Interdiction Cruisers (894) or Odysseus (89607)".into(),
                         }));
                     }
                     self_disable_mwd_mjd = true;
