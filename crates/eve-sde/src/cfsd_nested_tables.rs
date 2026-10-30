@@ -346,7 +346,6 @@ impl SdeRegistry {
         self.load_cfsd_nested("res:/staticdata/operationtasks.fsdbinary")
     }
 
-    // parity: sde:res:/staticdata/challengeconditions.fsdbinary, sde:res:/staticdata/challengeevents.fsdbinary, sde:res:/staticdata/challenges.fsdbinary
     /// Decodes `res:/staticdata/challengeconditions.fsdbinary` (`T-2`).
     pub fn challenge_conditions(&self) -> Result<BTreeMap<String, Value>, SdeError> {
         self.load_cfsd_nested("res:/staticdata/challengeconditions.fsdbinary")

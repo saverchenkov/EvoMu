@@ -269,7 +269,6 @@ async fn test_season_manager_rpc_suite() {
     // parity: rpc:seasonManager.challenge_is_dormant, rpc:seasonManager.get_challenge_expiration_date
     // parity: rpc:seasonManager.process_client_event, rpc:seasonManager.claim_challenge_rewards
     // parity: rpc:seasonManager.reload_fsd_data, rpc:seasonManager.get_loot_table_by_typeID
-    // parity: feat:pve.seasons-challenges
     eve_testkit::attest(&[
         "rpc:seasonManager.get_max_active_challenges",
         "rpc:seasonManager.fill_up_and_return_challenges_for_character",
@@ -280,7 +279,6 @@ async fn test_season_manager_rpc_suite() {
         "rpc:seasonManager.claim_challenge_rewards",
         "rpc:seasonManager.reload_fsd_data",
         "rpc:seasonManager.get_loot_table_by_typeID",
-        "feat:pve.seasons-challenges",
     ]);
 
     let ctx = ServerContext::new();
