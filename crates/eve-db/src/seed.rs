@@ -278,6 +278,8 @@ impl WorldRepository {
                     ess_reserve_bank: IskCents(0),
                     ess_linked_character_id: None,
                     ess_link_started_tick: None,
+                    ess_cycle_started_unix: 0,
+                    ess_main_bank_contributors: HashMap::new(),
                     sov_alliance_id: None,
                     military_index: 2,
                     industrial_index: 2,

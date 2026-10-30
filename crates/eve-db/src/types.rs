@@ -1281,6 +1281,10 @@ pub struct SystemDynamicState {
     pub ess_linked_character_id: Option<i64>,
     #[serde(default)]
     pub ess_link_started_tick: Option<u64>,
+    #[serde(default)]
+    pub ess_cycle_started_unix: u64,
+    #[serde(default)]
+    pub ess_main_bank_contributors: HashMap<i64, i64>,
     pub sov_alliance_id: Option<i64>,
     pub military_index: u8,
     pub industrial_index: u8,

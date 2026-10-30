@@ -24,6 +24,8 @@ pub fn step_dynamic_bounty_multiplier(
                 ess_reserve_bank: IskCents(0),
                 ess_linked_character_id: None,
                 ess_link_started_tick: None,
+                ess_cycle_started_unix: 0,
+                ess_main_bank_contributors: Default::default(),
                 sov_alliance_id: None,
                 military_index: 1,
                 industrial_index: 1,
@@ -1072,7 +1074,7 @@ pub async fn handle_legacy_and_ess(
                             .checked_add(main_cents)
                             .unwrap_or(st.ess_main_bank);
                         crate::services::pve_open_feats_b36::record_ess_main_bank_contribution(
-                            sys_id,
+                            st,
                             char_id,
                             main_cents.0,
                             ctx.now_unix(),

@@ -1280,7 +1280,7 @@ async fn test_c4_bounty_tick_dbs_ess_split_encounter_waves_and_sentry_guns() {
                 fw_capture_seconds_elapsed: 0,
                 fw_capture_duration_seconds: 0,
                 last_fw_capture_tick: 0,
-                last_sov_claim_tick: 0,
+                last_sov_claim_tick: 0, ess_cycle_started_unix: 0, ess_main_bank_contributors: Default::default(),
             },
         );
     });

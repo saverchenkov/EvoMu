@@ -450,7 +450,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
                     fw_capture_seconds_elapsed: 60,
                     fw_capture_duration_seconds: 600,
                     last_fw_capture_tick: 0,
-                    last_sov_claim_tick: 0,
+                    last_sov_claim_tick: 0, ess_cycle_started_unix: 0, ess_main_bank_contributors: Default::default(),
                 });
         st.fw_complex_position = Some([ship_pos.x + 100_000.0, ship_pos.y, ship_pos.z]);
     });

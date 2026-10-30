@@ -498,7 +498,7 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
                 fw_capture_seconds_elapsed: 0,
                 fw_capture_duration_seconds: 0,
                 last_fw_capture_tick: 0,
-                last_sov_claim_tick: 0,
+                last_sov_claim_tick: 0, ess_cycle_started_unix: 0, ess_main_bank_contributors: Default::default(),
             },
         );
     });

@@ -460,7 +460,7 @@ pub fn flush_npc_bounty_tick(
                     .checked_add(main_cents)
                     .unwrap_or(st.ess_main_bank);
                 crate::services::pve_open_feats_b36::record_ess_main_bank_contribution(
-                    solar_system_id,
+                    st,
                     char_id,
                     main_cents.0,
                     ctx.now_unix(),

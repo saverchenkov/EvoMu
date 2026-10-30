@@ -9,7 +9,6 @@
 //! - `feat:pve.wormhole-site-downtime-despawn`
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 use eve_db::{IskCents, OwnerNoteRecord, SolarSystemId, WorldStateSnapshot};
 use eve_proto::{BridgeRpcError, PyRep};
@@ -468,19 +467,8 @@ pub async fn check_ess_module_activation_allowed(
     Ok(())
 }
 
-#[derive(Debug, Clone, Default)]
-struct EssMainBankCycle {
-    cycle_started_unix: u64,
-    contributors: HashMap<CharacterId, i64>,
-}
-
-fn ess_main_bank_cycles() -> &'static Mutex<HashMap<SolarSystemId, EssMainBankCycle>> {
-    static CYCLES: OnceLock<Mutex<HashMap<SolarSystemId, EssMainBankCycle>>> = OnceLock::new();
-    CYCLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 pub fn record_ess_main_bank_contribution(
-    sys_id: SolarSystemId,
+    st: &mut eve_db::SystemDynamicState,
     char_id: CharacterId,
     added_cents: i64,
     now_unix: u64,
@@ -488,54 +476,53 @@ pub fn record_ess_main_bank_contribution(
     if added_cents <= 0 {
         return;
     }
-    let mut guard = ess_main_bank_cycles()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let cycle = guard.entry(sys_id).or_insert_with(|| EssMainBankCycle {
-        cycle_started_unix: now_unix,
-        contributors: HashMap::new(),
-    });
-    if cycle.cycle_started_unix == 0 {
-        cycle.cycle_started_unix = now_unix;
+    if st.ess_cycle_started_unix == 0 {
+        st.ess_cycle_started_unix = now_unix;
     }
-    *cycle.contributors.entry(char_id).or_insert(0) += added_cents;
+    *st.ess_main_bank_contributors.entry(char_id).or_insert(0) += added_cents;
 }
 
 /// Distributes accumulated ESS Main Bank ISK every 2h45m (`9_900` s) when not currently being hacked
 /// (`feat:pve.ess-main-bank-autopayout`).
 pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usize {
-    let mut guard = ess_main_bank_cycles()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut paid_systems = 0usize;
-    let sys_ids: Vec<SolarSystemId> = guard.keys().copied().collect();
-    for sys_id in sys_ids {
-        let Some(cycle) = guard.get_mut(&sys_id) else {
-            continue;
-        };
-        if now_unix.saturating_sub(cycle.cycle_started_unix) < ESS_MAIN_BANK_AUTOPAYOUT_SECS {
-            continue;
-        }
-        let total_contrib: i64 = cycle.contributors.values().sum();
-        if total_contrib <= 0 {
-            cycle.cycle_started_unix = now_unix;
-            continue;
-        }
-        let contribs: Vec<(CharacterId, i64)> = cycle
-            .contributors
+    let paid_events: Vec<(SolarSystemId, f64)> = ctx.db.with_mut_snapshot(|snap| {
+        let sys_ids: Vec<SolarSystemId> = snap
+            .system_states
             .iter()
-            .map(|(&cid, &c)| (cid, c))
+            .filter(|(_, st)| {
+                !st.ess_main_bank_contributors.is_empty()
+                    && st.ess_cycle_started_unix > 0
+                    && now_unix.saturating_sub(st.ess_cycle_started_unix) >= ESS_MAIN_BANK_AUTOPAYOUT_SECS
+            })
+            .map(|(&sid, _)| sid)
             .collect();
-        let paid = ctx.db.with_mut_snapshot(|snap| {
-            let Some(st) = snap.system_states.get_mut(&sys_id) else {
-                return None;
+        let mut events = Vec::new();
+        for sys_id in sys_ids {
+            let Some((pool, post_reserve, total_contrib, contribs)) =
+                snap.system_states.get_mut(&sys_id).and_then(|st| {
+                    if st.ess_linked_character_id.is_some() || st.ess_main_bank.0 <= 0 {
+                        return None;
+                    }
+                    let total_contrib: i64 = st.ess_main_bank_contributors.values().sum();
+                    if total_contrib <= 0 {
+                        st.ess_cycle_started_unix = now_unix;
+                        return None;
+                    }
+                    let pool = st.ess_main_bank.0;
+                    st.ess_main_bank = IskCents(0);
+                    let post_reserve = st.ess_reserve_bank.to_wire_f64();
+                    let contribs: Vec<(CharacterId, i64)> = st
+                        .ess_main_bank_contributors
+                        .iter()
+                        .map(|(&cid, &c)| (cid, c))
+                        .collect();
+                    st.ess_main_bank_contributors.clear();
+                    st.ess_cycle_started_unix = now_unix;
+                    Some((pool, post_reserve, total_contrib, contribs))
+                })
+            else {
+                continue;
             };
-            if st.ess_linked_character_id.is_some() || st.ess_main_bank.0 <= 0 {
-                return None;
-            }
-            let pool = st.ess_main_bank.0;
-            st.ess_main_bank = IskCents(0);
-            let post_reserve = st.ess_reserve_bank.to_wire_f64();
             for &(cid, contrib) in &contribs {
                 let share = ((pool as i128 * contrib as i128) / total_contrib as i128) as i64;
                 if share > 0 {
@@ -552,34 +539,23 @@ pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usiz
                     }
                 }
             }
-            Some(post_reserve)
-        });
-        if let Some(post_reserve) = paid {
-            cycle.contributors.clear();
-            cycle.cycle_started_unix = now_unix;
-            paid_systems += 1;
-            let ess_data = PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("mainBank", PyRep::Real(0.0)),
-                ("reserveBank", PyRep::Real(post_reserve)),
-            ]);
-            super::notify_emitters_batch6::emit_system_ess_data_changed(
-                ctx,
-                sys_id as i64,
-                ess_data,
-            );
+            events.push((sys_id, post_reserve));
         }
+        events
+    });
+    for &(sys_id, post_reserve) in &paid_events {
+        let ess_data = PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(sys_id as i64)),
+            ("mainBank", PyRep::Real(0.0)),
+            ("reserveBank", PyRep::Real(post_reserve)),
+        ]);
+        super::notify_emitters_batch6::emit_system_ess_data_changed(
+            ctx,
+            sys_id as i64,
+            ess_data,
+        );
     }
-    paid_systems
-}
-
-/// Returns the SDE Sleeper Sentry Tower type for a W-space class (`feat:pve.sleeper-sentry-towers`).
-pub fn sleeper_sentry_tower_type_for_class(wh_class: u8) -> TypeId {
-    match wh_class {
-        1..=2 => SLEEPER_SENTRY_VIGILANT,
-        3..=4 => SLEEPER_SENTRY_WAKEFUL,
-        _ => SLEEPER_SENTRY_RESTLESS,
-    }
+    paid_events.len()
 }
 
 /// Marks a W-space site as activated on first warp-in (`feat:pve.wormhole-site-downtime-despawn`).

@@ -146,7 +146,7 @@ pub(crate) fn seed_wormhole_pair(ctx: &ServerContext, from_sys: u32, to_sys: u32
             fw_capture_seconds_elapsed: 0,
             fw_capture_duration_seconds: 0,
             last_fw_capture_tick: 0,
-            last_sov_claim_tick: 0,
+            last_sov_claim_tick: 0, ess_cycle_started_unix: 0, ess_main_bank_contributors: Default::default(),
         });
         st.wormhole_destination_system_id = Some(to_sys);
         st.wormhole_remaining_mass_kg = mass_kg;
@@ -171,7 +171,7 @@ pub(crate) fn seed_wormhole_pair(ctx: &ServerContext, from_sys: u32, to_sys: u32
             fw_capture_seconds_elapsed: 0,
             fw_capture_duration_seconds: 0,
             last_fw_capture_tick: 0,
-            last_sov_claim_tick: 0,
+            last_sov_claim_tick: 0, ess_cycle_started_unix: 0, ess_main_bank_contributors: Default::default(),
         });
         dst.wormhole_remaining_mass_kg = mass_kg;
     });
