@@ -924,6 +924,17 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     });
                 }
             });
+            crate::services::notify_emitters_batch9::emit_password_changed(
+                ctx,
+                char_id,
+                container_id,
+                tid,
+            );
+            crate::services::notify_emitters_batch3::emit_invalidate_cache_for_locations(
+                ctx,
+                crate::router::NotificationTarget::Character(char_id),
+                &[container_id],
+            );
             Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordSet", PyRep::Bool(!password.is_empty()))])))
         }
 

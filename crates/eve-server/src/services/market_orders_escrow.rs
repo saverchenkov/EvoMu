@@ -806,7 +806,17 @@ pub fn handle_orders_escrow(
                         ("totalSalesTaxISK", PyRep::Real(total_tax.to_wire_f64())),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "CannotSellAssembledItem" || e.code == "CannotSellItemWithContents" {
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
+                            ctx,
+                            char_id,
+                            &e.code,
+                            1,
+                        );
+                    }
+                    Some(Err(e))
+                }
             }
         }
 
@@ -976,7 +986,17 @@ pub fn handle_orders_escrow(
                     );
                     Some(Ok(PyRep::Bool(true)))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "CannotSellAssembledItem" || e.code == "CannotSellItemWithContents" {
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
+                            ctx,
+                            char_id,
+                            &e.code,
+                            1,
+                        );
+                    }
+                    Some(Err(e))
+                }
             }
         }
 
@@ -1300,7 +1320,17 @@ pub fn handle_orders_escrow(
                         ])))
                     }
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "CannotSellAssembledItem" || e.code == "CannotSellItemWithContents" {
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
+                            ctx,
+                            char_id,
+                            &e.code,
+                            1,
+                        );
+                    }
+                    Some(Err(e))
+                }
             }
         }
 

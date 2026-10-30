@@ -1001,11 +1001,25 @@ fn handle_milestone_process_logon(
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
 
-    ctx.db.with_mut_snapshot(|snap| {
+    let already_claimed = ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         ext.milestone_logons.insert(char_id, now);
+        let claimed = ext
+            .claimed_milestones
+            .get(&char_id)
+            .is_some_and(|v| v.contains(&1));
         save_cosmetics_ui_state(snap, &ext);
+        claimed
     });
+
+    if !already_claimed {
+        let end_ft = ctx.now_blueos_filetime_ticks().saturating_add(7_200 * 10_000_000);
+        crate::services::notify_emitters_batch9::emit_login_milestone_timer_started(
+            ctx,
+            char_id,
+            end_ft,
+        );
+    }
 
     Ok(PyRep::None)
 }

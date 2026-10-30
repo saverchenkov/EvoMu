@@ -16,7 +16,7 @@
 
 use crate::formulas::{apply_standing_decrease, apply_standing_increase};
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord};
+use eve_db::{IskCents, StandingTransactionRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
@@ -640,95 +640,9 @@ pub fn handle_special_dialogue_action(
         }
 
         // 14 = agentDialogueButtonBuyDatacores (feat:pve.research-agents)
-        14 => {
-            let qty_opt = match args.get(2).and_then(|a| a.as_i64()) {
-                Some(raw) => i32::try_from(raw).ok().filter(|&q| (1..=100_000).contains(&q)),
-                None => Some(1),
-            };
-            let Some(qty) = qty_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDatacoreQuantity".into(),
-                    message: "Datacore quantity must be between 1 and 100,000".into(),
-                }));
-            };
-            if let Some(agent_info) = ctx.sde.agents.get(&agent_id) {
-                if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
-                    || (session.station_id.is_some()
-                        && agent_info.station_id.is_some()
-                        && agent_info.station_id != session.station_id)
-                {
-                    return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Must be co-located with R&D agent {agent_id} to redeem datacores") }));
-                }
-            }
-            let now_unix = ctx.now_unix();
-            let station_id = ctx.sde.agents.get(&agent_id).and_then(|a| a.station_id).or(session.station_id).unwrap_or(60_003_760);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut entries = load_rnd_research_entries(snap, char_id);
-                let Some(entry) = entries.iter_mut().find(|e| e.agent_id == agent_id) else {
-                    return Err(BridgeRpcError { code: "ResearchNotActive".into(), message: format!("No active R&D research with agent {agent_id}") });
-                };
-                let elapsed_days = (now_unix.saturating_sub(entry.started_unix) as f64) / 86_400.0;
-                let total_rp = entry.initial_points + entry.points_per_day * elapsed_days;
-                let rp_cost = 50.0 * (qty as f64);
-                if total_rp + 1e-6 < rp_cost {
-                    return Err(BridgeRpcError { code: "InsufficientResearchPoints".into(), message: format!("Buying {qty} datacore(s) requires {rp_cost:.1} RP, character has {total_rp:.1} RP") });
-                }
-                let isk_cost = IskCents::from_isk(10_000 * i64::from(qty));
-                let mut bal_after_opt = None;
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    if ch.balance < isk_cost {
-                        return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to redeem R&D datacores".into() });
-                    }
-                    ch.balance = ch.balance.checked_sub(isk_cost).unwrap_or(IskCents(0));
-                    bal_after_opt = Some(ch.balance);
-                }
-                if let Some(bal_after) = bal_after_opt {
-                    snap.append_journal(
-                        char_id,
-                        "DatacoreFee",
-                        IskCents(-isk_cost.0),
-                        bal_after,
-                        format!("Redeemed {qty} datacore(s) from R&D agent {agent_id}"),
-                    );
-                }
-                let rem_rp = (total_rp - rp_cost).max(0.0);
-                entry.initial_points = rem_rp;
-                entry.started_unix = now_unix;
-                let dc_type_id: TypeId = if entry.research_type_id == 11452 {
-                    20172
-                } else {
-                    20424 // Datacore - Minmatar Starship Engineering
-                };
-                save_rnd_research_entries(snap, char_id, &entries);
-                snap.next_entity_id += 1;
-                let item_id = snap.next_entity_id;
-                snap.items.insert(
-                    item_id,
-                    InventoryItemRecord {
-                        item_id,
-                        type_id: dc_type_id,
-                        owner_id: char_id,
-                        location_id: station_id,
-                        flag: InventoryFlag::Hangar,
-                        quantity: qty,
-                        singleton: false,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
-                Ok((item_id, dc_type_id, rem_rp))
-            });
-            match res {
-                Ok((item_id, dc_type_id, rem_rp)) => Some(Ok(PyRep::keyval([
-                    ("agentID", PyRep::Integer(agent_id)),
-                    ("datacoreItemID", PyRep::Integer(item_id)),
-                    ("datacoreTypeID", PyRep::Integer(dc_type_id as i64)),
-                    ("quantity", PyRep::Integer(qty as i64)),
-                    ("remainingResearchPoints", PyRep::Real(rem_rp)),
-                ]))),
-                Err(e) => Some(Err(e)),
-            }
-        }
+        14 => Some(crate::services::notify_emitters_batch9::handle_rnd_buy_datacores(
+            ctx, session, char_id, agent_id, sys_id, args,
+        )),
 
         // 15 | 16 | 17 = Locator Agent service (feat:pve.locator-agents)
         15..=17 => {

@@ -161,6 +161,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                 };
 
                 if rem_secs >= time_for_needed && needed_sp <= max_allowed_sp {
+                    let prev_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
                     rem_secs = (rem_secs - time_for_needed).max(0.0);
                     total_sp_gained += needed_sp;
                     skills_map.insert(
@@ -171,7 +172,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                             skill_points: q.end_sp,
                         },
                     );
-                    completed.push((q.type_id, q.target_level));
+                    completed.push((q.type_id, q.target_level, prev_lvl, q.end_sp));
                     history_to_append.push(SkillHistoryEntry {
                         log_date_ft: now_ft,
                         event_type_id: 37,
@@ -207,7 +208,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                         }
                     }
                     if achieved_lvl > current_lvl {
-                        completed.push((q.type_id, achieved_lvl));
+                        completed.push((q.type_id, achieved_lvl, current_lvl, q.start_sp));
                         history_to_append.push(SkillHistoryEntry {
                             log_date_ft: now_ft,
                             event_type_id: 37,
@@ -269,7 +270,20 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
     if paused_by_lapse {
         let _ = ctx.notify_skill_queue_paused_server(char_id);
     }
-    for (skill_type_id, lvl) in completed_events {
+    if !completed_events.is_empty() {
+        let trained_details: Vec<(u32, u8, u8, f64)> = completed_events
+            .iter()
+            .map(|&(tid, lvl, prev, sp)| (tid, prev, lvl, sp))
+            .collect();
+        super::notify_emitters_batch3::emit_logon_skills_trained(
+            ctx,
+            char_id,
+            &trained_details,
+            !paused_by_lapse,
+        );
+        super::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
+    }
+    for (skill_type_id, lvl, _, _) in completed_events {
         let _ = ctx.notify_skill_trained(char_id, 0, skill_type_id, lvl);
         super::jump_clone_names::emit_server_skills_changed(
             ctx,
@@ -885,6 +899,7 @@ pub fn handle(
                             "charid",
                             vec![PyRep::Real(remaining_free)],
                         );
+                        super::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
                         Some(Ok(PyRep::Real(new_skill_sp)))
                     }
                     Err(e) => Some(Err(e)),
@@ -1040,6 +1055,7 @@ pub fn handle(
                         "charid",
                         vec![PyRep::Real(rem_free)],
                     );
+                    super::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
                     Some(Ok(PyRep::Real(sp)))
                 }
                 Err(e) => Some(Err(e)),

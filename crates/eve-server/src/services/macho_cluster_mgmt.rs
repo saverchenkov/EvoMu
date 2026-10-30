@@ -884,6 +884,11 @@ fn handle_macho_net(
             }
             if timeout_seconds <= 0 {
                 crate::services::notify_emitters_batch3::emit_cluster_shutdown_cancelled(ctx, &shutdown_reason);
+            } else if !shutdown_reason.trim().is_empty() {
+                crate::services::notify_emitters_batch9_part2::emit_server_message_broadcast(
+                    ctx,
+                    &shutdown_reason,
+                );
             }
             Some(Ok(PyRep::None))
         }
@@ -988,6 +993,11 @@ fn handle_macho_net(
             Some(Ok(PyRep::String(active_hash)))
         }
 
-        _ => None,
+        _ => crate::services::notify_emitters_batch9_part2::handle_macho_batch9_rpc(
+            ctx,
+            session,
+            method,
+            args,
+        ),
     }
 }

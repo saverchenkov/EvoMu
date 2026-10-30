@@ -614,6 +614,10 @@ pub async fn handle(
                                 compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
 
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id)]);
+                            let clean_header = title.trim_start_matches("[d]").trim();
+                            let header_str = if clean_header.is_empty() { "Agent Transmission" } else { clean_header };
+                            let trans_kv = PyRep::keyval([("header", PyRep::String(header_str.to_string())), ("text", PyRep::String(briefing.clone())), ("icon", PyRep::String("res:/UI/Texture/WindowIcons/agent.png".into())), ("agentID", PyRep::Integer(agent_id))]);
+                            ctx.notify(NotificationTarget::Character(char_id), "OnIncomingTransmission", "charid", vec![trans_kv, PyRep::Bool(true)]);
                             let mut offer_kvs = vec![
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),

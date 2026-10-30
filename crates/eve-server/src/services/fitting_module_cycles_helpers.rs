@@ -1077,7 +1077,7 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     ctx: &ServerContext,
     sys: &SystemHandle,
     sys_id: u32,
-    _char_id: i64,
+    char_id: i64,
     ship_id: i64,
     module_id: i64,
     m: &eve_dogma::FittedModule,
@@ -1144,6 +1144,16 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
 
     let rep_hp = mod_type.default_attributes.get(&68).copied().unwrap_or(1_500.0);
     let (pct, enabled) = crate::services::sov_gameplay::apply_mercenary_den_shield_repair(ctx, sys_id, ship_id, target_id, rep_hp).await?;
+    crate::services::notify_emitters_batch3_space::emit_module_activation_godma_notifications(
+        ctx,
+        char_id,
+        ship_id,
+        module_id,
+        m.type_id,
+        "shieldRepair",
+        5.0,
+        Some(target_id),
+    );
     Ok(Some(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("targetID", PyRep::Integer(target_id)),

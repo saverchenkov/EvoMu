@@ -1000,6 +1000,11 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
         );
     }
 
+    crate::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+        ctx,
+        now_unix,
+    );
+
     // 7. Decay expired wrecks (2h = 7200s), corpses (2h = 7200s), jetcans (1h = 3600s),
     //    and Mobile Warp Disruptors (SDE decay = 48h), and complete anchoring Mobile Warp Disruptors
     //    (`feat:lifecycle.wreck-restart`, `feat:lifecycle.mobile_warp_disruptor-lifecycle`)

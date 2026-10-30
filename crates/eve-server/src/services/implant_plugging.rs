@@ -437,6 +437,7 @@ pub fn inject_implant(
         "charid",
         vec![],
     );
+    crate::services::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
     Ok(PyRep::None)
 }
 
@@ -511,6 +512,7 @@ pub fn destroy_implant(
         "charid",
         vec![],
     );
+    crate::services::notify_emitters_batch9::emit_server_brain_updated(ctx, char_id);
     Ok(PyRep::None)
 }
 
@@ -935,7 +937,7 @@ pub fn inject_skillpoints(
     let current_ship = session.ship_id;
     let now_ft = ctx.now_blueos_filetime_ticks();
 
-    let (yielded, new_free_sp, is_non_dim, _consumed_type_id) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (yielded, new_free_sp, is_non_dim, rem_non_dim) = ctx.db.try_with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
@@ -1009,9 +1011,26 @@ pub fn inject_skillpoints(
             }
         }
 
+        let rem_non_dim: i64 = if non_dim_yield.is_some() {
+            snap.items
+                .values()
+                .filter(|it| {
+                    is_non_diminishing_injector(&ctx.sde, it.type_id)
+                        && it.quantity > 0
+                        && snap.is_item_consumable_by(it, char_id, current_dock, current_ship)
+                })
+                .map(|it| it.quantity as i64)
+                .sum()
+        } else {
+            1
+        };
+
+        if is_daily {
+            crate::services::notify_emitters_batch9::clear_alpha_avail_notified(snap, char_id);
+        }
         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
             ch_mut.free_skill_points += y;
-            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), type_id))
+            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), rem_non_dim))
         } else {
             Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
@@ -1027,6 +1046,9 @@ pub fn inject_skillpoints(
             "charid",
             vec![PyRep::Integer(1)],
         );
+        if rem_non_dim <= 0 {
+            crate::services::notify_emitters_batch9::emit_non_diminishing_injections_removed(ctx, char_id);
+        }
     }
 
     ctx.notify(
@@ -1090,16 +1112,23 @@ pub fn handle_skill_notifications_and_injections(
                 Err(e) => return Some(Err(e)),
             };
             let now_ft = ctx.now_blueos_filetime_ticks();
-            let next_available = ctx.db.with_snapshot(|snap| {
+            let (next_available, is_alpha) = ctx.db.with_snapshot(|snap| {
+                let is_alpha = snap.characters.get(&char_id).is_some_and(|c| c.clone_grade <= 1);
                 let cooldowns = load_alpha_injector_cooldowns(snap);
                 if let Some(&last_ft) = cooldowns.get(&char_id) {
                     let cd_end = last_ft + ALPHA_INJECTOR_COOLDOWN_TICKS;
                     if now_ft < cd_end {
-                        return cd_end;
+                        return (cd_end, is_alpha);
                     }
                 }
-                0
+                (0, is_alpha)
             });
+            crate::services::notify_emitters_batch9::maybe_emit_alpha_injection_available(
+                ctx,
+                char_id,
+                is_alpha,
+                next_available,
+            );
             Some(Ok(PyRep::Integer(next_available)))
         }
         _ => None,

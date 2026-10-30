@@ -447,6 +447,9 @@ pub(super) fn handle_corps(
                         (PyRep::String(("taxRate").into()), PyRep::Tuple(vec![PyRep::Real(old_tax), PyRep::Real(tax)])),
                     ]);
                     ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                    if let Some(allow_war) = args.get(3).and_then(|a| a.as_bool()).or_else(|| args.get(4).and_then(|a| a.as_bool())) {
+                        crate::services::notify_emitters_batch9::emit_allow_war_updated(ctx, corp_id, allow_war);
+                    }
                     Some(Ok(PyRep::keyval([
                         ("corporationID", PyRep::Integer(corp_id)), ("description", PyRep::String(desc)),
                         ("url", PyRep::String(url)), ("taxRate", PyRep::Real(tax)),
@@ -585,6 +588,9 @@ pub(super) fn handle_corps(
                         PyRep::Tuple(vec![PyRep::String(old_name), PyRep::String(new_name.to_string())]),
                     )]);
                     ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                    if let Some(allow_war) = args.get(3).and_then(|a| a.as_bool()).or_else(|| args.get(4).and_then(|a| a.as_bool())) {
+                        crate::services::notify_emitters_batch9::emit_allow_war_updated(ctx, corp_id, allow_war);
+                    }
                     Some(Ok(PyRep::keyval([
                         ("divisionID", PyRep::Integer(div_id as i64)),
                         ("name", PyRep::String(new_name.to_string())),

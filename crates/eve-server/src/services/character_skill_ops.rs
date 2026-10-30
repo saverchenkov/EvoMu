@@ -91,6 +91,7 @@ pub fn migrate_obsolete_skills_for_character(
         Ok((to_refund, total_sp, new_free_sp)) if !to_refund.is_empty() => {
             let removed_pairs: Vec<(u32, u8)> = to_refund.iter().map(|&(sk, _)| (sk, 0u8)).collect();
             super::jump_clone_names::emit_server_skills_removed(ctx, char_id, &removed_pairs);
+            super::notify_emitters_batch9::emit_skill_forced_refresh(ctx, char_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnFreeSkillPointsChanged",

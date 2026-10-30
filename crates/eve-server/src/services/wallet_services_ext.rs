@@ -413,6 +413,7 @@ pub fn handle(
             };
             let trade_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now = ctx.now_unix();
+            let mut added_item_id: Option<i64> = None;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let nid = if trade_id > 0 {
                     trade_note_id(trade_id)
@@ -525,6 +526,7 @@ pub fn handle(
                         tr.accept_a = false;
                         tr.accept_b = false;
                         save_json_note(snap, nid, -73, tr.trade_id, format!("trade:{}", tr.trade_id), &tr, now);
+                        added_item_id = Some(item_id);
                     }
                     "OfferMoney" => {
                         let isk = args
@@ -773,6 +775,15 @@ pub fn handle(
                                         PyRep::Bool(tr.accept_b),
                                     ],
                                 );
+                                if party != char_id {
+                                    if let Some(iid) = added_item_id {
+                                        crate::services::notify_emitters_batch9_part2::emit_priming_needed_for_trade_items(
+                                            ctx,
+                                            party,
+                                            &[iid],
+                                        );
+                                    }
+                                }
                             }
                             "MakeOffer" => {
                                 ctx.notify(

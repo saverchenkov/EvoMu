@@ -69,7 +69,11 @@ pub fn handle(
     if service != "invbroker"
         || !matches!(
             method,
-            "GetInventoryFromId" | "GetInventory" | "GetSelfInvItem" | "GetAvailableTurretSlots"
+            "GetInventoryFromId"
+                | "GetInventory"
+                | "GetSelfInvItem"
+                | "GetAvailableTurretSlots"
+                | "InvalidateLocationCache"
         )
     {
         return None;
@@ -87,6 +91,13 @@ pub fn handle(
     };
     match method {
         "GetSelfInvItem" => Some(self_inv_item(ctx, session, char_id, location_id)),
+        "InvalidateLocationCache" => Some(
+            crate::services::notify_emitters_batch9_part2::handle_invalidate_location_cache_rpc(
+                ctx,
+                session,
+                bound_entry,
+            ),
+        ),
         "GetAvailableTurretSlots" => {
             // `monolith_task_tracker/client/eventHandler.pyj:38-46` (`OnHighSlotFittingChanged`):
             // calls `sm.GetService('invCache').GetInventoryFromId(shipID).GetAvailableTurretSlots()`

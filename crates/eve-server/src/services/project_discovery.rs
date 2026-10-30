@@ -769,12 +769,13 @@ pub fn handle_project_discovery(
                     ("gotBonusXP", PyRep::Bool(had_bonus)),
                     ("bonusSamplesAfterClassification", PyRep::Integer(st.bonus_samples_left)),
                     ("loot_crates", PyRep::List(crates_granted)),
-                    ("playerState", player_state_rep),
+                    ("playerState", player_state_rep.clone()),
                     ("player", PyRep::keyval([("score", PyRep::Real(st.accuracy))])),
                     ("rank", PyRep::Integer(st.rank)),
                 ]);
                 Ok((
                     rep,
+                    player_state_rep,
                     new_bal,
                     xp_gain,
                     st.experience,
@@ -788,6 +789,7 @@ pub fn handle_project_discovery(
             match res {
                 Ok((
                     rep,
+                    player_state_rep,
                     new_bal,
                     _xp_gain,
                     total_xp,
@@ -799,6 +801,11 @@ pub fn handle_project_discovery(
                     if let Some(bal) = new_bal {
                         let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
                     }
+                    crate::services::notify_emitters_batch9::emit_player_state_updated(
+                        ctx,
+                        char_id,
+                        player_state_rep,
+                    );
                     let xp_args = vec![PyRep::Real(total_xp)];
                     session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
                     let _ = ctx.notify(
