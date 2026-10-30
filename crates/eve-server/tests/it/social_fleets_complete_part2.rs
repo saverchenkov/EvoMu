@@ -250,7 +250,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     let rep_pos = ctx.db.with_snapshot(|snap| {
         snap.cosmic_signatures[&30_000_142].iter().find(|s| s.signature_id == replacement_sig_id).unwrap().position
     });
-    ctx.advance_secs(70_000);
+    ctx.advance_secs(75_000);
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142;
     });

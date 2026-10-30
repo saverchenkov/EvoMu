@@ -1180,7 +1180,7 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
                 .iter_mut()
                 .find(|s| s.signature_id == wh_sig_id)
                 .unwrap();
-            wh.created_unix = ctx.now_unix().saturating_sub(70_000); // 70k / 86.4k elapsed -> EOL
+            wh.created_unix = ctx.now_unix().saturating_sub(75_000); // 75k / 86.4k elapsed -> <4h remaining -> EOL
             Ok::<(), std::convert::Infallible>(())
         })
         .unwrap();

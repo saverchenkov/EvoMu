@@ -319,8 +319,11 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     let sig_upd = find_notif(&exp_notifs, "OnSignalTrackerSignatureUpdate");
     assert_eq!(sig_upd[0], PyRep::Integer(sys_lowsec as i64));
     let PyRep::Dict(ref sig_dict) = sig_upd[1] else { panic!("expected dict") };
-    assert!(!sig_dict.is_empty() && sig_dict[0].1.dict_get("targetID").is_some());
-    let sig_kv = &sig_dict[0].1;
+    let sig_kv = sig_dict
+        .iter()
+        .map(|(_, v)| v)
+        .find(|v| v.dict_get("targetID").is_some())
+        .expect("expected added signature with targetID");
     let dev = sig_kv.dict_get("deviation").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!(dev > 0.0, "unscanned signature must report positive deviation");
     let reported_pos = match sig_kv.dict_get("position") {

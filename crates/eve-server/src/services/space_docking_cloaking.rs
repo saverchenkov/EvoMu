@@ -809,6 +809,11 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     let mut k162_to_materialize: Option<(SolarSystemId, i64, CosmicSignatureRecord, DVec3)> = None;
     let mut fallback_exit_pos: Option<DVec3> = None;
 
+    enum WormholeJumpTxOutcome {
+        Collapsed(BridgeRpcError),
+        Jumped(SolarSystemId, i64, i64, String, f64, f64, &'static str, f64, &'static str, i64, bool, WormholeBuckets),
+    }
+
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         // Resolve canonical parent signature even if jumping via materialized `K162-<orig_id>` string or `exit_wh_id`.
         let mut reverse_parent_opt: Option<(SolarSystemId, String)> = None;
@@ -953,43 +958,36 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 });
             }
 
-            let mut spawn_replacement = |sigs_vec: &mut Vec<CosmicSignatureRecord>, idx: usize| {
-                if let Some(rep) = build_static_replacement_wormhole(
-                    ctx,
-                    sig_host_sys,
-                    &sigs_vec[idx],
-                    now_unix,
-                    next_seq,
-                ) {
-                    replacement_to_spawn = Some((sig_host_sys, rep.clone()));
-                    sigs_vec.push(rep);
+            let mut record_collapse = |sigs_vec: &mut Vec<CosmicSignatureRecord>, idx: usize| {
+                let was_collapsed = sigs_vec[idx].collapsed;
+                sigs_vec[idx].collapsed = true;
+                collapsed_balls_to_remove.push((old_sys, wh_id));
+                collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
+                if !was_collapsed {
+                    collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
+                    let mirror_sys = if is_reverse_exit_jump { old_sys } else { dest_sys };
+                    collapsed_mirror_delta = Some((mirror_sys, format!("K162-{sig_id_str}")));
+                    if let Some(rep) = build_static_replacement_wormhole(
+                        ctx, sig_host_sys, &sigs_vec[idx], now_unix, next_seq,
+                    ) {
+                        replacement_to_spawn = Some((sig_host_sys, rep.clone()));
+                        sigs_vec.push(rep);
+                    }
                 }
             };
 
             let elapsed = now_unix.saturating_sub(sigs[wh_idx].created_unix);
             if elapsed >= sigs[wh_idx].lifetime_seconds || sigs[wh_idx].collapsed {
-                let was_already_collapsed = sigs[wh_idx].collapsed;
-                sigs[wh_idx].collapsed = true;
-                collapsed_balls_to_remove.push((old_sys, wh_id));
-                collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
-                if !was_already_collapsed {
-                    collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
-                    if !is_reverse_exit_jump {
-                        collapsed_mirror_delta = Some((dest_sys, format!("K162-{sig_id_str}")));
-                    } else {
-                        collapsed_mirror_delta = Some((old_sys, format!("K162-{sig_id_str}")));
-                    }
-                    spawn_replacement(sigs, wh_idx);
-                }
+                record_collapse(sigs, wh_idx);
                 let code = if elapsed >= sigs[wh_idx].lifetime_seconds {
                     "WormholeCollapsed"
                 } else {
                     "WormholeMassCollapsed"
                 };
-                return Err(BridgeRpcError {
+                return Ok(WormholeJumpTxOutcome::Collapsed(BridgeRpcError {
                     code: code.into(),
                     message: "Wormhole has collapsed".into(),
-                });
+                }));
             }
 
             let (origin_class, _, _, _) = system_wormhole_profile_sde(&ctx.sde, old_sys);
@@ -1017,32 +1015,16 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             }
 
             if sigs[wh_idx].remaining_mass_kg <= 0.0 {
-                sigs[wh_idx].collapsed = true;
-                collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
-                collapsed_mirror_delta = Some((
-                    if is_reverse_exit_jump { old_sys } else { dest_sys },
-                    format!("K162-{sig_id_str}"),
-                ));
-                collapsed_balls_to_remove.push((old_sys, wh_id));
-                collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
-                spawn_replacement(sigs, wh_idx);
-                return Err(BridgeRpcError {
+                record_collapse(sigs, wh_idx);
+                return Ok(WormholeJumpTxOutcome::Collapsed(BridgeRpcError {
                     code: "WormholeMassCollapsed".into(),
                     message: "Wormhole lacks remaining mass capacity and has collapsed".into(),
-                });
+                }));
             }
 
             sigs[wh_idx].remaining_mass_kg -= ship_mass;
             if sigs[wh_idx].remaining_mass_kg <= 0.0 {
-                sigs[wh_idx].collapsed = true;
-                collapsed_sig_delta = Some((sig_host_sys, sig_id_str.clone()));
-                collapsed_mirror_delta = Some((
-                    if is_reverse_exit_jump { old_sys } else { dest_sys },
-                    format!("K162-{sig_id_str}"),
-                ));
-                collapsed_balls_to_remove.push((old_sys, wh_id));
-                collapsed_balls_to_remove.push((dest_sys, exit_wh_id));
-                spawn_replacement(sigs, wh_idx);
+                record_collapse(sigs, wh_idx);
             }
 
             let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
@@ -1103,7 +1085,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
         snap.wh_polarizations.insert((char_id, dest_sys as i64), now_unix + 300);
         snap.wh_polarizations.insert((char_id, wh_id), now_unix + 300);
 
-        Ok((dest_sys, wh_id, exit_wh_id, sig_id_str, rem_mass, max_jump, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets))
+        Ok(WormholeJumpTxOutcome::Jumped(dest_sys, wh_id, exit_wh_id, sig_id_str, rem_mass, max_jump, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets))
     });
 
     for (b_sys, rem_id) in &collapsed_balls_to_remove {
@@ -1190,7 +1172,8 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     }
 
     match res {
-        Ok((dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets)) => {
+        Ok(WormholeJumpTxOutcome::Collapsed(err)) => return Some(Err(err)),
+        Ok(WormholeJumpTxOutcome::Jumped(dest_sys_id, wh_item_id, exit_wh_id, sig_id_str, remaining_mass, max_jump_mass, mass_stage, wh_size, life_stage, wh_age, is_collapsed, buckets)) => {
             let prev_cs = old_handle.get_combat_state(ship_id).await.ok().flatten();
             crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
             crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
