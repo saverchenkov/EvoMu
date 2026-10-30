@@ -10468,6 +10468,16 @@
       "evidence": "Acceptance (ledger.json:62417-62429) says belts spawn asteroids as balls 'with ore type/quantity by region and security'. Ore types come from the same DERIVED volume-band guess described for feat:mining.belt-ore-distribution. Quantities are also invented: crates/eve-server/src/system_actor/belts.rs:287-293 (diff.patch:287-293) is labelled 'DERIVED (OF-36): initial asteroid quantity/radius/mass scaling ((2,000 / unit_volume) rounded to portion size batch, radius clamp 60..2,500m, mass total_m3 * 5e7)'. The tagged test test_mn02_asteroid_belts_as_balls_highsec_and_nullsec (crates/eve-server/tests/it/mining_mn_closure.rs, diff.patch:399-460) checks only volume bands, radius >= 60, and that the server emits OnWarpStarted on warp-to-belt (diff.patch:458). docs/parity/triage.json:2822-2825 triages notify:OnWarpStarted as client_local: the client scatters it from Warp.pyj:561 WarpLoop. So the test requires server traffic that the project's own triage says the live server never sends. action_plan_mining.rs:303-305 asserts the same.",
       "id": "feat:mining.belts-as-balls",
       "flagged_by_audit": "20261030-112821"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/space_docking_cloaking.rs:106-114 labels every wormhole with 4h or more remaining as \"<1 day\", including holes with more than 24h left (a fresh 48h static would read 'Less than 1 day remaining'). wiki:Wormholes.md:99-107 says this text marks the earliest possible closure, so it can't apply to a hole with more than a day left. The tagged test crates/eve-server/tests/it/wormhole_restrictions_and_buckets.rs:435-460 only tries remaining lifetimes at or under 24h and never covers the over-24h band. The lifetime description served alongside it (space_docking_cloaking.rs:117-123) has the swapped strings described above. The destination/size buckets are labelled DERIVED (:73, :90, :103).",
+      "id": "feat:navigation.wormhole-info-buckets",
+      "flagged_by_audit": "20261030-134339"
+    },
+    {
+      "evidence": "The show-info lifetime strings are swapped. crates/eve-server/src/services/space_docking_cloaking.rs:117-123 returns \"This wormhole is beginning to decay, and probably won't last another day\" when more than 24h remain, and the invented \"This wormhole is not yet beginning to decay\" for 4h-24h. wiki:Wormholes.md:141,151,161 says 'beginning to decay' means more than 4 hours from collapse, i.e. the under-one-day band; the over-24h band says the hole has not yet begun to decay. The tagged test crates/eve-server/tests/it/wormhole_statics_lifecycle_closure.rs:423-438 asserts the swapped mapping: the 48h/36h holes expect 'beginning to decay', the 24h/16h holes expect 'not yet beginning to decay'. The test therefore locks in wrong output. The decay-stage signatures are also injected by hand through with_mut_snapshot (:326-365), not created by spawn logic.",
+      "id": "feat:wormholes.lifetime-decay-stages",
+      "flagged_by_audit": "20261030-134339"
     }
   ]
 }
