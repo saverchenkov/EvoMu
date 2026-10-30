@@ -547,3 +547,4 @@ mod paragon_hub_self_purchase;
 mod open_feats_and_rpcs_b29;
 mod quasar_b29_closure;
 mod quasar_b33_closure;
+mod open_feats_and_rpcs_b22;
