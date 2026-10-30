@@ -302,8 +302,9 @@ pub async fn handle(
                 let resolved_sid = if raw_u32 <= MAX_STATION_SERVICE_ID {
                     if op_svcs.contains(&raw_u32) {
                         Some(raw_u32)
-                    } else if raw_u32.is_power_of_two() && op_svcs.contains(&(raw_u32.trailing_zeros() + 1)) {
-                        Some(raw_u32.trailing_zeros() + 1)
+                    } else if raw_u32 == 16 && op_svcs.contains(&5) {
+                        // Legacy EVE appConst.stationServiceReprocessingPlant bitmask (1 << 4 = 16 -> service 5)
+                        Some(5)
                     } else {
                         None
                     }

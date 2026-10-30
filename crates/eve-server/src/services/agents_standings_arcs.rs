@@ -327,9 +327,13 @@ pub fn compute_effective_agent_standing(
     vals.into_iter().fold(-10.0_f64, f64::max)
 }
 
-/// DERIVED: inter-faction standing relations on EVE's `[-10.0, +10.0]` scale (secondary's view of primary).
-/// DATA GAP: V24 client SDE does not ship the full server-side inter-NPC standings matrix.
-pub const DERIVED_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
+// SYNTHESIZED (approximated): inter-faction standing relations on EVE's `[-10.0, +10.0]` scale (secondary's view of primary).
+// Provenance: EVE Wiki `NPC_standings.md#Derived_standings` (explicitly documents Amarr -> Minmatar = -5.0,
+// Minmatar -> Amarr = -5.0, Minmatar -> Thukker = +3.0 via "+2% Minmatar -> -1% Amarr, +1% Thukker" at
+// size_factors 5.0/3.0, CONCORD <-> pirates = -10.0, Triglavian <-> EDENCOM = -10.0) and archived
+// `newedenlibrary.net/eon/faction_standings.shtml` alliance/rivalry tiers.
+// DATA GAP: V24 client SDE does not ship server-side `npccorporationstandings` / `npc_standings` tables.
+pub const SYNTHESIZED_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_001, 500_004, -5.0), (500_001, 500_003, 5.0), (500_001, 500_002, -2.0), (500_001, 500_007, 4.0), (500_001, 500_008, 5.0), (500_001, 500_010, -8.0), (500_001, 500_019, -10.0),
     (500_002, 500_004, 5.0), (500_002, 500_003, -5.0), (500_002, 500_001, -2.0), (500_002, 500_007, -7.0), (500_002, 500_011, -8.0), (500_002, 500_015, 4.0), (500_002, 500_019, -10.0),
     (500_003, 500_001, 5.0), (500_003, 500_002, -5.0), (500_003, 500_004, -3.0), (500_003, 500_007, 8.0), (500_003, 500_008, 7.0), (500_003, 500_012, -8.0), (500_003, 500_015, -5.0), (500_003, 500_019, -10.0),
@@ -339,9 +343,9 @@ pub const DERIVED_NPC_FACTION_STANDINGS: &[(i64, i64, f64)] = &[
     (500_010, 500_001, -8.0), (500_011, 500_002, -8.0), (500_012, 500_003, -8.0), (500_020, 500_004, -8.0), (500_019, 500_001, -10.0), (500_019, 500_002, -10.0), (500_019, 500_003, -10.0), (500_019, 500_004, -10.0), (500_019, 500_014, -5.0), (500_019, 500_016, -5.0),
     (500_026, 500_027, -10.0), (500_027, 500_026, -10.0),
 ];
-pub fn static_npc_faction_standings() -> &'static [(i64, i64, f64)] { DERIVED_NPC_FACTION_STANDINGS }
-/// DERIVED / DATA GAP: returns derived inter-faction standings only (no synthesized corporation rows).
-pub fn get_sde_npc_npc_standings(_sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> { DERIVED_NPC_FACTION_STANDINGS.to_vec() }
+pub fn static_npc_faction_standings() -> &'static [(i64, i64, f64)] { SYNTHESIZED_NPC_FACTION_STANDINGS }
+// SYNTHESIZED / DATA GAP: returns approximated inter-faction standings only (no synthesized corporation rows).
+pub fn get_sde_npc_npc_standings(_sde: &eve_sde::SdeRegistry) -> Vec<(i64, i64, f64)> { SYNTHESIZED_NPC_FACTION_STANDINGS.to_vec() }
 
 /// Applies a primary faction standing percentage change (`fac_pct`, positive for gain or
 /// negative for loss) and, when `apply_derived` is true, propagates derived faction standings
@@ -384,7 +388,7 @@ pub fn apply_faction_standing_with_derived(
     if primary_size <= 0.0 {
         return;
     }
-    for &(secondary_f, target_f, rel) in DERIVED_NPC_FACTION_STANDINGS {
+    for &(secondary_f, target_f, rel) in SYNTHESIZED_NPC_FACTION_STANDINGS {
         if target_f != primary_faction_id || rel == 0.0 {
             continue;
         }

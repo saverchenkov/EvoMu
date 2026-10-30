@@ -11,7 +11,7 @@ use std::collections::HashMap;
 fn is_obsolete_skill(sde: &eve_sde::SdeRegistry, sk_id: u32) -> bool {
     match sde.types.get(&sk_id) {
         Some(t) => !t.published || t.category_id != 16,
-        None => matches!(sk_id, 3374..=3379 | 12376 | 12385 | 12387 | 999_999),
+        None => matches!(sk_id, 3374..=3379 | 12376 | 12383 | 12385..=12387),
     }
 }
 
@@ -25,7 +25,17 @@ pub fn migrate_obsolete_skills_for_character(
     char_id: i64,
 ) -> (usize, f64) {
     // Guard against incomplete SDE catalogs so missing entries never wipe valid character skills.
-    if ctx.sde.types.len() < 10_000 {
+    let has_core_skills = ctx
+        .sde
+        .types
+        .get(&3300)
+        .is_some_and(|t| t.published && t.category_id == 16)
+        && ctx
+            .sde
+            .types
+            .get(&3327)
+            .is_some_and(|t| t.published && t.category_id == 16);
+    if !has_core_skills {
         return (0, 0.0);
     }
 

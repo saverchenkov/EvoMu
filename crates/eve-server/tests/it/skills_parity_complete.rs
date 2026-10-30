@@ -189,15 +189,18 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     place_hangar_item(&ctx, 991_000_106, 40_519, char_id, 1);
     rpc(&ctx, &mut sess, "skillMgr2", "ExtractSkills", &[PyRep::Dict(vec![(PyRep::Integer(25_739), PyRep::Integer(500_000))]), PyRep::Integer(991_000_106)]).await.expect("ExtractSkills");
 
-    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): legacy pre-V24 skill 999_999 migrated on SelectCharacterID after SQLite reopen,
-    // while incomplete SDEs and unrecognized non-deprecated skill IDs are never wiped (R-OBSOLETE-WIPE-04).
+    // 4. Event 38 (`feat:skills.skill-remove-obsolete`): real retired EVE learning skill `3374` ('Learning',
+    // reclassified in V24 SDE to group 267 / category 17 Commodity, published = false) and real unpublished SDE
+    // skill `3362` ('DED Connections', category 16, published = false) migrate on SelectCharacterID after SQLite
+    // reopen, while incomplete SDEs and unrecognized non-deprecated skill IDs (`888_888`) are never wiped.
     ctx.advance_secs(30);
     let (sp_pre_obs, free_pre_obs) = ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.skill_points += 2_500.0;
+        ch.skill_points += 10_500.0;
         let pre = (ch.skill_points, ch.free_skill_points);
         let sk = snap.skills.entry(char_id).or_default();
-        sk.insert(999_999, TrainedSkillRecord { type_id: 999_999, level: 2, skill_points: 1_500.0 });
+        sk.insert(3374, TrainedSkillRecord { type_id: 3374, level: 3, skill_points: 8_000.0 });
+        sk.insert(3362, TrainedSkillRecord { type_id: 3362, level: 2, skill_points: 1_500.0 });
         sk.insert(888_888, TrainedSkillRecord { type_id: 888_888, level: 1, skill_points: 1_000.0 });
         pre
     });
@@ -209,7 +212,10 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     empty_sde.types.clear();
     ctx_partial.sde = Arc::new(empty_sde);
     assert_eq!(eve_server::services::character_skill_ops::migrate_obsolete_skills_for_character(&ctx_partial, char_id), (0, 0.0));
-    assert!(repo2.with_snapshot(|s| s.skills[&char_id].contains_key(&3327) && s.skills[&char_id].contains_key(&999_999) && s.skills[&char_id].contains_key(&888_888)));
+    assert!(repo2.with_snapshot(|s| {
+        let sk = &s.skills[&char_id];
+        sk.contains_key(&3327) && sk.contains_key(&3374) && sk.contains_key(&3362) && sk.contains_key(&888_888)
+    }));
 
     let ctx2 = ServerContext::with_repository(repo2);
     common::pin_clock(&ctx2);
@@ -217,10 +223,11 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     let mut sess2 = login_and_select(&ctx2, 1012, "hist_pilot_u", "hist-pass", char_id).await;
 
     let ch_post = ctx2.db.get_character(char_id).unwrap();
-    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&999_999)));
+    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&3374)));
+    assert!(!ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&3362)));
     assert!(ctx2.db.with_snapshot(|s| s.skills[&char_id].contains_key(&888_888) && s.skills[&char_id].contains_key(&3327)));
-    assert!((ch_post.skill_points - (sp_pre_obs - 1_500.0)).abs() < 1e-3);
-    assert!((ch_post.free_skill_points - (free_pre_obs + 1_500.0)).abs() < 1e-3);
+    assert!((ch_post.skill_points - (sp_pre_obs - 9_500.0)).abs() < 1e-3);
+    assert!((ch_post.free_skill_points - (free_pre_obs + 9_500.0)).abs() < 1e-3);
     let notifs = ctx2.drain_notifications_for_char(char_id);
     assert!(notifs.iter().any(|n| n.event == "OnServerSkillsRemoved"));
     assert!(notifs.iter().any(|n| n.event == "OnFreeSkillPointsChanged"));
@@ -231,6 +238,8 @@ async fn test_feat_skills_history_events_and_obsolete_refund() {
     for expected_ev in [33, 36, 37, 38, 39] {
         assert!(ev_types.contains(&expected_ev), "Missing skill history event {expected_ev} in {ev_types:?}");
     }
+    assert!(rows.iter().any(|r| r[1].as_i64() == Some(38) && r[2].as_i64() == Some(3374)));
+    assert!(rows.iter().any(|r| r[1].as_i64() == Some(38) && r[2].as_i64() == Some(3362)));
     let _ = std::fs::remove_file(&db_path);
 }
 

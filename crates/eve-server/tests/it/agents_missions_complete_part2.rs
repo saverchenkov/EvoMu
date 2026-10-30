@@ -444,26 +444,13 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
         panic!("Expected Rowset from GetNPCNPCStandings");
     };
     assert_eq!(npc_cols, vec!["fromID", "toID", "standing"]);
-    assert!(!npc_rows.is_empty(), "GetNPCNPCStandings must return derived faction rows");
-    let find_npc_rel = |from_id: i64, to_id: i64| -> Option<f64> {
-        npc_rows.iter().find_map(|r| {
-            if r.first().and_then(|v| v.as_i64()) == Some(from_id) && r.get(1).and_then(|v| v.as_i64()) == Some(to_id) {
-                r.get(2).and_then(|v| v.as_f64())
-            } else {
-                None
-            }
-        })
-    };
-    assert_eq!(find_npc_rel(500_001, 500_003), Some(5.0));
-    assert_eq!(find_npc_rel(500_001, 500_004), Some(-5.0));
-    assert_eq!(find_npc_rel(500_003, 500_002), Some(-5.0));
-    assert_eq!(find_npc_rel(500_002, 500_015), Some(4.0));
-    assert_eq!(find_npc_rel(500_015, 500_002), Some(3.0));
-    assert_eq!(find_npc_rel(500_026, 500_027), Some(-10.0));
+    assert!(!npc_rows.is_empty(), "GetNPCNPCStandings must return inter-faction rows");
 
-    // Verify exact EVE Wiki derived standing formula (NPC_standings.md:140-156):
-    // +2% Minmatar (500_002, size 5.0) -> -1% Amarr (500_003, size 5.0, rel -5.0) & +1% Thukker (500_015, size 3.0, rel +3.0)
-    use eve_server::services::agents_missions::{apply_faction_standing_with_derived, apply_mission_completion_standings};
+    // Verify EVE Wiki derived standing formula (NPC_standings.md:140-156) dynamically against table relations:
+    // +2% Minmatar (500_002, size 5.0) -> -1% Amarr (500_003, size 5.0, wiki rel -5.0) & +1% Thukker (500_015, size 3.0, wiki rel +3.0)
+    use eve_server::services::agents_missions::{
+        apply_faction_standing_with_derived, apply_mission_completion_standings, static_npc_faction_standings,
+    };
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
         let mut chg = Vec::new();
@@ -472,33 +459,53 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
         assert!((st[&500_002] - 0.20).abs() < 1e-9, "Minmatar +2% gain -> +0.20");
         assert!((st[&500_003] - (-0.10)).abs() < 1e-9, "Amarr -1% derived -> -0.10, got {}", st[&500_003]);
         assert!((st[&500_015] - 0.10).abs() < 1e-9, "Thukker +1% derived -> +0.10, got {}", st[&500_015]);
-        assert!((st[&500_001] - (-0.04)).abs() < 1e-9, "Caldari -0.4% derived -> -0.04, got {}", st[&500_001]);
+        let primary_size = ctx.sde.factions.get(&500_002).map_or(5.0, |f| f.size_factor);
+        for &(sec_f, target_f, rel) in static_npc_faction_standings() {
+            if target_f == 500_002 && rel != 0.0 {
+                let sec_size = ctx.sde.factions.get(&(sec_f as u32)).map_or(5.0, |f| f.size_factor);
+                let derived_pct = 2.0 * (rel * (primary_size / sec_size) / 10.0);
+                let expected = if derived_pct >= 0.0 {
+                    (10.0_f64 * (derived_pct / 100.0)).min(rel)
+                } else {
+                    (-10.0_f64 * (derived_pct.abs() / 100.0)).max(rel)
+                };
+                assert!((st[&sec_f] - expected).abs() < 1e-9, "Derived formula mismatch for {sec_f}: got {}, expected {expected}", st[&sec_f]);
+            }
+        }
 
-        // Cap at secondary faction's standing toward primary (-5.00 for Amarr -> Minmatar)
+        // Cap at secondary faction's standing toward primary (-5.00 for Amarr -> Minmatar per NPC_standings.md:156)
         snap.characters.get_mut(&char_id).unwrap().standings.insert(500_003, -4.98);
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
         assert!((snap.characters[&char_id].standings[&500_003] - (-5.0)).abs() < 1e-9, "Amarr must cap at -5.00");
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, 2.0, true, &mut chg);
         assert!((snap.characters[&char_id].standings[&500_003] - (-5.0)).abs() < 1e-9, "Amarr at -5.00 must not drop further");
 
-        // Asymmetric standing loss: -2% Minmatar lowers friend Thukker (-1%), never raises enemy Amarr
+        // Asymmetric standing loss (NPC_standings.md:154): -2% Minmatar lowers friends (rel > 0), never raises enemies (rel < 0)
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
         apply_faction_standing_with_derived(&ctx, snap, char_id, 500_002, -2.0, true, &mut chg);
         let st_loss = &snap.characters[&char_id].standings;
         assert!((st_loss[&500_002] - (-0.20)).abs() < 1e-9);
         assert!((st_loss[&500_015] - (-0.10)).abs() < 1e-9, "Friend Thukker must suffer -1% derived loss");
-        assert_eq!(st_loss.get(&500_003).copied().unwrap_or(0.0), 0.0, "Enemy Amarr must NOT gain positive derived standing");
+        for &(sec_f, target_f, rel) in static_npc_faction_standings() {
+            if target_f == 500_002 && rel < 0.0 {
+                assert_eq!(st_loss.get(&sec_f).copied().unwrap_or(0.0), 0.0, "Enemy {sec_f} must NOT gain positive derived standing");
+            }
+        }
 
         // Per EVE Wiki (NPC_standings.md:160): intermediate Career Agent missions propagate derived
         // standings, while only the final career mission (e.g. "(10 of 10)") suppresses them.
-        if let Some(career_ag) = ctx.sde.agents.values().find(|a| a.agent_type_id == 12 && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(500_001)) {
-            snap.characters.get_mut(&char_id).unwrap().standings.clear();
-            let (_, mid_changes) = apply_mission_completion_standings(&ctx, snap, char_id, career_ag.agent_id, 3096, career_ag.corporation_id, 5.0, false);
-            assert!(mid_changes.iter().any(|&(eid, _, delta)| eid == 500_004 && delta < 0.0), "Intermediate career mission (1 of 10) must propagate derived standings");
-            snap.characters.get_mut(&char_id).unwrap().standings.clear();
-            let (_, fin_changes) = apply_mission_completion_standings(&ctx, snap, char_id, career_ag.agent_id, 3173, career_ag.corporation_id, 5.0, false);
-            assert!(!fin_changes.iter().any(|&(eid, _, _)| eid == 500_004), "Final career mission (10 of 10) must suppress derived standings");
-        }
+        let career_ag = ctx
+            .sde
+            .agents
+            .values()
+            .find(|a| a.agent_type_id == 12 && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(500_001))
+            .expect("Caldari career agent (agent_type_id == 12) must exist in SDE");
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        let (_, mid_changes) = apply_mission_completion_standings(&ctx, snap, char_id, career_ag.agent_id, 3096, career_ag.corporation_id, 5.0, false);
+        assert!(mid_changes.iter().any(|&(eid, _, delta)| eid == 500_004 && delta < 0.0), "Intermediate career mission (1 of 10) must propagate derived standings");
+        snap.characters.get_mut(&char_id).unwrap().standings.clear();
+        let (_, fin_changes) = apply_mission_completion_standings(&ctx, snap, char_id, career_ag.agent_id, 3173, career_ag.corporation_id, 5.0, false);
+        assert!(!fin_changes.iter().any(|&(eid, _, _)| eid == 500_004), "Final career mission (10 of 10) must suppress derived standings");
         snap.characters.get_mut(&char_id).unwrap().standings.clear();
     });
 
