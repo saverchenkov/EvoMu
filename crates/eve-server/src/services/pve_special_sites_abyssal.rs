@@ -388,7 +388,10 @@ pub async fn spawn_abyssal_room_contents(
 
     let cache_pos = base + DVec3::new(0.0, -5_000.0, z);
     let cache_ball = make_site_npc_ball(cache_item_id, BIOADAPTIVE_CACHE_TYPE_ID, cache_pos);
-    let cache_cs = ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID);
+    let mut cache_cs = ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID);
+    let cache_hp_mult = if tier >= 5 { 25.0 } else if tier >= 3 { 5.0 } else { 1.0 };
+    cache_cs.max_structure_hp *= cache_hp_mult;
+    cache_cs.structure_hp *= cache_hp_mult;
     let _ = sys_handle.spawn_ball_with_combat(cache_ball, cache_cs.clone()).await;
 
     let subnode_id = cache_item_id + 500_000;
