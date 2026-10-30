@@ -550,7 +550,9 @@ impl LivingWorldDirector {
             let _ = handle.set_ball_position(hauler_ball_id, ast_pos + DVec3::new(1_200.0, 0.0, 200.0)).await;
         }
 
-        // Compute SDE mining laser cycle yield & Venture ore hold capacity (`483` Miner I + `ship_type_id` hull attrs)
+        // DERIVED (MN-17): NPC mining op simulation uses SDE hull + Miner I (`483`) attributes rather
+        // than `mining_cycle::resolve_cycle` with fitted-module attributes (`feat:mining.npc-mining-ops`
+        // and `plan:MN-17` remain open until NPC miners run through the shared cycle engine and are attackable).
         let ship_type = sde.types.get(&ship_type_id);
         let turrets = ship_type
             .and_then(|t| t.default_attributes.get(&102).copied())
