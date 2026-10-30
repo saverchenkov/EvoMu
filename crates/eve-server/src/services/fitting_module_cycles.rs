@@ -810,6 +810,18 @@ pub(crate) async fn handle_module_cycles(
                 is_overloaded, mod_type, &ctx.sde,
             );
             let shield_boost_amount = if matches!(mod_type.group_id, 41 | 1697) { 0.0 } else { raw_shield * overload_mult };
+            let duration_s = if shield_boost_amount > 0.0 {
+                let boost_mult = sys
+                    .ballpark
+                    .read()
+                    .ok()
+                    .and_then(|bp| bp.combat_states.get(&ship_id).map(|cs| cs.shield_boost_multiplier))
+                    .filter(|&m| m > 0.0)
+                    .unwrap_or(1.0);
+                duration_s * boost_mult
+            } else {
+                duration_s
+            };
             let initial_armor_repair = if matches!(mod_type.group_id, 325 | 2018 | 1698) { 0.0 } else { raw_armor * overload_mult };
             let hull_repair_amount = if mod_type.group_id == 585 { 0.0 } else { raw_hull * overload_mult };
             let mut remote_armor_amount = if mod_type.group_id == 2018 && remote_armor_amount <= 0.0 {

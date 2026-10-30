@@ -206,15 +206,15 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     let default_vel = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0);
     let default_cap_rech = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&55).copied()).unwrap_or(120_000.0);
 
-    // 1. Move ship into Tachyon cloud boundary (-50% signature radius, 4x velocity, 4x inertia)
+    // 1. Move ship into Tachyon cloud boundary (+300% signature radius, 4x velocity, 0.5x inertia)
     let _ = sys_handle.set_ball_position(ship_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
     let effect = evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyssal_sys, ship_id).await;
     assert_eq!(effect, Some("TachyonCloud"));
     let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let cs_tach = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((ball.max_velocity - default_vel * 4.0).abs() < 1e-3, "Tachyon cloud quadruples max velocity");
-    assert!((ball.inertia - 0.5 * 4.0).abs() < 1e-3, "Tachyon cloud multiplies inertia by 4");
-    assert!((cs_tach.signature_radius - 125.0 * 0.5).abs() < 1e-3, "Tachyon cloud halves signature radius (-50%)");
+    assert!((ball.inertia - 0.5 * 0.5).abs() < 1e-3, "Tachyon cloud halves inertia (-50%)");
+    assert!((cs_tach.signature_radius - 125.0 * 4.0).abs() < 1e-3, "Tachyon cloud blooms signature radius +300% (x4)");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.dynamic_attributes.is_empty()).unwrap_or(true)), "Dynamic attributes must not be polluted by spatial clouds");
 
     // 2. Move ship into Bioluminescent cloud boundary (+300% sig radius = 4x)
@@ -226,7 +226,7 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!((ball.max_velocity - default_vel).abs() < 1e-3, "Velocity unchanged in Bioluminescent cloud");
 
-    // 3. Move ship into Filament cloud boundary (0.6x shield boost, 1.5x cap recharge time, 1.25x sig radius)
+    // 3. Move ship into Filament cloud boundary (0.6x shield boost & cycle duration, unchanged sig & cap recharge)
     let _ = sys_handle.set_ball_position(ship_id, DVec3::new(0.0, 15_000.0, 0.0)).await;
     let effect = evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyssal_sys, ship_id).await;
     assert_eq!(effect, Some("FilamentCloud"));
@@ -234,8 +234,8 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     let cs_fil = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((ball.max_velocity - default_vel).abs() < 1e-3, "Filament cloud does not change velocity");
     assert!((cs_fil.shield_boost_multiplier - 0.6).abs() < 1e-6, "Filament cloud applies -40% shield boost penalty (0.6x)");
-    assert!((cs_fil.signature_radius - 125.0 * 1.25).abs() < 1e-3, "Filament cloud applies +25% signature radius penalty");
-    assert!((cs_fil.capacitor_recharge_time_ms - default_cap_rech * 1.5).abs() < 1.0, "Filament cloud penalizes cap recharge time (+50%)");
+    assert!((cs_fil.signature_radius - 125.0).abs() < 1e-3, "Filament cloud does not alter signature radius");
+    assert!((cs_fil.capacitor_recharge_time_ms - default_cap_rech).abs() < 1.0, "Filament cloud does not alter cap recharge time");
 
     // Verify active Small Shield Booster I (10838) heals 0.6x inside FilamentCloud vs 1.0x outside
     let mut sess = SessionState::new(883_310);
@@ -250,27 +250,40 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     let mut cs_dmg = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     (cs_dmg.shield_hp, cs_dmg.max_shield_hp, cs_dmg.shield_recharge_time_ms, cs_dmg.capacitor, cs_dmg.max_capacitor) = (100.0, 2_000.0, 1.0e15, 5_000.0, 5_000.0);
     let _ = sys_handle.set_combat_state(ship_id, cs_dmg).await;
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(booster_id), PyRep::String("shieldBoosting".into())], &kw, None).await.expect("Activate shield booster in FilamentCloud");
-    let _ = sys_handle.step_manual(3.2).await;
-    let healed_in_cloud = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp - 100.0;
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(booster_id), PyRep::String("shieldBoosting".into()), PyRep::None, PyRep::Integer(10)], &kw, None).await.expect("Activate shield booster in FilamentCloud");
+    let _ = sys_handle.step_manual(1.0).await;
+    let cs_1_in = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let healed_1_in_cloud = cs_1_in.shield_hp - 100.0;
+    for _ in 0..9 { let _ = sys_handle.step_manual(1.0).await; }
+    let cs_10_in = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let healed_10s_in_cloud = cs_10_in.shield_hp - 100.0;
+    let cap_used_10s_in_cloud = 5_000.0 - cs_10_in.capacitor;
     let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(booster_id)], &kw, None).await;
 
-    // 4. Move ship outside all clouds and verify full 1.0x shield boost restored
+    // 4. Move ship outside all clouds and verify full 1.0x shield boost & 4.0s cycle restored
     let _ = sys_handle.set_ball_position(ship_id, DVec3::new(0.0, 0.0, 0.0)).await;
     let effect = evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyssal_sys, ship_id).await;
     assert!(effect.is_none(), "No cloud effect outside boundary");
     let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!((ball.max_velocity - default_vel).abs() < 1e-3, "Base velocity restored outside cloud boundary");
-    let mut cs_out = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let cs_out = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((cs_out.signature_radius - 125.0).abs() < 1e-3, "Base signature radius restored outside cloud boundary");
     assert!((cs_out.shield_boost_multiplier - 1.0).abs() < 1e-6, "Shield boost multiplier restored to 1.0 outside FilamentCloud");
-    let _ = sys_handle.step_manual(10.0).await;
-    (cs_out.shield_hp, cs_out.shield_recharge_time_ms, cs_out.capacitor) = (100.0, 1.0e15, 5_000.0);
+    for _ in 0..5 { let _ = sys_handle.step_manual(1.0).await; }
+    let mut cs_out = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    (cs_out.shield_hp, cs_out.max_shield_hp, cs_out.shield_recharge_time_ms, cs_out.capacitor, cs_out.max_capacitor) = (100.0, 2_000.0, 1.0e15, 5_000.0, 5_000.0);
     let _ = sys_handle.set_combat_state(ship_id, cs_out).await;
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(booster_id), PyRep::String("shieldBoosting".into())], &kw, None).await.expect("Activate shield booster outside cloud");
-    let _ = sys_handle.step_manual(3.2).await;
-    let healed_outside = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp - 100.0;
-    assert!(healed_in_cloud > 0.0 && (healed_in_cloud - healed_outside * 0.6).abs() < 1.0, "Shield boost inside FilamentCloud ({healed_in_cloud}) must be ~0.6x outside ({healed_outside})");
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(booster_id), PyRep::String("shieldBoosting".into()), PyRep::None, PyRep::Integer(10)], &kw, None).await.expect("Activate shield booster outside cloud");
+    let _ = sys_handle.step_manual(1.0).await;
+    let cs_1_out = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let healed_1_outside = cs_1_out.shield_hp - 100.0;
+    for _ in 0..9 { let _ = sys_handle.step_manual(1.0).await; }
+    let cs_10_out = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let healed_10s_outside = cs_10_out.shield_hp - 100.0;
+    let cap_used_10s_outside = 5_000.0 - cs_10_out.capacitor;
+    assert!(healed_1_in_cloud > 0.0 && (healed_1_in_cloud - healed_1_outside * 0.6).abs() < 1e-3, "Single-cycle shield boost inside FilamentCloud ({healed_1_in_cloud}) must be 0.6x outside ({healed_1_outside})");
+    assert!((healed_10s_in_cloud - healed_10s_outside).abs() < 1e-3, "Sustained 10s HPS inside FilamentCloud ({healed_10s_in_cloud}) must match outside ({healed_10s_outside}) due to -40% cycle duration");
+    assert!(cap_used_10s_in_cloud > cap_used_10s_outside * 1.5, "Faster cycle inside FilamentCloud ({cap_used_10s_in_cloud} GJ) must consume ~1.67x capacitor vs outside ({cap_used_10s_outside} GJ)");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.dynamic_attributes.is_empty()).unwrap_or(true)), "Dynamic attributes remain empty outside clouds");
 
     // 5. Test real-time tick in Ballpark via step_abyssal_hazards_and_pylons_in_ballpark
@@ -279,7 +292,7 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     let (pre_vel, pre_in) = { let b = bp.balls.get(&ship_id).unwrap(); (b.max_velocity, b.inertia) };
     step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyssal_sys);
     assert!((bp.balls.get(&ship_id).unwrap().max_velocity - pre_vel * 4.0).abs() < 1e-3, "Tick applies Tachyon cloud 4x max velocity");
-    assert!((bp.balls.get(&ship_id).unwrap().inertia - pre_in * 4.0).abs() < 1e-3, "Tick applies Tachyon cloud 4x inertia");
+    assert!((bp.balls.get(&ship_id).unwrap().inertia - pre_in * 0.5).abs() < 1e-3, "Tick applies Tachyon cloud 0.5x inertia");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.dynamic_attributes.is_empty()).unwrap_or(true)), "Tick does not pollute dynamic_attributes");
 }
 
@@ -615,7 +628,7 @@ async fn test_abyssal_timer_collapse_and_pod_death() {
     }).await;
     let prox_err = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id)], &kw, None)
         .await.expect_err("Abyssal filament deployment within 1,000 km of station must be rejected");
-    assert_eq!(prox_err.code, "FilamentProximityRestriction");
+    assert_eq!(prox_err.code, "ProximityRestriction");
 
     // Move > 1,000 km away from stations/stargates and deploy/enter via real RPCs
     for sid in [ship_id, ship2_id] {

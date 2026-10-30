@@ -326,6 +326,20 @@ async fn activate_trace(
         });
     }
 
+    let (tier, weather) =
+        crate::services::pve_special_sites::classify_abyssal_filament(trace.filament_type_id)
+            .unwrap_or((1, crate::services::pve_special_sites::AbyssalWeatherKind::Electrical));
+    let origin_sec = ctx
+        .sde
+        .solar_systems
+        .get(&cur_sys)
+        .map(|s| s.security_status)
+        .unwrap_or(0.9);
+    let gives_suspect =
+        crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
+            origin_sec, tier,
+        )?;
+
     let cap_exceeded = with_pve_special_reg(ctx, |reg| {
         for (tid, t) in reg.abyssal_traces.iter_mut() {
             if *tid != trace.trace_ball_id {
@@ -349,24 +363,6 @@ async fn activate_trace(
         });
     }
 
-    let (tier, weather) =
-        crate::services::pve_special_sites::classify_abyssal_filament(trace.filament_type_id)
-            .unwrap_or((1, crate::services::pve_special_sites::AbyssalWeatherKind::Electrical));
-    let origin_sec = ctx
-        .sde
-        .solar_systems
-        .get(&cur_sys)
-        .map(|s| s.security_status)
-        .unwrap_or(0.9);
-    let gives_suspect =
-        crate::services::pve_special_sites_abyssal::evaluate_highsec_abyssal_tier_policy(
-            origin_sec, tier,
-        )?;
-    let penalty_pct = match tier {
-        0 | 1 => 30.0,
-        2 | 3 => 50.0,
-        _ => 70.0,
-    };
     if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
         ctx.db.with_mut_snapshot(|snap| {
             snap.item_positions
@@ -391,17 +387,18 @@ async fn activate_trace(
             cur_sys,
         )
         .await;
-    let remaining_sec = with_pve_special_reg(ctx, |reg| {
+    let (remaining_sec, penalty_pct) = with_pve_special_reg(ctx, |reg| {
         reg.abyssal_pockets
             .get(&char_id)
             .map(|p| {
-                if p.fleet_ship_ids.len() <= 1 {
+                let rem = if p.fleet_ship_ids.len() <= 1 {
                     1_200
                 } else {
                     p.collapse_at_sec.saturating_sub(entry_now).min(1_200) as i64
-                }
+                };
+                (rem, p.weather_penalty_pct)
             })
-            .unwrap_or(1_200)
+            .unwrap_or((1_200, 50.0))
     });
 
     sys_handle.try_remove_ball(ship_id);
@@ -410,7 +407,12 @@ async fn activate_trace(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let mut max_vel = 250.0;
+    let mut max_vel = ctx
+        .sde
+        .types
+        .get(&ship_type)
+        .and_then(|t| t.default_attributes.get(&37).copied())
+        .unwrap_or(250.0);
     let mut opt_range = 20_000.0;
     crate::services::pve_special_sites_abyssal::apply_abyssal_weather_to_combat_and_nav(
         weather,
@@ -472,11 +474,6 @@ async fn activate_inventory_filament(
     let weather = crate::services::pve_special_sites::classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(crate::services::pve_special_sites::AbyssalWeatherKind::Electrical);
-    let penalty_pct = match tier {
-        0 | 1 => 30.0,
-        2 | 3 => 50.0,
-        _ => 70.0,
-    };
 
     let now_unix = ctx.now_unix();
     let origin_handle = ctx.systems.get_or_spawn(cur_sys);
@@ -524,6 +521,12 @@ async fn activate_inventory_filament(
             cur_sys,
         )
         .await;
+    let penalty_pct = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&char_id)
+            .map(|p| p.weather_penalty_pct)
+            .unwrap_or(50.0)
+    });
 
     origin_handle.try_remove_ball(ship_id);
     let abyss_handle = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);
@@ -531,7 +534,12 @@ async fn activate_inventory_filament(
         .db
         .with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(621));
     let mut cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type);
-    let mut max_vel = 250.0;
+    let mut max_vel = ctx
+        .sde
+        .types
+        .get(&ship_type)
+        .and_then(|t| t.default_attributes.get(&37).copied())
+        .unwrap_or(250.0);
     let mut opt_range = 20_000.0;
     crate::services::pve_special_sites_abyssal::apply_abyssal_weather_to_combat_and_nav(
         weather,

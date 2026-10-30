@@ -634,13 +634,13 @@ pub(crate) async fn handle_void_space_player_jump(
     if let Ok(Some(cs)) = origin_handle.get_combat_state(ship_id).await {
         if cs.is_cloaked {
             return Err(BridgeRpcError {
-                code: "CannotActivateFilamentCloaked".into(),
+                code: "ShipIsCloaked".into(),
                 message: "Cannot activate filament while cloaked".into(),
             });
         }
         if cs.is_tethered {
             return Err(BridgeRpcError {
-                code: "CannotActivateFilamentTethered".into(),
+                code: "ShipIsTethered".into(),
                 message: "Cannot activate filament while tethered".into(),
             });
         }

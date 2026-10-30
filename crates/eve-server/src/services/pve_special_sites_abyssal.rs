@@ -268,11 +268,13 @@ pub async fn spawn_abyssal_room_contents(
     let weather = classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
-    let penalty_pct = match tier {
-        0 | 1 => 30.0,
-        2 | 3 => 50.0,
-        _ => 70.0,
-    };
+    let penalty_pct = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_pockets
+            .values()
+            .find(|p| p.pocket_id == pocket_id)
+            .map(|p| p.weather_penalty_pct)
+    })
+    .unwrap_or_else(|| roll_abyssal_weather_penalty_pct(ctx, tier));
     let bonus_pct = 50.0;
     let mult = difficulty_mult.max(1.0);
     for (idx, &bid) in npc_ids.iter().enumerate() {
@@ -287,6 +289,13 @@ pub async fn spawn_abyssal_room_contents(
         (cs.shield_hp, cs.armor_hp, cs.structure_hp) =
             (cs.max_shield_hp, cs.max_armor_hp, cs.max_structure_hp);
         let mut ball = make_site_npc_ball(bid, tid, pos);
+        ball.max_velocity = ctx
+            .sde
+            .types
+            .get(&tid)
+            .and_then(|t| t.default_attributes.get(&37).copied())
+            .filter(|&v| v > 0.0)
+            .unwrap_or(380.0);
         let mut opt_range = ctx
             .sde
             .types
@@ -323,13 +332,7 @@ pub async fn spawn_abyssal_room_contents(
         (3_i64, FILAMENT_CLOUD_TYPE_ID, base + DVec3::new(0.0, 15_000.0, z)),
     ] {
         let mut cball = make_site_npc_ball(cloud_base + offset_id, cloud_tid, cpos);
-        cball.radius = ctx
-            .sde
-            .types
-            .get(&cloud_tid)
-            .and_then(|t| t.default_attributes.get(&54).copied())
-            .filter(|&r| r > 0.0)
-            .unwrap_or(SPATIAL_CLOUD_RADIUS_M);
+        cball.radius = spatial_cloud_radius_m(Some(&ctx.sde), cloud_tid, SPATIAL_CLOUD_RADIUS_M);
         let _ = sys_handle.spawn_ball(cball).await;
     }
 
@@ -355,14 +358,7 @@ pub async fn spawn_abyssal_room_contents(
 
     let cache_pos = base + DVec3::new(0.0, -5_000.0, z);
     let cache_ball = make_site_npc_ball(cache_item_id, BIOADAPTIVE_CACHE_TYPE_ID, cache_pos);
-    let mut cache_cs = ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID);
-    let cache_hull_hp = match tier {
-        0..=2 => 1_500.0 * (1.0 + tier as f64),
-        3..=4 => 8_000.0 * (tier as f64 - 1.0),
-        _ => 45_000.0 * (tier as f64 - 3.0),
-    };
-    cache_cs.max_structure_hp = cache_hull_hp;
-    cache_cs.structure_hp = cache_hull_hp;
+    let cache_cs = ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID);
     let _ = sys_handle.spawn_ball_with_combat(cache_ball, cache_cs.clone()).await;
 
     let subnode_id = cache_item_id + 500_000;
@@ -674,11 +670,20 @@ pub async fn enter_abyssal_pocket_for_character(
     let weather = classify_abyssal_filament(filament_type_id)
         .map(|(_, w)| w)
         .unwrap_or(AbyssalWeatherKind::Electrical);
-    let penalty_pct = match tier {
-        0 | 1 => 30.0,
-        2 | 3 => 50.0,
-        _ => 70.0,
-    };
+    let existing_penalty = with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_traces
+            .values()
+            .filter(|t| t.entered_char_ids.contains(&char_id))
+            .max_by_key(|t| t.trace_ball_id)
+            .and_then(|t| t.pocket_id)
+            .and_then(|pid| {
+                reg.abyssal_pockets
+                    .values()
+                    .find(|p| p.pocket_id == pid && !p.completed && !p.collapsed_destroyed)
+                    .map(|p| p.weather_penalty_pct)
+            })
+    });
+    let penalty_pct = existing_penalty.unwrap_or_else(|| roll_abyssal_weather_penalty_pct(ctx, tier));
     let bonus_pct = 50.0;
     let diff_mult = 1.0 + (tier as f64) * 1.25;
     let saved_attrs = apply_abyssal_weather_dogma_modifiers_to_ship(

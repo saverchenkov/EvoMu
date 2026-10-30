@@ -1217,7 +1217,7 @@ pub async fn handle_gm_slash_ext(
     }
 
     if cmd == "/downtime" || cmd.starts_with("/downtime ") {
-        let rep = crate::services::wallet_serverops::run_daily_downtime_and_jobs(ctx);
+        let rep = crate::services::wallet_serverops::run_daily_downtime_and_jobs_forced(ctx);
         let entries = rep.into_iter().map(|(k, v)| (PyRep::String(k), PyRep::Integer(v))).collect();
         return Some(Ok(PyRep::Dict(entries)));
     }

@@ -118,13 +118,12 @@ pub(crate) fn seed_cargo_item(ctx: &ServerContext, item_id: i64, type_id: u32, c
     });
 }
 
-// parity: feat:pve.abyssal-highsec-tier-suspect, feat:pve.abyssal-trace-suspect-flag, feat:pve.abyssal-activation-restrictions
+// parity: feat:pve.abyssal-highsec-tier-suspect, feat:pve.abyssal-trace-suspect-flag
 #[tokio::test]
 async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
     eve_testkit::attest(&[
         "feat:pve.abyssal-highsec-tier-suspect",
         "feat:pve.abyssal-trace-suspect-flag",
-        "feat:pve.abyssal-activation-restrictions",
     ]);
 
     let ctx = ServerContext::new();
@@ -197,20 +196,20 @@ async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
     }
     assert!(ctx.crimewatch.read().unwrap().is_suspect(char_id, ctx.now_unix()), "Suspect flag re-applied on high-sec exit");
 
-    // 2. Activation restrictions: cloak, tether, warp-scram, warp-exit invuln, safe-logoff timer, 1000km proximity, deadspace
+    // 2. Activation restrictions: cloak, tether, warp-scram, warp-exit invuln, safe-logoff & PvP timer, 1000km proximity (depot, gate, station, trace), deadspace
     let test_pos = DVec3::new(120_000_000.0, 2.0e9, 0.0);
     move_pilot_to_system(&ctx, &mut sess, char_id, ship_id, 621, SYS_08_LASHESIH, test_pos).await;
-    seed_cargo_item(&ctx, 710_100_099, FIL_T1_ELEC, char_id, ship_id, 5);
+    seed_cargo_item(&ctx, 710_100_099, FIL_T1_ELEC, char_id, ship_id, 8);
     let sys_h = ctx.systems.get_or_spawn(SYS_08_LASHESIH);
 
     { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = true; }
     let e_cloak = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
-    assert_eq!(e_cloak.code, "CannotActivateFilamentCloaked");
+    assert_eq!(e_cloak.code, "ShipIsCloaked");
     { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_cloaked = false; }
 
     { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = true; }
     let e_teth = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
-    assert_eq!(e_teth.code, "CannotActivateFilamentTethered");
+    assert_eq!(e_teth.code, "ShipIsTethered");
     { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().is_tethered = false; }
 
     { let mut bp = sys_h.ballpark.write().unwrap(); bp.combat_states.get_mut(&ship_id).unwrap().warp_scramble_strength = 2; }
@@ -237,17 +236,47 @@ async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
     };
     let _ = sys_h.spawn_ball(depot_ball).await;
     let e_prox = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
-    assert_eq!(e_prox.code, "FilamentProximityRestriction");
+    assert_eq!(e_prox.code, "ProximityRestriction");
     sys_h.try_remove_ball(710_200_001);
+
+    // Within 1,000 km of an SDE stargate -> ProximityRestriction
+    let gate_anchor = ctx.sde.stargates().values().find(|g| g.from_solar_system_id == SYS_08_LASHESIH).expect("Lashesih stargate").position;
+    let _ = sys_h.set_ball_position(ship_id, gate_anchor + DVec3::new(500_000.0, 0.0, 0.0)).await;
+    let e_gate_prox = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
+    assert_eq!(e_gate_prox.code, "ProximityRestriction", "Refused within 1,000 km of stargate");
+
+    // Within 1,000 km of an SDE station -> ProximityRestriction (Jita has NPC stations in V24 SDE)
+    let station_anchor = ctx.sde.solar_systems.get(&SYS_09_JITA).and_then(|s| s.stations.first()).expect("Jita station").position;
+    move_pilot_to_system(&ctx, &mut sess, char_id, ship_id, 621, SYS_09_JITA, station_anchor + DVec3::new(500_000.0, 0.0, 0.0)).await;
+    let e_station_prox = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
+    assert_eq!(e_station_prox.code, "ProximityRestriction", "Refused within 1,000 km of station");
+
+    // Return to 0.8 Lashesih for trace proximity and PvP timer checks (T1 Calm filament allowed in 0.8)
+    move_pilot_to_system(&ctx, &mut sess, char_id, ship_id, 621, SYS_08_LASHESIH, test_pos).await;
+    let sys_h = ctx.systems.get_or_spawn(SYS_08_LASHESIH);
+    let dep_trace = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.expect("deploy trace");
+    assert!(dep_trace.dict_get("traceBallID").is_some());
+    let _ = sys_h.set_ball_position(ship_id, test_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
+    let e_trace_prox = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
+    assert_eq!(e_trace_prox.code, "ProximityRestriction", "Refused within 1,000 km of another Abyssal Trace");
+
+    // Active 15-minute Capsuleer Log-Off (PvP) timer -> PvpTimerActive
+    let far_pos = test_pos + DVec3::new(2_500_000.0, 0.0, 0.0);
+    let _ = sys_h.set_ball_position(ship_id, far_pos).await;
+    eve_server::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(&ctx, char_id, 90_000_002, ctx.now_unix());
+    let e_pvp = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
+    assert_eq!(e_pvp.code, "PvpTimerActive", "Refused with active 15m capsuleer log-off timer");
+    ctx.crimewatch.write().unwrap().states.remove(&char_id);
+    ctx.advance_secs(901);
 
     let accel_gate_tid = ctx.sde.types.values().filter(|t| t.group_id == 366).map(|t| t.type_id).min().expect("SDE group 366 Acceleration Gate");
     let ded_gate = Ball {
-        id: 710_200_002, type_id: accel_gate_tid, position: test_pos + DVec3::new(10_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        id: 710_200_002, type_id: accel_gate_tid, position: far_pos + DVec3::new(10_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
         max_velocity: 0.0, inertia: 1.0, mass: 10_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     };
     let _ = sys_h.spawn_ball(ded_gate).await;
     let e_ded = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(710_100_099)], &kw, None).await.unwrap_err();
-    assert_eq!(e_ded.code, "CannotActivateFilamentInDeadspace");
+    assert_eq!(e_ded.code, "ShipInDungeon");
     sys_h.try_remove_ball(710_200_002);
 }
 
@@ -279,7 +308,7 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
     let mut sess3 = login_pilot_in_space(&ctx, 887_103, "abyss_p3", "pw123", char3, ship3, 16_236, sys_id, base1 + DVec3::new(600.0, 0.0, 0.0)).await;
     let mut sess4 = login_pilot_in_space(&ctx, 887_104, "abyss_p4", "pw123", char4, ship4, 587, sys_id, base1 + DVec3::new(700.0, 0.0, 0.0)).await;
 
-    // 1. Disallowed ship hulls rejected with DisallowedShipType
+    // 1. Disallowed ship hulls rejected with DisallowedShipType; Expedition Frigate (group 1283) allowed (3-ship co-op)
     for (idx, bad_hull) in [641_u32, 16_227, 29_990, 19_720, 648, 670].into_iter().enumerate() {
         move_pilot_to_system(&ctx, &mut sess1, char1, ship1, bad_hull, sys_id, base1).await;
         let fiid = 720_100_000 + idx as i64;
@@ -287,6 +316,11 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
         let err = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fiid)], &kw, None).await.unwrap_err();
         assert_eq!(err.code, "DisallowedShipType", "hull {bad_hull} must be disallowed");
     }
+    let exp_frig_tid = ctx.sde.types.values().filter(|t| t.group_id == 1283).map(|t| t.type_id).min().expect("Expedition Frigate group 1283");
+    move_pilot_to_system(&ctx, &mut sess1, char1, ship1, exp_frig_tid, sys_id, base1 + DVec3::new(2_000_000.0, 0.0, 0.0)).await;
+    seed_cargo_item(&ctx, 720_100_010, FIL_T1_ELEC, char1, ship1, 3);
+    let dep_exp = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_010)], &kw, None).await.expect("Expedition Frigate deploy");
+    assert_eq!(dep_exp.dict_get("maxShips"), Some(&PyRep::Integer(3)), "Expedition Frigate (group 1283) allows 3-ship co-op");
 
     // 2. Destroyer co-op: requires 2 filaments (1 rejected), allows 2 fleetmates, rejects 3rd (TraceShipLimitReached) & non-fleetmate (AccessDenied)
     move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 16_236, sys_id, base1).await;
@@ -315,11 +349,22 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
     move_pilot_to_system(&ctx, &mut sess3, char3, ship3, 16_236, sys_id, base1 + DVec3::new(500.0, 0.0, 0.0)).await;
     let ent_dd1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(dd_trace)], &kw, None).await.expect("DD 1 enter");
     let ent_dd2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(dd_trace)], &kw, None).await.expect("DD 2 enter");
-    assert_eq!(ent_dd1.dict_get("pocketID"), ent_dd2.dict_get("pocketID"));
+    let dd_pid = ent_dd1.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(Some(dd_pid), ent_dd2.dict_get("pocketID").and_then(|v| v.as_i64()));
+    let dd_cache_id = 1_896_000_000 + dd_pid * 10 + 1;
+    ctx.db.with_snapshot(|s| {
+        let mut by_tid: HashMap<u32, i32> = HashMap::new();
+        for it in s.items.values().filter(|i| i.location_id == dd_cache_id) {
+            *by_tid.entry(it.type_id).or_default() += it.quantity;
+        }
+        assert_eq!(by_tid.get(&FIL_T1_ELEC), Some(&2), "2x Destroyer scales filament loot by 2x");
+        assert_eq!(by_tid.get(&48_121), Some(&4), "2x Destroyer scales T1 survey database loot by 2x (4)");
+        assert_eq!(by_tid.get(&48_112), Some(&20), "2x Destroyer scales T1 zero-point condensate loot by 2x (20)");
+    });
     let e_dd3 = ctx.dispatch_rpc(&mut sess3, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(dd_trace)], &kw, None).await.unwrap_err();
     assert_eq!(e_dd3.code, "TraceShipLimitReached");
 
-    // 3. Frigate co-op in 0.8 high-sec with T4 filament: consumes 3 filaments, allows 3 fleetmates, propagates Suspect flag, and despawns trace on last exit
+    // 3. Frigate co-op in 0.8 high-sec with T4 filament: consumes 3 filaments, 3x cache loot, allows 3 fleetmates, propagates Suspect flag, returns to origin & despawns trace on last exit
     let base2 = DVec3::new(10_000_000.0, 2.0e9, 0.0);
     for (s, cid, sid, dx) in [(&mut sess1, char1, ship1, 0.0), (&mut sess2, char2, ship2, 300.0), (&mut sess3, char3, ship3, 400.0), (&mut sess4, char4, ship4, 500.0)] {
         move_pilot_to_system(&ctx, s, cid, sid, 587, sys_id, base2 + DVec3::new(dx, 0.0, 0.0)).await;
@@ -345,6 +390,16 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
     assert!(ctx.crimewatch.read().unwrap().is_suspect(char2, ctx.now_unix()), "Fleetmate receives Suspect flag on high-sec Suspect trace entry");
 
     let fg_pid = ent_fg1.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
+    let fg_cache_id = 1_896_000_000 + fg_pid * 10 + 1;
+    ctx.db.with_snapshot(|s| {
+        let mut by_tid: HashMap<u32, i32> = HashMap::new();
+        for it in s.items.values().filter(|i| i.location_id == fg_cache_id) {
+            *by_tid.entry(it.type_id).or_default() += it.quantity;
+        }
+        assert_eq!(by_tid.get(&FIL_T4_ELEC), Some(&3), "3x Frigate scales filament loot by 3x");
+        assert_eq!(by_tid.get(&48_121), Some(&15), "3x Frigate scales T4 survey database loot by 3x (15)");
+        assert_eq!(by_tid.get(&48_112), Some(&75), "3x Frigate scales T4 zero-point condensate loot by 3x (75)");
+    });
     let fg_sys = ent_fg1.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     let fg_h = ctx.systems.get_or_spawn(fg_sys);
     for r in 0..3 {
@@ -362,4 +417,26 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
         }
     }
     assert!(ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(fg_trace).await.unwrap().is_none(), "Trace despawns after last frigate exits");
+    let ret_pos = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship1).await.unwrap().unwrap().1.position;
+    assert!(ret_pos.distance(base2) <= 2_000.0, "Exiting ship returns to origin location (dist = {})", ret_pos.distance(base2));
+
+    // 4. 20-minute timer expiry destroys both ship AND capsule (670) and respawns pilot at home station
+    let base3 = DVec3::new(20_000_000.0, 2.0e9, 0.0);
+    move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 621, sys_id, base3).await;
+    seed_cargo_item(&ctx, 720_100_040, FIL_T1_ELEC, char1, ship1, 1);
+    let dep_exp_run = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(720_100_040)], &kw, None).await.expect("solo deploy");
+    let tr_exp = dep_exp_run.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    let ent_exp = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr_exp)], &kw, None).await.expect("solo enter");
+    let exp_sys = ent_exp.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    assert!(ctx.systems.get_or_spawn(exp_sys).get_ball_snapshot(ship1).await.unwrap().is_some(), "Ship in pocket before expiry");
+
+    ctx.advance_secs(1_205);
+    assert!(ctx.systems.get_or_spawn(exp_sys).get_ball_snapshot(ship1).await.unwrap().is_none(), "Ship ball destroyed on 20-minute expiry");
+    assert!(!ctx.systems.get_or_spawn(exp_sys).list_balls().await.unwrap().iter().any(|b| b.type_id == 670), "Capsule (670) also destroyed on 20-minute expiry");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&ship1), "Ship item destroyed on 20-minute expiry");
+        let ch = &snap.characters[&char1];
+        assert!(ch.station_id.is_some(), "Pilot respawned at home station after capsule destruction");
+        assert!(!(32_000_000..=32_999_999).contains(&ch.solar_system_id), "Pilot no longer in Abyssal space");
+    });
 }

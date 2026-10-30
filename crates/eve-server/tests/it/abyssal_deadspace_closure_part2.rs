@@ -5,7 +5,7 @@
 
 use crate::abyssal_deadspace_closure::{
     login_pilot_in_space, move_pilot_to_system, seed_cargo_item, FIL_T0_ELEC, FIL_T1_ELEC,
-    FIL_T3_ELEC, SYS_08_LASHESIH, SYS_09_JITA,
+    FIL_T3_ELEC, SYS_08_LASHESIH, SYS_09_JITA, SYS_LOW_TAMA,
 };
 use crate::common;
 use eve_db::{BookmarkRecord, InventoryFlag, InventoryItemRecord};
@@ -18,14 +18,15 @@ use eve_server::quasar_gateway::STATUS_FORBIDDEN;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::pve_special_sites_abyssal::{
-    apply_abyssal_weather_dogma_modifiers_to_ship, apply_abyssal_weather_to_combat_and_nav,
     evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
-    pulse_abyssal_automated_pylons, restore_abyssal_weather_dogma_modifiers,
+    pulse_abyssal_automated_pylons, roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m,
     step_abyssal_hazards_and_pylons_in_ballpark, AbyssalWeatherKind,
     AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
-    AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
+    AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
+    BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID,
+    FILAMENT_CLOUD_LARGE_TYPE_ID, FILAMENT_CLOUD_SMALL_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
     MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
-    SPATIAL_CLOUD_RADIUS_M, TACHYON_CLOUD_TYPE_ID,
+    PROVING_TACHYON_CLOUD_TYPE_ID, SPATIAL_CLOUD_RADIUS_M, TACHYON_CLOUD_TYPE_ID,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -138,9 +139,33 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     let e_map = ctx.dispatch_rpc(&mut sess1, "map", None, "GetHistory", &[PyRep::Integer(3), PyRep::Integer(24)], &kw, None).await.unwrap_err();
     assert_eq!(e_map.code, "MapDisabledInAbyssalSpace");
 
-    // Clear Room 1 NPCs -> zero generic NPC wrecks (26557), transfer gate unlocks & spawns 50km from Room 2 gate
+    // Clear Room 1 NPCs -> zero wrecks of any type, zero bounty, zero faction standing change, 300 HP Bioadaptive Cache
+    let r1_cache_id = 1_896_000_000 + pid * 10 + 1;
+    let cache_cs = abyss_h.get_combat_state(r1_cache_id).await.unwrap().expect("Bioadaptive Cache combat state");
+    let cache_total_hp = cache_cs.shield_hp + cache_cs.armor_hp + cache_cs.structure_hp;
+    assert!((cache_total_hp - 300.0).abs() < 1e-6, "Triglavian Bioadaptive Cache must have 300 total HP (got {cache_total_hp})");
+
+    let (pre_balance, pre_standings, pre_standing_tx) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters[&char1].balance,
+            snap.characters[&char1].standings.clone(),
+            snap.standing_transactions.get(&char1).cloned(),
+        )
+    });
     crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char1, 0).await;
-    assert!(!abyss_h.list_balls().await.unwrap().iter().any(|b| b.type_id == 26_557), "No generic NPC wrecks in Abyssal room");
+    assert!(
+        !abyss_h.list_balls().await.unwrap().iter().any(|b| ctx.sde.wrecks.values().any(|&w| w == b.type_id) || ctx.sde.types.get(&b.type_id).is_some_and(|t| t.group_id == 186)),
+        "Abyssal NPCs must leave zero wrecks of any type in space"
+    );
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.characters[&char1].balance, pre_balance, "Abyssal NPCs must pay zero bounty");
+        assert_eq!(snap.characters[&char1].standings, pre_standings, "Abyssal NPCs must cause zero faction standing change");
+        assert_eq!(snap.standing_transactions.get(&char1).cloned(), pre_standing_tx, "Abyssal NPCs must record zero standing transactions");
+        assert!(
+            !snap.items.values().any(|i| i.location_id == abyss_sys as i64 && (ctx.sde.wrecks.values().any(|&w| w == i.type_id) || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186))),
+            "Abyssal NPCs must leave zero wreck items in DB"
+        );
+    });
     let _ = abyss_h.set_ball_position(ship1, gate_pos + DVec3::new(100.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalGateActivation", &[PyRep::Integer(r1_gate)], &kw, None).await.expect("R1->R2");
     let r2_gate = 1_895_000_000 + pid * 10 + 2;
@@ -226,6 +251,10 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     assert!(ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()), "Pilot respawned at home station after pod boundary death");
 
     // 4. Downtime evacuation: preserves DroneBay drones, destroys deployed drones in space, restores origin Local chat
+    // Position clock at 10:55 UTC (5m before 11:00 UTC downtime) so the 20m Abyssal timer stays active across the window boundary
+    let sec_init = ctx.now_unix() % 86_400;
+    let target_pre_dt = 11 * 3_600 - 300;
+    ctx.advance_virtual_clock(if sec_init <= target_pre_dt { target_pre_dt - sec_init } else { 86_400 - sec_init + target_pre_dt });
     let char2 = 90_000_002_i64;
     let ship2 = 630_000_002_i64;
     let mut sess2 = login_pilot_in_space(&ctx, 887_202, "other", "other-secret", char2, ship2, 621, sys_id, DVec3::new(30_000_000.0, 2.0e9, 0.0)).await;
@@ -274,8 +303,16 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
         });
     });
 
-    let evac_count = evacuate_abyssal_pockets_for_downtime(&ctx);
-    assert!(evac_count >= 1, "Downtime evacuation rescued active pocket");
+    // Downtime outside 11:00 UTC window (10:55 UTC) must NOT evacuate active pocket; inside 11:00 UTC window (11:01 UTC) evacuates & destroys deployed drones
+    let dt_non_window = eve_server::services::wallet_serverops::run_daily_downtime_and_jobs(&ctx);
+    assert_eq!(dt_non_window.get("is1100UtcWindow"), Some(&0));
+    assert_eq!(dt_non_window.get("evacuatedAbyssalPilots"), Some(&0), "Outside 11:00 UTC window must not evacuate pocket");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char2].solar_system_id), p2_sys);
+
+    ctx.advance_virtual_clock(360); // 10:55 UTC -> 11:01 UTC (6m elapsed, well within 20m Abyssal timer)
+    let dt_window = eve_server::services::wallet_serverops::run_daily_downtime_and_jobs(&ctx);
+    assert_eq!(dt_window.get("is1100UtcWindow"), Some(&1));
+    assert!(dt_window.get("evacuatedAbyssalPilots").copied().unwrap_or(0) >= 1, "11:00 UTC downtime rescues active pocket");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char2].solar_system_id, sys_id, "Pilot returned to origin system");
         assert!(snap.items.contains_key(&bay_drone), "Drone in DroneBay preserved");
@@ -283,15 +320,47 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
         let origin_chan = format!("solarsystemid2:{sys_id}");
         assert!(snap.chat_channels.get(&origin_chan).is_some_and(|c| c.members.contains(&char2)), "Origin Local chat restored");
     });
+
+    // Verify Triglavian Extraction SubNode (49662) rolls limited loot pool and may be empty (~35% chance)
+    let mut empty_seed = None;
+    let mut full_seed = None;
+    for s in 1_u64..200 {
+        ctx.set_mechanic_rng_seed(Some(s));
+        let _ = ctx.mechanic_rng.roll(0.5); // consumed by roll_abyssal_weather_penalty_pct
+        let u = ctx.mechanic_rng.try_unit_f64().unwrap();
+        if u < 0.35 && empty_seed.is_none() { empty_seed = Some(s); }
+        if u >= 0.35 && full_seed.is_none() { full_seed = Some(s); }
+        if empty_seed.is_some() && full_seed.is_some() { break; }
+    }
+    for (idx, (seed, expect_loot)) in [(empty_seed.unwrap(), false), (full_seed.unwrap(), true)].into_iter().enumerate() {
+        let pos = DVec3::new((idx as f64 + 1.0) * 8_000_000.0, 2.0e9, 0.0);
+        move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 621, sys_id, pos).await;
+        ctx.set_mechanic_rng_seed(Some(seed));
+        let fiid = 730_500_000 + idx as i64;
+        seed_cargo_item(&ctx, fiid, FIL_T1_ELEC, char1, ship1, 1);
+        let d_sub = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fiid)], &kw, None).await.expect("dep");
+        let t_sub = d_sub.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+        let e_sub = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t_sub)], &kw, None).await.expect("ent");
+        let pid_sub = e_sub.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
+        let sub_id = 1_896_000_000 + pid_sub * 10 + 1 + 500_000;
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.items[&sub_id].type_id, 49_662, "Extraction SubNode spawned in T1");
+            let child_count = snap.items.values().filter(|i| i.location_id == sub_id).count();
+            if expect_loot {
+                assert!(child_count > 0, "Non-empty subnode roll must contain limited loot items");
+            } else {
+                assert_eq!(child_count, 0, "Empty subnode roll (~35%) must contain 0 items");
+            }
+        });
+        let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
+    }
 }
 
-// parity: feat:abyssal.automated-pylons, feat:abyssal.bioadaptive-cache-rewards, feat:abyssal.spatial-hazard-clouds, feat:abyssal.weather-effects-and-penalties
+// parity: feat:abyssal.automated-pylons, feat:abyssal.weather-effects-and-penalties
 #[tokio::test]
 async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     eve_testkit::attest(&[
         "feat:abyssal.automated-pylons",
-        "feat:abyssal.bioadaptive-cache-rewards",
-        "feat:abyssal.spatial-hazard-clouds",
         "feat:abyssal.weather-effects-and-penalties",
     ]);
 
@@ -416,7 +485,16 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
         assert!(s.items.values().any(|i| i.location_id == wreck.item_id && i.quantity >= 4), "Loot transferred to wreck");
     });
 
-    // 3. Spatial hazard clouds (Bioluminescence, Filament, Tachyon) & all 5 weather types across T0/T3/T6
+    // 3. Spatial hazard clouds (Bioluminescence, Filament Small/Medium/Large, Tachyon): SDE radii, numeric modifiers & exit restoration
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, 0.0), 5_000.0);
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), BIOLUMINESCENT_CLOUD_TYPE_ID, 0.0), 15_000.0);
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID, 0.0), 40_000.0);
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), FILAMENT_CLOUD_SMALL_TYPE_ID, 0.0), 5_000.0);
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), FILAMENT_CLOUD_TYPE_ID, 0.0), 15_000.0);
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), FILAMENT_CLOUD_LARGE_TYPE_ID, 0.0), 40_000.0);
+    assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), PROVING_TACHYON_CLOUD_TYPE_ID, 0.0), 40_000.0);
+
+    let default_vel = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0);
     let _ = sys_h.spawn_ball(Ball {
         id: 740_020_001, type_id: BIOLUMINESCENT_CLOUD_TYPE_ID, position: DVec3::new(0.0, 50_000.0, 0.0), velocity: DVec3::ZERO,
         max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: SPATIAL_CLOUD_RADIUS_M, speed_fraction: 0.0, mode: MovementMode::Stop,
@@ -432,35 +510,121 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
 
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(0.0, 50_000.0, 0.0)).await;
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyss_sys, ship_id).await, Some("BioluminescentCloud"));
+    assert!((sys_h.get_combat_state(ship_id).await.unwrap().unwrap().signature_radius - 500.0).abs() < 1e-3);
+    assert!((sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.max_velocity - default_vel).abs() < 1e-3);
+
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(50_000.0, 50_000.0, 0.0)).await;
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyss_sys, ship_id).await, Some("FilamentCloud"));
+    let fil_cs = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((fil_cs.shield_boost_multiplier - 0.6).abs() < 1e-6);
+    assert!((fil_cs.signature_radius - 125.0).abs() < 1e-3);
+
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(-50_000.0, 50_000.0, 0.0)).await;
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyss_sys, ship_id).await, Some("TachyonCloud"));
+    let (_, tach_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!((tach_ball.max_velocity - default_vel * 4.0).abs() < 1e-3);
+    assert!((tach_ball.inertia - 0.25).abs() < 1e-3);
+    assert!((sys_h.get_combat_state(ship_id).await.unwrap().unwrap().signature_radius - 500.0).abs() < 1e-3);
+
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(0.0, 0.0, 0.0)).await;
     assert!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyss_sys, ship_id).await.is_none());
+    let (_, exit_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let exit_cs = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((exit_ball.max_velocity - default_vel).abs() < 1e-3);
+    assert!((exit_ball.inertia - 0.5).abs() < 1e-3);
+    assert!((exit_cs.signature_radius - 125.0).abs() < 1e-3);
+    assert!((exit_cs.shield_boost_multiplier - 1.0).abs() < 1e-6);
 
-    let w_ship = 640_000_030_i64;
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(w_ship, InventoryItemRecord {
-            item_id: w_ship, type_id: 621, owner_id: char1, location_id: SYS_08_LASHESIH as i64,
-            flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
-        });
-    });
-    for pct in [30.0_f64, 50.0, 70.0] {
-        for weather in [
-            AbyssalWeatherKind::Electrical,
-            AbyssalWeatherKind::Dark,
-            AbyssalWeatherKind::Exotic,
-            AbyssalWeatherKind::Firestorm,
-            AbyssalWeatherKind::Gamma,
-        ] {
-            let mut cs = ctx.build_type_combat_state(621);
-            let (mut vel, mut opt) = (250.0, 15_000.0);
-            apply_abyssal_weather_to_combat_and_nav(weather, pct, pct, &mut cs, &mut vel, &mut opt);
-            let saved = apply_abyssal_weather_dogma_modifiers_to_ship(&ctx, w_ship, weather, pct, pct);
-            assert!(!saved.is_empty());
-            restore_abyssal_weather_dogma_modifiers(&ctx, w_ship, &saved);
-            assert!(ctx.db.with_snapshot(|s| s.items[&w_ship].dynamic_attributes.is_empty()));
+    // 4. Weather penalty RNG distribution (30%/50% for T0..=T3, 50%/70% for T4..=T6) & all 5 weather types across player & NPC ships
+    let mut low_seed = None;
+    let mut high_seed = None;
+    for s in 1_u64..100 {
+        ctx.set_mechanic_rng_seed(Some(s));
+        if ctx.mechanic_rng.roll(0.5) {
+            if high_seed.is_none() { high_seed = Some(s); }
+        } else if low_seed.is_none() {
+            low_seed = Some(s);
         }
+        if low_seed.is_some() && high_seed.is_some() { break; }
+    }
+    let (low_seed, high_seed) = (low_seed.unwrap(), high_seed.unwrap());
+    ctx.set_mechanic_rng_seed(Some(low_seed));
+    assert_eq!(roll_abyssal_weather_penalty_pct(&ctx, 1), 30.0);
+    ctx.set_mechanic_rng_seed(Some(high_seed));
+    assert_eq!(roll_abyssal_weather_penalty_pct(&ctx, 1), 50.0);
+    ctx.set_mechanic_rng_seed(Some(low_seed));
+    assert_eq!(roll_abyssal_weather_penalty_pct(&ctx, 4), 50.0);
+    ctx.set_mechanic_rng_seed(Some(high_seed));
+    assert_eq!(roll_abyssal_weather_penalty_pct(&ctx, 4), 70.0);
+
+    let base_ship_cs = ctx.build_ship_combat_state(char1, c_ship, 621);
+    let base_opt = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&54).copied()).unwrap_or(15_000.0);
+    let base_scan = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&564).copied()).unwrap_or(250.0);
+    let weather_cases = [
+        (47_765_u32, AbyssalWeatherKind::Electrical, low_seed, 30.0_f64),
+        (47_762, AbyssalWeatherKind::Dark, high_seed, 50.0),
+        (47_761, AbyssalWeatherKind::Exotic, low_seed, 30.0),
+        (47_763, AbyssalWeatherKind::Firestorm, high_seed, 50.0),
+        (47_764, AbyssalWeatherKind::Gamma, low_seed, 30.0),
+        (47_906, AbyssalWeatherKind::Electrical, high_seed, 70.0),
+        (47_894, AbyssalWeatherKind::Dark, high_seed, 70.0),
+        (47_890, AbyssalWeatherKind::Exotic, high_seed, 70.0),
+        (47_898, AbyssalWeatherKind::Firestorm, high_seed, 70.0),
+        (47_902, AbyssalWeatherKind::Gamma, high_seed, 70.0),
+    ];
+    for (idx, (fil_tid, weather, seed, exp_pen)) in weather_cases.into_iter().enumerate() {
+        move_pilot_to_system(&ctx, &mut sess1, char1, c_ship, 621, SYS_LOW_TAMA, DVec3::new((idx as f64 + 1.0) * 6_000_000.0, 2.0e9, 0.0)).await;
+        ctx.set_mechanic_rng_seed(Some(seed));
+        let fiid = 740_200_000 + idx as i64;
+        seed_cargo_item(&ctx, fiid, fil_tid, char1, c_ship, 1);
+        let d_w = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fiid)], &kw, None).await.expect("dep w");
+        let t_w = d_w.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+        let e_w = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t_w)], &kw, None).await.expect("ent w");
+        let w_sys = e_w.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+        let w_h = ctx.systems.get_or_spawn(w_sys);
+        let npc_id = with_pve_special_reg(&ctx, |reg| {
+            let p = &reg.abyssal_pockets[&char1];
+            assert_eq!(p.weather, weather);
+            assert_eq!(p.weather_penalty_pct, exp_pen);
+            p.rooms[0].npc_ball_ids[0]
+        });
+        let (_, s_ball) = w_h.get_ball_snapshot(c_ship).await.unwrap().unwrap();
+        let s_cs = w_h.get_combat_state(c_ship).await.unwrap().unwrap();
+        let (_, n_ball) = w_h.get_ball_snapshot(npc_id).await.unwrap().unwrap();
+        let n_cs = w_h.get_combat_state(npc_id).await.unwrap().unwrap();
+        let n_base_cs = ctx.build_type_combat_state(n_ball.type_id);
+        let n_base_vel = ctx.sde.types.get(&n_ball.type_id).and_then(|t| t.default_attributes.get(&37).copied()).filter(|&v| v > 0.0).unwrap_or(380.0);
+        let pen = exp_pen / 100.0;
+        let dyn_attrs = ctx.db.with_snapshot(|s| s.items[&c_ship].dynamic_attributes.clone());
+        match weather {
+            AbyssalWeatherKind::Electrical => {
+                assert!((s_cs.shield_resonance[0] - (1.0 - (1.0 - base_ship_cs.shield_resonance[0]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((s_cs.armor_resonance[0] - (1.0 - ((1.0 - base_ship_cs.armor_resonance[0]) + base_ship_cs.armor_resonance[0] * 0.5))).abs() < 1e-4);
+                assert!((s_cs.capacitor_recharge_time_ms - (base_ship_cs.capacitor_recharge_time_ms * 0.5).max(1_000.0)).abs() < 1.0);
+                assert!((n_cs.shield_resonance[0] - (1.0 - (1.0 - n_base_cs.shield_resonance[0]) * (1.0 - pen))).abs() < 1e-4);
+            }
+            AbyssalWeatherKind::Dark => {
+                assert!((s_ball.max_velocity - default_vel * 1.5).abs() < 1e-3);
+                assert!((dyn_attrs[&54] - base_opt * (1.0 - pen)).abs() < 1.0);
+                assert!((n_ball.max_velocity - n_base_vel * 1.5).abs() < 1e-3);
+            }
+            AbyssalWeatherKind::Exotic => {
+                assert!((s_cs.shield_resonance[2] - (1.0 - (1.0 - base_ship_cs.shield_resonance[2]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((dyn_attrs[&564] - base_scan * 1.5).abs() < 1e-3);
+                assert!((n_cs.shield_resonance[2] - (1.0 - (1.0 - n_base_cs.shield_resonance[2]) * (1.0 - pen))).abs() < 1e-4);
+            }
+            AbyssalWeatherKind::Firestorm => {
+                assert!((s_cs.max_armor_hp - base_ship_cs.max_armor_hp * 1.5).abs() < 1.0);
+                assert!((s_cs.armor_resonance[1] - (1.0 - (1.0 - base_ship_cs.armor_resonance[1]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((n_cs.armor_resonance[1] - (1.0 - (1.0 - n_base_cs.armor_resonance[1]) * (1.0 - pen))).abs() < 1e-4);
+            }
+            AbyssalWeatherKind::Gamma => {
+                assert!((s_cs.max_shield_hp - base_ship_cs.max_shield_hp * 1.5).abs() < 1.0);
+                assert!((s_cs.shield_resonance[3] - (1.0 - (1.0 - base_ship_cs.shield_resonance[3]) * (1.0 - pen))).abs() < 1e-4);
+                assert!((n_cs.shield_resonance[3] - (1.0 - (1.0 - n_base_cs.shield_resonance[3]) * (1.0 - pen))).abs() < 1e-4);
+            }
+        }
+        let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
+        assert!(ctx.db.with_snapshot(|s| s.items[&c_ship].dynamic_attributes.is_empty()), "Ship attributes restored on exit");
     }
 }

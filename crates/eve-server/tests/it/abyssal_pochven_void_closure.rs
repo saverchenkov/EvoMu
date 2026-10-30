@@ -245,6 +245,55 @@ async fn test_void_space_player_jump_and_gate_activation() {
         Some(&PyRep::Integer(JITA_SYS_ID as i64))
     );
     assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID));
+
+    // 8. Also verify V24 Warp Matrix / Void filament type 62_448 ("QA Void Filament", SDE group_id = 4145)
+    //    jumps into Void Space (32_000_002) and distinguish it from Needlejack Jump Filaments (53_977, group_id = 4041)
+    assert_eq!(ctx.sde.types.get(&62_448).map(|t| t.group_id), Some(4145), "QA Void Filament 62448 is SDE group 4145 (Warp Matrix Filaments)");
+    assert_eq!(ctx.sde.types.get(&53_977).map(|t| t.group_id), Some(4041), "Noise-5 53977 is SDE group 4041 (Jump Filaments), not Void Space");
+    let void_fil_iid = 200_000_602_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            void_fil_iid,
+            eve_db::InventoryItemRecord {
+                item_id: void_fil_iid,
+                type_id: 62_448, // QA Void Filament (SDE group 4145)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let jump_rep2 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "voidSpaceMgr",
+            None,
+            "VoidSpacePlayerJump",
+            &[PyRep::Integer(void_fil_iid), PyRep::Integer(5002)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("VoidSpacePlayerJump via QA Void Filament 62448");
+    assert_eq!(jump_rep2.dict_get("solarSystemID"), Some(&PyRep::Integer(VOID_SPACE_SYS_ID as i64)));
+    assert_eq!(sess.solar_system_id, Some(VOID_SPACE_SYS_ID));
+    let exit_rep2 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "voidSpaceMgr",
+            None,
+            "VoidSpaceEndGateActivation",
+            &[PyRep::Integer(888_001)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("VoidSpaceEndGateActivation second exit");
+    assert_eq!(exit_rep2.dict_get("solarSystemID"), Some(&PyRep::Integer(JITA_SYS_ID as i64)));
+    assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID));
 }
 
 #[tokio::test]

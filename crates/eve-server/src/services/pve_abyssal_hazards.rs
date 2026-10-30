@@ -98,7 +98,7 @@ pub fn validate_abyssal_hull_and_capacity(
     });
     let is_allowed_hull = matches!(
         ship_group_id,
-        25 | 26 | 324 | 358 | 420 | 541 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 1305 | 1527 | 1534 | 1972
+        25 | 26 | 324 | 358 | 420 | 541 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 1283 | 1305 | 1527 | 1534 | 1972
     );
     if !is_allowed_hull {
         return Err(rpc_err(
@@ -106,7 +106,7 @@ pub fn validate_abyssal_hull_and_capacity(
             format!("Ship type {ship_type_id} (group {ship_group_id}) is not permitted to enter Abyssal Deadspace"),
         ));
     }
-    let max_ships: u8 = if matches!(ship_group_id, 25 | 324 | 830 | 831 | 834 | 893 | 1527) {
+    let max_ships: u8 = if matches!(ship_group_id, 25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527) {
         3
     } else if matches!(ship_group_id, 420 | 541 | 1305 | 1534) {
         2
@@ -152,7 +152,7 @@ pub async fn check_not_in_deadspace_pocket(
 ) -> Result<(), BridgeRpcError> {
     if (32_000_000..=32_999_999).contains(&cur_sys) {
         return Err(rpc_err(
-            "CannotActivateFilamentInDeadspace",
+            "ShipInDungeon",
             "Cannot activate filament while inside Abyssal or Void deadspace",
         ));
     }
@@ -167,7 +167,7 @@ pub async fn check_not_in_deadspace_pocket(
     });
     if near_deadspace_gate {
         return Err(rpc_err(
-            "CannotActivateFilamentInDeadspace",
+            "ShipInDungeon",
             "Cannot activate filament while inside a deadspace pocket",
         ));
     }
@@ -181,7 +181,7 @@ pub async fn check_not_in_deadspace_pocket(
                 .is_some_and(|t| t.group_id == 366);
             if is_accel_gate && b.position.distance(ship_pos) < 250_000.0 {
                 return Err(rpc_err(
-                    "CannotActivateFilamentInDeadspace",
+                    "ShipInDungeon",
                     "Cannot activate filament near a deadspace acceleration gate",
                 ));
             }
@@ -263,7 +263,7 @@ pub async fn check_filament_1000km_proximity(
             let d = st.position.distance(ship_pos);
             if d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M {
                 return Err(rpc_err(
-                    "FilamentProximityRestriction",
+                    "ProximityRestriction",
                     format!("Cannot activate filament within 1,000 km of station {} ({d:.0} m)", st.station_id),
                 ));
             }
@@ -273,7 +273,7 @@ pub async fn check_filament_1000km_proximity(
         let d = j.position.distance(ship_pos);
         if d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M {
             return Err(rpc_err(
-                "FilamentProximityRestriction",
+                "ProximityRestriction",
                 format!("Cannot activate filament within 1,000 km of stargate {} ({d:.0} m)", j.stargate_id),
             ));
         }
@@ -289,7 +289,7 @@ pub async fn check_filament_1000km_proximity(
     });
     if let Some((sid, d)) = too_close_struct {
         return Err(rpc_err(
-            "FilamentProximityRestriction",
+            "ProximityRestriction",
             format!("Cannot activate filament within 1,000 km of structure {sid} ({d:.0} m)"),
         ));
     }
@@ -304,7 +304,7 @@ pub async fn check_filament_1000km_proximity(
     });
     if let Some((tid, d)) = too_close_trace {
         return Err(rpc_err(
-            "FilamentProximityRestriction",
+            "ProximityRestriction",
             format!("Cannot activate filament within 1,000 km of Abyssal trace {tid} ({d:.0} m)"),
         ));
     }
@@ -321,7 +321,7 @@ pub async fn check_filament_1000km_proximity(
                 let d = b.position.distance(ship_pos);
                 if d < FILAMENT_PROXIMITY_RESTRICTION_RANGE_M {
                     return Err(rpc_err(
-                        "FilamentProximityRestriction",
+                        "ProximityRestriction",
                         format!("Cannot activate filament within 1,000 km of object {} ({d:.0} m)", b.id),
                     ));
                 }
@@ -348,10 +348,10 @@ pub async fn validate_and_consume_abyssal_filaments(
     let sys_handle = ctx.systems.get_or_spawn(cur_sys);
     if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
         if cs.is_cloaked {
-            return Err(rpc_err("CannotActivateFilamentCloaked", "Cannot activate filament while cloaked"));
+            return Err(rpc_err("ShipIsCloaked", "Cannot activate filament while cloaked"));
         }
         if cs.is_tethered {
-            return Err(rpc_err("CannotActivateFilamentTethered", "Cannot activate filament while tethered"));
+            return Err(rpc_err("ShipIsTethered", "Cannot activate filament while tethered"));
         }
     }
     let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
@@ -410,6 +410,27 @@ pub async fn validate_and_consume_abyssal_filaments(
     }
 
     Ok((iid, filament_type_id, tier, max_ships, origin_sec, ship_pos))
+}
+
+/// Rolls the Abyssal weather penalty percentage (`30%` or `50%` for `T0..=T3`, `50%` or `70%` for `T4..=T6`).
+pub fn roll_abyssal_weather_penalty_pct(ctx: &ServerContext, tier: u8) -> f64 {
+    let high_roll = ctx.mechanic_rng.roll(0.5);
+    match tier {
+        0..=3 => {
+            if high_roll {
+                50.0
+            } else {
+                30.0
+            }
+        }
+        _ => {
+            if high_roll {
+                70.0
+            } else {
+                50.0
+            }
+        }
+    }
 }
 
 /// Applies Abyssal weather dogma modifiers to a `CombatState` and velocity/optimal.
@@ -582,19 +603,40 @@ fn is_spatial_hazard_cloud_type(tid: TypeId) -> bool {
     )
 }
 
+/// Returns the V24 SDE radius (`attr 54`, fallback `5_000` / `15_000` / `40_000` m) for a spatial hazard cloud type.
+pub fn spatial_cloud_radius_m(
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    cloud_tid: TypeId,
+    fallback_radius: f64,
+) -> f64 {
+    if let Some(r) = sde_opt
+        .and_then(|s| s.types.get(&cloud_tid))
+        .and_then(|t| t.default_attributes.get(&54).copied())
+        .filter(|&r| r > 0.0)
+    {
+        return r;
+    }
+    match cloud_tid {
+        BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID | FILAMENT_CLOUD_SMALL_TYPE_ID => 5_000.0,
+        TACHYON_CLOUD_TYPE_ID | BIOLUMINESCENT_CLOUD_TYPE_ID | FILAMENT_CLOUD_TYPE_ID => 15_000.0,
+        PROVING_TACHYON_CLOUD_TYPE_ID | BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID | FILAMENT_CLOUD_LARGE_TYPE_ID => 40_000.0,
+        _ => fallback_radius.max(SPATIAL_CLOUD_RADIUS_M),
+    }
+}
+
 fn cloud_modifiers_for_type(cloud_tid: Option<TypeId>) -> (f64, f64, f64, f64, f64, Option<&'static str>) {
     match cloud_tid {
         Some(TACHYON_CLOUD_TYPE_ID | PROVING_TACHYON_CLOUD_TYPE_ID) => {
-            (4.0, 0.5, 4.0, 1.0, 1.0, Some("TachyonCloud"))
+            (4.0, 4.0, 0.5, 1.0, 1.0, Some("TachyonCloud"))
         }
         Some(
             BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID
             | BIOLUMINESCENT_CLOUD_TYPE_ID
             | BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
         ) => (1.0, 4.0, 1.0, 1.0, 1.0, Some("BioluminescentCloud")),
-        Some(
-            FILAMENT_CLOUD_SMALL_TYPE_ID | FILAMENT_CLOUD_TYPE_ID | FILAMENT_CLOUD_LARGE_TYPE_ID,
-        ) => (1.0, 1.25, 1.0, 0.6, 1.5, Some("FilamentCloud")),
+        Some(FILAMENT_CLOUD_SMALL_TYPE_ID) => (1.0, 1.0, 1.0, 0.5, 1.0, Some("FilamentCloud")),
+        Some(FILAMENT_CLOUD_TYPE_ID) => (1.0, 1.0, 1.0, 0.6, 1.0, Some("FilamentCloud")),
+        Some(FILAMENT_CLOUD_LARGE_TYPE_ID) => (1.0, 1.0, 1.0, 0.7, 1.0, Some("FilamentCloud")),
         _ => (1.0, 1.0, 1.0, 1.0, 1.0, None),
     }
 }
@@ -636,9 +678,10 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     let mut active_cloud: Option<TypeId> = None;
     for b in &balls {
         let cloud_pocket = (b.id >= 1_898_000_000).then_some((b.id - 1_898_000_000) / 100);
+        let radius = spatial_cloud_radius_m(Some(&ctx.sde), b.type_id, b.radius);
         if (cloud_pocket.is_none() || cloud_pocket == ship_pocket)
             && is_spatial_hazard_cloud_type(b.type_id)
-            && ship_ball.position.distance(b.position) < b.radius.max(SPATIAL_CLOUD_RADIUS_M)
+            && ship_ball.position.distance(b.position) < radius
         {
             active_cloud = Some(b.type_id);
             break;
@@ -757,11 +800,6 @@ pub async fn pulse_abyssal_automated_pylons(
     (damaged_count, tracking_buffed_count)
 }
 
-fn boundary_ticks_store() -> &'static std::sync::Mutex<HashMap<i64, u32>> {
-    static STORE: std::sync::OnceLock<std::sync::Mutex<HashMap<i64, u32>>> = std::sync::OnceLock::new();
-    STORE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
 /// Removes active scanner probes that have strayed beyond the 75 km Abyssal pocket boundary.
 pub fn prune_out_of_bounds_abyssal_probes(ctx: &ServerContext, sys_id: SolarSystemId) {
     if !(32_000_001..=32_999_999).contains(&sys_id) {
@@ -815,10 +853,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     let mut pocket_npc_ids: HashSet<i64> = HashSet::new();
     let mut arena_ships: HashSet<i64> = HashSet::new();
     let mut active_clouds: HashMap<i64, TypeId> = HashMap::new();
-    let mut boundary_ticks: HashMap<i64, u32> = boundary_ticks_store()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let mut boundary_ticks: HashMap<i64, u32> = HashMap::new();
     if let Some(db) = db_opt {
         let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
             if let Some(blob) = snap.service_state_blobs.get("incursions_state") {
@@ -853,11 +888,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                 active_clouds = serde_json::from_str(cblob).unwrap_or_default();
             }
             if let Some(bblob) = snap.service_state_blobs.get("abyssal_boundary_ticks") {
-                if let Ok(db_ticks) = serde_json::from_str::<HashMap<i64, u32>>(bblob) {
-                    for (k, v) in db_ticks {
-                        boundary_ticks.entry(k).or_insert(v);
-                    }
-                }
+                boundary_ticks = serde_json::from_str(bblob).unwrap_or_default();
             }
             Ok(())
         });
@@ -1250,9 +1281,6 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     }
 
     boundary_ticks.retain(|bid, _| ballpark.balls.contains_key(bid));
-    *boundary_ticks_store()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = boundary_ticks.clone();
     if let Some(db) = db_opt {
         if let Ok(json) = serde_json::to_string(&boundary_ticks) {
             let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
@@ -1266,11 +1294,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     for (&bid, b) in &ballpark.balls {
         if is_spatial_hazard_cloud_type(b.type_id) {
             let c_pocket = (bid >= 1_898_000_000).then_some((bid - 1_898_000_000) / 100);
-            let c_range = sde_opt
-                .and_then(|s| s.types.get(&b.type_id))
-                .and_then(|t| t.default_attributes.get(&54).copied())
-                .filter(|&r| r > 0.0)
-                .unwrap_or(b.radius.max(SPATIAL_CLOUD_RADIUS_M));
+            let c_range = spatial_cloud_radius_m(sde_opt, b.type_id, b.radius);
             clouds.push((c_pocket, b.type_id, b.position, c_range));
         }
     }
