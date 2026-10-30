@@ -593,22 +593,16 @@ pub async fn handle_legacy_and_ess(
                             );
                             snap.next_entity_id += 1;
                             let krid = snap.next_entity_id;
-                            snap.kill_rights.insert(
-                                krid,
-                                KillRightRecord {
-                                    kill_right_id: krid,
-                                    owner_id: victim_char_id,
-                                    target_id: char_id,
-                                    activation_fee: IskCents::from_isk(1_000_000),
-                                    is_active_suspect: false,
-                                },
-                            );
-                            snap.combat_crimewatch_state
-                                .kill_right_expires_unix
-                                .insert(krid, ctx.now_unix().saturating_add(30 * 86_400));
                             Ok::<_, std::convert::Infallible>((kid, krid))
                         })
                         .unwrap();
+                    crate::services::combat_crimewatch::create_kill_right(
+                        ctx,
+                        kr_id,
+                        victim_char_id,
+                        char_id,
+                        0.0,
+                    );
                     // CONCORD kill voids any active ship insurance contract (`feat:combat.insurance-payout`)
                     let _ = process_ship_insurance_payout(ctx, char_id, ship_id, attacker_ball.type_id, true);
                     // Destroy the criminal's ship + cargo/modules and respawn in a Capsule at home_station_id
@@ -879,31 +873,19 @@ pub async fn handle_legacy_and_ess(
                     .db
                     .try_with_mut_snapshot(|snap| {
                         if is_lowsec_unprovoked {
-                            let sec_penalty = if is_pod_target { 1.5 } else { 0.2 };
+                            let target_sec = snap
+                                .characters
+                                .get(&victim_char_id)
+                                .map(|c| c.security_status)
+                                .unwrap_or(0.0);
                             if let Some(att) = snap.characters.get_mut(&char_id) {
-                                att.security_status = (att.security_status - sec_penalty).max(-10.0);
-                            }
-                            // Issue or refresh Suspect flag / KillRight without unbounded duplication
-                            if let Some(existing_kr) = snap.kill_rights.values_mut().find(|kr| {
-                                kr.owner_id == victim_char_id && kr.target_id == char_id
-                            }) {
-                                existing_kr.is_active_suspect = true;
-                            } else {
-                                snap.next_entity_id += 1;
-                                let krid = snap.next_entity_id;
-                                snap.kill_rights.insert(
-                                    krid,
-                                    KillRightRecord {
-                                        kill_right_id: krid,
-                                        owner_id: victim_char_id,
-                                        target_id: char_id,
-                                        activation_fee: IskCents::from_isk(1_000_000),
-                                        is_active_suspect: true,
-                                    },
+                                let sec_penalty = crate::combat::crimewatch::compute_sec_status_loss(
+                                    att.security_status,
+                                    target_sec,
+                                    is_pod_target,
+                                    sys_sec,
                                 );
-                                snap.combat_crimewatch_state
-                                    .kill_right_expires_unix
-                                    .insert(krid, ctx.now_unix().saturating_add(30 * 86_400));
+                                att.security_status = (att.security_status - sec_penalty).clamp(-10.0, 10.0);
                             }
                         }
                         if destroyed {

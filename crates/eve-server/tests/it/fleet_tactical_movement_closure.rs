@@ -467,7 +467,36 @@ async fn test_fleet_tactical_broadcasts_watchlist_and_tagging() {
     assert_eq!(err.code, "CannotBroadcastInFleet");
 
     // 4. feat:fleet.target-tagging
-    // Boss assigns tag 'A' to target entity 999001
+    // Boss spawns and locks target entity 999001 on grid, then assigns tag 'A'
+    let sys_id = sess1.solar_system_id.unwrap_or(30_000_142);
+    let ship1 = sess1.ship_id.unwrap_or(1);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: 999001,
+            type_id: 587,
+            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle
+        .add_target_lock(
+            ship1,
+            eve_destiny::TargetLock {
+                target_id: 999001,
+                lock_time_ms: 0.0,
+                remaining_lock_ms: 0.0,
+                locked: true,
+                max_range_m: None,
+            },
+        )
+        .await;
     let tag_rep = rpc(
         &ctx,
         &mut sess1,

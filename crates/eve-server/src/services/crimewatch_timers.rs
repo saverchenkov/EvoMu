@@ -448,7 +448,7 @@ pub fn apply_illegal_pvp_sec_status_loss(
         return;
     }
     let old_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
-    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, 0.0, is_pod_target, sys_sec);
     let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -1254,8 +1254,13 @@ pub fn evaluate_and_record_pvp_aggression(
             ctx.notify(NotificationTarget::Character(vcid), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(attacker_char_id), PyRep::Integer(timeout_ft)]);
         }
         if !is_legal && sys_sec > 0.0 {
-            let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&attacker_char_id).map(|c| c.security_status).unwrap_or(0.0));
-            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+            let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
+                (
+                    s.characters.get(&attacker_char_id).map(|c| c.security_status).unwrap_or(0.0),
+                    s.characters.get(&vcid).map(|c| c.security_status).unwrap_or(0.0),
+                )
+            });
+            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod_target, sys_sec);
             ctx.db.with_mut_snapshot(|s| {
                 if let Some(ch) = s.characters.get_mut(&attacker_char_id) { ch.security_status = (old_sec - loss).clamp(-10.0, 10.0); }
             });

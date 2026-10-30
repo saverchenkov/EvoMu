@@ -14,14 +14,19 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 /// Computes character security status loss from criminal actions (`feat:crimewatch.sec-status-loss`).
-pub fn compute_sec_status_loss(current_sec: f64, is_pod: bool, sys_sec: f64) -> f64 {
+///
+/// EVE Online formula:
+/// `Modification% = -2.5% (ship) or -25% (pod) * System security * (1 + (Target sec - Aggressor sec) / 100)`
+/// `New sec = Old sec + (10 - Old sec) * Modification%`
+pub fn compute_sec_status_loss(current_sec: f64, target_sec: f64, is_pod: bool, sys_sec: f64) -> f64 {
     if current_sec <= -10.0 {
         return 0.0;
     }
-    let base_penalty = if is_pod { 2.0 } else { 0.5 };
-    let sec_scale = (sys_sec.max(0.0) + 1.0) * 0.5;
-    let distance_to_min = (current_sec - (-10.0)).max(0.0);
-    (base_penalty + distance_to_min * 0.02 * sec_scale).max(base_penalty)
+    let base_mod = if is_pod { 0.25 } else { 0.025 };
+    let sec_factor = sys_sec.max(0.0);
+    let standing_factor = (1.0 + (target_sec - current_sec) / 100.0).max(0.0);
+    let mod_pct = base_mod * sec_factor * standing_factor;
+    ((10.0 - current_sec) * mod_pct).max(0.0)
 }
 
 /// Aggression manager tracking PvP engagements between pilots (`feat:combat.aggression-tracking`).

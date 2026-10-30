@@ -756,10 +756,13 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                             }
                         }
                         emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
-                        let old_sec = ctx.db.with_snapshot(|s| {
-                            s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0)
+                        let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
+                            (
+                                s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
+                                s.characters.get(&vcid).map(|c| c.security_status).unwrap_or(0.0),
+                            )
                         });
-                        let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod, sys_sec);
+                        let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod, sys_sec);
                         let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
                         ctx.db.with_mut_snapshot(|s| {
                             if let Some(ch) = s.characters.get_mut(&char_id) {
@@ -986,10 +989,13 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                                         st.suspect_flag_until_unix = 0;
                                                     }
                                                 }
-                                                let old_sec = ctx.db.with_snapshot(|s| {
-                                                    s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0)
+                                                let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
+                                                    (
+                                                        s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
+                                                        s.characters.get(&vcid).map(|c| c.security_status).unwrap_or(0.0),
+                                                    )
                                                 });
-                                                let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod, sys_sec);
+                                                let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod, sys_sec);
                                                 let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
                                                 ctx.db.with_mut_snapshot(|s| {
                                                     if let Some(ch) = s.characters.get_mut(&char_id) {

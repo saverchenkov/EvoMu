@@ -87,6 +87,11 @@ pub fn execute_death_pipeline_sync_inner(
         Some(sys_id),
         victim_ship_id,
     );
+
+    crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(
+        ctx,
+        victim_ship_id,
+    );
     let fitted_mods: Vec<(i64, u32, u16)> = ctx
         .ship_fittings
         .write()

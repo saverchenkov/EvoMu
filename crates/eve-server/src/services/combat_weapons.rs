@@ -277,8 +277,13 @@ pub async fn handle_weapons(
                             }
                         }
                         if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg {
-                            let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
-                            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod_target, sys_sec);
+                            let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
+                                (
+                                    s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
+                                    victim_char_opt.and_then(|vid| s.characters.get(&vid)).map(|c| c.security_status).unwrap_or(0.0),
+                                )
+                            });
+                            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod_target, sys_sec);
                             ctx.db.with_mut_snapshot(|s| {
                                 if let Some(ch) = s.characters.get_mut(&char_id) {
                                     ch.security_status = (old_sec - loss).clamp(-10.0, 10.0);

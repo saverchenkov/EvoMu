@@ -613,6 +613,7 @@ async fn activate_single_fighter_ability(
                     });
                     let loss = crate::combat::crimewatch::compute_sec_status_loss(
                         old_sec,
+                        0.0,
                         false,
                         sec,
                     );
@@ -988,6 +989,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                                     });
                                     let loss = crate::combat::crimewatch::compute_sec_status_loss(
                                         old_sec,
+                                        0.0,
                                         b.type_id == 670,
                                         sys_sec,
                                     );

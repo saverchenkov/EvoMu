@@ -1015,16 +1015,34 @@ pub(super) async fn handle_finder_and_tactical(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SetTargetTag requires targetID".into() }));
             };
             let tag_str = args.get(1).and_then(|a| match a { PyRep::String(s) => Some(s.trim().to_string()), PyRep::Integer(i) => Some(i.to_string()), _ => None }).unwrap_or_default();
-            if !tag_str.is_empty()
-                && !(tag_str.len() == 1
-                    && tag_str
-                        .bytes()
-                        .all(|b| b.is_ascii_uppercase() || (b'1'..=b'9').contains(&b)))
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "SetTargetTag requires an alphanumeric tag (A-Z, 1-9) or empty to clear".into(),
-                }));
+            if !tag_str.is_empty() {
+                let valid = tag_str.len() == 1
+                    && tag_str.chars().all(|c| c.is_ascii_uppercase() || ('1'..='9').contains(&c));
+                if !valid {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidTargetTag".into(),
+                        message: format!("Target tag '{tag_str}' must be a single letter A-Z or digit 1-9"),
+                    }));
+                }
+                let Some(sys_id) = session.solar_system_id else {
+                    return Some(Err(BridgeRpcError::user_error("NotInSpace")));
+                };
+                let Some(ship_id) = session.ship_id else {
+                    return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
+                };
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                let on_grid = sys_handle.get_ball_snapshot(target_id).await.ok().flatten().is_some();
+                let is_locked = sys_handle
+                    .get_target_locks(ship_id)
+                    .await
+                    .map(|locks| locks.iter().any(|l| l.target_id == target_id))
+                    .unwrap_or(false);
+                if !on_grid || !is_locked {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetNotLocked".into(),
+                        message: format!("Target {target_id} must be on grid and locked before tagging"),
+                    }));
+                }
             }
             let tags_dict = {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
@@ -1126,5 +1144,32 @@ pub(super) async fn handle_finder_and_tactical(
         }
 
         _ => None,
+    }
+}
+
+/// Clears any fleet target tags associated with `target_id` upon target destruction (`feat:fleet.target-tagging`).
+pub fn clear_destroyed_target_tag(ctx: &ServerContext, target_id: i64) {
+    let affected_fleets: Vec<(i64, i64)> = {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let mut affected = Vec::new();
+        for (&fleet_id, tags) in ex.target_tags.iter_mut() {
+            if tags.remove(&target_id).is_some() {
+                let boss_id = ctx
+                    .db
+                    .with_snapshot(|snap| snap.fleets.get(&fleet_id).map(|f| f.boss_id))
+                    .unwrap_or(0);
+                affected.push((fleet_id, boss_id));
+            }
+        }
+        affected
+    };
+    for (fleet_id, boss_id) in affected_fleets {
+        let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), boss_id, 1.0, 1.0, 1.0);
+        ctx.notify(
+            NotificationTarget::Fleet(fleet_id),
+            "OnFleetStateChange",
+            "fleetid",
+            vec![fleet_state],
+        );
     }
 }

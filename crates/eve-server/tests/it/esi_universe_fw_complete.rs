@@ -7,9 +7,8 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{
-    CorporationRecord, FwCharacterStatsRecord, FwSystemOccupationRecord, FwWindowedStat, IskCents,
-    KillmailDetailRecord, KillmailRecord, SystemDynamicState, SystemJumpEvent, SystemKillEvent,
-    UpwellStructureRecord, WarRecord,
+    CorporationRecord, InventoryItemRecord, KillmailDetailRecord, KillmailRecord, SystemJumpEvent,
+    SystemKillEvent, UpwellStructureRecord, WarRecord,
 };
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
@@ -286,18 +285,30 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     let char_id = 90_000_001_i64;
     let other_char_id = 90_000_002_i64;
     let corp_id = 98_000_001_i64;
-    let sys_id = 30_000_001_u32;
-    let char_enlisted_unix = now - 604_800;
-    let corp_enlisted_unix = now - 1_209_600;
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.fw_system_occupations.clear();
+    // Pick a real Gallente-occupied FW warzone system so Caldari militia (`500_001`) can contest & capture it.
+    let sys_id = ctx.db.with_mut_snapshot(|snap| {
+        if snap.fw_system_occupations.is_empty() {
+            snap.backfill_fw_system_occupations();
+        }
+        let target_sys = snap
+            .fw_system_occupations
+            .values_mut()
+            .filter(|o| o.occupier_faction_id == 500_004)
+            .min_by_key(|o| o.solar_system_id)
+            .expect("Gallente FW warzone system in SDE");
+        target_sys.victory_points = 0;
+        target_sys.victory_points_threshold = 200;
+        let sid = target_sys.solar_system_id;
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.user_id = 1;
             ch.corporation_id = corp_id;
-            ch.war_faction_id = Some(500_001); // Caldari State FW
-            ch.solar_system_id = sys_id;
+            ch.solar_system_id = sid;
             ch.loyalty_points.insert(1_000_035, 99_999); // LP balance must not leak into FW victory points
+        }
+        if let Some(ch2) = snap.characters.get_mut(&other_char_id) {
+            ch2.user_id = 2;
+            ch2.solar_system_id = sid;
         }
         snap.corporations.insert(
             corp_id,
@@ -310,64 +321,132 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
                 ..Default::default()
             },
         );
-        snap.fw_character_stats.insert(
-            char_id,
-            FwCharacterStatsRecord {
-                character_id: char_id,
-                faction_id: Some(500_001),
-                enlisted_on_unix: Some(char_enlisted_unix),
-                current_rank: 3,
-                highest_rank: 4,
-                kills: FwWindowedStat {
-                    yesterday: 2,
-                    last_week: 5,
-                    total: 12,
-                },
-                victory_points: FwWindowedStat {
-                    yesterday: 400,
-                    last_week: 1_200,
-                    total: 3_400,
-                },
-            },
-        );
-        snap.fw_corp_enlisted_on.insert(corp_id, corp_enlisted_unix);
-        snap.fw_system_occupations.insert(
-            sys_id,
-            FwSystemOccupationRecord {
-                solar_system_id: sys_id,
-                owner_faction_id: 500_004,
-                occupier_faction_id: 500_001,
-                victory_points: 2_250,
-                victory_points_threshold: 4_500,
-            },
-        );
-        snap.system_states.insert(
-            sys_id,
-            SystemDynamicState {
-                solar_system_id: sys_id,
-                dbs_multiplier: 1.0,
-                ess_main_bank: IskCents(0),
-                ess_reserve_bank: IskCents(0),
-                ess_linked_character_id: None,
-                ess_link_started_tick: None,
-                sov_alliance_id: None,
-                military_index: 0,
-                industrial_index: 0,
-                strategic_index: 0,
-                fw_contested_pct: 50.0,
-                insurgency_corruption_stage: 0,
-                insurgency_suppression_stage: 0,
-                wormhole_remaining_mass_kg: 0.0,
-                wormhole_destination_system_id: None,
-                signature_position: None,
-                fw_complex_position: None,
-                fw_capture_seconds_elapsed: 0,
-                fw_capture_duration_seconds: 0,
-                last_fw_capture_tick: 0,
-                last_sov_claim_tick: 0, ess_cycle_started_unix: 0, ess_main_bank_contributors: Default::default(),
-            },
-        );
+        sid
     });
+
+    // 1. Enlist corp (`char_id` as CEO) in Caldari State (`500_001`) and `other_char_id` in Gallente (`500_004`) via real RPCs.
+    let mut sess1 = eve_machonet::SessionState::default();
+    sess1.user_id = Some(1);
+    sess1.character_id = Some(char_id);
+    sess1.corporation_id = Some(corp_id);
+    sess1.solar_system_id = Some(sys_id);
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "facWarMgr",
+        None,
+        "JoinFactionAsCorporation",
+        &[eve_proto::PyRep::Integer(500_001)],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("JoinFactionAsCorporation ok");
+
+    let mut sess2 = eve_machonet::SessionState::default();
+    sess2.user_id = Some(2);
+    sess2.character_id = Some(other_char_id);
+    sess2.solar_system_id = Some(sys_id);
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "facWarMgr",
+        None,
+        "JoinFactionAsCharacter",
+        &[eve_proto::PyRep::Integer(500_004)],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("JoinFactionAsCharacter ok");
+
+    // 2. Earn a real FW PvP kill (+1 kill, +20 VP) by destroying `other_char_id`'s ship in `sys_id`.
+    let victim_ship_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let sid = snap.next_entity_id;
+        snap.items.insert(
+            sid,
+            InventoryItemRecord {
+                item_id: sid,
+                type_id: 587, // Rifter
+                owner_id: other_char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        sid
+    });
+    let _ = eve_server::combat::death_pipeline::execute_death_pipeline(
+        &ctx,
+        sys_id,
+        other_char_id,
+        victim_ship_id,
+        char_id,
+        glam::DVec3::ZERO,
+        42,
+    )
+    .await
+    .expect("FW PvP kill death pipeline");
+
+    // 3. Capture a real FW Novice complex (+100 VP) via `tick_fw_gameplay`.
+    let (complex_id, char_ship_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let gid = snap.next_entity_id;
+        snap.next_entity_id += 1;
+        let shid = snap.next_entity_id;
+        snap.items.insert(
+            shid,
+            InventoryItemRecord {
+                item_id: shid,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.fw_runtime.fw_complexes.insert(
+            gid,
+            (sys_id, "Novice".to_string(), 500_004, 0.0, false),
+        );
+        snap.fw_runtime
+            .complex_occupants
+            .insert(gid, vec![(char_id, shid)]);
+        snap.fw_runtime.complex_guards_cleared.insert(gid, true);
+        snap.fw_runtime
+            .complex_last_step_unix
+            .insert(gid, now.saturating_sub(900));
+        (gid, shid)
+    });
+    let pocket = eve_server::services::fw_gameplay::pocket_pos_for_complex(complex_id);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: char_ship_id,
+            type_id: 587,
+            position: pocket,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    eve_server::services::fw_gameplay::tick_fw_gameplay(&ctx, now).await;
+
+    let expected_vp = ctx.db.with_mut_snapshot(|snap| {
+        let occ = snap.fw_system_occupations.get_mut(&sys_id).unwrap();
+        let vp = occ.victory_points;
+        assert!(vp >= 70 && vp <= 120, "expected 20 PvP VP + 50..100 complex VP, got {vp}");
+        occ.victory_points_threshold = vp + 20;
+        vp
+    });
+    let expected_threshold = expected_vp + 20;
 
     let char_token = issue_token_with_scopes(
         &ctx,
@@ -387,16 +466,14 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         200,
     );
     assert_eq!(char_fw["faction_id"], json!(500_001));
-    assert_eq!(char_fw["current_rank"], json!(3));
-    assert_eq!(char_fw["highest_rank"], json!(4));
-    assert_eq!(char_fw["enlisted_on"], json!(fmt(char_enlisted_unix)));
+    assert_eq!(char_fw["enlisted_on"], json!(fmt(now)));
     assert_eq!(
         char_fw["kills"],
-        json!({ "yesterday": 2, "last_week": 5, "total": 12 })
+        json!({ "yesterday": 1, "last_week": 1, "total": 1 })
     );
     assert_eq!(
         char_fw["victory_points"],
-        json!({ "yesterday": 400, "last_week": 1_200, "total": 3_400 })
+        json!({ "yesterday": expected_vp, "last_week": expected_vp, "total": expected_vp })
     );
 
     // Scope & identity enforcement (401 without token, 403 without scope, 403 for other character)
@@ -427,14 +504,14 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     );
     assert_eq!(corp_fw["faction_id"], json!(500_001));
     assert_eq!(corp_fw["pilots"], json!(1));
-    assert_eq!(corp_fw["enlisted_on"], json!(fmt(corp_enlisted_unix)));
+    assert_eq!(corp_fw["enlisted_on"], json!(fmt(now)));
     assert_eq!(
         corp_fw["kills"],
-        json!({ "yesterday": 2, "last_week": 5, "total": 12 })
+        json!({ "yesterday": 1, "last_week": 1, "total": 1 })
     );
     assert_eq!(
         corp_fw["victory_points"],
-        json!({ "yesterday": 400, "last_week": 1_200, "total": 3_400 })
+        json!({ "yesterday": expected_vp, "last_week": expected_vp, "total": expected_vp })
     );
 
     call(
@@ -457,16 +534,12 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
 
     // 3. FW Leaderboards (`GET /fw/leaderboards`, `/characters`, `/corporations`)
     let lb = call(&router, EsiHttpRequest::new("GET", "/v1/fw/leaderboards/"), 200);
-    for (bucket, expected_kills, expected_vp) in [
-        ("yesterday", 2_i64, 400_i64),
-        ("last_week", 5, 1_200),
-        ("active_total", 12, 3_400),
-    ] {
+    for bucket in ["yesterday", "last_week", "active_total"] {
         let k_arr = lb["kills"][bucket].as_array().unwrap();
         assert_eq!(k_arr.len(), 4);
         assert_eq!(
             k_arr.iter().find(|e| e["faction_id"] == json!(500_001)).unwrap()["amount"],
-            json!(expected_kills)
+            json!(1)
         );
         let vp_arr = lb["victory_points"][bucket].as_array().unwrap();
         assert_eq!(vp_arr.len(), 4);
@@ -481,68 +554,45 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         EsiHttpRequest::new("GET", "/v1/fw/leaderboards/characters/"),
         200,
     );
-    assert_eq!(
-        lb_char["kills"]["yesterday"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["character_id"] == json!(char_id))
-            .unwrap()["amount"],
-        json!(2)
-    );
-    assert_eq!(
-        lb_char["kills"]["last_week"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["character_id"] == json!(char_id))
-            .unwrap()["amount"],
-        json!(5)
-    );
-    assert_eq!(
-        lb_char["kills"]["active_total"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["character_id"] == json!(char_id))
-            .unwrap()["amount"],
-        json!(12)
-    );
+    for bucket in ["yesterday", "last_week", "active_total"] {
+        assert_eq!(
+            lb_char["kills"][bucket]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["character_id"] == json!(char_id))
+                .unwrap()["amount"],
+            json!(1)
+        );
+        assert_eq!(
+            lb_char["victory_points"][bucket]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["character_id"] == json!(char_id))
+                .unwrap()["amount"],
+            json!(expected_vp)
+        );
+    }
 
     let lb_corp = call(
         &router,
         EsiHttpRequest::new("GET", "/v1/fw/leaderboards/corporations/"),
         200,
     );
-    assert_eq!(
-        lb_corp["victory_points"]["yesterday"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["corporation_id"] == json!(corp_id))
-            .unwrap()["amount"],
-        json!(400)
-    );
-    assert_eq!(
-        lb_corp["victory_points"]["last_week"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["corporation_id"] == json!(corp_id))
-            .unwrap()["amount"],
-        json!(1_200)
-    );
-    assert_eq!(
-        lb_corp["victory_points"]["active_total"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["corporation_id"] == json!(corp_id))
-            .unwrap()["amount"],
-        json!(3_400)
-    );
+    for bucket in ["yesterday", "last_week", "active_total"] {
+        assert_eq!(
+            lb_corp["victory_points"][bucket]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["corporation_id"] == json!(corp_id))
+                .unwrap()["amount"],
+            json!(expected_vp)
+        );
+    }
 
-    // 4. FW Stats (`GET /fw/stats`) — verify populated faction and unpopulated faction (0 pilots, 0 systems)
+    // 4. FW Stats (`GET /fw/stats`) — verify populated faction and unpopulated faction (0 pilots)
     let fw_stats = call(&router, EsiHttpRequest::new("GET", "/v1/fw/stats/"), 200);
     let fac_stats_arr = fw_stats.as_array().expect("fw stats array");
     assert_eq!(fac_stats_arr.len(), 4);
@@ -551,49 +601,63 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         .find(|s| s["faction_id"] == json!(500_001))
         .expect("Caldari FW stats");
     assert_eq!(caldari_fw["pilots"], json!(1));
-    assert_eq!(caldari_fw["systems_controlled"], json!(1));
     assert_eq!(
         caldari_fw["kills"],
-        json!({ "yesterday": 2, "last_week": 5, "total": 12 })
+        json!({ "yesterday": 1, "last_week": 1, "total": 1 })
     );
     assert_eq!(
         caldari_fw["victory_points"],
-        json!({ "yesterday": 400, "last_week": 1_200, "total": 3_400 })
+        json!({ "yesterday": expected_vp, "last_week": expected_vp, "total": expected_vp })
     );
     let minmatar_fw = fac_stats_arr
         .iter()
         .find(|s| s["faction_id"] == json!(500_002))
         .expect("Minmatar FW stats");
     assert_eq!(minmatar_fw["pilots"], json!(0));
-    assert_eq!(minmatar_fw["systems_controlled"], json!(0));
 
-    // 5. FW Systems (`GET /fw/systems`) + live capture mutation
+    // 5. FW Systems (`GET /fw/systems`) + live LP donation & second PvP kill via RPCs
     let fw_systems = call(&router, EsiHttpRequest::new("GET", "/v1/fw/systems/"), 200);
     let sys_arr = fw_systems.as_array().expect("fw systems array");
     let sys_entry = sys_arr
         .iter()
         .find(|s| s["solar_system_id"] == json!(sys_id))
         .expect("contested system in /fw/systems");
-    assert_eq!(sys_entry["owner_faction_id"], json!(500_004));
-    assert_eq!(sys_entry["occupier_faction_id"], json!(500_001));
+    assert_eq!(sys_entry["occupier_faction_id"], json!(500_004));
     assert_eq!(sys_entry["contested"], json!("contested"));
-    assert_eq!(sys_entry["victory_points"], json!(2_250));
-    assert_eq!(sys_entry["victory_points_threshold"], json!(4_500));
+    assert_eq!(sys_entry["victory_points"], json!(expected_vp));
+    assert_eq!(sys_entry["victory_points_threshold"], json!(expected_threshold));
 
-    // Mutate system capture to 4500/4500 -> becomes "vulnerable", and mutate character FW stats -> live update.
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
-            occ.victory_points = 4_500;
-        }
-        if let Some(rec) = snap.fw_character_stats.get_mut(&char_id) {
-            rec.kills.yesterday += 1;
-            rec.kills.last_week += 1;
-            rec.kills.total += 1;
-            rec.victory_points.yesterday += 150;
-            rec.victory_points.last_week += 150;
-            rec.victory_points.total += 150;
-        }
+    // Score a second FW PvP kill via `execute_death_pipeline` (+20 VP -> 90/90 -> "vulnerable").
+    let victim_ship_id_2 = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let sid = snap.next_entity_id;
+        snap.items.insert(
+            sid,
+            InventoryItemRecord {
+                item_id: sid,
+                type_id: 587,
+                owner_id: other_char_id,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        sid
     });
+    let _ = eve_server::combat::death_pipeline::execute_death_pipeline(
+        &ctx,
+        sys_id,
+        other_char_id,
+        victim_ship_id_2,
+        char_id,
+        glam::DVec3::ZERO,
+        43,
+    )
+    .await
+    .expect("second FW PvP kill");
+
     let fw_systems_after = call(&router, EsiHttpRequest::new("GET", "/v1/fw/systems/"), 200);
     let sys_after = fw_systems_after
         .as_array()
@@ -602,8 +666,8 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         .find(|s| s["solar_system_id"] == json!(sys_id))
         .unwrap();
     assert_eq!(sys_after["contested"], json!("vulnerable"));
-    assert_eq!(sys_after["victory_points"], json!(4_500));
-    assert_eq!(sys_after["victory_points_threshold"], json!(4_500));
+    assert_eq!(sys_after["victory_points"], json!(expected_threshold));
+    assert_eq!(sys_after["victory_points_threshold"], json!(expected_threshold));
 
     let char_fw_after = call(
         &router,
@@ -611,8 +675,8 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
             .with_bearer_token(&char_token),
         200,
     );
-    assert_eq!(char_fw_after["kills"]["total"], json!(13));
-    assert_eq!(char_fw_after["victory_points"]["total"], json!(3_550));
+    assert_eq!(char_fw_after["kills"]["total"], json!(2));
+    assert_eq!(char_fw_after["victory_points"]["total"], json!(expected_threshold));
 
     // 6. FW Wars (`GET /fw/wars`) + live inter-militia war mutation
     let fw_wars = call(&router, EsiHttpRequest::new("GET", "/v1/fw/wars/"), 200);

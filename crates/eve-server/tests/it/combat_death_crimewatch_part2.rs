@@ -259,11 +259,13 @@ async fn test_c8_crimewatch_concord_timers_and_security_status() {
     assert!(aggressors.contains(&char_id));
 
     // 3. Security status loss and gain formulas (feat:crimewatch.sec-status-loss, feat:crimewatch.sec-status-gain)
-    let loss_ship = compute_sec_status_loss(0.5, false, 0.95);
-    assert!(loss_ship >= 0.5, "Ship unprovoked attack penalty >= 0.5");
+    let loss_ship = compute_sec_status_loss(0.5, 0.0, false, 0.95);
+    let expected_ship = (10.0 - 0.5) * 0.025 * 0.95 * (1.0 + (0.0 - 0.5) / 100.0);
+    assert!((loss_ship - expected_ship).abs() < 1e-6, "Ship unprovoked attack penalty matches EVE formula");
 
-    let loss_pod = compute_sec_status_loss(0.5, true, 0.95);
-    assert!(loss_pod >= 2.0, "Pod kill penalty >= 2.0");
+    let loss_pod = compute_sec_status_loss(0.5, 0.0, true, 0.95);
+    let expected_pod = (10.0 - 0.5) * 0.25 * 0.95 * (1.0 + (0.0 - 0.5) / 100.0);
+    assert!((loss_pod - expected_pod).abs() < 1e-6, "Pod kill penalty matches EVE formula");
 
     let gain = compute_sec_status_gain(0.0, 500_000.0);
     assert!(gain > 0.0, "Ratting bounty must increase security status");
