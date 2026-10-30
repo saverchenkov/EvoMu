@@ -274,6 +274,7 @@ pub async fn spawn_expedition_site_instance_core(
             lifetime_seconds: entry.expires_at_sec.saturating_sub(entry.created_at_sec),
             expedition_instance_id: Some(entry.instance_id),
             gate_ball_id: None,
+            ..Default::default()
         });
     });
 }

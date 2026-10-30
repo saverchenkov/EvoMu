@@ -161,3 +161,6 @@ pub mod tourney_service;
 pub mod wallet_ledger;
 pub mod wallet_serverops;
 pub mod wallet_services_ext;
+pub mod wormhole_lifecycle_ops;
+pub mod wormhole_pve_escalations;
+pub mod wormhole_pve_seeding;

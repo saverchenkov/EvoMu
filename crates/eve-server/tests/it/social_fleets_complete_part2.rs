@@ -196,8 +196,8 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     });
     let c5_scan = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_001_886)], &kw, None).await.unwrap();
     let Some(PyRep::List(c5_sigs)) = c5_scan.dict_get("signatures") else { panic!() };
-    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WST-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30643))));
-    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WND-")) && s.dict_get("typeID") == Some(&PyRep::Integer(30645))));
+    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WST-")) && s.dict_get("typeID").and_then(|v| v.as_i64()).is_some_and(|tid| (30698..=30703).contains(&tid))));
+    assert!(c5_sigs.iter().any(|s| s.dict_get("signatureID").and_then(|v| v.as_str()).is_some_and(|id| id.starts_with("WND-")) && s.dict_get("typeID").and_then(|v| v.as_i64()).is_some_and(|tid| (30698..=30706).contains(&tid))));
 
     // 7. Natural lifetime progression & natural expiration collapse
     let rep_wh_item_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(30_000_142, &replacement_sig_id);

@@ -343,7 +343,7 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     assert_eq!(r.expect_err("cleared").code, "SiteAlreadyCleared");
 
     // 5. C3 Sleeper site seeded by production `ensure_system_pve_sites_seeded` with zero-bounty Sleepers
-    let c3 = 31_000_003_u32;
+    let c3 = 31_000_885_u32;
     ensure_system_pve_sites_seeded(&ctx, c3).await;
     let wh_site = format!("PVE-ANOM-{c3}-1");
     let (w1, wave1, _, _) = site_state(&ctx, c3, &wh_site);

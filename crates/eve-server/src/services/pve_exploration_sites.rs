@@ -395,7 +395,12 @@ pub async fn spawn_sleeper_wave_core(
                 entropic_cycles: 0,
                 drifter_overshield_hp: 0.0,
                 drifter_doomsday_fired: false,
-                web_speed_factor: 0.5,
+                web_speed_factor: sde
+                    .types
+                    .get(&tid)
+                    .and_then(|t| t.default_attributes.get(&20).copied())
+                    .filter(|&v| v < 0.0)
+                    .unwrap_or(-50.0),
                 web_range: 15_000.0,
                 scram_strength: 2.0,
                 scram_range: 12_000.0,
@@ -412,6 +417,19 @@ pub async fn spawn_sleeper_wave_core(
         );
         drop(rt);
         ball_ids.push(bid);
+    }
+    if wave == 1 {
+        let sentry_bid = crate::services::wormhole_pve_escalations::spawn_sleeper_sentry_tower_for_class(
+            systems,
+            db,
+            sde,
+            combat_ephemeral,
+            solar_system_id,
+            wh_class,
+            center,
+        )
+        .await;
+        ball_ids.push(sentry_bid);
     }
     ball_ids
 }

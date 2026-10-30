@@ -340,7 +340,11 @@ async fn handle_cmd_warp_to_stuff(
                                     && eff_strength >= 1.0))
                                 && !s.collapsed
                             {
-                                return Some(DVec3::from_array(s.position));
+                                let base_pos = crate::services::space_destiny::space_pochven_wormholes::pochven_wormhole_ball_position(&ctx.sde, s);
+                                if crate::services::wormhole_lifecycle_ops::is_drifter_wormhole(&ctx.sde, s) {
+                                    return Some(base_pos + DVec3::new(80_000.0, 0.0, 0.0));
+                                }
+                                return Some(base_pos);
                             }
                         }
                     }
@@ -376,7 +380,21 @@ async fn handle_cmd_warp_to_stuff(
     if resolved_pos.is_none() && target_id > 0 && target_id != ship_id && !is_unresolved_sig_ball {
         if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
             if matches!(tb.mode, MovementMode::Rigid) {
-                resolved_pos = Some(tb.position);
+                let is_drifter_ball = matches!(
+                    tb.type_id,
+                    34_494 | 35_650..=35_654 | 30_671..=30_676
+                ) || (tb.type_id == 26_272
+                    && (14..=18).contains(
+                        &crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(
+                            &ctx.sde, sys_id,
+                        )
+                        .0,
+                    ));
+                resolved_pos = Some(if is_drifter_ball {
+                    tb.position + DVec3::new(80_000.0, 0.0, 0.0)
+                } else {
+                    tb.position
+                });
             }
         }
     }

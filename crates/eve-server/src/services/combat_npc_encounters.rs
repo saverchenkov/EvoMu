@@ -339,18 +339,36 @@ pub async fn handle_npc_destroyed_in_space(
         });
         let supp_mult = 1.0 + 0.05 * f64::from(s_stage.min(5));
         let eff_bounty = npc.bounty_isk * supp_mult;
-        let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
-        if solar_system_id < 31_000_000
-            && npc.archetype != "Sleeper"
-            && eff_bounty > 0.0
-            && killer > 0
-            && rt.bounty_credited_balls.insert(killed_ball_id)
+        let drop_drifter_sleeper_loot =
+            npc.archetype == "Drifter" && npc.custom_cargo_loot.is_some();
+        let drop_pos = npc.spawn_position;
+        let drop_cls = npc.sleeper_wh_class.max(5);
         {
-            *rt.pending_bounty_ticks
-                .entry((solar_system_id, killer))
-                .or_insert(0.0) += eff_bounty;
+            let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+            if solar_system_id < 31_000_000
+                && npc.archetype != "Sleeper"
+                && eff_bounty > 0.0
+                && killer > 0
+                && rt.bounty_credited_balls.insert(killed_ball_id)
+            {
+                *rt.pending_bounty_ticks
+                    .entry((solar_system_id, killer))
+                    .or_insert(0.0) += eff_bounty;
+            }
+            rt.destroyed_npc_cache.insert(killed_ball_id, npc);
         }
-        rt.destroyed_npc_cache.insert(killed_ball_id, npc);
+        if drop_drifter_sleeper_loot && killer > 0 {
+            let _ = crate::services::pve_exploration_sites::drop_sleeper_wreck_core(
+                db,
+                systems,
+                sde,
+                solar_system_id,
+                killer,
+                drop_pos,
+                drop_cls,
+            )
+            .await;
+        }
     }
 }
 

@@ -97,7 +97,7 @@
   },
   "E-1": {
     "assessment": "PARTIAL",
-    "note": "Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending clearance."
+    "note": "Broker fee calculation with Broker Relations and standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending clearance."
   },
   "E-2": {
     "assessment": "PARTIAL",
@@ -137,7 +137,7 @@
   },
   "ESI-5": {
     "assessment": "DONE",
-    "note": "All 28 Alliance and Corporation ESI routes and 12 governance/lifecycle domain features closed with state-backed tests in esi_corp_alliance.rs and esi_corp_governance.rs."
+    "note": "All 28 Alliance and Corporation ESI routes and 12 governance and lifecycle domain features closed with state-backed integration tests."
   },
   "ESI-6": {
     "assessment": "PARTIAL",
@@ -177,7 +177,7 @@
   },
   "MN-08": {
     "assessment": "DONE",
-    "note": "Regional ice belts with 4h respawn, ice harvester 1,000 m3 block cycles and duration modifiers (Ice Harvesting, Mining Barge/Exhumer, IHU II, accelerator rig), and K-space/W-space gas harvesting tested."
+    "note": "Regional ice belts with 4h respawn, ice harvester 1,000 m3 block cycles and duration modifiers (Ice Harvesting, Barge/Exhumer, IHU II, rig), and K-space/W-space gas harvesting tested."
   },
   "MN-09": {
     "assessment": "DONE",
@@ -189,15 +189,15 @@
   },
   "MN-11": {
     "assessment": "DONE",
-    "note": "In-space compression (Porpoise/Orca/Rorqual Industrial Core + compressor modules via inSpaceCompressionMgr) and structure compression/gas decompression (Athanor/Tatara via structureCompressionMgr) tested."
+    "note": "In-space compression (Porpoise/Orca/Rorqual Industrial Core + compressor modules via inSpaceCompressionMgr) and Athanor/Tatara compression/gas decompression (structureCompressionMgr) tested."
   },
   "MN-12": {
     "assessment": "DONE",
-    "note": "Station and Upwell structure reprocessing (reprocessingSvc) with SDE typeMaterials, facility/rig/skill/implant (RX-801..804) yield curve, standing-based NPC tax, per-structure service tax, Scrapmetal, and Prismaticite tested."
+    "note": "Station and Upwell reprocessing (reprocessingSvc) with SDE typeMaterials, facility/rig/skill/implant yield curve, standing NPC tax, structure service tax, Scrapmetal, and Prismaticite tested."
   },
   "MN-13": {
     "assessment": "DONE",
-    "note": "Moon survey probes (18635/18637/18626, T1/T2 launcher 33270/33272, 100,000 km range + alignment + flight time + undocked check, OnNewMoonProbe/OnMoonScanComplete/OnRemoveMoonProbe) and server-tick moon extraction/fracture/jackpot/decay tested."
+    "note": "Moon survey probes and T1/T2 launchers (100,000 km range, alignment, flight time, OnNewMoonProbe/OnMoonScanComplete/OnRemoveMoonProbe) and server-tick moon extraction/fracture/jackpot/decay tested."
   },
   "MN-14": {
     "assessment": "DONE",
@@ -277,15 +277,15 @@
   },
   "Q-8": {
     "assessment": "PARTIAL",
-    "note": "Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
+    "note": "Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations handlers implemented; open quasar:* endpoint rows and Phase Q client journeys pending."
   },
   "Q-9": {
     "assessment": "PARTIAL",
-    "note": "Quasar Ship Cosmetics, SKINR Third-Party Sequencing, Licenses, Drafts, Structure Paintwork, and App Infrastructure gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
+    "note": "Quasar Ship Cosmetics, SKINR Sequencing, Licenses, Drafts, Structure Paintwork, and App Infrastructure handlers implemented; open quasar:* endpoint rows and Phase Q client journeys pending."
   },
   "S-1": {
     "assessment": "DONE",
-    "note": "Only types with SDE typeMaterials can be reprocessed; rejects Tritanium and non-reprocessable items with ItemNotReprocessable, and reprocesses Veldspar into SDE material yields scaled by portion size credited to station hangar."
+    "note": "Only types with SDE typeMaterials reprocess; rejects Tritanium and non-reprocessable items with ItemNotReprocessable, and credits Veldspar SDE material yields scaled by portion size."
   },
   "S-10": {
     "assessment": "PARTIAL",
@@ -393,11 +393,11 @@
   },
   "T-5": {
     "assessment": "DONE",
-    "note": "Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score."
+    "note": "Installed cargo-llvm-cov and cargo-mutants and added QA coverage and mutation verification harness enforcing >= 85% thresholds."
   },
   "T-6": {
     "assessment": "PARTIAL",
-    "note": "tools/client-harness/run_journeys script and simulated two-client harness in place; real V24 client journey execution pending."
+    "note": "Client journey runner and simulated two-client harness in place; real V24 client journey execution pending."
   },
   "T-7": {
     "assessment": "DONE",
@@ -405,11 +405,11 @@
   },
   "T-11": {
     "assessment": "PARTIAL",
-    "note": "Differential harness framework implemented in t11_destiny_differential.rs; 6 baseline scenarios tested. Full closure requires 1,000 scenarios driven directly against CCP _destiny.so runtime."
+    "note": "Destiny differential harness framework implemented with 6 baseline scenarios tested; full closure requires 1,000 scenarios driven against CCP _destiny runtime."
   },
   "T-12": {
     "assessment": "DONE",
-    "note": "Differential harness in t12_dogma_differential.rs evaluating 10 canonical fits and 520 procedural ship/module/implant fits within relative tolerance 1e-5 against CCP's compiled Python 2.7 Dogma runtime (BaseDogmaLocation, ModifierEffect, Attribute, StackingNurfedAttribute, SkillLevelAttribute, with deterministic __hash__ on Attribute for reproducible set iteration) using unmodified Attribute.Update() (dgmOperatorPrecedence = [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]) and SkillLevelAttribute on attribute 280 (where AddIncomingModifier for operator 9 dgmAssSpecialSkillRelationship on effect_id 132 skillEffect is a no-op), rigs, boosters, module overheating, command gang bursts with duplicate dbuff aggregation (Maximum/Minimum/Additive DERIVED from SDE dbuffCollections schema) and stacking penalties, and abyssal mutaplasmids."
+    "note": "Dogma differential harness verifying 10 canonical and 520 procedural ship, module, implant, rig, booster, overheat, gang burst, and mutaplasmid fits within 1e-5 against CCP Python 2.7 Dogma runtime."
   },
   "Z-1": {
     "assessment": "PARTIAL",
@@ -433,11 +433,11 @@
   },
   "Z-6": {
     "assessment": "NOT STARTED",
-    "note": "Real-client journeys require execution via tools/client-harness/run_journeys."
+    "note": "Real-client journeys require execution via the V24 client journey harness."
   },
   "Z-7": {
     "assessment": "PARTIAL",
-    "note": "scripts/qa/verify_cov_and_mutants.py harness present; full workspace >=90% coverage and >=85% mutation gate pending."
+    "note": "Coverage and mutation QA harness present; full workspace >=90% coverage and >=85% mutation gate pending."
   },
   "Z-8": {
     "assessment": "NOT STARTED",

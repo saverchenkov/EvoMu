@@ -301,7 +301,7 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
 
     // 4. Pochven wormholes: Non-deadspace geometry (30km offset) and guards
     let pch_sys_id = 30_000_157_u32; // Senda (Pochven)
-    let static_whs = eve_server::services::space_destiny::space_pochven_wormholes::pochven_static_wormholes(pch_sys_id, 0, ctx.now_unix());
+    let static_whs = eve_server::services::space_destiny::space_pochven_wormholes::pochven_static_wormholes(&ctx.sde, pch_sys_id, 0, ctx.now_unix());
     assert!(!static_whs.is_empty(), "Static wormholes generated for Pochven system");
     let wh_sig = &static_whs[0];
     assert!(eve_server::services::space_destiny::space_pochven_wormholes::is_pochven_wormhole(&ctx.sde, wh_sig));
