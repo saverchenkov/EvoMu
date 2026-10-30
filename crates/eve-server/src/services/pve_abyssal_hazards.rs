@@ -749,30 +749,60 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     sys_id: SolarSystemId,
     ship_id: ItemId,
 ) -> Option<&'static str> {
+    if sys_id == crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID {
+        return None;
+    }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, mut ship_ball) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten()?;
-    let is_arena_ship = ctx.db.with_snapshot(|snap| {
+    let (_, ship_ball) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten()?;
+    let is_excluded_ship = ctx.db.with_snapshot(|snap| {
         let pvp = crate::services::pvp_filament_mgr::load_pvp_store(snap);
-        pvp.active_matches.values().filter(|m| m.active).any(|m| {
-            m.team_a.iter().chain(m.team_b.iter()).any(|&cid| {
-                snap.characters.get(&cid).is_some_and(|c| c.active_ship_id == ship_id)
-            })
-        })
+        let in_pvp = pvp.active_matches.values().any(|m| {
+            let elim = pvp.match_eliminated.get(&m.match_id);
+            crate::services::pvp_filament_arena::effective_match_teams(&pvp, m)
+                .into_iter()
+                .flatten()
+                .any(|cid| {
+                    !m.exited_pilots.contains(&cid)
+                        && !elim.is_some_and(|e| e.contains(&cid))
+                        && snap.characters.get(&cid).is_some_and(|c| {
+                            c.active_ship_id == ship_id
+                                && c.solar_system_id == m.arena_solar_system_id
+                        })
+                })
+        });
+        in_pvp
+    }) || with_pve_special_reg(ctx, |reg| {
+        reg.void_space_sessions
+            .values()
+            .any(|vs| vs.ship_id == ship_id)
     });
-    if is_arena_ship {
+    if is_excluded_ship {
         return None;
     }
     let (ship_pocket, weather_vel_mult, weather_cap_mult) = with_pve_special_reg(ctx, |reg| {
-        let p = reg
-            .abyssal_pockets
-            .values()
-            .find(|p| !p.completed && !p.collapsed_destroyed && (p.fleet_ship_ids.contains(&ship_id) || p.ship_id == ship_id));
+        let p = reg.abyssal_pockets.values().find(|p| {
+            !p.completed
+                && !p.collapsed_destroyed
+                && (p.fleet_ship_ids.contains(&ship_id) || p.ship_id == ship_id)
+        });
         let pid = p.map(|p| p.pocket_id);
         let v_mult = p
-            .map(|p| if p.weather == AbyssalWeatherKind::Dark { 1.0 + (p.weather_bonus_pct / 100.0) } else { 1.0 })
+            .map(|p| {
+                if p.weather == AbyssalWeatherKind::Dark {
+                    1.0 + (p.weather_bonus_pct / 100.0)
+                } else {
+                    1.0
+                }
+            })
             .unwrap_or(1.0);
         let c_mult = p
-            .map(|p| if p.weather == AbyssalWeatherKind::Electrical { (1.0 - p.weather_bonus_pct / 100.0).max(0.1) } else { 1.0 })
+            .map(|p| {
+                if p.weather == AbyssalWeatherKind::Electrical {
+                    (1.0 - p.weather_bonus_pct / 100.0).max(0.1)
+                } else {
+                    1.0
+                }
+            })
             .unwrap_or(1.0);
         (pid, v_mult, c_mult)
     });
@@ -790,24 +820,69 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
         }
     }
 
-    let (vel_mult, sig_mult, inertia_mult, boost_mult, cap_rech_mult, label) = cloud_modifiers_for_type(active_cloud);
-    let (default_vel, default_sig, default_cap_rech) = ctx.db.with_snapshot(|snap| {
-        let ship_type = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(ship_ball.type_id);
-        let sde_t = ctx.sde.types.get(&ship_type);
-        let dv = sde_t.and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0);
-        let ds = sde_t.and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(125.0);
-        let dc = sde_t.and_then(|t| t.default_attributes.get(&55).copied()).unwrap_or(120_000.0);
-        (dv, ds, dc)
+    let (vel_mult, sig_mult, inertia_mult, boost_mult, cap_rech_mult, label) =
+        cloud_modifiers_for_type(active_cloud);
+    let (char_id, ship_type, has_dyn_vel, has_dyn_cap) = ctx.db.with_snapshot(|snap| {
+        let ship_item = snap.items.get(&ship_id);
+        let stype = ship_item.map(|i| i.type_id).unwrap_or(ship_ball.type_id);
+        let cid = ship_item
+            .map(|i| i.owner_id)
+            .filter(|&o| o > 0)
+            .or_else(|| {
+                snap.characters
+                    .values()
+                    .find(|c| c.active_ship_id == ship_id)
+                    .map(|c| c.character_id)
+            })
+            .unwrap_or(0);
+        let dyn_v = ship_item.is_some_and(|i| i.dynamic_attributes.contains_key(&37));
+        let dyn_c = ship_item.is_some_and(|i| i.dynamic_attributes.contains_key(&55));
+        (cid, stype, dyn_v, dyn_c)
     });
+    let fitted_ball = crate::services::pve_abyssal_pylons::build_fitted_ship_space_ball(
+        ctx,
+        char_id,
+        ship_id,
+        ship_type,
+        ship_ball.position,
+    );
+    let fitted_cs = if char_id > 0 {
+        ctx.build_ship_combat_state(char_id, ship_id, ship_type)
+    } else {
+        ctx.build_type_combat_state(ship_type)
+    };
+    let eff_weather_vel = if has_dyn_vel { 1.0 } else { weather_vel_mult };
+    let eff_weather_cap = if has_dyn_cap { 1.0 } else { weather_cap_mult };
 
-    ship_ball.max_velocity = default_vel * weather_vel_mult * vel_mult;
-    ship_ball.inertia = 0.5 * inertia_mult;
-    let _ = sys_handle.spawn_ball(ship_ball).await;
-    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
-        cs.signature_radius = default_sig * sig_mult;
-        cs.shield_boost_multiplier = boost_mult;
-        cs.capacitor_recharge_time_ms = (default_cap_rech * weather_cap_mult * cap_rech_mult).max(1_000.0);
-        let _ = sys_handle.set_combat_state(ship_id, cs).await;
+    {
+        let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = bp.balls.get_mut(&ship_id) {
+            b.max_velocity = fitted_ball.max_velocity * eff_weather_vel * vel_mult;
+            b.inertia = fitted_ball.inertia * inertia_mult;
+        }
+        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+            cs.signature_radius = fitted_cs.signature_radius * sig_mult;
+            cs.shield_boost_multiplier = boost_mult;
+            cs.capacitor_recharge_time_ms =
+                (fitted_cs.capacitor_recharge_time_ms * eff_weather_cap * cap_rech_mult)
+                    .max(1_000.0);
+        }
     }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut active_clouds: HashMap<i64, TypeId> = snap
+            .service_state_blobs
+            .get("abyssal_active_clouds")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if let Some(cid) = active_cloud {
+            active_clouds.insert(ship_id, cid);
+        } else {
+            active_clouds.remove(&ship_id);
+        }
+        if let Ok(json) = serde_json::to_string(&active_clouds) {
+            snap.service_state_blobs
+                .insert("abyssal_active_clouds".into(), json);
+        }
+    });
     label
 }

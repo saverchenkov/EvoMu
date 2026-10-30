@@ -453,8 +453,21 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
     let (ship1, ship2, ship3) = (625_000_001_i64, 625_000_002_i64, 625_000_003_i64);
     let base = DVec3::new(35_000_000.0, 2.0e9, 0.0);
 
-    // 1. BF-06: activate_trace enforces cloak/tether checks, 30m un-entered lifetime, and fitted exit Ball kinematics
+    // 1. BF-06 & R-ABYSS-CLOUD-FIT-01: activate_trace enforces cloak/tether checks, 30m un-entered lifetime, and fitted Dogma kinematics across ClientIsReady & exit
     let mut sess1 = login_pilot_in_space(&ctx, 887_401, "demo", "demo-secret", char1, ship1, 624, sys_id, base).await;
+    let nano_id = 725_100_099_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(nano_id, InventoryItemRecord {
+            item_id: nano_id, type_id: 2_605, owner_id: char1, location_id: ship1, flag: InventoryFlag::LoSlot0, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+        snap.module_online_states.insert(nano_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship1);
+    let raw_maller_vel = ctx.sde.types[&624].default_attributes[&37];
+    let raw_maller_in = ctx.sde.types[&624].default_attributes[&70];
+    let pre_fit = ctx.get_or_rebuild_ship_fitting(char1, ship1).expect("fitted Maller");
+    let (fit_maller_vel, fit_maller_in) = (pre_fit.ship.get_attribute(37, &ctx.sde), pre_fit.ship.get_attribute(70, &ctx.sde));
+    assert!((fit_maller_vel - raw_maller_vel).abs() > 1.0 && (fit_maller_in - raw_maller_in).abs() > 0.01, "Nanofiber II modifies Maller speed & agility");
     seed_cargo_item(&ctx, 725_100_001, FIL_T1_ELEC, char1, ship1, 1);
     let dep1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(725_100_001)], &kw, None).await.expect("dep1");
     let tr1 = dep1.dict_get("traceBallID").unwrap().as_i64().unwrap();
@@ -470,6 +483,11 @@ async fn test_abyssal_coop_staggered_rooms_reentry_kinematics_and_pod_corpse() {
     let pid1 = ent1.dict_get("pocketID").unwrap().as_i64().unwrap();
     let p_sys = ent1.dict_get("solarSystemID").unwrap().as_i64().unwrap() as u32;
     let p_h = ctx.systems.get_or_spawn(p_sys);
+    let ready_rep = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "ClientIsReady", &[], &kw, None).await.expect("abyssalMgr.ClientIsReady");
+    assert_eq!(ready_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
+    let (_, ready_maller) = p_h.get_ball_snapshot(ship1).await.unwrap().expect("in-pocket Maller ball after ClientIsReady");
+    assert!((ready_maller.max_velocity - fit_maller_vel).abs() < 1e-3 && (ready_maller.max_velocity - raw_maller_vel).abs() > 1.0, "ClientIsReady preserves fitted max_velocity");
+    assert!((ready_maller.inertia - fit_maller_in).abs() < 1e-4 && (ready_maller.inertia - 0.5).abs() > 1e-3, "ClientIsReady preserves fitted inertia (not hardcoded 0.5)");
     for r in 0..3 {
         crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char1, r).await;
         let gid = 1_895_000_000 + pid1 * 10 + (r as i64 + 1);

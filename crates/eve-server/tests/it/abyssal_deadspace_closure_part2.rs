@@ -233,24 +233,22 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&pod_id].type_id), 670);
 
     for _ in 0..20 {
-        if ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()) {
-            break;
-        }
+        if ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()) { break; }
         let mut bp = abyss_h.ballpark.write().unwrap();
         step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), abyss_sys);
     }
     assert!(ctx.db.with_snapshot(|s| s.characters[&char1].station_id.is_some()), "Pilot respawned at home station after pod boundary death");
+    let origin_h = ctx.systems.get_or_spawn(sys_id);
+    assert!(origin_h.get_ball_snapshot(tr1).await.unwrap().is_none(), "Origin trace ball despawned after boundary pod death");
+    assert!(with_pve_special_reg(&ctx, |reg| !reg.abyssal_traces.contains_key(&tr1)), "abyssal_traces entry removed after boundary pod death");
 
-    // 4. Downtime evacuation: preserves DroneBay drones, destroys deployed drones in space, restores origin Local chat
-    // Position clock at 10:55 UTC (5m before 11:00 UTC downtime) so the 20m Abyssal timer stays active across the window boundary
+    // 4. Downtime evacuation: preserves DroneBay drones, destroys deployed drones in space, spawns ship in origin ballpark, despawns trace, restores Local chat
     let sec_init = ctx.now_unix() % 86_400;
     let target_pre_dt = 11 * 3_600 - 300;
     ctx.advance_virtual_clock(if sec_init <= target_pre_dt { target_pre_dt - sec_init } else { 86_400 - sec_init + target_pre_dt });
-    let char2 = 90_000_002_i64;
-    let ship2 = 630_000_002_i64;
+    let (char2, ship2) = (90_000_002_i64, 630_000_002_i64);
     let mut sess2 = login_pilot_in_space(&ctx, 887_202, "other", "other-secret", char2, ship2, 621, sys_id, DVec3::new(30_000_000.0, 2.0e9, 0.0)).await;
-    let bay_drone = 730_500_001_i64;
-    let space_drone = 730_500_002_i64;
+    let (bay_drone, space_drone) = (730_500_001_i64, 730_500_002_i64);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(bay_drone, InventoryItemRecord {
             item_id: bay_drone, type_id: 2456, owner_id: char2, location_id: ship2, flag: InventoryFlag::DroneBay, quantity: 1, singleton: true, version: 1, ..Default::default()
@@ -264,6 +262,7 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     let tr2 = dep2.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
     let ent2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(tr2)], &kw, None).await.expect("ent2");
     let p2_sys = ent2.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    assert!(origin_h.get_ball_snapshot(tr2).await.unwrap().is_some(), "Origin trace ball present before downtime evacuation");
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.insert(space_drone, eve_server::services::combat_crimewatch::DroneSpaceState {
             ball_id: space_drone, drone_item_id: space_drone, type_id: 2456, group_id: 100, owner_char_id: char2,
@@ -284,6 +283,9 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     let dt_window = eve_server::services::wallet_serverops::run_daily_downtime_and_jobs(&ctx);
     assert_eq!(dt_window.get("is1100UtcWindow"), Some(&1));
     assert!(dt_window.get("evacuatedAbyssalPilots").copied().unwrap_or(0) >= 1, "11:00 UTC downtime rescues active pocket");
+    assert!(origin_h.get_ball_snapshot(ship2).await.unwrap().is_some(), "Evacuated ship ball spawned in origin solar system ballpark");
+    assert!(origin_h.get_ball_snapshot(tr2).await.unwrap().is_none(), "Origin trace ball despawned on downtime evacuation");
+    assert!(with_pve_special_reg(&ctx, |reg| !reg.abyssal_traces.contains_key(&tr2)), "abyssal_traces entry removed on downtime evacuation");
     ctx.db.with_snapshot(|snap| {
         assert_eq!(snap.characters[&char2].solar_system_id, sys_id, "Pilot returned to origin system");
         assert!(snap.items.contains_key(&bay_drone), "Drone in DroneBay preserved");
@@ -512,7 +514,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), FILAMENT_CLOUD_LARGE_TYPE_ID, 0.0), 40_000.0);
     assert_eq!(spatial_cloud_radius_m(Some(&ctx.sde), PROVING_TACHYON_CLOUD_TYPE_ID, 0.0), 40_000.0);
 
-    let default_vel = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0);
+    let (default_vel, default_in) = ctx.sde.types.get(&621).map(|t| (t.default_attributes.get(&37).copied().unwrap_or(250.0), t.default_attributes.get(&70).copied().unwrap_or(0.5))).unwrap_or((250.0, 0.5));
     for (cid, ctid, cx) in [(740_020_001, BIOLUMINESCENT_CLOUD_TYPE_ID, 0.0), (740_020_002, FILAMENT_CLOUD_TYPE_ID, 50_000.0), (740_020_003, TACHYON_CLOUD_TYPE_ID, -50_000.0)] {
         let _ = sys_h.spawn_ball(Ball { id: cid, type_id: ctid, position: DVec3::new(cx, 50_000.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1.0, radius: SPATIAL_CLOUD_RADIUS_M, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     }
@@ -532,7 +534,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, abyss_sys, ship_id).await, Some("TachyonCloud"));
     let (_, tach_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     assert!((tach_ball.max_velocity - default_vel * 4.0).abs() < 1e-3);
-    assert!((tach_ball.inertia - 0.25).abs() < 1e-3);
+    assert!((tach_ball.inertia - default_in * 0.5).abs() < 1e-3);
     assert!((sys_h.get_combat_state(ship_id).await.unwrap().unwrap().signature_radius - 500.0).abs() < 1e-3);
 
     let _ = sys_h.set_ball_position(ship_id, DVec3::new(0.0, 0.0, 0.0)).await;
@@ -540,7 +542,7 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     let (_, exit_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let exit_cs = sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((exit_ball.max_velocity - default_vel).abs() < 1e-3);
-    assert!((exit_ball.inertia - 0.5).abs() < 1e-3);
+    assert!((exit_ball.inertia - default_in).abs() < 1e-3);
     assert!((exit_cs.signature_radius - 125.0).abs() < 1e-3);
     assert!((exit_cs.shield_boost_multiplier - 1.0).abs() < 1e-6);
 

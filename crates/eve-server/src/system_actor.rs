@@ -1243,6 +1243,9 @@ impl SystemRegistry {
         if let Some(existing) = guard.get(&solar_system_id) {
             return existing.clone();
         }
+        if let Some(ref db) = self.db {
+            register_db_system_ballpark(db, solar_system_id, &handle);
+        }
         guard.insert(solar_system_id, handle.clone());
         handle
     }

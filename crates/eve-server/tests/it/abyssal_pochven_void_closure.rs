@@ -309,83 +309,58 @@ async fn test_void_space_player_jump_and_gate_activation() {
         "Exit gate 888001 must exist in Void Space"
     );
 
-    // 6. ClientIsReady RPC
-    let ready_rep = ctx
-        .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "ClientIsReady", &[], &kw, None)
-        .await
-        .expect("ClientIsReady");
+    // 6. ClientIsReady RPC & R-VOID-BOUNDARY-02: Void Space ship at 100 km from [0,0,0] takes 0 Abyssal boundary damage
+    let ready_rep = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "ClientIsReady", &[], &kw, None).await.expect("ClientIsReady");
     assert_eq!(ready_rep.dict_get("ready"), Some(&PyRep::Bool(true)));
+    let _ = void_handle.set_ball_position(ship_id, DVec3::new(100_000.0, 0.0, 0.0)).await;
+    let pre_void_hp = void_handle.get_combat_state(ship_id).await.unwrap().unwrap().structure_hp;
+    for _ in 0..5 {
+        let mut bp = void_handle.ballpark.write().unwrap();
+        eve_server::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(&mut bp, Some(&ctx.sde), Some(&ctx.db), VOID_SPACE_SYS_ID);
+    }
+    assert_eq!(void_handle.get_combat_state(ship_id).await.unwrap().unwrap().structure_hp, pre_void_hp, "Void Space ship at 100km takes 0 Abyssal boundary damage");
+    let _ = void_handle.set_ball_position(ship_id, DVec3::ZERO).await;
 
     // 7. Exit gate activation returns to origin solar system, restores Local chat, and preserves fitted Dogma kinematics
-    let exit_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "voidSpaceMgr",
-            None,
-            "VoidSpaceEndGateActivation",
-            &[PyRep::Integer(888_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("VoidSpaceEndGateActivation");
-    assert_eq!(
-        exit_rep.dict_get("solarSystemID"),
-        Some(&PyRep::Integer(JITA_SYS_ID as i64))
-    );
+    let exit_rep = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect("VoidSpaceEndGateActivation");
+    assert_eq!(exit_rep.dict_get("solarSystemID"), Some(&PyRep::Integer(JITA_SYS_ID as i64)));
     assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID));
     assert!(ctx.db.with_snapshot(|s| s.chat_channels["solarsystemid2:30000142"].members.contains(&char_id)), "Restored to Jita Local chat on Void Space exit");
     let (_, jb) = jita_handle.get_ball_snapshot(ship_id).await.unwrap().expect("Ship ball restored in Jita");
     assert!((jb.max_velocity - fit_vel).abs() < 1e-3 && (jb.inertia - fit_in).abs() < 1e-4, "Returned Jita ball preserves fitted Dogma kinematics");
 
-    // 8. Also verify V24 Warp Matrix / Void filament type 62_448 ("QA Void Filament", SDE group_id = 4145)
-    //    jumps into Void Space (32_000_002) and distinguish it from Needlejack Jump Filaments (53_977, group_id = 4041)
+    // 8. Verify V24 Warp Matrix / Void filament 62_448 (group 4145) vs Needlejack 53_977 (group 4041), and verify Void Space expiry evacuates cleanly without stranding
     assert_eq!(ctx.sde.types.get(&62_448).map(|t| t.group_id), Some(4145), "QA Void Filament 62448 is SDE group 4145 (Warp Matrix Filaments)");
     assert_eq!(ctx.sde.types.get(&53_977).map(|t| t.group_id), Some(4041), "Noise-5 53977 is SDE group 4041 (Jump Filaments), not Void Space");
     let void_fil_iid = 200_000_602_i64;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            void_fil_iid,
-            eve_db::InventoryItemRecord {
-                item_id: void_fil_iid,
-                type_id: 62_448, // QA Void Filament (SDE group 4145)
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: eve_db::InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        snap.items.insert(void_fil_iid, eve_db::InventoryItemRecord {
+            item_id: void_fil_iid, type_id: 62_448, owner_id: char_id, location_id: ship_id, flag: eve_db::InventoryFlag::Cargo, quantity: 2, singleton: false, ..Default::default()
+        });
     });
-    let jump_rep2 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "voidSpaceMgr",
-            None,
-            "VoidSpacePlayerJump",
-            &[PyRep::Integer(void_fil_iid), PyRep::Integer(5002)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("VoidSpacePlayerJump via QA Void Filament 62448");
+    let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
+    let jump_rep2 = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid), PyRep::Integer(5002)], &kw, None).await.expect("VoidSpacePlayerJump 62448");
     assert_eq!(jump_rep2.dict_get("solarSystemID"), Some(&PyRep::Integer(VOID_SPACE_SYS_ID as i64)));
     assert_eq!(sess.solar_system_id, Some(VOID_SPACE_SYS_ID));
-    let exit_rep2 = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "voidSpaceMgr",
-            None,
-            "VoidSpaceEndGateActivation",
-            &[PyRep::Integer(888_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("VoidSpaceEndGateActivation second exit");
-    assert_eq!(exit_rep2.dict_get("solarSystemID"), Some(&PyRep::Integer(JITA_SYS_ID as i64)));
-    assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID));
+    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        if let Some(vs) = reg.void_space_sessions.get_mut(&char_id) {
+            vs.expires_at_sec = ctx.now_unix().saturating_sub(1);
+        }
+    });
+    let exp_err = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect_err("Expired Void Space gate returns PocketCollapsed");
+    assert_eq!(exp_err.code, "PocketCollapsed");
+    assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID), "Expired Void Space gate evacuates session back to Jita (not stranded in 32000002)");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), JITA_SYS_ID, "DB solar_system_id evacuated to Jita");
+    assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Evacuated ship ball spawned in Jita");
+
+    let _ = jita_handle.set_ball_position(ship_id, DVec3::new(0.0, 2.0e9, 0.0)).await;
+    ctx.advance_secs(15);
+    let _ = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(void_fil_iid)], &kw, None).await.expect("VoidSpacePlayerJump 3");
+    ctx.advance_secs(1_205); // background cluster tick expiry sweep also evacuates pilot cleanly to Jita
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&char_id].solar_system_id), JITA_SYS_ID, "Background Void Space expiry sweep evacuates pilot to Jita");
+    assert!(jita_handle.get_ball_snapshot(ship_id).await.unwrap().is_some(), "Background Void Space expiry spawns ship ball in Jita");
+    let _ = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[PyRep::Integer(888_001)], &kw, None).await.expect_err("Post-sweep VoidSpaceEndGateActivation syncs stale session");
+    assert_eq!(sess.solar_system_id, Some(JITA_SYS_ID), "Stale session synced back to Jita");
 }
 
 #[tokio::test]

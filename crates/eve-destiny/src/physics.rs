@@ -254,8 +254,8 @@ impl Ballpark {
                 }
                 let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                if matches!(group_a, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1408 | 1657)
-                    || matches!(group_b, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1408 | 1657)
+                if matches!(group_a, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1408 | 1657 | 1971 | 1980 | 1981)
+                    || matches!(group_b, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1408 | 1657 | 1971 | 1980 | 1981)
                 {
                     continue;
                 }

@@ -885,6 +885,8 @@ pub(crate) async fn handle_void_space_end_gate_activation(
         reg.void_space_sessions.get(&char_id).cloned()
     });
     let Some(vs) = void_session else {
+        ctx.sync_session(session);
+        ctx.quasar_gateway.on_session_changed(session, ctx.now_unix());
         return Err(BridgeRpcError {
             code: "NotInVoidSpace".into(),
             message: "No active Void Space session record for character".into(),
@@ -893,16 +895,14 @@ pub(crate) async fn handle_void_space_end_gate_activation(
 
     let now_unix = ctx.now_unix();
     if vs.expires_at_sec > 0 && now_unix >= vs.expires_at_sec {
-        crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-            reg.void_space_sessions.remove(&char_id);
-        });
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.remove(&format!("void_space_content:{char_id}"));
-        });
-        crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+        crate::services::pve_abyssal_lifecycle::evacuate_void_space_session_sync(
+            ctx, char_id, &vs, now_unix,
+        );
+        ctx.sync_session(session);
+        ctx.quasar_gateway.on_session_changed(session, now_unix);
         return Err(BridgeRpcError {
             code: "PocketCollapsed".into(),
-            message: "Void Space pocket has expired and collapsed".into(),
+            message: "Void Space pocket has expired and evacuated pilot to origin solar system".into(),
         });
     }
 

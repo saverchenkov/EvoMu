@@ -542,7 +542,9 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
     solar_system_id: eve_sde::SolarSystemId,
 ) -> Vec<i64> {
     let mut suppressor_destroyed = Vec::new();
-    if !(32_000_001..=32_999_999).contains(&solar_system_id) {
+    if !(32_000_001..=32_999_999).contains(&solar_system_id)
+        || solar_system_id == crate::services::abyssal_void_mgr::VOID_SPACE_SYSTEM_ID
+    {
         return suppressor_destroyed;
     }
     let mut pocket_by_ship: HashMap<i64, i64> = HashMap::new();
@@ -556,6 +558,12 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         let _ = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
             if let Some(blob) = snap.service_state_blobs.get("incursions_state") {
                 if let Ok(reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(blob) {
+                    for vs in reg.void_space_sessions.values() {
+                        arena_ships.insert(vs.ship_id);
+                        if let Some(ch) = snap.characters.get(&vs.char_id) {
+                            arena_ships.insert(ch.active_ship_id);
+                        }
+                    }
                     let active_pockets: Vec<_> = reg
                         .abyssal_pockets
                         .values()
@@ -589,10 +597,19 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                 }
             }
             let pvp_store = crate::services::pvp_filament_mgr::load_pvp_store(snap);
-            for m in pvp_store.active_matches.values().filter(|m| m.active) {
-                for &cid in m.team_a.iter().chain(m.team_b.iter()) {
-                    if let Some(ch) = snap.characters.get(&cid) {
-                        arena_ships.insert(ch.active_ship_id);
+            for m in pvp_store.active_matches.values() {
+                let elim = pvp_store.match_eliminated.get(&m.match_id);
+                for team in crate::services::pvp_filament_arena::effective_match_teams(&pvp_store, m) {
+                    for cid in team {
+                        if !m.exited_pilots.contains(&cid)
+                            && !elim.is_some_and(|e| e.contains(&cid))
+                        {
+                            if let Some(ch) = snap.characters.get(&cid) {
+                                if ch.solar_system_id == m.arena_solar_system_id {
+                                    arena_ships.insert(ch.active_ship_id);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -787,6 +804,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         }
         if is_pod {
             let mut spawned_corpse: Option<(ItemId, CharacterId)> = None;
+            let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
             if let Some(db) = db_opt {
                 let now_u = db.clock().now_unix_secs();
                 crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
@@ -807,16 +825,66 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                     st.ship_combat_hp.remove(&bid);
                     if cid > 0 {
                         st.abyssal_sessions.remove(&cid);
+                        let mut caches_to_purge: Vec<i64> = Vec::new();
                         if let Some(blob) = snap.service_state_blobs.get("incursions_state").cloned() {
                             if let Ok(mut reg) = serde_json::from_str::<crate::services::pve_special_sites::PveSpecialSitesRegistry>(&blob) {
-                                if let Some(p) = reg.abyssal_pockets.get_mut(&cid) {
+                                let p_info = reg.abyssal_pockets.get_mut(&cid).map(|p| {
                                     p.collapsed_destroyed = true;
                                     p.completed = true;
+                                    let npcs: Vec<i64> = p
+                                        .rooms
+                                        .iter()
+                                        .flat_map(|r| r.npc_ball_ids.iter().copied())
+                                        .collect();
+                                    (p.pocket_id, p.origin_solar_system_id, p.trace_ball_id, npcs)
+                                });
+                                if let Some((pid, origin_sys, bound_tid, npcs)) = p_info {
+                                    let any_other_alive = reg.abyssal_pockets.values().any(|other| {
+                                        other.pocket_id == pid && !other.completed && !other.collapsed_destroyed
+                                    });
+                                    if !any_other_alive {
+                                        let mut trace_ids = Vec::new();
+                                        if bound_tid > 0 {
+                                            trace_ids.push(bound_tid);
+                                        }
+                                        reg.abyssal_traces.retain(|&tid, t| {
+                                            if t.pocket_id == Some(pid) || (bound_tid > 0 && tid == bound_tid) {
+                                                if !trace_ids.contains(&tid) {
+                                                    trace_ids.push(tid);
+                                                }
+                                                false
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                        let mut room_balls = npcs;
+                                        for r in 1..=3_i64 {
+                                            let mid = 1_895_000_000 + pid * 10 + r;
+                                            let cid_b = 1_896_000_000 + pid * 10 + r;
+                                            let sid_b = cid_b + 500_000;
+                                            room_balls.extend([mid, cid_b, sid_b]);
+                                            caches_to_purge.extend([cid_b, sid_b]);
+                                            for c in 1..=3_i64 {
+                                                room_balls.push(1_898_000_000 + pid * 100 + r * 10 + c);
+                                            }
+                                            for py in 1..=5_i64 {
+                                                room_balls.push(1_899_000_000 + pid * 100 + r * 10 + py);
+                                            }
+                                        }
+                                        final_cleanup = Some((origin_sys, trace_ids, room_balls));
+                                    }
                                 }
                                 if let Ok(js) = serde_json::to_string(&reg) {
                                     snap.service_state_blobs.insert("incursions_state".into(), js);
                                 }
                             }
+                        }
+                        if !caches_to_purge.is_empty() {
+                            for &c_id in &caches_to_purge {
+                                snap.items.remove(&c_id);
+                                snap.item_positions.remove(&c_id);
+                            }
+                            snap.items.retain(|_, it| !caches_to_purge.contains(&it.location_id));
                         }
                         let (_, _, _, corpse_id, _) = destroy_pod_and_respawn_faction_corvette_in_snap(
                             snap,
@@ -829,6 +897,16 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                         spawned_corpse = Some((corpse_id, cid));
                     }
                 });
+                if let Some((origin_sys, trace_ids, room_balls)) = final_cleanup {
+                    for rbid in room_balls {
+                        let _ = ballpark.remove_ball(rbid);
+                    }
+                    if origin_sys != solar_system_id {
+                        for tid in trace_ids {
+                            crate::system_actor::try_remove_ball_for_db(db, origin_sys, tid);
+                        }
+                    }
+                }
             }
             if let Some((corpse_id, cid)) = spawned_corpse {
                 let (c_grp, c_cat) = sde_opt
@@ -1033,6 +1111,10 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
 
         let prev_cloud = active_clouds.get(&sid).copied();
         if prev_cloud == current_cloud {
+            if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
+                let (_, _, _, cur_b, _, _) = cloud_modifiers_for_type(current_cloud);
+                cs.shield_boost_multiplier = cur_b;
+            }
             continue;
         }
 

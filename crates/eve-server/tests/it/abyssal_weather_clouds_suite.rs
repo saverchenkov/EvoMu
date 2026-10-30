@@ -183,6 +183,7 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     }
 
     let default_vel = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(250.0);
+    let default_inertia = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&70).copied()).unwrap_or(0.5);
     let default_cap_rech = ctx.sde.types.get(&621).and_then(|t| t.default_attributes.get(&55).copied()).unwrap_or(120_000.0);
 
     // 1. Move ship into Tachyon cloud boundary (+300% signature radius, 4x velocity, 0.5x inertia)
@@ -192,7 +193,7 @@ async fn test_abyssal_spatial_hazard_clouds_and_composed_velocity() {
     let (_, ball) = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let cs_tach = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
     assert!((ball.max_velocity - default_vel * 4.0).abs() < 1e-3, "Tachyon cloud quadruples max velocity");
-    assert!((ball.inertia - 0.5 * 0.5).abs() < 1e-3, "Tachyon cloud halves inertia (-50%)");
+    assert!((ball.inertia - default_inertia * 0.5).abs() < 1e-3, "Tachyon cloud halves fitted/SDE inertia (-50%)");
     assert!((cs_tach.signature_radius - 125.0 * 4.0).abs() < 1e-3, "Tachyon cloud blooms signature radius +300% (x4)");
     assert!(ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.dynamic_attributes.is_empty()).unwrap_or(true)), "Dynamic attributes must not be polluted by spatial clouds");
 

@@ -663,7 +663,7 @@ impl Ballpark {
                     return None;
                 }
                 let grp = self.ball_group_ids.get(&other_id).copied().unwrap_or(25);
-                if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657) {
+                if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657 | 1971 | 1980 | 1981) {
                     return None;
                 }
                 let is_marauder = grp == 900 || matches!(b.type_id, 28659 | 28661 | 28665 | 28710);
