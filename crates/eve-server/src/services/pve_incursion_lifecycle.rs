@@ -341,7 +341,13 @@ pub fn spawn_incursion_site_in_role_system(
             entry.site_id.clone(),
             IncursionSiteWaveMeta {
                 current_wave: 1,
-                total_waves: if tier == "Staging" { 2 } else { 3 },
+                total_waves: if tier == "Mothership" {
+                    1
+                } else if tier == "Staging" {
+                    2
+                } else {
+                    3
+                },
             },
         );
         inc.sites.push(entry.clone());
@@ -410,7 +416,10 @@ pub async fn advance_incursion_wave_on_escort_kill(
                     &site.tier,
                     wave_meta.current_wave,
                 );
-                let mut to_spawn = Vec::with_capacity(reinforcements.len());
+                let mut to_spawn = Vec::with_capacity(reinforcements.len() + 1);
+                if wave_meta.current_wave >= wave_meta.total_waves {
+                    to_spawn.push((site.boss_npc_ball_id, site.boss_type_id, site.position));
+                }
                 for r in reinforcements {
                     to_spawn.push((r.npc_ball_id, r.type_id, site.position + DVec3::new(r.offset[0], r.offset[1], r.offset[2])));
                     site.escort_spawns.push(r);
@@ -425,12 +434,14 @@ pub async fn advance_incursion_wave_on_escort_kill(
         let sys_handle = systems.get_or_spawn(solar_system_id);
         for (bid, tid, pos) in spawns {
             systems.claim_special_site_ball(solar_system_id, bid);
-            let _ = sys_handle
-                .spawn_ball_with_combat(
-                    make_site_npc_ball(bid, tid, pos),
-                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, tid),
-                )
-                .await;
+            if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
+                let _ = sys_handle
+                    .spawn_ball_with_combat(
+                        make_site_npc_ball(bid, tid, pos),
+                        crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, tid),
+                    )
+                    .await;
+            }
         }
     }
 }
@@ -739,7 +750,13 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
                         if s.locked_until_low_influence {
                             continue;
                         }
-                        spawn_balls.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                        let on_final_wave = reg
+                            .incursion_site_waves
+                            .get(&s.site_id)
+                            .is_none_or(|w| w.current_wave >= w.total_waves);
+                        if on_final_wave {
+                            spawn_balls.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                        }
                         for esc in &s.escort_spawns {
                             if !esc.destroyed {
                                 let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);

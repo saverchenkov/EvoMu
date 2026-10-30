@@ -628,7 +628,13 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
                 if s.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
                     continue;
                 }
-                g_list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                let on_final_wave = reg
+                    .incursion_site_waves
+                    .get(&s.site_id)
+                    .is_none_or(|w| w.current_wave >= w.total_waves);
+                if on_final_wave {
+                    g_list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                }
                 for esc in &s.escort_spawns {
                     if !esc.destroyed {
                         let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);

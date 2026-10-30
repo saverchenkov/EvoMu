@@ -235,8 +235,19 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
     assert_eq!(rep_row.dict_get("influence").and_then(|v| v.as_f64()), Some(1.0));
     assert_eq!(rep_row.dict_get("hasBoss").and_then(|v| v.as_bool()), Some(false));
 
-    // 3. Verify multi-wave NPC spawning when Wave 1 escorts are destroyed
+    // 3. Verify multi-wave NPC spawning & boss wave gate: boss is NOT spawned in Wave 1 and early completion is rejected
     let vg_sys_id = vg_sys_list[0];
+    let vg_handle = ctx.systems.get_or_spawn(vg_sys_id);
+    assert!(
+        vg_handle.get_ball_snapshot(vg_boss_bid).await.unwrap().is_none(),
+        "Vanguard boss must NOT spawn in Wave 1 before escort waves are cleared"
+    );
+    let early_err = on_incursion_boss_destroyed(&ctx, vg_sys_id, vg_boss_bid, Some(90_000_001))
+        .await
+        .expect("site matched")
+        .expect_err("early boss kill on Wave 1 must be rejected");
+    assert_eq!(early_err.code, "IncursionSiteNpcsRemaining");
+
     with_pve_special_reg(&ctx, |reg| {
         let inc = reg.incursions.get_mut(&target_cid).unwrap();
         let site = inc.sites.iter_mut().find(|s| s.site_id == vg_site_id).unwrap();
@@ -250,17 +261,18 @@ async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
         reg.incursion_site_waves.get(&vg_site_id).map(|w| w.current_wave).unwrap_or(1)
     });
     assert_eq!(wave_after, 2, "Destroying wave 1 escorts must spawn wave 2 reinforcements");
-    assert!(vg_boss_bid > 0);
+    assert!(vg_handle.get_ball_snapshot(vg_boss_bid).await.unwrap().is_none(), "Boss still deferred on Wave 2 of 3");
 
-    // 4. Unlock Mothership at low influence, kill it, verify withdrawal timer & respawn cadence
-    let ms_boss_bid = with_pve_special_reg(&ctx, |reg| {
+    // 4. Unlock Mothership at low influence, clear its escort fleet, kill it, verify withdrawal timer & respawn cadence
+    let (ms_site_id, ms_boss_bid) = with_pve_special_reg(&ctx, |reg| {
         let inc = reg.incursions.get_mut(&target_cid).unwrap();
         inc.influence = 0.05;
         inc.mothership_spawned = true;
         let ms = inc.sites.iter_mut().find(|s| s.tier == "Mothership").unwrap();
         ms.locked_until_low_influence = false;
-        ms.boss_npc_ball_id
+        (ms.site_id.clone(), ms.boss_npc_ball_id)
     });
+    crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &ms_site_id).await;
     let ms_res = on_incursion_boss_destroyed(&ctx, hq_sys, ms_boss_bid, Some(90_000_001))
         .await
         .expect("Mothership site matched")
@@ -330,7 +342,7 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
     crate::common::pin_clock(&ctx);
     ensure_special_sites_spawned(&ctx).await;
 
-    let (target_cid, hq_sys, vg_sys, vg_bid, as_sys, as_bid, hq_bid) =
+    let (target_cid, hq_sys, vg_sys, vg_sid, as_sys, as_sid, hq_sid) =
         with_pve_special_reg(&ctx, |reg| {
             let (&cid, inc) = reg.incursions.iter().next().unwrap();
             assert_eq!(inc.influence, 1.0, "Influence must start at 100% (1.0)");
@@ -341,10 +353,10 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
                 cid,
                 inc.hq_solar_system_id,
                 vg.solar_system_id,
-                vg.boss_npc_ball_id,
+                vg.site_id.clone(),
                 ass.solar_system_id,
-                ass.boss_npc_ball_id,
-                hq.boss_npc_ball_id,
+                ass.site_id.clone(),
+                hq.site_id.clone(),
             )
         });
 
@@ -376,17 +388,20 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
     assert_eq!(attrs_full[&263], 500.0);
     assert_eq!(attrs_full[&64], 0.5);
 
-    // 2. Completing Vanguard (-0.05), Assault (-0.20), and HQ (-0.25) reduces influence by site class
+    // 2. Completing Vanguard (-0.05), Assault (-0.20), and HQ (-0.25) after clearing waves reduces influence by site class
+    let vg_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys, &vg_sid).await;
     let _ = ctx.systems.get_or_spawn(vg_sys).remove_ball(vg_bid).await;
     on_incursion_boss_destroyed(&ctx, vg_sys, vg_bid, Some(90_000_001)).await.unwrap().unwrap();
     let inf_after_vg = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
     assert!((inf_after_vg - 0.95).abs() < 1e-6, "Vanguard reduces influence by 0.05");
 
+    let as_bid = crate::common::clear_incursion_site_escort_waves(&ctx, as_sys, &as_sid).await;
     let _ = ctx.systems.get_or_spawn(as_sys).remove_ball(as_bid).await;
     on_incursion_boss_destroyed(&ctx, as_sys, as_bid, Some(90_000_001)).await.unwrap().unwrap();
     let inf_after_as = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
     assert!((inf_after_as - 0.75).abs() < 1e-6, "Assault reduces influence by 0.20");
 
+    let hq_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &hq_sid).await;
     let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(hq_bid).await;
     on_incursion_boss_destroyed(&ctx, hq_sys, hq_bid, Some(90_000_001)).await.unwrap().unwrap();
     let inf_after_hq = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
@@ -413,14 +428,15 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
     assert_eq!(attrs_half[&64], 0.75, "25% damage penalty at 0.50 influence");
 
     // 5. At 0.08 influence (> 0%), Mothership stays locked; dropping to 0.0 (0%) unlocks Mothership -> Mobilizing
-    let (vg2_sys, vg2_bid, second_hq_bid, ms_boss_id) = with_pve_special_reg(&ctx, |reg| {
+    let (vg2_sys, vg2_sid, second_hq_sid, ms_sid) = with_pve_special_reg(&ctx, |reg| {
         let inc = reg.incursions.get_mut(&target_cid).unwrap();
         inc.influence = 0.13;
         let vg2 = inc.sites.iter().find(|s| s.tier == "Vanguard" && !s.boss_destroyed).unwrap();
         let hq2 = inc.sites.iter().find(|s| s.tier == "Headquarters" && !s.boss_destroyed).unwrap();
         let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
-        (vg2.solar_system_id, vg2.boss_npc_ball_id, hq2.boss_npc_ball_id, ms.boss_npc_ball_id)
+        (vg2.solar_system_id, vg2.site_id.clone(), hq2.site_id.clone(), ms.site_id.clone())
     });
+    let vg2_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg2_sys, &vg2_sid).await;
     let _ = ctx.systems.get_or_spawn(vg2_sys).remove_ball(vg2_bid).await;
     on_incursion_boss_destroyed(&ctx, vg2_sys, vg2_bid, Some(90_000_001)).await.unwrap().unwrap();
     let still_locked_at_008 = with_pve_special_reg(&ctx, |reg| {
@@ -429,6 +445,7 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
     });
     assert!(still_locked_at_008, "Mothership must remain locked at 8% (0.08) influence");
 
+    let second_hq_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &second_hq_sid).await;
     let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(second_hq_bid).await;
     on_incursion_boss_destroyed(&ctx, hq_sys, second_hq_bid, Some(90_000_001)).await.unwrap().unwrap();
     let ms_unlocked = with_pve_special_reg(&ctx, |reg| {
@@ -437,6 +454,7 @@ async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
     });
     assert!(ms_unlocked, "Dropping influence to 0.0 must unlock Mothership site and enter Mobilizing");
 
+    let ms_boss_id = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &ms_sid).await;
     let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(ms_boss_id).await;
     on_incursion_boss_destroyed(&ctx, hq_sys, ms_boss_id, Some(90_000_001)).await.unwrap().unwrap();
     assert!(
@@ -462,10 +480,10 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
 
-    let (target_cid, vg_sys_id, hq_sys_id, vg_boss_bid, site_pos) = with_pve_special_reg(&ctx, |reg| {
+    let (target_cid, vg_sys_id, hq_sys_id, vg_site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
         let (&cid, inc) = reg.incursions.iter().next().unwrap();
         let vg = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-        (cid, vg.solar_system_id, inc.hq_solar_system_id, vg.boss_npc_ball_id, vg.position)
+        (cid, vg.solar_system_id, inc.hq_solar_system_id, vg.site_id.clone(), vg.position)
     });
 
     // Fleet 950_001: Pilot 1 & Pilot 2 on grid at site; Pilot 3 in same system 800 km off-grid; Pilot 4 in HQ system
@@ -539,6 +557,7 @@ async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
         })
         .collect();
 
+    let vg_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &vg_site_id).await;
     let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
     let _ = vg_sys
         .apply_damage_with_attacker(

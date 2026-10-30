@@ -383,10 +383,11 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(sess_p1.ship_id.unwrap(), glam::DVec3::from_array(cpos) + glam::DVec3::new(500.0, 0.0, 0.0)).await;
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
         call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
-        let (vg_sys, vg_bid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        let (vg_sys, vg_sid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
             let s = reg.incursions[&20_000_020].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-            (s.solar_system_id, s.boss_npc_ball_id, s.position)
+            (s.solar_system_id, s.site_id.clone(), s.position)
         });
+        let vg_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys, &vg_sid).await;
         sess_p1.solar_system_id = Some(vg_sys);
         let s1 = ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = vg_sys; s.characters[&P1].active_ship_id });
         let _ = ctx.systems.get_or_spawn(vg_sys).spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(s1, 587, vg_pos)).await;

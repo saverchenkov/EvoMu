@@ -318,3 +318,50 @@ pub fn scan_row_field(rows: &[PyRep], sig_id: &str, key: &str) -> PyRep {
         .and_then(|r| r.dict_get(key).cloned())
         .unwrap_or_else(|| panic!("scan row {sig_id} missing {key}"))
 }
+
+/// Clears all escort waves (`1..=total_waves`) of an incursion site via `on_incursion_boss_destroyed`
+/// so its final-wave boss spawns in space and is eligible for site completion.
+#[allow(dead_code)]
+pub async fn clear_incursion_site_escort_waves(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    site_id: &str,
+) -> i64 {
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    for _ in 0..6 {
+        let (escorts, done, boss_bid) = eve_server::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+            let site = reg
+                .incursions
+                .values()
+                .flat_map(|inc| &inc.sites)
+                .find(|s| s.site_id == site_id)
+                .unwrap_or_else(|| panic!("incursion site {site_id} not found"));
+            let pending: Vec<i64> = site
+                .escort_spawns
+                .iter()
+                .filter(|e| !e.destroyed)
+                .map(|e| e.npc_ball_id)
+                .collect();
+            let wave_done = reg
+                .incursion_site_waves
+                .get(site_id)
+                .is_none_or(|w| w.current_wave >= w.total_waves)
+                && pending.is_empty();
+            (pending, wave_done, site.boss_npc_ball_id)
+        });
+        if done {
+            return boss_bid;
+        }
+        for ebid in escorts {
+            let _ = sys_handle.remove_ball(ebid).await;
+            let _ = eve_server::services::pve_incursion_sites::on_incursion_boss_destroyed(
+                ctx,
+                solar_system_id,
+                ebid,
+                None,
+            )
+            .await;
+        }
+    }
+    panic!("failed to clear escort waves for incursion site {site_id}");
+}

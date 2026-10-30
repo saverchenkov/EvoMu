@@ -362,7 +362,13 @@ pub fn seed_incursion_for_constellation(
             s.site_id.clone(),
             crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta {
                 current_wave: 1,
-                total_waves: if s.tier == "Staging" { 2 } else { 3 },
+                total_waves: if s.tier == "Mothership" {
+                    1
+                } else if s.tier == "Staging" {
+                    2
+                } else {
+                    3
+                },
             },
         );
     }
@@ -538,6 +544,23 @@ pub async fn process_incursion_site_completion_and_payout_core(
                             }
                         }
                     }
+                    if let Some(wm) = reg.incursion_site_waves.get(&site.site_id) {
+                        if wm.current_wave < wm.total_waves {
+                            return Err(rpc_err(
+                                "IncursionSiteNpcsRemaining",
+                                format!(
+                                    "Incursion site {} is on wave {}/{}; clear all waves before site completion",
+                                    site.site_id, wm.current_wave, wm.total_waves
+                                ),
+                            ));
+                        }
+                    }
+                    if site.escort_spawns.iter().any(|e| !e.destroyed) {
+                        return Err(rpc_err(
+                            "IncursionSiteNpcsRemaining",
+                            format!("Incursion site {} escort NPCs are still alive", site.site_id),
+                        ));
+                    }
                     if !site.boss_destroyed {
                         return Err(rpc_err(
                             "IncursionSiteNpcsRemaining",
@@ -674,7 +697,13 @@ pub async fn process_incursion_site_completion_and_payout_core(
             .iter()
             .position(|s| s.site_id == matched_site_id)
             .unwrap();
-        if !inc.sites[site_idx].boss_destroyed {
+        if !inc.sites[site_idx].boss_destroyed
+            || reg
+                .incursion_site_waves
+                .get(&inc.sites[site_idx].site_id)
+                .is_some_and(|w| w.current_wave < w.total_waves)
+            || inc.sites[site_idx].escort_spawns.iter().any(|e| !e.destroyed)
+        {
             return None;
         }
         inc.sites[site_idx].boss_destroyed = false;
@@ -748,14 +777,17 @@ pub async fn process_incursion_site_completion_and_payout_core(
                 .map(|e| (e.npc_ball_id, e.type_id, e.offset))
                 .collect();
             inc.sites[site_idx].escort_spawns = fresh_escorts;
-            reg.incursion_site_waves.insert(
-                inc.sites[site_idx].site_id.clone(),
-                crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta {
-                    current_wave: 1,
-                    total_waves: if s_tier == "Staging" { 2 } else { 3 },
-                },
-            );
-            (Some((next_boss_bid, next_b_tid, escorts)), ms)
+            let has_wave_tracker = reg.incursion_site_waves.contains_key(&inc.sites[site_idx].site_id);
+            if has_wave_tracker {
+                reg.incursion_site_waves.insert(
+                    inc.sites[site_idx].site_id.clone(),
+                    crate::services::pve_incursion_lifecycle::IncursionSiteWaveMeta {
+                        current_wave: 1,
+                        total_waves: if s_tier == "Staging" { 2 } else { 3 },
+                    },
+                );
+            }
+            (Some((next_boss_bid, next_b_tid, escorts, !has_wave_tracker)), ms)
         };
         Some((
             b_isk,
@@ -799,14 +831,16 @@ pub async fn process_incursion_site_completion_and_payout_core(
         let _ = sys_handle.remove_ball(bid).await;
     }
 
-    if let Some((new_bid, new_tid, new_escorts)) = next_boss_ball {
-        systems.claim_special_site_ball(target_sys, new_bid);
-        let _ = sys_handle
-            .spawn_ball_with_combat(
-                make_site_npc_ball(new_bid, new_tid, site_pos),
-                crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, new_tid),
-            )
-            .await;
+    if let Some((new_bid, new_tid, new_escorts, spawn_boss_now)) = next_boss_ball {
+        if spawn_boss_now {
+            systems.claim_special_site_ball(target_sys, new_bid);
+            let _ = sys_handle
+                .spawn_ball_with_combat(
+                    make_site_npc_ball(new_bid, new_tid, site_pos),
+                    crate::services::pve_special_sites::build_special_site_npc_combat_state(sde, new_tid),
+                )
+                .await;
+        }
         for (esc_bid, esc_tid, esc_offset) in new_escorts {
             systems.claim_special_site_ball(target_sys, esc_bid);
             let esc_pos = site_pos + DVec3::new(esc_offset[0], esc_offset[1], esc_offset[2]);
@@ -1077,6 +1111,14 @@ pub fn mark_incursion_boss_destroyed(
                     if site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
                         return false;
                     }
+                    if reg
+                        .incursion_site_waves
+                        .get(&site.site_id)
+                        .is_some_and(|w| w.current_wave < w.total_waves)
+                        || site.escort_spawns.iter().any(|e| !e.destroyed)
+                    {
+                        return false;
+                    }
                     site.boss_destroyed = true;
                     site.killer_char_id = None;
                     site.killer_fleet_id = None;
@@ -1109,17 +1151,25 @@ pub async fn on_incursion_boss_destroyed_core(
                 if site.solar_system_id == solar_system_id && site.boss_npc_ball_id == npc_ball_id {
                     let locked = site.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned);
                     if locked {
-                        return Some((site.site_id.clone(), true, false));
+                        return Some((site.site_id.clone(), true, false, false));
+                    }
+                    let waves_pending = reg
+                        .incursion_site_waves
+                        .get(&site.site_id)
+                        .is_some_and(|w| w.current_wave < w.total_waves)
+                        || site.escort_spawns.iter().any(|e| !e.destroyed);
+                    if waves_pending {
+                        return Some((site.site_id.clone(), false, false, true));
                     }
                     site.boss_destroyed = true;
                     site.killer_char_id = killer_char_id;
                     site.killer_fleet_id = killer_fleet_id;
-                    return Some((site.site_id.clone(), false, false));
+                    return Some((site.site_id.clone(), false, false, false));
                 }
                 for esc in &mut site.escort_spawns {
                     if site.solar_system_id == solar_system_id && esc.npc_ball_id == npc_ball_id {
                         esc.destroyed = true;
-                        return Some((site.site_id.clone(), false, true));
+                        return Some((site.site_id.clone(), false, true, false));
                     }
                 }
             }
@@ -1127,11 +1177,17 @@ pub async fn on_incursion_boss_destroyed_core(
         None
     });
 
-    let (site_id, is_locked, is_escort) = site_found?;
+    let (site_id, is_locked, is_escort, waves_pending) = site_found?;
     if is_locked {
         return Some(Err(rpc_err(
             "MothershipSiteLocked",
             "Mothership HQ site is locked while Sansha influence > 0.0",
+        )));
+    }
+    if waves_pending {
+        return Some(Err(rpc_err(
+            "IncursionSiteNpcsRemaining",
+            format!("Incursion site {site_id} escort waves must be cleared before boss kill"),
         )));
     }
     if is_escort {

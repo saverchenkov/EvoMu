@@ -354,14 +354,14 @@ async fn notify_batch7_weapons_fittings_drones_stances_jump_and_skills() {
             .code,
         "CharacterNotFound"
     );
-    rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/energy 2840".into())])
+    rpc(&ctx, &mut sess_a, "slash", "SlashCmd", &[PyRep::String("/energy 40".into())])
         .await
         .expect("GM /energy");
     let energy_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let energy_args = find_notif(&energy_notifs, "OnCharacterEnergyChanged");
     assert_eq!(energy_args.len(), 2);
     assert_eq!(energy_args[0], PyRep::Integer(PILOT_A));
-    assert_eq!(energy_args[1].dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(2840));
+    assert_eq!(energy_args[1].dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(40));
 
     // 11. OnNonDiminishingInjectionsUsed (1-arg) + crateService.ClaimSkillBundle (DATA GAP: OnSkillBundleInjected remains open)
     let (mini_inj_id, crate_id) = (720_000_071_i64, 720_000_072_i64);

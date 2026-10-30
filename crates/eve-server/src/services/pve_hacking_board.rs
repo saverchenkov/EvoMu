@@ -155,7 +155,33 @@ pub fn resolve_fitted_analyzer_virus_stats(
             }
         }
 
-        (matching, lvl, extra_coh, extra_str)
+        // Metaliminal Electrical Storm system-wide weather beacons stored in per-ServerContext `snap.items`
+        let mut storm_coh_bonus = 0i32;
+        if let Some(sys_id) = session
+            .solar_system_id
+            .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+        {
+            let sys_loc = i64::from(sys_id);
+            for item in snap.items.values() {
+                if item.location_id != sys_loc || item.flag != InventoryFlag::None {
+                    continue;
+                }
+                let item_bonus = match item.type_id {
+                    47382 | 56057 => 25,
+                    47381 | 56064 => 10,
+                    _ => ctx
+                        .sde
+                        .get_type(item.type_id)
+                        .filter(|t| matches!(t.group_id, 920 | 1975))
+                        .and_then(|t| t.default_attributes.get(&1915).copied())
+                        .map(|v| v as i32)
+                        .unwrap_or(0),
+                };
+                storm_coh_bonus = storm_coh_bonus.max(item_bonus);
+            }
+        }
+
+        (matching, lvl, extra_coh + storm_coh_bonus, extra_str)
     });
 
     let Some(mod_tid) = mod_type_id else {
@@ -177,22 +203,7 @@ pub fn resolve_fitted_analyzer_virus_stats(
         .unwrap_or(5_000.0)
         .max(1_000.0);
 
-    let mut storm_coh_bonus = 0i32;
-    if let Some(sys_id) = session.solar_system_id {
-        if let Ok(sw_st) =
-            crate::services::inventory_fitting::scanners_superweapons_state().read()
-        {
-            if let Some(tids) = sw_st.system_wide_effect_lists.get(&sys_id) {
-                if tids.iter().any(|&tid| tid == 56057 || tid == 47381) {
-                    storm_coh_bonus += 25;
-                } else if tids.iter().any(|&tid| tid == 56064 || tid == 47382) {
-                    storm_coh_bonus += 10;
-                }
-            }
-        }
-    }
-
-    let total_coh = (base_coh + skill_level * 10 + bonus_coh + storm_coh_bonus).max(10);
+    let total_coh = (base_coh + skill_level * 10 + bonus_coh).max(10);
     let total_str = (base_str + bonus_str).max(5);
     Ok((total_coh, total_str, slots, max_range))
 }
@@ -253,10 +264,10 @@ pub fn build_hacking_grid_procedural(
     let fw_coh = 20 + (diff as i32) * 4;
     let fw_str = 10 + (diff as i32) * 2;
     // Anti-Virus: lower coherence, high strength
-    let av_coh = 15 + (diff as i32) * 2;
+    let av_coh = 14 + (diff as i32) * 2;
     let av_str = 15 + (diff as i32) * 3;
     // Restoration Node & Virus Suppressor
-    let support_coh = 15 + (diff as i32) * 2;
+    let support_coh = 14 + (diff as i32) * 2;
     let support_str = 10;
 
     let mut pool: Vec<(HackingNodeKind, i32, i32, Option<HackingUtilityKind>)> =
@@ -425,7 +436,7 @@ pub fn resolve_hacking_turn_combat(
                 t_ref.strength = 10 + (inferred_diff as i32) * 2;
             } else {
                 t_ref.kind = HackingNodeKind::Antivirus;
-                t_ref.coherence = 15 + (inferred_diff as i32) * 2;
+                t_ref.coherence = 14 + (inferred_diff as i32) * 2;
                 t_ref.strength = 15 + (inferred_diff as i32) * 3;
             }
         }

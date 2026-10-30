@@ -272,7 +272,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
     // Pin constellation influence to 0.05 before each Vanguard site (delta 0.05 -> new_influence 0.0 -> 1.0x influence_scale)
     // so the comparison across Cases A/B/C strictly isolates fleet-size scaling.
     // Case A: Optimal fleet (5 on-grid pilots <= 10 optimal) -> full 1.0x payout (10,395,000 ISK, 1,400 LP)
-    let (cid_a, sys_a, site_a, boss_a, pos_a) = vg_sites[0].clone();
+    let (cid_a, sys_a, site_a, _, pos_a) = vg_sites[0].clone();
     with_pve_special_reg(&ctx, |reg| reg.incursions.get_mut(&cid_a).unwrap().influence = 0.05);
     let mut pilots_a = Vec::new();
     let mut lead_sess = None;
@@ -299,6 +299,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
         );
     });
     let bal_before_a = ctx.db.with_snapshot(|s| s.characters[&pilots_a[0]].balance.0);
+    let boss_a = crate::common::clear_incursion_site_escort_waves(&ctx, sys_a, &site_a).await;
     let _ = ctx.systems.get_or_spawn(sys_a).remove_ball(boss_a).await;
     let res_a = on_incursion_boss_destroyed(&ctx, sys_a, boss_a, Some(pilots_a[0]))
         .await
@@ -330,7 +331,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
     assert_eq!(lp_rows[0].dict_get("siteID").and_then(|v| v.as_str()), Some(site_a.as_str()));
 
     // Case B: Over-optimal fleet (12 on-grid pilots: 10 < 12 <= 15 hard cap) -> diminishing return (< 1.0x, > 0)
-    let (cid_b, sys_b, _, boss_b, pos_b) = vg_sites[1].clone();
+    let (cid_b, sys_b, site_b, _, pos_b) = vg_sites[1].clone();
     with_pve_special_reg(&ctx, |reg| reg.incursions.get_mut(&cid_b).unwrap().influence = 0.05);
     let mut pilots_b = Vec::new();
     for i in 0..12 {
@@ -351,6 +352,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
             },
         );
     });
+    let boss_b = crate::common::clear_incursion_site_escort_waves(&ctx, sys_b, &site_b).await;
     let _ = ctx.systems.get_or_spawn(sys_b).remove_ball(boss_b).await;
     let res_b = on_incursion_boss_destroyed(&ctx, sys_b, boss_b, Some(pilots_b[0]))
         .await
@@ -365,7 +367,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
     assert!(res_b.concord_lp_per_pilot > 0 && res_b.concord_lp_per_pilot < res_a.concord_lp_per_pilot);
 
     // Case C: Beyond hard-cap fleet (16 on-grid pilots > 15 Vanguard cutoff) -> 0 ISK and 0 CONCORD LP!
-    let (cid_c, sys_c, _, boss_c, pos_c) = vg_sites[2].clone();
+    let (cid_c, sys_c, site_c, _, pos_c) = vg_sites[2].clone();
     with_pve_special_reg(&ctx, |reg| reg.incursions.get_mut(&cid_c).unwrap().influence = 0.05);
     let mut pilots_c = Vec::new();
     for i in 0..16 {
@@ -390,6 +392,7 @@ async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
     let lp_before_c = ctx
         .db
         .with_snapshot(|s| s.characters[&pilots_c[0]].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
+    let boss_c = crate::common::clear_incursion_site_escort_waves(&ctx, sys_c, &site_c).await;
     let _ = ctx.systems.get_or_spawn(sys_c).remove_ball(boss_c).await;
     let res_c = on_incursion_boss_destroyed(&ctx, sys_c, boss_c, Some(pilots_c[0]))
         .await

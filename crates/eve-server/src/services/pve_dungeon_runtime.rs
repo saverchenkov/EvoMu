@@ -657,7 +657,7 @@ pub(crate) async fn materialize_dungeon_room_entities(
         },
     }
 
-    let (plans, obj_ids, npc_ids, gate_id_opt) = ctx.db.with_mut_snapshot(|snap| {
+    let (plans, obj_ids, npc_ids, gate_id_opt) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut store: DungeonRuntimeStore = snap
             .service_state_blobs
             .get(DUNGEON_RUNTIME_BLOB_KEY)

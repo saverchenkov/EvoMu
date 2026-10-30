@@ -54,7 +54,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         if let Err(e) =
                             crate::services::pve_dungeon_runtime::check_deadspace_mwd_allowed(
                                 ctx,
-                                _sys_id,
+                                sys_id,
                                 sb.position.to_array(),
                             )
                         {

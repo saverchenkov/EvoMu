@@ -382,3 +382,102 @@ async fn test_overlapping_storms_stack_effects_without_cross_context_leakage() {
     assert_eq!(attrs2[&55], 100.0, "Storm effects in ctx1 must not leak into ctx2");
     assert_eq!(attrs2[&265], 1_000.0, "Storm effects in ctx1 must not leak into ctx2");
 }
+
+// ============================================================================
+// 3. Electrical Storm Hacking Virus Coherence Bonus (+25 Core / +10 Periphery)
+// ============================================================================
+#[tokio::test]
+async fn test_electrical_storm_grants_hacking_virus_coherence_per_context() {
+    // parity: feat:pve.metaliminal-storms, feat:pve.hacking-node-types
+    eve_testkit::attest(&["feat:pve.metaliminal-storms", "feat:pve.hacking-node-types"]);
+
+    let ctx1 = ServerContext::new();
+    let ctx2 = ServerContext::new();
+    crate::common::pin_clock(&ctx1);
+    crate::common::pin_clock(&ctx2);
+
+    let center_sys = 30_000_208_u32;
+    let (core_sys_list, periph_sys_list) = compute_storm_footprint(&ctx1, center_sys);
+    let periph_sys = periph_sys_list
+        .iter()
+        .copied()
+        .find(|s| !core_sys_list.contains(s))
+        .expect("distinct periphery system");
+
+    let ship_core = 731_060_001_i64;
+    let mut sess_core = setup_pilot(&ctx1, 8520, PILOT_1, ship_core, 587, center_sys, DVec3::ZERO).await;
+    let sess_iso = setup_pilot(&ctx2, 8522, PILOT_1, ship_core, 587, center_sys, DVec3::ZERO).await;
+
+    for (ctx, char_id, ship_id, mod_id) in [
+        (&ctx1, PILOT_1, ship_core, 731_060_101_i64),
+        (&ctx2, PILOT_1, ship_core, 731_060_103_i64),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(char_id).or_default().insert(
+                21718,
+                eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 },
+            );
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 22175, // Data Analyzer I (40 base coherence, 20 strength)
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::MedSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+
+    let (base_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx1, &sess_core, PILOT_1, false,
+    )
+    .expect("baseline analyzer stats");
+    assert_eq!(base_coh, 90, "Baseline Data Analyzer I + Hacking V coherence = 90");
+
+    with_pve_special_reg(&ctx1, |reg| {
+        reg.roaming_storms = vec![RoamingStormRecord {
+            storm_id: 301,
+            weather: AbyssalWeatherKind::Electrical,
+            center_solar_system_id: center_sys,
+            strong_core_systems: core_sys_list,
+            weak_periphery_systems: periph_sys_list,
+            step_count: 0,
+            next_move_at_sec: u64::MAX,
+            recent_centers: vec![center_sys],
+        }];
+    });
+    sync_metaliminal_storm_effects_and_sites(&ctx1);
+
+    let (core_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx1, &sess_core, PILOT_1, false,
+    )
+    .expect("core storm analyzer stats");
+    let (iso_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx2, &sess_iso, PILOT_1, false,
+    )
+    .expect("isolated context analyzer stats");
+
+    assert_eq!(core_coh, 115, "Strong Electrical Storm core grants +25 virus coherence (90 -> 115)");
+    assert_eq!(iso_coh, 90, "Electrical Storm in ctx1 must not leak coherence bonus into ctx2");
+
+    // Move pilot in ctx1 into the weak storm periphery system and verify +10 coherence bonus.
+    sess_core.solar_system_id = Some(periph_sys);
+    ctx1.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.solar_system_id = periph_sys;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_core) {
+            ship.location_id = i64::from(periph_sys);
+        }
+    });
+    let (periph_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx1, &sess_core, PILOT_1, false,
+    )
+    .expect("periphery storm analyzer stats");
+    assert_eq!(periph_coh, 100, "Weak Electrical Storm periphery grants +10 virus coherence (90 -> 100)");
+}
