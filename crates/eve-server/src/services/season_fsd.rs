@@ -319,6 +319,8 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
                     .and_then(|n| n.as_i64())
                     .unwrap_or(0) as i32;
                 let client_event_driven = event_type.starts_with("client_");
+                // DERIVED: V24 FSD has no explicit dormancy flag; derive dormancy from
+                // `should_be_active_on_season_start == 0` or being a `next_challenge` target.
                 let is_dormant = !active_start || next_targets.contains(&cid);
                 // DERIVED: challenges.fsdbinary has no per-season binding or localized text table in FSD;
                 // default season_id to 1 and format title from category, challenge ID, and message ID.

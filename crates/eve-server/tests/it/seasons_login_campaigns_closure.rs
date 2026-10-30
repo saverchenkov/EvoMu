@@ -261,8 +261,11 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .await;
     assert!(repeat_err.is_err(), "repeat claim_challenge_rewards must fail");
 
-    // Negative trust checks: dormant, unassigned starter, and locked chain step claims must fail
+    // Negative trust checks: dormant, unassigned starter (when all active slots are full), and locked chain step claims must fail
     // with no change to ISK or items.
+    let _ = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
+        .await
+        .expect("fill all active slots before testing unassigned claim");
     let (dormant_id, unassigned_starter_id, unassigned_client_id) = ctx.db.with_snapshot(|snap| {
         let st = load_season_state_from_blobs(snap, PILOT_1);
         let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
@@ -292,12 +295,10 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
             .is_err(),
         "Claiming a dormant challenge must fail"
     );
-    assert!(
-        rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(unassigned_starter_id)])
-            .await
-            .is_err(),
-        "Claiming an unassigned starter challenge must fail"
-    );
+    let unassigned_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(unassigned_starter_id)])
+        .await
+        .expect_err("Claiming an unassigned starter challenge when all active slots are full must fail");
+    assert_eq!(unassigned_err.code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
     assert!(
         rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)])
             .await

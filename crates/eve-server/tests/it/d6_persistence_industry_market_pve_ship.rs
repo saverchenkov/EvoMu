@@ -578,17 +578,17 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(injector_id)]).await.expect("InjectSkillpoints");
         let sp_before = call(&ctx, &mut sess, "skillMgr2", "GetFreeSkillPoints", &[]).await.expect("GetFreeSkillPoints").as_i64().unwrap();
 
-        let err_client = call(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect_err("process_client_event rejects server-driven challenge");
+        let err_client = call(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(297), PyRep::Integer(5)]).await.expect_err("process_client_event rejects server-driven challenge");
         assert_eq!(err_client.code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
         call(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
         ctx.db.with_mut_snapshot(|s| {
-            for i in 1..=5 {
+            for i in 1..=15 {
                 s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 500_000_100, attacker_character_id: P1, ..Default::default() });
             }
             eve_server::services::project_discovery::configure_project_discovery_mmos(s, 2_000.0, 250.0, 150.0, 75.0, 50);
         });
-        call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
-        call(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
+        call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("get_challenge");
+        call(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(297)]).await.expect("claim_challenge_rewards");
         for _ in 0..4 { call(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level"); }
         assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards"), PyRep::Bool(true));
         call(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
@@ -662,9 +662,9 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         let err_cd = call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(777_102)]).await.expect_err("Daily Alpha Injector cooldown must persist across restart");
         assert_eq!(err_cd.code, "DailyAlphaInjectorCooldownActive");
 
-        let ch_rep = call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
+        let ch_rep = call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("get_challenge");
         assert_eq!(ch_rep.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(50));
+        assert_eq!(ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(10));
         let pd_stats = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
         assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(1), Some(1)));
         assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(325.0));

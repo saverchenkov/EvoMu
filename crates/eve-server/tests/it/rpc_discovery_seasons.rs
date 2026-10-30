@@ -264,8 +264,7 @@ async fn test_project_discovery_tutorial_and_rewards() {
 
 #[tokio::test]
 async fn test_season_manager_rpc_suite() {
-    // parity: rpc:seasonManager.get_max_active_challenges, rpc:seasonManager.get_season_end_time
-    // parity: rpc:seasonManager.select_season, rpc:seasonManager.get_season_data_for_character
+    // parity: rpc:seasonManager.get_max_active_challenges
     // parity: rpc:seasonManager.fill_up_and_return_challenges_for_character, rpc:seasonManager.get_challenge
     // parity: rpc:seasonManager.challenge_is_dormant, rpc:seasonManager.get_challenge_expiration_date
     // parity: rpc:seasonManager.process_client_event, rpc:seasonManager.claim_challenge_rewards
@@ -273,9 +272,6 @@ async fn test_season_manager_rpc_suite() {
     // parity: feat:pve.seasons-challenges
     eve_testkit::attest(&[
         "rpc:seasonManager.get_max_active_challenges",
-        "rpc:seasonManager.get_season_end_time",
-        "rpc:seasonManager.select_season",
-        "rpc:seasonManager.get_season_data_for_character",
         "rpc:seasonManager.fill_up_and_return_challenges_for_character",
         "rpc:seasonManager.get_challenge",
         "rpc:seasonManager.challenge_is_dormant",
@@ -384,6 +380,7 @@ async fn test_season_manager_rpc_suite() {
     // Real V24 item-reward & chained challenge 2724 (reward type_id 92391 x 15, next_challenge 2743)
     // Locked chain step 2743 must fail to claim before predecessor 2724 is claimed.
     assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)]).await.is_err());
+    // Unit-level shortcut: seed completed chain predecessor 2724 directly in state to exercise item-reward delivery and chain unlock 2724 -> 2743.
     ctx.db.with_mut_snapshot(|s| {
         let mut st = eve_server::services::season_manager::load_season_state_from_blobs(s, P1);
         let def2724 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 2724).unwrap().clone();

@@ -587,7 +587,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
 
     let mut ch_state = eve_server::services::season_manager::CharacterSeasonState::default();
     eve_server::services::season_manager::ensure_challenges(&mut ch_state, 133_000_000_000_000_000);
-    if let Some(c) = ch_state.challenges.get_mut(&1002) { c.progress = 3; }
+    if let Some(c) = ch_state.challenges.get_mut(&297) { c.progress = 3; }
     ctx.db.with_mut_snapshot(|s| {
         eve_server::services::season_manager::save_season_state_to_blobs(s, 90_000_106, &ch_state);
     });
@@ -646,14 +646,14 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let r_ch = call_req(&ctx_reloaded, &session, "eve.seasonalevent.challenge.GetChallengesForCharacterRequest", make_sequential_id_request(90_000_106), true);
     assert_eq!(r_ch.status_code, STATUS_OK, "GetChallengesForCharacterRequest after reload failed");
     let ch_wm = WireMessage::decode(&r_ch.payload.as_ref().unwrap().value).expect("decode challenges");
-    let ch1002_cur = ch_wm.fields.iter().filter(|f| f.field_number == 1).find_map(|f| {
+    let ch297_cur = ch_wm.fields.iter().filter(|f| f.field_number == 1).find_map(|f| {
         let b = f.value.as_bytes()?;
         let m = WireMessage::decode(b).ok()?;
-        if m.fields.iter().find(|x| x.field_number == 1)?.value.as_varint()? == 1002 {
+        if m.fields.iter().find(|x| x.field_number == 1)?.value.as_varint()? == 297 {
             m.fields.iter().find(|x| x.field_number == 3)?.value.as_varint()
         } else {
             None
         }
     });
-    assert_eq!(ch1002_cur, Some(3), "Seasonal challenge 1002 progress 3 must persist across SQLite reload");
+    assert_eq!(ch297_cur, Some(3), "Seasonal challenge 297 progress 3 must persist across SQLite reload");
 }
