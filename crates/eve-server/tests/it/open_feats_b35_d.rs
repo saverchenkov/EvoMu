@@ -77,6 +77,15 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     assert_eq!((c5, c10, c20), (2, 4, 8), "Paste cost must scale linearly with module volume (5m3 / 10m3 / 20m3)");
     assert!((rate_0 - 0.67).abs() < 1e-3);
 
+    // Negative: duplicate InitiateModuleRepair on an already-repairing module rejected & preserves paste;
+    // activating, overloading, or unfitting a module while undergoing nanite repair is also rejected!
+    let paste_after_start = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
+    assert!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_5m3)], &kw, None).await.is_err(), "Duplicate InitiateModuleRepair on repairing module must fail");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity), paste_after_start, "Rejected duplicate repair must not consume extra paste");
+    assert!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mod_5m3)], &kw, None).await.is_err(), "Cannot Activate module while undergoing nanite repair");
+    assert!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_5m3)], &kw, None).await.is_err(), "Cannot Overload module while undergoing nanite repair");
+    assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_5m3), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await.is_err(), "Cannot unfit module while undergoing nanite repair");
+
     // 4. Step 10s mid-cycle and call StopModuleRepair on mod_20m3: partial repair committed & unused paste refunded!
     let paste_before_stop = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
     let _ = sys.step_manual(10.0).await;
@@ -128,6 +137,10 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
         }
     });
     sess.station_id = Some(60003760);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_10m3).unwrap().dynamic_attributes.insert(3, 15.0);
+    });
+    assert!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_10m3)], &kw, None).await.is_err(), "In-space InitiateModuleRepair must be rejected while docked");
     ctx.dispatch_rpc(&mut sess, "repairSvc", None, "RepairItemsInStation", &[PyRep::List(vec![PyRep::Integer(mod_5m3)]), PyRep::Real(5_000_000.0)], &kw, None).await.expect("Repair burned-out module in station");
     let dmg_after_station = ctx.db.with_snapshot(|s| s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     assert!(dmg_after_station <= 1e-6, "Station repair service must clear burned-out module damage");

@@ -140,6 +140,11 @@ pub(crate) fn step_cycles_and_capacitor(
 
     // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`)
     active_nanite_repairs.retain_mut(|nr| {
+        if !ballpark.balls.contains_key(&nr.ship_id)
+            || active_module_cycles.iter().any(|c| c.ship_id == nr.ship_id && c.module_id == nr.module_id)
+        {
+            return false;
+        }
         nr.elapsed_s += dt;
         let done = nr.elapsed_s + 1e-6 >= nr.duration_s;
         let rem_dmg = if done {

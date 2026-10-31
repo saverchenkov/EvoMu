@@ -147,11 +147,7 @@ pub(crate) fn effective_item_unit_volume(
 
 /// Checks if `ship_id` in `sys_id` is within refitting range of an active Mobile Depot (`group_id == 1246`, 2,500m, owner-only, anchored)
 /// or another ship providing a Ship Maintenance Bay fitting service (`attr 907` / `908` > 0, 3,000m).
-pub async fn is_near_in_space_fitting_service(
-    ctx: &ServerContext,
-    sys_id: u32,
-    ship_id: i64,
-) -> bool {
+pub async fn is_near_in_space_fitting_service(ctx: &ServerContext, sys_id: u32, ship_id: i64) -> bool {
     let char_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.owner_id)).unwrap_or(0);
     let now_unix = ctx.now_unix();
     let deployables_state = crate::services::mobile_deployables::read_deployable_state(ctx);
@@ -168,14 +164,15 @@ pub async fn is_near_in_space_fitting_service(
                 let is_ship_fitting = t.default_attributes.get(&907).copied().unwrap_or(0.0) > 0.0
                     || t.default_attributes.get(&908).copied().unwrap_or(0.0) > 0.0;
                 if is_depot {
-                    // Mobile depot is usable ONLY by its owner (`feat:structures.mobile-depot`)
+                    // Mobile depot is usable ONLY by its owner and NOT while anchoring, unanchored, or in 48h reinforcement (`feat:modules.mobile-depot-deployment-and-refitting`)
                     if char_id != 0 && i.owner_id != char_id {
                         return None;
                     }
-                    // Cannot refit while anchoring (`feat:structures.mobile-depot`)
                     if let Some(rec) = deployables_state.deployables.get(&i.item_id) {
-                        let is_anchored = rec.anchor_completed || now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
-                        if !is_anchored {
+                        let is_anchored = !rec.is_unanchored
+                            && (rec.anchor_completed || now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs));
+                        let is_reinforced = rec.reinforced_until_unix.is_some_and(|u| now_unix < u);
+                        if !is_anchored || is_reinforced {
                             return None;
                         }
                     }
@@ -192,9 +189,7 @@ pub async fn is_near_in_space_fitting_service(
         return false;
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else {
-        return true;
-    };
+    let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else { return true };
     for (pid, is_depot) in providers {
         let p_pos = if let Ok(Some((_, p_ball))) = sys_handle.get_ball_snapshot(pid).await {
             Some(p_ball.position)

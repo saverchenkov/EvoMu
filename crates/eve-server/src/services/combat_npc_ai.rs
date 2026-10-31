@@ -298,16 +298,10 @@ pub fn is_candidate_hostile_to_edencom(
 /// `feat:npc.sleepers`, `feat:npc.edencom-npc`).
 pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     {
-        let rt = ctx
-            .combat_ephemeral
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        if !rt.npc_scrambled_ships.contains_key(&solar_system_id)
-            && !rt
-                .npc_entities
-                .values()
-                .any(|n| n.solar_system_id == solar_system_id)
-        {
+        let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
+        let has_npcs = guard.npc_entities.values().any(|n| n.solar_system_id == solar_system_id);
+        let has_scram = guard.npc_scrambled_ships.get(&solar_system_id).is_some_and(|s| !s.is_empty());
+        if !has_npcs && !has_scram {
             return;
         }
     }

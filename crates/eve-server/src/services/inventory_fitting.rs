@@ -292,7 +292,11 @@ pub async fn handle(
                         }
                     }
                     if let Some(sys_id) = session.solar_system_id {
-                        let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(src_item.location_id, item_id).await;
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        if sys.has_active_nanite_repair_sync(src_item.location_id, item_id) {
+                            return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be unfitted while undergoing nanite repair") }));
+                        }
+                        let _ = sys.remove_module_cycle(src_item.location_id, item_id).await;
                     }
                     let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
                         ctx, char_id, session.solar_system_id, src_item.location_id, item_id,

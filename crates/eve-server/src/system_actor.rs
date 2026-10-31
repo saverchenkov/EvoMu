@@ -1211,8 +1211,9 @@ impl SystemRegistry {
                                 let _ = reply.send(updated);
                             }
                             SystemCommand::StartNaniteRepair { repair, reply } => {
-                                active_nanite_repairs.retain(|r| !(r.ship_id == repair.ship_id && r.module_id == repair.module_id));
-                                active_nanite_repairs.push(repair);
+                                if !active_nanite_repairs.iter().any(|r| r.ship_id == repair.ship_id && r.module_id == repair.module_id) {
+                                    active_nanite_repairs.push(repair);
+                                }
                                 let _ = reply.send(());
                             }
                             SystemCommand::StopNaniteRepair { ship_id, module_id, reply } => {

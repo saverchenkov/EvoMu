@@ -471,10 +471,18 @@ pub(super) async fn group_jump_to_fleet_beacon(
             .collect::<Vec<_>>()
     });
 
+    let now = ctx.now_unix();
     let mut qualified_passengers = Vec::new();
     for (m_char, m_ship) in members_to_jump {
         if qualified_passengers.len() >= max_passengers {
             break;
+        }
+        let cd_until = ctx.db.with_snapshot(|s| s.characters.get(&m_char).map(|c| c.jump_cooldown_until_unix).unwrap_or(0));
+        if cd_until > now
+            || crate::services::space_destiny::check_session_change_timer_active(ctx, m_char, now, None).is_some()
+            || crate::services::combat_crimewatch::check_crimewatch_action_restriction(ctx, m_char, m_ship, sys_id, "jump_drive", now).is_err()
+        {
+            continue;
         }
         if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(m_ship).await {
             let in_warp = matches!(ball.mode, MovementMode::Warp { .. });
@@ -498,20 +506,59 @@ pub(super) async fn group_jump_to_fleet_beacon(
         }
     }
 
+    let mut jumped_passengers = Vec::new();
     for (m_char, m_ship) in &qualified_passengers {
         let p_dest = if landed_at_star {
             star_arrival_position(ctx, beacon.solar_system_id)
         } else {
             random_arrival_position(ctx, beacon.position)
         };
-        let _ = relocate_ship(ctx, *m_char, *m_ship, sys_id, beacon.solar_system_id, p_dest, dist, 1.0).await;
-        crate::services::map_service::record_solar_system_visit(ctx, *m_char, beacon.solar_system_id);
-        ctx.notify(
-            crate::router::NotificationTarget::Character(*m_char),
-            "OnGroupJumpedPassenger",
-            "charid",
-            vec![PyRep::Integer(char_id), PyRep::Integer(beacon.solar_system_id as i64)],
+        let (pvals, _) = evaluated_attrs(
+            ctx,
+            *m_char,
+            *m_ship,
+            &[ATTR_JUMP_THROUGH_FATIGUE_MULTIPLIER, ATTR_JUMP_FATIGUE_MULTIPLIER],
+            None,
         );
+        let p_fatigue_mult = if pvals[0] > 0.0 && (pvals[0] - 1.0).abs() > 1e-6 {
+            pvals[0]
+        } else if pvals[1] > 0.0 {
+            pvals[1]
+        } else {
+            1.0
+        };
+        if relocate_ship(ctx, *m_char, *m_ship, sys_id, beacon.solar_system_id, p_dest, dist, p_fatigue_mult)
+            .await
+            .is_ok()
+        {
+            jumped_passengers.push(*m_char);
+            crate::services::map_service::record_solar_system_visit(ctx, *m_char, beacon.solar_system_id);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(*m_char),
+                "OnSessionChanged",
+                "clientID",
+                vec![
+                    PyRep::Bool(false),
+                    PyRep::Integer(0),
+                    PyRep::Dict(vec![
+                        (
+                            PyRep::String("solarsystemid".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(beacon.solar_system_id as i64)]),
+                        ),
+                        (
+                            PyRep::String("solarsystemid2".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(beacon.solar_system_id as i64)]),
+                        ),
+                    ]),
+                ],
+            );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(*m_char),
+                "OnGroupJumpedPassenger",
+                "charid",
+                vec![PyRep::Integer(char_id), PyRep::Integer(beacon.solar_system_id as i64)],
+            );
+        }
     }
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
@@ -519,7 +566,7 @@ pub(super) async fn group_jump_to_fleet_beacon(
         "charid",
         vec![
             PyRep::Integer(beacon.solar_system_id as i64),
-            PyRep::Integer(qualified_passengers.len() as i64),
+            PyRep::Integer(jumped_passengers.len() as i64),
         ],
     );
 

@@ -708,12 +708,17 @@ pub(super) async fn relocate_ship(
     );
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
     let fat_secs = ((fat_min * 60.0).round() as u64).max(cd_secs + 1);
+    let dest_sys_rec = ctx.sde.solar_systems.get(&to_sys);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.jump_fatigue_minutes = fat_min;
             ch.jump_cooldown_until_unix = now + cd_secs;
             ch.jump_fatigue_until_unix = now + fat_secs;
             ch.solar_system_id = to_sys;
+            if let Some(sr) = dest_sys_rec {
+                ch.constellation_id = sr.constellation_id;
+                ch.region_id = sr.region_id;
+            }
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.location_id = to_sys as i64;
@@ -721,6 +726,13 @@ pub(super) async fn relocate_ship(
         }
         snap.character_last_jump_unix.insert(char_id, now);
     });
+    if let Ok(mut bmap) = ctx.bound_objects.write() {
+        for entry in bmap.values_mut() {
+            if entry.character_id == char_id && entry.service == "beyonce" {
+                entry.object_id = to_sys as i64;
+            }
+        }
+    }
     let from = ctx.systems.get_or_spawn(from_sys);
     let old = from.remove_ball(ship_id).await;
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);

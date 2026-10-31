@@ -593,6 +593,12 @@ pub(crate) async fn handle_dogma_ops(
                     failed.push(PyRep::Integer(module_id));
                     continue;
                 }
+                if let Some(sys_id) = session.solar_system_id {
+                    if ctx.systems.get_or_spawn(sys_id).has_active_nanite_repair_sync(ship_id, module_id) {
+                        failed.push(PyRep::Integer(module_id));
+                        continue;
+                    }
+                }
                 if cur_dmg <= 1e-6 {
                     skipped.push(PyRep::Integer(module_id));
                     continue;
@@ -613,10 +619,12 @@ pub(crate) async fn handle_dogma_ops(
                         .items
                         .values()
                         .find(|i| {
-                            i.location_id == ship_id
+                            i.owner_id == char_id
+                                && i.location_id == ship_id
                                 && i.flag == InventoryFlag::Cargo
                                 && i.type_id == 28668
                                 && i.quantity >= paste_needed
+                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
                         })
                         .map(|i| i.item_id);
                     let Some(pid) = paste_item_id else {

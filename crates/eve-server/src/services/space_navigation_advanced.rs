@@ -313,6 +313,9 @@ pub fn validate_npc_station_docking(
 }
 
 pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+    for (_, handle) in ctx.systems.active_system_handles() {
+        handle.cancel_ship_nanite_repairs_sync(ship_id, true);
+    }
     let (solar_system_id, active_mods): (Option<u32>, Vec<i64>) = ctx.db.with_mut_snapshot(|snap| {
         let sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id);
         let mods: Vec<i64> = snap

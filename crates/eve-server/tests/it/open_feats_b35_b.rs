@@ -226,20 +226,28 @@ async fn test_b35_07_conduit_jump() {
     let inelig = 952_405;   // Deacon with cloak in cargo -> SKIPPED
     let recon_far = 952_410; // Falcon at 15km (> 10km) -> SKIPPED
     let recon_optout = 952_411; // Falcon at 2km, accepts_conduit_jumps = false -> SKIPPED
+    let recon_wpn = 952_412; // Falcon at 2km with active Weapons Timer -> SKIPPED
+    let recon_cd = 952_413;  // Falcon at 2km with active red jump cooldown -> SKIPPED
     for &(cid, sid, tid, pos) in &[
         (recon_ok, 962_404, 11957u32, DVec3::new(2_000.0, 0.0, 0.0)),
         (inelig, 962_405, 37453, DVec3::new(2_000.0, 0.0, 0.0)),
         (recon_far, 962_410, 11957, DVec3::new(15_000.0, 0.0, 0.0)),
         (recon_optout, 962_411, 11957, DVec3::new(2_500.0, 0.0, 0.0)),
+        (recon_wpn, 962_412, 11957, DVec3::new(2_000.0, 0.0, 0.0)),
+        (recon_cd, 962_413, 11957, DVec3::new(2_000.0, 0.0, 0.0)),
     ] {
         seed_pilot(&ctx, cid, sid, tid, NULL_SYS, false);
         spawn_ship_in_space(&ctx, cid, sid, tid, NULL_SYS, pos).await;
     }
     give_item(&ctx, 972_409, 11578, inelig, 962_405, InventoryFlag::Cargo, 1);
+    let now_u = ctx.now_unix_secs();
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(recon_wpn).weapon_timer_until_unix = now_u + 60;
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&recon_cd).unwrap().jump_cooldown_until_unix = now_u + 600; });
 
     put_in_fleet(&ctx, 880_004, blops_char, &[
         (cyno_char, true), (blops_char, true), (recon_ok, true),
         (inelig, true), (recon_far, true), (recon_optout, false),
+        (recon_wpn, true), (recon_cd, true),
     ]);
     let origin_sys = ctx.systems.get_or_spawn(NULL_SYS);
     let blops_max_cap = origin_sys.get_combat_state(blops_ship).await.unwrap().unwrap().max_capacitor;
@@ -255,6 +263,10 @@ async fn test_b35_07_conduit_jump() {
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&inelig).unwrap().solar_system_id), NULL_SYS);
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&recon_far).unwrap().solar_system_id), NULL_SYS, ">10km member must not be conduit jumped");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&recon_optout).unwrap().solar_system_id), NULL_SYS, "Opted-out member must be skipped");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&recon_wpn).unwrap().solar_system_id), NULL_SYS, "Passenger with active Weapons Timer must be excluded from conduit jump");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&recon_cd).unwrap().solar_system_id), NULL_SYS, "Passenger with active jump cooldown must be excluded from conduit jump");
+    let recon_fat = ctx.db.with_snapshot(|s| s.characters.get(&recon_ok).unwrap().jump_fatigue_minutes);
+    assert!((recon_fat - 10.0 * (1.0 + dist_ly * 1.0)).abs() < 0.05, "Falcon passenger (1.0x fatigue multiplier) must receive 1.0x distance fatigue ({recon_fat})");
 
     // 2. Rorqual (28352): blocked while Industrial Core active (preserving fuel & cap); when inactive, flat 5000 * LY,
     // jumps Venture (32880), Procurer (17480), Porpoise (42244), and EXCLUDES Orca (28606)!
@@ -286,6 +298,8 @@ async fn test_b35_07_conduit_jump() {
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&m_proc).unwrap().solar_system_id), DEST_NULL_SYS);
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&m_porp).unwrap().solar_system_id), DEST_NULL_SYS, "Porpoise must conduit jump with Rorqual");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&m_orca).unwrap().solar_system_id), NULL_SYS, "Orca must NOT conduit jump with Rorqual");
+    let porp_fat = ctx.db.with_snapshot(|s| s.characters.get(&m_porp).unwrap().jump_fatigue_minutes);
+    assert!((porp_fat - 10.0 * (1.0 + dist_ly * 0.10)).abs() < 0.05, "Porpoise passenger (90% jump fatigue reduction, attr 1971=0.1) must receive 0.10x distance fatigue ({porp_fat})");
 
     // 3. Carrier (Archon 23757, CJPG 0 -> cap 5) vs Command Carrier (Salvation 92822, CJPG 0 -> double cap = 10)
     let car_char = 952_430;

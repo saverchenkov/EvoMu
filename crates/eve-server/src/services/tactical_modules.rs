@@ -658,7 +658,11 @@ pub async fn activate_superweapon_or_lance(
 
 fn parse_vec3_arg(arg: Option<&PyRep>) -> Option<DVec3> {
     let items = match arg? { PyRep::Tuple(v) | PyRep::List(v) if v.len() >= 3 => v, _ => return None };
-    Some(DVec3::new(items[0].as_f64()?, items[1].as_f64()?, items[2].as_f64()?))
+    Some(DVec3::new(
+        items[0].as_f64().filter(|v| v.is_finite())?,
+        items[1].as_f64().filter(|v| v.is_finite())?,
+        items[2].as_f64().filter(|v| v.is_finite())?,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -880,6 +884,11 @@ pub async fn activate_superweapon_with_args(
         .unwrap_or(DVec3::X);
 
     if is_slash {
+        for raw_arg in [args.get(1), args.get(2)].into_iter().flatten() {
+            if matches!(raw_arg, PyRep::Tuple(_) | PyRep::List(_)) && parse_vec3_arg(Some(raw_arg)).is_none() {
+                return Err(BridgeRpcError { code: "InvalidDirectionVector".into(), message: "Lance direction vector coordinates must be finite".into() });
+            }
+        }
         // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule(moduleID, startDir, endDir)`): 300km directional beam after 15s warmup
         let raw_dir = match (parse_vec3_arg(args.get(1)), parse_vec3_arg(args.get(2))) {
             (Some(p0), Some(p1)) if (p1 - p0).length_squared() > 1e-4 => Some(p1 - p0),
@@ -924,7 +933,7 @@ pub async fn activate_superweapon_with_args(
         ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
         ("warmupSeconds", PyRep::Real(if is_slash { 15.0 } else { 0.0 })),
         ("tickCount", PyRep::Integer(1)),
-        ("immobilizeSeconds", PyRep::Real(15.0)), ("jumpBlockSeconds", PyRep::Real(300.0)),
+        ("immobilizeSeconds", PyRep::Real(if is_slash { 300.0 } else { 15.0 })), ("jumpBlockSeconds", PyRep::Real(300.0)),
         ("jumpWarpSuppressionSeconds", PyRep::Real(if is_slash { 300.0 } else { 0.0 })),
         ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
     ]))
@@ -980,6 +989,14 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         for &(vid, _) in &hits {
             st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
         }
+    }
+    if let Some(c_cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+        c_cs.lance_disrupted_remaining_s = c_cs.lance_disrupted_remaining_s.max(285.0);
+        c_cs.is_tethered = false;
+    }
+    if let Some(c_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+        c_ball.velocity = DVec3::ZERO;
+        c_ball.speed_fraction = 0.0;
     }
     if let Some(attacker_char_id) = cycle.owner_char_id {
         pending_cycle_actions.push(crate::system_actor::PendingCycleAction::LanceBeamFired {

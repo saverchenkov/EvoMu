@@ -271,11 +271,25 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     ctx.db
         .acquire_online_lock_with_computer_hash(titan_uid, titan_char as u64, Some(titan_char), None, true, 1)
         .expect("register titan online session");
+    ctx.db.with_mut_snapshot(|s| {
+        let mut acc = s.accounts.values().next().cloned().unwrap();
+        acc.user_id = v_200_char as u64;
+        acc.username = format!("u_{v_200_char}");
+        s.accounts.insert(acc.username.clone(), acc);
+        s.characters.get_mut(&v_200_char).unwrap().user_id = v_200_char as u64;
+    });
+    ctx.db.acquire_online_lock_with_computer_hash(v_200_char as u64, v_200_char as u64, Some(v_200_char), None, true, 1).expect("register v_200 online");
     let _ = ctx.drain_notifications_for_char(titan_char);
     let _ = ctx.drain_notifications_for_char(v_200_char);
     let _ = ctx.drain_notifications_for_char(v_150_char);
 
     let origin_arg = PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]);
+    // Negative: non-finite direction vectors (NaN / INFINITY) rejected before consuming fuel
+    let nan_dir = PyRep::Tuple(vec![PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)]);
+    let inf_dir = PyRep::Tuple(vec![PyRep::Real(f64::INFINITY), PyRep::Real(0.0), PyRep::Real(0.0)]);
+    assert!(ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), nan_dir], &kw, None).await.is_err(), "NaN direction vector must be rejected");
+    assert!(ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), inf_dir], &kw, None).await.is_err(), "INFINITY direction vector must be rejected");
+
     let lance_res = ctx
         .dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg, dir_arg], &kw, None)
         .await
@@ -315,13 +329,17 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
         let _ = sys.try_step_full_tick(1.0);
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let mut t15_notifs = ctx.drain_notifications_for_char(titan_char);
-    t15_notifs.extend(ctx.drain_notifications_for_char(v_200_char));
-    t15_notifs.extend(ctx.drain_notifications_for_char(v_150_char));
-    assert!(
-        t15_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1),
-        "Single-arg OnDamageMessage dict must be emitted at t=15s when the Lance beam fires"
-    );
+    let titan_notifs = ctx.drain_notifications_for_char(titan_char);
+    let victim_notifs = ctx.drain_notifications_for_char(v_200_char);
+    assert!(titan_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1), "Attacker OnDamageMessage must be emitted at t=15s");
+    assert!(victim_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1), "Hit player victim must receive incoming OnDamageMessage at t=15s");
+
+    // At t = 90s (> 60s weapons timer, < 300s caster lock): Titan caster STILL cannot tether or maneuver!
+    ctx.advance_time_seconds(75);
+    let _ = sys.set_ball_position(titan_ship, DVec3::new(200_500.0, 0.0, 0.0)).await;
+    eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, titan_char, NULL_SYS, titan_ship).await;
+    assert!(!sys.get_combat_state(titan_ship).await.unwrap().unwrap().is_tethered, "Titan caster must remain tether-locked for the full 300s after firing Lance");
+    assert!(ctx.dispatch_rpc(&mut titan_sess, "beyonce", Some(titan_beyonce), "CmdGotoDirection", &[PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)], &kw, None).await.is_err(), "Titan caster must remain subwarp-immobilized during 300s lock");
     // Killmail generated for destroyed Rifter at 150km with Titan recorded as attacker!
     let has_lance_killmail = ctx.db.with_snapshot(|snap| {
         snap.killmails.values().any(|km| {
@@ -521,16 +539,16 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
         set_skill(&ctx, char_id, sk, lvl);
     }
 
-    // Negative/abuse case 2: reject deployment near stargate/celestial
+    // Negative/abuse case 2: reject deployment near stargate (<50km) and SDE celestial (<5km)
     let gate = ctx.sde.stargates().values().find(|j| j.from_solar_system_id == NULL_SYS).expect("SDE stargate in NULL_SYS");
     let depot_item = 971_201;
     give_item(&ctx, depot_item, 33474, char_id, ship_id, InventoryFlag::Cargo, 1);
     sys.try_set_ball_position(ship_id, gate.position + DVec3::new(1_000.0, 0.0, 0.0));
     let near_pos = gate.position + DVec3::new(1_200.0, 0.0, 0.0);
-    assert!(
-        ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_item), PyRep::Tuple(vec![PyRep::Real(near_pos.x), PyRep::Real(near_pos.y), PyRep::Real(near_pos.z)])], &kw, None).await.is_err(),
-        "Mobile Depot deployment near stargate/celestial must be rejected"
-    );
+    assert!(ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_item), PyRep::Tuple(vec![PyRep::Real(near_pos.x), PyRep::Real(near_pos.y), PyRep::Real(near_pos.z)])], &kw, None).await.is_err());
+    let cel_pos = ctx.sde.celestials_in_system(NULL_SYS).into_iter().find(|c| c.group_id == 7).unwrap().position + DVec3::new(2_000.0, 0.0, 0.0);
+    sys.try_set_ball_position(ship_id, cel_pos);
+    assert!(ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(depot_item), PyRep::Tuple(vec![PyRep::Real(cel_pos.x), PyRep::Real(cel_pos.y), PyRep::Real(cel_pos.z)])], &kw, None).await.is_err(), "Mobile Depot deployment <5km from SDE planet must be rejected");
 
     // Launch from cargo >= 50km from celestials: 60s anchoring countdown
     let dep_pos = DVec3::new(100_000.0, 0.0, 0.0);
@@ -570,6 +588,19 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
     let st_anchored = ctx.db.with_snapshot(|snap| eve_server::services::mobile_deployables::read_deployable_state_snap(snap).deployables.get(&depot_item).cloned()).unwrap();
     assert!(st_anchored.anchor_completed, "Mobile Depot must complete anchoring after 60s");
 
+    // Dedicated storage bay deposit & retrieval via invbroker.Add
+    let bay_item = 971_215;
+    give_item(&ctx, bay_item, 34, char_id, ship_id, InventoryFlag::Cargo, 250);
+    ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(bay_item), PyRep::Integer(depot_item), PyRep::Integer(5)], &kw, None).await.expect("Deposit into Mobile Depot storage bay");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&bay_item).unwrap().location_id), depot_item);
+    ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(bay_item), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await.expect("Withdraw from Mobile Depot storage bay");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&bay_item).unwrap().location_id), ship_id);
+
+    // Weapons timer blocks refitting even within 2,500m of an anchored Mobile Depot
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = ctx.now_unix_secs() + 60;
+    assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Weapons Timer must block Mobile Depot refitting");
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = 0;
+
     // Live refit within <= 2,500m via invbroker.Add:
     // (a) Fit & unfit module (3041 -> HiSlot0 = 27 -> Cargo = 5)
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.expect("Fit module near Mobile Depot");
@@ -598,16 +629,10 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
 
     let t3_ship = 961_206;
     give_item(&ctx, t3_ship, 29984, char_id, NULL_SYS as i64, InventoryFlag::None, 1);
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.active_ship_id = t3_ship;
-        }
-    });
+    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&char_id) { ch.active_ship_id = t3_ship; } });
     sess.ship_id = Some(t3_ship);
     spawn_ship_in_space(&ctx, char_id, t3_ship, 29984, NULL_SYS, target_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
-    for &(sk, lvl) in &[(30651, 5), (30544, 5), (30548, 5), (30549, 5), (30552, 5)] {
-        set_skill(&ctx, char_id, sk, lvl);
-    }
+    for &(sk, lvl) in &[(30651, 5), (30544, 5), (30548, 5), (30549, 5), (30552, 5)] { set_skill(&ctx, char_id, sk, lvl); }
     give_item(&ctx, 971_220, 45589, char_id, t3_ship, InventoryFlag::SubSystemSlot1, 1);
     give_item(&ctx, 971_221, 45590, char_id, t3_ship, InventoryFlag::Cargo, 1);
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(971_220), PyRep::Integer(t3_ship), PyRep::Integer(5)], &kw, None).await.expect("Unfit old Tengu subsystem near Mobile Depot");
@@ -615,28 +640,19 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&971_221).unwrap().flag), InventoryFlag::SubSystemSlot1);
 
     // Switch back to Megathron and move > 2,500m (5,000m from depot): live invbroker.Add rejected!
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.active_ship_id = ship_id;
-        }
-    });
+    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&char_id) { ch.active_ship_id = ship_id; } });
     sess.ship_id = Some(ship_id);
-
-    // (d) Beyond > 2,500m (5,000m from depot): live invbroker.Add rejected!
     let _ = sys.set_ball_position(ship_id, target_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    assert!(
-        ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(),
-        "Live module fitting > 2,500m from Mobile Depot must fail"
-    );
+    assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Live module fitting > 2,500m from Mobile Depot must fail");
 
-    // Attacking anchored depot to 0% shield triggers 48h (172,800s) reinforced timer
+    // Attacking anchored depot to 0% shield triggers 48h (172,800s) reinforced timer AND disables fitting service!
     let now_u = ctx.now_unix_secs();
     let _ = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
         &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), 10.0, now_u,
     ).await;
     let st_reinf = ctx.db.with_snapshot(|snap| eve_server::services::mobile_deployables::read_deployable_state_snap(snap).deployables.get(&depot_item).cloned()).unwrap();
-    assert!(
-        st_reinf.reinforced_until_unix.unwrap_or(0) >= now_u + 172_800 - 5,
-        "Depleting Mobile Depot shield must trigger 48-hour (172,800s) reinforced timer"
-    );
+    assert!(st_reinf.reinforced_until_unix.unwrap_or(0) >= now_u + 172_800 - 5, "Depleting Mobile Depot shield to 0% must trigger 48-hour (172,800s) reinforced timer");
+    assert!(sys.get_combat_state(depot_item).await.unwrap().unwrap().shield_hp <= 1e-6, "Reinforcement must trigger at 0% shield");
+    let _ = sys.set_ball_position(ship_id, target_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Refitting off a reinforced Mobile Depot must be disabled during 48h reinforcement");
 }

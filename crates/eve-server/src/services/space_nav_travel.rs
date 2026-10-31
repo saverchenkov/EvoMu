@@ -99,6 +99,7 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
         ctx, ship_id, "tether",
     )
     .is_err()
+        || crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "tether").is_err()
         || crate::services::pve_crab_beacons::is_ship_crab_linked(ctx, ship_id, now);
     let (anchors, disallow_active, is_piloted) = ctx.db.with_snapshot(|snap| {
         let ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
@@ -226,6 +227,12 @@ async fn ensure_ship_not_immobilized(
     handle: &crate::system_actor::SystemHandle,
     ship_id: i64,
 ) -> Result<(), BridgeRpcError> {
+    if crate::services::tactical_modules::has_lance_caster_lock(ctx, ship_id) {
+        return Err(BridgeRpcError {
+            code: "CantMoveWhileModuleActive".into(),
+            message: "Ship is immobilized while superweapon warmup or 5-minute Lance caster lock is active".into(),
+        });
+    }
     if let Ok(Some((_, b))) = handle.get_ball_snapshot(ship_id).await {
         if b.max_velocity <= 1e-9
             && (crate::services::tactical_modules::has_lance_caster_lock(ctx, ship_id)

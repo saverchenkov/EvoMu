@@ -354,6 +354,14 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "No active ship in session".into(),
                 }));
             };
+            if session.station_id.is_some() || session.structure_id.is_some() || session.solar_system_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotRepairModuleWhileDocked".into(),
+                    message: "In-space Nanite Repair Paste module repair requires being in space".into(),
+                }));
+            }
+            let sys_id = session.solar_system_id.unwrap();
+            let sys = ctx.systems.get_or_spawn(sys_id);
             let module_id = args
                 .get(1)
                 .and_then(|a| a.as_i64())
@@ -364,6 +372,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                     })
                 })
                 .unwrap_or(0);
+            if sys.has_active_nanite_repair_sync(ship_id, module_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleAlreadyRepairing".into(),
+                    message: format!("Module {module_id} is already undergoing nanite repair"),
+                }));
+            }
 
             let mod_check = ctx.db.with_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {

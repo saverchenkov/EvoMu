@@ -78,6 +78,9 @@ pub(crate) async fn handle_module_cycles(
             if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
                 return Some(Err(e));
             }
+            if sys.has_active_nanite_repair_sync(ship_id, module_id) {
+                return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {module_id} cannot be activated or overloaded while undergoing nanite repair") }));
+            }
             let is_burned = m.damage_hp >= m.max_hp - 1e-6
                 || ctx.db.with_snapshot(|s| {
                     let it = s.items.get(&module_id);

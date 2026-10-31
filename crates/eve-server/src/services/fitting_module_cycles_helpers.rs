@@ -1052,6 +1052,46 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         vec![dmg_dict.clone()],
                     );
                     msg_tuples.push(PyRep::Tuple(vec![dmg_dict]));
+                    let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                        snap.characters
+                            .values()
+                            .find(|c| c.active_ship_id == victim_id)
+                            .map(|c| c.character_id)
+                            .or_else(|| {
+                                snap.items
+                                    .get(&victim_id)
+                                    .map(|i| i.owner_id)
+                                    .filter(|oid| snap.characters.contains_key(oid))
+                            })
+                    });
+                    if let Some(victim_char_id) = victim_char_opt {
+                        let vic_dict = PyRep::Dict(vec![
+                            (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+                            (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+                            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+                            (PyRep::String("target".into()), PyRep::Integer(victim_id)),
+                            (PyRep::String("target_ID".into()), PyRep::Integer(victim_id)),
+                            (
+                                PyRep::String("owner".into()),
+                                PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
+                            ),
+                            (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
+                            (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
+                            (PyRep::String("attackType".into()), PyRep::String("other".into())),
+                        ]);
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(victim_char_id),
+                            "OnDamageMessage",
+                            "charid",
+                            vec![vic_dict.clone()],
+                        );
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(victim_char_id),
+                            "OnDamageMessages",
+                            "charid",
+                            vec![PyRep::List(vec![PyRep::Tuple(vec![vic_dict])])],
+                        );
+                    }
                 }
                 if !msg_tuples.is_empty() {
                     ctx.notify(

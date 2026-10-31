@@ -50,7 +50,7 @@ pub const MIN_DEPOT_TO_DEPOT_DISTANCE_M: f64 = 5_000.0;
 pub const DEPOT_ANCHOR_TIME_SECS: u64 = 60;
 pub const DEPOT_REINFORCE_DURATION_SECS: u64 = 2 * 86_400; // 48 hours (2 days)
 pub const DEPOT_LIFETIME_SECS: u64 = 30 * 86_400; // 30 days
-pub const DEPOT_REINFORCE_SHIELD_THRESHOLD: f64 = 0.25; // 25% shield HP
+pub const DEPOT_REINFORCE_SHIELD_THRESHOLD: f64 = 0.0; // 0% shield HP (<= 1e-6)
 pub const MTU_LIFETIME_SECS: u64 = 2 * 86_400; // 2 days
 pub const MMJU_ACTIVATION_DELAY_SECS: u64 = 60; // 1 minute
 pub const MMJU_LIFETIME_SECS: u64 = 2 * 86_400; // 2 days
@@ -379,11 +379,26 @@ pub fn check_mobile_deployment_restrictions(
             }
         }
 
-        // Distance from another Mobile Depot (>= 5 km)
+        // Distance from another Mobile Depot, other anchored deployables, or SDE celestials (>= 5 km)
         if group_id == GROUP_MOBILE_DEPOT {
+            for cel in ctx.sde.celestials_in_system(sys_id) {
+                if (anchor_pos != DVec3::ZERO || cel.position != DVec3::ZERO)
+                    && matches!(cel.group_id, 6..=9)
+                    && (anchor_pos - cel.position).length() < MIN_DEPOT_TO_DEPOT_DISTANCE_M
+                {
+                    return Err(BridgeRpcError {
+                        code: "DeploymentTooCloseToCelestial".into(),
+                        message: format!(
+                            "Cannot anchor within 5km of a celestial body (distance: {:.1} km)",
+                            (anchor_pos - cel.position).length() / 1_000.0
+                        ),
+                    });
+                }
+            }
+            let dep_state = read_deployable_state_snap(snap);
             for it in snap.items.values() {
                 if it.item_id != item_id && it.location_id == sys_id as i64 {
-                    let it_grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    let (it_grp, it_cat) = ctx.sde.types.get(&it.type_id).map(|t| (t.group_id, t.category_id)).unwrap_or((0, 0));
                     if it_grp == GROUP_MOBILE_DEPOT {
                         if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
                             let opos = DVec3::from_array(*pos_arr);
@@ -392,6 +407,19 @@ pub fn check_mobile_deployment_restrictions(
                                     code: "DeploymentTooCloseToSameType".into(),
                                     message: format!(
                                         "Cannot anchor within 5km of another Mobile Depot (distance: {:.1} km)",
+                                        (anchor_pos - opos).length() / 1_000.0
+                                    ),
+                                });
+                            }
+                        }
+                    } else if it_cat == CATEGORY_DEPLOYABLE || dep_state.deployables.contains_key(&it.item_id) {
+                        if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
+                            let opos = DVec3::from_array(*pos_arr);
+                            if (anchor_pos - opos).length() < MIN_DEPOT_TO_DEPOT_DISTANCE_M {
+                                return Err(BridgeRpcError {
+                                    code: "DeploymentTooCloseToStructure".into(),
+                                    message: format!(
+                                        "Cannot anchor within 5km of another deployable structure (distance: {:.1} km)",
                                         (anchor_pos - opos).length() / 1_000.0
                                     ),
                                 });
@@ -1016,12 +1044,12 @@ pub fn handle_ball_damage_in_actor(
                 return Some((applied, destroyed, ball_snap));
             }
 
-            // Reinforcement threshold at <= 25% shield HP
-            let shield_threshold = cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD;
-            if cs.shield_hp > shield_threshold {
-                let damage_to_threshold = cs.shield_hp - shield_threshold;
+            // Reinforcement threshold at 0% shield HP (`<= 1e-6`)
+            let shield_threshold = (cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD).max(0.0);
+            if cs.shield_hp > shield_threshold + 1e-6 {
+                let damage_to_threshold = (cs.shield_hp - shield_threshold).max(0.0);
                 let incoming_total = damage.total();
-                if incoming_total >= damage_to_threshold {
+                if incoming_total + 1e-6 >= damage_to_threshold {
                     cs.shield_hp = shield_threshold;
                     let reinf_until = now_unix.saturating_add(DEPOT_REINFORCE_DURATION_SECS);
                     db.with_mut_snapshot(|snap| {
