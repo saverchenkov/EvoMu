@@ -564,17 +564,32 @@ pub fn char_fleet_id(ctx: &ServerContext, char_id: i64) -> Option<i64> {
 pub fn on_deployable_deactivated(ctx: &ServerContext, session_fleet_id: Option<i64>, item_id: i64) {
     let info = ctx.db.with_snapshot(|snap| {
         let st = crate::services::mobile_deployables::read_deployable_state_snap(snap);
-        let rec = st.deployables.get(&item_id)?;
-        if rec.group_id != crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
+        if let Some(rec) = st.deployables.get(&item_id) {
+            if rec.group_id != crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
+                return None;
+            }
+            let fleet_id = session_fleet_id.or_else(|| {
+                snap.fleets
+                    .values()
+                    .find(|f| f.boss_id == rec.owner_id || f.members.contains(&rec.owner_id))
+                    .map(|f| f.fleet_id)
+            })?;
+            return Some((fleet_id, rec.solar_system_id, rec.owner_id));
+        }
+        let item = snap.items.get(&item_id)?;
+        let item_type = ctx.sde.types.get(&item.type_id)?;
+        if item_type.group_id != crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
             return None;
         }
+        let sys_id = (item.location_id > 0 && item.location_id < 100_000_000)
+            .then_some(item.location_id as u32)?;
         let fleet_id = session_fleet_id.or_else(|| {
             snap.fleets
                 .values()
-                .find(|f| f.boss_id == rec.owner_id || f.members.contains(&rec.owner_id))
+                .find(|f| f.boss_id == item.owner_id || f.members.contains(&item.owner_id))
                 .map(|f| f.fleet_id)
         })?;
-        Some((fleet_id, rec.solar_system_id, rec.owner_id))
+        Some((fleet_id, sys_id, item.owner_id))
     });
     if let Some((fleet_id, sys_id, owner_id)) = info {
         crate::services::notify_emitters_batch3_space::emit_fleet_jump_beacon_deployable_change(

@@ -746,6 +746,7 @@ pub fn execute_death_pipeline_sync_inner(
         }
     });
 
+    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, None, victim_ship_id);
     sys_handle.try_remove_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {
         ctx.sde

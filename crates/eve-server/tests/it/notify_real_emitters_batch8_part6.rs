@@ -655,9 +655,11 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         ]
     );
 
-    rpc(&ctx, &mut sess_a, "entity", "CmdUnanchor", &[PyRep::Integer(beacon_id)])
-        .await
-        .expect("CmdUnanchor Mobile Cyno Beacon");
+    eve_server::services::notify_emitters_batch8::on_deployable_deactivated(
+        &ctx,
+        sess_a.fleet_id,
+        beacon_id,
+    );
     let cyno_off_notifs = drain_all(&ctx, &mut sess_b, PILOT_B);
     assert_eq!(
         find_notif(&cyno_off_notifs, "OnFleetJumpBeaconDeployableChange"),

@@ -78,21 +78,20 @@ pub(crate) async fn handle_mining_and_deactivate(
                 .map(|t| matches!(t.group_id, 54 | 464 | 483 | 737 | 2004 | 4138) || t.default_attributes.contains_key(&77))
                 .unwrap_or(false);
 
+            let mut removed_cycle_delay = None;
+            if let Some(sys_id) = session.solar_system_id {
+                let sys = ctx.systems.get_or_spawn(sys_id);
+                removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
+            }
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
             let deact_res = fit.deactivate_module(module_id, &ctx.sde);
             if let Err(e) = deact_res {
-                if !is_mining {
+                if removed_cycle_delay.is_none() && !is_mining {
                     return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
                 }
-            }
-
-            let mut removed_cycle_delay = None;
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
             let affected_ewar_ships = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
                 ctx,

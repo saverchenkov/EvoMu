@@ -235,6 +235,7 @@ impl ServerContext {
                 ) else { return; };
                 let ctx = ServerContext::from_step_components(instance_id, sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map, pe, pes, aes, tac);
                 for (tid, killer_opt) in destroyed_balls {
+                    crate::services::notify_emitters_batch8::on_deployable_deactivated(&ctx, None, tid);
                     let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
                     if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {

@@ -308,31 +308,92 @@ impl SystemHandle {
     }
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
-        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let super::SystemActorState {
-            active_module_cycles,
-            base_scramble_strengths,
-            base_core_strengths,
-            asteroids,
-            db_opt,
-            ..
-        } = &mut *st;
-        super::cycles::remove_all_ship_module_cycles(
-            &mut bp,
-            active_module_cycles,
-            base_scramble_strengths,
-            base_core_strengths,
-            db_opt,
-            ball_id,
-            deact_guard.as_ref(),
-        );
-        base_scramble_strengths.remove(&ball_id);
-        base_core_strengths.remove(&ball_id);
-        asteroids.remove(&ball_id);
-        let _ = bp.remove_ball(ball_id);
-        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let (removed_cycles, db_opt, deact_guard) = {
+            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let super::SystemActorState {
+                active_module_cycles,
+                base_scramble_strengths,
+                base_core_strengths,
+                db_opt,
+                ..
+            } = &mut *st;
+            let removed_cycles = super::cycles::remove_all_ship_module_cycles(
+                &mut bp,
+                active_module_cycles,
+                base_scramble_strengths,
+                base_core_strengths,
+                &None,
+                ball_id,
+                None,
+            );
+            base_scramble_strengths.remove(&ball_id);
+            base_core_strengths.remove(&ball_id);
+            let _ = bp.remove_ball(ball_id);
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            (removed_cycles, db_opt.clone(), deact_guard)
+        };
+        if let Some(db_ref) = db_opt {
+            if !db_ref.is_write_locked_by_current_thread() {
+                db_ref.with_mut_snapshot(|snap| {
+                    let ship_mod_ids: Vec<i64> = snap
+                        .items
+                        .values()
+                        .filter(|it| it.location_id == ball_id)
+                        .map(|it| it.item_id)
+                        .collect();
+                    for mid in ship_mod_ids {
+                        snap.module_active_states.remove(&mid);
+                        snap.module_active_charges.remove(&mid);
+                    }
+                    for (removed, _) in &removed_cycles {
+                        snap.module_active_states.remove(&removed.module_id);
+                        snap.module_active_charges.remove(&removed.module_id);
+                        if removed.adc_saved_resists.is_some() {
+                            if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
+                                for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
+                                    tr.remove(&aid);
+                                }
+                            }
+                        }
+                        if removed.mutadaptive_spool_step > 0.0 {
+                            if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
+                                tr.remove(&84);
+                            }
+                        }
+                        if removed.is_rah {
+                            if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
+                                for aid in 267..=270 {
+                                    tr.remove(&aid);
+                                }
+                            }
+                            if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
+                                for aid in 267..=270 {
+                                    tr.remove(&aid);
+                                }
+                            }
+                        }
+                    }
+                });
+                if let Some(hook) = deact_guard.as_ref() {
+                    for (removed, char_id_opt) in &removed_cycles {
+                        let cid = (*char_id_opt).or_else(|| {
+                            db_ref.with_snapshot(|s| {
+                                s.characters
+                                    .values()
+                                    .find(|c| c.active_ship_id == removed.ship_id)
+                                    .map(|c| c.character_id)
+                                    .or_else(|| s.items.get(&removed.ship_id).map(|it| it.owner_id))
+                            })
+                        });
+                        if let Some(cid) = cid {
+                            hook(cid, removed);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn try_spawn_asteroid(&self, asteroid: AsteroidState, ball: Ball) {

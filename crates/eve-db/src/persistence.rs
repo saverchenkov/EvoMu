@@ -295,6 +295,27 @@ impl WorldStateWalDelta {
     }
 }
 
+thread_local! {
+    static DB_WRITE_LOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct DbWriteLockDepthGuard;
+
+impl DbWriteLockDepthGuard {
+    #[inline]
+    fn enter() -> Self {
+        DB_WRITE_LOCK_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for DbWriteLockDepthGuard {
+    #[inline]
+    fn drop(&mut self) {
+        DB_WRITE_LOCK_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 static NEXT_REPO_INSTANCE_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -789,6 +810,13 @@ impl WorldRepository {
         }
     }
 
+    /// Returns `true` if the current thread currently holds the `WorldRepository` write lock
+    /// (inside `with_mut_snapshot` / `try_with_mut_snapshot`). Used to prevent re-entrant
+    /// same-thread deadlocks from synchronous callbacks such as `SystemHandle::try_remove_ball`.
+    pub fn is_write_locked_by_current_thread(&self) -> bool {
+        DB_WRITE_LOCK_DEPTH.with(|d| d.get() > 0)
+    }
+
     /// Transactionally applies a fallible closure `f` in-place (with zero whole-world `WorldStateSnapshot`
     /// cloning) and commits dirty rows inside an immediate `rusqlite::Transaction` ONLY when `f` returns
     /// `Ok(val)` AND durable persistence succeeds, rolling back in-memory state from the committed SQLite
@@ -799,6 +827,7 @@ impl WorldRepository {
         E: FromWalError,
     {
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let _write_depth_guard = DbWriteLockDepthGuard::enter();
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         match f(&mut guard) {

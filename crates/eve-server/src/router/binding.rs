@@ -800,9 +800,6 @@ impl ServerContext {
         let pending = Arc::clone(&self.pending_notifications);
         let notify_tx = self.notify_tx.clone();
         let ship_fittings = Arc::clone(&self.ship_fittings);
-<<<<<<< HEAD
-        let cd_map = Arc::clone(&self.module_reactivation_cooldowns);
-=======
         let combat_ephemeral = Arc::clone(&self.combat_ephemeral);
         let quasar_gateway = Arc::clone(&self.quasar_gateway);
         let inv_roll = Arc::clone(&self.invention_roll_override);
@@ -812,7 +809,6 @@ impl ServerContext {
         let projected_ewar_sources = Arc::clone(&self.projected_ewar_sources);
         let active_ewar_starts = Arc::clone(&self.active_ewar_starts);
         let tactical_state = Arc::clone(&self.tactical_state);
->>>>>>> 4152549 (fix(server): remediate Batch 8 review findings B8-01..B8-06 (EWAR auth/lifecycle, loadService/localization, QA_SeedRaffles escrow, claims))
 
         self.systems.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
             ship_fittings
@@ -820,7 +816,6 @@ impl ServerContext {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&cycle.ship_id);
 
-<<<<<<< HEAD
             let is_cloak = sde.types.get(&cycle.module_type_id).is_some_and(|t| t.group_id == 330)
                 || cycle.effect_name.to_ascii_lowercase().contains("cloak");
             if is_cloak {
