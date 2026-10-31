@@ -423,14 +423,13 @@ pub fn handle(
             let caller_alliance_id = session.alliance_id;
 
             ctx.db.with_snapshot(|snap| {
-                // Player corporations (group 2): must be war-eligible (own an Upwell structure or belong to an alliance)
+                // Player corporations (group 2): must be war-eligible (own an Upwell structure)
                 // and must not be the caller's own corporation or in the caller's own alliance.
                 for corp in snap.corporations.values() {
                     if corp.corporation_id >= 98_000_000
                         && Some(corp.corporation_id) != caller_corp_id
                         && (caller_alliance_id.is_none() || corp.alliance_id != caller_alliance_id)
-                        && (corp.alliance_id.is_some()
-                            || snap.structures.values().any(|s| s.owner_corp_id == corp.corporation_id))
+                        && snap.structures.values().any(|s| s.owner_corp_id == corp.corporation_id)
                         && (matches_query(&corp.name, &query, exact)
                             || matches_query(&corp.ticker, &query, exact))
                     {
@@ -444,9 +443,17 @@ pub fn handle(
                         ));
                     }
                 }
-                // Alliances (group 32): war-eligible, excluding caller's own alliance
+                // Alliances (group 32): war-eligible (at least one member corp owns an Upwell structure),
+                // excluding caller's own alliance
                 for al in snap.alliances.values() {
+                    let has_structure = al.member_corp_ids.iter().any(|&cid| {
+                        snap.structures.values().any(|s| s.owner_corp_id == cid)
+                    }) || snap.corporations.values().any(|c| {
+                        c.alliance_id == Some(al.alliance_id)
+                            && snap.structures.values().any(|s| s.owner_corp_id == c.corporation_id)
+                    });
                     if Some(al.alliance_id) != caller_alliance_id
+                        && has_structure
                         && (matches_query(&al.name, &query, exact)
                             || matches_query(&al.short_name, &query, exact))
                     {

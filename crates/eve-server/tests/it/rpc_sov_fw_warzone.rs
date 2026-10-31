@@ -254,15 +254,14 @@ async fn test_sov_mgr_structures_and_fuel_access() {
 
     // 3. GetSovStructuresInfoForSolarSystem & GetSovStructuresInfoForLocalSolarSystem
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(
-            1_000_000_090_001,
+        let mk_struct = |structure_id: i64, type_id: u32, owner_corp_id: i64, name: &str, x: f64| {
             eve_db::UpwellStructureRecord {
-                structure_id: 1_000_000_090_001,
-                type_id: 35832, // Astrahus (non-sov Upwell structure)
-                owner_corp_id: 98_000_001,
+                structure_id,
+                type_id,
+                owner_corp_id,
                 solar_system_id: NULLSEC_SYS_ID,
-                name: "Non-Sov Astrahus".into(),
-                position: [0.0, 0.0, 0.0],
+                name: name.into(),
+                position: [x, 0.0, 0.0],
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
                 fuel_blocks: 100,
@@ -273,50 +272,23 @@ async fn test_sov_mgr_structures_and_fuel_access() {
                 last_damage_tick: 0,
                 last_damage_unix: 0,
                 self_destruct_at_unix: None,
+            }
+        };
+        snap.structures.insert(1_000_000_090_001, mk_struct(1_000_000_090_001, 35832, 98_000_001, "Non-Sov Astrahus", 0.0));
+        snap.structures.insert(1_000_000_090_002, mk_struct(1_000_000_090_002, 32458, 98_000_001, "Sov Hub", 1000.0));
+        snap.structures.insert(1_000_000_090_003, mk_struct(1_000_000_090_003, 81826, 98_000_001, "Metenox Moon Drill", 2000.0));
+        snap.corporations.insert(
+            98_000_077,
+            eve_db::CorporationRecord {
+                corporation_id: 98_000_077,
+                name: "Rival Sov Corp".into(),
+                ticker: "RSC".into(),
+                ceo_id: 90_000_077,
+                alliance_id: Some(99_000_077),
+                ..Default::default()
             },
         );
-        snap.structures.insert(
-            1_000_000_090_002,
-            eve_db::UpwellStructureRecord {
-                structure_id: 1_000_000_090_002,
-                type_id: 32458, // Sovereignty Hub
-                owner_corp_id: 98_000_001,
-                solar_system_id: NULLSEC_SYS_ID,
-                name: "Sov Hub".into(),
-                position: [1000.0, 0.0, 0.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 100.0,
-                armor_hp: 100.0,
-                hull_hp: 100.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-                self_destruct_at_unix: None,
-            },
-        );
-        snap.structures.insert(
-            1_000_000_090_003,
-            eve_db::UpwellStructureRecord {
-                structure_id: 1_000_000_090_003,
-                type_id: 81826, // Metenox Moon Drill (non-sov Upwell structure)
-                owner_corp_id: 98_000_001,
-                solar_system_id: NULLSEC_SYS_ID,
-                name: "Metenox Moon Drill".into(),
-                position: [2000.0, 0.0, 0.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 100,
-                shield_hp: 100.0,
-                armor_hp: 100.0,
-                hull_hp: 100.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-                self_destruct_at_unix: None,
-            },
-        );
+        snap.structures.insert(1_000_000_090_004, mk_struct(1_000_000_090_004, 32226, 98_000_077, "Rival TCU", 3000.0));
     });
     let structures_sys = ctx
         .dispatch_rpc(
@@ -330,8 +302,8 @@ async fn test_sov_mgr_structures_and_fuel_access() {
         )
         .await
         .expect("GetSovStructuresInfoForSolarSystem");
-    let PyRep::List(sov_structs) = get_kv(&structures_sys, "structures").expect("structures") else {
-        panic!("expected structures list");
+    let PyRep::List(sov_structs) = structures_sys else {
+        panic!("expected top-level structures list from GetSovStructuresInfoForSolarSystem");
     };
     assert!(
         sov_structs.iter().all(|s| get_kv(s, "typeID") != Some(&PyRep::Integer(35832))),
@@ -341,9 +313,21 @@ async fn test_sov_mgr_structures_and_fuel_access() {
         sov_structs.iter().all(|s| get_kv(s, "typeID") != Some(&PyRep::Integer(81826))),
         "Non-sov Metenox Moon Drill must be excluded from GetSovStructuresInfoForSolarSystem"
     );
-    assert!(
-        sov_structs.iter().any(|s| get_kv(s, "typeID") == Some(&PyRep::Integer(32458))),
-        "Sovereignty Hub (32458) must be returned by GetSovStructuresInfoForSolarSystem"
+    let hub_entry = sov_structs
+        .iter()
+        .find(|s| get_kv(s, "itemID") == Some(&PyRep::Integer(1_000_000_090_002)))
+        .expect("Sovereignty Hub (32458) must be returned by GetSovStructuresInfoForSolarSystem");
+    assert_eq!(get_kv(hub_entry, "typeID"), Some(&PyRep::Integer(32458)));
+    assert_eq!(get_kv(hub_entry, "allianceID"), Some(&PyRep::Integer(ALLIANCE_ID)));
+    let rival_tcu = sov_structs
+        .iter()
+        .find(|s| get_kv(s, "itemID") == Some(&PyRep::Integer(1_000_000_090_004)))
+        .expect("Rival TCU (32226) must be returned by GetSovStructuresInfoForSolarSystem");
+    assert_eq!(get_kv(rival_tcu, "typeID"), Some(&PyRep::Integer(32226)));
+    assert_eq!(
+        get_kv(rival_tcu, "allianceID"),
+        Some(&PyRep::Integer(99_000_077)),
+        "Structure allianceID must reflect owner corp's alliance even when it differs from system sov alliance"
     );
 
     let local_structures = ctx

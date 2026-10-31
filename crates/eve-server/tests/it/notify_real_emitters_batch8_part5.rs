@@ -44,8 +44,7 @@ async fn rpc(
 
 // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:sessionMgr.EndAllGameSessions
 // parity: rpc:sessionMgr.RemoveSessionsFromServer, rpc:localizationServer.ReloadFSDPickle
-// parity: rpc:loadService.GetTotalStats
-// parity: rpc:loadService.StartLoad, rpc:loadService.StopLoad
+// parity: rpc:loadService.GetTotalStats, rpc:loadService.StartLoad, rpc:loadService.StopLoad
 #[tokio::test]
 async fn notify_batch8_session_localization_and_load_rpcs() {
     eve_testkit::attest(&[
@@ -53,7 +52,6 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         "rpc:sessionMgr.EndAllGameSessions",
         "rpc:sessionMgr.RemoveSessionsFromServer",
         "rpc:localizationServer.ReloadFSDPickle",
-        "rpc:localizationServer.UpdateLocalizationQAWrap",
         "rpc:loadService.GetTotalStats",
         "rpc:loadService.StartLoad",
         "rpc:loadService.StopLoad",

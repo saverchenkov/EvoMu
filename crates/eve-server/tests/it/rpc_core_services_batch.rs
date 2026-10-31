@@ -318,6 +318,7 @@ async fn test_rpc_lookup_svc_batch() {
                 name: "Peaceful Federation Corp".into(),
                 ticker: "PFC".into(),
                 ceo_id: 90_000_051,
+                alliance_id: Some(99_000_051),
                 ..Default::default()
             },
         );
@@ -352,6 +353,16 @@ async fn test_rpc_lookup_svc_batch() {
                 member_corp_ids: [98_000_050].into_iter().collect(),
             },
         );
+        snap.alliances.insert(
+            99_000_051,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_051,
+                name: "Peaceful Federation Alliance".into(),
+                short_name: "PFA".into(),
+                executor_corp_id: 98_000_051,
+                member_corp_ids: [98_000_051].into_iter().collect(),
+            },
+        );
     });
     let res = ctx
         .dispatch_rpc(
@@ -369,10 +380,12 @@ async fn test_rpc_lookup_svc_batch() {
     let own_corp_id = sess.corporation_id.unwrap_or(98_000_001);
     let has_own_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(own_corp_id)));
     let has_peaceful_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_051)));
+    let has_peaceful_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_051)));
     let has_target_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_050)) && w.dict_get("groupID") == Some(&PyRep::Integer(2)));
     let has_target_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_050)) && w.dict_get("groupID") == Some(&PyRep::Integer(32)));
     assert!(!has_own_corp, "Caller's own corp must be excluded");
-    assert!(!has_peaceful_corp, "Corp without Upwell structures or alliance must be excluded");
+    assert!(!has_peaceful_corp, "Corp without Upwell structures must be excluded even if in an alliance");
+    assert!(!has_peaceful_alliance, "Alliance with no structure-owning member corps must be excluded");
     assert!(has_target_corp, "Must find warable corp with Upwell structure");
     assert!(has_target_alliance, "Must find warable alliance");
 }

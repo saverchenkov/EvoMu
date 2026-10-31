@@ -944,13 +944,8 @@ pub async fn handle(
                     message: "GetSovStructuresInfoForSolarSystem requires a valid solarSystemID argument or active session solar system".into(),
                 }));
             };
-            let (alliance_id, structs_list) = ctx.db.with_snapshot(|snap| {
-                let aid = snap
-                    .system_states
-                    .get(&sys_id)
-                    .and_then(|s| s.sov_alliance_id);
-                let list: Vec<PyRep> = snap
-                    .structures
+            let structs_list = ctx.db.with_snapshot(|snap| {
+                snap.structures
                     .values()
                     .filter(|s| {
                         s.solar_system_id == sys_id
@@ -980,17 +975,9 @@ pub async fn handle(
                             ("vulnerableEndTime", PyRep::Integer(vuln.1 as i64)),
                         ])
                     })
-                    .collect();
-                (aid, list)
+                    .collect::<Vec<PyRep>>()
             });
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                (
-                    "allianceID",
-                    alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                ("structures", PyRep::List(structs_list)),
-            ])))
+            Some(Ok(PyRep::List(structs_list)))
         }
 
         ("sovMgr", "GetSovStructuresInfoForLocalSolarSystem") => {
