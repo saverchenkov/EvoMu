@@ -22,7 +22,6 @@ async fn call_rpc(
 
 #[tokio::test]
 async fn test_journey_mail_notifications() {
-    // parity: journey:mail_notifications
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -74,7 +73,7 @@ async fn test_journey_mail_notifications() {
 
     // 3. Notifications & Calendar events
     let notifs = call_rpc(&ctx, &mut sess2, "notificationMgr", "GetUnprocessed", &[]).await.expect("GetUnprocessed");
-    assert!(!format!("{notifs:?}").is_empty());
+    assert!(format!("{notifs:?}").contains("CRowset"));
     let ev = call_rpc(
         &ctx,
         &mut sess1,
@@ -96,7 +95,6 @@ async fn test_journey_mail_notifications() {
 
 #[tokio::test]
 async fn test_journey_esi_external() {
-    // parity: journey:esi_external
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -166,7 +164,6 @@ async fn test_journey_esi_external() {
 
 #[tokio::test]
 async fn test_journey_downtime_persistence() {
-    // parity: journey:downtime_persistence
     let tmp_dir = std::env::temp_dir();
     let db_path = tmp_dir.join(format!("evomu_journey_dt_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
@@ -221,7 +218,6 @@ async fn test_journey_downtime_persistence() {
 
 #[tokio::test]
 async fn test_journey_gm_tools() {
-    // parity: journey:gm_tools
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();

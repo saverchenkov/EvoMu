@@ -20,7 +20,6 @@ async fn call_rpc(
 
 #[tokio::test]
 async fn test_journey_ship_loss() {
-    // parity: journey:ship_loss
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -52,7 +51,6 @@ async fn test_journey_ship_loss() {
 
 #[tokio::test]
 async fn test_journey_clones() {
-    // parity: journey:clones
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -88,7 +86,6 @@ async fn test_journey_clones() {
 
 #[tokio::test]
 async fn test_journey_industry() {
-    // parity: journey:industry
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -127,13 +124,10 @@ async fn test_journey_industry() {
         .await
         .expect("InstallJob Manufacturing");
     let job_id = job_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("jobID");
+    let dur_s = job_rep.dict_get("durationSeconds").and_then(|v| v.as_i64()).unwrap_or(600) as u64;
 
-    // 2. Advance timer & deliver job
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(j) = snap.industry_jobs.get_mut(&job_id) {
-            j.start_unix = 0;
-        }
-    });
+    // 2. Advance virtual clock past job duration & deliver job
+    ctx.advance_secs(dur_s + 10);
     let done = call_rpc(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(job_id)])
         .await
         .expect("CompleteJob");
@@ -142,7 +136,6 @@ async fn test_journey_industry() {
 
 #[tokio::test]
 async fn test_journey_planetary() {
-    // parity: journey:planetary
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -190,12 +183,11 @@ async fn test_journey_planetary() {
     let col = call_rpc(&ctx, &mut sess, "planetMgr", "GetPlanetResourceInfo", &[PyRep::Integer(planet_id)])
         .await
         .expect("GetPlanetResourceInfo");
-    assert!(!format!("{col:?}").is_empty());
+    assert!(col.dict_get("planetID").is_some() || col.dict_get("resources").is_some());
 }
 
 #[tokio::test]
 async fn test_journey_corporation() {
-    // parity: journey:corporation
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -225,18 +217,21 @@ async fn test_journey_corporation() {
     .await
     .expect("AddCorporation");
     let corp_id = created.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corporationID");
-    sess1.corporation_id = Some(corp_id);
-    sess1.corp_role = corp_roles::ROLE_DIRECTOR;
+    assert_eq!(sess1.corporation_id, Some(corp_id));
+    assert!(sess1.corp_role & corp_roles::ROLE_DIRECTOR != 0);
 
-    // 2. Apply & accept second character, rent office, create alliance
-    call_rpc(&ctx, &mut sess2, "corpRegistry", "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())])
+    // 2. Apply & accept second character via real corpRegistry RPCs, rent office, create alliance
+    let app = call_rpc(&ctx, &mut sess2, "corpRegistry", "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())])
         .await
         .expect("InsertApplication");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
-            ch.corporation_id = corp_id;
-        }
-    });
+    let app_id = app
+        .dict_get("applicationID")
+        .and_then(|v| v.as_i64())
+        .or_else(|| app.as_i64())
+        .expect("applicationID");
+    call_rpc(&ctx, &mut sess1, "corpRegistry", "UpdateApplicationOffer", &[PyRep::Integer(app_id), PyRep::String("Accepted".into())])
+        .await
+        .expect("UpdateApplicationOffer");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&90_000_002].corporation_id), corp_id);
 
     ctx.db.with_mut_snapshot(|snap| {

@@ -1,10 +1,10 @@
 //! End-to-End Integration Journeys Part 5 (`journey:fleet` .. `journey:cosmetics_store`).
 #![forbid(unsafe_code)]
 
-use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, EvePublicRequest,
+    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
     EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, WireField, WireMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
@@ -77,7 +77,6 @@ async fn quasar_rpc(
 
 #[tokio::test]
 async fn test_journey_fleet() {
-    // parity: journey:fleet
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -132,7 +131,6 @@ async fn test_journey_fleet() {
 
 #[tokio::test]
 async fn test_journey_structures() {
-    // parity: journey:structures
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -142,20 +140,18 @@ async fn test_journey_structures() {
     call_rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
         .await
         .expect("SelectCharacterID");
-    sess.corp_role = corp_roles::ROLE_DIRECTOR;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.corporation_id = 98_000_001;
-        }
-        snap.corporations.entry(98_000_001).or_insert_with(|| eve_db::CorporationRecord {
-            corporation_id: 98_000_001,
-            name: "EvoMu Structures Corp".into(),
-            ticker: "EVST".into(),
-            ceo_id: 90_000_001,
-            ..Default::default()
-        });
-    });
-    sess.corporation_id = Some(98_000_001);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    let created = call_rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "AddCorporation",
+        &[PyRep::String("EvoMu Structures Corp".into()), PyRep::String("EVST".into()), PyRep::Real(0.05)],
+    )
+    .await
+    .expect("AddCorporation");
+    let corp_id = created.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corporationID");
+    assert_eq!(sess.corporation_id, Some(corp_id));
 
     // 1. Undock & anchor an Astrahus (type 35832) in space
     call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
@@ -204,12 +200,14 @@ async fn test_journey_structures() {
 
 #[tokio::test]
 async fn test_journey_sovereignty_fw() {
-    // parity: journey:sovereignty_fw
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
 
     let mut sess = SessionState::new(504);
+    ctx.db
+        .set_account_role("demo", eve_db::service_roles::ROLE_GM_DEFAULT)
+        .expect("set_account_role");
     crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     call_rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
         .await
@@ -223,16 +221,95 @@ async fn test_journey_sovereignty_fw() {
     let stats = call_rpc(&ctx, &mut sess, "facWarMgr", "GetStats_Character", &[])
         .await
         .expect("GetStats_Character");
-    assert!(format!("{stats:?}").contains("500001") || !format!("{stats:?}").is_empty());
+    let PyRep::Dict(ref stat_entries) = stats else { panic!("expected Dict from GetStats_Character") };
+    assert_eq!(stat_entries.len(), 6);
 
-    // 2. Equinox Sov hub query via Quasar
-    let sov_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.hub.api.GetResourcesRequest", Vec::new()).await;
-    assert!(sov_rsp.status_code == STATUS_OK || sov_rsp.status_code == 400 || sov_rsp.status_code == 404);
+    // 2. Anchor a Sovereignty Hub & query resources via Quasar
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    let created = call_rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "AddCorporation",
+        &[PyRep::String("EvoMu Sov Corp".into()), PyRep::String("EVSV".into()), PyRep::Real(0.05)],
+    )
+    .await
+    .expect("AddCorporation");
+    let corp_id = created.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corporationID");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.master_wallet = eve_db::IskCents::from_isk(2_000_000_000);
+            c.set_division_balance(1, eve_db::IskCents::from_isk(2_000_000_000));
+        }
+    });
+    call_rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "CreateAlliance",
+        &[PyRep::String("EvoMu Sov Alliance".into()), PyRep::String("EVSA".into()), PyRep::String("Sov".into()), PyRep::String("https://evomu.local".into())],
+    )
+    .await
+    .expect("CreateAlliance");
+    let nullsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status <= 0.0)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_004_759);
+    call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
+    call_rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String(format!("/tr {nullsec_sys}"))])
+        .await
+        .expect("/tr nullsec");
+    let ship_id = sess.ship_id.unwrap();
+    let sys_h = ctx.systems.get_or_spawn(nullsec_sys);
+    let _ = sys_h.set_ball_position(ship_id, glam::DVec3::new(2_500_000.0, 0.0, 0.0)).await;
+    let hub_item = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            InventoryItemRecord {
+                item_id: id,
+                type_id: 32458, // Sovereignty Hub
+                owner_id: corp_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+        id
+    });
+    let anchored = call_rpc(
+        &ctx,
+        &mut sess,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(hub_item), PyRep::String("EvoMu Sov Hub".into()), PyRep::Integer(1)],
+    )
+    .await
+    .expect("structureDeployment.Anchor Sov Hub");
+    let hub_id = anchored.dict_get("structureID").and_then(|v| v.as_i64()).unwrap_or(hub_item);
+    let mut hub_msg = Vec::new();
+    encode_varint_field(1, hub_id as u64, &mut hub_msg);
+    let mut sov_req = Vec::new();
+    encode_bytes_field(1, &hub_msg, &mut sov_req);
+    let sov_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.sovereignty.hub.api.GetResourcesRequest", sov_req).await;
+    assert_eq!(sov_rsp.status_code, STATUS_OK);
+    let sov_wm = WireMessage::decode(&sov_rsp.payload.unwrap().value).expect("decode GetResourcesResponse");
+    assert!(sov_wm.fields.iter().any(|f| f.field_number == 1), "GetResourcesResponse must include power field");
 }
 
 #[tokio::test]
 async fn test_journey_daily_goals_events() {
-    // parity: journey:daily_goals_events
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -272,7 +349,6 @@ async fn test_journey_daily_goals_events() {
 
 #[tokio::test]
 async fn test_journey_cosmetics_store() {
-    // parity: journey:cosmetics_store
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -301,5 +377,19 @@ async fn test_journey_cosmetics_store() {
 
     // 2. Apply ship SKIN via shipCosmeticsMgr
     let ship_id = sess.ship_id.expect("ship_id");
-    let _ = call_rpc(&ctx, &mut sess, "shipCosmeticsMgr", "ApplySkinToShip", &[PyRep::Integer(ship_id), PyRep::Integer(1)]).await;
+    let ship_type_id = ctx.db.with_snapshot(|s| s.items[&ship_id].type_id);
+    let skin_id = ctx
+        .sde
+        .skins
+        .iter()
+        .find(|(_, sk)| sk.types.contains(&ship_type_id))
+        .map(|(id, _)| *id as i64)
+        .unwrap_or(1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.licensed_skins.entry(90_000_001).or_default().push(skin_id as u32);
+    });
+    let skin_res = call_rpc(&ctx, &mut sess, "shipCosmeticsMgr", "ApplySkinToShip", &[PyRep::Integer(ship_id), PyRep::Integer(skin_id)])
+        .await
+        .expect("ApplySkinToShip");
+    assert_eq!(skin_res.dict_get("shipID").and_then(|v| v.as_i64()), Some(ship_id));
 }

@@ -39,7 +39,6 @@ fn bound_id_from_tuple(rep: &PyRep) -> u64 {
 
 #[tokio::test]
 async fn test_journey_local_chat() {
-    // parity: journey:local_chat
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -112,7 +111,6 @@ async fn test_journey_local_chat() {
 
 #[tokio::test]
 async fn test_journey_multiplayer_presence() {
-    // parity: journey:multiplayer_presence
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -188,7 +186,6 @@ async fn test_journey_multiplayer_presence() {
 
 #[tokio::test]
 async fn test_journey_skills_training() {
-    // parity: journey:skills_training
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -246,7 +243,6 @@ async fn test_journey_skills_training() {
 
 #[tokio::test]
 async fn test_journey_market_trade() {
-    // parity: journey:market_trade
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -368,7 +364,6 @@ async fn test_journey_market_trade() {
 
 #[tokio::test]
 async fn test_journey_contracts() {
-    // parity: journey:contracts
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();

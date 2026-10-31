@@ -22,7 +22,6 @@ async fn call_rpc(
 
 #[tokio::test]
 async fn test_journey_mining_loop() {
-    // parity: journey:mining_loop
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -58,13 +57,12 @@ async fn test_journey_mining_loop() {
         .await
         .expect("spawn asteroid");
 
-    let (miner_id, ore_id) = ctx.db.with_mut_snapshot(|snap| {
+    let miner_id = ctx.db.with_mut_snapshot(|snap| {
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.type_id = 32880; // Venture
         }
-        snap.next_entity_id += 2;
-        let mid = snap.next_entity_id - 1;
-        let oid = snap.next_entity_id;
+        snap.next_entity_id += 1;
+        let mid = snap.next_entity_id;
         snap.items.insert(
             mid,
             InventoryItemRecord {
@@ -83,25 +81,7 @@ async fn test_journey_mining_loop() {
                 blueprint_runs_remaining: None,
             },
         );
-        snap.items.insert(
-            oid,
-            InventoryItemRecord {
-                item_id: oid,
-                type_id: 1230, // Veldspar
-                owner_id: 90_000_001,
-                location_id: 60_003_760,
-                flag: InventoryFlag::Hangar,
-                quantity: 1_000,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        (mid, oid)
+        mid
     });
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(miner_id, true);
@@ -125,30 +105,38 @@ async fn test_journey_mining_loop() {
     });
     ctx.invalidate_ship_fitting(ship_id);
 
-    // 2. Lock asteroid & activate mining laser
+    // 2. Lock asteroid via dogmaIM.AddTarget & activate mining laser
     call_rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(asteroid_id)])
         .await
         .expect("AddTarget asteroid");
-    let _ = sys_h
-        .add_target_lock(
-            ship_id,
-            eve_destiny::TargetLock {
-                target_id: asteroid_id,
-                lock_time_ms: 100.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: None,
-            },
-        )
-        .await;
+    for _ in 0..15 {
+        let _ = sys_h.tick().await;
+        if sys_h
+            .get_target_locks(ship_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|l| l.target_id == asteroid_id && l.locked)
+        {
+            break;
+        }
+    }
     call_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(miner_id), PyRep::String("miningLaser".into()), PyRep::Integer(asteroid_id), PyRep::Integer(0)])
         .await
         .expect("Activate Miner I");
-    for _ in 0..10 {
-        let _ = sys_h.tick().await;
-    }
+    ctx.advance_secs(65);
+    let _ = eve_server::services::mining_cycle::process_mining_cycles(&ctx).await;
 
-    // 3. Dock & reprocess ore with skill-based yields
+    let (mined_ore_id, mined_ore_qty) = ctx.db.with_snapshot(|s| {
+        s.items
+            .values()
+            .find(|i| i.owner_id == 90_000_001 && i.location_id == ship_id && i.type_id == 1230)
+            .map(|i| (i.item_id, i.quantity))
+            .unwrap_or((0, 0))
+    });
+    assert!(mined_ore_qty > 0, "mining cycle must yield Veldspar into ship hold");
+
+    // 3. Dock & reprocess the mined ore with skill-based yields
     let st_pos = ctx.sde.stations.get(&60_003_760).map(|s| s.position).unwrap_or(DVec3::ZERO);
     let _ = sys_h.set_ball_position(ship_id, st_pos).await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
@@ -157,11 +145,18 @@ async fn test_journey_mining_loop() {
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(bey_bid), "CmdDock", &[PyRep::Integer(60_003_760)], &HashMap::new(), None)
         .await
         .expect("CmdDock");
-    let quotes = call_rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(ore_id)]), PyRep::Integer(60_003_760)])
+    let inv_bind = call_rpc(&ctx, &mut sess, "invbroker", "MachoBindObject", &[PyRep::Integer(60_003_760), PyRep::None])
+        .await
+        .expect("invbroker bind");
+    let inv_bid = match inv_bind { PyRep::Tuple(t) => t[0].as_i64().unwrap_or(1) as u64, other => other.as_i64().unwrap_or(1) as u64 };
+    ctx.dispatch_rpc(&mut sess, "invbroker", Some(inv_bid), "Add", &[PyRep::Integer(mined_ore_id), PyRep::Integer(ship_id), PyRep::Integer(4)], &HashMap::new(), None)
+        .await
+        .expect("invbroker.Add");
+    let quotes = call_rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(mined_ore_id)]), PyRep::Integer(60_003_760)])
         .await
         .expect("GetQuotes");
     assert!(format!("{quotes:?}").contains("34"), "Veldspar quote must include Tritanium (34)");
-    call_rpc(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(ore_id)])
+    call_rpc(&ctx, &mut sess, "reprocessingSvc", "Reprocess", &[PyRep::Integer(mined_ore_id)])
         .await
         .expect("Reprocess Veldspar");
     let trit_qty: i32 = ctx.db.with_snapshot(|s| {
@@ -172,7 +167,6 @@ async fn test_journey_mining_loop() {
 
 #[tokio::test]
 async fn test_journey_pve_combat() {
-    // parity: journey:pve_combat
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -249,7 +243,7 @@ async fn test_journey_pve_combat() {
             Ball {
                 id: npc_id,
                 type_id: 10002,
-                position: ship_ball.position + DVec3::new(1_500.0, 0.0, 0.0),
+                position: ship_ball.position + DVec3::new(500.0, 0.0, 0.0),
                 velocity: DVec3::ZERO,
                 max_velocity: 200.0,
                 inertia: 1.0,
@@ -263,36 +257,45 @@ async fn test_journey_pve_combat() {
         .await
         .expect("spawn belt rat");
 
-    // Lock target, activate weapon, tick combat
+    // Lock target via dogmaIM.AddTarget, activate weapon, tick combat
+    let wallet_before = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
     call_rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)])
         .await
         .expect("AddTarget NPC");
-    let _ = sys_h
-        .add_target_lock(
-            ship_id,
-            eve_destiny::TargetLock {
-                target_id: npc_id,
-                lock_time_ms: 100.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: None,
-            },
-        )
-        .await;
+    for _ in 0..15 {
+        let _ = sys_h.tick().await;
+        if sys_h
+            .get_target_locks(ship_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|l| l.target_id == npc_id && l.locked)
+        {
+            break;
+        }
+    }
+    ctx.set_invention_roll_override(Some(0.001));
     call_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id), PyRep::Integer(0)])
         .await
         .expect("Activate weapon");
     for _ in 0..10 {
-        let _ = sys_h.tick().await;
+        ctx.advance_secs(5);
+        let _ = sys_h.step_manual(1.0).await;
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+        if sys_h.get_ball_snapshot(npc_id).await.unwrap().is_none() {
+            break;
+        }
     }
+    ctx.set_invention_roll_override(None);
 
     let npc_after = sys_h.get_ball_snapshot(npc_id).await.unwrap();
-    assert!(npc_after.is_none() || npc_after.is_some(), "weapon cycle executed against NPC");
+    assert!(npc_after.is_none(), "NPC must be destroyed by weapon fire");
+    let wallet_after = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
+    assert!(wallet_after >= wallet_before, "wallet balance must not decrease after NPC kill");
 }
 
 #[tokio::test]
 async fn test_journey_missions() {
-    // parity: journey:missions
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -310,7 +313,14 @@ async fn test_journey_missions() {
         .expect("GetAgents");
     assert!(format!("{agents:?}").contains("agentID"));
 
-    let agent_id = ctx.sde.agents.keys().next().copied().unwrap_or(3018418) as i64;
+    call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
+    let agent = ctx
+        .sde
+        .agents
+        .values()
+        .find(|a| a.solar_system_id == Some(30_000_142) && !matches!(a.agent_type_id, 3 | 6 | 11))
+        .expect("regular agent in Jita");
+    let agent_id = agent.agent_id;
     let abind = call_rpc(&ctx, &mut sess, "agentMgr", "MachoBindObject", &[PyRep::Integer(agent_id), PyRep::None])
         .await
         .expect("agentMgr bind");
@@ -318,9 +328,17 @@ async fn test_journey_missions() {
         PyRep::Tuple(t) if !t.is_empty() => t[0].as_i64().unwrap_or(1) as u64,
         other => other.as_i64().unwrap_or(1) as u64,
     };
-    let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None).await;
-    let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(3)], &HashMap::new(), None).await;
-    let _ = ctx.dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(6)], &HashMap::new(), None).await;
+    let req_m = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None)
+        .await
+        .expect("DoAction(RequestMission)");
+    let PyRep::KeyVal(ref req_kv) = req_m else { panic!("expected KeyVal from DoAction(2)") };
+    let mid = req_kv.get("missionID").and_then(|v| v.as_i64()).expect("missionID");
+    let acc_m = ctx
+        .dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &HashMap::new(), None)
+        .await
+        .expect("DoAction(AcceptMission)");
+    assert!(matches!(acc_m, PyRep::KeyVal(_)), "DoAction(3) must return mission KeyVal");
 
     // 2. Check LP store offers
     let offers = call_rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_035)])
@@ -332,7 +350,6 @@ async fn test_journey_missions() {
 
 #[tokio::test]
 async fn test_journey_exploration() {
-    // parity: journey:exploration
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -408,7 +425,6 @@ async fn test_journey_exploration() {
 
 #[tokio::test]
 async fn test_journey_wormholes_filaments() {
-    // parity: journey:wormholes_filaments
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();

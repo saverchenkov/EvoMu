@@ -44,7 +44,6 @@ fn bound_id_from_tuple(rep: &PyRep) -> u64 {
 
 #[tokio::test]
 async fn test_journey_launch_login() {
-    // parity: journey:launch_login
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -137,7 +136,6 @@ async fn test_journey_launch_login() {
 
 #[tokio::test]
 async fn test_journey_create_character() {
-    // parity: journey:create_character
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -209,7 +207,6 @@ async fn test_journey_create_character() {
 
 #[tokio::test]
 async fn test_journey_station_ui() {
-    // parity: journey:station_ui
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -234,13 +231,13 @@ async fn test_journey_station_ui() {
     let fittings = call_rpc(&ctx, &mut sess, "charFittingMgr", "GetFittings", &[PyRep::Integer(90_000_001)])
         .await
         .expect("GetFittings");
-    assert!(!format!("{fittings:?}").is_empty());
+    assert!(matches!(fittings, PyRep::List(_) | PyRep::Rowset { .. }));
 
     // 4. Market
     let mkt = call_rpc(&ctx, &mut sess, "marketProxy", "GetMarketGroups", &[])
         .await
         .expect("GetMarketGroups");
-    assert!(!format!("{mkt:?}").is_empty());
+    assert!(format!("{mkt:?}").contains("marketGroupID"));
 
     // 5. Industry
     let fac = call_rpc(&ctx, &mut sess, "facilityManager", "GetFacilities", &[])
@@ -253,7 +250,7 @@ async fn test_journey_station_ui() {
     let ops = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(1)])
         .await
         .expect("get_category_state");
-    assert!(!format!("{ops:?}").is_empty());
+    assert!(matches!(ops, PyRep::Integer(s) if s >= 0));
 
     // 7. Character Sheet
     let pub_info = call_rpc(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[PyRep::Integer(90_000_001)])
@@ -265,7 +262,7 @@ async fn test_journey_station_ui() {
     let sk_handler = call_rpc(&ctx, &mut sess, "skillMgr2", "GetMySkillHandler", &[])
         .await
         .expect("GetMySkillHandler");
-    assert!(!format!("{sk_handler:?}").is_empty());
+    assert!(bound_id_from_tuple(&sk_handler) > 0);
 
     // 9. Wallet & 10. Journal
     let bal = call_rpc(&ctx, &mut sess, "account", "GetCashBalance", &[])
@@ -326,7 +323,6 @@ async fn test_journey_station_ui() {
 
 #[tokio::test]
 async fn test_journey_fit_ship() {
-    // parity: journey:fit_ship
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -519,12 +515,11 @@ async fn test_journey_fit_ship() {
     let dogma_bind = call_rpc(&ctx, &mut sess, "dogmaIM", "MachoBindObject", &[PyRep::Integer(ship_id), PyRep::None])
         .await
         .expect("dogmaIM.MachoBindObject");
-    assert!(!format!("{dogma_bind:?}").is_empty());
+    assert!(bound_id_from_tuple(&dogma_bind) > 0);
 }
 
 #[tokio::test]
 async fn test_journey_undock_navigate() {
-    // parity: journey:undock_navigate
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
