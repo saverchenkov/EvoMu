@@ -407,29 +407,107 @@ pub fn emit_structure_cfg_data_changed(
     );
 }
 
-/// Dispatches `browserLockdownSvc` queries (fail-closed until real lockdown state exists).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BrowserLockdownPolicy {
+    lockdown: bool,
+    default_home_page: String,
+    flagged_sites: Vec<String>,
+}
+
+impl Default for BrowserLockdownPolicy {
+    fn default() -> Self {
+        Self {
+            lockdown: false,
+            default_home_page: "https://www.eveonline.com/".to_string(),
+            flagged_sites: Vec::new(),
+        }
+    }
+}
+
+fn load_browser_lockdown_policy(snap: &eve_db::WorldStateSnapshot) -> BrowserLockdownPolicy {
+    snap.service_state_blobs
+        .get("browser_lockdown_policy")
+        .and_then(|raw| serde_json::from_str::<BrowserLockdownPolicy>(raw).ok())
+        .unwrap_or_default()
+}
+
+fn compute_flagged_sites_hash(sites: &[String]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for site in sites {
+        for b in site.as_bytes() {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+pub fn set_browser_lockdown_policy(
+    snap: &mut eve_db::WorldStateSnapshot,
+    lockdown: bool,
+    default_home_page: &str,
+    flagged_sites: Vec<String>,
+) {
+    let policy = BrowserLockdownPolicy {
+        lockdown,
+        default_home_page: default_home_page.to_string(),
+        flagged_sites,
+    };
+    if let Ok(json) = serde_json::to_string(&policy) {
+        snap.service_state_blobs
+            .insert("browser_lockdown_policy".to_string(), json);
+    }
+}
+
+/// Dispatches `browserLockdownSvc` queries backed by `service_state_blobs["browser_lockdown_policy"]`.
 pub fn handle_misc_batch9(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     session: &SessionState,
     service: &str,
     method: &str,
     _args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        (
-            "browserLockdownSvc",
-            "GetDefaultHomePage"
-            | "IsBrowserInLockdown"
-            | "GetFlaggedSitesHash"
-            | "GetFlaggedSitesList",
-        ) => {
+        ("browserLockdownSvc", "IsBrowserInLockdown") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            Some(Err(err(
-                "UnimplementedRPC",
-                format!("browserLockdownSvc.{method} is not yet implemented"),
+            let lockdown = ctx
+                .db
+                .with_snapshot(|snap| load_browser_lockdown_policy(snap).lockdown);
+            Some(Ok(PyRep::Bool(lockdown)))
+        }
+        ("browserLockdownSvc", "GetDefaultHomePage") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let home = ctx
+                .db
+                .with_snapshot(|snap| load_browser_lockdown_policy(snap).default_home_page);
+            Some(Ok(PyRep::String(home)))
+        }
+        ("browserLockdownSvc", "GetFlaggedSitesList") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let sites = ctx
+                .db
+                .with_snapshot(|snap| load_browser_lockdown_policy(snap).flagged_sites);
+            Some(Ok(PyRep::List(
+                sites.into_iter().map(PyRep::String).collect(),
             )))
+        }
+        ("browserLockdownSvc", "GetFlaggedSitesHash") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let hash = ctx.db.with_snapshot(|snap| {
+                let policy = load_browser_lockdown_policy(snap);
+                compute_flagged_sites_hash(&policy.flagged_sites)
+            });
+            Some(Ok(PyRep::String(hash)))
         }
         _ => None,
     }
