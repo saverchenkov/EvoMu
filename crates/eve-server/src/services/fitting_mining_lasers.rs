@@ -776,10 +776,7 @@ pub(crate) fn compute_nanite_repair_params(
     let vol_scale = mod_type
         .map(|t| (t.volume / 5.0).clamp(1.0, 250.0))
         .unwrap_or(1.0);
-    let base_full_cost = mod_type
-        .and_then(|t| t.default_attributes.get(&1231).copied())
-        .unwrap_or(4.0 * vol_scale)
-        .max(1.0);
+    let base_full_cost = (4.0 * vol_scale).max(1.0);
     let skill_cost_mult = (1.0 - 0.05 * (nanite_op_lvl.min(5) as f64))
         * (1.0 - 0.05 * (thermo_lvl.min(5) as f64));
     let raw_paste = (cur_dmg.max(0.0) / max_hp.max(1.0)) * base_full_cost * skill_cost_mult;

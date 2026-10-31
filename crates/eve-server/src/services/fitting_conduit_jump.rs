@@ -117,15 +117,21 @@ pub(super) async fn bridge_to_fleet_beacon(
             format!("{} cannot operate {}", ship_type.name, portal_type.name),
         ));
     }
-    let accepts_beacon = if is_deployable {
-        if beacon.beacon_type_id == 56488 {
-            ship_accepts_beacon(ctx, ship_type, 28650)
-        } else {
-            true
-        }
+    let is_covert_portal = portal_tid == 28652
+        || type_attr(ctx, portal_type, ATTR_IS_COVERT) > 0.0
+        || type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_PASSENGER_REQUIRED_ATTR) as AttributeId == 3320;
+    let eff_beacon_type = effective_beacon_field_type(ctx, beacon.beacon_type_id);
+    let is_industrial_beacon = ctx
+        .sde
+        .types
+        .get(&eff_beacon_type)
+        .is_some_and(|t| type_attr(ctx, t, ATTR_IS_INDUSTRIAL_CYNO) > 0.0);
+    let portal_matches_beacon = if is_covert_portal {
+        is_covert_beacon_type(eff_beacon_type) || is_industrial_beacon
     } else {
-        ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id)
+        !is_covert_beacon_type(eff_beacon_type)
     };
+    let accepts_beacon = ship_accepts_beacon(ctx, ship_type, eff_beacon_type) && portal_matches_beacon;
     if !accepts_beacon {
         return Err(err(
             "ShipCannotBridgeToBeacon",
@@ -317,15 +323,7 @@ pub(super) async fn group_jump_to_fleet_beacon(
             format!("{} is not capable of conduit jumping", ship_type.name),
         ));
     }
-    let accepts_beacon = if is_deployable {
-        if beacon.beacon_type_id == 56488 {
-            ship_accepts_beacon(ctx, ship_type, 28650)
-        } else {
-            type_attr(ctx, ship_type, ATTR_CAN_JUMP) > 0.0
-        }
-    } else {
-        ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id)
-    };
+    let accepts_beacon = ship_accepts_beacon(ctx, ship_type, effective_beacon_field_type(ctx, beacon.beacon_type_id));
     if type_attr(ctx, ship_type, ATTR_CAN_JUMP) <= 0.0 || !accepts_beacon {
         return Err(err(
             "ShipCannotJumpToBeacon",
@@ -611,7 +609,7 @@ pub(super) async fn group_jump_to_fleet_beacon(
 }
 
 /// `beyonce.CmdJumpThroughFleet(otherCharID, otherShipID, beaconID?, toSolarsystemID?)`: passenger jumps through an open portal.
-// parity: feat:modules.jump-portal-bridge-rules, feat:navigation.jump-arrival-placement
+// parity: feat:modules.covert-jump-portal-generator, feat:modules.jump-portal-bridge-rules, feat:navigation.jump-arrival-placement
 pub(super) async fn jump_through_fleet(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -714,13 +712,14 @@ pub(super) async fn jump_through_fleet(
         .get(&bridge.portal_module_type_id)
         .ok_or_else(|| err("ModuleNotFound", "Portal type unknown"))?;
     let required_attr = type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_PASSENGER_REQUIRED_ATTR) as AttributeId;
-    let passenger_ok = if required_attr == 3320 {
-        type_attr(ctx, ship_type, required_attr) > 0.0
-            || is_covert_ops_cloak_capable(ctx, ship_type)
-            || ctx.db.with_snapshot(|s| ship_has_fitted_covert_cloak(s, ctx, ship_id))
-    } else {
-        required_attr != 0 && type_attr(ctx, ship_type, required_attr) > 0.0
-    };
+    let (pvals, _) = evaluated_attrs(
+        ctx,
+        char_id,
+        ship_id,
+        &[required_attr, ATTR_JUMP_THROUGH_FATIGUE_MULTIPLIER],
+        None,
+    );
+    let passenger_ok = required_attr != 0 && (pvals[0] > 0.0 || type_attr(ctx, ship_type, required_attr) > 0.0);
     if !passenger_ok {
         return Err(err(
             "JumpBridgeRestrictedShip",
@@ -738,7 +737,6 @@ pub(super) async fn jump_through_fleet(
         bridge.bridger_ship_id,
         bridger_type,
     );
-    let (pvals, _) = evaluated_attrs(ctx, char_id, ship_id, &[ATTR_JUMP_THROUGH_FATIGUE_MULTIPLIER], None);
     let mass = if ball.mass > 0.0 { ball.mass } else { ship_type.mass };
     let fuel_type = type_attr(ctx, bridger_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
     // DERIVED: portal fuel = bridger effective jumpDriveConsumptionAmount * jumpPortalConsumptionMassFactor * passenger mass * LY.
@@ -764,7 +762,7 @@ pub(super) async fn jump_through_fleet(
         beacon.solar_system_id,
         pos,
         bridge.distance_ly,
-        pvals[0],
+        pvals[1],
     )
     .await?;
     Ok(JumpOutcome {

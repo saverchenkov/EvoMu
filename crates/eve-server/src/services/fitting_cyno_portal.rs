@@ -92,6 +92,25 @@ pub fn is_covert_beacon_type(beacon_type_id: TypeId) -> bool {
     matches!(beacon_type_id, 28646 | 28650 | 59630 | 59631)
 }
 
+pub(super) fn effective_beacon_field_type(ctx: &ServerContext, beacon_type_id: TypeId) -> TypeId {
+    match beacon_type_id {
+        59630 => 59631,
+        57319 => 57425,
+        other => {
+            if let Some(t) = ctx.sde.types.get(&other) {
+                if t.group_id == 4093 {
+                    return if type_attr(ctx, t, ATTR_IS_COVERT) > 0.0 {
+                        59631
+                    } else {
+                        57425
+                    };
+                }
+            }
+            other
+        }
+    }
+}
+
 pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     let key = ctx_key(ctx);
     let now = ctx.now_unix_secs();
@@ -121,14 +140,14 @@ fn ctx_key(ctx: &ServerContext) -> usize {
     ctx.instance_id as usize
 }
 
-/// Active cynosural field beacon counts per solar system for `map.GetBeaconCount`.
+/// Active cynosural field beacon counts per solar system for `map.GetBeaconCount` (excludes covert cynos).
 pub(crate) fn active_cyno_beacon_counts(ctx: &ServerContext) -> HashMap<i64, i64> {
     let key = ctx_key(ctx);
     let now_unix = ctx.now_unix();
     let mut counts = HashMap::new();
     if let Ok(state) = cyno_state().read() {
         for (&(k, _), b) in &state.beacons {
-            if k == key && b.expires_at_unix > now_unix {
+            if k == key && b.expires_at_unix > now_unix && !is_covert_beacon_type(b.beacon_type_id) {
                 *counts.entry(i64::from(b.solar_system_id)).or_insert(0) += 1;
             }
         }
@@ -474,7 +493,7 @@ pub(crate) async fn handle_cyno_generator_activation(
 }
 
 #[allow(clippy::too_many_arguments)]
-// parity: feat:ships.cynosural-beacon-spawning, feat:modules.industrial-cyno-rules
+// parity: feat:ships.cynosural-beacon-spawning, feat:modules.covert-cyno-rules, feat:modules.industrial-cyno-rules
 async fn light_cyno(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
@@ -526,13 +545,19 @@ async fn light_cyno(
     }
     let beacon_type_id = beacon_type_for_module(ctx, mod_type)
         .ok_or_else(|| err("NoActiveBeacon", "No SDE beacon type matches this cynosural generator"))?;
-    let (_, mod_vals) = evaluated_attrs(
+    let (ship_vals, mod_vals) = evaluated_attrs(
         ctx,
         char_id,
         ship_id,
-        &[],
+        &[3320],
         Some((module_id, &[attr_ids::DURATION, ATTR_CONSUMPTION_QUANTITY])),
     );
+    if is_covert && ship_type.group_id == 963 && ship_vals[0] <= 0.0 {
+        return Err(err(
+            "CannotLightCynoInSystem",
+            format!("{} requires a Covert Reconfiguration subsystem to light {}", ship_type.name, mod_type.name),
+        ));
+    }
     let duration_ms = if mod_vals[0] > 0.0 {
         mod_vals[0]
     } else {
@@ -542,6 +567,19 @@ async fn light_cyno(
     let cft_lvl = ctx.db.with_snapshot(|s| {
         s.skills.get(&char_id).and_then(|sk| sk.get(&21603)).map(|r| r.level).unwrap_or(0)
     });
+    let req_skill = type_attr(ctx, mod_type, 182) as u32;
+    let req_skill_lvl = type_attr(ctx, mod_type, 277) as i32;
+    if req_skill != 0 && req_skill_lvl > 0 {
+        let char_sk = ctx.db.with_snapshot(|s| {
+            s.skills.get(&char_id).and_then(|sk| sk.get(&req_skill)).map(|r| r.level).unwrap_or(0)
+        });
+        if (char_sk as i32) < req_skill_lvl {
+            return Err(err(
+                "SkillMissing",
+                format!("{} requires Cynosural Field Theory level {req_skill_lvl}", mod_type.name),
+            ));
+        }
+    }
     let raw_base = type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY);
     let role_mult = if ship_type.effect_ids.contains(&3526) {
         (1.0 + type_attr(ctx, ship_type, 1296) / 100.0).max(0.0)
@@ -648,6 +686,8 @@ async fn light_cyno(
         ("beaconID", PyRep::Integer(beacon_id)),
         ("beaconTypeID", PyRep::Integer(beacon_type_id as i64)),
         ("solarSystemID", PyRep::Integer(sys_id as i64)),
+        ("isCovert", PyRep::Bool(is_covert)),
+        ("onGridOnly", PyRep::Bool(is_covert)),
         ("consumptionTypeID", PyRep::Integer(fuel_type as i64)),
         ("consumptionQuantity", PyRep::Integer(fuel_qty)),
         ("durationSeconds", PyRep::Real(duration_s)),
@@ -875,15 +915,10 @@ pub(super) async fn caller_in_space(
     let now = ctx.now_unix();
     let release_portal_mod = {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-        if let Some(b) = st.bridges.get(&(ctx_key(ctx), char_id)) {
-            if b.bridger_ship_id == ship_id && b.expires_at_unix > now {
-                return Err(err("JumpPortalOpen", "Cannot jump while own portal is open"));
-            }
-        }
         let pmod = st
             .bridges
             .get(&(ctx_key(ctx), char_id))
-            .filter(|b| b.bridger_ship_id == ship_id)
+            .filter(|b| b.bridger_ship_id == ship_id && b.expires_at_unix <= now)
             .map(|b| b.portal_module_id);
         if pmod.is_some() {
             st.bridges.remove(&(ctx_key(ctx), char_id));
@@ -909,6 +944,14 @@ pub(super) async fn caller_in_space(
             "WarpScrambled",
             "Cannot jump or bridge while warp scrambled or inside a warp disruption bubble",
         ));
+    }
+    {
+        let st = cyno_state().read().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = st.bridges.get(&(ctx_key(ctx), char_id)) {
+            if b.bridger_ship_id == ship_id && b.expires_at_unix > now {
+                return Err(err("JumpPortalOpen", "Cannot jump while own portal is open"));
+            }
+        }
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
@@ -977,20 +1020,30 @@ pub(super) async fn resolve_fleet_beacon(
                 .or_else(|| s.corporations.get(&owner_id).and_then(|c| c.alliance_id));
             caller_alliance.is_some() && caller_alliance == owner_alliance
         };
+        let now_unix = ctx.now_unix();
+        let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(s);
         let is_deployable_beacon = |it: &eve_db::InventoryItemRecord| {
-            let is_cyno_type = matches!(it.type_id, 56099 | 56488);
+            let is_cyno_type = matches!(it.type_id, 57319 | 59630)
+                || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 4093);
             if !is_cyno_type {
                 return false;
             }
-            if it.flag != eve_db::InventoryFlag::None || !(30_000_000..=33_000_000).contains(&it.location_id) {
+            if !matches!(it.flag, eve_db::InventoryFlag::None | eve_db::InventoryFlag::Hangar)
+                || !(30_000_000..=33_000_000).contains(&it.location_id)
+            {
                 return false;
             }
-            if let Some(meta) = s.sp6_lifecycle.space_object_meta.get(&it.item_id) {
-                if !meta.anchor_completed && meta.anchor_start_unix.is_some() {
-                    return false;
-                }
+            let Some(rec) = dep_state.deployables.get(&it.item_id) else {
+                return false;
+            };
+            if rec.is_unanchored
+                || now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                || now_unix >= rec.expires_at_unix
+            {
+                return false;
             }
-            true
+            let owner_fleet = fleet_of(s, it.owner_id);
+            it.owner_id == char_id || (caller_fleet.is_some() && caller_fleet == owner_fleet)
         };
         if beacon_id != 0 {
             if let Some(it) = s.items.get(&beacon_id) {
@@ -1138,15 +1191,7 @@ pub(super) async fn jump_to_fleet_beacon(
     }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
-    let accepts_beacon = if is_deployable {
-        if beacon.beacon_type_id == 56488 {
-            ship_accepts_beacon(ctx, ship_type, 28650)
-        } else {
-            type_attr(ctx, ship_type, ATTR_CAN_JUMP) > 0.0
-        }
-    } else {
-        ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id)
-    };
+    let accepts_beacon = ship_accepts_beacon(ctx, ship_type, effective_beacon_field_type(ctx, beacon.beacon_type_id));
     if type_attr(ctx, ship_type, ATTR_CAN_JUMP) <= 0.0 || !accepts_beacon {
         return Err(err(
             "ShipCannotJumpToBeacon",

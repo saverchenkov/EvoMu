@@ -77,6 +77,21 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     assert_eq!((c5, c10, c20), (2, 4, 8), "Paste cost must scale linearly with module volume (5m3 / 10m3 / 20m3)");
     assert!((rate_0 - 0.67).abs() < 1e-3);
 
+    // Shield booster (type 10838, carries SDE attr 1231 overloadShieldBonus) must also scale paste cost by volume, not attr 1231
+    let mod_sb = 971_304;
+    give_item(&ctx, mod_sb, 10838, char_id, ship_id, InventoryFlag::MedSlot0, 1);
+    let sb_type = ctx.sde.types.get(&10838).unwrap();
+    assert!(sb_type.default_attributes.contains_key(&1231), "Shield booster 10838 must carry attr 1231");
+    let sb_hp = sb_type.default_attributes.get(&9).copied().unwrap_or(40.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_sb).unwrap().dynamic_attributes.insert(3, sb_hp * 0.5);
+    });
+    let rep_sb = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_sb)], &kw, None).await.expect("Repair shield booster");
+    let c_sb = rep_sb.dict_get("pasteConsumed").and_then(|v| v.as_i64()).unwrap();
+    let expected_sb = ((0.5 * 4.0 * (sb_type.volume / 5.0).clamp(1.0, 250.0)) - 1e-9).ceil().max(1.0) as i64;
+    assert_eq!(c_sb, expected_sb, "Shield booster paste cost must derive from volume, not attr 1231");
+    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopModuleRepair", &[PyRep::Integer(mod_sb)], &kw, None).await;
+
     // Negative: duplicate InitiateModuleRepair on an already-repairing module rejected & preserves paste;
     // activating, overloading, or unfitting a module while undergoing nanite repair is also rejected!
     let paste_after_start = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
