@@ -73,9 +73,11 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     let c5 = rep_5.dict_get("pasteConsumed").and_then(|v| v.as_i64()).unwrap();
     let c10 = rep_10.dict_get("pasteConsumed").and_then(|v| v.as_i64()).unwrap();
     let c20 = rep_20.dict_get("pasteConsumed").and_then(|v| v.as_i64()).unwrap();
-    let rate_0 = rep_20.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
+    let rate_5 = rep_5.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
+    let rate_10 = rep_10.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
+    let rate_20 = rep_20.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
     assert_eq!((c5, c10, c20), (2, 4, 8), "Paste cost must scale linearly with module volume (5m3 / 10m3 / 20m3)");
-    assert!((rate_0 - 0.67).abs() < 1e-3);
+    assert!((rate_5 - 0.67).abs() < 1e-3 && (rate_10 - 1.34).abs() < 1e-3 && (rate_20 - 2.68).abs() < 1e-3, "Repair rate must scale with module volume ({rate_5}, {rate_10}, {rate_20})");
 
     // Shield booster (type 10838, carries SDE attr 1231 overloadShieldBonus) must also scale paste cost by volume, not attr 1231
     let mod_sb = 971_304;
@@ -101,21 +103,21 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     assert!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_5m3)], &kw, None).await.is_err(), "Cannot Overload module while undergoing nanite repair");
     assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_5m3), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await.is_err(), "Cannot unfit module while undergoing nanite repair");
 
-    // 4. Step 10s mid-cycle and call StopModuleRepair on mod_20m3: partial repair committed & unused paste refunded!
+    // 4. Step 3s mid-cycle and call StopModuleRepair on mod_20m3: partial repair committed & unused paste refunded!
     let paste_before_stop = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
-    let _ = sys.step_manual(10.0).await;
+    let _ = sys.step_manual(3.0).await;
     let stop_res = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopModuleRepair", &[PyRep::Integer(mod_20m3)], &kw, None).await.expect("StopModuleRepair");
     let rem_dmg = stop_res.dict_get("remainingDamage").and_then(|v| v.as_f64()).unwrap();
     let refunded = stop_res.dict_get("pasteRefunded").and_then(|v| v.as_i64()).unwrap();
     let paste_after_stop = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
     let db_dmg_mid = ctx.db.with_snapshot(|s| s.items.get(&mod_20m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
-    assert!(rem_dmg > 12.0 && rem_dmg < 14.0, "10s at 0.67 HP/s must repair ~6.7 HP of 20 HP (remaining {rem_dmg})");
+    assert!(rem_dmg > 10.0 && rem_dmg < 14.0, "3s at 2.68 HP/s must repair ~8.04 HP of 20 HP (remaining {rem_dmg})");
     assert!((db_dmg_mid - rem_dmg).abs() < 1e-3, "Partial repair must be persisted to item DAMAGE attribute");
-    assert!(refunded >= 5, "Stopping at ~33% progress must refund unused paste (refunded {refunded} of 8)");
+    assert!(refunded >= 4, "Stopping at ~40% progress must refund unused paste (refunded {refunded} of 8)");
     assert_eq!(paste_after_stop, paste_before_stop + refunded as i32);
 
-    // Step remaining 25s -> mod_5m3 and mod_10m3 complete repair all the way to 0.0 DAMAGE!
-    let _ = sys.step_manual(25.0).await;
+    // Step remaining 32s -> mod_5m3 and mod_10m3 complete repair all the way to 0.0 DAMAGE!
+    let _ = sys.step_manual(32.0).await;
     let dmg_5_done = ctx.db.with_snapshot(|s| s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     let dmg_10_done = ctx.db.with_snapshot(|s| s.items.get(&mod_10m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     assert!(dmg_5_done <= 1e-6 && dmg_10_done <= 1e-6, "Stepped modules must finish repairing to 0.0 DAMAGE");
@@ -135,12 +137,12 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
         snap.items.get_mut(&mod_20m3).unwrap().dynamic_attributes.insert(3, 20.0);
     });
     set_skill(&ctx, char_id, 28879, 5); // Nanite Operation V -> additional -25% (8 * 0.75 * 0.75 = 4.5 -> 5)
-    set_skill(&ctx, char_id, 28880, 5); // Nanite Interfacing V -> +100% rate (1.34 HP/s)
+    set_skill(&ctx, char_id, 28880, 5); // Nanite Interfacing V -> +100% rate (5.36 HP/s on 20 m³)
     let rep_all_v = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_20m3)], &kw, None).await.expect("Repair with all V");
     let c_all_v = rep_all_v.dict_get("pasteConsumed").and_then(|v| v.as_i64()).unwrap();
     let rate_v = rep_all_v.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
     assert!(c_all_v < c_thermo, "Nanite Operation V must further reduce paste cost ({c_all_v} < {c_thermo})");
-    assert!((rate_v - 1.34).abs() < 1e-2, "Nanite Interfacing V must double repair rate to 1.34 HP/s");
+    assert!((rate_v - 5.36).abs() < 1e-2, "Nanite Interfacing V must double 20m³ repair rate to 5.36 HP/s (got {rate_v})");
     let _ = sys.step_manual(20.0).await;
 
     // 6. Burned-out module (40.0 / 40.0 HP) IS repaired when docked at station OR tethered/at Upwell structure!
@@ -207,12 +209,15 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, char_id, NULL_SYS, ship_id).await;
     let _ = sys.step_manual(1.0).await;
     assert!(sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered, "Ship must be tethered in space to the operational Astrahus");
+    let dmg_after_1s = ctx.db.with_snapshot(|s| s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
+    assert!(dmg_after_1s > 0.0 && dmg_after_1s < 40.0, "Tether heat repair must be gradual, not instant (after 1s: {dmg_after_1s})");
+    let _ = sys.step_manual(25.0).await;
     let (dmg_after_tether, is_online_after_tether) = ctx.db.with_snapshot(|s| {
         let dmg = s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0);
         let onl = s.module_online_states.get(&mod_5m3).copied().unwrap_or(true);
         (dmg, onl)
     });
-    assert!(dmg_after_tether <= 1e-6, "In-space Upwell structure tethering must clear burned-out module heat damage");
+    assert!(dmg_after_tether <= 1e-6, "In-space Upwell structure tethering must gradually clear burned-out module heat damage");
     assert!(!is_online_after_tether, "Tether-repaired burned-out module must remain offline until manually onlined by pilot");
     // BF-B35-03: InitiateModuleRepairMany must also reject docked sessions
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760));
@@ -221,6 +226,20 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
         ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepairMany", &[PyRep::List(vec![PyRep::Integer(mod_5m3)])], &kw, None).await.unwrap_err().code,
         "CannotRepairNaniteWhileDocked"
     );
+
+    // Regression B35R-P1-01: try_remove_ball while holding DB write lock must not deadlock when ship has active nanite repair
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().station_id = None;
+        s.items.get_mut(&mod_5m3).unwrap().dynamic_attributes.insert(3, 10.0);
+    });
+    sess.station_id = None;
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_5m3)], &kw, None)
+        .await
+        .expect("Start nanite repair before try_remove_ball");
+    ctx.db.with_mut_snapshot(|_| {
+        sys.try_remove_ball(ship_id);
+    });
+    assert!(sys.get_ball_snapshot(ship_id).await.unwrap().is_none(), "Ship ball must be removed without deadlocking");
 }
 
 #[tokio::test]

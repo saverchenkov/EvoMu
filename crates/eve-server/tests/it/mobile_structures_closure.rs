@@ -114,7 +114,7 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     let sys = ctx.systems.get_or_spawn(TEST_SYSTEM);
     let anchor_dmg = DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
     let (dmg_done, destroyed, _) = sys.apply_damage(depot_item_id, anchor_dmg).await.expect("apply damage").expect("depot hit");
-    assert!(dmg_done > 0.0);
+    assert_eq!(dmg_done, 0.0, "Mobile Depot must be invulnerable during 60s anchoring phase");
     assert!(!destroyed);
     let rec_anchor = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().unwrap();
     assert!(rec_anchor.reinforced_until_unix.is_none(), "Depot must not reinforce during anchoring phase");
@@ -275,9 +275,9 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     ctx.advance_secs(DEPOT_ANCHOR_TIME_SECS + 1);
     sys.step_manual(1.0).await.unwrap();
 
-    // Attack while shields <= 25% asserting destruction instead of reinforcement (MD-R3)
+    // Attack while shields at 0% (at/below reinforcement threshold) asserting destruction instead of reinforcement (MD-R3)
     let mut cs_depleted = sys.get_combat_state(depot_2_id).await.unwrap().unwrap();
-    cs_depleted.shield_hp = cs_depleted.max_shield_hp * 0.20;
+    cs_depleted.shield_hp = 0.0;
     sys.set_combat_state(depot_2_id, cs_depleted).await.unwrap();
 
     let fatal_dmg = DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 };

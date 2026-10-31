@@ -419,60 +419,65 @@ impl SystemHandle {
     }
 
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
-        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
-        let mut cancelled = Vec::new();
-        st.active_nanite_repairs.retain(|r| {
-            if r.ship_id == ship_id {
-                let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
-                let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
-                let paste_used = ((r.paste_reserved as f64) * frac).ceil() as i32;
-                let refund = (r.paste_reserved - paste_used.clamp(0, r.paste_reserved)).max(0);
-                cancelled.push((r.char_id, r.module_id, rem_dmg, refund));
-                false
-            } else {
-                true
-            }
-        });
+        let (cancelled, db_opt) = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let mut cancelled = Vec::new();
+            st.active_nanite_repairs.retain(|r| {
+                if r.ship_id == ship_id {
+                    let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
+                    let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
+                    let paste_used = ((r.paste_reserved as f64) * frac).ceil() as i32;
+                    let refund = (r.paste_reserved - paste_used.clamp(0, r.paste_reserved)).max(0);
+                    cancelled.push((r.char_id, r.module_id, rem_dmg, refund));
+                    false
+                } else {
+                    true
+                }
+            });
+            (cancelled, st.db_opt.clone())
+        };
         if !cancelled.is_empty() {
-            if let Some(db) = st.db_opt.as_ref() {
-                db.with_mut_snapshot(|snap| {
-                    for (char_id, module_id, rem_dmg, refund) in cancelled {
-                        if let Some(m_item) = snap.items.get_mut(&module_id) {
-                            if rem_dmg <= 1e-6 {
-                                m_item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
-                            } else {
-                                m_item.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, rem_dmg);
-                            }
-                        }
-                        if refund_paste && refund > 0 {
-                            if let Some(pid) = snap.items.values().find(|i| {
-                                i.owner_id == char_id
-                                    && i.location_id == ship_id
-                                    && i.flag == eve_db::InventoryFlag::Cargo
-                                    && i.type_id == 28668
-                                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                            }).map(|i| i.item_id) {
-                                if let Some(p_item) = snap.items.get_mut(&pid) {
-                                    p_item.quantity += refund;
-                                    p_item.version += 1;
+            if let Some(db) = db_opt {
+                if !db.is_write_locked_by_current_thread() {
+                    db.with_mut_snapshot(|snap| {
+                        for (char_id, module_id, rem_dmg, refund) in cancelled {
+                            if let Some(m_item) = snap.items.get_mut(&module_id) {
+                                if rem_dmg <= 1e-6 {
+                                    m_item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                                } else {
+                                    m_item.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, rem_dmg);
                                 }
-                            } else {
-                                snap.next_entity_id += 1;
-                                let new_id = snap.next_entity_id;
-                                snap.items.insert(new_id, eve_db::InventoryItemRecord {
-                                    item_id: new_id,
-                                    type_id: 28668,
-                                    owner_id: char_id,
-                                    location_id: ship_id,
-                                    flag: eve_db::InventoryFlag::Cargo,
-                                    quantity: refund,
-                                    singleton: false,
-                                    ..Default::default()
-                                });
+                            }
+                            if refund_paste && refund > 0 {
+                                if let Some(pid) = snap.items.values().find(|i| {
+                                    i.owner_id == char_id
+                                        && i.location_id == ship_id
+                                        && i.flag == eve_db::InventoryFlag::Cargo
+                                        && i.type_id == 28668
+                                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                                }).map(|i| i.item_id) {
+                                    if let Some(p_item) = snap.items.get_mut(&pid) {
+                                        p_item.quantity += refund;
+                                        p_item.version += 1;
+                                    }
+                                } else {
+                                    snap.next_entity_id += 1;
+                                    let new_id = snap.next_entity_id;
+                                    snap.items.insert(new_id, eve_db::InventoryItemRecord {
+                                        item_id: new_id,
+                                        type_id: 28668,
+                                        owner_id: char_id,
+                                        location_id: ship_id,
+                                        flag: eve_db::InventoryFlag::Cargo,
+                                        quantity: refund,
+                                        singleton: false,
+                                        ..Default::default()
+                                    });
+                                }
                             }
                         }
-                    }
-                });
+                    });
+                }
             }
         }
     }

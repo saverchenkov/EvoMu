@@ -94,8 +94,8 @@ pub fn is_covert_beacon_type(beacon_type_id: TypeId) -> bool {
 
 pub(super) fn effective_beacon_field_type(ctx: &ServerContext, beacon_type_id: TypeId) -> TypeId {
     match beacon_type_id {
-        59630 => 59631,
-        57319 => 57425,
+        56488 | 59630 => 59631,
+        56099 | 57319 => 57425,
         other => {
             if let Some(t) = ctx.sde.types.get(&other) {
                 if t.group_id == 4093 {
@@ -1023,7 +1023,7 @@ pub(super) async fn resolve_fleet_beacon(
         let now_unix = ctx.now_unix();
         let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(s);
         let is_deployable_beacon = |it: &eve_db::InventoryItemRecord| {
-            let is_cyno_type = matches!(it.type_id, 57319 | 59630)
+            let is_cyno_type = matches!(it.type_id, 56099 | 56488 | 57319 | 59630)
                 || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 4093);
             if !is_cyno_type {
                 return false;
@@ -1033,14 +1033,13 @@ pub(super) async fn resolve_fleet_beacon(
             {
                 return false;
             }
-            let Some(rec) = dep_state.deployables.get(&it.item_id) else {
-                return false;
-            };
-            if rec.is_unanchored
-                || now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
-                || now_unix >= rec.expires_at_unix
-            {
-                return false;
+            if let Some(rec) = dep_state.deployables.get(&it.item_id) {
+                if rec.is_unanchored
+                    || now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                    || now_unix >= rec.expires_at_unix
+                {
+                    return false;
+                }
             }
             let owner_fleet = fleet_of(s, it.owner_id);
             it.owner_id == char_id || (caller_fleet.is_some() && caller_fleet == owner_fleet)

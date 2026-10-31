@@ -375,9 +375,6 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     seed_item(&ctx, 891_099, 28668, C1, ship1, InventoryFlag::Cargo, 100);
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&C1) {
-            ch.station_id = Some(60_003_760);
-        }
         if let Some(it) = snap.items.get_mut(&mod_id) {
             it.dynamic_attributes.insert(attr_ids::DAMAGE, 10.0);
         }
@@ -385,7 +382,6 @@ async fn test_dogma_im_targeting_and_queries_complete() {
             it.dynamic_attributes.insert(attr_ids::DAMAGE, 40.0);
         }
     });
-    s1.station_id = Some(60_003_760);
     let repair_res = rpc(
         &ctx,
         &mut s1,

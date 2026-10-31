@@ -189,37 +189,6 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
     cs.is_tethered = should;
     if should {
         handle.cancel_ship_nanite_repairs_sync(ship_id, true);
-        let repaired_mods: Vec<(i64, i64, f64)> = ctx.db.with_mut_snapshot(|snap| {
-            let mut repaired = Vec::new();
-            for it in snap.items.values_mut() {
-                if it.location_id == ship_id
-                    && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
-                {
-                    if let Some(old_dmg) = it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE) {
-                        if old_dmg > 0.0 {
-                            repaired.push((it.owner_id, it.item_id, old_dmg));
-                        }
-                    }
-                }
-            }
-            repaired
-        });
-        if !repaired_mods.is_empty() {
-            let now_ft = unix_to_filetime(now);
-            for (owner_id, item_id, old_dmg) in repaired_mods {
-                crate::services::notify_emitters_batch3::emit_setattr_notifications(
-                    ctx,
-                    owner_id,
-                    ship_id,
-                    item_id,
-                    eve_sde::attr_ids::DAMAGE,
-                    now_ft,
-                    0.0,
-                    old_dmg,
-                );
-            }
-            ctx.invalidate_ship_fitting(ship_id);
-        }
     }
     if should
         && (cs.shield_hp < cs.max_shield_hp
@@ -1105,7 +1074,13 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
                 cloaking_skill as u8,
             );
         if !cs.is_cloaked {
-            let orig_v = cs.cloak_original_max_velocity.unwrap_or(ball.max_velocity);
+            let orig_v = cs.cloak_original_max_velocity.unwrap_or_else(|| {
+                if vel_mult > 1e-6 && vel_mult < 1.0 {
+                    ball.max_velocity / vel_mult
+                } else {
+                    ball.max_velocity
+                }
+            });
             cs.cloak_original_max_velocity = Some(orig_v);
             ball.max_velocity = orig_v * vel_mult;
             cs.is_cloaked = true;

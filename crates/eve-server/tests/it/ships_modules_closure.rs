@@ -419,6 +419,9 @@ async fn test_ships_cyno_beacon_jump_fatigue_and_titan_portal_bridge() {
     let fatigue_min = jump_through.dict_get("jumpFatigueMinutes").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!(fatigue_min > 0.0, "Passenger must accumulate jump fatigue");
 
+    ctx.advance_secs(61);
+    let _ = ctx.systems.get_or_spawn(low_origin).step_manual(1.0).await;
+
     let far_err = call_service(&ctx, &mut s_titan, "beyonce", "CmdJumpToFleetModuleBeacon", vec![PyRep::Integer(cyno_char), PyRep::Integer(30000142), PyRep::Integer(beacon_id)], HashMap::new()).await.expect_err("Jump distance out of range");
     assert_eq!(far_err.code, "JumpDistanceOutOfRange");
 

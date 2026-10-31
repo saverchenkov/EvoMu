@@ -256,9 +256,7 @@ pub(crate) fn handle_add_module_cycle(
                 cycle.original_max_velocity = Some(orig_v);
                 if is_cloak_cycle {
                     ball.max_velocity = orig_v * (1.0 + cycle.speed_boost_factor).max(0.0);
-                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-                        cs.cloak_original_max_velocity = Some(orig_v);
-                    }
+                    ballpark.combat_states.entry(cycle.ship_id).or_default().cloak_original_max_velocity = Some(orig_v);
                 } else if let Some(cloak_mult) = active_cloak_mult {
                     ball.max_velocity = orig_v * cloak_mult;
                 } else {

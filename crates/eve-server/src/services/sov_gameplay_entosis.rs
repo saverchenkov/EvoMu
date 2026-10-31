@@ -312,7 +312,7 @@ async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_i
 }
 
 fn remove_ship_entosis_link(ctx: &ServerContext, ship_id: i64) {
-    let db_key = ctx.instance_id as usize;
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
     let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
     if let Some(link) = st.entosis_active_links.remove(&(db_key, ship_id)) {
         st.entosis_target_cycles.remove(&(db_key, link.target_id, ship_id));
@@ -333,7 +333,7 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
     if entries.is_empty() {
         return;
     }
-    let db_key = ctx.instance_id as usize;
+    let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
 
     for (target_id, (char_id, alliance_id, ship_id, mut accrued_secs, last_ts)) in entries {
         let meta = ctx.db.with_snapshot(|snap| {

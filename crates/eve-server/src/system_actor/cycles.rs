@@ -132,14 +132,23 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
-    // Upwell structure tethering repairs fitted module heat damage (including burned-out modules, leaving them offline) (`feat:modules.nanite-repair-paste-in-space`)
+    // Upwell structure tethering gradually repairs fitted module heat damage (including burned-out modules, leaving them offline) (`feat:modules.nanite-repair-paste-in-space`)
+    // DERIVED: 2.0 HP/s gradual tether heat-damage repair rate (Overheating.md:151 'heat damage ... is slowly repaired')
     let tethered_ships: Vec<BallId> = ballpark.combat_states.iter().filter_map(|(&bid, cs)| cs.is_tethered.then_some(bid)).collect();
     if !tethered_ships.is_empty() {
+        let tether_repair_hp = 2.0 * dt.max(0.0);
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 for it in snap.items.values_mut() {
                     if tethered_ships.contains(&it.location_id) && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171) {
-                        it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                        if let Some(cur_dmg) = it.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE).copied() {
+                            let new_dmg = (cur_dmg - tether_repair_hp).max(0.0);
+                            if new_dmg <= 1e-6 {
+                                it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                            } else {
+                                it.dynamic_attributes.insert(eve_sde::attr_ids::DAMAGE, new_dmg);
+                            }
+                        }
                     }
                 }
             });
