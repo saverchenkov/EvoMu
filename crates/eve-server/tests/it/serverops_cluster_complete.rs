@@ -504,6 +504,8 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
                 ess_reserve_bank: IskCents::from_isk(200_000),
                 ess_linked_character_id: None,
                 ess_link_started_tick: None,
+                ess_cycle_started_unix: 0,
+                ess_main_bank_contributors: Default::default(),
                 sov_alliance_id: Some(99_000_001),
                 military_index: 4,
                 industrial_index: 3,

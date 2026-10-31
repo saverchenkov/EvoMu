@@ -482,12 +482,15 @@ async fn test_deathless_shipcaster_zarzakh_to_fob() {
             st.landing_pads.push(eve_server::services::cluster_macho_misc_services::LandingPadRecord {
                 item_id: pid,
                 type_id: 77_263,
+                built_type_id: 77_263,
                 solar_system_id: psys,
                 faction_id: 500_010, // Guristas
                 position: DVec3::new(50_000.0, 0.0, 50_000.0),
                 is_built: true,
                 is_disrupted: false,
                 link_timestamp: 1,
+                required_materials: Default::default(),
+                contributed_materials: Default::default(),
             });
         }
     });

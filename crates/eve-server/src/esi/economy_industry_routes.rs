@@ -39,8 +39,8 @@ fn map_job_status(status: &str) -> &'static str {
 /// Rolling 28-day window used for EVE Online System Cost Index calculation (`Manufacturing.md:88`).
 pub const INDUSTRY_COST_INDEX_WINDOW_SECS: u64 = 28 * 86_400;
 
-/// Minimum baseline System Cost Index (`0.01%`) for solar systems with zero 28-day job hours.
-pub const BASELINE_SYSTEM_COST_INDEX: f64 = 0.0001;
+/// Idle System Cost Index (`1.0%`) matching `compute_canonical_system_cost_index` when no 28-day jobs exist.
+pub const BASELINE_SYSTEM_COST_INDEX: f64 = 0.01;
 
 const ESI_INDUSTRY_ACTIVITIES: [&str; 6] = [
     "manufacturing",
@@ -52,7 +52,7 @@ const ESI_INDUSTRY_ACTIVITIES: [&str; 6] = [
 ];
 
 /// Computes EVE's rolling 28-day square-root System Cost Index (`sqrt(sys_work / universe_work)`)
-/// across known-space SDE solar systems and active structure systems (`Manufacturing.md:88`).
+/// across all SDE solar systems and active facility systems, matching `compute_canonical_system_cost_index`.
 pub fn compute_industry_system_cost_indices(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
@@ -60,20 +60,14 @@ pub fn compute_industry_system_cost_indices(
 ) -> Vec<Value> {
     let cutoff = now_unix.saturating_sub(INDUSTRY_COST_INDEX_WINDOW_SECS);
     let mut sys_work: BTreeMap<u32, BTreeMap<&'static str, u64>> = BTreeMap::new();
-    for &sid in sde.solar_systems.keys() {
-        if (30_000_000..31_000_000).contains(&sid) {
-            sys_work.entry(sid).or_default();
-        }
-    }
-    for st in snap.structures.values() {
-        sys_work.entry(st.solar_system_id).or_default();
-    }
     let mut total_activity_work: BTreeMap<&'static str, u64> = BTreeMap::new();
     for j in snap.industry_jobs.values() {
-        if j.status.eq_ignore_ascii_case("cancelled")
-            || j.status.eq_ignore_ascii_case("reverted")
-            || j.start_unix < cutoff
+        if j.status.eq_ignore_ascii_case("Cancelled")
+            || j.status.eq_ignore_ascii_case("Reverted")
         {
+            continue;
+        }
+        if j.start_unix > 0 && j.start_unix < cutoff {
             continue;
         }
         let Some(sid) = sde
@@ -93,7 +87,8 @@ pub fn compute_industry_system_cost_indices(
             9 | 11 => "reaction",
             _ => continue,
         };
-        let work = u64::from(j.runs).saturating_mul(j.duration_seconds);
+        // Canonical System Cost Index (`compute_canonical_system_cost_index`): aggregates job duration_seconds over 28d.
+        let work = j.duration_seconds;
         if work == 0 {
             continue;
         }
@@ -101,18 +96,25 @@ pub fn compute_industry_system_cost_indices(
         *total_activity_work.entry(activity).or_insert(0) += work;
     }
 
-    sys_work
+    let all_sids: std::collections::BTreeSet<u32> = sde
+        .solar_systems
+        .keys()
+        .copied()
+        .chain(sys_work.keys().copied())
+        .collect();
+
+    all_sids
         .into_iter()
-        .map(|(sid, acts)| {
+        .map(|sid| {
+            let acts = sys_work.get(&sid);
             let cost_indices: Vec<Value> = ESI_INDUSTRY_ACTIVITIES
                 .iter()
                 .map(|&activity| {
-                    let work = acts.get(activity).copied().unwrap_or(0);
                     let total = total_activity_work.get(activity).copied().unwrap_or(0);
-                    let cost_index = if work > 0 && total > 0 {
-                        ((work as f64) / (total as f64))
-                            .sqrt()
-                            .clamp(BASELINE_SYSTEM_COST_INDEX, 1.0)
+                    let work = acts.and_then(|m| m.get(activity).copied()).unwrap_or(0);
+                    // DERIVED: floor/ceiling clamp (0.001 to 0.50) matches `compute_canonical_system_cost_index` (`0.01` when idle).
+                    let cost_index = if total > 0 && work > 0 {
+                        ((work as f64) / (total as f64)).sqrt().clamp(0.001, 0.50)
                     } else {
                         BASELINE_SYSTEM_COST_INDEX
                     };

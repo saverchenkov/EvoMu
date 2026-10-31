@@ -843,9 +843,14 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
         let active_sci_count = sci_rows
             .iter()
             .filter(|v| {
-                v["cost_indices"]
-                    .as_array()
-                    .is_some_and(|arr| arr.iter().any(|e| e["cost_index"].as_f64().unwrap_or(0.0) > 0.0001))
+                v["cost_indices"].as_array().is_some_and(|arr| {
+                    arr.iter().any(|e| {
+                        let ci = e["cost_index"]
+                            .as_f64()
+                            .unwrap_or(crate::esi::economy_industry_routes::BASELINE_SYSTEM_COST_INDEX);
+                        (ci - crate::esi::economy_industry_routes::BASELINE_SYSTEM_COST_INDEX).abs() > 1e-9
+                    })
+                })
             })
             .count() as i64;
         if let Ok(meta_json) = serde_json::to_string(&serde_json::json!({

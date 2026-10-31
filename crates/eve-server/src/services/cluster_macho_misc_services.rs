@@ -227,12 +227,15 @@ pub fn default_pirate_fob_pads() -> Vec<LandingPadRecord> {
         LandingPadRecord {
             item_id: 104_000_030,
             type_id: 79018, // Deathless Interstellar Shipcaster
+            built_type_id: 79018,
             solar_system_id: 30_100_000, // Zarzakh
             faction_id: 0,
             is_built: true,
             link_timestamp: 1_700_000_000,
             is_disrupted: false,
             position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
         },
     ]
 }
