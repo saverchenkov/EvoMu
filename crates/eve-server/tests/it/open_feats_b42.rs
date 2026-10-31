@@ -647,7 +647,7 @@ async fn test_b42_zarzakh_and_ship_mechanics() {
     let ozone_after_covert: i32 = ctx.db.with_snapshot(|s| {
         s.items.values().filter(|i| i.location_id == recon_ship && i.type_id == 16_273).map(|i| i.quantity).sum()
     });
-    assert_eq!(ozone_after_covert, 450, "Covert cyno consumes 50 Liquid Ozone");
+    assert_eq!(ozone_after_covert, 475, "Covert cyno consumes 25 Liquid Ozone (50 base * 0.5 CFT V)");
 
     let recon_ship2 = 742_050_025_i64;
     let normal_cyno_mod = 742_050_022_i64;
