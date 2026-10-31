@@ -99,29 +99,15 @@ pub struct ActiveWubbleDebuff {
     pub velocity_multiplier: f64,
 }
 
-static ACTIVE_WUBBLE_BY_BP: std::sync::OnceLock<
-    RwLock<std::collections::HashMap<usize, std::collections::HashMap<i64, f64>>>,
-> = std::sync::OnceLock::new();
-
-fn wubble_bp_map() -> &'static RwLock<std::collections::HashMap<usize, std::collections::HashMap<i64, f64>>> {
-    ACTIVE_WUBBLE_BY_BP.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
-}
-
-fn ballpark_ptr_key(ballpark: &Ballpark) -> usize {
-    std::ptr::from_ref(ballpark) as usize
-}
-
 /// Returns active Stasis Webification Probe velocity multipliers (`0.05..=1.0`) currently affecting balls in `ballpark`.
 pub fn active_wubble_multipliers_for_ballpark(
     ballpark: &Ballpark,
 ) -> std::collections::HashMap<i64, f64> {
-    let bp_key = ballpark_ptr_key(ballpark);
-    wubble_bp_map()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&bp_key)
-        .cloned()
-        .unwrap_or_default()
+    ballpark
+        .active_wubble_multipliers
+        .iter()
+        .map(|(&ball_id, &mult)| (ball_id, mult))
+        .collect()
 }
 
 /// Registers a newly launched Stasis Webification Probe (`56748`) using SDE `speedFactor` (`20`),
@@ -185,7 +171,6 @@ pub fn step_wubble_probes_and_debuffs(
         return;
     };
     let db_key = tactical_modules::db_ptr_key(db_ref);
-    let bp_key = ballpark_ptr_key(ballpark);
     let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
 
     let ship_ids: Vec<i64> = ballpark.balls.keys().copied().collect();
@@ -229,16 +214,12 @@ pub fn step_wubble_probes_and_debuffs(
     }
     st.pending_wubble_probes = kept_pending;
 
-    let mut current_mults = std::collections::HashMap::new();
+    ballpark.active_wubble_multipliers.clear();
     for sid in &ship_ids {
         if let Some(debuff) = st.active_wubble_debuffs.get(&(db_key, *sid)) {
-            current_mults.insert(*sid, debuff.velocity_multiplier);
+            ballpark
+                .active_wubble_multipliers
+                .insert(*sid, debuff.velocity_multiplier);
         }
-    }
-    let mut bp_guard = wubble_bp_map().write().unwrap_or_else(|e| e.into_inner());
-    if current_mults.is_empty() {
-        bp_guard.remove(&bp_key);
-    } else {
-        bp_guard.insert(bp_key, current_mults);
     }
 }

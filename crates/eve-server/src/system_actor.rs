@@ -775,11 +775,14 @@ impl SystemRegistry {
                             SystemCommand::SetWarpScrambleStrength { ball_id, strength, reply } => {
                                 if ballpark.set_warp_scramble_strength(ball_id, strength) {
                                     base_scramble_strengths.insert(ball_id, strength);
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     reconcile_tackle_and_bubbles(
                                         &mut ballpark,
                                         active_module_cycles,
                                         &base_scramble_strengths,
                                         &base_core_strengths,
+                                        &db_opt,
+                                        deact_guard.as_ref(),
                                     );
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     let _ = reply.send(Ok(ballpark.current_tick));
@@ -790,11 +793,14 @@ impl SystemRegistry {
                             SystemCommand::SetWarpCoreStrength { ball_id, strength, reply } => {
                                 if ballpark.set_warp_core_strength(ball_id, strength) {
                                     base_core_strengths.insert(ball_id, strength);
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     reconcile_tackle_and_bubbles(
                                         &mut ballpark,
                                         active_module_cycles,
                                         &base_scramble_strengths,
                                         &base_core_strengths,
+                                        &db_opt,
+                                        deact_guard.as_ref(),
                                     );
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     let _ = reply.send(Ok(ballpark.current_tick));
@@ -1173,11 +1179,14 @@ impl SystemRegistry {
                                     crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &combat_state);
                                 }
                                 ballpark.combat_states.insert(ball_id, combat_state);
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 reconcile_tackle_and_bubbles(
                                     &mut ballpark,
                                     active_module_cycles,
                                     &base_scramble_strengths,
                                     &base_core_strengths,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
                                 );
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(Ok(()));
@@ -1187,6 +1196,7 @@ impl SystemRegistry {
                                 let _ = reply.send(cs);
                             }
                             SystemCommand::AddModuleCycle { cycle, reply } => {
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let res = handle_add_module_cycle(
                                     &mut ballpark,
                                     active_module_cycles,
@@ -1194,6 +1204,7 @@ impl SystemRegistry {
                                     &base_core_strengths,
                                     &sde_opt,
                                     &db_opt,
+                                    deact_guard.as_ref(),
                                     cycle,
                                 );
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
@@ -1206,11 +1217,14 @@ impl SystemRegistry {
                                     let rem_cycle = (removed.duration_s - removed.elapsed_s).max(0.0);
                                     remaining_cooldown = Some(rem_cycle + removed.reactivation_delay_s);
                                     cleanup_removed_module_cycle(&mut ballpark, &removed, &db_opt);
+                                    let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                     reconcile_tackle_and_bubbles(
                                         &mut ballpark,
                                         active_module_cycles,
                                         &base_scramble_strengths,
                                         &base_core_strengths,
+                                        &db_opt,
+                                        deact_guard.as_ref(),
                                     );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
@@ -1230,65 +1244,19 @@ impl SystemRegistry {
                                 let _ = reply.send(exists);
                             }
                             SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
-                                let mut updated = false;
-                                for c in active_module_cycles.iter_mut() {
-                                    if c.ship_id == ship_id && c.module_id == module_id {
-                                        if c.is_overloaded != is_overloaded {
-                                            if c.speed_boost_factor > 0.0 {
-                                                let ovl_bonus = sde_opt
-                                                    .as_ref()
-                                                    .and_then(|sde| sde.types.get(&c.module_type_id))
-                                                    .and_then(|t| t.default_attributes.get(&1223).copied())
-                                                    .map(|pct| 1.0 + pct / 100.0)
-                                                    .unwrap_or(1.50);
-                                                if is_overloaded {
-                                                    c.speed_boost_factor *= ovl_bonus;
-                                                } else {
-                                                    c.speed_boost_factor /= ovl_bonus;
-                                                }
-                                                if let Some(orig_v) = c.original_max_velocity {
-                                                    let new_v = orig_v * (1.0 + c.speed_boost_factor);
-                                                    if let Some(bv) = ballpark.base_webbed_max_velocity.get_mut(&ship_id) {
-                                                        *bv = new_v;
-                                                    } else if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
-                                                        ball.max_velocity = new_v;
-                                                    }
-                                                }
-                                            }
-                                            let rep_bonus = sde_opt
-                                                .as_ref()
-                                                .and_then(|sde| sde.types.get(&c.module_type_id))
-                                                .and_then(|t| t.default_attributes.get(&1223).copied())
-                                                .map(|pct| 1.0 + pct / 100.0)
-                                                .unwrap_or(1.20);
-                                            if is_overloaded {
-                                                c.shield_boost_amount *= rep_bonus;
-                                                c.armor_repair_amount *= rep_bonus;
-                                                c.hull_repair_amount *= rep_bonus;
-                                                c.remote_shield_amount *= rep_bonus;
-                                                c.remote_armor_amount *= rep_bonus;
-                                                c.remote_hull_amount *= rep_bonus;
-                                            } else {
-                                                c.shield_boost_amount /= rep_bonus;
-                                                c.armor_repair_amount /= rep_bonus;
-                                                c.hull_repair_amount /= rep_bonus;
-                                                c.remote_shield_amount /= rep_bonus;
-                                                c.remote_armor_amount /= rep_bonus;
-                                                c.remote_hull_amount /= rep_bonus;
-                                            }
-                                        }
-                                        c.is_overloaded = is_overloaded;
-                                        updated = true;
-                                    }
-                                }
-                                if updated {
-                                    reconcile_tackle_and_bubbles(
-                                        &mut ballpark,
-                                        active_module_cycles,
-                                        &base_scramble_strengths,
-                                        &base_core_strengths,
-                                    );
-                                }
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                let updated = handle_update_module_overload(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &sde_opt,
+                                    &db_opt,
+                                    deact_guard.as_ref(),
+                                    ship_id,
+                                    module_id,
+                                    is_overloaded,
+                                );
                                 let _ = reply.send(updated);
                             }
                             SystemCommand::StartNaniteRepair { repair, reply } => {
@@ -1303,8 +1271,14 @@ impl SystemRegistry {
                                     let r = active_nanite_repairs.remove(pos);
                                     let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
                                     let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
-                                    let paste_used = ((r.paste_reserved as f64) * frac).ceil() as i32;
-                                    let paste_refund = (r.paste_reserved - paste_used.clamp(0, r.paste_reserved)).max(0);
+                                    let used_units = if r.elapsed_s <= 1e-6 {
+                                        0
+                                    } else {
+                                        ((r.paste_total_needed.max(1) as f64) * frac - 1e-9)
+                                            .ceil()
+                                            .clamp(0.0, r.paste_consumed_so_far as f64) as i32
+                                    };
+                                    let paste_refund = r.paste_consumed_so_far.saturating_sub(used_units);
                                     rem = Some((rem_dmg, paste_refund));
                                 }
                                 let _ = reply.send(rem);
@@ -1355,13 +1329,15 @@ impl SystemRegistry {
                             }
                             SystemCommand::AddInterdictionSphere { id, position, radius, reply } => {
                                 let ok = ballpark.add_interdiction_sphere(id, position, radius);
-                                reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths);
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(ok);
                             }
                             SystemCommand::AddMobileWarpDisruptor { id, position, radius, reply } => {
                                 let ok = ballpark.add_mobile_warp_disruptor(id, position, radius);
-                                reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths);
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                reconcile_tackle_and_bubbles(&mut ballpark, active_module_cycles, &base_scramble_strengths, &base_core_strengths, &db_opt, deact_guard.as_ref());
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let _ = reply.send(ok);
                             }

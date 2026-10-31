@@ -1,7 +1,7 @@
 //! End-to-End Integration Tests closing Navigation parity rows (Part 1):
 //! `feat:navigation.route-waypoints`, `feat:navigation.warp-vector`,
 //! `feat:navigation.align-server-tick-rounding`, `feat:navigation.collision-bumping`,
-//! `feat:navigation.warp-landing-points`, and `feat:navigation.cloak-velocity-penalty`.
+//! and `feat:navigation.cloak-velocity-penalty`.
 
 use crate::modules_advanced_tactical::*;
 use eve_db::{InventoryFlag, UpwellStructureRecord};
@@ -362,10 +362,9 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
 
 #[tokio::test]
 async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
-    // parity: feat:navigation.collision-bumping, feat:navigation.warp-landing-points, feat:navigation.cloak-velocity-penalty
+    // parity: feat:navigation.collision-bumping, feat:navigation.cloak-velocity-penalty
     eve_testkit::attest(&[
         "feat:navigation.collision-bumping",
-        "feat:navigation.warp-landing-points",
         "feat:navigation.cloak-velocity-penalty",
     ]);
 
@@ -475,9 +474,9 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
         .find(|c| c.group_id == 7 && c.radius > 0.0)
         .expect("Jita planet");
     for (static_id, static_pos, core_rad, label) in [
-        (JITA_STATION, station_pos, sta_ball.radius.min(1_000.0), "NPC station"),
-        (struct_id, DVec3::from_array(struct_pos), struct_ball.radius.min(1_000.0), "Upwell structure"),
-        (gate.stargate_id, gate.position, gate_ball.radius.min(2_500.0), "stargate"),
+        (JITA_STATION, station_pos, sta_ball.radius, "NPC station"),
+        (struct_id, DVec3::from_array(struct_pos), struct_ball.radius, "Upwell structure"),
+        (gate.stargate_id, gate.position, gate_ball.radius, "stargate"),
     ] {
         let mut cs_coll = ctx.build_ship_combat_state(char_a, ship_a, 640);
         cs_coll.undock_invulnerable_remaining_ticks = 0;
@@ -502,7 +501,7 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     let (_, post_struct) = sys.get_ball_snapshot(struct_id).await.unwrap().unwrap();
     assert!(post_struct.position.distance(DVec3::from_array(struct_pos)) < 1e-6, "Anchored Upwell structure must remain stationary");
 
-    // 2. Celestial, Stargate, Station, & Upwell Structure Warp Landing Points (`feat:navigation.warp-landing-points`)
+    // 2. Celestial, Stargate, Station, & Upwell Structure Warp Landing Points
     let b_jita = ctx
         .bind_object(&mut sess_a, "beyonce", jita_sys as i64)
         .expect("bind beyonce Jita");
@@ -602,7 +601,7 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     ).await.expect("Warp to NPC station at 0m");
     let (_, w_sta) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let MovementMode::Warp { destination: dest_sta, .. } = w_sta.mode else { panic!("Expected Warp"); };
-    assert!((dest_sta.distance(station_pos) - 2_000.0).abs() < 10.0, "NPC station landing must be at 2,000m docking ring");
+    assert!((dest_sta.distance(station_pos) - (sta_ball.radius + 2_000.0)).abs() < 10.0, "NPC station landing must be on Zero Point Envelope (radius + 2,000m)");
 
     sys.spawn_ball(Ball {
         id: ship_a, type_id: 640, position: DVec3::from_array(struct_pos) - DVec3::new(10_000_000.0, 0.0, 0.0),
@@ -615,7 +614,7 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     ).await.expect("Warp to Upwell structure at 0m");
     let (_, w_struct) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let MovementMode::Warp { destination: dest_struct, .. } = w_struct.mode else { panic!("Expected Warp"); };
-    assert!((dest_struct.distance(DVec3::from_array(struct_pos)) - 2_000.0).abs() < 10.0, "Structure landing must be at 2,000m docking ring");
+    assert!((dest_struct.distance(DVec3::from_array(struct_pos)) - (struct_ball.radius + 2_000.0)).abs() < 10.0, "Structure landing must be on Zero Point Envelope (radius + 2,000m)");
 
     // 3. Cloak Velocity Penalty & Restoration (`feat:navigation.cloak-velocity-penalty`)
     for (cloak_tid, expected_mult) in [(11_370_u32, 0.10_f64), (11_577, 0.25), (11_578, 1.00)] {

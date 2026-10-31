@@ -912,9 +912,9 @@ impl WarpBubble {
             return Some(origin);
         }
 
-        // Stop bubble (in front of destination): t0 > 0 and t0 <= dist
+        // Stop bubble (within 150 km exit corridor in front of destination): t0 >= dist - 150_000.0 and t0 <= dist
         // Drag bubble (behind destination inline, within 500 km = 500,000 m): t0 > dist and (t0 - dist) <= 500_000.0
-        if t0 > 0.0 && (t0 <= dist || (t0 - dist) <= 500_000.0) {
+        if t0 > 0.0 && t0 >= dist - 150_000.0 && (t0 - dist) <= 500_000.0 {
             Some(origin + dir_norm * t0)
         } else {
             None
@@ -1016,6 +1016,8 @@ pub struct Ballpark {
     #[serde(default)]
     pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
     pub base_webbed_max_velocity: BTreeMap<BallId, f64>,
+    #[serde(skip, default)]
+    pub active_wubble_multipliers: BTreeMap<BallId, f64>,
 }
 
 impl Ballpark {

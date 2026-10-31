@@ -47,9 +47,9 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
         speed_fraction: 0.0, mode: MovementMode::Rigid,
     }).await.unwrap();
 
-    // 1a. Catch bubble at 20,000 km (20 km radius -> catches at 19,980 km)
-    let catch_bubble_id: i64 = 88_702;
-    sys.add_warp_bubble(catch_bubble_id, DVec3::new(20_000_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    // 1a. Mid-path bubble at 20,000 km on a 30,000 km warp (10,000 km from destination) must NOT catch
+    let mid_bubble_id: i64 = 88_702;
+    sys.add_warp_bubble(mid_bubble_id, DVec3::new(20_000_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
     spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, origin).await;
     spawn_in_space(&ctx, shuttle_char, shuttle_id, 672, null_sys, origin).await;
     // Step 1 tick first to prove reconcile_tackle_and_bubbles preserves Shuttle passive SDE 1538 immunity!
@@ -61,12 +61,26 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     ctx.dispatch_rpc(
         &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
-    ).await.expect("Crane warp into catch bubble");
+    ).await.expect("Crane warp past mid-path bubble");
+    let (_, crane_mid) = sys.get_ball_snapshot(target_ship_id).await.unwrap().unwrap();
+    let MovementMode::Warp { destination: crane_mid_dest, .. } = crane_mid.mode else {
+        panic!("Expected Crane in Warp mode");
+    };
+    assert!((crane_mid_dest.x - 30_000_000.0).abs() < 10.0, "mid-path bubble must not catch; got {}", crane_mid_dest.x);
+
+    // 1b. Exit-corridor catch bubble within 150 km in front of destination (at 29,900 km, 20 km radius -> catches at 29,880 km)
+    let catch_bubble_id: i64 = 88_704;
+    sys.add_warp_bubble(catch_bubble_id, DVec3::new(29_900_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, origin).await;
+    ctx.dispatch_rpc(
+        &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
+    ).await.expect("Crane warp into exit-corridor catch bubble");
     let (_, crane_catch) = sys.get_ball_snapshot(target_ship_id).await.unwrap().unwrap();
     let MovementMode::Warp { destination: crane_catch_dest, .. } = crane_catch.mode else {
         panic!("Expected Crane in Warp mode");
     };
-    assert!((crane_catch_dest.x - 19_980_000.0).abs() < 10.0, "got {}", crane_catch_dest.x);
+    assert!((crane_catch_dest.x - 29_880_000.0).abs() < 10.0, "got {}", crane_catch_dest.x);
 
     // Shuttle (group 31, SDE attr 1538 = 1.0) ignores catch bubble AND warps out from inside a bubble
     ctx.dispatch_rpc(

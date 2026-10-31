@@ -1,6 +1,6 @@
 //! `nav_warp_interdiction` — Autopilot Waypoints, Celestial/Gate Warp Landing Points,
 //! and Cargo Warp Vector Data Consumption (`feat:navigation.route-waypoints`,
-//! `feat:navigation.warp-landing-points`, `feat:navigation.warp-vector`).
+//! `feat:navigation.warp-vector`).
 
 #![forbid(unsafe_code)]
 
@@ -13,7 +13,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-/// Docking perimeter landing standoff (`2,000 m`, inside the `2,500 m` `CmdDock` docking perimeter).
+/// Zero Point Envelope landing standoff (`2,000 m` outside target ball radius, inside the `radius + 2,500 m` `CmdDock` docking perimeter).
 pub const STATION_DOCKING_RING_STANDOFF_M: f64 = 2_000.0;
 
 /// Per-pilot reactivation cooldown (`300 s` = 5 min) after consuming a Warp Vector Data item.
@@ -149,7 +149,7 @@ pub fn is_valid_waypoint_destination(ctx: &ServerContext, dest_id: i64) -> bool 
         || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dest_id))
 }
 
-/// Computes the exact warp landing point for `target_id` in `sys_id` (`feat:navigation.warp-landing-points`):
+/// Computes the exact warp landing point for `target_id` in `sys_id`:
 /// - Planets (`group 7`) and Moons (`group 8`): `2,500 m` outside celestial surface radius along approach vector.
 /// - Stars (`group 6`): `100,000 m` outside star corona radius along approach vector.
 /// - Stargates (`group 10` / `sde.jumps`): stargate perimeter (`gate_radius`) along approach vector (`0 m` from jump activation radius).
@@ -181,18 +181,35 @@ pub fn resolve_warp_landing_point(
             .unwrap_or(14_051.0);
         return anchor_pos - dir * gate_radius;
     }
-    if ctx
+    if let Some(st) = ctx
         .sde
         .stations
         .get(&target_id)
-        .is_some_and(|st| st.solar_system_id == sys_id)
-        || ctx.db.with_snapshot(|snap| {
-            snap.structures
-                .get(&target_id)
-                .is_some_and(|st| st.solar_system_id == sys_id && st.state != "Destroyed")
-        })
+        .filter(|st| st.solar_system_id == sys_id)
     {
-        return anchor_pos - dir * STATION_DOCKING_RING_STANDOFF_M;
+        let anchor_radius = ctx
+            .sde
+            .types
+            .get(&st.station_type_id)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(0.0);
+        return anchor_pos - dir * (anchor_radius + STATION_DOCKING_RING_STANDOFF_M);
+    }
+    if let Some(struct_type_id) = ctx.db.with_snapshot(|snap| {
+        snap.structures
+            .get(&target_id)
+            .filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed")
+            .map(|st| st.type_id)
+    }) {
+        let anchor_radius = ctx
+            .sde
+            .types
+            .get(&struct_type_id)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(0.0);
+        return anchor_pos - dir * (anchor_radius + STATION_DOCKING_RING_STANDOFF_M);
     }
     if let Some(cel) = ctx
         .sde

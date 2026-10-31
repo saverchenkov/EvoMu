@@ -715,6 +715,7 @@ pub(crate) async fn handle_module_cycles(
                     self_mass_multiplier, is_adc, remote_shield_amount, remote_armor_amount,
                     remote_hull_amount, remote_cap_amount, remote_optimal, remote_falloff,
                     mutadaptive_spool_step, mutadaptive_spool_max,
+                    grappler_optimal_m, grappler_falloff_m, grappler_speed_factor_pct,
                 } = match prepare_ewar_and_capital_module(
                     ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type,
                     &mod_state, &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
@@ -1135,6 +1136,9 @@ pub(crate) async fn handle_module_cycles(
                 grants_interdiction_nullification,
                 effective_max_capacitor,
                 lance_beam_dir: None,
+                grappler_optimal_m,
+                grappler_falloff_m,
+                grappler_speed_factor_pct,
                 target_velocity_multiplier,
                 target_original_max_velocity: None,
                 immobilize_self,

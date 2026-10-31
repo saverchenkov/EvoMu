@@ -638,6 +638,7 @@ pub(crate) async fn handle_dogma_ops(
                         nanite_interfacing_lvl,
                     );
 
+                let initial_paste = 1_i32.min(paste_needed.max(1));
                 let deduct_ok = ctx.db.try_with_mut_snapshot(|snap| {
                     let avail: i32 = snap
                         .items
@@ -652,14 +653,14 @@ pub(crate) async fn handle_dogma_ops(
                         })
                         .map(|i| i.quantity)
                         .sum();
-                    if avail < paste_needed {
+                    if avail < initial_paste {
                         return Err(());
                     }
                     crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
                         snap,
                         char_id,
                         ship_id,
-                        paste_needed,
+                        initial_paste,
                     );
                     Ok(())
                 });
@@ -671,7 +672,8 @@ pub(crate) async fn handle_dogma_ops(
                             ship_id,
                             module_id,
                             initial_damage_hp: cur_dmg,
-                            paste_reserved: paste_needed,
+                            paste_total_needed: paste_needed.max(1),
+                            paste_consumed_so_far: initial_paste,
                             duration_s,
                             elapsed_s: 0.0,
                         })
@@ -847,9 +849,14 @@ fn get_item_attribute_value(
     if item_id == active_ship_id && active_ship_id > 0 {
         if matches!(attr_id, 1175 | 1176 | 1177) {
             if let Some(live_heat) = ctx.db.with_snapshot(|snap| {
-                snap.items
+                snap.transient_item_attributes
                     .get(&item_id)
-                    .and_then(|it| it.dynamic_attributes.get(&attr_id).copied())
+                    .and_then(|tr| tr.get(&attr_id).copied())
+                    .or_else(|| {
+                        snap.items
+                            .get(&item_id)
+                            .and_then(|it| it.dynamic_attributes.get(&attr_id).copied())
+                    })
             }) {
                 return live_heat;
             }

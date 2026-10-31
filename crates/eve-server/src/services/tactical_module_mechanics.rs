@@ -3,14 +3,13 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::{NotificationTarget, ServerContext};
+use crate::router::ServerContext;
 use crate::services::inventory_fitting::fitting_module_cycles::set_modules_reload_until;
 use crate::services::tactical_modules::{self, TacticalModulesState};
-use crate::system_actor::{ActiveModuleCycle, ActiveNaniteRepair, SystemHandle};
+use crate::system_actor::{ActiveModuleCycle, SystemHandle};
 use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository, WorldStateSnapshot};
 use eve_destiny::{Ball, BallId, Ballpark, CombatState, MovementMode, SlimItemMeta};
 use eve_dogma::{FittedModule, ShipFittingEngine};
-use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{attr_ids, InvType, SdeRegistry};
 use glam::DVec3;
@@ -217,11 +216,156 @@ pub async fn activate_interdiction_sphere_launcher(
     let launcher_cap = mod_type.capacity.max(15.0);
     let max_probes_in_launcher = (launcher_cap / probe_vol).floor().max(1.0) as i32;
 
-    let (probe_id, remaining_in_launcher, auto_reloaded) = ctx.db.with_mut_snapshot(|snap| {
+    let bubble_radius = probe_sde
+        .and_then(|t| {
+            t.default_attributes
+                .get(&103)
+                .copied()
+                .or_else(|| t.default_attributes.get(&2279).copied())
+                .or_else(|| t.default_attributes.get(&99).copied())
+        })
+        .unwrap_or(if is_wubble_probe { 15_000.0 } else { 20_000.0 });
+    let lifetime_s = probe_sde
+        .and_then(|t| {
+            t.default_attributes
+                .get(&281)
+                .copied()
+                .or_else(|| t.default_attributes.get(&2280).copied())
+        })
+        .map(|ms| ms / 1000.0)
+        .unwrap_or(if is_wubble_probe { 30.0 } else { 120.0 });
+    let probe_hp = probe_sde
+        .and_then(|t| t.default_attributes.get(&9).copied())
+        .unwrap_or(1_000.0);
+    let probe_group_id = probe_sde
+        .map(|t| t.group_id)
+        .unwrap_or(if is_wubble_probe { 4088 } else { 548 });
+
+    // Pre-allocate probe entity ID and spawn the ball/sphere BEFORE consuming charges (`S-8` atomicity).
+    let probe_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        snap.next_entity_id
+    });
+    let probe_ball = Ball {
+        id: probe_id,
+        type_id: probe_type_id,
+        position: ship_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 100.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    };
+    let probe_cs = CombatState {
+        shield_hp: 0.0,
+        max_shield_hp: 0.0,
+        armor_hp: 0.0,
+        max_armor_hp: 0.0,
+        structure_hp: probe_hp,
+        max_structure_hp: probe_hp,
+        ..CombatState::default()
+    };
+    if let Err(e) = sys
+        .spawn_ball_with_meta(
+            probe_ball,
+            probe_cs,
+            SlimItemMeta {
+                group_id: probe_group_id,
+                category_id: 8,
+                owner_id: char_id,
+                char_id: Some(char_id),
+                corp_id: 0,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+            },
+        )
+        .await
+    {
+        return Err(BridgeRpcError {
+            code: "SystemActorError".into(),
+            message: e,
+        });
+    }
+    if !is_wubble_probe {
+        if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
+            let _ = sys.remove_ball(probe_id).await;
+            return Err(BridgeRpcError {
+                code: "SystemActorError".into(),
+                message: e,
+            });
+        }
+    }
+
+    let consume_res: Result<(i32, i32), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+        let (cur_qty, cur_tid) = match snap.items.get(&charge_item_id) {
+            Some(ci)
+                if ci.location_id == ship_id
+                    && (ci.flag as u16) == m.flag_id
+                    && ci.quantity > 0 =>
+            {
+                (ci.quantity, ci.type_id)
+            }
+            _ => {
+                return Err(BridgeRpcError {
+                    code: "NoProbesLoaded".into(),
+                    message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into(),
+                });
+            }
+        };
+        // Return any excess charges above launcher capacity back to Cargo instead of destroying them.
+        if cur_qty > max_probes_in_launcher {
+            let excess = cur_qty - max_probes_in_launcher;
+            if let Some(ci) = snap.items.get_mut(&charge_item_id) {
+                ci.quantity = max_probes_in_launcher;
+                ci.version += 1;
+            }
+            let existing_cargo_id = snap
+                .items
+                .values()
+                .find(|i| {
+                    i.owner_id == char_id
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && i.type_id == cur_tid
+                        && !i.singleton
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| i.item_id);
+            if let Some(cid) = existing_cargo_id {
+                if let Some(c_item) = snap.items.get_mut(&cid) {
+                    c_item.quantity += excess;
+                    c_item.version += 1;
+                }
+            } else {
+                snap.next_entity_id += 1;
+                let excess_id = snap.next_entity_id;
+                snap.items.insert(
+                    excess_id,
+                    InventoryItemRecord {
+                        item_id: excess_id,
+                        type_id: cur_tid,
+                        owner_id: char_id,
+                        location_id: ship_id,
+                        flag: InventoryFlag::Cargo,
+                        quantity: excess,
+                        singleton: false,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    },
+                );
+            }
+        }
         let mut rem = 0;
         if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-            ci.quantity = ci.quantity.min(max_probes_in_launcher);
             ci.quantity = (ci.quantity - 1).max(0);
+            ci.version += 1;
             rem = ci.quantity;
         }
         if rem == 0 {
@@ -238,6 +382,7 @@ pub async fn activate_interdiction_sphere_launcher(
                         && i.flag == InventoryFlag::Cargo
                         && i.quantity > 0
                         && i.type_id == probe_type_id
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
                 })
                 .or_else(|| {
                     snap.items.values().find(|i| {
@@ -245,6 +390,7 @@ pub async fn activate_interdiction_sphere_launcher(
                             && i.location_id == ship_id
                             && i.flag == InventoryFlag::Cargo
                             && i.quantity > 0
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
                             && ctx
                                 .sde
                                 .types
@@ -266,6 +412,7 @@ pub async fn activate_interdiction_sphere_launcher(
                 if let Some(c_item) = snap.items.get_mut(&cargo_id) {
                     take = c_item.quantity.min(r_cap);
                     c_item.quantity -= take;
+                    c_item.version += 1;
                     cargo_rem = c_item.quantity;
                 }
                 if cargo_rem == 0 {
@@ -297,9 +444,26 @@ pub async fn activate_interdiction_sphere_launcher(
                 }
             }
         }
-        snap.next_entity_id += 1;
-        (snap.next_entity_id, rem, reloaded_qty)
+        Ok((rem, reloaded_qty))
     });
+    let (remaining_in_launcher, auto_reloaded) = match consume_res {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = sys.remove_ball(probe_id).await;
+            return Err(e);
+        }
+    };
+
+    if is_wubble_probe {
+        tactical_modules::register_launched_wubble_probe(
+            ctx,
+            probe_id,
+            probe_type_id,
+            sys_id,
+            ship_pos,
+            bubble_radius,
+        );
+    }
 
     if auto_reloaded > 0 {
         let reload_time_s = mod_type
@@ -316,86 +480,6 @@ pub async fn activate_interdiction_sphere_launcher(
     }
     if remaining_in_launcher == 0 || auto_reloaded > 0 {
         ctx.invalidate_ship_fitting(ship_id);
-    }
-
-    let bubble_radius = probe_sde
-        .and_then(|t| {
-            t.default_attributes
-                .get(&103)
-                .copied()
-                .or_else(|| t.default_attributes.get(&2279).copied())
-                .or_else(|| t.default_attributes.get(&99).copied())
-        })
-        .unwrap_or(if is_wubble_probe { 15_000.0 } else { 20_000.0 });
-    let lifetime_s = probe_sde
-        .and_then(|t| {
-            t.default_attributes
-                .get(&281)
-                .copied()
-                .or_else(|| t.default_attributes.get(&2280).copied())
-        })
-        .map(|ms| ms / 1000.0)
-        .unwrap_or(if is_wubble_probe { 30.0 } else { 120.0 });
-    let probe_hp = probe_sde
-        .and_then(|t| t.default_attributes.get(&9).copied())
-        .unwrap_or(1_000.0);
-    let probe_group_id = probe_sde
-        .map(|t| t.group_id)
-        .unwrap_or(if is_wubble_probe { 4088 } else { 548 });
-
-    // Spawn the physical probe ball in space so AoE Smartbombs/Bombs can destroy it (1,000 HP).
-    let probe_ball = Ball {
-        id: probe_id,
-        type_id: probe_type_id,
-        position: ship_pos,
-        velocity: DVec3::ZERO,
-        max_velocity: 0.0,
-        inertia: 1.0,
-        mass: 100.0,
-        radius: 10.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Rigid,
-    };
-    let probe_cs = CombatState {
-        shield_hp: 0.0,
-        max_shield_hp: 0.0,
-        armor_hp: 0.0,
-        max_armor_hp: 0.0,
-        structure_hp: probe_hp,
-        max_structure_hp: probe_hp,
-        ..CombatState::default()
-    };
-    let _ = sys
-        .spawn_ball_with_meta(
-            probe_ball,
-            probe_cs,
-            SlimItemMeta {
-                group_id: probe_group_id,
-                category_id: 8,
-                owner_id: char_id,
-                char_id: Some(char_id),
-                corp_id: 0,
-                alliance_id: -1,
-                security_status: 0.0,
-                is_cloaked: false,
-            },
-        )
-        .await;
-
-    if is_wubble_probe {
-        tactical_modules::register_launched_wubble_probe(
-            ctx,
-            probe_id,
-            probe_type_id,
-            sys_id,
-            ship_pos,
-            bubble_radius,
-        );
-    } else if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
-        return Err(BridgeRpcError {
-            code: "SystemActorError".into(),
-            message: e,
-        });
     }
 
     {
@@ -513,258 +597,8 @@ pub fn step_interdiction_probes_lifetime(
     }
 }
 
-/// Handles `dogmaIM.RepairModule` / `InitiateModuleRepair` (`feat:modules.nanite-repair-paste-in-space`):
-/// - When docked or tethered (`cs.is_tethered`), repairs damaged AND burned-out modules with `0` paste.
-/// - In space when untethered, rejects active modules (`CannotRepairActiveModule`) and completely burned-out
-///   modules (`ModuleBurnedOut`), requires sufficient Nanite Repair Paste (`28668`) in cargo (`NotEnoughNanitePaste`),
-///   deducts the initial 1 unit at `t = 0`, and streams remaining paste consumption per tick as HP is repaired.
-pub async fn handle_repair_module_rpc(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "No active ship in session".into(),
-        });
-    };
-    let module_id = args
-        .get(1)
-        .and_then(|a| a.as_i64())
-        .or_else(|| {
-            args.first().and_then(|a| match a {
-                PyRep::List(v) | PyRep::Tuple(v) => v.first().and_then(|x| x.as_i64()),
-                other => other.as_i64(),
-            })
-        })
-        .unwrap_or(0);
-
-    let is_docked = session.station_id.is_some() || session.structure_id.is_some();
-    let is_tethered = if !is_docked {
-        if let Some(sys_id) = session.solar_system_id {
-            ctx.systems
-                .get_or_spawn(sys_id)
-                .get_combat_state(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|cs| cs.is_tethered)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    let free_station_or_tether_repair = is_docked || is_tethered;
-
-    let mod_check = ctx.db.with_snapshot(|snap| {
-        let Some(m_item) = snap.items.get(&module_id) else {
-            return Err(BridgeRpcError {
-                code: "ModuleNotFound".into(),
-                message: format!("Module {module_id} not found"),
-            });
-        };
-        if m_item.owner_id != char_id
-            || m_item.location_id != ship_id
-            || !matches!(m_item.flag as u16, 11..=34 | 92..=94 | 125..=132)
-        {
-            return Err(BridgeRpcError {
-                code: "ModuleOwnershipViolation".into(),
-                message: format!(
-                    "Module {module_id} is not fitted on active ship {ship_id} owned by character {char_id}"
-                ),
-            });
-        }
-        let active = snap.module_active_states.contains(&module_id);
-        let is_ehe = matches!(m_item.type_id, 40714..=40718)
-            || ctx
-                .sde
-                .types
-                .get(&m_item.type_id)
-                .is_some_and(|t| t.effect_ids.contains(&6484));
-        if is_ehe && !free_station_or_tether_repair {
-            return Err(BridgeRpcError {
-                code: "ModuleBurnedOut".into(),
-                message: "UserError: Capital Emergency Hull Energizer cannot be repaired with Nanite Repair Paste".into(),
-            });
-        }
-        let dmg = m_item
-            .dynamic_attributes
-            .get(&attr_ids::DAMAGE)
-            .copied()
-            .unwrap_or(0.0);
-        let hp = m_item
-            .dynamic_attributes
-            .get(&attr_ids::HP_STRUCT)
-            .copied()
-            .or_else(|| {
-                ctx.sde
-                    .types
-                    .get(&m_item.type_id)
-                    .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
-            })
-            .unwrap_or(40.0);
-        let base_cost = ctx
-            .sde
-            .types
-            .get(&m_item.type_id)
-            .map(|t| (t.volume * 0.8).max(1.0))
-            .unwrap_or(4.0);
-        let sk = snap.skills.get(&char_id);
-        let thermo_lvl = sk.and_then(|m| m.get(&28164)).map(|r| r.level).unwrap_or(0);
-        let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
-        let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
-        Ok((active, dmg, hp, base_cost, thermo_lvl, op_lvl, int_lvl))
-    });
-    let (
-        is_active,
-        cur_dmg,
-        max_hp,
-        base_paste_cost,
-        thermo_lvl,
-        nanite_op_lvl,
-        nanite_interfacing_lvl,
-    ) = mod_check?;
-
-    if is_active {
-        return Err(BridgeRpcError {
-            code: "CannotRepairActiveModule".into(),
-            message: "Module must be deactivated before initiating nanite repair".into(),
-        });
-    }
-    if cur_dmg <= 1e-6 {
-        return Ok(PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("pasteConsumed", PyRep::Integer(0)),
-            ("damageToRepair", PyRep::Real(0.0)),
-        ]));
-    }
-    if free_station_or_tether_repair {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(m_item) = snap.items.get_mut(&module_id) {
-                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-            }
-        });
-        ctx.invalidate_ship_fitting(ship_id);
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnRepairDone",
-            "charid",
-            vec![PyRep::List(vec![PyRep::Integer(module_id)])],
-        );
-        return Ok(PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("pasteConsumed", PyRep::Integer(0)),
-            ("totalPasteRequired", PyRep::Integer(0)),
-            ("damageToRepair", PyRep::Real(cur_dmg)),
-            ("tetherFreeRepair", PyRep::Bool(is_tethered)),
-        ]));
-    }
-
-    if let Some(sys_id) = session.solar_system_id {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        if sys.has_active_overloaded_cycle_sync(ship_id) {
-            return Err(BridgeRpcError {
-                code: "CannotRepairWhileOverheating".into(),
-                message: "UserError: Cannot initiate in-space Nanite Repair Paste repair while modules are overheating".into(),
-            });
-        }
-        if sys.is_module_being_nanite_repaired_sync(ship_id, module_id) {
-            return Err(BridgeRpcError {
-                code: "ModuleAlreadyRepairing".into(),
-                message: format!("Module {module_id} is already undergoing Nanite Repair Paste repair"),
-            });
-        }
-    }
-
-    if cur_dmg >= max_hp - 1e-6 {
-        return Err(BridgeRpcError {
-            code: "ModuleBurnedOut".into(),
-            message: "Completely burned-out modules cannot be repaired with Nanite Repair Paste in space".into(),
-        });
-    }
-
-    // Paste cost scales with SDE module `volume` (`0.8 * volume`), Nanite Operation (`28879`, `-5%/lvl`),
-    // and Thermodynamics (`28164`, `-5%/lvl`).
-    let effective_paste_per_hp = (base_paste_cost / max_hp.max(1.0))
-        * (1.0 - 0.05 * (nanite_op_lvl.min(5) as f64))
-        * (1.0 - 0.05 * (thermo_lvl.min(5) as f64));
-    let total_paste_needed =
-        eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp).max(1)
-            as i32;
-
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let total_avail: i32 = snap
-            .items
-            .values()
-            .filter(|i| {
-                i.owner_id == char_id
-                    && i.location_id == ship_id
-                    && i.flag == InventoryFlag::Cargo
-                    && i.type_id == 28668
-                    && i.quantity > 0
-                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
-            })
-            .map(|i| i.quantity)
-            .sum();
-        if total_avail < total_paste_needed {
-            return Err(BridgeRpcError {
-                code: "NotEnoughNanitePaste".into(),
-                message: format!(
-                    "Need {total_paste_needed} Nanite Repair Paste (type 28668) in ship cargo"
-                ),
-            });
-        }
-        deduct_paste_from_cargo_in_snap(snap, char_id, ship_id, total_paste_needed);
-        Ok(())
-    })?;
-
-    // Repair rate scales with Nanite Interfacing (`28880`, `+20%/lvl`) and Thermodynamics (`28164`, `+5%/lvl`).
-    let repair_rate_hp_per_s = 0.67
-        * (1.0 + 0.20 * (nanite_interfacing_lvl.min(5) as f64))
-        * (1.0 + 0.05 * (thermo_lvl.min(5) as f64));
-    let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
-    if let Some(sys_id) = session.solar_system_id {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys
-            .start_nanite_repair(ActiveNaniteRepair {
-                char_id,
-                ship_id,
-                module_id,
-                initial_damage_hp: cur_dmg,
-                paste_reserved: total_paste_needed,
-                duration_s,
-                elapsed_s: 0.0,
-            })
-            .await;
-    } else {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(m_item) = snap.items.get_mut(&module_id) {
-                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-            }
-        });
-        ctx.invalidate_ship_fitting(ship_id);
-    }
-
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnMultiModuleRepairStarted",
-        "charid",
-        vec![PyRep::List(vec![PyRep::Integer(module_id)])],
-    );
-
-    Ok(PyRep::keyval([
-        ("moduleID", PyRep::Integer(module_id)),
-        ("pasteConsumed", PyRep::Integer(total_paste_needed as i64)),
-        ("totalPasteRequired", PyRep::Integer(total_paste_needed as i64)),
-        ("damageToRepair", PyRep::Real(cur_dmg)),
-        ("repairRateHpPerSec", PyRep::Real(repair_rate_hp_per_s)),
-        ("repairDurationSec", PyRep::Real(duration_s)),
-    ]))
-}
-
+/// Deducts up to `amount` unlocked Nanite Repair Paste (`type_id == 28668`) from `InventoryFlag::Cargo`,
+/// returning the exact quantity deducted (`0..=amount`) for streaming per-tick module repair.
 pub(crate) fn deduct_paste_from_cargo_in_snap(
     snap: &mut WorldStateSnapshot,
     char_id: i64,
@@ -810,16 +644,73 @@ pub(crate) fn deduct_paste_from_cargo_in_snap(
     taken_total
 }
 
-/// Refunds unconsumed Nanite Repair Paste (`type_id == 28668`) back into the ship's cargo hold
-/// when an active in-space module repair is cancelled early (`StopModuleRepair` or system jump).
-pub(crate) fn refund_paste_to_cargo_in_snap(
+/// Computes remaining free cargo capacity (`m3`) on `ship_id` (`hull_capacity - used_cargo_m3`),
+/// accounting for fitted Cargohold Expanders (`attr 38` / `attr 614`) via `ShipFittingEngine`.
+pub(crate) fn ship_free_cargo_m3_in_snap(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    ship_id: i64,
+) -> f64 {
+    let Some(ship_item) = snap.items.get(&ship_id) else {
+        return 0.0;
+    };
+    let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, sde);
+    if let Some(sk_map) = snap.skills.get(&ship_item.owner_id) {
+        for (&skill_tid, rec) in sk_map {
+            fit.character_skills.insert(skill_tid, rec.level);
+        }
+    }
+    for (&aid, &val) in &ship_item.dynamic_attributes {
+        fit.ship.base_attributes.insert(aid, val);
+    }
+    for it in snap.items.values().filter(|i| i.location_id == ship_id) {
+        let flag_u16 = it.flag as u16;
+        if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132)
+            && sde.types.get(&it.type_id).is_some_and(|t| matches!(t.category_id, 7 | 32))
+        {
+            let online = snap.module_online_states.get(&it.item_id).copied().unwrap_or(true);
+            let _ = fit.fit_module_with_state(it.item_id, it.type_id, flag_u16, online, sde);
+        }
+    }
+    fit.recalculate_stats(sde);
+    let cap_m3 = fit
+        .ship
+        .get_attribute(38, sde)
+        .max(sde.types.get(&ship_item.type_id).map(|t| t.capacity).unwrap_or(0.0));
+    let used_m3: f64 = snap
+        .items
+        .values()
+        .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo && i.quantity > 0)
+        .map(|i| {
+            let unit_vol = sde.types.get(&i.type_id).map(|t| t.volume.max(0.0)).unwrap_or(0.0);
+            unit_vol * (i.quantity as f64)
+        })
+        .sum();
+    (cap_m3 - used_m3).max(0.0)
+}
+
+/// Refunds unconsumed Nanite Repair Paste (`type_id == 28668`) back into the ship's cargo hold,
+/// capping refunded quantity to remaining ship hull cargo capacity (`m3`) so cargo volume can never overflow.
+pub(crate) fn refund_paste_to_cargo_capped_in_snap(
     snap: &mut WorldStateSnapshot,
+    sde: &SdeRegistry,
     char_id: i64,
     ship_id: i64,
     amount: i32,
-) {
+) -> i32 {
     if amount <= 0 {
-        return;
+        return 0;
+    }
+    let paste_vol = sde
+        .types
+        .get(&28668)
+        .map(|t| t.volume.max(1e-6))
+        .unwrap_or(0.01);
+    let free_m3 = ship_free_cargo_m3_in_snap(snap, sde, ship_id);
+    let max_fit = ((free_m3 + 1e-9) / paste_vol).floor().max(0.0) as i32;
+    let refund_qty = amount.min(max_fit);
+    if refund_qty <= 0 {
+        return 0;
     }
     let existing_stack_id = snap
         .items
@@ -835,7 +726,7 @@ pub(crate) fn refund_paste_to_cargo_in_snap(
         .map(|i| i.item_id);
     if let Some(pid) = existing_stack_id {
         if let Some(p_item) = snap.items.get_mut(&pid) {
-            p_item.quantity += amount;
+            p_item.quantity += refund_qty;
             p_item.version += 1;
         }
     } else {
@@ -849,7 +740,7 @@ pub(crate) fn refund_paste_to_cargo_in_snap(
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
-                quantity: amount,
+                quantity: refund_qty,
                 singleton: false,
                 version: 1,
                 dynamic_attributes: HashMap::new(),
@@ -860,87 +751,7 @@ pub(crate) fn refund_paste_to_cargo_in_snap(
             },
         );
     }
-}
-
-/// Finalizes an aborted `ActiveNaniteRepair`, persisting partial damage repaired so far and
-/// refunding unconsumed Nanite Repair Paste to cargo (`feat:modules.nanite-repair-paste-in-space`).
-pub fn finalize_cancelled_nanite_repair(ctx: &ServerContext, job: &ActiveNaniteRepair) -> i32 {
-    let progress = (job.elapsed_s / job.duration_s.max(0.1)).clamp(0.0, 1.0);
-    let consumed_by_now = ((job.paste_reserved as f64) * progress)
-        .ceil()
-        .clamp(0.0, job.paste_reserved as f64) as i32;
-    let unconsumed = job.paste_reserved.saturating_sub(consumed_by_now);
-    let rem_dmg = job.initial_damage_hp * (1.0 - progress).clamp(0.0, 1.0);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m_item) = snap.items.get_mut(&job.module_id) {
-            if rem_dmg <= 1e-6 {
-                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-            } else {
-                m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
-            }
-        }
-        refund_paste_to_cargo_in_snap(snap, job.char_id, job.ship_id, unconsumed);
-    });
-    ctx.invalidate_ship_fitting(job.ship_id);
-    unconsumed
-}
-
-/// Cancels any active in-space Nanite Repair Paste jobs when a ship jumps systems or docks,
-/// refunding unconsumed paste and notifying `OnRepairDone` (`feat:modules.nanite-repair-paste-in-space`).
-pub fn cancel_ship_nanite_repairs_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
-    let cancelled = ctx.systems.cancel_nanite_repairs_for_ship_sync(ship_id);
-    if cancelled.is_empty() {
-        return;
-    }
-    let mut mod_ids = Vec::with_capacity(cancelled.len());
-    for job in &cancelled {
-        finalize_cancelled_nanite_repair(ctx, job);
-        mod_ids.push(PyRep::Integer(job.module_id));
-    }
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnRepairDone",
-        "charid",
-        vec![PyRep::List(mod_ids)],
-    );
-}
-
-/// Advances active in-space Nanite Repair Paste jobs per tick (`dt`), tracking incremental paste
-/// consumption proportional to elapsed repair progress (`feat:modules.nanite-repair-paste-in-space`).
-pub fn step_nanite_repairs_in_actor(
-    active_nanite_repairs: &mut Vec<ActiveNaniteRepair>,
-    db_opt: &Option<Arc<WorldRepository>>,
-    dt: f64,
-) {
-    let mut finished_indices = Vec::new();
-    for (idx, job) in active_nanite_repairs.iter_mut().enumerate() {
-        job.elapsed_s += dt;
-        let progress = (job.elapsed_s / job.duration_s.max(0.1)).clamp(0.0, 1.0);
-        let done = job.elapsed_s + 1e-6 >= job.duration_s;
-
-        if let Some(db_ref) = db_opt {
-            db_ref.with_mut_snapshot(|snap| {
-                let rem_dmg = if done {
-                    0.0
-                } else {
-                    job.initial_damage_hp * (1.0 - progress).clamp(0.0, 1.0)
-                };
-                if let Some(m_item) = snap.items.get_mut(&job.module_id) {
-                    if rem_dmg <= 1e-6 {
-                        m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-                    } else {
-                        m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
-                    }
-                }
-            });
-        }
-        if done {
-            finished_indices.push(idx);
-        }
-    }
-    for idx in finished_indices.into_iter().rev() {
-        active_nanite_repairs.remove(idx);
-    }
+    refund_qty
 }
 
 /// Canonical ship rack heat Dogma attribute IDs: `[heatHi (1175), heatMed (1176), heatLow (1177)]`.
@@ -1025,36 +836,53 @@ fn evaluate_ship_thermodynamics(
     })
 }
 
-fn load_persisted_rack_heat(ship_id: BallId, db_opt: &Option<Arc<WorldRepository>>) -> [f64; 3] {
-    db_opt
-        .as_ref()
-        .map(|db| {
-            db.with_snapshot(|snap| {
-                snap.items
-                    .get(&ship_id)
-                    .map(|sh| {
-                        [
-                            sh.dynamic_attributes
-                                .get(&RACK_HEAT_ATTR_IDS[0])
-                                .copied()
-                                .unwrap_or(0.0)
-                                .clamp(0.0, 1.0),
-                            sh.dynamic_attributes
-                                .get(&RACK_HEAT_ATTR_IDS[1])
-                                .copied()
-                                .unwrap_or(0.0)
-                                .clamp(0.0, 1.0),
-                            sh.dynamic_attributes
-                                .get(&RACK_HEAT_ATTR_IDS[2])
-                                .copied()
-                                .unwrap_or(0.0)
-                                .clamp(0.0, 1.0),
-                        ]
-                    })
-                    .unwrap_or([0.0; 3])
-            })
+fn sync_runtime_rack_heat(ship_id: BallId, db_opt: &Option<Arc<WorldRepository>>) -> [f64; 3] {
+    let Some(db) = db_opt.as_ref() else {
+        return [0.0; 3];
+    };
+    let has_legacy_dyn = db.with_snapshot(|snap| {
+        snap.items.get(&ship_id).is_some_and(|sh| {
+            RACK_HEAT_ATTR_IDS
+                .iter()
+                .any(|aid| sh.dynamic_attributes.contains_key(aid))
         })
-        .unwrap_or([0.0; 3])
+    });
+    if has_legacy_dyn && !db.is_write_locked_by_current_thread() {
+        db.with_mut_snapshot(|snap| {
+            let mut migrated = [None; 3];
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                for (idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
+                    migrated[idx] = sh.dynamic_attributes.remove(&aid);
+                }
+            }
+            let tr = snap.transient_item_attributes.entry(ship_id).or_default();
+            for (idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
+                if let Some(val) = migrated[idx] {
+                    let clamped = val.clamp(0.0, 1.0);
+                    if clamped > 0.0 {
+                        tr.insert(aid, clamped);
+                    } else {
+                        tr.remove(&aid);
+                    }
+                }
+            }
+            if tr.is_empty() {
+                snap.transient_item_attributes.remove(&ship_id);
+            }
+        });
+    }
+    db.with_snapshot(|snap| {
+        snap.transient_item_attributes
+            .get(&ship_id)
+            .map(|tr| {
+                [
+                    tr.get(&RACK_HEAT_ATTR_IDS[0]).copied().unwrap_or(0.0).clamp(0.0, 1.0),
+                    tr.get(&RACK_HEAT_ATTR_IDS[1]).copied().unwrap_or(0.0).clamp(0.0, 1.0),
+                    tr.get(&RACK_HEAT_ATTR_IDS[2]).copied().unwrap_or(0.0).clamp(0.0, 1.0),
+                ]
+            })
+            .unwrap_or([0.0; 3])
+    })
 }
 
 /// Integrates rack heat once per tick (`dt`) across all ships with active overloaded cycles or residual heat,
@@ -1079,10 +907,10 @@ pub fn step_rack_heat_per_tick(
     ship_ids.sort_unstable();
     for sid in ship_ids {
         let eval = evaluate_ship_thermodynamics(sid, sde_opt, db_opt);
-        let persisted = load_persisted_rack_heat(sid, db_opt);
-        let racks = ship_rack_heat.entry(sid).or_insert(persisted);
+        let runtime_heat = sync_runtime_rack_heat(sid, db_opt);
+        let racks = ship_rack_heat.entry(sid).or_insert(runtime_heat);
         if db_opt.is_some() {
-            *racks = persisted;
+            *racks = runtime_heat;
         }
         let mut rack_absorption_sum = [0.0_f64; 3];
         for c in active_module_cycles
@@ -1121,12 +949,18 @@ pub fn step_rack_heat_per_tick(
             ship_rack_heat.remove(&sid);
         }
         if changed {
-            if let Some(db_ref) = db_opt {
+            if let Some(db_ref) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
                 db_ref.with_mut_snapshot(|snap| {
-                    if let Some(ship_item) = snap.items.get_mut(&sid) {
-                        for (r_idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
-                            ship_item.dynamic_attributes.insert(aid, heat_snap[r_idx]);
+                    let tr = snap.transient_item_attributes.entry(sid).or_default();
+                    for (r_idx, &aid) in RACK_HEAT_ATTR_IDS.iter().enumerate() {
+                        if heat_snap[r_idx] > 0.0 {
+                            tr.insert(aid, heat_snap[r_idx]);
+                        } else {
+                            tr.remove(&aid);
                         }
+                    }
+                    if tr.is_empty() {
+                        snap.transient_item_attributes.remove(&sid);
                     }
                 });
             }
@@ -1149,11 +983,11 @@ pub fn apply_overheat_rack_and_damage_on_cycle(
 ) {
     let r_idx = cycle.rack_idx.min(2);
     let eval = evaluate_ship_thermodynamics(cycle.ship_id, sde_opt, db_opt);
-    let persisted = load_persisted_rack_heat(cycle.ship_id, db_opt);
+    let runtime_heat = sync_runtime_rack_heat(cycle.ship_id, db_opt);
     let current_rack_heat = ship_rack_heat
         .get(&cycle.ship_id)
-        .map(|r| r[r_idx].max(persisted[r_idx]))
-        .unwrap_or(persisted[r_idx])
+        .map(|r| r[r_idx].max(runtime_heat[r_idx]))
+        .unwrap_or(runtime_heat[r_idx])
         .clamp(0.0, 1.0);
     if current_rack_heat <= 0.0 {
         return;

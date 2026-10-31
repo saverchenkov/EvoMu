@@ -340,7 +340,7 @@ impl ServerContext {
             snap.module_active_states.clear();
             for item in snap.items.values_mut() {
                 if !item.dynamic_attributes.contains_key(&2114) && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6) {
-                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] { item.dynamic_attributes.remove(&aid); }
+                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113, 1175, 1176, 1177] { item.dynamic_attributes.remove(&aid); }
                 }
             }
         });

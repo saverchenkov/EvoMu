@@ -123,6 +123,9 @@ pub struct ActiveModuleCycle {
     /// Deactivates module cycle if target moves outside this range.
     pub max_effective_range_m: Option<f64>,
     pub lance_beam_dir: Option<DVec3>,
+    pub grappler_optimal_m: f64,
+    pub grappler_falloff_m: f64,
+    pub grappler_speed_factor_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +134,8 @@ pub struct ActiveNaniteRepair {
     pub ship_id: BallId,
     pub module_id: i64,
     pub initial_damage_hp: f64,
-    pub paste_reserved: i32,
+    pub paste_total_needed: i32,
+    pub paste_consumed_so_far: i32,
     pub duration_s: f64,
     pub elapsed_s: f64,
 }

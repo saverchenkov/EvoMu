@@ -1,9 +1,9 @@
-//! End-to-End Integration Tests closing Nosferatu, Grappler, and Mutadaptive RAR parity rows (Part 4):
+//! End-to-End Integration Tests closing Nosferatu, Grappler, Mutadaptive RAR, and Streaming Nanite Paste (Part 4):
 //! `feat:modules.energy-nosferatu-relative-capacitor`, `feat:modules.stasis-grappler-mechanics`,
-//! and `feat:modules.mutadaptive-remote-armor-repairer`.
+//! `feat:modules.mutadaptive-remote-armor-repairer`, and `feat:modules.nanite-repair-paste-in-space`.
 
 use crate::modules_advanced_tactical::*;
-use eve_db::InventoryFlag;
+use eve_db::{ContractRecord, InventoryFlag, IskCents};
 use eve_destiny::DVec3;
 use eve_proto::PyRep;
 use eve_server::services::combat_npc_police::scan_and_enforce_highsec_contraband;
@@ -135,6 +135,24 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     assert!(b_16k.max_velocity > base_t_vel * 0.90);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(77_011)]).await.unwrap();
 
+    // Overloaded Grappler (`attr 1222` = +300% optimal -> 4,000m) MUST retain full -80% web across ticks at 3,500m!
+    sys.set_ball_position(ship_tgt, origin + DVec3::new(3_500.0, 0.0, 0.0)).await;
+    rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
+        PyRep::Integer(77_011), PyRep::String("useMissiles".into()), PyRep::Integer(ship_tgt), PyRep::Integer(1),
+    ]).await.unwrap();
+    sys.step_manual(1.0).await.unwrap();
+    let (_, b_3500_norm) = sys.get_ball_snapshot(ship_tgt).await.unwrap().unwrap();
+    assert!(b_3500_norm.max_velocity > base_t_vel * 0.23, "Cold grappler at 3.5km (>1km optimal) decays below full 80%");
+    rpc(&ctx, &mut sess_src, "dogmaIM", "Overload", vec![PyRep::Integer(77_011)]).await.unwrap();
+    sys.step_manual(1.0).await.unwrap();
+    let (_, b_3500_ovl) = sys.get_ball_snapshot(ship_tgt).await.unwrap().unwrap();
+    assert!(
+        (b_3500_ovl.max_velocity - base_t_vel * 0.20).abs() < 1.0,
+        "Overloaded Grappler (+300% optimal = 4km) must retain full 80% slow across ticks at 3.5km: got {}",
+        b_3500_ovl.max_velocity
+    );
+    rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(77_011)]).await.unwrap();
+
     // 3. Mutadaptive Remote Armor Repairer (`feat:modules.mutadaptive-remote-armor-repairer`): spool, +150% cap (2.5x), unlock & switch reset
     assert!(fit_mod(&ctx, &mut cruiser_sess, 84_054, 77_020, 49_770, 27).await.is_err());
     ctx.db.with_mut_snapshot(|snap| {
@@ -252,4 +270,147 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     ]).await.expect("Scan Bustard DST");
     assert_eq!(scan_bustard.dict_get("cargoScanImmune"), None);
     assert_eq!(scan_bustard.dict_get("totalScannedQuantity"), Some(&PyRep::Integer(500)));
+}
+
+#[tokio::test]
+async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
+    // parity: feat:modules.nanite-repair-paste-in-space
+    eve_testkit::attest(&["feat:modules.nanite-repair-paste-in-space"]);
+
+    let ctx = build_ctx();
+    let char_a: i64 = 94_161;
+    let ship_a: i64 = 84_161;
+    let mut sess_a = seed_pilot(&ctx, char_a, ship_a, 22_456, NULL_SYS, false); // Sabre (Interdictor, 180 m3 cargo)
+    let sys = ctx.systems.get_or_spawn(NULL_SYS);
+    let origin = DVec3::new(10_000_000.0, 0.0, 0.0);
+    spawn_in_space(&ctx, char_a, ship_a, 22_456, NULL_SYS, origin).await;
+
+    set_skill_level(&ctx, char_a, 28_164, 0); // Thermodynamics L0
+    set_skill_level(&ctx, char_a, 28_879, 0); // Nanite Operation L0
+    set_skill_level(&ctx, char_a, 28_880, 0); // Nanite Interfacing L0
+
+    // 1. Streaming per-tick paste deduction + clean mid-repair halt when cargo paste is exhausted!
+    // Mega Pulse Laser II (`3057`, 20 m3, 40 HP) at 20.0 HP damage requires 8 paste over ~7.46s (2.68 HP/s).
+    // Seed only 3 paste in cargo -> 1 consumed at t=0, 2 streamed over ticks, then repair halts cleanly at 3/8 (12.5 HP remaining)!
+    let mod_stream: i64 = 77_201;
+    let paste_stack: i64 = 77_202;
+    give_item(&ctx, mod_stream, 3_057, char_a, ship_a, InventoryFlag::HiSlot1, 1);
+    give_item(&ctx, paste_stack, 28_668, char_a, ship_a, InventoryFlag::Cargo, 3);
+    set_item_dyn_attr(&ctx, mod_stream, 3, 20.0);
+
+    let rep_start = rpc(&ctx, &mut sess_a, "dogmaIM", "InitiateModuleRepair", vec![PyRep::Integer(mod_stream)]).await.unwrap();
+    assert_eq!(rep_start.dict_get("pasteConsumed"), Some(&PyRep::Integer(1)), "Only 1 paste unit deducted at t=0");
+    assert_eq!(rep_start.dict_get("totalPasteRequired"), Some(&PyRep::Integer(8)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&paste_stack).unwrap().quantity), 2, "2 paste units remain in cargo at t=0");
+
+    for _ in 0..8 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let paste_left = ctx.db.with_snapshot(|s| s.items.get(&paste_stack).map(|i| i.quantity).unwrap_or(0));
+    assert_eq!(paste_left, 0, "All 3 available paste units must be streamed and consumed");
+    assert!(!sys.is_module_being_nanite_repaired_sync(ship_a, mod_stream), "Repair must halt cleanly when cargo paste is exhausted");
+    let dmg_after_exhaust = ctx.db.with_snapshot(|s| s.items.get(&mod_stream).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
+    assert!(
+        (dmg_after_exhaust - 12.5).abs() < 0.05,
+        "Exhausting 3 of 8 required paste must repair exactly 3/8 of 20 HP (12.5 HP left), got {dmg_after_exhaust}"
+    );
+
+    // 2. Cargo capacity guard on cancellation refund: filling cargo to 100% hull capacity before t=0 StopModuleRepair
+    // must NOT overflow hull cargo volume!
+    give_item(&ctx, 77_203, 28_668, char_a, ship_a, InventoryFlag::Cargo, 2);
+    rpc(&ctx, &mut sess_a, "dogmaIM", "InitiateModuleRepair", vec![PyRep::Integer(mod_stream)]).await.unwrap();
+    // Fill Sabre cargo (400 m3) completely: 1 unit of 28668 (0.01 m3) + 39,999 Tritanium (`34`, 0.01 m3) = 400.00 m3 (0.00 m3 free!)
+    give_item(&ctx, 77_204, 34, char_a, ship_a, InventoryFlag::Cargo, 39_999);
+    let stop_full = rpc(&ctx, &mut sess_a, "dogmaIM", "StopModuleRepair", vec![PyRep::Integer(mod_stream)]).await.unwrap();
+    assert_eq!(stop_full.dict_get("pasteRefunded"), Some(&PyRep::Integer(0)), "Refund must cap to 0 when ship cargo has 0.00 m3 free");
+    let cargo_used_m3: f64 = ctx.db.with_snapshot(|s| {
+        s.items.values().filter(|i| i.location_id == ship_a && i.flag == InventoryFlag::Cargo).map(|i| {
+            ctx.sde.types.get(&i.type_id).unwrap().volume * (i.quantity as f64)
+        }).sum()
+    });
+    assert!(cargo_used_m3 <= 400.0 + 1e-6, "Cargo volume must never exceed Sabre 400 m3 capacity: got {cargo_used_m3}");
+    ctx.db.with_mut_snapshot(|s| { s.items.remove(&77_204); });
+
+    // 3. Interdiction Sphere Launcher (`BF-02`): excess probes above launcher capacity return to Cargo (never destroyed),
+    // and contract-locked probes in Cargo are NOT auto-reloaded!
+    let launcher_id: i64 = 77_210;
+    let over_stack_id: i64 = 77_211;
+    let locked_probe_id: i64 = 77_212;
+    give_item(&ctx, launcher_id, 22_782, char_a, ship_a, InventoryFlag::HiSlot0, 1);
+    give_item(&ctx, over_stack_id, 22_778, char_a, ship_a, InventoryFlag::HiSlot0, 5); // 5 loaded > max 3 (15 m3 / 5 m3)
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(launcher_id, true); });
+    ctx.invalidate_ship_fitting(ship_a);
+
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![
+        PyRep::Integer(launcher_id), PyRep::String("useMissiles".into()), PyRep::None, PyRep::Integer(0),
+    ]).await.expect("Launch 1st probe with 5 loaded");
+    let (rem_slot, returned_cargo) = ctx.db.with_snapshot(|s| {
+        let slot_q = s.items.get(&over_stack_id).map(|i| i.quantity).unwrap_or(0);
+        let cargo_q: i32 = s.items.values().filter(|i| i.location_id == ship_a && i.flag == InventoryFlag::Cargo && i.type_id == 22_778).map(|i| i.quantity).sum();
+        (slot_q, cargo_q)
+    });
+    assert_eq!((rem_slot, returned_cargo), (2, 2), "Excess 2 probes above capacity 3 must return to Cargo (5 - 1 = 4 total preserved)");
+
+    // Clear unlocked cargo probes, leave 1 in launcher, and lock a cargo stack in an Outstanding contract -> auto-reload must skip locked stack!
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.retain(|_, i| !(i.location_id == ship_a && i.flag == InventoryFlag::Cargo && i.type_id == 22_778));
+        s.items.get_mut(&over_stack_id).unwrap().quantity = 1;
+    });
+    give_item(&ctx, locked_probe_id, 22_778, char_a, ship_a, InventoryFlag::Cargo, 3);
+    ctx.db.with_mut_snapshot(|s| {
+        s.contracts.insert(990_001, ContractRecord {
+            contract_id: 990_001, issuer_id: char_a, issuer_corp_id: 1_000_009, assignee_id: 0, acceptor_id: None,
+            start_station_id: 60_003_760, end_station_id: 60_003_760, contract_type: "ItemExchange".into(),
+            status: "Outstanding".into(), title: "Locked Probes".into(), for_corp: false, availability: "Public".into(),
+            date_issued_unix: 1, expiration_unix: u64::MAX, num_days: 1,
+            price: IskCents(100), reward: IskCents(0), collateral: IskCents(0), buyout: IskCents(0),
+            current_bid: IskCents(0), current_bidder_id: None,
+            item_ids: vec![locked_probe_id], requested_items: Vec::new(), bid_history: Vec::new(),
+        });
+    });
+    for _ in 0..6 { sys.step_manual(1.0).await.unwrap(); }
+    let launch_last = rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![
+        PyRep::Integer(launcher_id), PyRep::String("useMissiles".into()), PyRep::None, PyRep::Integer(0),
+    ]).await.unwrap();
+    assert_eq!(launch_last.dict_get("reloading"), Some(&PyRep::Bool(false)), "Contract-locked cargo probes must not be auto-reloaded");
+    assert_eq!(launch_last.dict_get("remainingInLauncher"), Some(&PyRep::Integer(0)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&locked_probe_id).unwrap().quantity), 3);
+
+    // 4. Scram-aborted MWD (`BF-04`): Warp Scrambler cleans up `snap.module_active_states` and emits `OnGodmaShipEffect` deactivation!
+    let char_v: i64 = 94_162;
+    let ship_v: i64 = 84_162;
+    let mut sess_v = seed_pilot(&ctx, char_v, ship_v, 621, NULL_SYS, false);
+    let mwd_id: i64 = 77_220;
+    let scram_id: i64 = 77_221;
+    give_item(&ctx, mwd_id, 5_973, char_v, ship_v, InventoryFlag::MedSlot0, 1); // 50MN MWD II
+    give_item(&ctx, scram_id, 448, char_a, ship_a, InventoryFlag::MedSlot0, 1); // Warp Scrambler II
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(mwd_id, true);
+        s.module_online_states.insert(scram_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_v);
+    ctx.invalidate_ship_fitting(ship_a);
+    spawn_in_space(&ctx, char_v, ship_v, 621, NULL_SYS, origin + DVec3::new(3_000.0, 0.0, 0.0)).await;
+    sys.add_target_lock(ship_a, eve_destiny::TargetLock {
+        target_id: ship_v, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0),
+    }).await.unwrap();
+    rpc(&ctx, &mut sess_v, "dogmaIM", "Activate", vec![
+        PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1),
+    ]).await.unwrap();
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&mwd_id)));
+    let _ = sess_v.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_v);
+
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![
+        PyRep::Integer(scram_id), PyRep::String("warpScramblerMWD".into()), PyRep::Integer(ship_v), PyRep::Integer(1),
+    ]).await.unwrap();
+    assert!(
+        !ctx.db.with_snapshot(|s| s.module_active_states.contains(&mwd_id)),
+        "Warp Scrambler aborting MWD must remove MWD from snap.module_active_states"
+    );
+    let notifs_scram = ctx.drain_notifications_for_char(char_v);
+    assert!(
+        notifs_scram.iter().any(|n| n.event == "OnGodmaShipEffect" && n.args.first() == Some(&PyRep::Integer(mwd_id))),
+        "Warp Scrambler aborting MWD must emit OnGodmaShipEffect deactivation notification to victim"
+    );
 }

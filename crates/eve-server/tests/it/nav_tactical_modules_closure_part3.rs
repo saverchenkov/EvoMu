@@ -1,13 +1,26 @@
-//! End-to-End Integration Tests closing Overheat Rack Heat, Probabilistic Heat Damage Propagation,
-//! and In-Space Nanite Repair Paste parity rows (Part 3):
-//! `feat:modules.overheat-rack-heat-generation`, `feat:modules.overheat-damage-propagation`,
-//! and `feat:modules.nanite-repair-paste-in-space`.
+//! End-to-End Integration Tests closing Overheat Rack Heat and Probabilistic Heat Damage Propagation
+//! parity rows (Part 3):
+//! `feat:modules.overheat-rack-heat-generation` and `feat:modules.overheat-damage-propagation`.
 
 use crate::modules_advanced_tactical::*;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, CombatState, DVec3, MovementMode};
 use eve_proto::PyRep;
 use std::collections::HashMap;
+
+fn set_ship_rack_heat(ctx: &eve_server::router::ServerContext, ship_id: i64, attr_id: u16, val: f64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let tr = snap.transient_item_attributes.entry(ship_id).or_default();
+        if val > 0.0 {
+            tr.insert(attr_id, val);
+        } else {
+            tr.remove(&attr_id);
+        }
+        if tr.is_empty() {
+            snap.transient_item_attributes.remove(&ship_id);
+        }
+    });
+}
 
 #[tokio::test]
 async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
@@ -69,6 +82,15 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     let h_1mod = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(ship_a)]).await.unwrap(), 1175);
     let expected_1mod = 1.0 - (-0.10_f64).exp();
     assert!((h_1mod - expected_1mod).abs() < 1e-4, "1-module high rack heat (1175) must follow 1 - exp(-0.10): got {h_1mod} vs {expected_1mod}");
+    assert!(
+        ctx.db.with_snapshot(|s| {
+            let sh = s.items.get(&ship_a).unwrap();
+            !sh.dynamic_attributes.contains_key(&1175)
+                && !sh.dynamic_attributes.contains_key(&1176)
+                && !sh.dynamic_attributes.contains_key(&1177)
+        }),
+        "Transient ship rack heat (1175..=1177) must never be persisted to ship_item.dynamic_attributes"
+    );
 
     // 1b. Exponential passive dissipation when overload is stopped: H_cool(10) = H_0 * exp(-10 * 0.01)
     rpc(&ctx, &mut sess_a, "dogmaIM", "StopOverload", vec![PyRep::Integer(mod_0)]).await.unwrap();
@@ -80,7 +102,7 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     assert!((h_cooled - h_1mod * (-0.10_f64).exp()).abs() < 1e-4, "Passive cooling must follow H * exp(-t * diss): got {h_cooled}");
 
     // 1c. Linear 2-module sum (NOT N^2 * 2^N): 2 overloaded blasters -> gen_rate = 0.02 -> H(10) = 1 - exp(-0.20)
-    set_item_dyn_attr(&ctx, ship_a, 1175, 0.0);
+    set_ship_rack_heat(&ctx, ship_a, 1175, 0.0);
     set_item_dyn_attr(&ctx, mod_0, 3, 0.0);
     set_item_dyn_attr(&ctx, mod_1, 3, 0.0);
     for &mid in &[mod_0, mod_1] {
@@ -148,15 +170,34 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     let gun_norm = fit_eval.build_effective_module_state(mod_0, 3_170, false, &ctx.sde);
     let gun_ovl = fit_eval.build_effective_module_state(mod_0, 3_170, true, &ctx.sde);
     assert!((gun_ovl.get_attribute(64, &ctx.sde) - gun_norm.get_attribute(64, &ctx.sde) * 1.15).abs() < 1e-3);
+
+    // Mid-cycle UpdateModuleOverload on active Medium Armor Repairer II (`3530`): +10% armor repair (`1230`) & -15% duration (`1206`)
+    let mut rep_cs = sys.get_combat_state(ship_a).await.unwrap().unwrap();
+    rep_cs.max_armor_hp = 50_000.0;
+    rep_cs.armor_hp = 1_000.0;
+    sys.set_combat_state(ship_a, rep_cs).await.unwrap();
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![
+        PyRep::Integer(rep_id), PyRep::String("armorRepair".into()), PyRep::None, PyRep::Integer(1),
+    ]).await.unwrap();
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(rep_id)]).await.unwrap();
+    // Base duration is 12.0s; overloaded (-15%) is 10.2s -> after 11s (10.2s < 11s < 12.0s), 1 overloaded cycle (+10% amount) has already completed!
+    for _ in 0..11 {
+        sys.set_capacitor(ship_a, 10_000.0).await.unwrap();
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let armor_after_mid_ovl = sys.get_combat_state(ship_a).await.unwrap().unwrap().armor_hp;
+    let expected_armor = 1_000.0 + rep_norm.get_attribute(84, &ctx.sde) * 1.10;
+    assert!(
+        (armor_after_mid_ovl - expected_armor).abs() < 1.0,
+        "Mid-cycle Overload on Armor Repairer II must apply +10% amount (attr 1230) and -15% duration (attr 1206, 10.2s): got {armor_after_mid_ovl} vs {expected_armor}"
+    );
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(rep_id)]).await.unwrap();
 }
 
 #[tokio::test]
 async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
-    // parity: feat:modules.overheat-damage-propagation, feat:modules.nanite-repair-paste-in-space
-    eve_testkit::attest(&[
-        "feat:modules.overheat-damage-propagation",
-        "feat:modules.nanite-repair-paste-in-space",
-    ]);
+    // parity: feat:modules.overheat-damage-propagation
+    eve_testkit::attest(&["feat:modules.overheat-damage-propagation"]);
 
     let ctx = build_ctx();
     let _kw: HashMap<String, PyRep> = HashMap::new();
@@ -222,7 +263,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     // 1. Seeded probabilistic heat damage: cold vs hot rack, non-wrapping distance attenuation, cross-rack isolation,
     // Thermodynamics L0 vs L5 (-25%), and Online Slots / Total Slots reduction (`feat:modules.overheat-damage-propagation`)
     ctx.set_mechanic_rng_seed(Some(2026));
-    set_item_dyn_attr(&ctx, ship_a, 1175, 0.0);
+    set_ship_rack_heat(&ctx, ship_a, 1175, 0.0);
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![
         PyRep::Integer(mod_0), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1),
     ]).await.unwrap();
@@ -239,7 +280,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
         set_item_dyn_attr(&ctx, mid, 3, 0.0);
         set_item_dyn_attr(&ctx, mid, 40, 400.0);
     }
-    set_item_dyn_attr(&ctx, ship_a, 1175, 0.85);
+    set_ship_rack_heat(&ctx, ship_a, 1175, 0.85);
     ctx.set_mechanic_rng_seed(Some(7));
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![
         PyRep::Integer(mod_0), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1),
@@ -265,7 +306,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     // Thermodynamics L5 (-25% per-hit damage) under identical seed 7 -> exact 0.75x damage!
     set_skill_level(&ctx, char_a, 28_164, 5);
     for &mid in &[mod_0, mod_1, mod_2, mod_6] { set_item_dyn_attr(&ctx, mid, 3, 0.0); }
-    set_item_dyn_attr(&ctx, ship_a, 1175, 0.85);
+    set_ship_rack_heat(&ctx, ship_a, 1175, 0.85);
     ctx.set_mechanic_rng_seed(Some(7));
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![
         PyRep::Integer(mod_0), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1),
@@ -286,7 +327,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     });
     ctx.invalidate_ship_fitting(ship_a);
     for &mid in &[mod_0, mod_1, mod_2, mod_6] { set_item_dyn_attr(&ctx, mid, 3, 0.0); }
-    set_item_dyn_attr(&ctx, ship_a, 1175, 0.85);
+    set_ship_rack_heat(&ctx, ship_a, 1175, 0.85);
     ctx.set_mechanic_rng_seed(Some(7));
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![
         PyRep::Integer(mod_0), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1),

@@ -77,6 +77,7 @@ impl Ballpark {
             ball_harmonics: BTreeMap::new(),
             ball_wormhole_stages: BTreeMap::new(),
             base_webbed_max_velocity: BTreeMap::new(),
+            active_wubble_multipliers: BTreeMap::new(),
         }
     }
 
@@ -439,6 +440,7 @@ impl Ballpark {
         self.formation_states.remove(&ball_id);
         self.ball_harmonics.remove(&ball_id);
         self.base_webbed_max_velocity.remove(&ball_id);
+        self.active_wubble_multipliers.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
             locks.retain(|l| l.target_id != ball_id);
@@ -579,46 +581,6 @@ impl Ballpark {
     pub fn set_warp_core_strength(&mut self, ball_id: BallId, strength: i32) -> bool {
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
             cs.warp_core_strength = strength;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns `true` when `ball_id` is immune to warp disruption bubbles (Shuttles `group 31` or active Interdiction Nullifier).
-    pub fn is_ball_bubble_immune(&self, ball_id: BallId) -> bool {
-        self.ball_group_ids.get(&ball_id) == Some(&31)
-            || self
-                .combat_states
-                .get(&ball_id)
-                .map(|cs| cs.is_interdiction_nullified)
-                .unwrap_or(false)
-    }
-
-    pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
-        if let Some(cs) = self.combat_states.get(&ball_id) {
-            if cs.is_warp_scrambled() {
-                return true;
-            }
-        }
-        if !self.is_ball_bubble_immune(ball_id)
-            && !self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_emergency_warping)
-        {
-            if let Some(ball) = self.balls.get(&ball_id) {
-                if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn set_interdiction_nullified(&mut self, ball_id: BallId, nullified: bool) -> bool {
-        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
-            cs.is_interdiction_nullified = nullified;
             true
         } else {
             false

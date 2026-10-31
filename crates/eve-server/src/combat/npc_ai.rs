@@ -805,11 +805,18 @@ impl NpcSpawnManager {
             for (tid, dmg) in dmg_updates {
                 bp.apply_damage_to_ball(tid, dmg);
             }
+            let deact_guard = sys_handle
+                .module_deactivation_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             crate::system_actor::reconcile_tackle_and_bubbles(
                 &mut bp,
                 &mut st.active_module_cycles,
                 &st.base_scramble_strengths,
                 &st.base_core_strengths,
+                &st.db_opt,
+                deact_guard.as_ref(),
             );
             crate::system_actor::sync_ball_positions(
                 &bp,

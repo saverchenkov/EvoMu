@@ -707,11 +707,18 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         tcs.warp_scramble_strength.max(npc.scram_strength as i32);
                     tcs.is_mwd_mjd_disabled = true;
                 }
+                let deact_guard = sys_handle
+                    .module_deactivation_hook
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 crate::system_actor::reconcile_tackle_and_bubbles(
                     &mut bp,
                     &mut st.active_module_cycles,
                     &st.base_scramble_strengths,
                     &st.base_core_strengths,
+                    &st.db_opt,
+                    deact_guard.as_ref(),
                 );
             }
             if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
@@ -839,11 +846,18 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 st.base_scramble_strengths.remove(&tid);
             }
         }
+        let deact_guard = sys_handle
+            .module_deactivation_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         crate::system_actor::reconcile_tackle_and_bubbles(
             &mut bp,
             &mut st.active_module_cycles,
             &st.base_scramble_strengths,
             &st.base_core_strengths,
+            &st.db_opt,
+            deact_guard.as_ref(),
         );
         crate::system_actor::sync_ball_positions(
             &bp,

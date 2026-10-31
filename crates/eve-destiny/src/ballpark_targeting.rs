@@ -250,11 +250,18 @@ impl Ballpark {
         for i in 0..ball_keys.len() {
             let id_a = ball_keys[i];
             let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
-            let is_station_or_struct_a =
-                matches!(group_a, 15 | 1404..=1410 | 1657 | 2016 | 2017);
+            let is_station_or_struct_a = matches!(group_a, 15 | 1404..=1410 | 1657 | 2016 | 2017)
+                || self
+                    .ball_slim_meta
+                    .get(&id_a)
+                    .is_some_and(|m| m.category_id == 65);
             let is_static_a = self.is_static_ball(id_a)
                 || matches!(self.balls[&id_a].mode, MovementMode::Miniball)
-                || is_station_or_struct_a;
+                || is_station_or_struct_a
+                || self
+                    .ball_slim_meta
+                    .get(&id_a)
+                    .is_some_and(|m| matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65));
 
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
@@ -265,10 +272,18 @@ impl Ballpark {
                     continue;
                 }
                 let is_station_or_struct_b =
-                    matches!(group_b, 15 | 1404..=1410 | 1657 | 2016 | 2017);
+                    matches!(group_b, 15 | 1404..=1410 | 1657 | 2016 | 2017)
+                        || self
+                            .ball_slim_meta
+                            .get(&id_b)
+                            .is_some_and(|m| m.category_id == 65);
                 let is_static_b = self.is_static_ball(id_b)
                     || matches!(self.balls[&id_b].mode, MovementMode::Miniball)
-                    || is_station_or_struct_b;
+                    || is_station_or_struct_b
+                    || self
+                        .ball_slim_meta
+                        .get(&id_b)
+                        .is_some_and(|m| matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65));
 
                 if is_static_a && is_static_b {
                     continue;
@@ -306,31 +321,13 @@ impl Ballpark {
                     continue;
                 }
 
-                // NPC stations (`group 15`) and Upwell structures (`1404..=1410 | 1657 | 2016 | 2017`)
-                // have outer SDE visual radii up to 150 km while their docking ring sits at 2,000 m,
-                // and stargates (`group 10`) have jump activation rings at ~3,532 m; collide against
-                // their inner core hull (`1,000 m` / `2,500 m`) so 0 m warp-ins and docking/jumping work.
                 let (pos_a, rad_a, mass_a, vel_a) = {
                     let b = &self.balls[&id_a];
-                    let r = if is_station_or_struct_a {
-                        b.radius.min(1_000.0)
-                    } else if group_a == 10 {
-                        b.radius.min(2_500.0)
-                    } else {
-                        b.radius
-                    };
-                    (b.position, r, b.mass.max(1.0), b.velocity)
+                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
                 };
                 let (pos_b, rad_b, mass_b, vel_b) = {
                     let b = &self.balls[&id_b];
-                    let r = if is_station_or_struct_b {
-                        b.radius.min(1_000.0)
-                    } else if group_b == 10 {
-                        b.radius.min(2_500.0)
-                    } else {
-                        b.radius
-                    };
-                    (b.position, r, b.mass.max(1.0), b.velocity)
+                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
                 };
 
                 let delta = pos_a - pos_b;
@@ -440,6 +437,46 @@ impl Ballpark {
                     self.queue_event_for_grid_observers(gid, None, &vel_ev);
                 }
             }
+        }
+    }
+
+    /// Returns `true` when `ball_id` is immune to warp disruption bubbles (Shuttles `group 31` or active Interdiction Nullifier).
+    pub fn is_ball_bubble_immune(&self, ball_id: BallId) -> bool {
+        self.ball_group_ids.get(&ball_id) == Some(&31)
+            || self
+                .combat_states
+                .get(&ball_id)
+                .map(|cs| cs.is_interdiction_nullified)
+                .unwrap_or(false)
+    }
+
+    pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
+        if let Some(cs) = self.combat_states.get(&ball_id) {
+            if cs.is_warp_scrambled() {
+                return true;
+            }
+        }
+        if !self.is_ball_bubble_immune(ball_id)
+            && !self
+                .combat_states
+                .get(&ball_id)
+                .is_some_and(|cs| cs.is_emergency_warping)
+        {
+            if let Some(ball) = self.balls.get(&ball_id) {
+                if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn set_interdiction_nullified(&mut self, ball_id: BallId, nullified: bool) -> bool {
+        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            cs.is_interdiction_nullified = nullified;
+            true
+        } else {
+            false
         }
     }
 }

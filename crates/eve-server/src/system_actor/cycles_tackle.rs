@@ -13,6 +13,8 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
 ) {
     // 1. Collect all target balls currently subjected to MWD/MJD suppression (Warp Scrambler / Scripted HIC WDFG / Zero-Point Mass Entangler)
     let mut mwd_disabled_targets: Vec<BallId> = Vec::new();
@@ -98,8 +100,12 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     }
 
     // 4. Immediately shut down any active MWD or MJD cycle on MWD/MJD-disabled targets (Warp Scrambler / Scripted HIC WDFG / ESS field)
-    let mut idx = 0;
-    while idx < active_module_cycles.len() {
+    let reentrant_db = db_opt
+        .as_ref()
+        .is_some_and(|db| db.is_write_locked_by_current_thread());
+    let effective_db = if reentrant_db { &None } else { db_opt };
+    let mut aborted_cycles = Vec::new();
+    for idx in (0..active_module_cycles.len()).rev() {
         let ship_id = active_module_cycles[idx].ship_id;
         let mjd_or_mwd_disabled = mwd_disabled_targets.contains(&ship_id)
             || ballpark
@@ -111,9 +117,13 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             && mjd_or_mwd_disabled;
         if stop_mwd_or_mjd {
             let shut_down = active_module_cycles.remove(idx);
-            cleanup_removed_module_cycle(ballpark, &shut_down, &None);
-        } else {
-            idx += 1;
+            cleanup_removed_module_cycle(ballpark, &shut_down, effective_db);
+            aborted_cycles.push(shut_down);
+        }
+    }
+    if !reentrant_db {
+        for shut_down in &aborted_cycles {
+            emit_cycle_deactivation(shut_down, ballpark, effective_db, deactivation_hook);
         }
     }
     let warp_stop_ids: Vec<BallId> = ballpark
@@ -220,6 +230,8 @@ pub(crate) fn on_target_unlocked_in_actor(
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
+            db_opt,
+            deactivation_hook,
         );
         for removed in &removed_cycles {
             emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
@@ -227,6 +239,7 @@ pub(crate) fn on_target_unlocked_in_actor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_add_module_cycle(
     ballpark: &mut Ballpark,
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
@@ -234,6 +247,7 @@ pub(crate) fn handle_add_module_cycle(
     base_core_strengths: &HashMap<BallId, i32>,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
     mut cycle: ActiveModuleCycle,
 ) -> Result<(), String> {
     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
@@ -480,8 +494,173 @@ pub(crate) fn handle_add_module_cycle(
         active_module_cycles,
         base_scramble_strengths,
         base_core_strengths,
+        db_opt,
+        deactivation_hook,
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_update_module_overload(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
+    ship_id: BallId,
+    module_id: i64,
+    is_overloaded: bool,
+) -> bool {
+    let mut updated = false;
+    for c in active_module_cycles.iter_mut() {
+        if c.ship_id != ship_id || c.module_id != module_id {
+            continue;
+        }
+        if c.is_overloaded != is_overloaded {
+            let mt_opt = sde_opt.as_ref().and_then(|sde| sde.types.get(&c.module_type_id));
+            let has_cat5 = match (sde_opt.as_ref(), mt_opt) {
+                (Some(sde), Some(mt)) => mt
+                    .effect_ids
+                    .iter()
+                    .any(|eid| sde.effects.get(eid).is_some_and(|e| e.effect_category == 5)),
+                _ => false,
+            };
+            let apply_scale = |val: &mut f64, mult: f64| {
+                if (mult - 1.0).abs() > 1e-9 && mult > 0.0 {
+                    if is_overloaded {
+                        *val *= mult;
+                    } else {
+                        *val /= mult;
+                    }
+                }
+            };
+
+            if c.speed_boost_factor > 0.0 {
+                let ovl_speed = mt_opt
+                    .and_then(|t| t.default_attributes.get(&1223).copied())
+                    .map(|pct| (1.0 + pct / 100.0).max(0.1))
+                    .unwrap_or(1.50);
+                apply_scale(&mut c.speed_boost_factor, ovl_speed);
+                if let Some(orig_v) = c.original_max_velocity {
+                    let new_v = orig_v * (1.0 + c.speed_boost_factor);
+                    if let Some(bv) = ballpark.base_webbed_max_velocity.get_mut(&ship_id) {
+                        *bv = new_v;
+                    } else if let Some(ball) = ballpark.balls.get_mut(&ship_id) {
+                        ball.max_velocity = new_v;
+                    }
+                }
+            }
+
+            // SDE cycle-duration overload attributes: `1206` (`overloadSelfDurationBonus`, `-15%` repairers),
+            // `1205` (`overloadRofBonus`, `-15%` turrets/launchers), `1181` (`overloadDurationBonus`).
+            if let Some(dur_pct) = mt_opt.and_then(|t| {
+                t.default_attributes
+                    .get(&1206)
+                    .copied()
+                    .or_else(|| t.default_attributes.get(&1205).copied())
+                    .or_else(|| t.default_attributes.get(&1181).copied())
+            }) {
+                let dur_mult = (1.0 + dur_pct / 100.0).max(0.1);
+                apply_scale(&mut c.duration_s, dur_mult);
+            }
+
+            // SDE `1230` (`overloadArmorDamageAmount`, `+10%`) for armor / remote-armor / AAR repairers,
+            // `1231` (`overloadShieldBonus`, `+10%`) for shield / remote-shield boosters,
+            // and `1.20` fallback only when no category-5 overload Dogma effect exists on the module.
+            let armor_mult = mt_opt
+                .and_then(|t| {
+                    t.default_attributes.get(&1230).copied().or_else(|| {
+                        t.default_attributes
+                            .get(&1210)
+                            .copied()
+                            .filter(|_| matches!(t.group_id, 62 | 325 | 2018 | 1199 | 1698))
+                    })
+                })
+                .map(|pct| (1.0 + pct / 100.0).max(0.1))
+                .unwrap_or(if has_cat5 { 1.0 } else { 1.20 });
+            let shield_mult = mt_opt
+                .and_then(|t| {
+                    t.default_attributes.get(&1231).copied().or_else(|| {
+                        t.default_attributes
+                            .get(&1208)
+                            .copied()
+                            .filter(|_| matches!(t.group_id, 40 | 41 | 1156 | 1697))
+                    })
+                })
+                .map(|pct| (1.0 + pct / 100.0).max(0.1))
+                .unwrap_or(if has_cat5 { 1.0 } else { 1.20 });
+            let hull_mult = mt_opt
+                .and_then(|t| t.default_attributes.get(&1230).copied())
+                .map(|pct| (1.0 + pct / 100.0).max(0.1))
+                .unwrap_or(if has_cat5 { 1.0 } else { 1.20 });
+
+            apply_scale(&mut c.armor_repair_amount, armor_mult);
+            apply_scale(&mut c.remote_armor_amount, armor_mult);
+            apply_scale(&mut c.aar_base_armor_repair, armor_mult);
+            apply_scale(&mut c.shield_boost_amount, shield_mult);
+            apply_scale(&mut c.remote_shield_amount, shield_mult);
+            apply_scale(&mut c.hull_repair_amount, hull_mult);
+            apply_scale(&mut c.remote_hull_amount, hull_mult);
+
+            // SDE `1210` (`overloadDamageModifier`, e.g. `+15%` turrets) on weapon volleys
+            if let Some(dmg_pct) = mt_opt.and_then(|t| t.default_attributes.get(&1210).copied()) {
+                let wep_mult = (1.0 + dmg_pct / 100.0).max(0.1);
+                apply_scale(&mut c.damage_vector.em, wep_mult);
+                apply_scale(&mut c.damage_vector.thermal, wep_mult);
+                apply_scale(&mut c.damage_vector.kinetic, wep_mult);
+                apply_scale(&mut c.damage_vector.explosive, wep_mult);
+            }
+
+            // SDE `1222` (`overloadRangeBonus`, e.g. `+300%` Grappler, `+30%` Web, `+20%` Scram)
+            if let Some(rng_pct) = mt_opt.and_then(|t| t.default_attributes.get(&1222).copied()) {
+                let rng_mult = (1.0 + rng_pct / 100.0).max(0.1);
+                if c.grappler_optimal_m > 0.0 {
+                    apply_scale(&mut c.grappler_optimal_m, rng_mult);
+                    c.max_effective_range_m =
+                        Some(c.grappler_optimal_m + 3.0 * c.grappler_falloff_m.max(0.0));
+                    if let Some(tid) = c.target_id {
+                        if let (Some(sb), Some(tb)) = (ballpark.balls.get(&ship_id), ballpark.balls.get(&tid)) {
+                            let dist = (sb.position - tb.position).length();
+                            let att = eve_dogma::compute_falloff_attenuation(
+                                dist,
+                                c.grappler_optimal_m,
+                                c.grappler_falloff_m,
+                            );
+                            let eff_sf = if dist <= c.grappler_optimal_m + 3.0 * c.grappler_falloff_m.max(1.0) {
+                                c.grappler_speed_factor_pct * att
+                            } else {
+                                0.0
+                            };
+                            c.target_velocity_multiplier =
+                                Some((1.0 + eff_sf / 100.0).clamp(0.05, 1.0));
+                        }
+                    }
+                } else if let Some(ref mut max_r) = c.max_effective_range_m {
+                    if c.remote_falloff == 0.0 {
+                        apply_scale(max_r, rng_mult);
+                    }
+                }
+                if c.remote_optimal > 0.0 {
+                    apply_scale(&mut c.remote_optimal, rng_mult);
+                }
+            }
+        }
+        c.is_overloaded = is_overloaded;
+        updated = true;
+    }
+    if updated {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            deactivation_hook,
+        );
+    }
+    updated
 }
 
 pub(super) fn apply_destiny_event_in_actor(

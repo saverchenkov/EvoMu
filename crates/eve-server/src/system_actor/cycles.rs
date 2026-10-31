@@ -146,18 +146,44 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
-    // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`)
+    // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`):
+    // consume paste incrementally per tick and halt cleanly if cargo paste is exhausted mid-repair.
     active_nanite_repairs.retain_mut(|nr| {
         if !ballpark.balls.contains_key(&nr.ship_id)
             || active_module_cycles.iter().any(|c| c.ship_id == nr.ship_id && c.module_id == nr.module_id)
         {
             return false;
         }
-        nr.elapsed_s += dt;
-        let done = nr.elapsed_s + 1e-6 >= nr.duration_s;
-        let rem_dmg = if done { 0.0 } else { nr.initial_damage_hp * (1.0 - nr.elapsed_s / nr.duration_s.max(0.1)).clamp(0.0, 1.0) };
-        if let Some(db_ref) = db_opt {
+        let next_elapsed = (nr.elapsed_s + dt).min(nr.duration_s);
+        let next_progress = (next_elapsed / nr.duration_s.max(0.1)).clamp(0.0, 1.0);
+        let total_needed = nr.paste_total_needed.max(1);
+        let target_consumed = ((total_needed as f64) * next_progress - 1e-9)
+            .ceil()
+            .clamp(1.0, total_needed as f64) as i32;
+        let mut halted_for_paste = false;
+        let mut effective_progress = next_progress;
+        if let Some(db_ref) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
             db_ref.with_mut_snapshot(|snap| {
+                if target_consumed > nr.paste_consumed_so_far {
+                    let delta = target_consumed - nr.paste_consumed_so_far;
+                    let taken = crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
+                        snap,
+                        nr.char_id,
+                        nr.ship_id,
+                        delta,
+                    );
+                    nr.paste_consumed_so_far += taken;
+                    if taken < delta {
+                        halted_for_paste = true;
+                        effective_progress = ((nr.paste_consumed_so_far as f64) / (total_needed as f64)).clamp(0.0, 1.0);
+                    }
+                }
+                let done_now = !halted_for_paste && (next_elapsed + 1e-6 >= nr.duration_s);
+                let rem_dmg = if done_now {
+                    0.0
+                } else {
+                    nr.initial_damage_hp * (1.0 - effective_progress).clamp(0.0, 1.0)
+                };
                 if let Some(m_item) = snap.items.get_mut(&nr.module_id) {
                     if rem_dmg <= 1e-6 {
                         m_item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
@@ -167,7 +193,12 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             });
         }
-        !done
+        if halted_for_paste {
+            nr.elapsed_s = nr.duration_s * effective_progress;
+            return false;
+        }
+        nr.elapsed_s = next_elapsed;
+        nr.elapsed_s + 1e-6 < nr.duration_s
     });
 
     pending_anchoring_disruptors.retain_mut(|d| {
@@ -226,17 +257,37 @@ pub(crate) fn step_cycles_and_capacitor(
                 continue;
             }
             if cycle.target_velocity_multiplier.is_some() {
-                if let (Some(sb), Some(tb), Some(sde)) = (source_ball, target_ball, sde_opt.as_ref()) {
-                    if let Some(mt) = sde.types.get(&cycle.module_type_id).filter(|t| t.group_id == 1672) {
+                if let (Some(sb), Some(tb)) = (source_ball, target_ball) {
+                    let is_grappler = cycle.grappler_speed_factor_pct != 0.0
+                        || sde_opt
+                            .as_ref()
+                            .and_then(|sde| sde.types.get(&cycle.module_type_id))
+                            .is_some_and(|t| t.group_id == 1672);
+                    if is_grappler {
                         let dist = (sb.position - tb.position).length();
-                        let opt = mt.default_attributes.get(&54).copied().unwrap_or(1_000.0);
-                        let fo = mt
-                            .default_attributes
-                            .get(&2044)
-                            .copied()
-                            .or_else(|| mt.default_attributes.get(&158).copied())
-                            .unwrap_or(8_000.0);
-                        let raw_sf = mt.default_attributes.get(&20).copied().unwrap_or(-80.0);
+                        let sde_mt = sde_opt.as_ref().and_then(|sde| sde.types.get(&cycle.module_type_id));
+                        let opt = if cycle.grappler_optimal_m > 0.0 {
+                            cycle.grappler_optimal_m
+                        } else {
+                            sde_mt.and_then(|mt| mt.default_attributes.get(&54).copied()).unwrap_or(1_000.0)
+                        };
+                        let fo = if cycle.grappler_falloff_m > 0.0 {
+                            cycle.grappler_falloff_m
+                        } else {
+                            sde_mt
+                                .and_then(|mt| {
+                                    mt.default_attributes
+                                        .get(&2044)
+                                        .copied()
+                                        .or_else(|| mt.default_attributes.get(&158).copied())
+                                })
+                                .unwrap_or(8_000.0)
+                        };
+                        let raw_sf = if cycle.grappler_speed_factor_pct != 0.0 {
+                            cycle.grappler_speed_factor_pct
+                        } else {
+                            sde_mt.and_then(|mt| mt.default_attributes.get(&20).copied()).unwrap_or(-80.0)
+                        };
                         let att = eve_dogma::compute_falloff_attenuation(dist, opt, fo);
                         let eff_sf = if dist <= opt + 3.0 * fo.max(1.0) {
                             raw_sf * att
@@ -938,7 +989,14 @@ pub(crate) fn step_cycles_and_capacitor(
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
         emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
     }
-        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
+    reconcile_tackle_and_bubbles(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+        db_opt,
+        deactivation_hook,
+    );
     destroyed_balls
 }
 
@@ -1059,6 +1117,8 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
+            db_opt,
+            deactivation_hook,
         );
         for removed in &removed_cycles {
             emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
@@ -1080,8 +1140,7 @@ pub(crate) fn remove_all_ship_module_cycles(
         .is_some_and(|db| db.is_write_locked_by_current_thread());
     let effective_db = if reentrant_db { &None } else { db_opt };
     let mut removed_cycles = Vec::new();
-    let mut i = 0;
-    while i < active_module_cycles.len() {
+    for i in (0..active_module_cycles.len()).rev() {
         if active_module_cycles[i].ship_id == ship_id || active_module_cycles[i].target_id == Some(ship_id) {
             let removed = active_module_cycles.swap_remove(i);
             cleanup_removed_module_cycle(ballpark, &removed, effective_db);
@@ -1091,8 +1150,6 @@ pub(crate) fn remove_all_ship_module_cycles(
                 })
             });
             removed_cycles.push((removed, char_id));
-        } else {
-            i += 1;
         }
     }
     if let Some(db_ref) = effective_db {
@@ -1105,7 +1162,14 @@ pub(crate) fn remove_all_ship_module_cycles(
         });
     }
     if !removed_cycles.is_empty() {
-        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            effective_db,
+            if reentrant_db { None } else { deactivation_hook },
+        );
         if !reentrant_db {
             for (removed, _) in &removed_cycles {
                 emit_cycle_deactivation(removed, ballpark, effective_db, deactivation_hook);

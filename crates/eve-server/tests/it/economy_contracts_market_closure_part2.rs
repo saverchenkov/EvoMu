@@ -396,6 +396,13 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
         .await
         .expect("Activate Mutadaptive RAR");
 
+        ctx.set_mechanic_rng_seed(Some(7));
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.transient_item_attributes
+                .entry(ship_id)
+                .or_default()
+                .insert(1175, 0.90);
+        });
         rpc_call(
             &ctx,
             &mut sess,
@@ -474,9 +481,9 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
             let hi_heat = s
                 .transient_item_attributes
                 .get(&ship_id)
-                .and_then(|t| t.get(&1177).copied())
+                .and_then(|t| t.get(&1175).copied())
                 .unwrap_or(0.0);
-            assert!(hi_heat > 0.0, "High rack heat attr 1177 must be > 0 before crash, got {hi_heat}");
+            assert!(hi_heat > 0.0, "High rack heat attr 1175 must be > 0 before crash, got {hi_heat}");
         });
         let mut active_attrs = std::collections::HashMap::new();
         eve_server::services::tactical_modules::apply_tactical_module_ship_attributes(

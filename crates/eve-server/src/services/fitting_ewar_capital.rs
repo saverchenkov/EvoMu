@@ -30,6 +30,9 @@ pub(crate) struct EwarCapitalPrep {
     pub remote_falloff: f64,
     pub mutadaptive_spool_step: f64,
     pub mutadaptive_spool_max: f64,
+    pub grappler_optimal_m: f64,
+    pub grappler_falloff_m: f64,
+    pub grappler_speed_factor_pct: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -120,6 +123,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                 }
                 let mut target_velocity_multiplier: Option<f64> = None;
+                let mut grappler_optimal_m = 0.0;
+                let mut grappler_falloff_m = 0.0;
+                let mut grappler_speed_factor_pct = 0.0;
                 let mut immobilize_self = false;
                 let mut self_disallow_assistance = false;
                 let mut self_ewar_immune = false;
@@ -623,6 +629,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         };
                         target_velocity_multiplier = Some((1.0 + eff_sf / 100.0).clamp(0.05, 1.0));
                         if mod_type.group_id == 1672 {
+                            grappler_optimal_m = max_range;
+                            grappler_falloff_m = falloff;
+                            grappler_speed_factor_pct = raw_sf;
                             proj_mod_state.base_attributes.insert(20, eff_sf);
                             proj_mod_state.base_attributes.insert(54, 1_000_000_000.0);
                             proj_mod_state.modifiers.retain(|mm| mm.target_attribute_id != 20);
@@ -871,6 +880,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
         remote_falloff,
         mutadaptive_spool_step,
         mutadaptive_spool_max,
+        grappler_optimal_m,
+        grappler_falloff_m,
+        grappler_speed_factor_pct,
     }))
 }
 
