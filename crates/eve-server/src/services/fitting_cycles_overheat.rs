@@ -211,6 +211,8 @@ pub async fn handle_active_overload_toggle(
         ]);
     }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+    let _ = apply_overheat_cycle_to_fit(ctx, char_id, &mut fit, module_id, 0.25);
+    ctx.store_ship_fitting(ship_id, fit);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnHeatAdded",
@@ -251,4 +253,42 @@ pub fn check_nanite_repair_overheat_lockout(
         });
     }
     Ok(())
+}
+
+/// Applies one overheat heat-generation and damage-propagation cycle directly to `fit`.
+pub fn apply_overheat_cycle_to_fit(
+    ctx: &ServerContext,
+    char_id: i64,
+    fit: &mut ShipFittingEngine,
+    module_id: i64,
+    dmg_roll: f64,
+) -> Option<eve_dogma::HeatDamageReport> {
+    let (heat_gen_rate, heat_attenuation) = {
+        let m = fit.modules.get(&module_id)?;
+        let mod_t = ctx.sde.types.get(&m.type_id);
+        let absorb = mod_t
+            .and_then(|t| t.default_attributes.get(&1180).copied())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(0.05);
+        let ship_t = ctx.sde.types.get(&fit.ship.type_id);
+        let atten_attr = match m.flag_id {
+            27..=34 => 1259,
+            19..=26 => 1260,
+            _ => 1261,
+        };
+        let atten = ship_t
+            .and_then(|t| t.default_attributes.get(&atten_attr).copied())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(0.01);
+        (absorb, atten)
+    };
+    let thermo_lvl = ctx.db.with_snapshot(|s| {
+        s.skills
+            .get(&char_id)
+            .and_then(|m| m.get(&28164))
+            .map(|sk| sk.level as f64)
+            .unwrap_or(0.0)
+    });
+    fit.apply_heat_cycle(module_id, heat_gen_rate, heat_attenuation, thermo_lvl, dmg_roll, &ctx.sde)
+        .ok()
 }

@@ -1083,6 +1083,7 @@ pub mod cfsd_nested_layouts_ops;
 pub mod cfsd_nested_tables;
 pub mod sqlite_loader;
 pub mod sqlite_loader_skins;
+pub mod belt_ores;
 pub mod static_domain_loaders;
 pub use cfsd_domain_loaders::*;
 pub use cfsd_flat_tables::*;

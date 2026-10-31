@@ -461,7 +461,7 @@ pub(crate) async fn handle_mine(
                     * ice_spec_factor
                     * rorq_ice_dur_factor
                     * core_ice_dur_factor;
-                (ind_core_ice_rate_mult, dur_s.max(1.0))
+                (1.0, dur_s.max(1.0))
             } else {
                 let spec_factor = if matches!(d_item.type_id, 10250 | 41030 | 90621) {
                     1.0 + 0.02 * (drone_spec_lvl as f64)
@@ -504,19 +504,16 @@ pub(crate) async fn handle_mine(
             let r = fit.get_module_effective_attribute(m.item_id, 54, &ctx.sde);
             (y, if raw_w > 1.0 { raw_w / 100.0 } else { raw_w }, if r > 0.0 { r } else { 35_000.0 })
         } else {
-            let has_any_mining_mod = fit.modules.values().any(|m| {
-                ctx.sde.types.get(&m.type_id).is_some_and(|t| matches!(t.group_id, 54 | 464 | 483 | 737))
+            return Err(BridgeRpcError {
+                code: "NoMiningModuleFitted".into(),
+                message: "Ship has no online compatible mining/harvesting module fitted".into(),
             });
-            if has_any_mining_mod || ore_group_id == 711 || ore_group_id == 465 || !matches!(ship_id, 100_000_001 | 100_000_002) {
-                return Err(BridgeRpcError { code: "NoMiningModuleFitted".into(), message: "Ship has no online compatible mining/harvesting module fitted".into() });
-            }
-            (40.0, 0.0, 35_000.0)
         }
     } else {
-        if ore_group_id == 711 || ore_group_id == 465 || !matches!(ship_id, 100_000_001 | 100_000_002) {
-            return Err(BridgeRpcError { code: "NoMiningModuleFitted".into(), message: "Ship has no online compatible mining/harvesting module fitted".into() });
-        }
-        (40.0, 0.0, 35_000.0)
+        return Err(BridgeRpcError {
+            code: "NoMiningModuleFitted".into(),
+            message: "Ship has no online compatible mining/harvesting module fitted".into(),
+        });
     };
 
     if has_ast_ball && ast_surface_dist_m > max_range {

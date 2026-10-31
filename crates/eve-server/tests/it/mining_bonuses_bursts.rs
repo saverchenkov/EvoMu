@@ -1113,7 +1113,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     });
     assert!(has_exc_ore, "'Excavator' Mining Drone on active-core Rorqual V must yield floor(668.25 / 0.1) = 6,682 Veldspar units in SpecializedOreHold");
 
-    // 'Excavator' Ice Harvesting Drone (43681): base 1000 m3 * 4.0 (Industrial Core I -75% ice drone cycle time) = 4,000 m3 = 4 Clear Icicle units
+    // 'Excavator' Ice Harvesting Drone (43681): base 1000 m3 per shortened cycle = 1 Clear Icicle unit
     let _exc_ice_res = p
         .ctx
         .dispatch_rpc(
@@ -1132,7 +1132,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     });
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ice).await;
     let has_exc_ice = p.ctx.db.with_snapshot(|snap| {
-        snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 16262 && it.quantity == 4)
+        snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 16262 && it.quantity == 1)
     });
-    assert!(has_exc_ice, "'Excavator' Ice Harvesting Drone on active-core Rorqual must harvest 4 Clear Icicle units (4,000 m3)");
+    assert!(has_exc_ice, "'Excavator' Ice Harvesting Drone on active-core Rorqual must harvest 1 Clear Icicle unit (1,000 m3) per shortened cycle");
 }

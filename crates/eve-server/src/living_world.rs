@@ -65,6 +65,7 @@ pub struct LivingWorldDirector {
     routes: RwLock<HashMap<i64, ConvoyRouteState>>,
     hauler_cooldowns: RwLock<HashMap<SolarSystemId, std::time::Instant>>,
     mining_last_step: RwLock<HashMap<i64, u64>>,
+    hauler_cargo: RwLock<HashMap<i64, i32>>,
 }
 
 impl Default for LivingWorldDirector {
@@ -154,7 +155,18 @@ impl LivingWorldDirector {
             routes: RwLock::new(HashMap::new()),
             hauler_cooldowns: RwLock::new(HashMap::new()),
             mining_last_step: RwLock::new(HashMap::new()),
+            hauler_cargo: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Returns the current ore units carried by the companion hauler for `convoy_id`.
+    pub fn hauler_cargo_units(&self, convoy_id: i64) -> i32 {
+        self.hauler_cargo
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&convoy_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Explicitly seeds demo convoys `800_000_001..=800_000_003` for tests or `--seed-demo` (`S-5`).
@@ -531,6 +543,15 @@ impl LivingWorldDirector {
             let _ = handle.set_ball_position(convoy_id, ast_pos + DVec3::new(500.0, 0.0, 0.0)).await;
         }
         let hauler_ball_id = convoy_id + 1_000_000;
+        let belt_hauler_pos = ast_pos + DVec3::new(1_200.0, 0.0, 200.0);
+        let dest_station_pos = sde
+            .solar_systems
+            .get(&sys_id)
+            .and_then(|sys| sys.stations.iter().find(|st| st.station_id == dest_station_id))
+            .map(|st| st.position)
+            .unwrap_or(belt_hauler_pos + DVec3::new(100_000_000.0, 0.0, 0.0));
+        let in_transit_cargo = self.hauler_cargo_units(convoy_id);
+        let desired_hauler_pos = if in_transit_cargo > 0 { dest_station_pos } else { belt_hauler_pos };
         if handle
             .get_ball_snapshot(hauler_ball_id)
             .await
@@ -543,11 +564,11 @@ impl LivingWorldDirector {
                 sde,
                 hauler_ball_id,
                 hauler_tid,
-                ast_pos + DVec3::new(1_200.0, 0.0, 200.0),
+                desired_hauler_pos,
             );
             let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
         } else {
-            let _ = handle.set_ball_position(hauler_ball_id, ast_pos + DVec3::new(1_200.0, 0.0, 200.0)).await;
+            let _ = handle.set_ball_position(hauler_ball_id, desired_hauler_pos).await;
         }
 
         // DERIVED (MN-17): NPC mining op simulation uses SDE hull + Miner I (`483`) attributes rather
@@ -604,11 +625,10 @@ impl LivingWorldDirector {
         let mut hauled = false;
         let mut final_cargo = current_cargo + extraction.mined_units as i32;
 
-        // When SDE ore hold capacity (`specialOreHoldCapacity` attr 1556) is filled, companion hauler delivers to NPC station
-        if (final_cargo as f64) * ore_unit_vol >= ore_hold_m3 - 1e-6 {
+        // If hauler is at destination station with cargo, offload into NPC sell orders and return to belt
+        if in_transit_cargo > 0 {
             hauled = true;
-            // Replenish destination station NPC market orders
-            let added_units = final_cargo;
+            let added_units = in_transit_cargo;
             let (sys_region_id, owner_corp_id) = sde
                 .solar_systems
                 .get(&sys_id)
@@ -624,7 +644,6 @@ impl LivingWorldDirector {
                 })
                 .unwrap_or((10_000_002, 1_000_035));
             db.with_mut_snapshot(|snap| {
-                // Determine regional market price for ore from active sell orders, or fall back to SDE base price
                 let ore_price = snap
                     .market_orders
                     .values()
@@ -672,7 +691,19 @@ impl LivingWorldDirector {
                     );
                 }
             });
+            self.hauler_cargo
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&convoy_id);
+            let _ = handle.set_ball_position(hauler_ball_id, belt_hauler_pos).await;
+        } else if (final_cargo as f64) * ore_unit_vol >= ore_hold_m3 - 1e-6 {
+            // Miner ore hold is full: transfer ore to companion hauler and warp hauler to destination station
+            self.hauler_cargo
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(convoy_id, final_cargo);
             final_cargo = 0;
+            let _ = handle.set_ball_position(hauler_ball_id, dest_station_pos).await;
         }
 
         // Update convoy state
