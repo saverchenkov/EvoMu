@@ -385,6 +385,12 @@ impl PublicGatewayRouter {
         crate::services::quasar_inventory_asset::register_inventory_asset_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         crate::services::quasar_assetholding_entitlements::register_assetholding_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         crate::services::quasar_economy_planetary_industry::register_economy_planetary_industry_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
+        crate::services::quasar_b34_services::register_handlers(
+            &router,
+            Arc::clone(&db),
+            Arc::clone(&sde),
+            Arc::clone(&router.progression.daily_goals),
+        );
         router
     }
 

@@ -647,21 +647,11 @@ pub async fn prepare_ship_for_wormhole_jump(
     });
 
     if let Some(block_tid) = blocking_mod {
-        return Err(BridgeRpcError {
-            code: "CannotJumpWormholeWhileImmobilized".into(),
-            message: format!("Cannot jump wormhole while immobilizing module (type {block_tid}) is active"),
-        });
+        return Err(BridgeRpcError { code: "CannotJumpWormholeWhileImmobilized".into(), message: format!("Cannot jump wormhole while immobilizing module (type {block_tid}) is active") });
     }
-
     if !bastion_mod_ids.is_empty() {
-        ctx.db.with_mut_snapshot(|snap| {
-            for mid in &bastion_mod_ids {
-                snap.module_active_states.remove(mid);
-            }
-        });
-        for mid in &bastion_mod_ids {
-            let _ = old_handle.remove_module_cycle(ship_id, *mid).await;
-        }
+        ctx.db.with_mut_snapshot(|snap| { for mid in &bastion_mod_ids { snap.module_active_states.remove(mid); } });
+        for mid in &bastion_mod_ids { let _ = old_handle.remove_module_cycle(ship_id, *mid).await; }
         if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
             cs.is_mwd_mjd_disabled = false;
             cs.disallow_assistance = false;
@@ -670,7 +660,6 @@ pub async fn prepare_ship_for_wormhole_jump(
         ctx.invalidate_ship_fitting(ship_id);
         return Ok(true);
     }
-
     Ok(false)
 }
 
@@ -1282,12 +1271,7 @@ pub async fn activate_command_burst(
     let ind_core_range_bonus = match active_ind_core_tid {
         Some(62590) => 0.45, Some(62591) => 0.60, Some(58945) => 0.75, Some(58950) => 1.00, Some(28583) => 2.00, Some(42890) => 2.50, _ => 0.0,
     };
-    let aoe_range = 15_000.0
-        * (1.0 + 0.07 * (leadership_lvl as f64))
-        * (1.0 + 0.06 * (wing_cmd_lvl as f64))
-        * (1.0 + 0.05 * (fleet_cmd_lvl as f64))
-        * ship_range_mult
-        * (1.0 + ind_core_range_bonus);
+    let aoe_range = 15_000.0 * (1.0 + 0.07 * (leadership_lvl as f64)) * (1.0 + 0.06 * (wing_cmd_lvl as f64)) * (1.0 + 0.05 * (fleet_cmd_lvl as f64)) * ship_range_mult * (1.0 + ind_core_range_bonus);
     let cycle_duration_s = 15.0 * (1.0 + 0.10 * (command_lvl as f64));
 
     let mod_strength_bonus = if is_t2_module { 0.25 } else { 0.0 };

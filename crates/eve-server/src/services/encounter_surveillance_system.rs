@@ -559,8 +559,29 @@ pub async fn handle_ess_link(
     if link_started_only {
         if method == "AttemptLinkToReserveBank" {
             super::notify_emitters_batch6::emit_ess_reserve_bank_link_notification(ctx, sys_id);
+            super::quasar_b34_services::emit_ess_reserve_bank_primed(
+                &ctx.quasar_gateway,
+                sys_id,
+                IskCents(0),
+                now_unix,
+            );
         } else {
             super::notify_emitters_batch6::emit_ess_main_bank_link_notification(ctx, sys_id);
+            super::quasar_b34_services::emit_ess_main_bank_link_established(
+                &ctx.quasar_gateway,
+                char_id as u32,
+                sys_id,
+                0,
+                IskCents(0),
+                IskCents(0),
+                now_unix,
+            );
+            super::quasar_b34_services::emit_ess_main_bank_primed(
+                &ctx.quasar_gateway,
+                sys_id,
+                IskCents(0),
+                now_unix,
+            );
         }
     }
     if clear_unlock {
@@ -598,7 +619,25 @@ pub async fn handle_ess_link(
         if method != "AttemptLinkToReserveBank" {
             super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, link_id);
             super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", link_id);
+            let stolen_cents = IskCents((payout * 100.0).round() as i64);
+            super::quasar_b34_services::emit_ess_main_bank_theft_completed(
+                &ctx.quasar_gateway,
+                char_id as u32,
+                sys_id,
+                IskCents(0),
+                stolen_cents,
+                IskCents(0),
+                now_u,
+            );
+            super::quasar_b34_services::emit_ess_solar_system_persisted(
+                &ctx.quasar_gateway,
+                sys_id,
+                IskCents(0),
+                IskCents(0),
+                now_u,
+            );
         } else if reserve_terminated {
+            // V24 `dynamicresources.common.ess.const.UNLINKED_MANUAL = 0` (`unlink_reason_description(0) -> None`, normal completion disconnect)
             super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
         let (post_main, post_reserve) = ctx.db.with_snapshot(|snap| {
