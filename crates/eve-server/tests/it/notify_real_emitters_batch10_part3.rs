@@ -365,14 +365,16 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
         }
     });
     // Negative: advancing 5s (before withdraw_until_sec) does NOT emit OnTaleRemove
-    ctx.advance_secs(5);
+    ctx.clock().advance_secs(5);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!has_notif(
         &drain_all(&ctx, &mut sess, PILOT_A),
         "OnTaleRemove"
     ));
 
     // Positive: advancing 35s crosses withdrawal expiry -> ends incursion and emits OnTaleRemove
-    ctx.advance_secs(35);
+    ctx.clock().advance_secs(35);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let rem_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     let tr_args = find_notif(&rem_notifs, "OnTaleRemove");
     assert_eq!(
@@ -386,7 +388,7 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
         ]
     );
 
-    // 4. Roaming Metaliminal Storms via live ctx.advance_secs(delta) -> on_server_clock_advanced
+    // 4. Roaming Metaliminal Storms via live tick_background_cluster -> on_server_clock_advanced
     // Position storm #0 on a neighbor of SYS_JITA so its next step enters SYS_JITA, then moves onward.
     let storm_dest: u32 = 30_000_208;
     let now2 = ctx.now_unix();
@@ -408,13 +410,15 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
     let _ = drain_all(&ctx, &mut sess, PILOT_A);
 
     // Negative: advancing 10s (before next_move_at_sec) does NOT move storm or emit storm notifications
-    ctx.advance_secs(10);
+    ctx.clock().advance_secs(10);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let pre_storm = drain_all(&ctx, &mut sess, PILOT_A);
     assert!(!has_notif(&pre_storm, "OnSystemEffectStarted"));
     assert!(!has_notif(&pre_storm, "OnCosmicAnomalyAdded"));
 
     // Positive: advancing 60s moves storm into neighbor so storm_dest enters strong core -> emits OnSystemEffectStarted + OnCosmicAnomalyAdded
-    ctx.advance_secs(60);
+    ctx.clock().advance_secs(60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let storm_in = drain_all(&ctx, &mut sess, PILOT_A);
     let eff_start = find_notif(&storm_in, "OnSystemEffectStarted");
     assert_eq!(eff_start.len(), 1);
@@ -445,14 +449,16 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
         s.next_move_at_sec = now3 + 60;
     });
     // Negative: 10s before scheduled jump -> storm effect still active
-    ctx.advance_secs(10);
+    ctx.clock().advance_secs(10);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!has_notif(
         &drain_all(&ctx, &mut sess, PILOT_A),
         "OnSystemWideEffectStop"
     ));
 
     // Positive: 60s advances storm to far_sys -> removes beacon & environment from storm_dest
-    ctx.advance_secs(60);
+    ctx.clock().advance_secs(60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let storm_out = drain_all(&ctx, &mut sess, PILOT_A);
     let stop_args = find_notif(&storm_out, "OnSystemWideEffectStop");
     assert_eq!(stop_args.len(), 3);

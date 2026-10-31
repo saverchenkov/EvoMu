@@ -1126,69 +1126,6 @@ pub fn dispatch_dungeon_notify_actions(
 ) {
     for act in actions {
         match act {
-            DungeonTriggerAction::CameraInterest {
-                obj_idx,
-                speed_milli,
-                duration_ms,
-            } => {
-                if let Some(&bid) = obj_ball_ids.get(obj_idx).filter(|&&b| b > 0) {
-                    crate::services::notify_emitters_batch10::emit_dungeon_camera_interest_core(
-                        db,
-                        pending_notifications,
-                        notify_tx,
-                        char_id,
-                        bid,
-                        (speed_milli as f64) / 1000.0,
-                        (duration_ms as f64) / 1000.0,
-                    );
-                }
-            }
-            DungeonTriggerAction::AmbientSound { sound_id, obj_idx } => {
-                if let Some(&bid) = obj_ball_ids.get(obj_idx).filter(|&&b| b > 0) {
-                    crate::services::notify_emitters_batch10::emit_dungeon_trigger_ambient_sound_core(
-                        db,
-                        pending_notifications,
-                        notify_tx,
-                        char_id,
-                        dungeon_id,
-                        &sound_id,
-                        bid,
-                    );
-                }
-            }
-            DungeonTriggerAction::Audio { audio_url } => {
-                crate::services::notify_emitters_batch10::emit_dungeon_trigger_audio_core(
-                    db,
-                    pending_notifications,
-                    notify_tx,
-                    char_id,
-                    dungeon_id,
-                    &audio_url,
-                );
-            }
-            DungeonTriggerAction::Message {
-                message_type,
-                message_id,
-            } => {
-                crate::services::notify_emitters_batch10::emit_dungeon_trigger_message_core(
-                    db,
-                    pending_notifications,
-                    notify_tx,
-                    char_id,
-                    &message_type,
-                    message_id,
-                );
-            }
-            DungeonTriggerAction::Music { music_trigger_id } => {
-                crate::services::notify_emitters_batch10::emit_dungeon_trigger_music_core(
-                    db,
-                    pending_notifications,
-                    notify_tx,
-                    char_id,
-                    dungeon_id,
-                    music_trigger_id,
-                );
-            }
             _ => {}
         }
     }

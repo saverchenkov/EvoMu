@@ -916,9 +916,6 @@ pub(crate) async fn handle_update_state_request(
             code: "DestinyQueryFailed".into(),
             message: e,
         })?;
-    if let Ok((_, _, PyRep::List(updates))) = handle.get_set_state(ship_id).await {
-        crate::services::notify_emitters_batch3_space::emit_destiny_updates(ctx, char_id, updates);
-    }
     crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
     Ok(PyRep::None)
 }

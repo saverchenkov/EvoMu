@@ -47,11 +47,6 @@ pub enum DungeonTriggerAction {
     UnlockGate,
     SpawnNpcGroup(u8),
     CompleteDungeon,
-    CameraInterest { obj_idx: usize, speed_milli: i64, duration_ms: i64 },
-    AmbientSound { sound_id: String, obj_idx: usize },
-    Audio { audio_url: String },
-    Message { message_type: String, message_id: i64 },
-    Music { music_trigger_id: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,7 +1041,7 @@ async fn apply_dungeon_trigger_actions_core(
             return;
         };
         let obj_ids: Vec<i64> = room.objects.iter().map(|o| o.ball_id).collect();
-        let mut n_acts = Vec::new();
+        let n_acts = Vec::new();
         for act in actions {
             fired_count += 1;
             match act {
@@ -1056,7 +1051,6 @@ async fn apply_dungeon_trigger_actions_core(
                     room.cleared = true;
                     complete_now = true;
                 }
-                other => n_acts.push(other),
             }
         }
         if !n_acts.is_empty() {

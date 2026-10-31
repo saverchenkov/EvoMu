@@ -114,7 +114,10 @@ async fn setup_pilot_in_space(
     });
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys
-        .spawn_ball_with_combat(make_ball(ship_id, ship_type_id, DVec3::new(1000.0, 0.0, 0.0)), Default::default())
+        .spawn_ball_with_combat(
+            make_ball(ship_id, ship_type_id, DVec3::new(1000.0, 0.0, 0.0)),
+            ctx.build_ship_combat_state(char_id, ship_id, ship_type_id),
+        )
         .await;
     let mut sess = SessionState::new(char_id as u64);
     let (user, pass) = if char_id == PILOT_A { ("demo", "demo-secret") } else { ("other", "other-secret") };
@@ -162,13 +165,9 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             700_530,
-            make_item(700_530, 487, PILOT_A, 700_501, InventoryFlag::HiSlot0, 1, true),
+            make_item(700_530, 2262, PILOT_A, 700_501, InventoryFlag::HiSlot0, 1, true),
         );
-        snap.items.insert(
-            700_531,
-            make_item(700_531, 178, PILOT_A, 700_501, InventoryFlag::HiSlot0, 100, false),
-        );
-        for &sk in &[3300_u32, 3302] {
+        for &sk in &[3300_u32, 3303, 3426] {
             snap.skills.entry(PILOT_A).or_default().insert(
                 sk,
                 eve_db::TrainedSkillRecord { type_id: sk, level: 5, skill_points: 256_000.0 },
@@ -207,21 +206,15 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
         .await;
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
 
-    // Negative: shooting 500k-HP NPC does NOT destroy it -> zero OnSystemDynamicBountyStateChanged
-    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(900_550)])
-        .await
-        .unwrap();
+    // Negative: flushing 0 pending NPC bounty in Null-Sec does NOT change DBS rate or emit OnSystemDynamicBountyStateChanged
+    eve_server::services::combat_crimewatch::flush_npc_bounty_tick(&ctx, null_sys, PILOT_A, 0.0);
     assert!(!has_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnSystemDynamicBountyStateChanged"));
 
-    for _ in 0..10 {
-        null_handle.step_manual(1.0).await.unwrap();
-    }
-    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
-
-    // Positive: destroying 1-HP pirate NPC in Null-Sec adjusts DBS rate and emits OnSystemDynamicBountyStateChanged
-    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", &[PyRep::Integer(900_551)])
-        .await
-        .unwrap();
+    // Positive: flushing accrued pirate NPC bounty via flush_npc_bounty_tick adjusts DBS rate and emits OnSystemDynamicBountyStateChanged
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.pending_bounty_ticks.insert((null_sys, PILOT_A), 500_000.0);
+    });
+    eve_server::services::combat_crimewatch::flush_npc_bounty_tick(&ctx, null_sys, PILOT_A, 0.0);
     let dbs_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let dbs_args = find_notif(&dbs_notifs, "OnSystemDynamicBountyStateChanged");
     assert_eq!(dbs_args.len(), 2);

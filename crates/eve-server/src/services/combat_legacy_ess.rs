@@ -1174,9 +1174,6 @@ pub async fn handle_legacy_and_ess(
 
             match res {
                 Ok((kill_id, wreck_id)) => {
-                    if is_kspace_nullsec && npc_base_bounty > 0.0 {
-                        step_dynamic_bounty_multiplier(ctx, sys_id, npc_base_bounty, 0.0);
-                    }
                     Some(Ok(PyRep::keyval([
                         ("targetID", PyRep::Integer(target_id)),
                         ("appliedDamage", PyRep::Real(applied_dmg)),

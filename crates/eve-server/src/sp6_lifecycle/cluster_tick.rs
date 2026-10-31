@@ -1174,6 +1174,17 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
 
     on_advance_secs(ctx, now_unix, 0);
+    let elapsed_secs = ctx.db.with_mut_snapshot(|snap| {
+        let prev = snap
+            .service_state_blobs
+            .get("cluster_tick_last_unix")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| now_unix.saturating_sub(1));
+        snap.service_state_blobs
+            .insert("cluster_tick_last_unix".into(), now_unix.to_string());
+        now_unix.saturating_sub(prev).max(1)
+    });
+    crate::services::pve_crab_beacons::on_server_clock_advanced(ctx, elapsed_secs);
     let prev_metenox_tick = ctx.db.with_mut_snapshot(|snap| {
         let prev = snap
             .service_state_blobs

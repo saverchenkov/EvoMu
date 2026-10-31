@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::{NotificationTarget, ServerContext};
-use eve_proto::{BridgeRpcError, PyRep};
+use eve_proto::PyRep;
 use glam::DVec3;
 
 // ---------------------------------------------------------------------------
@@ -491,96 +491,12 @@ pub fn emit_dungeon_trigger_music_core(
 // 4. Progression & Conversations
 // ---------------------------------------------------------------------------
 
-pub fn emit_progression_room_joined(
-    ctx: &ServerContext,
-    char_id: i64,
-    progression_name_id: i64,
-    objective_id: i64,
-    task_widget_states: Vec<(i64, i64, i64)>,
-    objective_history: Vec<i64>,
-    room_id: i64,
-) {
-    let widgets = task_widget_states
-        .into_iter()
-        .map(|(tid, wid, st)| {
-            PyRep::Tuple(vec![
-                PyRep::Integer(tid),
-                PyRep::Integer(wid),
-                PyRep::Integer(st),
-            ])
-        })
-        .collect();
-    let history = objective_history.into_iter().map(PyRep::Integer).collect();
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnProgressionRoomJoined",
-        "charid",
-        vec![
-            PyRep::Integer(progression_name_id),
-            PyRep::Integer(objective_id),
-            PyRep::List(widgets),
-            PyRep::List(history),
-            PyRep::Integer(room_id),
-        ],
-    );
-}
-
-pub fn emit_progression_task_and_objective_updates(
-    ctx: &ServerContext,
-    char_id: i64,
-    next_objective_id: i64,
-    completed_task_id: i64,
-) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnProgressionTaskWidgetUpdate",
-        "charid",
-        vec![
-            PyRep::Integer(completed_task_id),
-            PyRep::Integer(completed_task_id),
-            PyRep::Integer(2),
-        ],
-    );
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnProgressionTaskCompleted",
-        "charid",
-        vec![PyRep::Integer(completed_task_id)],
-    );
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnProgressionAdvanced",
-        "charid",
-        vec![
-            PyRep::Integer(next_objective_id),
-            PyRep::Integer(completed_task_id),
-        ],
-    );
-}
-
 pub fn emit_progression_left(ctx: &ServerContext, char_id: i64) {
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnProgressionLeft",
         "charid",
         vec![],
-    );
-}
-
-pub fn emit_start_conversation(
-    ctx: &ServerContext,
-    char_id: i64,
-    conversation_id: i64,
-    show_continue_button: bool,
-) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnStartConversation",
-        "charid",
-        vec![
-            PyRep::Integer(conversation_id),
-            PyRep::Bool(show_continue_button),
-        ],
     );
 }
 
@@ -688,15 +604,6 @@ pub fn emit_component_removed_system_environment(ctx: &ServerContext, solar_syst
         "OnComponentRemovedSystemEnvironment",
         "solarsystemid",
         vec![PyRep::Integer(i64::from(solar_system_id))],
-    );
-}
-
-pub fn emit_ess_reserve_bank_inventory_full(ctx: &ServerContext, char_id: i64) {
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnEssReserveBankInventoryFull",
-        "charid",
-        vec![],
     );
 }
 
@@ -886,71 +793,4 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
             ],
         );
     }
-}
-
-pub fn emit_server_map_data_push_from_killmails(
-    ctx: &ServerContext,
-    target_char_id: i64,
-) -> Result<usize, BridgeRpcError> {
-    let per_sys: Vec<(u32, i64, i64, f64)> = ctx.db.with_snapshot(|snap| {
-        let mut agg: HashMap<u32, (i64, i64, f64)> = HashMap::new();
-        for km in snap.killmails.values() {
-            if km.solar_system_id == 0 {
-                continue;
-            }
-            let entry = agg.entry(km.solar_system_id).or_insert((0, 0, 0.0));
-            if km.ship_type_id == 670 {
-                entry.1 += 1;
-            } else {
-                entry.0 += 1;
-            }
-            entry.2 += km.total_value_isk;
-        }
-        let mut rows: Vec<(u32, i64, i64, f64)> = agg
-            .into_iter()
-            .map(|(sys_id, (ships, pods, val))| (sys_id, ships, pods, val))
-            .collect();
-        rows.sort_by_key(|r| r.0);
-        rows
-    });
-
-    if per_sys.is_empty() {
-        return Err(BridgeRpcError::user_error("NoMapActivityData"));
-    }
-
-    let tricolors = PyRep::List(vec![
-        PyRep::Tuple(vec![PyRep::Real(0.2), PyRep::Real(0.7), PyRep::Real(1.0)]),
-        PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.6), PyRep::Real(0.1)]),
-        PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.15), PyRep::Real(0.1)]),
-    ]);
-    let data = PyRep::List(
-        per_sys
-            .iter()
-            .map(|&(sys_id, ships, pods, val_isk)| {
-                let total = ships + pods;
-                let rgb = if total >= 5 {
-                    PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.15), PyRep::Real(0.1)])
-                } else if total >= 2 {
-                    PyRep::Tuple(vec![PyRep::Real(1.0), PyRep::Real(0.6), PyRep::Real(0.1)])
-                } else {
-                    PyRep::Tuple(vec![PyRep::Real(0.2), PyRep::Real(0.7), PyRep::Real(1.0)])
-                };
-                PyRep::Tuple(vec![
-                    PyRep::Integer(i64::from(sys_id)),
-                    PyRep::Integer(ships),
-                    PyRep::Integer(pods),
-                    PyRep::Real(val_isk),
-                    rgb,
-                ])
-            })
-            .collect(),
-    );
-
-    ctx.notify(
-        NotificationTarget::Character(target_char_id),
-        "OnServerMapDataPush",
-        "charid",
-        vec![tricolors, data],
-    );
-    Ok(per_sys.len())
 }

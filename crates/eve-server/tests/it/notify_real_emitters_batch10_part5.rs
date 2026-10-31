@@ -155,24 +155,30 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
     let ctx = Arc::new(ServerContext::new());
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_701, 587, SYS_JITA).await;
 
-    // 1. DoDestinyUpdates via live beyonce.UpdateStateRequest
-    // Negative: docked pilot calling UpdateStateRequest does NOT emit DoDestinyUpdates
+    // 1. DoDestinyUpdates via live beyonce.CmdStop
+    let beyonce_oid = ctx.bind_object(&sess, "beyonce", i64::from(SYS_JITA)).unwrap();
+    let empty_kw = std::collections::HashMap::new();
+    // Negative: docked pilot calling CmdStop fails and does NOT emit DoDestinyUpdates
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&PILOT_A).unwrap().station_id = Some(60_003_760);
     });
     sess.station_id = Some(60_003_760);
-    let _ = rpc(&ctx, &mut sess, "beyonce", "UpdateStateRequest", &[]).await;
+    assert!(
+        ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &empty_kw, None)
+            .await
+            .is_err()
+    );
     assert!(!has_notif(
         &drain_all(&ctx, &mut sess, PILOT_A),
         "DoDestinyUpdates"
     ));
 
-    // Positive: undocked pilot in space receives DoDestinyUpdates([(stamp, ("SetState", KeyVal))])
+    // Positive: undocked pilot in space receives DoDestinyUpdates([(stamp, ("Stop", (ship_id,)))])
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&PILOT_A).unwrap().station_id = None;
     });
     sess.station_id = None;
-    rpc(&ctx, &mut sess, "beyonce", "UpdateStateRequest", &[])
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdStop", &[], &empty_kw, None)
         .await
         .unwrap();
     let dest_notifs = drain_all(&ctx, &mut sess, PILOT_A);
@@ -185,8 +191,8 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
                 PyRep::Tuple(pair) => {
                     assert_eq!(pair.len(), 2);
                     match &pair[1] {
-                        PyRep::Tuple(cmd) => assert_eq!(cmd[0], PyRep::String("SetState".into())),
-                        other => panic!("expected (\"SetState\", payload), got {other:?}"),
+                        PyRep::Tuple(cmd) => assert_eq!(cmd[0], PyRep::String("Stop".into())),
+                        other => panic!("expected (\"Stop\", payload), got {other:?}"),
                     }
                 }
                 other => panic!("expected (stamp, cmd) tuple, got {other:?}"),

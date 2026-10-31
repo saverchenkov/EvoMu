@@ -880,6 +880,9 @@ pub async fn handle(
                             ]),
                         ],
                     );
+                    if old_sys != match_sys as u32 || old_st.is_some() {
+                        crate::services::notify_emitters_batch10::emit_enter_tournament_system(ctx, cid);
+                    }
                 }
             }
             res
