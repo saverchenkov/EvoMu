@@ -409,22 +409,37 @@ async fn light_cyno(
     let duration_ms = if mod_vals[0] > 0.0 { mod_vals[0] } else { type_attr(ctx, mod_type, attr_ids::DURATION) };
     let fuel_type = type_attr(ctx, mod_type, ATTR_CONSUMPTION_TYPE) as TypeId;
     let cft_lvl = ctx.db.with_snapshot(|s| {
-        s.skills.get(&char_id).and_then(|sk| sk.get(&21611)).map(|r| r.level).unwrap_or(0)
+        s.skills.get(&char_id).and_then(|sk| sk.get(&21603)).map(|r| r.level).unwrap_or(0)
     });
+    let req_skill = type_attr(ctx, mod_type, 182) as u32;
+    let req_skill_lvl = type_attr(ctx, mod_type, 277) as i32;
+    if req_skill != 0 && req_skill_lvl > 0 {
+        let char_sk = ctx.db.with_snapshot(|s| {
+            s.skills.get(&char_id).and_then(|sk| sk.get(&req_skill)).map(|r| r.level).unwrap_or(0)
+        });
+        if (char_sk as i32) < req_skill_lvl {
+            return Err(err("SkillMissing", format!("{} requires Cynosural Field Theory level {req_skill_lvl}", mod_type.name)));
+        }
+    }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let is_industrial = type_attr(ctx, mod_type, ATTR_IS_INDUSTRIAL_CYNO) > 0.0;
-    let base_fuel = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
-    let after_cft = if cft_lvl > 0 && (mod_vals[1] <= 0.0 || mod_vals[1] >= type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY)) {
-        base_fuel * (1.0 - 0.10 * (cft_lvl as f64))
+    let fuel_qty = if mod_vals[1] > 0.0 && mod_vals[1] < type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) {
+        mod_vals[1].max(1.0).ceil() as i64
     } else {
-        base_fuel
+        let base_fuel = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
+        let after_cft = if cft_lvl > 0 {
+            base_fuel * (1.0 - 0.10 * (cft_lvl as f64))
+        } else {
+            base_fuel
+        };
+        let role_bonus = ctx.sde.types.get(&ship_type_id).and_then(|t| t.default_attributes.get(&1296)).copied().unwrap_or(0.0);
+        let after_role = if is_industrial && role_bonus != 0.0 {
+            after_cft * (1.0 + role_bonus / 100.0)
+        } else {
+            after_cft
+        };
+        after_role.max(1.0).ceil() as i64
     };
-    let after_role = if is_industrial && ship_type_id == 32880 {
-        after_cft * 0.5
-    } else {
-        after_cft
-    };
-    let fuel_qty = after_role.max(1.0).ceil() as i64;
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}"))?;
 
     let duration_s = duration_ms / 1000.0;
@@ -482,6 +497,8 @@ async fn light_cyno(
         ("beaconID", PyRep::Integer(beacon_id)),
         ("beaconTypeID", PyRep::Integer(beacon_type_id as i64)),
         ("solarSystemID", PyRep::Integer(sys_id as i64)),
+        ("isCovert", PyRep::Bool(is_covert)),
+        ("onGridOnly", PyRep::Bool(is_covert)),
         ("consumptionTypeID", PyRep::Integer(fuel_type as i64)),
         ("consumptionQuantity", PyRep::Integer(fuel_qty)),
         ("durationSeconds", PyRep::Real(duration_s)),
@@ -1190,6 +1207,12 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
             ));
         }
     }
+    if origin_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(err(
+            "WarpScrambled",
+            "Cannot jump through portal while warp scrambled or inside a warp disruption bubble",
+        ));
+    }
     let beacon = live_beacon(ctx, bridge.beacon.char_id, bridge.beacon.beacon_id, bridge.beacon.solar_system_id)
         .unwrap_or_else(|_| bridge.beacon.clone());
     if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
@@ -1279,15 +1302,22 @@ pub(crate) async fn activate_clone_vat_bay(
         let q = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
         (q.max(1.0)).ceil() as i64
     };
-    consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
-        format!("Clone Vat Bay requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-    })?;
+    let has_fuel = ctx.db.with_snapshot(|s| {
+        s.items.values().any(|i| i.location_id == ship_id && i.type_id == fuel_type && i.quantity as i64 >= fuel_qty)
+    });
+    if !has_fuel {
+        return Err(err("NotEnoughFuel", format!("Clone Vat Bay requires {fuel_qty} x type {fuel_type}")));
+    }
     let duration_s = duration_ms / 1000.0;
     sys.add_module_cycle(self_immobilizing_cycle(ship_id, module_id, mod_type.type_id, "effects.CloneVatBay", duration_s))
         .await
         .map_err(|e| err("ModuleActivationFailed", e))?;
+    let _ = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
+        format!("Clone Vat Bay requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+    });
     ctx.db.with_mut_snapshot(|s| {
         s.module_online_states.insert(module_id, true);
+        s.module_active_states.insert(module_id);
     });
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

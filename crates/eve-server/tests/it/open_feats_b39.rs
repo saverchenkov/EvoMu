@@ -163,9 +163,11 @@ async fn test_b39_fulcrum_alignment_services() {
     )
     .await
     .expect("Neutral pilot docks at Fulcrum");
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 17));
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 21));
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 13));
+    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 13)); // Repair Facilities
+    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 17)); // Fitting
+    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 7));  // Market
+    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 21)); // Insurance
+    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 14)); // Industry (Factory)
 
     // 3. Jump cloning requires pirate enlistment; corp offices require pirate-enlisted corp; Angel/Guristas LP stores
     sess.station_id = Some(fulcrum_id);
@@ -207,17 +209,31 @@ async fn test_b39_fulcrum_alignment_services() {
         .await
         .expect("Pirate-enlisted corp rents office at Fulcrum");
 
+    ctx.db.with_mut_snapshot(|s| {
+        use eve_db::LoyaltyStoreOfferRecord;
+        s.loyalty_store_offers.insert(1_000_124, vec![LoyaltyStoreOfferRecord { offer_id: 1001, type_id: 17926, quantity: 1, lp_cost: 1000, isk_cost: 1000, ak_cost: None, required_items: Vec::new() }]);
+        s.loyalty_store_offers.insert(1_000_127, vec![LoyaltyStoreOfferRecord { offer_id: 1002, type_id: 17928, quantity: 1, lp_cost: 1000, isk_cost: 1000, ak_cost: None, required_items: Vec::new() }]);
+    });
+
     // Angel Cartel (1000124) and Guristas (1000127) LP stores available
     let angel_lp = ctx
         .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_124)], &kw, None)
         .await
         .expect("Angel Cartel LP store offers");
-    assert!(!matches!(angel_lp, PyRep::None));
+    let angel_offers = match &angel_lp {
+        PyRep::List(l) => l,
+        _ => panic!("angel offers list"),
+    };
+    assert!(!angel_offers.is_empty(), "Angel LP store offers should not be empty");
     let guristas_lp = ctx
         .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_127)], &kw, None)
         .await
         .expect("Guristas LP store offers");
-    assert!(!matches!(guristas_lp, PyRep::None));
+    let guristas_offers = match &guristas_lp {
+        PyRep::List(l) => l,
+        _ => panic!("guristas offers list"),
+    };
+    assert!(!guristas_offers.is_empty(), "Guristas LP store offers should not be empty");
 }
 
 #[tokio::test]
@@ -350,6 +366,8 @@ async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
         .cloned()
         .unwrap();
     assert_eq!(dep_rec.expires_at_unix - dep_rec.anchor_start_unix, 60 + 3_600);
+    let cov_dur = eve_server::services::mobile_deployables::COVERT_CYNO_BEACON_DURATION_SECS;
+    assert_eq!(cov_dur, 1_800, "Covert cyno beacon duration is 30 minutes");
     let norm_cs = ctx.build_type_combat_state(TYPE_MOBILE_CYNO_BEACON);
     let cov_cs = ctx.build_type_combat_state(TYPE_COVERT_MOBILE_CYNO_BEACON);
     let norm_hp = norm_cs.max_shield_hp + norm_cs.max_armor_hp + norm_cs.max_structure_hp;
@@ -411,12 +429,33 @@ async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
         .unwrap();
     assert_eq!(mju_rec.expires_at_unix - mju_rec.anchor_start_unix, 2 * 86_400);
     let scoop_err = ctx
-        .dispatch_rpc(&mut sess1, "posMgr", None, "Scoop", &[PyRep::Integer(mju_id)], &kw, None)
+        .dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(mju_id)], &kw, None)
         .await
         .expect_err("MMJU cannot be scooped");
-    assert!(!scoop_err.code.is_empty());
+    assert_eq!(scoop_err.code, "CannotScoop");
 
-    ctx.advance_secs(61);
+    // Early activation (< 1 minute after deploy) is refused
+    ctx.advance_secs(30);
+    let early_err = ctx
+        .dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
+        .await
+        .expect_err("Early activation (before 1 minute) rejected");
+    assert_eq!(early_err.code, "DeployableAnchoring");
+
+    // Advance past the 1-minute activation delay
+    ctx.advance_secs(31);
+
+    // Heavy ship (> 1,000,000,000 kg) is refused
+    let c_heavy = 91_000_015_i64;
+    let s_heavy = 101_000_015_i64;
+    let mut sess_heavy = setup_pilot(&ctx, c_heavy, s_heavy, 11567, dest_sys, DVec3::new(500_200.0, 0.0, 0.0), 1_000_009).await;
+    let heavy_err = ctx
+        .dispatch_rpc(&mut sess_heavy, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
+        .await
+        .expect_err("Heavy ship (>1B kg) rejected");
+    assert_eq!(heavy_err.code, "ShipTooHeavy");
+    let _ = dest_handle.remove_ball(s_heavy).await;
+
     let (_, before_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
     ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
         .await
@@ -451,6 +490,12 @@ async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
     assert!((jumped_dist - 100_000.0).abs() < 100.0, "Ship jumped 100 km (got {jumped_dist})");
     let (_, h_after) = dest_handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap();
     assert!(((h_after.position - h_before.position).length() - 100_000.0).abs() < 100.0, "Hostile ship jumped 100 km");
+
+    // No use cooldown: can reactivate MMJU immediately after returning to range
+    let _ = dest_handle.set_ball_position(s1, DVec3::from_array(mju_rec.position)).await;
+    ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
+        .await
+        .expect("Immediate reactivation after jump succeeds (no use cooldown)");
 }
 
 #[tokio::test]
@@ -466,10 +511,11 @@ async fn test_b39_mobile_observatory_decloak_ping() {
 
     let mut sess = setup_pilot(&ctx, c1, s1, 587, hisec_sys, DVec3::new(600_000.0, 0.0, 0.0), 1_000_009).await;
     let obs_id = 101_000_090_i64;
+    // Anchoring II refusal
     ctx.db.with_mut_snapshot(|s| {
         s.skills.entry(c1).or_default().insert(
             SKILL_ANCHORING,
-            TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 3, skill_points: 40_000.0 },
+            TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 2, skill_points: 10_000.0 },
         );
         s.items.insert(
             obs_id,
@@ -485,6 +531,11 @@ async fn test_b39_mobile_observatory_decloak_ping() {
             },
         );
     });
+    let sk_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err();
+    assert!(matches!(sk_err.code.as_str(), "SkillRequired" | "SkillMissing"));
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.get_mut(&c1).unwrap().get_mut(&SKILL_ANCHORING).unwrap().level = 3;
+    });
 
     // 1. Mobile Observatory refused in high-sec, wormhole, Abyssal, and deadspace
     let hisec_err = ctx
@@ -493,21 +544,25 @@ async fn test_b39_mobile_observatory_decloak_ping() {
         .expect_err("Observatory refused in high-sec");
     assert_eq!(hisec_err.code, "CannotDeployInHighSec");
 
-    sess.solar_system_id = Some(31_000_001);
-    let wh_err = ctx
-        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
-        .await
-        .expect_err("Observatory refused in wormhole");
-    assert!(!wh_err.code.is_empty());
+    let wh_sys = 31_000_007_u32;
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = wh_sys; s.items.get_mut(&s1).unwrap().location_id = wh_sys as i64; });
+    let wh_h = ctx.systems.get_or_spawn(wh_sys);
+    let _ = wh_h.spawn_ball(Ball { id: s1, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+    sess.solar_system_id = Some(wh_sys);
+    let wh_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.expect_err("Observatory refused in wormhole");
+    assert_eq!(wh_err.code, "CannotDeployInWormhole");
+    let _ = wh_h.remove_ball(s1).await;
 
-    sess.solar_system_id = Some(32_000_001);
-    let abyss_err = ctx
-        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
-        .await
-        .expect_err("Observatory refused in Abyssal space");
-    assert!(!abyss_err.code.is_empty());
+    let abyss_sys = 32_000_001_u32;
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = abyss_sys; s.items.get_mut(&s1).unwrap().location_id = abyss_sys as i64; });
+    let ab_h = ctx.systems.get_or_spawn(abyss_sys);
+    let _ = ab_h.spawn_ball(Ball { id: s1, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+    sess.solar_system_id = Some(abyss_sys);
+    let abyss_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.expect_err("Observatory refused in Abyssal space");
+    assert_eq!(abyss_err.code, "CannotDeployInAbyssalSpace");
+    let _ = ab_h.remove_ball(s1).await;
 
-    // Move to low-sec and deploy -> 10m deploy, can't be scooped, pings cloaked ships past stabilization
+    // Move to low-sec and test deadspace refusal
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&c1).unwrap().solar_system_id = lowsec_sys;
         s.items.get_mut(&s1).unwrap().location_id = lowsec_sys as i64;
@@ -532,16 +587,37 @@ async fn test_b39_mobile_observatory_decloak_ping() {
         )
         .await;
 
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.entry(lowsec_sys).or_default().push(eve_server::services::pve_exploration::PveSiteInstance {
+            dungeon_id: 1234, position: [1_000_000_000.0, 0.0, 0.0], ..Default::default()
+        });
+    });
+    let ds_err = ctx
+        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
+        .await
+        .expect_err("Observatory refused in deadspace");
+    assert_eq!(ds_err.code, "CannotDeployInDeadspace");
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| { reg.sites_by_system.remove(&lowsec_sys); });
+
     ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
         .await
         .expect("Deploy Mobile Observatory in low-sec");
     let scoop_err = ctx
-        .dispatch_rpc(&mut sess, "posMgr", None, "Scoop", &[PyRep::Integer(obs_id)], &kw, None)
+        .dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(obs_id)], &kw, None)
         .await
         .expect_err("Observatory cannot be scooped");
-    assert!(!scoop_err.code.is_empty());
+    assert_eq!(scoop_err.code, "CannotScoop");
 
-    // Spawn 10 cloaked ships past stabilization timer and advance 10 minutes -> ~40% decloaked
+    // Spawn 1 ship within cloak stabilization timer (immune) and 10 ships past stabilization timer
+    let tid_immune = 101_000_299_i64;
+    let mut cs_immune = ctx.build_type_combat_state(587);
+    cs_immune.is_cloaked = true;
+    cs_immune.cloak_stabilization_remaining_s = 60.0;
+    let _ = low_handle.spawn_ball_with_combat(
+        Ball { id: tid_immune, type_id: 587, position: DVec3::new(1_000_040_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        cs_immune,
+    ).await;
+
     for i in 0..10_i64 {
         let tid = 101_000_200 + i;
         let mut cs = ctx.build_type_combat_state(587);
@@ -571,6 +647,7 @@ async fn test_b39_mobile_observatory_decloak_ping() {
     );
     ctx.advance_secs(601);
     low_handle.step_manual(1.0).await.expect("step observatory ping");
+    assert!(low_handle.get_combat_state(tid_immune).await.unwrap().unwrap().is_cloaked, "Ship within cloak stabilization is immune");
     let mut decloaked = 0;
     for i in 0..10_i64 {
         let tid = 101_000_200 + i;
@@ -581,6 +658,13 @@ async fn test_b39_mobile_observatory_decloak_ping() {
         }
     }
     assert!(decloaked > 0 && decloaked < 10, "40% independent decloak ping decloaked {decloaked}/10 ships");
+
+    // Second ping every 10 minutes
+    ctx.advance_secs(600);
+    low_handle.step_manual(1.0).await.expect("step second observatory ping");
+    let dep_st = eve_server::services::mobile_deployables::read_deployable_state(&ctx);
+    let obs_rec = dep_st.deployables.get(&obs_id).unwrap();
+    assert!(obs_rec.last_ping_unix.unwrap() >= 1200, "Second ping executed after another 10 minutes");
 
     // 2. Mobile Observatory expires after 2 hours
     ctx.advance_secs(7_201);

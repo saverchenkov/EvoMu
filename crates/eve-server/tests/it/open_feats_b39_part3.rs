@@ -139,6 +139,21 @@ async fn test_b39_clone_vat_bay_and_nosferatu_relative_cap() {
     sess_titan.fleet_id = Some(889);
     sess_mate.fleet_id = Some(889);
 
+    // Negative test: clone offer is rejected when Clone Vat Bay is not active
+    let inactive_err = ctx
+        .dispatch_rpc(
+            &mut sess_titan,
+            "jumpCloneSvc",
+            None,
+            "OfferShipCloneInstallation",
+            &[PyRep::Integer(c_mate), PyRep::Integer(s_titan)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Clone offer refused before module activation");
+    assert_eq!(inactive_err.code, "NoActiveCloneVatBay");
+
     ctx.dispatch_rpc(&mut sess_titan, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_mod)], &kw, None)
         .await
         .expect("Titan activates Clone Vat Bay");

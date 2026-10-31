@@ -1153,6 +1153,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                             && (matches!(i.type_id, 23735 | 24258)
                                 || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 815))
                             && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                            && snap.module_active_states.contains(&i.item_id)
                     });
                     let sys_and_fleet = if target_char_id == char_id {
                         true
@@ -1288,6 +1289,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                         i.location_id == host_ship_id
                             && (matches!(i.type_id, 23735 | 24258) || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 815))
                             && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                            && snap.module_active_states.contains(&i.item_id)
                     });
                     if !valid_hull || !has_mod {
                         return Err(BridgeRpcError {

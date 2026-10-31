@@ -1095,13 +1095,13 @@ pub(crate) async fn ship_scoop_and_store(
         let it_grp = it_type.map(|t| t.group_id).unwrap_or(0);
         let it_vol = effective_item_unit_volume(&ctx.sde, it) * (it.quantity as f64);
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        if !crate::services::mobile_deployables::can_deployable_be_scooped(it_grp) {
+            return Err(err("CannotScoop", "This mobile deployable cannot be scooped"));
+        }
         if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get(&item_id) {
             if meta.anchor_start_unix.is_some() || meta.anchor_completed {
                 return Err(err("CannotScoopAnchored", "Cannot scoop an anchored or anchoring object"));
             }
-        }
-        if !crate::services::mobile_deployables::can_deployable_be_scooped(it_grp) {
-            return Err(err("CannotScoop", "This mobile deployable cannot be scooped"));
         }
         if it_grp == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT && it.owner_id != char_id {
             return Err(err("OwnershipViolation", "Only the owner may access or scoop this Mobile Depot"));

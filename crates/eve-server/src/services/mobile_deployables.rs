@@ -260,18 +260,6 @@ pub fn check_mobile_deployment_restrictions(
         });
     }
     if group_id == GROUP_MOBILE_OBSERVATORY {
-        let sys_sec = ctx
-            .sde
-            .solar_systems
-            .get(&sys_id)
-            .map(|s| s.security_status)
-            .unwrap_or(1.0);
-        if sys_sec >= 0.45 {
-            return Err(BridgeRpcError {
-                code: "CannotDeployInHighSec".into(),
-                message: "Mobile Observatory cannot be deployed in high-security space".into(),
-            });
-        }
         if (31_000_000..32_000_000).contains(&sys_id) {
             return Err(BridgeRpcError {
                 code: "CannotDeployInWormhole".into(),
@@ -282,6 +270,18 @@ pub fn check_mobile_deployment_restrictions(
             return Err(BridgeRpcError {
                 code: "CannotDeployInAbyssalSpace".into(),
                 message: "Mobile Observatory cannot be deployed in Abyssal space".into(),
+            });
+        }
+        let sys_sec = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status)
+            .unwrap_or(1.0);
+        if sys_sec >= 0.45 {
+            return Err(BridgeRpcError {
+                code: "CannotDeployInHighSec".into(),
+                message: "Mobile Observatory cannot be deployed in high-security space".into(),
             });
         }
         let in_deadspace = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
