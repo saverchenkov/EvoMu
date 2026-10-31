@@ -396,7 +396,7 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
     assert_eq!(ad_entry.dict_get("fuelBlocks"), Some(&PyRep::None), "Non-corp pilot must not see exact fuelBlocks");
     assert_eq!(ad_entry.dict_get("profileID"), Some(&PyRep::None), "External pilot must not see profileID in GetStructures");
     let Some(PyRep::Dict(ad_services)) = ad_entry.dict_get("services") else { panic!("expected services dict") };
-    assert!(ad_services.iter().any(|(k, v)| k.as_i64() == Some(1) && v.as_i64() == Some(1)), "Ally entry must expose online market service (1)");
+    assert!(ad_services.iter().any(|(k, v)| k.as_i64() == Some(5) && v.as_i64() == Some(1)), "Ally entry must expose online market service (SERVICE_MARKET = 5)");
     let Some(PyRep::List(ad_online_types)) = ad_entry.dict_get("onlineServiceTypeIDs") else { panic!("expected onlineServiceTypeIDs list") };
     assert!(ad_online_types.contains(&PyRep::Integer(35892)), "Ally entry must expose Standup Market Hub I (35892) in onlineServiceTypeIDs");
 

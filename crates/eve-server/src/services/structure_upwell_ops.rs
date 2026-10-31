@@ -766,18 +766,21 @@ fn handle_get_num_clones_in_structure(ctx: &ServerContext, session: &mut Session
     Ok(PyRep::Integer(count as i64))
 }
 
-/// Maps SDE service module `type_id` to V24 structure service IDs.
+/// Maps SDE service module `type_id` to V24 structure service IDs (`structures/services.pyj`).
 pub fn service_id_for_module_type(type_id: u32) -> Option<i64> {
+    use crate::services::structure_profile_services::*;
     match type_id {
-        35892 => Some(1), // Market (`Standup Market Hub I`)
-        35894 => Some(2), // Clone Bay (`Standup Cloning Center I`)
-        35899 => Some(3), // Reprocessing (`Standup Reprocessing Facility I`)
-        35878 => Some(4), // Manufacturing (`Standup Manufacturing Plant I`)
-        35891 => Some(5), // Research (`Standup Hyasyoda Research Lab`)
-        35886 => Some(6), // Invention (`Standup Invention Lab I`)
-        45537..=45539 => Some(7), // Reactions (`Standup Composite/Biochemical/Hybrid Reactor I`)
-        45009 => Some(8), // Moon Drilling (`Standup Moon Drill I`)
-        35913 => Some(9), // Jump Bridge (`Standup Coaxial Regenerative Projector`)
+        35892 => Some(SERVICE_MARKET), // 5: Standup Market Hub I
+        35894 => Some(SERVICE_JUMP_CLONE), // 10: Standup Cloning Center I
+        35899 => Some(SERVICE_REPROCESSING), // 4: Standup Reprocessing Facility I
+        35878 => Some(SERVICE_MANUFACTURING_BASIC), // 22: Standup Manufacturing Plant I
+        35891 => Some(SERVICE_LABORATORY_RESEARCH_TIME), // 31: Standup Hyasyoda Research Lab
+        35886 => Some(SERVICE_LABORATORY_INVENTION), // 34: Standup Invention Lab I
+        45537 => Some(SERVICE_REACTIONS_COMPOSITE), // 41: Standup Composite Reactor I
+        45538 => Some(SERVICE_REACTIONS_BIOCHEMICAL), // 42: Standup Biochemical Reactor I
+        45539 => Some(SERVICE_REACTIONS_HYBRID), // 43: Standup Hybrid Reactor I
+        45009 => Some(SERVICE_MOONMINING), // 14: Standup Moon Drill I
+        35913 => Some(SERVICE_JUMP_BRIDGE), // 15: Standup Coaxial Regenerative Projector
         _ => None,
     }
 }

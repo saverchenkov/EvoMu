@@ -1009,6 +1009,11 @@ pub async fn step_structure_auto_defense(ctx: &ServerContext, sys_id: u32, dt: f
                     st.solar_system_id == sys_id
                         && is_operational(&st.state)
                         && !ext.active_pilot_by_structure.contains_key(&st.structure_id)
+                        && crate::services::structure_acl_defense_rules::load_defense_settings(
+                            snap,
+                            st.structure_id,
+                        )
+                        .auto_defense_enabled
                 })
                 .filter_map(|st| {
                     let st_attrs = ctx.sde.types.get(&st.type_id).map(|t| &t.default_attributes);

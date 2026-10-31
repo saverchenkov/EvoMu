@@ -326,8 +326,8 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
                     PyRep::Tuple(vec![PyRep::Integer(9), PyRep::Integer(101), PyRep::Integer(5)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(102), PyRep::Integer(3060), PyRep::Real(0.11), PyRep::Real(0.11)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(103), PyRep::Integer(2492), PyRep::Real(0.12), PyRep::Real(0.12)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(104), PyRep::Integer(2493), PyRep::Real(0.13), PyRep::Real(0.13)]),
-                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(105), PyRep::Integer(2494), PyRep::Real(0.14), PyRep::Real(0.14)]),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(104), PyRep::Integer(2494), PyRep::Real(0.13), PyRep::Real(0.13)]),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(105), PyRep::Integer(2482), PyRep::Real(0.14), PyRep::Real(0.14)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(106), PyRep::Integer(2541), PyRep::Real(0.15), PyRep::Real(0.15)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(107), PyRep::Integer(2543), PyRep::Real(0.16), PyRep::Real(0.16)]),
                 ]),
@@ -471,6 +471,18 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         .expect_err("Installing schematic on Storage pin must fail");
     assert_eq!(non_fac_err.code, "InvalidSchematic");
 
+    let find_schem = |out_tid: u32, pin_tid: u32| -> i64 {
+        ctx.sde
+            .planet_schematics
+            .iter()
+            .find(|(_, s)| {
+                (s.pins.is_empty() || s.pins.contains(&pin_tid))
+                    && s.types.iter().any(|t| !t.is_input && t.type_id == out_tid)
+            })
+            .map(|(&id, _)| i64::from(id))
+            .unwrap()
+    };
+    let nano_schem = find_schem(2875, 2482);
     ctx.dispatch_rpc(
         &mut sess,
         "planetMgr",
@@ -479,9 +491,9 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         &[
             PyRep::Integer(JITA_PLANET_ID),
             PyRep::List(vec![
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(basic_id), PyRep::Integer(66)]),
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(adv_id), PyRep::Integer(83)]),
-                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(htech_id), PyRep::Integer(119)]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(basic_id), PyRep::Integer(find_schem(3645, 2492))]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(adv_id), PyRep::Integer(find_schem(9832, 2494))]),
+                PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(htech_id), PyRep::Integer(nano_schem)]),
             ]),
         ],
         &kw,
@@ -490,15 +502,26 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
     .await
     .expect("Install P1, P2, and P4 schematics");
 
+    let nano_inputs: Vec<(u32, u64)> = ctx
+        .sde
+        .planet_schematics
+        .get(&(nano_schem as u32))
+        .expect("Nano-Factory schematic in SDE")
+        .types
+        .iter()
+        .filter(|t| t.is_input)
+        .map(|t| (t.type_id, t.quantity))
+        .collect();
+
     ctx.db.with_mut_snapshot(|snap| {
         let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 5);
         if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == store_id) {
             pin.contents.insert(2268, 6_000);
             pin.contents.insert(3645, 80);
             pin.contents.insert(2390, 80);
-            pin.contents.insert(2349, 12);
-            pin.contents.insert(2358, 12);
-            pin.contents.insert(2367, 12);
+            for &(in_tid, in_qty) in &nano_inputs {
+                pin.contents.insert(in_tid, in_qty * 2);
+            }
         }
         eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
         if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
@@ -512,6 +535,29 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         .expect("GetColony without routes");
     assert_eq!(col_unrouted.dict_get("simulatedProcessedQuantity"), Some(&PyRep::Integer(0)));
 
+    let mut route_cmds = vec![
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(basic_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(basic_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(adv_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(adv_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(htech_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(htech_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(basic_id)]), PyRep::Integer(2268), PyRep::Integer(3_000)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(2), PyRep::List(vec![PyRep::Integer(basic_id), PyRep::Integer(pad_id)]), PyRep::Integer(3645), PyRep::Integer(20)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(3), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(3645), PyRep::Integer(40)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(4), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(2390), PyRep::Integer(40)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(5), PyRep::List(vec![PyRep::Integer(adv_id), PyRep::Integer(pad_id)]), PyRep::Integer(9832), PyRep::Integer(5)]),
+        PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(9), PyRep::List(vec![PyRep::Integer(htech_id), PyRep::Integer(pad_id)]), PyRep::Integer(2875), PyRep::Integer(1)]),
+    ];
+    for (idx, &(in_tid, in_qty)) in nano_inputs.iter().enumerate() {
+        route_cmds.push(PyRep::Tuple(vec![
+            PyRep::Integer(6),
+            PyRep::Integer(10 + idx as i64),
+            PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]),
+            PyRep::Integer(i64::from(in_tid)),
+            PyRep::Integer(in_qty as i64),
+        ]));
+    }
     ctx.dispatch_rpc(
         &mut sess,
         "planetMgr",
@@ -519,23 +565,7 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         "UserUpdateNetwork",
         &[
             PyRep::Integer(JITA_PLANET_ID),
-            PyRep::List(vec![
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(basic_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(basic_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(adv_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(adv_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(store_id), PyRep::Integer(htech_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(htech_id), PyRep::Integer(pad_id), PyRep::Integer(2)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(basic_id)]), PyRep::Integer(2268), PyRep::Integer(3_000)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(2), PyRep::List(vec![PyRep::Integer(basic_id), PyRep::Integer(pad_id)]), PyRep::Integer(3645), PyRep::Integer(20)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(3), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(3645), PyRep::Integer(40)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(4), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(adv_id)]), PyRep::Integer(2390), PyRep::Integer(40)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(5), PyRep::List(vec![PyRep::Integer(adv_id), PyRep::Integer(pad_id)]), PyRep::Integer(9832), PyRep::Integer(5)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(6), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]), PyRep::Integer(2349), PyRep::Integer(6)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(7), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]), PyRep::Integer(2358), PyRep::Integer(6)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(8), PyRep::List(vec![PyRep::Integer(store_id), PyRep::Integer(htech_id)]), PyRep::Integer(2367), PyRep::Integer(6)]),
-                PyRep::Tuple(vec![PyRep::Integer(6), PyRep::Integer(9), PyRep::List(vec![PyRep::Integer(htech_id), PyRep::Integer(pad_id)]), PyRep::Integer(2875), PyRep::Integer(1)]),
-            ]),
+            PyRep::List(route_cmds),
         ],
         &kw,
         None,

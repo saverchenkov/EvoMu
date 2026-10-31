@@ -216,19 +216,19 @@ async fn test_structure_settings_parity() {
         .expect("CharacterGetServices with market hub");
     let PyRep::Dict(active_entries) = s_active else { panic!("expected Dict"); };
     assert_eq!(active_entries.len(), 1, "Expected only mapped service ID in Dict (no module typeIDs)");
-    assert_eq!(active_entries.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v), Some(&PyRep::Real(0.01)));
+    assert_eq!(active_entries.iter().find(|(k, _)| k == &PyRep::Integer(5)).map(|(_, v)| v), Some(&PyRep::Real(0.01)));
 
-    let has_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let has_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterHasService for market service ID");
     assert_eq!(has_market, PyRep::Bool(true));
 
-    let check_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let check_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterCheckService");
     assert_eq!(check_market, PyRep::None);
 
-    let get_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let get_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterGetService");
     assert_eq!(get_market, PyRep::Real(0.01));
@@ -296,32 +296,33 @@ async fn test_structure_settings_parity() {
     let profile_id = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Trade Profile".into()), PyRep::String("Desc".into())]).await.expect("CreateProfile").as_i64().expect("profileID");
     assert!(profile_id >= 70_000_001);
     assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "UpdateProfile", &[PyRep::Integer(profile_id), PyRep::String("Updated Trade Profile".into()), PyRep::String("Updated Desc".into())]).await.expect("UpdateProfile"), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group_id), PyRep::Real(0.025)])])]).await.expect("SaveProfileSettings on profile_id"), PyRep::Bool(true));
+    let mut sess_blocked = setup_pilot(&ctx, 102, "other", "other-secret", PILOT2).await;
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(PILOT1)]), PyRep::Bool(false)]).await.expect("allow pilot1 in group");
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Integer(group_id), PyRep::Real(0.025)]), PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Real(0.0)])])]).await.expect("SaveProfileSettings on profile_id"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(structure_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles"), PyRep::Bool(true));
     assert_eq!(
-        ctx.db.with_snapshot(|s| load_ext_state(s).access_profiles.get(&structure_id).and_then(|p| p.service_settings.get(&1)).copied()),
+        ctx.db.with_snapshot(|s| load_ext_state(s).access_profiles.get(&structure_id).and_then(|p| p.service_settings.get(&4)).copied()),
         Some(250),
         "2.5% tax rate assigned via standalone profile must be stored as 250 basis points (i64)"
     );
 
-    let get_market_updated = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let get_market_updated = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterGetService updated");
     assert_eq!(get_market_updated, PyRep::Real(0.025));
 
     // Allowed vs blocked character/alliance test via structureSettings & ownerGroupManager RPCs
-    let mut sess_blocked = setup_pilot(&ctx, 102, "other", "other-secret", PILOT2).await;
-    let foreign_save = rpc(&ctx, &mut sess_blocked, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.05)])])]).await;
+    let foreign_save = rpc(&ctx, &mut sess_blocked, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Real(0.05)])])]).await;
     assert_eq!(foreign_save.unwrap_err().code, "StructureOwnershipViolation");
 
     // Atomic batch rollback: valid PILOT2 + invalid 888_777_666 must fail and leave PILOT2 unblocked
     let bad_batch = rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(PILOT2), PyRep::Integer(888_777_666)]), PyRep::Bool(true)]).await;
     assert_eq!(bad_batch.unwrap_err().code, "InvalidAccessEntity");
-    assert_eq!(rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await.expect("PILOT2 still has service after failed batch"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(5)]).await.expect("PILOT1 still has service after failed batch"), PyRep::Bool(true));
 
     // Blocking PILOT2's alliance (99_000_077) via standalone group_id blocks PILOT2 from structure services, docking, jump bridge, and tether
     rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("block alliance in group");
-    let ally_blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await;
+    let ally_blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(5)]).await;
     assert_eq!(ally_blocked_check.unwrap_err().code, "StructureServiceAccessDenied");
     let jita_sys = ctx.systems.get_or_spawn(SYS_JITA);
     let _ = jita_sys.spawn_ball(eve_destiny::Ball {
@@ -340,7 +341,7 @@ async fn test_structure_settings_parity() {
     let ally_jb_err = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_jb_err.unwrap_err().code, "AccessDenied", "Blocked alliance must be denied Ansiblex jump bridge usage");
     rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("unblock alliance in group");
-    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("allow alliance in group");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077), PyRep::Integer(PILOT2)]), PyRep::Bool(false)]).await.expect("allow alliance and pilot2 in group");
     ctx.advance_secs(12);
     let ally_jb_allowed = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_jb_allowed.unwrap_err().code, "NoLinkedStructure", "Allowed alliance must pass Ansiblex ACL check");
@@ -349,15 +350,15 @@ async fn test_structure_settings_parity() {
     // Blocking PILOT2 directly via character ID
     rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.expect("block character");
 
-    let blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await;
+    let blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(5)]).await;
     assert_eq!(blocked_check.unwrap_err().code, "StructureServiceAccessDenied");
 
-    let blocked_has = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let blocked_has = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterHasService blocked");
     assert_eq!(blocked_has, PyRep::Bool(false));
 
-    let blocked_get = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let blocked_get = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterGetService blocked");
     assert_eq!(blocked_get, PyRep::None);
@@ -368,14 +369,14 @@ async fn test_structure_settings_parity() {
     let PyRep::Dict(b_entries) = blocked_services else { panic!("expected Dict"); };
     assert!(b_entries.is_empty(), "Blocked character must receive empty services dict");
 
-    let blocked_setting = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let blocked_setting = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(structure_id), PyRep::Integer(4)])
         .await
         .expect("CharacterHasSetting blocked");
     assert_eq!(blocked_setting, PyRep::Bool(false));
 
     // Removing PILOT2 from blocked_characters restores access
     rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.expect("unblock character");
-    let unblocked_has = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+    let unblocked_has = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(5)])
         .await
         .expect("CharacterHasService after unblock");
     assert_eq!(unblocked_has, PyRep::Bool(true));
@@ -394,7 +395,7 @@ async fn test_structure_settings_parity() {
         &mut sess,
         "structureSettings",
         "CharacterHasService",
-        &[PyRep::Integer(1)],
+        &[PyRep::Integer(5)],
     )
     .await
     .expect("CharacterHasService while docked");

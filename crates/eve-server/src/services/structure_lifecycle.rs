@@ -1305,9 +1305,12 @@ pub fn validate_home_station_structure(ctx: &ServerContext, snap: &WorldStateSna
     if !super::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
         return Err(BridgeRpcError { code: "CloneBayAccessDenied".into(), message: format!("Character {char_id} lacks access to structure {structure_id}") });
     }
-    if !super::structure_upwell_ops::is_structure_service_online(ctx, snap, structure_id, 2)
-        && !super::structure_upwell_ops::is_structure_service_online(ctx, snap, structure_id, 9)
-    {
+    if !crate::services::structure_profile_services::is_v24_or_legacy_service_online(
+        ctx,
+        snap,
+        structure_id,
+        crate::services::structure_profile_services::SERVICE_JUMP_CLONE,
+    ) {
         return Err(BridgeRpcError { code: "CloneBayServiceOffline".into(), message: format!("Structure {structure_id} does not have an online Clone Bay service") });
     }
     Ok(())

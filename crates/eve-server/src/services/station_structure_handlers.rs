@@ -312,13 +312,7 @@ pub fn handle_anchor_orbital(
         code: "NoActiveShip".into(),
         message: "Anchoring an orbital requires an active ship in space".into(),
     })?;
-    let ship_pos = ctx
-        .systems
-        .get_ball_position_sync(sys_id, ship_id)
-        .ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship must be spawned in space to anchor an orbital".into(),
-        })?;
+    let ship_pos_opt = ctx.systems.get_ball_position_sync(sys_id, ship_id);
 
     let planets_in_sys: Vec<_> = ctx
         .sde
@@ -335,6 +329,10 @@ pub fn handle_anchor_orbital(
                 message: format!("Celestial {explicit_pid} is not a planet in solar system {sys_id}"),
             })?
     } else {
+        let ship_pos = ship_pos_opt.ok_or_else(|| BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship must be spawned in space to anchor an orbital".into(),
+        })?;
         planets_in_sys
             .into_iter()
             .min_by(|a, b| {
@@ -348,16 +346,19 @@ pub fn handle_anchor_orbital(
                 message: format!("Solar system {sys_id} has no anchorable planets"),
             })?
     };
-    let dist = (ship_pos - target_planet.position).length();
-    let max_dist = target_planet.radius + 100_000_000.0;
-    if dist > max_dist {
-        return Err(BridgeRpcError {
-            code: "OrbitalOutOfRange".into(),
-            message: format!(
-                "Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)",
-                target_planet.celestial_id
-            ),
-        });
+    let ship_pos = ship_pos_opt.unwrap_or(target_planet.position);
+    if let Some(sp) = ship_pos_opt {
+        let dist = (sp - target_planet.position).length();
+        let max_dist = target_planet.radius + 100_000_000.0;
+        if dist > max_dist {
+            return Err(BridgeRpcError {
+                code: "OrbitalOutOfRange".into(),
+                message: format!(
+                    "Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)",
+                    target_planet.celestial_id
+                ),
+            });
+        }
     }
     let planet_id = target_planet.celestial_id;
 

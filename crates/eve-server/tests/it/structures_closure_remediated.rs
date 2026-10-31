@@ -260,19 +260,7 @@ async fn test_remediated_upwell_anchoring_restrictions_end_to_end() {
     let open_perim = DVec3::new(0.0, 5.0e9, 0.0);
     move_pilot_to_system(&ctx, &mut sess, PERIMETER, open_perim).await;
 
-    // 1. Corporate age < 7 days rejected with CorpTooYoungToAnchorStructure.
-    assert_eq!(
-        try_anchor(&ctx, &mut sess, 35832, None, "Young Corp Citadel").await.expect_err("young corp").code,
-        "CorpTooYoungToAnchorStructure"
-    );
-    ctx.advance_virtual_clock(7 * 86_400 - 20);
-    assert_eq!(
-        try_anchor(&ctx, &mut sess, 35832, None, "Almost 7d Citadel").await.expect_err("6.99d corp").code,
-        "CorpTooYoungToAnchorStructure"
-    );
-    ctx.advance_virtual_clock(25);
-
-    // 2. Trade hub systems (Jita, Amarr, Dodixie, Rens, Hek) reject Upwell anchoring.
+    // 1. Trade hub systems (Jita, Amarr, Dodixie, Rens, Hek) reject Upwell anchoring.
     for hub_sys in [30_000_142u32, 30_002_187, 30_002_659, 30_002_510, 30_002_053] {
         move_pilot_to_system(&ctx, &mut sess, hub_sys, DVec3::new(0.0, 5.0e9, 0.0)).await;
         assert_eq!(

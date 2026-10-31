@@ -142,7 +142,7 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     let reproc_mod = grant(&ctx, OWNER, ship_id, 35899, InventoryFlag::Cargo, 1);
     inv_add(&ctx, &mut sess, reproc_mod, st_id, InventoryFlag::ServiceSlot1, false).await.expect("fit reproc");
     assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(reproc_mod)]).await.expect_err("16 < 2160").code, "InsufficientStructureFuelToOnline");
-    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(2)]).await.expect("has service"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.expect("has service"), PyRep::Bool(true));
     assert!(ctx.drain_notifications_for_char(OWNER).into_iter().any(|n| n.event == "OnStructureServiceChanged" && n.args == vec![PyRep::Integer(st_id)]), "OnStructureServiceChanged must emit exact 1-arg [structure_id]");
 
     // 2. Clone Bay: jump clone + medical home station + live pod-death respawn into Upwell Clone Bay structure!
@@ -456,12 +456,12 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
         (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
         (PyRep::String("accessGroups".into()), PyRep::List(vec![PyRep::Integer(group_id)])),
         (PyRep::String("blocked".into()), PyRep::List(vec![PyRep::Integer(OUTSIDER)])),
-        (PyRep::String("services".into()), PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(0.025))])),
+        (PyRep::String("services".into()), PyRep::Dict(vec![(PyRep::Integer(10), PyRep::Real(0.025))])),
     ]);
     rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), settings_payload]).await.expect("SaveProfileSettings");
 
-    assert!((rpc(&ctx, &mut guest_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(2)]).await.unwrap().as_f64().unwrap() - 0.025).abs() < 1e-6);
-    assert_eq!(rpc(&ctx, &mut outsider_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(2)]).await.unwrap(), PyRep::None);
+    assert!((rpc(&ctx, &mut guest_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.unwrap().as_f64().unwrap() - 0.025).abs() < 1e-6);
+    assert_eq!(rpc(&ctx, &mut outsider_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.unwrap(), PyRep::None);
     assert_eq!(rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::Integer(4_452)));
     assert_eq!(rpc(&ctx, &mut grunt_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));
     assert_eq!(rpc(&ctx, &mut guest_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));

@@ -305,76 +305,37 @@ pub fn is_v24_or_legacy_service_online(
 }
 
 fn candidate_settings_for_service_query(
-    ctx: &ServerContext,
-    snap: &WorldStateSnapshot,
-    prof: &StructureAccessProfile,
-    structure_id: i64,
+    _ctx: &ServerContext,
+    _snap: &WorldStateSnapshot,
+    _prof: &StructureAccessProfile,
+    _structure_id: i64,
     service_id: i64,
 ) -> (Vec<i64>, bool, &'static [i64]) {
-    let online = life::online_service_type_ids(ctx, snap, structure_id);
     match service_id {
-        1 | 35_892 => (vec![SETTING_MARKET_TAX, 35_892, 1], false, &[1, SETTING_MARKET_TAX, 35_892]),
-        2 | 35_894 | SERVICE_JUMP_CLONE => (
-            vec![SETTING_CLONINGBAY_TAX, 35_894, 2, 10, 6],
-            false,
-            &[2, SETTING_CLONINGBAY_TAX, 35_894],
-        ),
-        3 | 35_899 => (vec![SETTING_REPROCESSING_TAX, 35_899], false, &[3, 35_899]),
-        4 => {
-            if online.contains(&35_899) && (!online.contains(&35_878) || prof.service_acl_rules.contains_key(&3)) {
-                (vec![SETTING_REPROCESSING_TAX, 35_899, 4], false, &[3, 4, 35_899])
-            } else {
-                (vec![SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX, 35_878, 4], false, &[4, 29, 24])
-            }
-        }
-        5 => {
-            if online.contains(&35_892) && (!online.contains(&35_891) || prof.service_acl_rules.contains_key(&4)) {
-                (vec![SETTING_MARKET_TAX, 35_892, 1, 5], false, &[4, 1, 35_892, 5])
-            } else {
-                (vec![SETTING_RESEARCH_TAX, SETTING_INDUSTRY_TAX, 35_891, 5], false, &[5, 32, 24])
-            }
-        }
-        6 => {
-            if online.contains(&35_894) && (!online.contains(&35_886) || prof.service_acl_rules.contains_key(&23)) {
-                (vec![SETTING_CLONINGBAY_TAX, 35_894, 2, 6], false, &[23, 2, 35_894, 6])
-            } else {
-                (vec![SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX, 35_886, 6], false, &[6, 33, 24])
-            }
-        }
-        7 | SERVICE_REACTIONS => (
-            vec![28, 26, 27, 24, 45_537, 45_538, 45_539, 7],
-            true,
-            &[7, 28, 26, 27, 24],
-        ),
-        8 => {
-            if online.contains(&45_009) {
-                (vec![17, 14, 8], false, &[8, 14])
-            } else {
-                (vec![13, 8], false, &[13, 8])
-            }
-        }
-        9 | SERVICE_JUMP_BRIDGE | 35_913 => (
-            vec![SETTING_JUMP_BRIDGE_ACTIVATION, 35_913, 35_841, 15, 9],
-            false,
-            &[34, 9, 15],
-        ),
-        13 => (vec![13, 8], false, &[13, 8]),
-        SERVICE_MOONMINING | 45_009 => (vec![17, 14, 8], false, &[14, 8]),
-        SERVICE_CYNO_BEACON => (vec![SETTING_CYNO_BEACON, 16], false, &[35, 16]),
-        SERVICE_AUTOMOONMINING => (vec![SETTING_AUTOMOONMINING, 18], false, &[36, 18]),
+        SERVICE_DOCKING | SERVICE_FITTING => (vec![SETTING_HOUSING_CAN_DOCK], false, &[1]),
+        SERVICE_OFFICES => (vec![SETTING_CORP_RENT_OFFICE], false, &[3]),
+        SERVICE_REPROCESSING | 35_899 => (vec![SETTING_REPROCESSING_TAX], false, &[3]),
+        SERVICE_MARKET | 35_892 => (vec![SETTING_MARKET_TAX], false, &[4]),
+        SERVICE_MEDICAL | SERVICE_JUMP_CLONE | 35_894 => (vec![SETTING_CLONINGBAY_TAX], false, &[23]),
+        SERVICE_REPAIR | 13 => (vec![13, 8], false, &[13, 8]),
+        SERVICE_MOONMINING | 45_009 => (vec![SETTING_DEFENSE_CAN_CONTROL_STRUCTURE, 14], false, &[14]),
+        SERVICE_JUMP_BRIDGE | 35_913 => (vec![SETTING_JUMP_BRIDGE_ACTIVATION, 35_841], false, &[34, 15]),
+        SERVICE_CYNO_BEACON => (vec![SETTING_CYNO_BEACON], false, &[35, 16]),
+        SERVICE_AUTOMOONMINING => (vec![SETTING_AUTOMOONMINING], false, &[36, 18]),
         SERVICE_INDUSTRY => (vec![29, 30, 31, 32, 33, 28, 26, 27, 24], true, &[24, 29]),
-        SERVICE_MANUFACTURING => (vec![29, 30, 31, 24, 35_878], true, &[29, 24, 4]),
-        SERVICE_MANUFACTURING_BASIC | 35_878 => (vec![29, 24, 35_878], false, &[29, 24, 4]),
-        SERVICE_MANUFACTURING_CAPITAL => (vec![30, 29, 24, 35_878], false, &[30, 29, 24]),
-        SERVICE_MANUFACTURING_SUPERCAPITAL => (vec![31, 29, 24, 35_878], false, &[31, 29, 24]),
-        SERVICE_LABORATORY => (vec![32, 33, 24, 35_891, 35_886], true, &[32, 33, 24]),
+        SERVICE_MANUFACTURING => (vec![29, 30, 31, 24], true, &[29, 24]),
+        SERVICE_MANUFACTURING_BASIC | 35_878 => (vec![SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX], false, &[29, 24]),
+        SERVICE_MANUFACTURING_CAPITAL => (vec![SETTING_MANUFACTURING_CAPITAL_TAX, 29, 24], false, &[30, 29, 24]),
+        SERVICE_MANUFACTURING_SUPERCAPITAL => (vec![SETTING_MANUFACTURING_SUPERCAPITAL_TAX, 29, 24], false, &[31, 29, 24]),
+        SERVICE_LABORATORY => (vec![32, 33, 24], true, &[32, 33, 24]),
         SERVICE_LABORATORY_RESEARCH_TIME | SERVICE_LABORATORY_RESEARCH_MATERIAL | SERVICE_LABORATORY_COPYING | 35_891 => {
-            (vec![32, 24, 35_891], false, &[32, 24, 5])
+            (vec![SETTING_RESEARCH_TAX, SETTING_INDUSTRY_TAX], false, &[32, 24])
         }
-        SERVICE_LABORATORY_INVENTION | 35_886 => (vec![33, 24, 35_886], false, &[33, 24, 6]),
-        SERVICE_REACTIONS_COMPOSITE => (vec![28, 24, 45_537], false, &[28, 24, 7]),
-        SERVICE_REACTIONS_BIOCHEMICAL => (vec![26, 28, 24, 45_538], false, &[26, 28, 24, 7]),
-        SERVICE_REACTIONS_HYBRID => (vec![27, 28, 24, 45_539], false, &[27, 28, 24, 7]),
+        SERVICE_LABORATORY_INVENTION | 35_886 => (vec![SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX], false, &[33, 24]),
+        SERVICE_REACTIONS => (vec![28, 26, 27, 24], true, &[28, 26, 27, 24]),
+        SERVICE_REACTIONS_COMPOSITE | 45_537 => (vec![SETTING_REACTION_COMPOSITE_TAX, 24], false, &[28, 24]),
+        SERVICE_REACTIONS_BIOCHEMICAL | 45_538 => (vec![SETTING_REACTION_BIOCHEMICAL_TAX, 28, 24], false, &[26, 28, 24]),
+        SERVICE_REACTIONS_HYBRID | 45_539 => (vec![SETTING_REACTION_HYBRID_TAX, 28, 24], false, &[27, 28, 24]),
         other => (vec![other], false, &[]),
     }
 }

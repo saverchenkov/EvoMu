@@ -612,6 +612,11 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
     });
 
     // Negative: anchoring regular Mobile Depot does NOT emit OnFleetJumpBeaconDeployableChange
+    let _ = ctx
+        .systems
+        .get_or_spawn(SYS_JITA)
+        .set_ball_position(ship_a, DVec3::new(300_000.0, 0.0, 0.0))
+        .await;
     let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
     rpc(
         &ctx,
@@ -620,7 +625,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         "AnchorStructure",
         &[
             PyRep::Integer(depot_id),
-            PyRep::Tuple(vec![PyRep::Real(200_200.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Tuple(vec![PyRep::Real(300_200.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
         ],
     )
     .await
@@ -638,7 +643,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         "AnchorStructure",
         &[
             PyRep::Integer(beacon_id),
-            PyRep::Tuple(vec![PyRep::Real(200_300.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+            PyRep::Tuple(vec![PyRep::Real(300_300.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
         ],
     )
     .await

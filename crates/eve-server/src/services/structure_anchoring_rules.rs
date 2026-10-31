@@ -21,8 +21,6 @@ pub const TRADE_HUB_SYSTEM_IDS: [u32; 5] = [
     30_002_053, // Hek
 ];
 
-/// Minimum corporation age (7 days = 604,800 s) required to anchor an Upwell structure (`Anchoring_structures.md`).
-pub const CORP_MIN_AGE_TO_ANCHOR_SECS: u64 = 7 * 86_400;
 /// Minimum distance from deploying ship when explicit anchoring coordinates are supplied (`Anchoring_structures.md`: 50 km).
 pub const MIN_ANCHOR_SHIP_DISTANCE_M: f64 = 50_000.0;
 /// Maximum distance from deploying ship when explicit anchoring coordinates are supplied (`Anchoring_structures.md`: 75 km).
@@ -246,20 +244,8 @@ pub fn validate_and_resolve_anchor(
     corp_id: i64,
     ship_pos: DVec3,
     explicit_pos: Option<DVec3>,
-    now_unix: u64,
+    _now_unix: u64,
 ) -> Result<(DVec3, u64), BridgeRpcError> {
-    if let Some(gov) = snap.corp_governance.get(&corp_id) {
-        if gov.created_unix > 0 && now_unix.saturating_sub(gov.created_unix) < CORP_MIN_AGE_TO_ANCHOR_SECS {
-            return Err(err(
-                "CorpTooYoungToAnchorStructure",
-                format!(
-                    "Corporation {corp_id} must be at least 7 days old ({} s) before anchoring an Upwell structure",
-                    CORP_MIN_AGE_TO_ANCHOR_SECS
-                ),
-            ));
-        }
-    }
-
     let anchor_pos = match explicit_pos {
         Some(pos) => pos,
         None => ship_pos + DVec3::new(DEFAULT_ANCHOR_SHIP_OFFSET_M, 0.0, 0.0),

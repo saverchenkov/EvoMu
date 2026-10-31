@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 const OWNER: i64 = 90_000_001;
 const OTHER_PILOT: i64 = 90_000_002;
-const JITA: u32 = 30_000_142;
+const JITA: u32 = 30_000_144;
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let kw = HashMap::new();
@@ -40,10 +40,23 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, corp_na
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String(corp_name.into()), PyRep::String(ticker.into())]).await.expect("AddCorporation");
     ctx.advance_secs(12);
-    rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
-    let st_pos = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.position).unwrap_or(DVec3::ZERO);
-    let pos = st_pos + DVec3::new(0.0, 5.0e9, 0.0);
-    ctx.systems.get_or_spawn(JITA).set_ball_position(sess.ship_id.expect("ship"), pos).await;
+    let ship_id = sess.ship_id.expect("ship");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = JITA;
+            ch.station_id = None;
+        }
+        if let Some(it) = snap.items.get_mut(&ship_id) {
+            it.location_id = i64::from(JITA);
+        }
+    });
+    sess.solar_system_id = Some(JITA);
+    sess.station_id = None;
+    let pos = DVec3::new(0.0, 5.0e9, 0.0);
+    let _ = ctx.systems.get_or_spawn(JITA).spawn_ball(Ball {
+        id: ship_id, type_id: 587, position: pos, velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
     sess
 }
 
@@ -372,15 +385,21 @@ async fn test_reinforce_hour_hack_reveal_and_ewar_immunity() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OTHER_PILOT) {
             ch.user_id = 1;
+            ch.solar_system_id = JITA;
+            ch.station_id = None;
         }
     });
     let mut hacker_sess = SessionState::new(5);
     rpc(&ctx, &mut hacker_sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(&ctx, &mut hacker_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OTHER_PILOT)]).await.expect("Select");
     ctx.advance_secs(12);
-    rpc(&ctx, &mut hacker_sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    hacker_sess.solar_system_id = Some(JITA);
+    hacker_sess.station_id = None;
     let hacker_ship = hacker_sess.ship_id.expect("hacker_ship");
-    jita_sys.set_ball_position(hacker_ship, st_pos + DVec3::new(900.0, 0.0, 0.0)).await;
+    let _ = jita_sys.spawn_ball(Ball {
+        id: hacker_ship, type_id: 587, position: st_pos + DVec3::new(900.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
     let _ = jita_sys.add_target_lock(hacker_ship, eve_destiny::TargetLock {
         target_id: st_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None,
     }).await;

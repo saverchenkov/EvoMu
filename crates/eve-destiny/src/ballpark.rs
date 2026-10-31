@@ -150,17 +150,17 @@ impl Ballpark {
                 .is_some_and(|b| matches!(b.mode, MovementMode::Rigid))
     }
 
-    /// Returns `true` if `ball_id` is an immobile static celestial/station or an anchored Upwell structure (`category_id == 65` or `max_velocity <= 0.0`).
+    /// Returns `true` if `ball_id` is an immobile static celestial/station or an anchored structure (`category_id` in structure/station/deployable/orbital categories, or `max_velocity <= 0.0` when slim metadata is absent).
     pub fn is_immobile_structure_or_static(&self, ball_id: BallId) -> bool {
-        self.is_static_ball(ball_id)
-            || self
-                .ball_slim_meta
-                .get(&ball_id)
-                .is_some_and(|m| m.category_id == 65)
-            || self
-                .balls
-                .get(&ball_id)
-                .is_some_and(|b| b.max_velocity <= 0.0)
+        if self.is_static_ball(ball_id) {
+            return true;
+        }
+        if let Some(m) = self.ball_slim_meta.get(&ball_id) {
+            return matches!(m.category_id, 2 | 3 | 22 | 23 | 40 | 46 | 65);
+        }
+        self.balls
+            .get(&ball_id)
+            .is_some_and(|b| b.max_velocity <= 0.0)
     }
 
     /// Returns `true` if any dynamic (non-static) ball is currently in the `Ballpark`.

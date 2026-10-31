@@ -347,6 +347,9 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     fire_weapon(&ctx, &mut sess, st_id).await.expect("active High-Sec alliance war permitted");
     ctx.db.with_mut_snapshot(|snap| {
         assert!(eve_server::services::structure_acl_defense_rules::are_corps_at_war_in_snap(snap, my_corp, RIVAL_CORP, ctx.now_unix()));
+        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, st_id);
+        ds.auto_defense_enabled = true;
+        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
         assert!(eve_server::services::structure_acl_defense_rules::evaluate_auto_defense_target(&ctx, snap, st_id, OWNER));
         snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp;
     });

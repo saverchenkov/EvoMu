@@ -295,11 +295,11 @@ impl Default for StructureDefenseSettings {
     fn default() -> Self {
         Self {
             structure_id: 0,
-            auto_defense_enabled: true,
+            auto_defense_enabled: false,
             auto_target_attackers: true,
             auto_target_war_targets: true,
             standing_threshold: 0.0,
-            target_blocked_acl: true,
+            target_blocked_acl: false,
             known_attackers: Vec::new(),
             known_attacker_timestamps: HashMap::new(),
         }
@@ -401,6 +401,17 @@ pub fn evaluate_auto_defense_target(
         if are_corps_at_war_in_snap(snap, pilot_corp, st.owner_corp_id, ctx.now_unix()) {
             return true;
         }
+    }
+
+    // Security-band / Crimewatch gating: in high-sec, unmanned defense may only engage active attackers or war targets.
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&st.solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+    if sys_sec >= 0.45 && st.solar_system_id < 31_000_000 {
+        return false;
     }
 
     // 3. Standing threshold check: owner corporation/alliance standing toward the pilot (or pilot's corp/alliance)
