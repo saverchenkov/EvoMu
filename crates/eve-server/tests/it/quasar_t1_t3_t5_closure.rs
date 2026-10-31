@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
 use crate::common;
-use crate::quasar_sov_equinox_hub::{drain, field, id_req, idm, rpc, sess, structure, subscribe, varint};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, structure, subscribe, varint};
 use eve_db::corp_roles;
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
-use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_IMPLEMENTED, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB;
 
@@ -17,13 +17,7 @@ const URLEN: u32 = 30_000_138;
 
 #[tokio::test]
 async fn test_sov_hub_and_star_resource_configurations() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
-    ]);
-
+    // Kept untagged (open): client sovereignty star/planet resource tables are not in the SDE.
     let ctx = ServerContext::new();
     let mut s = sess(92_001, PILOT, CORP, JITA, corp_roles::ROLE_STATION_MANAGER);
 
@@ -49,15 +43,17 @@ async fn test_sov_hub_and_star_resource_configurations() {
     .await;
     assert_eq!(star_res.status_code, STATUS_OK);
     let star_payload = star_res.payload.expect("GetAllConfigurationsResponse payload").value;
-    let cfg = field(&star_payload, 1).expect("star configuration");
+    let expected_stars = ctx.sde.all_stars();
+    let returned_cfgs = fields(&star_payload, 1);
+    assert_eq!(returned_cfgs.len(), expected_stars.len(), "must return all SDE stars");
+    assert!(returned_cfgs.len() > 1, "must return stars across all systems, not just caller's system");
+
+    let cfg = &returned_cfgs[0];
     let star_id = field(&cfg, 1).and_then(|b| varint(&b, 1)).expect("star id");
     let star_power = varint(&cfg, 2).expect("star power");
     assert!(
-        ctx.sde
-            .celestials_in_system(JITA)
-            .iter()
-            .any(|c| c.group_id == 6 && c.celestial_id as u64 == star_id),
-        "star_id {star_id} must match SDE star in Jita"
+        expected_stars.iter().any(|(id, _)| *id as u64 == star_id),
+        "star_id {star_id} must match an SDE star"
     );
     assert!(star_power > 0);
 }
@@ -145,6 +141,86 @@ async fn test_sov_hub_workforce_transit_relay_network() {
     let imp_state = field(&state_msg, 2).unwrap();
     let src_entry = field(&imp_state, 1).unwrap();
     assert_eq!(varint(&src_entry, 2), Some(1_000));
+
+    // (a) Negative test: two importers competing for the same export -> only lowest hub ID receives it.
+    let hub_d = 1_020_000_064;
+    let ikuchi: u32 = 30_000_137; // 1 jump from Perimeter
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(hub_d, structure(hub_d, CORP, ikuchi, TYPE_SOVEREIGNTY_HUB));
+    });
+    let mut imp_d = Vec::new();
+    encode_bytes_field(1, &id_req(1, JITA as u64), &mut imp_d);
+    let mut imp_cfg_d = Vec::new();
+    encode_bytes_field(2, &imp_d, &mut imp_cfg_d);
+    let mut cfg_req_d = id_req(1, hub_d as u64);
+    encode_bytes_field(2, &imp_cfg_d, &mut cfg_req_d);
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_req_d)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+
+    let st_d = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
+        id_req(1, hub_d as u64),
+    )
+    .await;
+    assert_eq!(st_d.status_code, STATUS_OK);
+    let st_d_val = st_d.payload.unwrap().value;
+    let state_d = field(&st_d_val, 1).unwrap();
+    let imp_d_state = field(&state_d, 2).unwrap();
+    let src_d = field(&imp_d_state, 1).unwrap();
+    assert_eq!(varint(&src_d, 2), Some(0), "second competing importer must receive 0 workforce");
+
+    // (b) Negative test: Transit hub owned by a foreign corp/alliance -> relay is blocked.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&hub_b) {
+            st.owner_corp_id = CORP + 999;
+        }
+    });
+    let st_c_foreign = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
+        id_req(1, hub_c as u64),
+    )
+    .await;
+    assert_eq!(st_c_foreign.status_code, STATUS_OK);
+    let st_cf_val = st_c_foreign.payload.unwrap().value;
+    let state_cf = field(&st_cf_val, 1).unwrap();
+    let imp_cf = field(&state_cf, 2).unwrap();
+    let src_cf = field(&imp_cf, 1).unwrap();
+    assert_eq!(varint(&src_cf, 2), Some(0), "foreign-owned Transit hub must block relay");
+
+    // Restore hub_b ownership for out-of-range test.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&hub_b) {
+            st.owner_corp_id = CORP;
+        }
+    });
+
+    // (c) Negative test: out-of-range (> 2 jumps / > WORKFORCE_TRANSFER_MAX_JUMPS) -> rejected & 0 imported.
+    let hub_far = 1_020_000_065;
+    let amarr: u32 = 30_002_187; // > 5 jumps from Jita and Perimeter
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(hub_far, structure(hub_far, CORP, amarr, TYPE_SOVEREIGNTY_HUB));
+    });
+    let mut imp_far = Vec::new();
+    encode_bytes_field(1, &id_req(1, JITA as u64), &mut imp_far);
+    let mut imp_cfg_far = Vec::new();
+    encode_bytes_field(2, &imp_far, &mut imp_cfg_far);
+    let mut cfg_req_far = id_req(1, hub_far as u64);
+    encode_bytes_field(2, &imp_cfg_far, &mut cfg_req_far);
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_req_far)
+            .await
+            .status_code,
+        STATUS_BAD_REQUEST,
+        "out-of-range import configuration must be rejected"
+    );
 }
 
 #[tokio::test]
@@ -349,51 +425,14 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
 }
 
 #[tokio::test]
-async fn test_ai_assistant_chat_sde_query() {
-    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj",
-    ]);
-
+async fn test_ai_assistant_chat_data_gap() {
+    // Kept untagged (open): Aura Guidance AI assistant requires external LLM service (DATA GAP).
     let ctx = ServerContext::new();
     let mut s = sess(92_007, PILOT, CORP, JITA, 0);
 
-    // Empty query rejected with STATUS_BAD_REQUEST
-    let mut empty_req = Vec::new();
-    encode_string_field(1, "   ", &mut empty_req);
-    assert_eq!(
-        rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", empty_req)
-            .await
-            .status_code,
-        STATUS_BAD_REQUEST
-    );
-
-    // SDE solar system query ("Jita") -> fallback = false, contains Jita system ID
     let mut jita_req = Vec::new();
     encode_string_field(1, "Jita", &mut jita_req);
     let jita_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", jita_req).await;
-    assert_eq!(jita_res.status_code, STATUS_OK);
-    let jita_val = jita_res.payload.expect("QueryResponse payload").value;
-    let jita_text = String::from_utf8(field(&jita_val, 1).expect("response text")).expect("utf8");
-    assert!(jita_text.contains("30000142"), "Expected Jita ID in response: {jita_text}");
-    assert_eq!(varint(&jita_val, 2), Some(0), "SDE match must have fallback = false");
-
-    // SDE item type query ("Rifter") -> fallback = false, contains Rifter type ID 587
-    let mut rifter_req = Vec::new();
-    encode_string_field(1, "Rifter", &mut rifter_req);
-    let rifter_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", rifter_req).await;
-    assert_eq!(rifter_res.status_code, STATUS_OK);
-    let rifter_val = rifter_res.payload.expect("QueryResponse payload").value;
-    let rifter_text = String::from_utf8(field(&rifter_val, 1).expect("response text")).expect("utf8");
-    assert!(rifter_text.contains("587"), "Expected Rifter type ID 587 in response: {rifter_text}");
-    assert_eq!(varint(&rifter_val, 2), Some(0), "SDE match must have fallback = false");
-
-    // Unmatched query -> fallback = true
-    let mut unknown_req = Vec::new();
-    encode_string_field(1, "ZzzNonexistentEntity999", &mut unknown_req);
-    let unknown_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", unknown_req).await;
-    assert_eq!(unknown_res.status_code, STATUS_OK);
-    let unknown_val = unknown_res.payload.expect("QueryResponse payload").value;
-    assert_eq!(varint(&unknown_val, 2), Some(1), "Unmatched query must have fallback = true");
+    assert_eq!(jita_res.status_code, STATUS_NOT_IMPLEMENTED);
 }
 

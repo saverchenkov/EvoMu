@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_sov_hub::{required_id, system_yield, transact, PLANET_RESOURCE_TABLE};
+use super::quasar_sov_hub::{required_id, star_power, transact, PLANET_RESOURCE_TABLE};
 use super::quasar_sov_services::authorize_skyhook;
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
@@ -13,7 +13,7 @@ use eve_proto::quasar::{
     DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Longest skyhook theft vulnerability window an owner may schedule.
 const MAX_THEFT_WINDOW_SECS: u64 = 86_400;
@@ -209,28 +209,29 @@ pub fn register_handlers(
     }
 
     // 4. eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest
-    //    Star celestials (`group_id == 6`) of the caller's current system from SDE `mapDenormalize`.
-    //    DATA GAP: `quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj`
-    //    remains untagged (`OPEN`) per `docs/BLOCKERS.md` §9 until authoritative V24.01 star tables are imported.
+    //    All star celestials (`group_id == 6`) from SDE `sde_celestials` (cached in `OnceLock`).
     {
-        let db_star = Arc::clone(&db);
         let sde_star = Arc::clone(&sde);
         router.register_handler(
             "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let cid = ctx
+                let _cid = ctx
                     .effective_character_id()
-                    .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))? as i64;
-                let sys_id = db_star
-                    .with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
-                    .ok_or((STATUS_NOT_FOUND, format!("Character {cid} not found")))?;
-                let mut out = Vec::new();
-                for (star_id, power) in system_yield(&sde_star, sys_id).stars {
-                    let mut cfg_buf = Vec::new();
-                    encode_id_field(1, star_id as u64, &mut cfg_buf);
-                    encode_varint_field(2, power, &mut cfg_buf);
-                    encode_bytes_field(1, &cfg_buf, &mut out);
-                }
+                    .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))?;
+                static ALL_STAR_CONFIGS: OnceLock<Vec<u8>> = OnceLock::new();
+                let out = ALL_STAR_CONFIGS
+                    .get_or_init(|| {
+                        let mut buf = Vec::new();
+                        for (star_id, type_id) in sde_star.all_stars() {
+                            let power = star_power(&sde_star, type_id);
+                            let mut cfg_buf = Vec::new();
+                            encode_id_field(1, star_id as u64, &mut cfg_buf);
+                            encode_varint_field(2, power, &mut cfg_buf);
+                            encode_bytes_field(1, &cfg_buf, &mut buf);
+                        }
+                        buf
+                    })
+                    .clone();
 
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.star.api.GetAllConfigurationsResponse"),

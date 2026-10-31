@@ -107,6 +107,34 @@ fn can_relay_export(
     false
 }
 
+/// Selects at most one importer hub for `(exporter_id, dest_sys)` so exported workforce is never
+/// duplicated across multiple importers. Prefers a direct importer in `dest_sys`, then lowest hub ID.
+fn assigned_importer(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    exporter_id: i64,
+    dest_sys: u32,
+) -> Option<i64> {
+    let exp_sys = hub_sys(snap, exporter_id)?;
+    let mut direct_min: Option<i64> = None;
+    let mut relay_min: Option<i64> = None;
+    for (cand_id, h) in &snap.sov_runtime.sov_hubs {
+        if *cand_id == exporter_id {
+            continue;
+        }
+        let PersistedWorkforceMode::Import { sources } = &h.workforce else { continue };
+        if !sources.contains(&exp_sys) || !can_relay_export(snap, sde, exporter_id, dest_sys, *cand_id) {
+            continue;
+        }
+        if hub_sys(snap, *cand_id) == Some(dest_sys) {
+            direct_min = Some(direct_min.map_or(*cand_id, |m| m.min(*cand_id)));
+        } else {
+            relay_min = Some(relay_min.map_or(*cand_id, |m| m.min(*cand_id)));
+        }
+    }
+    direct_min.or(relay_min)
+}
+
 /// Workforce imported by `hub_id`, per configured source system (including `Transit` relays).
 pub fn imports(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<(u32, u64)> {
     let PersistedWorkforceMode::Import { sources } = mode(snap, hub_id) else { return Vec::new() };
@@ -120,7 +148,7 @@ pub fn imports(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec
                 .filter(|(id, _)| **id != hub_id && hub_sys(snap, **id) == Some(*src))
                 .filter_map(|(id, h)| match &h.workforce {
                     PersistedWorkforceMode::Export { destination: Some(d), amount }
-                        if can_relay_export(snap, sde, *id, *d, hub_id) =>
+                        if assigned_importer(snap, sde, *id, *d) == Some(hub_id) =>
                     {
                         Some(*amount)
                     }
@@ -143,16 +171,7 @@ pub fn exported_amount(snap: &WorldStateSnapshot, hub_id: i64) -> u64 {
 /// `true` when the export destination has a hub importing from this hub's system (directly or via `Transit`).
 fn export_connected(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<u32> {
     let PersistedWorkforceMode::Export { destination: Some(dest), .. } = mode(snap, hub_id) else { return None };
-    let my_sys = hub_sys(snap, hub_id)?;
-    snap.sov_runtime
-        .sov_hubs
-        .iter()
-        .any(|(id, h)| {
-            *id != hub_id
-                && matches!(&h.workforce, PersistedWorkforceMode::Import { sources } if sources.contains(&my_sys))
-                && can_relay_export(snap, sde, hub_id, dest, *id)
-        })
-        .then_some(dest)
+    assigned_importer(snap, sde, hub_id, dest).map(|_| dest)
 }
 
 /// Encodes `eve_public.sovereignty.hub.workforce.Configuration` for a persisted mode.

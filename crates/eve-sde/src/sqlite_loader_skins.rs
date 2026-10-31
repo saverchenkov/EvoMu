@@ -140,6 +140,37 @@ impl SdeRegistry {
         rows.flatten().collect()
     }
 
+    /// Queries all star celestials (`group_id == 6`) from `sde_celestials`.
+    pub fn all_stars(&self) -> Vec<(i64, TypeId)> {
+        let Some(ref p) = self.db_path else {
+            return Vec::new();
+        };
+        let path_str = p.display().to_string();
+        let clean_path = if cfg!(windows) && path_str.starts_with(r"\\?\") {
+            &path_str[4..]
+        } else {
+            &path_str
+        };
+        let uri = format!("file:{}?immutable=1", clean_path);
+        let Ok(conn) = Connection::open_with_flags(
+            &uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        ) else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT celestial_id, type_id FROM sde_celestials WHERE group_id = 6 ORDER BY celestial_id",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as TypeId))
+        }) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
+    }
+
     /// Resolves any station (`sde_stations`) or celestial (`sde_celestials`) location ID to its
     /// containing solar system (`res:/staticdata/locationcache.static`).
     pub fn location_solar_system(&self, location_id: i64) -> Option<SolarSystemId> {
