@@ -354,6 +354,9 @@ pub async fn handle_npc_destroyed_in_space(
                 *rt.pending_bounty_ticks
                     .entry((solar_system_id, killer))
                     .or_insert(0.0) += eff_bounty;
+                rt.bounty_tick_next_flush_unix
+                    .entry((solar_system_id, killer))
+                    .or_insert_with(|| db.clock().now_unix_secs().saturating_add(1_200));
             }
             rt.destroyed_npc_cache.insert(killed_ball_id, npc);
         }
@@ -384,6 +387,8 @@ pub fn flush_npc_bounty_tick(
     use crate::formulas::compute_dbs_and_ess_bounty_split;
 
     let raw_bounty = with_mut_combat_runtime(ctx, |rt| {
+        rt.bounty_tick_next_flush_unix
+            .remove(&(solar_system_id, char_id));
         rt.pending_bounty_ticks
             .remove(&(solar_system_id, char_id))
             .unwrap_or(0.0)
@@ -488,6 +493,14 @@ pub fn flush_npc_bounty_tick(
             });
         }
     });
+    if is_kspace_nullsec && raw_bounty > 0.0 {
+        let _ = crate::services::combat_crimewatch::step_dynamic_bounty_multiplier(
+            ctx,
+            solar_system_id,
+            raw_bounty,
+            0.0,
+        );
+    }
 
     (pilot_isk, main_ess, reserve_ess)
 }

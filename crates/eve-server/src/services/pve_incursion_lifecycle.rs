@@ -628,79 +628,87 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
     if !has_state {
         return;
     }
-    let (started_tales, balls_to_despawn, balls_to_spawn) = with_pve_special_reg(ctx, |reg| {
-        if reg.incursions.is_empty() {
-            return (Vec::new(), Vec::new(), Vec::new());
-        }
-        let now_sec = spec_now_sec(reg);
-        let mut despawn = Vec::new();
-        let mut latest_ended_sec: u64 = 0;
-        let mut latest_spawned_sec: u64 = 0;
-
-        let cids: Vec<ConstellationId> = reg.incursions.keys().copied().collect();
-        for cid in cids {
-            let meta = reg
-                .incursion_lifecycle
-                .entry(cid)
-                .or_insert_with(|| IncursionLifecycleMeta {
-                    spawned_at_sec: now_sec,
-                    last_site_completed_sec: now_sec,
-                    last_regen_sec: now_sec,
-                    withdraw_until_sec: None,
-                    ended_at_sec: None,
-                });
-            if meta.spawned_at_sec == 0 {
-                meta.spawned_at_sec = now_sec;
+    let (started_tales, ended_tales, regen_updates, balls_to_despawn, balls_to_spawn) =
+        with_pve_special_reg(ctx, |reg| {
+            if reg.incursions.is_empty() {
+                return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
             }
-            latest_spawned_sec = latest_spawned_sec.max(meta.spawned_at_sec);
-            if let Some(ended) = meta.ended_at_sec {
-                latest_ended_sec = latest_ended_sec.max(ended);
-            }
+            let now_sec = spec_now_sec(reg);
+            let mut despawn = Vec::new();
+            let mut ended_list = Vec::new();
+            let mut regen_list = Vec::new();
+            let mut latest_ended_sec: u64 = 0;
+            let mut latest_spawned_sec: u64 = 0;
 
-            let Some(inc) = reg.incursions.get_mut(&cid) else {
-                continue;
-            };
-            if inc.state == "Ended" {
-                continue;
-            }
+            let cids: Vec<ConstellationId> = reg.incursions.keys().copied().collect();
+            for cid in cids {
+                let meta = reg
+                    .incursion_lifecycle
+                    .entry(cid)
+                    .or_insert_with(|| IncursionLifecycleMeta {
+                        spawned_at_sec: now_sec,
+                        last_site_completed_sec: now_sec,
+                        last_regen_sec: now_sec,
+                        withdraw_until_sec: None,
+                        ended_at_sec: None,
+                    });
+                if meta.spawned_at_sec == 0 {
+                    meta.spawned_at_sec = now_sec;
+                }
+                latest_spawned_sec = latest_spawned_sec.max(meta.spawned_at_sec);
+                if let Some(ended) = meta.ended_at_sec {
+                    latest_ended_sec = latest_ended_sec.max(ended);
+                }
 
-            if inc.state == "Withdrawing" {
-                let withdraw_until = meta
-                    .withdraw_until_sec
-                    .unwrap_or(meta.last_site_completed_sec + INCURSION_WITHDRAWAL_DURATION_SEC);
-                if now_sec >= withdraw_until {
-                    inc.state = "Ended".into();
-                    meta.ended_at_sec = Some(now_sec);
-                    latest_ended_sec = latest_ended_sec.max(now_sec);
-                    for s in &inc.sites {
-                        despawn.push((s.solar_system_id, s.boss_npc_ball_id));
-                        for esc in &s.escort_spawns {
-                            despawn.push((s.solar_system_id, esc.npc_ball_id));
+                let Some(inc) = reg.incursions.get_mut(&cid) else {
+                    continue;
+                };
+                if inc.state == "Ended" {
+                    continue;
+                }
+
+                if inc.state == "Withdrawing" {
+                    let withdraw_until = meta
+                        .withdraw_until_sec
+                        .unwrap_or(meta.last_site_completed_sec + INCURSION_WITHDRAWAL_DURATION_SEC);
+                    if now_sec >= withdraw_until {
+                        inc.state = "Ended".into();
+                        meta.ended_at_sec = Some(now_sec);
+                        latest_ended_sec = latest_ended_sec.max(now_sec);
+                        ended_list.push((cid, inc.tale_id));
+                        for s in &inc.sites {
+                            despawn.push((s.solar_system_id, s.boss_npc_ball_id));
+                            for esc in &s.escort_spawns {
+                                despawn.push((s.solar_system_id, esc.npc_ball_id));
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // Regenerate influence over time while sites are not run (+2% per hour)
+                let baseline = meta.last_regen_sec.max(meta.last_site_completed_sec);
+                if now_sec > baseline && inc.influence < 1.0 {
+                    let elapsed = now_sec - baseline;
+                    let regen = (elapsed as f64) * (INCURSION_INFLUENCE_REGEN_PER_HOUR / 3600.0);
+                    let old_inf = inc.influence;
+                    inc.influence = (inc.influence + regen).min(1.0);
+                    meta.last_regen_sec = now_sec;
+                    if (inc.influence - old_inf).abs() > 1e-9 {
+                        regen_list.push((cid, inc.tale_id, inc.influence));
+                    }
+                    if inc.influence > 0.10 && inc.mothership_spawned && !inc.mothership_defeated {
+                        inc.mothership_spawned = false;
+                        inc.state = "Established".into();
+                        if let Some(ms) = inc.sites.iter().find(|s| s.tier == "Mothership") {
+                            despawn.push((ms.solar_system_id, ms.boss_npc_ball_id));
+                            for esc in &ms.escort_spawns {
+                                despawn.push((ms.solar_system_id, esc.npc_ball_id));
+                            }
                         }
                     }
                 }
-                continue;
             }
-
-            // Regenerate influence over time while sites are not run (+2% per hour)
-            let baseline = meta.last_regen_sec.max(meta.last_site_completed_sec);
-            if now_sec > baseline && inc.influence < 1.0 {
-                let elapsed = now_sec - baseline;
-                let regen = (elapsed as f64) * (INCURSION_INFLUENCE_REGEN_PER_HOUR / 3600.0);
-                inc.influence = (inc.influence + regen).min(1.0);
-                meta.last_regen_sec = now_sec;
-                if inc.influence > 0.10 && inc.mothership_spawned && !inc.mothership_defeated {
-                    inc.mothership_spawned = false;
-                    inc.state = "Established".into();
-                    if let Some(ms) = inc.sites.iter().find(|s| s.tier == "Mothership") {
-                        despawn.push((ms.solar_system_id, ms.boss_npc_ball_id));
-                        for esc in &ms.escort_spawns {
-                            despawn.push((ms.solar_system_id, esc.npc_ball_id));
-                        }
-                    }
-                }
-            }
-        }
 
         // Respawn cadence: maintain TARGET_ACTIVE_INCURSIONS once cooldown elapses after an incursion ends
         let mut started = Vec::new();
@@ -768,7 +776,7 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
             }
         }
 
-        (started, despawn, spawn_balls)
+        (started, ended_list, regen_list, despawn, spawn_balls)
     });
 
     sync_incursion_system_effect_beacons(ctx);
@@ -776,6 +784,27 @@ pub fn advance_incursion_lifecycles(ctx: &ServerContext) {
     let now_u = ctx.now_unix();
     for (tale_id, staging) in started_tales {
         publish_incursion_tale_notice(ctx.quasar_gateway.as_ref(), true, tale_id, staging, now_u);
+        if let Some(const_id) = ctx.sde.solar_systems.get(&staging).map(|s| s.constellation_id) {
+            for (&sys_id, sys_rec) in &ctx.sde.solar_systems {
+                if sys_rec.constellation_id == const_id {
+                    emit_active_incursion_tale_data_for_system(ctx, sys_id);
+                }
+            }
+        }
+    }
+    for (cid, tale_id, new_inf) in regen_updates {
+        crate::services::notify_emitters_batch10::emit_tale_influence_update(
+            ctx, cid, tale_id, new_inf,
+        );
+    }
+    for (cid, tale_id) in ended_tales {
+        crate::services::notify_emitters_batch10::emit_tale_remove_for_constellation(
+            ctx,
+            cid,
+            tale_id,
+            1,
+            INCURSION_TALE_TEMPLATE_ID as i64,
+        );
     }
 
     if (!balls_to_despawn.is_empty() || !balls_to_spawn.is_empty())
@@ -1251,4 +1280,53 @@ pub fn notify_incursion_site_completed(
         now,
         gateway,
     );
+}
+
+pub fn emit_active_incursion_tale_data_for_system(ctx: &ServerContext, sys_id: SolarSystemId) {
+    let found = with_pve_special_reg(ctx, |reg| {
+        reg.incursions
+            .values()
+            .find(|inc| {
+                inc.state != "Ended"
+                    && (inc.staging_solar_system_id == sys_id
+                        || inc.hq_solar_system_id == sys_id
+                        || inc.vanguard_solar_system_ids.contains(&sys_id)
+                        || inc.assault_solar_system_ids.contains(&sys_id))
+            })
+            .map(|inc| (inc.tale_id, build_incursion_tale_py(inc)))
+    });
+    if let Some((tale_id, payload)) = found {
+        crate::services::notify_emitters_batch10::emit_tale_data_for_system(
+            ctx, sys_id, tale_id, payload,
+        );
+    }
+}
+
+pub fn emit_incursion_completion_macho_notifications(
+    ctx: &ServerContext,
+    result: &crate::services::pve_incursion_sites::IncursionCompletionResult,
+) {
+    let info = with_pve_special_reg(ctx, |reg| {
+        reg.incursions
+            .values()
+            .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
+            .map(|inc| (inc.constellation_id, inc.tale_id))
+    });
+    if let Some((cid, tale_id)) = info {
+        crate::services::notify_emitters_batch10::emit_tale_influence_update(
+            ctx,
+            cid,
+            tale_id,
+            result.influence,
+        );
+        if result.incursion_ended {
+            crate::services::notify_emitters_batch10::emit_tale_remove_for_constellation(
+                ctx,
+                cid,
+                tale_id,
+                1,
+                INCURSION_TALE_TEMPLATE_ID as i64,
+            );
+        }
+    }
 }

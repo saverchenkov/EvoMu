@@ -75,6 +75,7 @@ pub mod notify_emitters_batch8_ops;
 pub mod notify_emitters_batch9;
 pub mod notify_emitters_batch9_crates;
 pub mod notify_emitters_batch9_part2;
+pub mod notify_emitters_batch10;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
 pub mod petitioner_ops;

@@ -493,6 +493,7 @@ async fn test_abyssal_trace_scanning_and_fleet_entry() {
             solar_system_id: origin_sys, position: [0.0, 0.0, 0.0], destination: [0.0, 0.0, 0.0],
             scan_range_m: 4.0 * 149_597_870_700.0, range_step: 4, base_sensor_strength: 50.0,
             max_flight_time_s: 3600.0, launched_at_unix: ctx.now_unix(), state: 1,
+            warp_end_ft: None,
         });
     }
     let scan_rep = ctx.dispatch_rpc(&mut sess2, "scanMgr", None, "RequestScans", &[PyRep::Real(4.0 * 149_597_870_700.0), PyRep::Real(40.0)], &kw, None).await.expect("RequestScans finds trace");

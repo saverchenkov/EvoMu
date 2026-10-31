@@ -815,6 +815,7 @@ pub async fn advance_site_wave_or_complete(
         total_waves,
         old_balls,
         completed_now,
+        exp_inst_id,
     ) = with_pve_exploration_reg(ctx, |reg| {
         let sites = reg.sites_by_system.entry(solar_system_id).or_default();
         let Some(site) = sites
@@ -844,6 +845,7 @@ pub async fn advance_site_wave_or_complete(
             site.total_waves,
             old,
             done,
+            site.expedition_instance_id,
         ))
     })?;
 
@@ -911,7 +913,9 @@ pub async fn advance_site_wave_or_complete(
         let should_escalate = matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")
             && crate::services::pve_expeditions::roll_escalation_chance(ctx);
 
-        if should_escalate {
+        if let Some(inst_id) = exp_inst_id {
+            let _ = crate::services::pve_expeditions::advance_expedition_step(ctx, char_id, inst_id).await;
+        } else if should_escalate {
             escalation_created = crate::services::pve_expeditions::create_escalation_expedition(
                 ctx,
                 char_id,

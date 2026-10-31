@@ -867,6 +867,9 @@ pub fn handle(
                         args.get(2).and_then(|a| a.as_i64()),
                     ),
                 };
+                if state_id <= 0 {
+                    return Some(Err(BridgeRpcError::user_error("InvalidTutorialState")));
+                }
                 ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
@@ -896,9 +899,11 @@ pub fn handle(
             }
 
             if event_name == "skip_tutorial" {
-                ctx.db.with_mut_snapshot(|snap| {
+                let had_active = ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
+                    let had_site = rec.active_site_id.take().is_some();
+                    let active = rec.tutorial_finished == Some(false) || had_site;
                     rec.tutorial_skipped = true;
                     rec.tutorial_finished = Some(true);
                     push_operation_event(rec, event_name, 0);
@@ -915,8 +920,12 @@ pub fn handle(
                     });
                     npe.completed = true;
                     npe.current_node_id = 4;
+                    active
                 });
                 crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
+                if had_active {
+                    crate::services::notify_emitters_batch10::emit_progression_left(ctx, char_id);
+                }
                 return Some(Ok(PyRep::Bool(true)));
             }
 

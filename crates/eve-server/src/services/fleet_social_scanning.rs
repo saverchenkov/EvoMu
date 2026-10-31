@@ -27,7 +27,20 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let sys_id = if method == "SignalTrackerRegister" {
+                match session.solar_system_id {
+                    Some(s) if s > 0 => s,
+                    _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
+                }
+            } else {
+                match session.solar_system_id.or_else(|| {
+                    ctx.db
+                        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+                }) {
+                    Some(s) if s > 0 => s,
+                    _ => return Some(Err(BridgeRpcError::user_error("NoSolarSystem"))),
+                }
+            };
             let now_unix = ctx.now_unix();
             let sigs = ensure_system_signatures(ctx, sys_id).await;
             let (anom_count, anom_rows, struct_rows) = ctx.db.with_snapshot(|snap| {
@@ -76,6 +89,9 @@ pub(super) async fn handle_scanning_and_wormholes(
             });
             if method == "SignalTrackerRegister" {
                 register_signal_tracker_subscriber(ctx, sys_id, char_id);
+                crate::services::notify_emitters_batch10::emit_signal_tracker_full_state_for_system(
+                    ctx, char_id, sys_id, &sigs,
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),

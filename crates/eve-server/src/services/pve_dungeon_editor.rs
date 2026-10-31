@@ -435,6 +435,11 @@ pub async fn handle_gm_dungeon_editor_op(
                     .set_ball_position(ship_id, DVec3::new(0.0, 0.0, first_z - 2_500.0))
                     .await;
             }
+            let room_pos = room
+                .objects
+                .first()
+                .map(|o| [o.x, o.y, o.z])
+                .unwrap_or([0.0, 0.0, 0.0]);
             with_dungeon_editor_store(ctx, |store| {
                 store.active_editors.insert(
                     char_id,
@@ -448,6 +453,15 @@ pub async fn handle_gm_dungeon_editor_op(
                     },
                 );
             });
+            if method == "EditDungeon" {
+                crate::services::notify_emitters_batch3_space::emit_dungeon_edit(
+                    ctx,
+                    char_id,
+                    dungeon_id,
+                    room.room_id,
+                    room_pos,
+                );
+            }
             Ok(PyRep::keyval([
                 ("dungeonID", PyRep::Integer(dungeon_id)),
                 ("roomID", PyRep::Integer(room.room_id)),
@@ -477,13 +491,25 @@ pub async fn handle_gm_dungeon_editor_op(
             });
             let room = room.ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
             let spawned = sync_editor_room_balls(ctx, sys_id, &old_balls, &room).await;
+            let room_pos = room
+                .objects
+                .first()
+                .map(|o| [o.x, o.y, o.z])
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let mut is_editing = false;
             with_dungeon_editor_store(ctx, |store| {
                 let entry = store.active_editors.entry(char_id).or_default();
+                is_editing = entry.godmode;
                 entry.dungeon_id = Some(dungeon_id);
                 entry.room_id = Some(room_id);
                 entry.spawned_ball_ids = spawned.clone();
                 entry.solar_system_id = Some(sys_id);
             });
+            if is_editing {
+                crate::services::notify_emitters_batch3_space::emit_dungeon_edit(
+                    ctx, char_id, dungeon_id, room_id, room_pos,
+                );
+            }
             Ok(PyRep::keyval([
                 ("dungeonID", PyRep::Integer(dungeon_id)),
                 ("roomID", PyRep::Integer(room_id)),

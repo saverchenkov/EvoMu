@@ -986,6 +986,7 @@ pub async fn process_incursion_site_completion_and_payout(
     .await;
     if let Ok(r) = &res {
         notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, site_sys, r);
+        crate::services::pve_incursion_lifecycle::emit_incursion_completion_macho_notifications(ctx, r);
     }
     res
 }
@@ -1185,6 +1186,7 @@ pub async fn on_incursion_boss_destroyed(
     .await;
     if let Some(Ok(r)) = &res {
         notify_incursion_site_completed(&ctx.quasar_gateway, &ctx.db, solar_system_id, r);
+        crate::services::pve_incursion_lifecycle::emit_incursion_completion_macho_notifications(ctx, r);
     }
     res
 }

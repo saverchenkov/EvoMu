@@ -259,15 +259,24 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
         }
     }
 
+    let mut removed_beacons: Vec<(SolarSystemId, i64, u32)> = Vec::new();
+    let mut added_by_sys: std::collections::HashMap<SolarSystemId, Vec<i64>> =
+        std::collections::HashMap::new();
+    let mut added_anomalies: Vec<(SolarSystemId, String, i64, i64, &'static str)> = Vec::new();
+
     // Store storm weather beacons strictly in per-ServerContext `ctx.db` `snap.items`
     // (never in process-global `scanners_superweapons_state`) so concurrent ServerContexts never leak.
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.retain(|_, it| {
             if it.flag == InventoryFlag::None && is_storm_beacon_type(it.type_id) {
                 let sys_id = it.location_id as u32;
-                effect_lists_by_sys
+                let keep = effect_lists_by_sys
                     .get(&sys_id)
-                    .is_some_and(|list| list.contains(&it.type_id))
+                    .is_some_and(|list| list.contains(&it.type_id));
+                if !keep {
+                    removed_beacons.push((sys_id, it.item_id, it.type_id));
+                }
+                keep
             } else {
                 true
             }
@@ -296,6 +305,7 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
                             ..Default::default()
                         },
                     );
+                    added_by_sys.entry(*sid).or_default().push(i64::from(tid));
                 }
             }
         }
@@ -311,39 +321,99 @@ pub fn sync_metaliminal_storm_effects_and_sites(ctx: &ServerContext) {
         }
 
         for &cs in &core_systems {
-            let anoms = snap.cosmic_anomalies.entry(cs).or_default();
-            if !anoms.iter().any(|a| a.anomaly_id.starts_with("DNG-9042-")) {
-                anoms.push(CosmicAnomalyRecord {
-                    anomaly_id: format!("DNG-9042-{cs}"),
-                    name: "Fresh Volatile Ice Field".into(),
-                    solar_system_id: cs,
-                    anomaly_type: "OreAnomaly".into(),
-                    position: [100_000_000.0, 50_000_000.0, -25_000_000.0],
-                    signal_strength: 1.0,
-                    ore_types: vec![56142], // Metaliminal volatile ice
-                    remaining_volume: 500_000.0,
-                    cleared: false,
-                    created_unix: now,
-                    lifetime_seconds: 7200,
-                });
+            let mut spawned_9042 = None;
+            let mut spawned_9043 = None;
+            {
+                let anoms = snap.cosmic_anomalies.entry(cs).or_default();
+                if !anoms.iter().any(|a| a.anomaly_id.starts_with("DNG-9042-")) {
+                    let aid = format!("DNG-9042-{cs}");
+                    anoms.push(CosmicAnomalyRecord {
+                        anomaly_id: aid.clone(),
+                        name: "Fresh Volatile Ice Field".into(),
+                        solar_system_id: cs,
+                        anomaly_type: "OreAnomaly".into(),
+                        position: [100_000_000.0, 50_000_000.0, -25_000_000.0],
+                        signal_strength: 1.0,
+                        ore_types: vec![56142], // Metaliminal volatile ice
+                        remaining_volume: 500_000.0,
+                        cleared: false,
+                        created_unix: now,
+                        lifetime_seconds: 7200,
+                    });
+                    spawned_9042 = Some(aid);
+                }
+                if !anoms.iter().any(|a| a.anomaly_id.starts_with("DNG-9043-")) {
+                    let aid = format!("DNG-9043-{cs}");
+                    anoms.push(CosmicAnomalyRecord {
+                        anomaly_id: aid.clone(),
+                        name: "Metaliminal Storm Surge Site".into(),
+                        solar_system_id: cs,
+                        anomaly_type: "CombatAnomaly".into(),
+                        position: [-85_000_000.0, 40_000_000.0, 30_000_000.0],
+                        signal_strength: 1.0,
+                        ore_types: Vec::new(),
+                        remaining_volume: 0.0,
+                        cleared: false,
+                        created_unix: now,
+                        lifetime_seconds: 7200,
+                    });
+                    spawned_9043 = Some(aid);
+                }
             }
-            if !anoms.iter().any(|a| a.anomaly_id.starts_with("DNG-9043-")) {
-                anoms.push(CosmicAnomalyRecord {
-                    anomaly_id: format!("DNG-9043-{cs}"),
-                    name: "Metaliminal Storm Surge Site".into(),
-                    solar_system_id: cs,
-                    anomaly_type: "CombatAnomaly".into(),
-                    position: [-85_000_000.0, 40_000_000.0, 30_000_000.0],
-                    signal_strength: 1.0,
-                    ore_types: Vec::new(),
-                    remaining_volume: 0.0,
-                    cleared: false,
-                    created_unix: now,
-                    lifetime_seconds: 7200,
-                });
+            if let Some(aid) = spawned_9042 {
+                snap.next_entity_id += 1;
+                added_anomalies.push((
+                    cs,
+                    aid,
+                    snap.next_entity_id,
+                    9042,
+                    "Fresh Volatile Ice Field",
+                ));
+            }
+            if let Some(aid) = spawned_9043 {
+                snap.next_entity_id += 1;
+                added_anomalies.push((
+                    cs,
+                    aid,
+                    snap.next_entity_id,
+                    9043,
+                    "Metaliminal Storm Surge Site",
+                ));
             }
         }
     });
+
+    for (sid, aid, inst_id, did, dname) in added_anomalies {
+        crate::services::notify_emitters_batch10::emit_cosmic_anomaly_added_for_system(
+            ctx, sid, &aid, inst_id, did, dname,
+        );
+    }
+
+    for (sid, tids) in added_by_sys {
+        crate::services::notify_emitters_batch10::emit_system_effect_started(ctx, sid, tids);
+    }
+    let mut cleared_env_systems = HashSet::new();
+    for (sid, item_id, old_tid) in removed_beacons {
+        let effect_id = ctx
+            .sde
+            .types
+            .get(&old_tid)
+            .and_then(|t| t.effect_ids.first().copied())
+            .map(i64::from)
+            .unwrap_or_else(|| i64::from(old_tid));
+        crate::services::notify_emitters_batch10::emit_system_wide_effect_stop(
+            ctx,
+            sid,
+            effect_id,
+            item_id,
+            i64::from(old_tid),
+        );
+        if !effect_lists_by_sys.contains_key(&sid) && cleared_env_systems.insert(sid) {
+            crate::services::notify_emitters_batch10::emit_component_removed_system_environment(
+                ctx, sid,
+            );
+        }
+    }
 }
 
 pub fn get_all_roaming_weather_systems(ctx: &ServerContext) -> Vec<PyRep> {

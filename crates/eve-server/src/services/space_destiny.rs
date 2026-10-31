@@ -912,11 +912,12 @@ pub(crate) async fn handle_update_state_request(
     handle
         .push_set_state(ship_id)
         .await
-        .map(|_tick| PyRep::None)
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
-        })
+        })?;
+    crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
+    Ok(PyRep::None)
 }
 
 async fn handle_admin_get_bubble_id(

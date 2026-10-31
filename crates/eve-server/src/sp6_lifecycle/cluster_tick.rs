@@ -639,7 +639,9 @@ fn execute_due_abyssal_collapse_sync(
 
 /// Runs all time-driven SP-6 / SP-7 lifecycle progressions when server time advances from `prev_unix`
 /// by `secs` seconds (or when `tick_background_cluster` runs with `secs == 0`).
-pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
+pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
+    crate::services::notify_emitters_batch10::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
+    crate::services::space_destiny::space_probe_scanning::tick_probe_warp_end(ctx);
     let now_unix = ctx.now_unix();
 
     // 0. Sweep expired market orders and check season transitions across cluster ticks.
@@ -1172,6 +1174,17 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
 
     on_advance_secs(ctx, now_unix, 0);
+    let elapsed_secs = ctx.db.with_mut_snapshot(|snap| {
+        let prev = snap
+            .service_state_blobs
+            .get("cluster_tick_last_unix")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| now_unix.saturating_sub(1));
+        snap.service_state_blobs
+            .insert("cluster_tick_last_unix".into(), now_unix.to_string());
+        now_unix.saturating_sub(prev).max(1)
+    });
+    crate::services::pve_crab_beacons::on_server_clock_advanced(ctx, elapsed_secs);
     let prev_metenox_tick = ctx.db.with_mut_snapshot(|snap| {
         let prev = snap
             .service_state_blobs
@@ -1205,6 +1218,34 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     crate::services::space_destiny::expire_all_overdue_probes(ctx, now_unix).await;
     crate::services::sov_gameplay::tick_sov_gameplay(ctx, now_unix).await;
     crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
+
+    let due_bounty_ticks: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
+        let mut due = Vec::new();
+        for (&(sys_id, char_id), &pending) in &rt.pending_bounty_ticks {
+            if pending <= 0.0 {
+                continue;
+            }
+            let next_flush = *rt
+                .bounty_tick_next_flush_unix
+                .entry((sys_id, char_id))
+                .or_insert_with(|| now_unix.saturating_add(1_200));
+            if now_unix >= next_flush {
+                due.push((sys_id, char_id));
+            }
+        }
+        for key in &due {
+            rt.bounty_tick_next_flush_unix.remove(key);
+        }
+        due
+    });
+    for (sys_id, char_id) in due_bounty_ticks {
+        let _ = crate::services::combat_npc_encounters::flush_npc_bounty_tick(
+            ctx,
+            sys_id,
+            char_id,
+            0.0,
+        );
+    }
 
     let mut temp_cw = crate::combat::crimewatch::CrimeWatchDirector::new();
     if let Ok(mut cw) = ctx.crimewatch.write() {
@@ -1304,6 +1345,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
+            crate::services::notify_emitters_batch10::sync_deathzone_state_notifications(ctx, sys_id);
         }
         let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(

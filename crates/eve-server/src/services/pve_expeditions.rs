@@ -183,6 +183,57 @@ pub async fn create_escalation_expedition_core(
     Some(entry)
 }
 
+pub fn expedition_sig_id(instance_id: i64, step_index: u8) -> String {
+    let h = instance_id
+        .unsigned_abs()
+        .wrapping_mul(31)
+        .wrapping_add(u64::from(step_index));
+    let c0 = (b'A' + ((h % 26) as u8)) as char;
+    let c1 = (b'A' + (((h / 26) % 26) as u8)) as char;
+    let c2 = (b'A' + (((h / 676) % 26) as u8)) as char;
+    let num = ((h / 17_576) % 900) + 100;
+    format!("{c0}{c1}{c2}-{num:03}")
+}
+
+fn dungeon_scan_strength(sde: &eve_sde::SdeRegistry, dungeon_id: u32) -> f64 {
+    sde.dungeons
+        .get(&dungeon_id)
+        .and_then(|d| d.difficulty)
+        .map(|diff| (1.0 / (diff.max(1) as f64)).clamp(0.05, 1.0))
+        .unwrap_or(0.5)
+}
+
+fn register_and_emit_expedition_signature(
+    ctx: &ServerContext,
+    entry: &EscalatingPathEntry,
+    exp_pos: [f64; 3],
+) {
+    let sig_id = expedition_sig_id(entry.instance_id, entry.step_index);
+    let scan_strength = dungeon_scan_strength(&ctx.sde, entry.expedition_dungeon_id);
+    crate::services::notify_emitters_batch3_space::emit_cosmic_signature_added(
+        ctx,
+        entry.destination_solar_system_id,
+        &sig_id,
+        &entry.expedition_name,
+        exp_pos,
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(list) = snap.cosmic_signatures.get_mut(&entry.destination_solar_system_id) {
+            if let Some(sig) = list.iter_mut().find(|s| s.signature_id == sig_id) {
+                sig.signal_strength = scan_strength;
+            }
+        }
+    });
+    crate::services::notify_emitters_batch10::emit_dungeon_instance_added(
+        ctx,
+        entry.destination_solar_system_id,
+        entry.instance_id,
+        i64::from(entry.expedition_dungeon_id),
+        &sig_id,
+        scan_strength,
+    );
+}
+
 pub async fn create_escalation_expedition(
     ctx: &ServerContext,
     char_id: CharacterId,
@@ -214,6 +265,7 @@ pub async fn create_escalation_expedition(
         entry.expedition_dungeon_id,
         true,
     );
+    register_and_emit_expedition_signature(ctx, &entry, exp_pos);
     Some(entry)
 }
 
@@ -368,8 +420,29 @@ pub async fn advance_expedition_step(
     char_id: CharacterId,
     instance_id: i64,
 ) -> Result<Option<EscalatingPathEntry>, BridgeRpcError> {
+    let prev_info = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+        reg.escalations_by_char
+            .get(&char_id)
+            .and_then(|list| list.iter().find(|e| e.instance_id == instance_id))
+            .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id, e.step_index))
+    });
     let updated = advance_expedition_step_core(&ctx.db, &ctx.sde, &ctx.systems, char_id, instance_id).await?;
-    if let Some(ref entry) = updated {
+    if let (Some((prev_sys, prev_did, prev_step)), Some(ref entry)) = (prev_info, &updated) {
+        let old_sig_id = expedition_sig_id(instance_id, prev_step);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(list) = snap.cosmic_signatures.get_mut(&prev_sys) {
+                for sig in list.iter_mut().filter(|s| s.signature_id == old_sig_id) {
+                    sig.collapsed = true;
+                }
+            }
+        });
+        crate::services::notify_emitters_batch10::emit_dungeon_instance_removed(
+            ctx,
+            prev_sys,
+            instance_id,
+            &old_sig_id,
+            i64::from(prev_did),
+        );
         crate::services::notify_emitters_batch3_space::emit_escalation_created_or_advanced(
             ctx,
             char_id,
@@ -377,6 +450,14 @@ pub async fn advance_expedition_step(
             entry.expedition_dungeon_id,
             true,
         );
+        if entry.step_index > prev_step {
+            let exp_pos = [
+                -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
+                15_000_000.0,
+                30_000_000.0,
+            ];
+            register_and_emit_expedition_signature(ctx, entry, exp_pos);
+        }
     }
     Ok(updated)
 }

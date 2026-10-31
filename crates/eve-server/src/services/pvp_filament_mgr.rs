@@ -779,6 +779,11 @@ pub async fn handle(
                 None
             });
             if let Some(e) = pre_err {
+                crate::services::notify_emitters_batch10::emit_pvp_matchmaking_failure(
+                    ctx,
+                    char_id,
+                    vec![e.code.clone()],
+                );
                 return Some(Err(e));
             }
             if let Err(e) = check_filament_1000km_proximity(

@@ -44,7 +44,7 @@ async fn rpc(
 
 // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:sessionMgr.EndAllGameSessions
 // parity: rpc:sessionMgr.RemoveSessionsFromServer, rpc:localizationServer.ReloadFSDPickle
-// parity: rpc:localizationServer.UpdateLocalizationQAWrap, rpc:loadService.GetTotalStats
+// parity: rpc:loadService.GetTotalStats
 // parity: rpc:loadService.StartLoad, rpc:loadService.StopLoad
 #[tokio::test]
 async fn notify_batch8_session_localization_and_load_rpcs() {
@@ -232,55 +232,36 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         "ReloadFSDPickle must scan real SDE localized entries"
     );
 
-    // Normal V24 character login calls UpdateLocalizationQAWrap(bool) without GM roles
-    let qa_bool_on = rpc(
-        &ctx,
-        &mut sess_b,
-        "localizationServer",
-        "UpdateLocalizationQAWrap",
-        &[PyRep::Bool(true)],
-    )
-    .await
-    .expect("non-GM UpdateLocalizationQAWrap(true)");
-    assert_eq!(qa_bool_on, PyRep::Bool(true));
-    let qa_bool_off = rpc(
-        &ctx,
-        &mut sess_b,
-        "localizationServer",
-        "UpdateLocalizationQAWrap",
-        &[PyRep::Bool(false)],
-    )
-    .await
-    .expect("non-GM UpdateLocalizationQAWrap(false)");
-    assert_eq!(qa_bool_off, PyRep::Bool(false));
-
-    // Negative: non-boolean, non-dict argument rejected with InvalidArgument
+    // UpdateLocalizationQAWrap requires GM/QA role and remains fail-closed (UnimplementedRPC)
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_b,
+            "localizationServer",
+            "UpdateLocalizationQAWrap",
+            &[PyRep::Bool(true)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "RoleRequired"
+    );
     assert_eq!(
         rpc(
             &ctx,
             &mut sess_a,
             "localizationServer",
             "UpdateLocalizationQAWrap",
-            &[PyRep::String("invalid".into())],
+            &[PyRep::Dict(vec![(
+                PyRep::Integer(42_001),
+                PyRep::String("[QA] Warp Drive Active".into()),
+            )])],
         )
         .await
         .unwrap_err()
         .code,
-        "InvalidArgument"
+        "UnimplementedRPC"
     );
-    let qa_wrap_rep = rpc(
-        &ctx,
-        &mut sess_a,
-        "localizationServer",
-        "UpdateLocalizationQAWrap",
-        &[PyRep::Dict(vec![(
-            PyRep::Integer(42_001),
-            PyRep::String("[QA] Warp Drive Active".into()),
-        )])],
-    )
-    .await
-    .expect("UpdateLocalizationQAWrap");
-    assert_eq!(qa_wrap_rep, PyRep::Bool(true));
 
     // 4. loadService.StartLoad, GetTotalStats, StopLoad
     let stats_0 = rpc(&ctx, &mut sess_a, "loadService", "GetTotalStats", &[])

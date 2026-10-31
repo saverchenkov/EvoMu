@@ -376,6 +376,11 @@ fn parse_rooms_from_pyrep(
                         .dict_get("actionGroup")
                         .and_then(|v| v.as_i64())
                         .unwrap_or(2) as u8;
+                    let _obj_idx = t_rep
+                        .dict_get("targetObjectIndex")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        .max(0) as usize;
                     let action = match action_str {
                         "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
                         "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
@@ -1097,5 +1102,31 @@ pub async fn on_dungeon_item_looted(
 
     for (sys_id, inst_id, r_idx, actions) in pending_actions {
         let _ = apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_dungeon_notify_actions(
+    db: &eve_db::WorldRepository,
+    pending_notifications: Option<
+        &std::sync::RwLock<
+            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+        >,
+    >,
+    notify_tx: Option<
+        &tokio::sync::broadcast::Sender<(
+            i64,
+            crate::router::cache_notifications::PendingMachoNotification,
+        )>,
+    >,
+    char_id: i64,
+    dungeon_id: i64,
+    obj_ball_ids: &[i64],
+    actions: Vec<DungeonTriggerAction>,
+) {
+    for act in actions {
+        match act {
+            _ => {}
+        }
     }
 }

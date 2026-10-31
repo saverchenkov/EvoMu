@@ -280,13 +280,25 @@ impl ServerContext {
         }
 
         if effective_service == "timeControl" && method == "AdvanceClock" {
-            let secs = args
-                .first()
-                .and_then(|a| match a {
-                    PyRep::Integer(i) => Some(*i as u64),
-                    _ => None,
-                })
-                .unwrap_or(12);
+            let _ = Self::require_auth(session)?;
+            if !session.has_gm_role() {
+                return Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: format!(
+                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
+                    ),
+                });
+            }
+            let secs = match args.first() {
+                Some(PyRep::Integer(i)) if *i < 0 => {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "AdvanceClock seconds must be non-negative".into(),
+                    });
+                }
+                Some(PyRep::Integer(i)) => *i as u64,
+                _ => 12,
+            };
             self.advance_secs(secs);
             if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                 let sys_h = self.systems.get_or_spawn(sys_id);
@@ -304,6 +316,15 @@ impl ServerContext {
         if (effective_service == "timeControl" || effective_service == "harness")
             && (method == "FastForwardSessionTimer" || method == "ClearSessionTimer")
         {
+            let _ = Self::require_auth(session)?;
+            if !session.has_gm_role() {
+                return Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: format!(
+                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
+                    ),
+                });
+            }
             if let Some(cid) = session.character_id {
                 crate::services::space_destiny::clear_session_change_timer(self, cid);
             }

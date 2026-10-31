@@ -378,6 +378,7 @@ pub async fn activate_scan_probe_launcher(
                     max_flight_time_s,
                     launched_at_unix: now_unix,
                     state: 1,
+                    warp_end_ft: None,
                 },
             );
     }
@@ -742,6 +743,7 @@ async fn handle_request_scans(
     }
 
     let warp_ft = ctx.now_blueos_filetime_ticks();
+    let warp_end_ft = warp_ft + 10_000_000;
     for (pid, new_pos) in moved_balls {
         if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(pid).await {
             let old_pos = b.position;
@@ -751,6 +753,11 @@ async fn handle_request_scans(
                 let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
                 let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
                 let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(1000)]);
+                if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+                    if let Some(p) = probe_map.get_mut(&pid) {
+                        p.warp_end_ft = Some(warp_end_ft);
+                    }
+                }
             }
         }
     }
@@ -1323,5 +1330,24 @@ async fn handle_destroy_probe(
         ("destroyedCount", PyRep::Integer(destroyed_probes.len() as i64)),
         ("destroyed", PyRep::Bool(!destroyed_probes.is_empty())),
     ])))
+}
+
+/// Emits `OnProbeWarpEnd` for any scanner probes whose warp arrival filetime has elapsed.
+pub fn tick_probe_warp_end(ctx: &ServerContext) {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let mut due = Vec::new();
+    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+        for p in probe_map.values_mut() {
+            if let Some(end_ft) = p.warp_end_ft {
+                if now_ft >= end_ft {
+                    p.warp_end_ft = None;
+                    due.push((p.owner_char_id, p.probe_id));
+                }
+            }
+        }
+    }
+    for (char_id, pid) in due {
+        crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, pid);
+    }
 }
 
