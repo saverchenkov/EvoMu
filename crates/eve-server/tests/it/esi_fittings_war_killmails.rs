@@ -95,7 +95,7 @@ fn fitting_body(name: &str, ship: u32, items: Value) -> Vec<u8> {
     .unwrap()
 }
 
-/// Rows of the client's `charFittingMgr.GetFittings` rowset as
+/// Entries of the client's `charFittingMgr.GetFittings` `{fittingID: KeyVal}` dict as
 /// `(fittingID, name, shipTypeID, [(typeID, flag, qty)])`.
 async fn client_fittings(ctx: &ServerContext) -> Vec<(i64, String, i64, Vec<(i64, i64, i64)>)> {
     let mut sess = eve_machonet::SessionState::new(91_001);
@@ -113,17 +113,16 @@ async fn client_fittings(ctx: &ServerContext) -> Vec<(i64, String, i64, Vec<(i64
         )
         .await
         .expect("charFittingMgr.GetFittings");
-    let PyRep::Rowset { columns, rows } = rep else {
-        panic!("GetFittings must return a rowset, got {rep:?}")
+    let PyRep::Dict(entries) = rep else {
+        panic!("GetFittings must return a Dict {{fittingID: KeyVal}}, got {rep:?}")
     };
-    assert_eq!(
-        columns,
-        ["fittingID", "name", "shipTypeID", "description", "items"]
-    );
-    rows.into_iter()
-        .map(|r| {
-            let items = match &r[4] {
-                PyRep::List(v) => v
+    entries
+        .into_iter()
+        .map(|(k, kv)| {
+            let fid = k.as_i64().expect("fittingID key");
+            assert_eq!(kv.dict_get("fittingID").and_then(|v| v.as_i64()), Some(fid));
+            let items = match kv.dict_get("fitData") {
+                Some(PyRep::List(v)) => v
                     .iter()
                     .map(|t| match t {
                         PyRep::Tuple(x) => (
@@ -134,12 +133,12 @@ async fn client_fittings(ctx: &ServerContext) -> Vec<(i64, String, i64, Vec<(i64
                         other => panic!("fit item {other:?}"),
                     })
                     .collect(),
-                other => panic!("items {other:?}"),
+                other => panic!("fitData {other:?}"),
             };
             (
-                r[0].as_i64().unwrap(),
-                r[1].as_str().unwrap().to_string(),
-                r[2].as_i64().unwrap(),
+                fid,
+                kv.dict_get("name").and_then(|v| v.as_str()).unwrap().to_string(),
+                kv.dict_get("shipTypeID").and_then(|v| v.as_i64()).unwrap(),
                 items,
             )
         })

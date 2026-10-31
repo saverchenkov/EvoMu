@@ -399,47 +399,60 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
         .await
         .expect("GetAllWarzonesOccupationStates");
     match all_occ {
-        PyRep::List(list) => {
-            assert!(!list.is_empty(), "Warzone list should not be empty");
-            let fw_entry = list
+        PyRep::Dict(by_wz) => {
+            let wz2 = by_wz
                 .iter()
-                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(FW_SYSTEM_ID as i64)))
-                .expect("FW system present in GetAllWarzonesOccupationStates");
+                .find_map(|(k, v)| match (k, v) {
+                    (PyRep::Integer(2), PyRep::Dict(m)) => Some(m),
+                    _ => None,
+                })
+                .expect("Warzone 2 dict present");
+            assert!(!wz2.is_empty(), "Warzone 2 dict should not be empty");
+            let find_sys = |sid: i64| {
+                by_wz.iter().find_map(|(_, v)| match v {
+                    PyRep::Dict(m) => m
+                        .iter()
+                        .find_map(|(k, kv)| (*k == PyRep::Integer(sid)).then_some(kv)),
+                    _ => None,
+                })
+            };
+            let fw_entry =
+                find_sys(FW_SYSTEM_ID as i64).expect("FW system present in GetAllWarzonesOccupationStates");
+            assert_eq!(
+                fw_entry.dict_get("occupierID"),
+                Some(&PyRep::Integer(FACTION_MINMATAR as i64))
+            );
             assert_eq!(
                 fw_entry.dict_get("occupierFactionID"),
                 Some(&PyRep::Integer(FACTION_MINMATAR as i64))
             );
             assert_eq!(
-                fw_entry.dict_get("frontlineStatus"),
+                fw_entry.dict_get("adjacencyState"),
                 Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_REARGUARD))
             );
 
             // Natural frontline system (30002087, border system with Amarr)
-            let frontline_entry = list
-                .iter()
-                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(30002087)))
-                .expect("30002087 in GetAllWarzonesOccupationStates");
+            let frontline_entry =
+                find_sys(30002087).expect("30002087 in GetAllWarzonesOccupationStates");
             assert_eq!(
                 frontline_entry.dict_get("frontlineStatus"),
                 Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_FRONTLINE))
             );
 
             // Natural command system (30002086, adjacent to frontline 30002087)
-            let command_entry = list
-                .iter()
-                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(30002086)))
-                .expect("30002086 in GetAllWarzonesOccupationStates");
+            let command_entry =
+                find_sys(30002086).expect("30002086 in GetAllWarzonesOccupationStates");
             assert_eq!(
                 command_entry.dict_get("frontlineStatus"),
                 Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_COMMAND))
             );
 
-            let non_fw = list
-                .iter()
-                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(NON_FW_SYSTEM_ID as i64)));
-            assert!(non_fw.is_none(), "Non-warzone system must not be in GetAllWarzonesOccupationStates");
+            assert!(
+                find_sys(NON_FW_SYSTEM_ID as i64).is_none(),
+                "Non-warzone system must not be in GetAllWarzonesOccupationStates"
+            );
         }
-        other => panic!("Expected List, got {other:?}"),
+        other => panic!("Expected Dict {{warzoneID: {{solarSystemID: KeyVal}}}}, got {other:?}"),
     }
 
     let fw_keys = ctx

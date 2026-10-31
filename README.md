@@ -212,9 +212,10 @@ On startup, `eve-server` loads [`evomu.toml`](./evomu.toml) from the working dir
 
 ```toml
 bind_address = "127.0.0.1"
-macho_port = 26000   # Native V24.01 eveMarshal / machoNet GPSTransport TCP port (EVE client)
-bridge_port = 26002  # JSON / MessagePack Client Bridge TCP port (dev harness & evomu_bridge.py)
-esi_port = 26004     # ESI OpenAPI + OAuth2 / PKCE (S256) SSO HTTP port
+macho_port = 26000        # Native V24.01 eveMarshal / machoNet GPSTransport TCP port (EVE client)
+bridge_port = 26002       # JSON / MessagePack Client Bridge TCP port (dev harness & evomu_bridge.py)
+esi_port = 26004          # ESI OpenAPI + OAuth2 / PKCE (S256) SSO HTTP port
+quasar_grpc_port = 26005  # Native V24.01 Quasar Public Gateway HTTP/2 (h2c) gRPC port
 
 sde_path = "data/evomu_sde.sqlite"
 world_db_path = "data/evomu_world.sqlite"
@@ -255,7 +256,9 @@ All settings can be overridden via environment variables without editing `evomu.
 |---|---|
 | `EVOMU_CONFIG_PATH` | Path to a custom `.toml` configuration file (defaults to `./evomu.toml`). |
 | `EVOMU_SDE_PATH` | Override `sde_path` (`data/evomu_sde.sqlite`). |
+| `EVOMU_RESFILES_DIR` / `EVOMU_SHARED_CACHE` | Override the EVE client `SharedCache/ResFiles` directory (auto-discovered on macOS and via `HKCU\Software\CCP\EVEONLINE\CACHEFOLDER` on Windows). |
 | `EVOMU_DB_PATH` / `EVOMU_SNAPSHOT_PATH` | Override `world_db_path` (`data/evomu_world.sqlite`). |
+| `EVOMU_QUASAR_GRPC_PORT` | Override `quasar_grpc_port` (defaults to `26005`). |
 | `EVOMU_ACCOUNTS` | Comma-separated `user:password` list to provision player accounts on startup (e.g. `pilot1:pass1,pilot2:pass2`). |
 | `EVOMU_GM_ACCOUNT` | `user:password` spec for a GM account (provisions character `90000003`, `"ISD Polaris"`). |
 | `EVOMU_ADMIN_TOKEN` | Provisions GM account `"admin"` with the given password token. |
@@ -286,7 +289,13 @@ cargo test --workspace
 python3 tools/client-harness/run_journeys --out /tmp/evomu_harness --bridge-harness-test
 ```
 
-To point the real V24.01 EVE client at your local server, see [`docs/BLOCKERS.md`](./docs/BLOCKERS.md) §3.
+To point the real V24.01 EVE client at your local server, see [`docs/BLOCKERS.md`](./docs/BLOCKERS.md) §3, and export `EVE_PUBLIC_GATEWAY_ADDRESS=127.0.0.1:26005` (or `<server-lan-ip>:26005`) in the client's environment before launching `exefile.exe` so `_grpc_public_gateway.pyd` connects to `eve-server`'s local HTTP/2 Quasar gateway instead of `tq-public-gateway.evetech.net`:
+
+```powershell
+# Windows PowerShell client launch example:
+$env:EVE_PUBLIC_GATEWAY_ADDRESS = "127.0.0.1:26005"
+Start-Process "C:\EVE\SharedCache\tq\bin64\exefile.exe" -ArgumentList "/server:127.0.0.1"
+```
 
 ---
 

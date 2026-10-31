@@ -1310,6 +1310,13 @@ pub fn handle(
         ("skillMgr2", "GetBoosters") => Some(crate::services::implant_plugging::get_boosters(
             ctx, session,
         )),
+        ("skillMgr2", "GetSkillChangesForISIS") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(Vec::new())))
+        }
         ("dogmaIM", "InjectImplant") => Some(crate::services::implant_plugging::inject_implant(
             ctx, session, args,
         )),

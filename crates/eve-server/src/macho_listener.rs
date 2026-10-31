@@ -558,6 +558,8 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 Some("machoNet:26000"),
                             )
                             .await;
+                        let rpc_res =
+                            crate::quasar_grpc::normalize_macho_rpc_reply(&service, &method, rpc_res);
 
                         if session.solar_system_id != prev_session.solar_system_id {
                             ballpark_ready = false;

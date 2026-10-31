@@ -134,8 +134,8 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         .expect("GetServiceInfo");
     assert!(matches!(svc_info, PyRep::Dict(_)));
 
-    // 4. subscriptionMgr / loginRewardFacilities: GetCloneGrade vs get_my_clone_grade
-    let clone_grade_kv = ctx
+    // 4. subscriptionMgr / loginRewardFacilities: GetCloneGrade vs get_my_clone_grade (CLONE_STATE_OMEGA == 1)
+    let clone_grade_sub = ctx
         .dispatch_rpc(
             &mut sess,
             "subscriptionMgr",
@@ -147,7 +147,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         )
         .await
         .expect("GetCloneGrade");
-    assert!(matches!(clone_grade_kv, PyRep::KeyVal(_)));
+    assert_eq!(clone_grade_sub, PyRep::Integer(1));
     let clone_grade_int = ctx
         .dispatch_rpc(
             &mut sess,
@@ -160,7 +160,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
         )
         .await
         .expect("get_my_clone_grade");
-    assert_eq!(clone_grade_int, PyRep::Integer(2));
+    assert_eq!(clone_grade_int, PyRep::Integer(1));
 
     // 5. jumpCloneSvc: GetPriceForClone, InstallCloneInStation (station clone bay check),
     // InstallCloneInStructure, GetCloneState vs GetStationCloneState, CloneJump (implant swap + departure bay check + cooldown)

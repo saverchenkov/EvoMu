@@ -1013,7 +1013,10 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         )
         .await
         .expect("charFittingMgr.GetFittings");
-    assert_eq!(fittings_rowset.row_count(), Some(3));
+    let PyRep::Dict(char_fits_map) = fittings_rowset else {
+        panic!("expected Dict from charFittingMgr.GetFittings");
+    };
+    assert_eq!(char_fits_map.len(), 3);
 
     // Corporate fitting save & retrieve via corpFittingMgr
     let corp_id = sess.corporation_id.unwrap_or(1_000_009);
@@ -1043,7 +1046,10 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         )
         .await
         .expect("corpFittingMgr.GetFittings");
-    assert_eq!(corp_fittings.row_count(), Some(1));
+    let PyRep::Dict(corp_fits_map) = corp_fittings else {
+        panic!("expected Dict from corpFittingMgr.GetFittings");
+    };
+    assert_eq!(corp_fits_map.len(), 1);
 
     // DeleteManyFittings & DeleteFitting
     ctx.dispatch_rpc(
@@ -1098,7 +1104,10 @@ async fn test_inv3_dna_fitting_string_encoder_decoder() {
         )
         .await
         .expect("allianceFittingMgr.GetFittings");
-    assert_eq!(alliance_fittings.row_count(), Some(1));
+    let PyRep::Dict(alliance_fits_map) = alliance_fittings else {
+        panic!("expected Dict from allianceFittingMgr.GetFittings");
+    };
+    assert_eq!(alliance_fits_map.len(), 1);
     ctx.dispatch_rpc(
         &mut sess,
         "allianceFittingMgr",

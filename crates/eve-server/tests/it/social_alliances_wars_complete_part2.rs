@@ -239,10 +239,12 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     let save_fit = ctx.dispatch_rpc(&mut sess1, "corpFittingMgr", None, "SaveFitting", &[PyRep::Integer(corp_id), fit_kv], &kw, None).await.unwrap();
     let fit_id = save_fit.as_i64().unwrap();
     let fits_rep = ctx.dispatch_rpc(&mut sess2, "corpFittingMgr", None, "GetFittings", &[PyRep::Integer(corp_id)], &kw, None).await.unwrap();
-    let (_, fits_rows) = rows(&fits_rep);
-    let fit_row = fits_rows.iter().find(|r| r[0] == PyRep::Integer(fit_id)).unwrap();
-    assert_eq!(&fit_row[1], &PyRep::String("Corp Doctrine Rifter".into()));
-    assert_eq!(&fit_row[2], &PyRep::Integer(587));
+    let PyRep::Dict(fits_entries) = &fits_rep else {
+        panic!("expected Dict from corpFittingMgr.GetFittings, got {fits_rep:?}");
+    };
+    let (_, fit_kv_out) = fits_entries.iter().find(|(k, _)| *k == PyRep::Integer(fit_id)).unwrap();
+    assert_eq!(fit_kv_out.dict_get("name"), Some(&PyRep::String("Corp Doctrine Rifter".into())));
+    assert_eq!(fit_kv_out.dict_get("shipTypeID"), Some(&PyRep::Integer(587)));
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpFittingMgr", None, "DeleteFitting", &[PyRep::Integer(corp_id), PyRep::Integer(fit_id)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     ctx.dispatch_rpc(&mut sess1, "corpFittingMgr", None, "DeleteFitting", &[PyRep::Integer(corp_id), PyRep::Integer(fit_id)], &kw, None).await.unwrap();
 

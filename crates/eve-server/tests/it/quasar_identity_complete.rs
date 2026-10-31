@@ -379,7 +379,7 @@ async fn test_q3_entitlements_omega_and_membership() {
     sess_101.character_id = Some(90_000_101);
     assert_eq!(
         ctx.dispatch_rpc(&mut sess_101, "loginRewardFacilities", None, "get_my_clone_grade", &[], &empty_kw, None).await.expect("clone grade pre"),
-        PyRep::Integer(1)
+        PyRep::Integer(0)
     );
 
     session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
@@ -433,7 +433,7 @@ async fn test_q3_entitlements_omega_and_membership() {
     assert_eq!(mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()), Some(b"omega".as_slice()));
     assert_eq!(
         ctx.dispatch_rpc(&mut sess_101, "loginRewardFacilities", None, "get_my_clone_grade", &[], &empty_kw, None).await.expect("clone grade post"),
-        PyRep::Integer(2)
+        PyRep::Integer(1)
     );
 
     let char_ent_req = build_public_request(

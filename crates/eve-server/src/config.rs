@@ -103,6 +103,8 @@ pub struct ServerConfig {
     pub bridge_port: u16,
     #[serde(default = "default_esi_port")]
     pub esi_port: u16,
+    #[serde(default = "default_quasar_grpc_port")]
+    pub quasar_grpc_port: u16,
     #[serde(default = "default_sde_path")]
     pub sde_path: String,
     #[serde(default = "default_world_db_path")]
@@ -135,6 +137,10 @@ fn default_esi_port() -> u16 {
     26_004
 }
 
+fn default_quasar_grpc_port() -> u16 {
+    26_005
+}
+
 fn default_sde_path() -> String {
     "data/evomu_sde.sqlite".to_string()
 }
@@ -158,6 +164,7 @@ impl Default for ServerConfig {
             macho_port: default_macho_port(),
             bridge_port: default_bridge_port(),
             esi_port: default_esi_port(),
+            quasar_grpc_port: default_quasar_grpc_port(),
             sde_path: default_sde_path(),
             world_db_path: default_world_db_path(),
             admin_accounts: Vec::new(),
@@ -261,6 +268,14 @@ impl ServerConfig {
                         character_name: default_admin_char_name(),
                     });
                 }
+            }
+        }
+        if let Ok(grpc_port_str) = std::env::var("EVOMU_QUASAR_GRPC_PORT") {
+            let trimmed = grpc_port_str.trim();
+            if !trimmed.is_empty() {
+                cfg.quasar_grpc_port = trimmed.parse::<u16>().map_err(|e| {
+                    format!("Invalid EVOMU_QUASAR_GRPC_PORT '{trimmed}': {e}")
+                })?;
             }
         }
         Ok(cfg)

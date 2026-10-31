@@ -483,7 +483,7 @@ pub(crate) async fn handle_fitting_mgr(
                 }
                 owner_id
             };
-            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+            let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 let mut fittings: Vec<_> = snap
                     .saved_fittings
                     .values()
@@ -504,20 +504,22 @@ pub(crate) async fn handle_fitting_mgr(
                                 ])
                             })
                             .collect();
-                        vec![
+                        (
                             PyRep::Integer(f.fitting_id),
-                            PyRep::String(f.name.clone()),
-                            PyRep::Integer(f.ship_type_id as i64),
-                            PyRep::String(f.description.clone()),
-                            PyRep::List(item_tuples),
-                        ]
+                            PyRep::keyval([
+                                ("fittingID", PyRep::Integer(f.fitting_id)),
+                                ("ownerID", PyRep::Integer(f.owner_id)),
+                                ("shipTypeID", PyRep::Integer(f.ship_type_id as i64)),
+                                ("name", PyRep::String(f.name.clone())),
+                                ("description", PyRep::String(f.description.clone())),
+                                ("fitData", PyRep::List(item_tuples.clone())),
+                                ("items", PyRep::List(item_tuples)),
+                            ]),
+                        )
                     })
                     .collect()
             });
-            Some(Ok(PyRep::rowset(
-                vec!["fittingID", "name", "shipTypeID", "description", "items"],
-                rows,
-            )))
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         ("charFittingMgr", "UpdateNameAndDescription") | ("corpFittingMgr", "UpdateNameAndDescription") | ("allianceFittingMgr", "UpdateNameAndDescription") | ("charFittingMgr", "UpdateFitting") | ("corpFittingMgr", "UpdateFitting") | ("allianceFittingMgr", "UpdateFitting") => {

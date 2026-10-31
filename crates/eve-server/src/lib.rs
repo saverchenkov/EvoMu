@@ -11,6 +11,7 @@ pub mod formulas;
 pub mod living_world;
 pub mod log_ring_buffer;
 pub mod quasar_gateway;
+pub mod quasar_grpc;
 pub mod rng;
 pub mod macho_listener;
 pub mod router;

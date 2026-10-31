@@ -44,35 +44,92 @@ LABEL_SPECS: Dict[str, Tuple[str, str]] = {
 }
 
 
+_TRANSPORT_WRAPPER_FILES = {
+    "moniker.py",
+    "machonettransport.py",
+    "servicecallgpcs.py",
+    "gpcs.py",
+    "retry.py",
+    "__init__.py",
+}
+
+
 def parse_traceback_summary(trace: str, stack_key: str) -> Tuple[str, str, str]:
     """
-    Extracts (exception_class, error_msg, location) from a Python stack trace.
-    Returns e.g. ("TypeError", "'NoneType' object is not subscriptable", "map.pyj:412 in Open").
+    Extracts (exception_class, error_msg, location) from either a standard Python traceback
+    or an EVE `alert.SendClientStackTraceAlert` formatted exception block (`Formatted exception info:`,
+    `Thrown at:`, `<pre>/path/file.py(123) func`, `EXCEPTION END`).
     """
     lines = [line.strip() for line in trace.strip().splitlines() if line.strip()]
     if not lines:
         return "UnknownException", "No traceback provided", stack_key or "unknown"
 
-    last_line = lines[-1]
-    if ":" in last_line:
-        exc_class, msg = last_line.split(":", 1)
-        exc_class = exc_class.strip()
-        msg = msg.strip()
-    else:
-        exc_class = last_line.strip()
-        msg = ""
+    exc_class = ""
+    msg = ""
+    for line in lines:
+        if line.startswith("Formatted exception info:"):
+            rest = line[len("Formatted exception info:") :].strip()
+            if ":" in rest:
+                exc_class, msg = rest.split(":", 1)
+                exc_class, msg = exc_class.strip(), msg.strip()
+            else:
+                exc_class = rest
+            break
 
-    location = stack_key or "unknown"
+    if not exc_class:
+        trailing_noise_prefixes = (
+            "EXCEPTION END",
+            "Reported from:",
+            "Stackhash:",
+            "Thread Locals:",
+            "Common path prefix",
+        )
+        candidate_lines = [
+            l for l in lines if not any(l.startswith(p) for p in trailing_noise_prefixes)
+        ]
+        last_line = candidate_lines[-1] if candidate_lines else lines[-1]
+        if ":" in last_line:
+            exc_class, msg = last_line.split(":", 1)
+            exc_class, msg = exc_class.strip(), msg.strip()
+        else:
+            exc_class = last_line.strip()
+            msg = ""
+
+    clean_stack_key = stack_key.strip() if stack_key else ""
+    if clean_stack_key.startswith(("Caught at:", "Thrown at:")):
+        clean_stack_key = ""
+    location = clean_stack_key or "unknown"
+
+    # Prefer frames under EVE's `Thrown at:` section when present.
+    thrown_idx = next((i for i, l in enumerate(lines) if l.startswith("Thrown at:")), None)
+    search_lines = lines[thrown_idx + 1 :] if thrown_idx is not None else lines
+
+    pre_frames: List[Tuple[str, str, Optional[str]]] = []
+    for line in search_lines:
+        if line.startswith(("Formatted exception info:", "Common path prefix", "EXCEPTION END")):
+            break
+        m_pre = re.match(r"^<pre>([^\s(]+)\((\d+)\)\s*(\w+)?", line)
+        if m_pre:
+            filepath = os.path.basename(m_pre.group(1).replace("\\", "/"))
+            pre_frames.append((filepath, m_pre.group(2), m_pre.group(3)))
+
+    if pre_frames:
+        chosen = pre_frames[-1]
+        for cand in reversed(pre_frames):
+            if cand[0].lower() not in _TRANSPORT_WRAPPER_FILES:
+                chosen = cand
+                break
+        filepath, lineno, fn = chosen
+        location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
+        return exc_class, msg, location
+
     for line in reversed(lines[:-1]):
         m = re.search(r'File\s+["\']([^"\']+)["\'],\s+line\s+(\d+)(?:,\s+in\s+(\w+))?', line)
         if m:
-            filepath = os.path.basename(m.group(1))
+            filepath = os.path.basename(m.group(1).replace("\\", "/"))
             lineno = m.group(2)
             fn = m.group(3)
-            if fn:
-                location = f"{filepath}:{lineno} in {fn}"
-            else:
-                location = f"{filepath}:{lineno}"
+            location = f"{filepath}:{lineno} in {fn}" if fn else f"{filepath}:{lineno}"
             break
 
     return exc_class, msg, location

@@ -4,6 +4,7 @@
 //! - TCP Port `26002`: Modern MessagePack/JSON Client Bridge listener (`evomu_bridge.py`).
 //! - TCP Port `26000`: Native V24.01 `eveMarshal` / `machoNet` `GPSTransport` handshake & packet listener (`P-6`).
 //! - TCP Port `26004`: ESI / SSO OAuth2 + PKCE (`S256`) HTTP listener (`ESI-1`).
+//! - TCP Port `26005`: Native V24.01 Quasar Public Gateway HTTP/2 gRPC listener (`EVE_PUBLIC_GATEWAY_ADDRESS=127.0.0.1:26005`).
 
 #![forbid(unsafe_code)]
 
@@ -11,6 +12,7 @@ use anyhow::{bail, Result};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeEnvelope, PyRep, MAX_FRAME_SIZE};
 use eve_server::macho_listener::handle_macho_client;
+use eve_server::quasar_grpc::handle_quasar_grpc_connection;
 use eve_server::router::ServerContext;
 use eve_server::sso::handle_http_connection;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,6 +82,7 @@ async fn main() -> Result<()> {
         sde_path = %cfg.sde_path,
         world_db_path = %cfg.world_db_path,
         esi_port = cfg.esi_port,
+        quasar_grpc_port = cfg.quasar_grpc_port,
         enable_quasar_gateway = cfg.feature_flags.enable_quasar_gateway,
         enable_esi_http = cfg.feature_flags.enable_esi_http,
         enable_living_world = cfg.feature_flags.enable_living_world,
@@ -96,6 +99,19 @@ async fn main() -> Result<()> {
             bind_address = %cfg.bind_address,
             esi_port = cfg.esi_port,
             "Listening on ESI / SSO OAuth2 HTTP TCP"
+        );
+        Some(l)
+    } else {
+        None
+    };
+    let quasar_grpc_listener = if cfg.feature_flags.enable_quasar_gateway && cfg.quasar_grpc_port > 0 {
+        let l = TcpListener::bind((cfg.bind_address.as_str(), cfg.quasar_grpc_port)).await?;
+        info!(
+            bind_address = %cfg.bind_address,
+            quasar_grpc_port = cfg.quasar_grpc_port,
+            "Listening on Quasar Public Gateway HTTP/2 gRPC TCP (set EVE_PUBLIC_GATEWAY_ADDRESS={}:{} on client)",
+            if cfg.bind_address == "0.0.0.0" { "127.0.0.1" } else { cfg.bind_address.as_str() },
+            cfg.quasar_grpc_port,
         );
         Some(l)
     } else {
@@ -158,6 +174,24 @@ async fn main() -> Result<()> {
                     let _permit = permit;
                     if let Err(e) = handle_http_connection(stream, ctx_clone).await {
                         error!(%addr, error = %e, "SSO/ESI HTTP connection closed with error");
+                    }
+                });
+            }
+            Ok((stream, addr)) = async {
+                match &quasar_grpc_listener {
+                    Some(l) => l.accept().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Ok(permit) = Arc::clone(&http_conn_limiter).try_acquire_owned() else {
+                    warn!(%addr, "Connection limit reached; rejecting Quasar gRPC HTTP/2 connection");
+                    continue;
+                };
+                let ctx_clone = Arc::clone(&ctx);
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Err(e) = handle_quasar_grpc_connection(stream, ctx_clone).await {
+                        warn!(%addr, error = %e, "Quasar gRPC HTTP/2 connection closed with error");
                     }
                 });
             }

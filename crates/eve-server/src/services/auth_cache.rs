@@ -527,27 +527,26 @@ pub async fn handle(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            let (clone_grade_u8, race_id) = session
+            // Client `clonegrade.const`: `CLONE_STATE_ALPHA = 0`, `CLONE_STATE_OMEGA = 1`
+            // (`eve-db` stores `1 = Alpha, 2 = Omega`).
+            let clone_grade_u8 = session
                 .character_id
                 .and_then(|cid| ctx.db.get_character(cid).ok())
-                .map(|c| (c.clone_grade, c.race_id))
-                .unwrap_or((1, 1));
-            let skill_caps_count = ctx
-                .sde
-                .clone_grades
-                .get(&race_id)
-                .or_else(|| ctx.sde.clone_grades.get(&(clone_grade_u8 as u32)))
-                .map(|g| g.alpha_skill_caps.len())
-                .unwrap_or(0);
-            Some(Ok(PyRep::keyval([
-                ("userID", PyRep::Integer(uid as i64)),
-                ("cloneGrade", PyRep::Integer(clone_grade_u8 as i64)),
-                ("alphaSkillCapsCount", PyRep::Integer(skill_caps_count as i64)),
-            ])))
+                .map(|c| c.clone_grade)
+                .unwrap_or_else(|| {
+                    ctx.db
+                        .get_characters_for_user(uid)
+                        .into_iter()
+                        .map(|c| c.clone_grade)
+                        .max()
+                        .unwrap_or(1)
+                });
+            let client_clone_state = if clone_grade_u8 >= 2 { 1 } else { 0 };
+            Some(Ok(PyRep::Integer(client_clone_state)))
         }
 
         ("loginRewardFacilities", "get_my_clone_grade") => {
-            let _ = match ServerContext::require_auth(session) {
+            let uid = match ServerContext::require_auth(session) {
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
@@ -555,8 +554,16 @@ pub async fn handle(
                 .character_id
                 .and_then(|cid| ctx.db.get_character(cid).ok())
                 .map(|c| c.clone_grade)
-                .unwrap_or(1);
-            Some(Ok(PyRep::Integer(clone_grade_u8 as i64)))
+                .unwrap_or_else(|| {
+                    ctx.db
+                        .get_characters_for_user(uid)
+                        .into_iter()
+                        .map(|c| c.clone_grade)
+                        .max()
+                        .unwrap_or(1)
+                });
+            let client_clone_state = if clone_grade_u8 >= 2 { 1 } else { 0 };
+            Some(Ok(PyRep::Integer(client_clone_state)))
         }
 
         ("slash", "SlashCmd") => {

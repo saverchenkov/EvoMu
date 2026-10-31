@@ -219,8 +219,7 @@ async fn test_account_alpha_omega_switch_and_subscription_time() {
         .dispatch_rpc(&mut sess, "subscriptionMgr", None, "GetCloneGrade", &[], &kw, None)
         .await
         .expect("GetCloneGrade after lapse");
-    let PyRep::KeyVal(grade_kv) = grade_rep else { panic!("expected KeyVal") };
-    assert_eq!(grade_kv.get("cloneGrade").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(grade_rep, PyRep::Integer(0), "CLONE_STATE_ALPHA == 0");
     let sub_after = ctx
         .dispatch_rpc(&mut sess, "subscriptionMgr", None, "GetSubscriptionTime", &[], &kw, None)
         .await

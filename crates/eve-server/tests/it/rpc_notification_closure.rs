@@ -371,7 +371,7 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
         )
         .await
         .expect("charFittingMgr.GetFittings");
-    assert!(matches!(fittings, PyRep::Rowset { .. }));
+    assert!(matches!(fittings, PyRep::Dict(_)));
 
     // 5. Test MachoBindObject with piggybacked method call
     let bind_res = ctx

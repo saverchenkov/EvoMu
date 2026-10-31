@@ -491,7 +491,7 @@ async fn test_fw_warzone_solarsystem_states_and_queries() {
         )
         .await
         .expect("GetAllWarzonesOccupationStates");
-    assert!(matches!(states_cached, PyRep::List(_)));
+    assert!(matches!(states_cached, PyRep::Dict(_)));
 
     let states_uncached = ctx
         .dispatch_rpc(
@@ -505,7 +505,7 @@ async fn test_fw_warzone_solarsystem_states_and_queries() {
         )
         .await
         .expect("GetAllWarzonesOccupationStatesUncached");
-    assert!(matches!(states_uncached, PyRep::List(_)));
+    assert!(matches!(states_uncached, PyRep::Dict(_)));
 
     // 4. GetLocalOccupationState
     let local_state = ctx

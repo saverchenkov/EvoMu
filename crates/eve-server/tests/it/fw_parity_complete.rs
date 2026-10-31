@@ -65,30 +65,31 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
         .await
         .expect("GetAllWarzonesOccupationStates");
     match all_states {
-        PyRep::List(states) => {
-            assert!(!states.is_empty(), "Must contain warzone systems");
-            let amo = states
-                .iter()
-                .find(|s| s.dict_get("solarSystemID") == Some(&PyRep::Integer(sys_id as i64)))
-                .expect("Amo must be in occupation states");
+        PyRep::Dict(by_wz) => {
+            let find_sys = |sid: i64| {
+                by_wz.iter().find_map(|(_, v)| match v {
+                    PyRep::Dict(m) => m
+                        .iter()
+                        .find_map(|(k, kv)| (*k == PyRep::Integer(sid)).then_some(kv)),
+                    _ => None,
+                })
+            };
+            let amo = find_sys(sys_id as i64).expect("Amo must be in occupation states");
+            assert_eq!(amo.dict_get("ownerID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
             assert_eq!(amo.dict_get("ownerFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
+            assert_eq!(amo.dict_get("occupierID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
             assert_eq!(amo.dict_get("occupierFactionID"), Some(&PyRep::Integer(FACTION_MINMATAR)));
+            assert_eq!(amo.dict_get("adjacencyState"), Some(&PyRep::Integer(STATUS_REARGUARD)));
             assert_eq!(amo.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_REARGUARD)));
             assert!(matches!(amo.dict_get("contestedPercentage"), Some(&PyRep::Real(_))));
 
             // Frontline system 30002087 and Command system 30002086
-            let fl = states
-                .iter()
-                .find(|s| s.dict_get("solarSystemID") == Some(&PyRep::Integer(30002087)))
-                .expect("30002087 must be present");
+            let fl = find_sys(30002087).expect("30002087 must be present");
             assert_eq!(fl.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_FRONTLINE)));
-            let cmd = states
-                .iter()
-                .find(|s| s.dict_get("solarSystemID") == Some(&PyRep::Integer(30002086)))
-                .expect("30002086 must be present");
+            let cmd = find_sys(30002086).expect("30002086 must be present");
             assert_eq!(cmd.dict_get("frontlineStatus"), Some(&PyRep::Integer(STATUS_COMMAND)));
         }
-        other => panic!("Expected List for GetAllWarzonesOccupationStates, got {other:?}"),
+        other => panic!("Expected Dict for GetAllWarzonesOccupationStates, got {other:?}"),
     }
 
     // GetLocalOccupationState returns tuple (sys_id, state_keyval)

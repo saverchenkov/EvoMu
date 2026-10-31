@@ -645,9 +645,10 @@ pub async fn handle(
                     snap.backfill_fw_system_occupations();
                 }
             });
-            let states = ctx.db.with_snapshot(|snap| {
+            let states_by_warzone = ctx.db.with_snapshot(|snap| {
                 let frontlines = compute_all_frontline_statuses(ctx, snap);
-                let mut list = Vec::new();
+                let mut wz1: Vec<(u32, PyRep)> = Vec::new();
+                let mut wz2: Vec<(u32, PyRep)> = Vec::new();
                 for (&sys_id, occ) in &snap.fw_system_occupations {
                     let c = snap
                         .system_states
@@ -664,17 +665,44 @@ pub async fn handle(
                             ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
                         });
                     let front = frontlines.get(&sys_id).copied().unwrap_or(STATUS_REARGUARD);
-                    list.push(PyRep::keyval([
+                    let kv = PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                        ("ownerID", PyRep::Integer(occ.owner_faction_id)),
                         ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
+                        ("occupierID", PyRep::Integer(occ.occupier_faction_id)),
                         ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
+                        ("adjacencyState", PyRep::Integer(front)),
                         ("frontlineStatus", PyRep::Integer(front)),
                         ("contestedPercentage", PyRep::Real(c)),
-                    ]));
+                    ]);
+                    if matches!(occ.owner_faction_id, FACTION_AMARR | FACTION_MINMATAR) {
+                        wz2.push((sys_id, kv));
+                    } else {
+                        wz1.push((sys_id, kv));
+                    }
                 }
-                list
+                wz1.sort_by_key(|(sid, _)| *sid);
+                wz2.sort_by_key(|(sid, _)| *sid);
+                PyRep::Dict(vec![
+                    (
+                        PyRep::Integer(1),
+                        PyRep::Dict(
+                            wz1.into_iter()
+                                .map(|(sid, kv)| (PyRep::Integer(i64::from(sid)), kv))
+                                .collect(),
+                        ),
+                    ),
+                    (
+                        PyRep::Integer(2),
+                        PyRep::Dict(
+                            wz2.into_iter()
+                                .map(|(sid, kv)| (PyRep::Integer(i64::from(sid)), kv))
+                                .collect(),
+                        ),
+                    ),
+                ])
             });
-            Some(Ok(PyRep::List(states)))
+            Some(Ok(states_by_warzone))
         }
 
         ("fwWarzoneSolarsystem", "GetLocalOccupationState") => {

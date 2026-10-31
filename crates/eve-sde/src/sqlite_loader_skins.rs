@@ -403,27 +403,117 @@ impl SdeRegistry {
     }
 
     /// Resolves the on-disk V24.01 client `SharedCache/ResFiles` path for a `res:/...` static
-    /// data resource indexed in `self.resources` (overridable via `EVOMU_RESFILES_DIR`).
+    /// data resource indexed in `self.resources` (overridable via `EVOMU_RESFILES_DIR` or
+    /// `EVOMU_SHARED_CACHE`, with cross-platform macOS + Windows `SharedCache` auto-discovery).
     pub fn cdn_resource_path(&self, res_path: &str) -> Result<PathBuf, SdeError> {
         let info = self.resources.get(res_path).ok_or_else(|| {
             SdeError::InvalidSchema(format!("SDE resource not indexed: {res_path}"))
         })?;
-        let base = if let Ok(dir) = std::env::var("EVOMU_RESFILES_DIR") {
-            if !dir.trim().is_empty() {
-                PathBuf::from(dir)
-            } else {
-                let home = std::env::var("HOME").unwrap_or_default();
-                PathBuf::from(home).join("Library/Application Support/EVE Online/SharedCache/ResFiles")
-            }
-        } else {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join("Library/Application Support/EVE Online/SharedCache/ResFiles")
-        };
+        let base = resolve_resfiles_base_dir();
         let path = base.join(&info.cdn_relative_path);
         if !path.is_file() {
             return Err(SdeError::MissingDatabase(path.display().to_string()));
         }
         Ok(path)
     }
+}
+
+fn resolve_resfiles_base_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("EVOMU_RESFILES_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Ok(sc) = std::env::var("EVOMU_SHARED_CACHE") {
+        let trimmed = sc.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            let res = p.join("ResFiles");
+            return if res.is_dir() { res } else { p };
+        }
+    }
+    static DISCOVERED_RESFILES_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DISCOVERED_RESFILES_DIR
+        .get_or_init(discover_platform_resfiles_dir)
+        .clone()
+}
+
+fn discover_platform_resfiles_dir() -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    #[cfg(windows)]
+    {
+        if let Ok(out) = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\CCP\EVEONLINE",
+                "/v",
+                "CACHEFOLDER",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    if let Some((_, val)) = line.split_once("REG_SZ") {
+                        let folder = val.trim();
+                        if !folder.is_empty() {
+                            candidates.push(PathBuf::from(folder).join("ResFiles"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            candidates.push(
+                PathBuf::from(home.trim())
+                    .join("Library/Application Support/EVE Online/SharedCache/ResFiles"),
+            );
+        }
+    }
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        if !local_app_data.trim().is_empty() {
+            candidates.push(
+                PathBuf::from(local_app_data.trim()).join(r"CCP\EVE\SharedCache\ResFiles"),
+            );
+        }
+    }
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        if !user_profile.trim().is_empty() {
+            candidates.push(
+                PathBuf::from(user_profile.trim())
+                    .join(r"AppData\Local\CCP\EVE\SharedCache\ResFiles"),
+            );
+        }
+    }
+    if let Ok(program_data) = std::env::var("PROGRAMDATA") {
+        if !program_data.trim().is_empty() {
+            candidates
+                .push(PathBuf::from(program_data.trim()).join(r"CCP\EVE\SharedCache\ResFiles"));
+        }
+    }
+    for fixed in [
+        r"C:\EVE\SharedCache\ResFiles",
+        r"C:\EVE\ResFiles",
+        r"C:\Games\EVE\ResFiles",
+        r"C:\Games\EVE\SharedCache\ResFiles",
+        r"D:\EVE\SharedCache\ResFiles",
+        r"D:\Games\EVE\ResFiles",
+    ] {
+        candidates.push(PathBuf::from(fixed));
+    }
+
+    for cand in &candidates {
+        if cand.is_dir() {
+            return cand.clone();
+        }
+    }
+    candidates.into_iter().next().unwrap_or_else(|| {
+        PathBuf::from("Library/Application Support/EVE Online/SharedCache/ResFiles")
+    })
 }
 
