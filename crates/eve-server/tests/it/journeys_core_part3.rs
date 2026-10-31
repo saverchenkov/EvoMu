@@ -177,87 +177,80 @@ async fn test_journey_pve_combat() {
         .await
         .expect("SelectCharacterID");
 
+    let ship_id = 100_000_001_i64;
+    let t1_id = 100_000_005_i64; // Seeded 200mm AutoCannon II in HiSlot0
+    let (t2_id, t3_id) = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 5;
+        let base = snap.next_entity_id - 4;
+        for (id, tid, flag, qty, sing) in [
+            (base, 2889, InventoryFlag::HiSlot1, 1, true),
+            (base + 1, 2889, InventoryFlag::HiSlot2, 1, true),
+            (base + 2, 21924, InventoryFlag::HiSlot0, 120, false),
+            (base + 3, 21924, InventoryFlag::HiSlot1, 120, false),
+            (base + 4, 21924, InventoryFlag::HiSlot2, 120, false),
+        ] {
+            snap.items.insert(
+                id,
+                InventoryItemRecord {
+                    item_id: id,
+                    type_id: tid,
+                    owner_id: 90_000_001,
+                    location_id: ship_id,
+                    flag,
+                    quantity: qty,
+                    singleton: sing,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        for gid in [t1_id, base, base + 1] {
+            snap.module_online_states.insert(gid, true);
+        }
+        snap.skills.entry(90_000_001).or_default().insert(
+            12201,
+            eve_db::TrainedSkillRecord { type_id: 12201, level: 5, skill_points: 256_000.0 },
+        );
+        (base, base + 1)
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    for slave_id in [t2_id, t3_id] {
+        call_rpc(&ctx, &mut sess, "dogmaIM", "LinkWeapons", &[PyRep::Integer(ship_id), PyRep::Integer(t1_id), PyRep::Integer(slave_id)])
+            .await
+            .expect("LinkWeapons");
+    }
+
     call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
     let sys_id = sess.solar_system_id.unwrap();
-    let ship_id = sess.ship_id.unwrap();
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     assert_eq!(sess.station_id, None);
 
-    // Fit 200mm AutoCannon I + Phased Plasma S
-    let gun_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 2;
-        let gid = snap.next_entity_id - 1;
-        let aid = snap.next_entity_id;
-        snap.items.insert(
-            gid,
-            InventoryItemRecord {
-                item_id: gid,
-                type_id: 2873,
-                owner_id: 90_000_001,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            aid,
-            InventoryItemRecord {
-                item_id: aid,
-                type_id: 178,
-                owner_id: 90_000_001,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        gid
-    });
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_online_states.insert(gun_id, true);
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-
-    // Spawn a belt rat NPC ball
-    let npc_id = 700_200_001_i64;
+    // Spawn a real SDE belt rat frigate with unmodified HP and positive bounty
+    let rat_type_id = ctx
+        .sde
+        .types
+        .values()
+        .filter(|t| {
+            t.default_attributes.get(&481).copied().unwrap_or(0.0) > 0.0
+                && t.default_attributes.get(&263).copied().unwrap_or(9999.0) <= 150.0
+                && t.default_attributes.get(&265).copied().unwrap_or(9999.0) <= 150.0
+                && t.default_attributes.get(&9).copied().unwrap_or(9999.0) <= 150.0
+        })
+        .map(|t| t.type_id)
+        .min()
+        .unwrap_or(10_035);
     let (_, ship_ball) = sys_h.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    let mut combat = ctx.build_type_combat_state(10002); // Guristas frigate
-    combat.shield_hp = 10.0;
-    combat.armor_hp = 10.0;
-    combat.structure_hp = 10.0;
-    sys_h
-        .spawn_ball_with_combat(
-            Ball {
-                id: npc_id,
-                type_id: 10002,
-                position: ship_ball.position + DVec3::new(500.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 200.0,
-                inertia: 1.0,
-                mass: 1_000_000.0,
-                radius: 40.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            combat,
-        )
-        .await
-        .expect("spawn belt rat");
+    let npc_id = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        rat_type_id,
+        "BeltRat",
+        1,
+        ship_ball.position + DVec3::new(500.0, 0.0, 0.0),
+    )
+    .await;
 
-    // Lock target via dogmaIM.AddTarget, activate weapon, tick combat
+    // Lock target via dogmaIM.AddTarget, activate repeating weapon bank, tick real combat
     let wallet_before = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
     call_rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_id)])
         .await
@@ -274,24 +267,22 @@ async fn test_journey_pve_combat() {
             break;
         }
     }
-    ctx.set_invention_roll_override(Some(0.001));
-    call_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id), PyRep::Integer(0)])
+    call_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(t1_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id), PyRep::Integer(1)])
         .await
         .expect("Activate weapon");
-    for _ in 0..10 {
-        ctx.advance_secs(5);
-        let _ = sys_h.step_manual(1.0).await;
-        eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    for _ in 0..60 {
+        let _ = sys_h.tick().await;
         if sys_h.get_ball_snapshot(npc_id).await.unwrap().is_none() {
             break;
         }
     }
-    ctx.set_invention_roll_override(None);
 
     let npc_after = sys_h.get_ball_snapshot(npc_id).await.unwrap();
     assert!(npc_after.is_none(), "NPC must be destroyed by weapon fire");
+    ctx.advance_secs(1_205);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let wallet_after = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance);
-    assert!(wallet_after >= wallet_before, "wallet balance must not decrease after NPC kill");
+    assert!(wallet_after > wallet_before, "wallet balance must increase after NPC bounty payout");
 }
 
 #[tokio::test]

@@ -254,9 +254,9 @@ async fn test_journey_sovereignty_fw() {
     let nullsec_sys = ctx
         .sde
         .solar_systems
-        .values()
-        .find(|s| s.security_status <= 0.0)
-        .map(|s| s.solar_system_id)
+        .keys().copied()
+        .filter(|&id| eve_server::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, id))
+        .min()
         .unwrap_or(30_004_759);
     call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
     call_rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String(format!("/tr {nullsec_sys}"))])
