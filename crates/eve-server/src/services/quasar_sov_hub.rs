@@ -416,7 +416,7 @@ fn hub_local_and_base_pool(
     }
     let power_local = star_p + harvested_p;
     let workforce_local = harvested_w;
-    let imported: u64 = super::quasar_sov_workforce::imports(snap, hub_id)
+    let imported: u64 = super::quasar_sov_workforce::imports(snap, sde, hub_id)
         .iter()
         .map(|s| s.1)
         .sum();
@@ -500,7 +500,7 @@ pub(crate) fn hub_views(snap: &WorldStateSnapshot, sde: &SdeRegistry, extra: &[i
             Some((id, HubView {
                 sys,
                 resources: compute_hub_resources(snap, sde, id)?,
-                state: super::quasar_sov_workforce::encode_state(snap, id),
+                state: super::quasar_sov_workforce::encode_state(snap, sde, id),
             }))
         })
         .collect()

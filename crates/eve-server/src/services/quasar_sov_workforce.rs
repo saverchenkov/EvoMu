@@ -50,10 +50,12 @@ fn linked_owners(snap: &WorldStateSnapshot, a: i64, b: i64) -> bool {
     }
 }
 
-/// Workforce imported by `hub_id`, per configured source system.
-pub fn imports(snap: &WorldStateSnapshot, hub_id: i64) -> Vec<(u32, u64)> {
+/// Workforce imported by `hub_id`, per configured source system (including `Transit` relays).
+pub fn imports(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<(u32, u64)> {
     let PersistedWorkforceMode::Import { sources } = mode(snap, hub_id) else { return Vec::new() };
     let Some(my_sys) = hub_sys(snap, hub_id) else { return Vec::new() };
+    let reachable: std::collections::HashSet<i64> =
+        networkable_hubs(snap, sde, hub_id).into_iter().map(|h| h.0).collect();
     sources
         .iter()
         .map(|src| {
@@ -61,7 +63,12 @@ pub fn imports(snap: &WorldStateSnapshot, hub_id: i64) -> Vec<(u32, u64)> {
                 .sov_runtime
                 .sov_hubs
                 .iter()
-                .filter(|(id, _)| **id != hub_id && hub_sys(snap, **id) == Some(*src) && linked_owners(snap, hub_id, **id))
+                .filter(|(id, _)| {
+                    **id != hub_id
+                        && reachable.contains(id)
+                        && hub_sys(snap, **id) == Some(*src)
+                        && linked_owners(snap, hub_id, **id)
+                })
                 .filter_map(|(_, h)| match &h.workforce {
                     PersistedWorkforceMode::Export { destination: Some(d), amount } if *d == my_sys => Some(*amount),
                     _ => None,
@@ -80,15 +87,18 @@ pub fn exported_amount(snap: &WorldStateSnapshot, hub_id: i64) -> u64 {
     }
 }
 
-/// `true` when the export destination has a hub importing from this hub's system.
-fn export_connected(snap: &WorldStateSnapshot, hub_id: i64) -> Option<u32> {
+/// `true` when the export destination has a reachable hub importing from this hub's system.
+fn export_connected(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<u32> {
     let PersistedWorkforceMode::Export { destination: Some(dest), .. } = mode(snap, hub_id) else { return None };
     let my_sys = hub_sys(snap, hub_id)?;
+    let reachable: std::collections::HashSet<i64> =
+        networkable_hubs(snap, sde, hub_id).into_iter().map(|h| h.0).collect();
     snap.sov_runtime
         .sov_hubs
         .iter()
         .any(|(id, h)| {
             *id != hub_id
+                && reachable.contains(id)
                 && hub_sys(snap, *id) == Some(dest)
                 && linked_owners(snap, hub_id, *id)
                 && matches!(&h.workforce, PersistedWorkforceMode::Import { sources } if sources.contains(&my_sys))
@@ -132,13 +142,13 @@ fn encode_export_destination(destination: Option<u32>, out: &mut Vec<u8>) {
 }
 
 /// Encodes the computed `eve_public.sovereignty.hub.workforce.State` of a hub.
-pub fn encode_state(snap: &WorldStateSnapshot, hub_id: i64) -> Vec<u8> {
+pub fn encode_state(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<u8> {
     let mut b = Vec::new();
     match mode(snap, hub_id) {
         PersistedWorkforceMode::Inactive => encode_varint_field(1, 1, &mut b),
         PersistedWorkforceMode::Import { .. } => {
             let mut imp = Vec::new();
-            for (src_sys, amount) in imports(snap, hub_id) {
+            for (src_sys, amount) in imports(snap, sde, hub_id) {
                 let mut src = Vec::new();
                 id_field(1, u64::from(src_sys), &mut src);
                 encode_varint_field(2, amount, &mut src);
@@ -151,7 +161,7 @@ pub fn encode_state(snap: &WorldStateSnapshot, hub_id: i64) -> Vec<u8> {
             encode_export_destination(destination, &mut exp);
             encode_varint_field(2, amount, &mut exp);
             let mut link = Vec::new();
-            match export_connected(snap, hub_id) {
+            match export_connected(snap, sde, hub_id) {
                 Some(dest) => {
                     id_field(1, u64::from(dest), &mut link);
                     encode_varint_field(2, amount, &mut link);
@@ -221,18 +231,31 @@ pub fn systems_within_jumps(sde: &SdeRegistry, origin: u32, max_jumps: usize) ->
     dist
 }
 
-/// Other sovereignty hubs of the same owner within transfer range of `hub_id`, ordered by id.
+/// Other sovereignty hubs of the same owner within transfer range of `hub_id` (including
+/// multi-hop relays through hubs in [`PersistedWorkforceMode::Transit`]), ordered by id.
 pub fn networkable_hubs(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<(i64, u32)> {
     let Some(my_sys) = hub_sys(snap, hub_id) else { return Vec::new() };
-    let reach = systems_within_jumps(sde, my_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
-    let mut hubs: Vec<(i64, u32)> = snap
-        .structures
-        .values()
-        .filter(|s| s.type_id == TYPE_SOVEREIGNTY_HUB && s.structure_id != hub_id)
-        .filter(|s| s.solar_system_id != my_sys && reach.contains_key(&s.solar_system_id))
-        .filter(|s| linked_owners(snap, hub_id, s.structure_id))
-        .map(|s| (s.structure_id, s.solar_system_id))
-        .collect();
+    let mut visited = std::collections::HashSet::from([hub_id]);
+    let mut queue = VecDeque::from([(hub_id, my_sys)]);
+    let mut hubs = Vec::new();
+    while let Some((_cur_id, cur_sys)) = queue.pop_front() {
+        let reach = systems_within_jumps(sde, cur_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
+        for s in snap.structures.values() {
+            if s.type_id != TYPE_SOVEREIGNTY_HUB
+                || s.solar_system_id == cur_sys
+                || !reach.contains_key(&s.solar_system_id)
+                || !linked_owners(snap, hub_id, s.structure_id)
+            {
+                continue;
+            }
+            if visited.insert(s.structure_id) {
+                hubs.push((s.structure_id, s.solar_system_id));
+                if matches!(mode(snap, s.structure_id), PersistedWorkforceMode::Transit) {
+                    queue.push_back((s.structure_id, s.solar_system_id));
+                }
+            }
+        }
+    }
     hubs.sort_unstable();
     hubs
 }
@@ -283,7 +306,7 @@ fn apply_configuration(
 /// Registers `eve_public.sovereignty.hub.workforce.api` handlers.
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) {
     {
-        let db = Arc::clone(&db);
+        let (db, sde) = (Arc::clone(&db), Arc::clone(&sde));
         router.register_handler(
             "eve_public.sovereignty.hub.workforce.api.GetStateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -291,7 +314,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                 let state = db.with_snapshot(|snap| {
                     let c = caller(ctx, snap)?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
-                    Ok::<_, RpcError>(encode_state(snap, hub_id))
+                    Ok::<_, RpcError>(encode_state(snap, &sde, hub_id))
                 })?;
                 let mut out = Vec::new();
                 encode_bytes_field(1, &state, &mut out);
@@ -331,11 +354,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                     require_roles(ctx, HUB_MANAGER_ROLES, "configure sovereignty hub workforce")?;
                     owned_structure(snap, &c, hub_id, &[TYPE_SOVEREIGNTY_HUB], "Sovereignty hub")?;
                     run_simulation(snap, &sde, &pending, hub_id, ctx.now_unix());
-                    let extra: Vec<i64> = std::iter::once(hub_id)
+                    let mut extra: Vec<i64> = std::iter::once(hub_id)
                         .chain(networkable_hubs(snap, &sde, hub_id).into_iter().map(|h| h.0))
                         .collect();
                     let before = hub_views(snap, &sde, &extra);
                     let (sys, old) = apply_configuration(snap, &sde, &c, hub_id, new_mode.clone())?;
+                    for (other_id, _) in networkable_hubs(snap, &sde, hub_id) {
+                        if !extra.contains(&other_id) {
+                            extra.push(other_id);
+                        }
+                    }
                     let mut n = Vec::new();
                     id_field(1, u64::from(sys), &mut n);
                     encode_bytes_field(2, &encode_configuration(&old), &mut n);
@@ -364,7 +392,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                         id_field(1, other as u64, &mut h);
                         id_field(2, u64::from(sys), &mut h);
                         encode_bytes_field(3, &encode_configuration(&mode(snap, other)), &mut h);
-                        encode_bytes_field(4, &encode_state(snap, other), &mut h);
+                        encode_bytes_field(4, &encode_state(snap, &sde, other), &mut h);
                         encode_bytes_field(1, &h, &mut out);
                     }
                     Ok::<_, RpcError>(out)

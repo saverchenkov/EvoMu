@@ -326,6 +326,7 @@ async fn test_quasar_mail_calendar_contacts_standings_complete() {
 
 #[tokio::test]
 async fn test_quasar_wars_tags_bookmarks_fleet_medal_security_complete() {
+    // parity: plan:Q-5
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
