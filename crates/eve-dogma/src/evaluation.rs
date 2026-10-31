@@ -632,6 +632,43 @@ impl ShipFittingEngine {
             }
         }
 
+        // 1d. Pre-apply `dbuff` `item_modifiers` targeting `ctx.ship` (such as V24 SDE `dbuff_id = 2544`
+        //     `FW Dungeon Effect 1` modifying Battlecruiser `shipBonus*BC*` attributes by `+20%`) before
+        //     Step 2 (`hull_type.effect_ids`) snapshots `ctx.ship` to propagate hull bonuses onto modules.
+        let mut bursts_by_dbuff: BTreeMap<u32, (i64, Vec<f64>)> = BTreeMap::new();
+        for burst in &self.gang_bursts {
+            if let Some(dbuff_id) = burst.dbuff_id {
+                bursts_by_dbuff
+                    .entry(dbuff_id)
+                    .or_insert_with(|| (burst.source_item_id, Vec::new()))
+                    .1
+                    .push(burst.value);
+            }
+        }
+        for (&dbuff_id, &(source_item_id, ref vals)) in &bursts_by_dbuff {
+            if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
+                let agg_value = aggregate_dbuff_values(&dbuff.aggregate_mode, vals);
+                let op = match dbuff.operation.as_str() {
+                    "PostPercent" => ModifierOperator::PostPercent,
+                    "PostMul" => ModifierOperator::PostMul,
+                    "ModAdd" => ModifierOperator::ModAdd,
+                    "PostAssignment" => ModifierOperator::PostAssign,
+                    _ => ModifierOperator::PostPercent,
+                };
+                for &aid in &dbuff.item_modifiers {
+                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
+                    ctx.ship.modifiers.push(AttributeModifier {
+                        source_item_id,
+                        effect_id: None,
+                        target_attribute_id: aid,
+                        operator: op,
+                        value: agg_value,
+                        stacking_penalized,
+                    });
+                }
+            }
+        }
+
         // 2. Evaluate ship hull passive effects (`effect_category == 0`).
         if let Some(hull_type) = sde.types.get(&self.ship.type_id) {
             ctx.item = ctx.ship.clone();
@@ -1045,18 +1082,7 @@ impl ShipFittingEngine {
             }
         }
 
-        // 6. Evaluate active command burst / gang warfare burst effects (`feat:dogma.gang-bursts`, `T-12`).
-        let mut bursts_by_dbuff: BTreeMap<u32, (i64, Vec<f64>)> = BTreeMap::new();
-        for burst in &self.gang_bursts {
-            if let Some(dbuff_id) = burst.dbuff_id {
-                bursts_by_dbuff
-                    .entry(dbuff_id)
-                    .or_insert_with(|| (burst.source_item_id, Vec::new()))
-                    .1
-                    .push(burst.value);
-            }
-        }
-
+        // 6. Evaluate active command burst / gang warfare burst module/group/skill effects (`feat:dogma.gang-bursts`, `T-12`).
         for (&dbuff_id, &(source_item_id, ref vals)) in &bursts_by_dbuff {
             if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
                 let agg_value = aggregate_dbuff_values(&dbuff.aggregate_mode, vals);
@@ -1067,17 +1093,6 @@ impl ShipFittingEngine {
                     "PostAssignment" => ModifierOperator::PostAssign,
                     _ => ModifierOperator::PostPercent,
                 };
-                for &aid in &dbuff.item_modifiers {
-                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
-                    ctx.ship.modifiers.push(AttributeModifier {
-                        source_item_id,
-                        effect_id: None,
-                        target_attribute_id: aid,
-                        operator: op,
-                        value: agg_value,
-                        stacking_penalized,
-                    });
-                }
                 for &aid in &dbuff.location_modifiers {
                     let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
                     for loc_item in &mut ctx.ship_located_items {

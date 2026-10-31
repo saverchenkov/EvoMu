@@ -76,6 +76,8 @@ pub struct SystemRegistry {
     /// in this registry's ballparks, preventing player scan RPCs from respawning killed guards.
     hydrated_wh_ore_anomalies: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, String)>>,
     pub tactical_state: Arc<RwLock<crate::services::tactical_modules::TacticalModulesState>>,
+    pending_notifications_opt: Option<Arc<RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>>,
+    notify_tx_opt: Option<broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 }
 
 impl Default for SystemRegistry {
@@ -100,6 +102,8 @@ impl SystemRegistry {
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
+            pending_notifications_opt: None,
+            notify_tx_opt: None,
         }
     }
 
@@ -118,6 +122,8 @@ impl SystemRegistry {
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
+            pending_notifications_opt: None,
+            notify_tx_opt: None,
         }
     }
 
@@ -136,7 +142,19 @@ impl SystemRegistry {
             special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
             hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
             tactical_state: Arc::new(RwLock::new(Default::default())),
+            pending_notifications_opt: None,
+            notify_tx_opt: None,
         }
+    }
+
+    pub fn with_notifications(
+        mut self,
+        pending_notifications: Arc<RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>,
+        notify_tx: broadcast::Sender<(i64, crate::router::PendingMachoNotification)>,
+    ) -> Self {
+        self.pending_notifications_opt = Some(pending_notifications);
+        self.notify_tx_opt = Some(notify_tx);
+        self
     }
 
     pub fn with_tactical_state(
@@ -392,6 +410,8 @@ impl SystemRegistry {
             db_opt,
             mechanic_rng_opt: Some(mechanic_rng.clone()),
             tactical_state: self.tactical_state.clone(),
+            pending_notifications_opt: self.pending_notifications_opt.clone(),
+            notify_tx_opt: self.notify_tx_opt.clone(),
             ..Default::default()
         }));
         let actor_state_actor = actor_state_shared.clone();
@@ -418,6 +438,8 @@ impl SystemRegistry {
                     sim_elapsed_secs,
                     pending_cycle_actions,
                     tactical_state,
+                    pending_notifications_opt,
+                    notify_tx_opt,
                 } = &mut *actor_st;
                 {
                     {
@@ -1050,6 +1072,8 @@ impl SystemRegistry {
                                     sde_opt.as_deref(),
                                     db_opt.as_ref(),
                                     solar_system_id,
+                                    pending_notifications_opt.as_deref(),
+                                    notify_tx_opt.as_ref(),
                                 ) {
                                     destroyed_balls.push((bid, None));
                                 }

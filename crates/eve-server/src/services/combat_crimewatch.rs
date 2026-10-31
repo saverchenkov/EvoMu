@@ -524,6 +524,17 @@ pub fn with_mut_combat_runtime<R>(
     })
 }
 
+pub fn with_combat_ephemeral<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&CombatRuntimeState) -> R,
+) -> R {
+    let guard = ctx
+        .combat_ephemeral
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    f(&guard)
+}
+
 pub fn with_mut_combat_ephemeral<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,

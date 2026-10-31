@@ -34,10 +34,10 @@ _Last updated: 2026-10-24 against `origin/main` (`2f23c1b9`). See also [`docs/OP
   - The client physics engine resides in `bin64/_destiny.so`, a native Mach-O dynamic library compiled against CCP's internal `blue` engine framework (`bin64/blue.so`, `libCarbon.dylib`).
   - Baseline differential tests in [`crates/eve-destiny/tests/t11_destiny_differential.rs`](../crates/eve-destiny/tests/t11_destiny_differential.rs) currently run against `DERIVED_REFERENCE` kinematics vectors (`crates/eve-destiny/tests/fixtures/ccp_golden_vectors.json`), so `plan:T-11` remains `OPEN` (`MISSING` in `parity.json`) until `bin64/_destiny.so` is executed directly inside the bundled Python 2.7/client environment (`"oracle_source": "CCP_BUNDLED_RUNTIME"`).
 
-## 6. Pirate Insurgency Stage Thresholds & Site-Spawn Tables (`feat:fw.corruption-suppression-effects` OPEN)
+## 6. Pirate Insurgency Stage Thresholds & Site-Spawn/Reward Tables (`DERIVED` data gap)
 
-- **Context (`feat:fw.corruption-suppression-effects`, `plan:Q-7`):** The V24 client stage/threshold table for Pirate Insurgency Corruption and Suppression (`insurgency_stage` in [`crates/eve-server/src/services/insurgency_services.rs`](../crates/eve-server/src/services/insurgency_services.rs)) and the per-stage site-spawn/pruning table (`insurgency_corruption_site_types_for_stage` / `prune_ineligible_insurgency_sites_in_snap` in [`crates/eve-server/src/services/security_mgr.rs`](../crates/eve-server/src/services/security_mgr.rs)) are not exported in the local SDE import and currently use `DERIVED (synthetic)` linear `200/400/600/800/1000` thresholds and site eligibility rules (matching the companion Quasar stage/threshold rows).
-- **Status:** Per repository parity rules, `feat:fw.corruption-suppression-effects` remains `OPEN` until authoritative client/SDE stage thresholds and site definitions are extracted and wired.
+- **Context (`feat:fw.corruption-suppression-effects`, `plan:Q-7`):** The stage→effect table for Pirate Insurgency Corruption and Suppression (stages 1–5) is now implemented and tested, but the V24 client point→stage threshold table (`insurgency_stage` in [`crates/eve-server/src/services/insurgency_services.rs`](../crates/eve-server/src/services/insurgency_services.rs)) and baseline site corruption/suppression point rewards (`security_mgr.rs`) are not exported in the local SDE import and still use `DERIVED (synthetic)` linear `200/400/600/800/1000` thresholds and site reward constants.
+- **Status:** Recorded as a derived-data gap until authoritative client/SDE stage thresholds and site reward definitions are extracted and imported.
 
 ## 7. Abyssal Weather SDE `dbuffCollections` vs `auditor_rows.json` Acceptance Text (`feat:abyssal.weather-effects-and-penalties` OPEN)
 

@@ -15,8 +15,8 @@ use crate::services::fw_services::{compute_all_frontline_statuses, set_facwar_bu
 use crate::services::insurgency_services::{
     add_system_suppression, emit_campaign_started, emit_campaign_updated, end_insurgency_campaign,
     get_campaign_phase_and_timer, init_insurgency_campaign, insurgency_stage,
-    spawn_pirate_stronghold, with_insurgency_runtime, InsurgencySiteRecord, FACTION_ANGEL_CARTEL,
-    FACTION_GURISTAS, PHASE_ACTIVE, PHASE_FORECASTING, PIRATE_STRONGHOLD_ANGEL_TYPE,
+    spawn_pirate_stronghold, with_insurgency_runtime, FACTION_ANGEL_CARTEL, FACTION_GURISTAS,
+    PHASE_ACTIVE, PHASE_FORECASTING, PHASE_WINDDOWN, PIRATE_STRONGHOLD_ANGEL_TYPE,
     PIRATE_STRONGHOLD_GURISTAS_TYPE, WINDDOWN_DURATION_SECS,
 };
 use eve_db::UpwellStructureRecord;
@@ -215,24 +215,15 @@ pub fn try_spread_insurgency_from_system(
                 c.suppression_points.entry(new_sys).or_insert(0);
             }
         }
-        let site_id = (rt.insurgency_instances.len() as i64) + 950_001;
-        rt.insurgency_instances.push(InsurgencySiteRecord {
-            instance_id: site_id,
-            solar_system_id: new_sys,
-            site_type: "CorporateOutpostRaid".into(),
-            name: "Corporate Outpost Raid".into(),
-            // DERIVED (synthetic): baseline corruption point reward for completing an insurgency site.
-            corruption_reward: 100.0,
-            completed: false,
-        });
     });
+    let now_spread = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        let st = snap.system_states.entry(new_sys).or_default();
-        st.solar_system_id = new_sys;
-        if st.fw_complex_position.is_none() {
-            // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
-            st.fw_complex_position = Some([0.0, 0.0, 0.0]);
-        }
+        crate::services::security_mgr::sync_stage_gated_insurgency_sites_in_snap(
+            &ctx.sde,
+            snap,
+            new_sys,
+            now_spread,
+        );
     });
     emit_campaign_started(ctx, new_sys, campaign_id);
     Some(new_sys)
@@ -910,71 +901,14 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
                 None
             };
             if phase == PHASE_ACTIVE {
-                // Ensure each covered system has documented insurgency sites (`docs/eve-wiki/Insurgency.md:77-83`).
-                for &sys in &camp.systems {
-                    let st = snap.system_states.entry(sys).or_default();
-                    st.solar_system_id = sys;
-                    if st.fw_complex_position.is_none() {
-                        // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
-                        st.fw_complex_position = Some([0.0, 0.0, 0.0]);
-                    }
-                    let c_st = st.insurgency_corruption_stage;
-
-                    let mut ensure_site = |stype: &str, sname: &str, rew: f64, target_sys: u32| {
-                        if !snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
-                            s.solar_system_id == target_sys && s.site_type == stype && !s.completed
-                        }) {
-                            let sid = (snap.insurgency_runtime.insurgency_instances.len() as i64) + 960_001;
-                            snap.insurgency_runtime.insurgency_instances.push(InsurgencySiteRecord {
-                                instance_id: sid,
-                                solar_system_id: target_sys,
-                                site_type: stype.into(),
-                                name: sname.into(),
-                                // DERIVED (synthetic): baseline corruption/suppression point reward for site completion.
-                                corruption_reward: rew,
-                                completed: false,
-                            });
-                        }
-                    };
-
-                    // Corruption 0+ in active campaign systems (`Insurgency.md:79`)
-                    ensure_site("CorporateOutpostRaid", "Corporate Outpost Raid", 100.0, sys);
-                    // Corruption 1+ (`Insurgency.md:80`)
-                    if c_st >= 1 {
-                        ensure_site("MiningOpAmbush", "Mining Op Ambush", 200.0, sys);
-                    }
-                    // Corruption 3-4 (`Insurgency.md:81`)
-                    if (3..=4).contains(&c_st) {
-                        ensure_site("IceRefineryHeist", "Ice Refinery Heist", 300.0, sys);
-                    }
-                    // Pirate FOB system (`Insurgency.md:82`)
-                    if sys == camp.fob_solar_system_id {
-                        ensure_site("PirateLaunderingFacility", "Pirate Laundering Facility", 150.0, sys);
-                    }
-
-                    crate::services::security_mgr::prune_ineligible_insurgency_sites_in_snap(snap, sys);
-                }
-
-                // Empire War HQ systems (`Insurgency.md:83,107`): Counter-Insurgency Outpost turn-in facilities
-                let war_hqs: &[u32] = if camp.pirate_faction_id == FACTION_ANGEL_CARTEL {
-                    &[30_002_974, 30_002_055] // Mehatoor (Amarr), Amo (Minmatar)
-                } else {
-                    &[30_045_324, 30_003_788] // Onnamon (Caldari), Intaki (Gallente)
-                };
-                for &hq_sys in war_hqs {
-                    if !snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
-                        s.solar_system_id == hq_sys && s.site_type == "CounterInsurgencyOutpost" && !s.completed
-                    }) {
-                        let sid = (snap.insurgency_runtime.insurgency_instances.len() as i64) + 970_001;
-                        snap.insurgency_runtime.insurgency_instances.push(InsurgencySiteRecord {
-                            instance_id: sid,
-                            solar_system_id: hq_sys,
-                            site_type: "CounterInsurgencyOutpost".into(),
-                            name: "Counter-Insurgency Outpost".into(),
-                            // DERIVED (synthetic): baseline suppression turn-in reward at Empire War HQ.
-                            corruption_reward: 100.0,
-                            completed: false,
-                        });
+                if notify_active.is_some() {
+                    for &sys in &camp.systems {
+                        crate::services::security_mgr::sync_stage_gated_insurgency_sites_in_snap(
+                            &ctx.sde,
+                            snap,
+                            sys,
+                            now_unix,
+                        );
                     }
                 }
                 if !snap.insurgency_runtime.campaign_outcomes.contains_key(&cid) {
@@ -1022,7 +956,7 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
         let active_sys_info: Option<(i64, i64, Vec<(u32, u8, u8)>)> = ctx.db.with_snapshot(|snap| {
             let camp = snap.insurgency_runtime.campaigns.get(&cid)?;
             let (phase, _) = get_campaign_phase_and_timer(camp, now_unix);
-            if phase != PHASE_ACTIVE {
+            if !matches!(phase, PHASE_ACTIVE | PHASE_WINDDOWN) {
                 return None;
             }
             let list = camp
@@ -1092,22 +1026,29 @@ fn select_insurgency_roamer_type(
     tier: usize,
     total_tiers: usize,
 ) -> Option<u32> {
-    let mut candidates: Vec<(u64, u64, u32)> = ctx
-        .sde
-        .types
-        .values()
-        .filter(|t| {
-            t.group_id == group_id
-                && t.faction_id.is_some()
-                && faction_filter.is_none_or(|fid| t.faction_id == Some(fid))
-        })
-        .map(|t| {
-            let hp = t.default_attributes.get(&263).copied().unwrap_or(0.0)
-                + t.default_attributes.get(&265).copied().unwrap_or(0.0)
-                + t.default_attributes.get(&9).copied().unwrap_or(0.0);
-            let bounty = t.default_attributes.get(&481).copied().unwrap_or(0.0);
-            (hp.round() as u64, bounty.round() as u64, t.type_id)
-        })
+    static ROAMER_POOL: std::sync::OnceLock<Vec<(u32, u32, u64, u64, u32)>> = std::sync::OnceLock::new();
+    let pool = ROAMER_POOL.get_or_init(|| {
+        ctx.sde
+            .types
+            .values()
+            .filter(|t| {
+                matches!(t.group_id, 4637 | 4638)
+                    && t.faction_id.is_some()
+                    && !crate::services::insurgency_complex_ops::is_named_insurgency_roamer(t.type_id)
+            })
+            .map(|t| {
+                let hp = t.default_attributes.get(&263).copied().unwrap_or(0.0)
+                    + t.default_attributes.get(&265).copied().unwrap_or(0.0)
+                    + t.default_attributes.get(&9).copied().unwrap_or(0.0);
+                let bounty = t.default_attributes.get(&481).copied().unwrap_or(0.0);
+                (t.group_id, t.faction_id.unwrap_or(0), hp.round() as u64, bounty.round() as u64, t.type_id)
+            })
+            .collect()
+    });
+    let mut candidates: Vec<(u64, u64, u32)> = pool
+        .iter()
+        .filter(|&&(gid, fid, _, _, _)| gid == group_id && faction_filter.is_none_or(|f| fid == f))
+        .map(|&(_, _, hp, bounty, tid)| (hp, bounty, tid))
         .collect();
     candidates.sort_unstable();
     if candidates.is_empty() {
@@ -1144,11 +1085,11 @@ async fn sync_insurgency_system_npcs(
     s_st: u8,
 ) {
     use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity;
-    use crate::services::combat_crimewatch::with_mut_combat_runtime;
+    use crate::services::combat_crimewatch::with_mut_combat_ephemeral;
 
     let desired_pirate: Option<u32> =
         crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
-            ctx, 4637, pirate_fac, c_st, s_st,
+            ctx, sys_id, 4637, pirate_fac, c_st, s_st,
         )
         .or_else(|| {
             (c_st >= 2).then(|| {
@@ -1158,14 +1099,14 @@ async fn sync_insurgency_system_npcs(
 
     let desired_enforcer: Option<u32> =
         crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
-            ctx, 4638, pirate_fac, c_st, s_st,
+            ctx, sys_id, 4638, pirate_fac, c_st, s_st,
         )
         .or_else(|| {
             (s_st >= 3).then(|| select_insurgency_roamer_type(ctx, 4638, None, usize::from(s_st - 3), 2)).flatten()
         });
 
     let (stale_balls, has_pirate, has_enforcer, has_ci_sentry, idle_roamers) =
-        with_mut_combat_runtime(ctx, |rt| {
+        with_mut_combat_ephemeral(ctx, |rt| {
             let mut stale = Vec::new();
             let mut hp = false;
             let mut he = false;
@@ -1205,6 +1146,17 @@ async fn sync_insurgency_system_npcs(
             }
             (stale, hp, he, hs, idle)
         });
+
+    let need_pirate = desired_pirate.is_some() && !has_pirate;
+    let need_enforcer = desired_enforcer.is_some() && !has_enforcer;
+    if stale_balls.is_empty() && idle_roamers.is_empty() && !need_pirate && !need_enforcer && (s_st < 5 || has_ci_sentry) {
+        if s_st < 5 {
+            with_mut_combat_ephemeral(ctx, |rt| {
+                rt.ci_sentry_deployed_systems.remove(&sys_id);
+            });
+        }
+        return;
+    }
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for bid in stale_balls {
@@ -1257,7 +1209,7 @@ async fn sync_insurgency_system_npcs(
             );
         }
         if !arrived_positions.is_empty() {
-            with_mut_combat_runtime(ctx, |rt| {
+            with_mut_combat_ephemeral(ctx, |rt| {
                 for (bid, pos) in arrived_positions {
                     if let Some(npc) = rt.npc_entities.get_mut(&bid) {
                         npc.spawn_position = pos;
@@ -1269,9 +1221,18 @@ async fn sync_insurgency_system_npcs(
 
     if let Some(tid) = desired_pirate {
         if !has_pirate {
-            let (spawn_pos, next_pos) = (waypoints[0] + pirate_offset, waypoints[1 % waypoints.len()] + pirate_offset);
-            let bid = spawn_specialized_npc_entity(ctx, sys_id, tid, "InsurgencyPirateRoamer", pirate_fac as u32, spawn_pos).await;
-            with_mut_combat_runtime(ctx, |rt| {
+            let spawn_pos = waypoints[0] + pirate_offset;
+            let next_pos = waypoints[1 % waypoints.len()] + pirate_offset;
+            let bid = spawn_specialized_npc_entity(
+                ctx,
+                sys_id,
+                tid,
+                "InsurgencyPirateRoamer",
+                pirate_fac as u32,
+                spawn_pos,
+            )
+            .await;
+            with_mut_combat_ephemeral(ctx, |rt| {
                 if let Some(npc) = rt.npc_entities.get_mut(&bid) {
                     npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
                 }
@@ -1281,9 +1242,18 @@ async fn sync_insurgency_system_npcs(
     }
     if let Some(tid) = desired_enforcer {
         if !has_enforcer {
-            let (spawn_pos, next_pos) = (waypoints[0] + enforcer_offset, waypoints[1 % waypoints.len()] + enforcer_offset);
-            let bid = spawn_specialized_npc_entity(ctx, sys_id, tid, "InsurgencyEnforcer", empire_fac as u32, spawn_pos).await;
-            with_mut_combat_runtime(ctx, |rt| {
+            let spawn_pos = waypoints[0] + enforcer_offset;
+            let next_pos = waypoints[1 % waypoints.len()] + enforcer_offset;
+            let bid = spawn_specialized_npc_entity(
+                ctx,
+                sys_id,
+                tid,
+                "InsurgencyEnforcer",
+                empire_fac as u32,
+                spawn_pos,
+            )
+            .await;
+            with_mut_combat_ephemeral(ctx, |rt| {
                 if let Some(npc) = rt.npc_entities.get_mut(&bid) {
                     npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
                 }
@@ -1291,7 +1261,7 @@ async fn sync_insurgency_system_npcs(
             let _ = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner()).goto_point(bid, next_pos);
         }
     }
-    let should_deploy_ci = with_mut_combat_runtime(ctx, |rt| {
+    let should_deploy_ci = with_mut_combat_ephemeral(ctx, |rt| {
         if s_st < 5 {
             rt.ci_sentry_deployed_systems.remove(&sys_id);
             false
@@ -1308,8 +1278,33 @@ async fn sync_insurgency_system_npcs(
     }
 }
 
-async fn cleanup_ended_campaign_sites_and_roamers(ctx: &ServerContext, pirate_fac: i64, ended_systems: &[u32]) {
-    use crate::services::combat_crimewatch::with_mut_combat_runtime;
+pub(crate) async fn sync_campaign_system_npcs(ctx: &ServerContext, campaign_id: i64, sys_id: u32) {
+    let now_unix = ctx.now_unix();
+    let info = ctx.db.with_snapshot(|snap| {
+        let camp = snap.insurgency_runtime.campaigns.get(&campaign_id)?;
+        let (phase, _) = get_campaign_phase_and_timer(camp, now_unix);
+        if !matches!(phase, PHASE_ACTIVE | PHASE_WINDDOWN) || !camp.systems.contains(&sys_id) {
+            return None;
+        }
+        let st = snap.system_states.get(&sys_id);
+        Some((
+            camp.pirate_faction_id,
+            camp.target_faction_id,
+            st.map_or(0, |s| s.insurgency_corruption_stage),
+            st.map_or(0, |s| s.insurgency_suppression_stage),
+        ))
+    });
+    if let Some((p_fac, e_fac, c_st, s_st)) = info {
+        sync_insurgency_system_npcs(ctx, p_fac, e_fac, sys_id, c_st, s_st).await;
+    }
+}
+
+async fn cleanup_ended_campaign_sites_and_roamers(
+    ctx: &ServerContext,
+    pirate_fac: i64,
+    ended_systems: &[u32],
+) {
+    use crate::services::combat_crimewatch::with_mut_combat_ephemeral;
 
     let orphan_systems: Vec<u32> = ctx.db.with_mut_snapshot(|snap| {
         let still_covered: std::collections::HashSet<u32> = snap.insurgency_runtime.campaigns.values().flat_map(|c| c.systems.iter().copied()).collect();
@@ -1321,11 +1316,14 @@ async fn cleanup_ended_campaign_sites_and_roamers(ctx: &ServerContext, pirate_fa
             if site.site_type == "CounterInsurgencyOutpost" && war_hqs.contains(&site.solar_system_id) { return same_fac_active; }
             !orphans.contains(&site.solar_system_id)
         });
+        snap.insurgency_runtime
+            .ice_heist_instances
+            .retain(|h| !orphans.contains(&h.solar_system_id) || h.instance_id < 860_001);
         orphans
     });
 
     // Despawn roaming Pirate & Enforcer NPCs in ended systems, while keeping Counter-Insurgency Sentry Guns (`79507`) until destroyed.
-    let to_remove: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
+    let to_remove: Vec<(u32, i64)> = with_mut_combat_ephemeral(ctx, |rt| {
         for &osys in &orphan_systems {
             rt.ci_sentry_deployed_systems.remove(&osys);
         }

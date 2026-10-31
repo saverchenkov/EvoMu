@@ -1256,6 +1256,23 @@ pub async fn handle_weapons(
                         ctx, char_id, sys_id, sys_sec, is_pod_target, now_unix,
                     );
                 }
+                if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && !is_mobile_struct {
+                    if let Some(sentry_origin) = crate::services::security_mgr::nearest_sentry_gun_origin(
+                        ctx,
+                        sys_id,
+                        attacker_ball.position,
+                    ) {
+                        let _ = crate::services::combat_crimewatch::crimewatch_timers::step_sentry_gun_grid_aggression(
+                            ctx,
+                            sys_id,
+                            char_id,
+                            ship_id,
+                            sentry_origin,
+                            is_new_agg,
+                        )
+                        .await;
+                    }
+                }
             } else if is_upwell_target {
                 ctx.crimewatch
                     .write()

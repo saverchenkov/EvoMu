@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5844 / 6351 ledger rows closed (92.02%)**, 2402 NA, 1198 tagged tests, 1575 passing tests. Flagged fake by the gap auditor: 335.
+**Parity: 5845 / 6351 ledger rows closed (92.03%)**, 2402 NA, 1205 tagged tests, 1604 passing tests. Flagged fake by the gap auditor: 335.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 8 | 1 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 167 | 0 | 30 |
-| feat | 1603 | 1297 | 94 | 212 |
+| feat | 1603 | 1298 | 94 | 211 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 410 | 819 | 82 |
 | plan | 117 | 77 | 0 | 40 |
@@ -179,7 +179,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | MISSING | 0/0 | — | PARTIAL | Daily/career goals, achievements, skill plans, tracks, goal+tale notices live. Data gap: incursion tale template/IDs synthetic (absent from client/SDE). Open quasar rows remain. | cbcbe79f 2026-10-25 |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | FLAGGED_FAKE | 0/0 | — | PARTIAL | Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 79c08ecf 2026-10-31 |
 | Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | FLAGGED_FAKE | 0/0 | — | PARTIAL | Quasar Market, Inventory, Asset Holding, Entitlements, Accounting, Industry, and Planetary gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 79c08ecf 2026-10-31 |
-| Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | MISSING | 0/0 | — | PARTIAL | Quasar Space, Celestials, Navigation, Bubble Presence, and Insurgency handlers wired; feat:fw.corruption-suppression-effects remains OPEN pending client stage/site tables. | 911eb8b4 2026-10-21 |
+| Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | MISSING | 0/0 | — | PARTIAL | Quasar Space, Celestials, Navigation, Bubble Presence, and Insurgency handlers wired; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b4 2026-10-21 |
 | Q-8 | Sovereignty, faction warfare and events: sovereignty, factionwarfare, faction, o… | MISSING | 0/0 | — | PARTIAL | Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations handlers implemented; open quasar:* endpoint rows and Phase Q client journeys pending. | e5bbe983 2026-10-31 |
 | Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | MISSING | 0/0 | — | PARTIAL | Quasar Ship Cosmetics, SKINR Sequencing, Licenses, Drafts, Structure Paintwork, and App Infrastructure handlers implemented; open quasar:* endpoint rows and Phase Q client journeys pending. | 3d7ef8a6 2026-10-25 |
 
