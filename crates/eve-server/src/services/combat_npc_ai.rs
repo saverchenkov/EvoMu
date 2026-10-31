@@ -203,7 +203,7 @@ pub async fn spawn_specialized_npc_entity(
         pos,
     );
     let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
-    with_mut_combat_runtime(ctx, |rt| {
+    with_mut_combat_ephemeral(ctx, |rt| {
         rt.npc_entities.insert(ball_id, entity);
     });
     ball_id
@@ -321,7 +321,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         .map(|(&id, b)| (id, b.clone()))
         .collect();
 
-    let (npc_ids, prev_npc_scram_targets): (Vec<i64>, HashSet<i64>) = with_mut_combat_runtime(ctx, |rt| {
+    let (npc_ids, prev_npc_scram_targets): (Vec<i64>, HashSet<i64>) = with_mut_combat_ephemeral(ctx, |rt| {
         let ids = rt
             .npc_entities
             .values()
@@ -342,7 +342,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         };
         let npc_dead = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner()).combat_states.get(&nid).is_some_and(|cs| cs.structure_hp <= 0.0);
         let Some(npc_ball) = ball_map.get(&nid).filter(|_| !npc_dead) else {
-            with_mut_combat_runtime(ctx, |rt| { rt.npc_entities.remove(&nid); });
+            with_mut_combat_ephemeral(ctx, |rt| { rt.npc_entities.remove(&nid); });
             continue;
         };
 
@@ -368,7 +368,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         {
             if matches!(npc_ball.mode, MovementMode::Warp { .. }) && npc.target_id.is_some() {
                 npc.target_id = None;
-                with_mut_combat_runtime(ctx, |rt| {
+                with_mut_combat_ephemeral(ctx, |rt| {
                     rt.npc_entities.insert(nid, npc);
                 });
             }
@@ -661,14 +661,14 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         npc.target_id = next_target;
 
         let Some(target_id) = npc.target_id else {
-            with_mut_combat_runtime(ctx, |rt| {
+            with_mut_combat_ephemeral(ctx, |rt| {
                 rt.npc_entities.insert(nid, npc);
             });
             continue;
         };
         let Some(target_ball) = ball_map.get(&target_id) else {
             npc.target_id = None;
-            with_mut_combat_runtime(ctx, |rt| {
+            with_mut_combat_ephemeral(ctx, |rt| {
                 rt.npc_entities.insert(nid, npc);
             });
             continue;
@@ -807,7 +807,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, ctx.now_unix());
         }
 
-        with_mut_combat_runtime(ctx, |rt| {
+        with_mut_combat_ephemeral(ctx, |rt| {
             rt.npc_entities.insert(nid, npc);
         });
     }
@@ -837,7 +837,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         );
     }
     if !active_npc_scram_targets.is_empty() {
-        with_mut_combat_runtime(ctx, |rt| {
+        with_mut_combat_ephemeral(ctx, |rt| {
             rt.npc_scrambled_ships
                 .insert(solar_system_id, active_npc_scram_targets);
         });
@@ -866,7 +866,7 @@ pub fn record_npc_threat_event(
     let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
     let role_mult = if is_ewar { 1.5 } else if is_logistics { 1.3 } else { 1.0 };
     let delta = (damage_dealt.max(if is_ewar || is_logistics { 120.0 } else { 0.0 }) + sig_weight) * role_mult;
-    let relay_sys_opt = with_mut_combat_runtime(ctx, |rt| {
+    let relay_sys_opt = with_mut_combat_ephemeral(ctx, |rt| {
         if let Some(npc) = rt.npc_entities.get_mut(&npc_ball_id) {
             if npc.archetype == "TransmissionRelay" || npc.type_id == 41_589 {
                 return Some(npc.solar_system_id);
