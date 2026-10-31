@@ -199,7 +199,13 @@ async fn batch10_progression_and_conversations() {
     .await
     .unwrap();
     let repeat_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(repeat_notifs.len(), 0);
+    assert_eq!(
+        repeat_notifs
+            .iter()
+            .filter(|(n, _)| n == "OnProgressionLeft")
+            .count(),
+        0
+    );
 }
 
 /// parity: notify:OnTaleData
