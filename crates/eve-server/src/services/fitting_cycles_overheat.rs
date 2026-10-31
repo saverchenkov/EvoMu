@@ -228,7 +228,7 @@ pub fn check_nanite_repair_overheat_lockout(
         });
     }
     if (method == "Overload" || mod_state == eve_dogma::ModuleState::Overloaded)
-        && sys.has_active_nanite_repair_sync(ship_id)
+        && sys.has_any_active_nanite_repair_sync(ship_id)
     {
         return Err(eve_proto::BridgeRpcError {
             code: "CannotOverheatWhileRepairing".into(),

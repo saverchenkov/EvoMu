@@ -300,7 +300,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             if overloaded
                 && session
                     .solar_system_id
-                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_active_nanite_repair_sync(ship_id))
+                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_any_active_nanite_repair_sync(ship_id))
             {
                 return Some(Err(BridgeRpcError {
                     code: "CannotOverheatWhileRepairing".into(),

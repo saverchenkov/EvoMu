@@ -730,14 +730,13 @@ pub async fn handle_repair_module_rpc(
         let sys = ctx.systems.get_or_spawn(sys_id);
         let _ = sys
             .start_nanite_repair(ActiveNaniteRepair {
+                char_id,
                 ship_id,
-                owner_char_id: char_id,
                 module_id,
                 initial_damage_hp: cur_dmg,
+                paste_reserved: total_paste_needed,
                 duration_s,
                 elapsed_s: 0.0,
-                total_paste_required: total_paste_needed,
-                paste_consumed_so_far: 0,
             })
             .await;
     } else {
@@ -867,11 +866,10 @@ pub(crate) fn refund_paste_to_cargo_in_snap(
 /// refunding unconsumed Nanite Repair Paste to cargo (`feat:modules.nanite-repair-paste-in-space`).
 pub fn finalize_cancelled_nanite_repair(ctx: &ServerContext, job: &ActiveNaniteRepair) -> i32 {
     let progress = (job.elapsed_s / job.duration_s.max(0.1)).clamp(0.0, 1.0);
-    let consumed_by_now = ((job.total_paste_required as f64) * progress)
+    let consumed_by_now = ((job.paste_reserved as f64) * progress)
         .ceil()
-        .clamp(0.0, job.total_paste_required as f64) as i32;
-    let consumed_final = job.paste_consumed_so_far.max(consumed_by_now);
-    let unconsumed = job.total_paste_required.saturating_sub(consumed_final);
+        .clamp(0.0, job.paste_reserved as f64) as i32;
+    let unconsumed = job.paste_reserved.saturating_sub(consumed_by_now);
     let rem_dmg = job.initial_damage_hp * (1.0 - progress).clamp(0.0, 1.0);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(m_item) = snap.items.get_mut(&job.module_id) {
@@ -881,7 +879,7 @@ pub fn finalize_cancelled_nanite_repair(ctx: &ServerContext, job: &ActiveNaniteR
                 m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
             }
         }
-        refund_paste_to_cargo_in_snap(snap, job.owner_char_id, job.ship_id, unconsumed);
+        refund_paste_to_cargo_in_snap(snap, job.char_id, job.ship_id, unconsumed);
     });
     ctx.invalidate_ship_fitting(job.ship_id);
     unconsumed
@@ -919,10 +917,6 @@ pub fn step_nanite_repairs_in_actor(
         job.elapsed_s += dt;
         let progress = (job.elapsed_s / job.duration_s.max(0.1)).clamp(0.0, 1.0);
         let done = job.elapsed_s + 1e-6 >= job.duration_s;
-        let target_paste_by_now = ((job.total_paste_required as f64) * progress)
-            .ceil()
-            .clamp(0.0, job.total_paste_required as f64) as i32;
-        job.paste_consumed_so_far = job.paste_consumed_so_far.max(target_paste_by_now);
 
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {

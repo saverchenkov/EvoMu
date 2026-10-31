@@ -1193,7 +1193,7 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
-    pub fn has_active_nanite_repair_sync(&self, ship_id: BallId) -> bool {
+    pub fn has_any_active_nanite_repair_sync(&self, ship_id: BallId) -> bool {
         let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
         st.active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
     }

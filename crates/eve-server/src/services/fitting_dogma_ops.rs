@@ -642,12 +642,12 @@ pub(crate) async fn handle_dogma_ops(
                     let avail: i32 = snap
                         .items
                         .values()
-                        .find(|i| {
+                        .filter(|i| {
                             i.owner_id == char_id
                                 && i.location_id == ship_id
                                 && i.flag == InventoryFlag::Cargo
                                 && i.type_id == 28668
-                                && i.quantity >= paste_needed
+                                && i.quantity > 0
                                 && !snap.is_item_locked_in_contract_or_job(i.item_id)
                         })
                         .map(|i| i.quantity)

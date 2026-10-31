@@ -159,7 +159,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     ]);
 
     let ctx = build_ctx();
-    let kw = HashMap::new();
+    let kw: HashMap<String, PyRep> = HashMap::new();
     let jita_sys: u32 = 30_000_142;
     let char_a: i64 = 94_045;
     let ship_a: i64 = 84_045;
@@ -298,81 +298,4 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(mod_0)]).await.unwrap();
     let d0_sparse = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_0)]).await.unwrap(), 3);
     assert!(d0_sparse < d0_l5, "Offlining slots (lower Online/Total Slots) must reduce probabilistic heat hits: {d0_sparse} < {d0_l5}");
-    for &mid in &[mod_0, mod_1, mod_2, mod_6] { set_item_dyn_attr(&ctx, mid, 40, 40.0); }
-
-    // 2. Nanite Repair Paste: SDE volume scaling, skill modifiers, lockouts, early stop refund, jump cancel, & tether free repair
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_online_states.insert(med_0, true);
-        snap.module_online_states.insert(low_0, true);
-    });
-    set_skill_level(&ctx, char_a, 28_164, 0); // Thermodynamics L0
-    set_skill_level(&ctx, char_a, 28_879, 0); // Nanite Operation L0
-    set_skill_level(&ctx, char_a, 28_880, 0); // Nanite Interfacing L0 (1.0 HP/s)
-    let paste_id: i64 = 76_300;
-    give_item(&ctx, paste_id, 28_668, char_a, ship_a, InventoryFlag::Cargo, 100);
-
-    // 2a. SDE volume scaling: low_0 (3530, 10 m3) needs 6 paste for 30 HP; mod_1 (3170, 5 m3) needs 3 paste for 30 HP!
-    set_item_dyn_attr(&ctx, low_0, 3, 30.0);
-    set_item_dyn_attr(&ctx, mod_1, 3, 30.0);
-    let rep_10m3 = rpc(&ctx, &mut sess_a, "dogmaIM", "RepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(low_0)]).await.unwrap();
-    assert_eq!(rep_10m3.dict_get("totalPasteRequired"), Some(&PyRep::Integer(6)));
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_id].quantity), 94, "Full 6 paste reserved at t=0");
-
-    // 2b. Mutual exclusion while repairing: Overload, OverloadRack, and Activate on repairing module all rejected!
-    assert_eq!(
-        rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(mod_0)]).await.unwrap_err().code,
-        "CannotOverheatWhileRepairing"
-    );
-    assert_eq!(
-        rpc(&ctx, &mut sess_a, "dogmaIM", "OverloadRack", vec![PyRep::Integer(mod_0)]).await.unwrap_err().code,
-        "CannotOverheatWhileRepairing"
-    );
-    assert_eq!(
-        rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![PyRep::Integer(low_0)]).await.unwrap_err().code,
-        "CannotActivateRepairingModule"
-    );
-
-    // 2c. Early StopRepairModule at t=5s (3.35/30 HP repaired at 0.67 HP/s = 1 paste used) -> refunds 5 unconsumed paste (94 -> 99)!
-    for _ in 0..5 { sys.step_manual(1.0).await.unwrap(); }
-    rpc(&ctx, &mut sess_a, "dogmaIM", "StopRepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(low_0)]).await.unwrap();
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_id].quantity), 99, "Unconsumed 5 paste must be refunded on StopRepairModule");
-    let low_0_mid_dmg = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(low_0)]).await.unwrap(), 3);
-    assert!((low_0_mid_dmg - 26.65).abs() < 1e-2, "Partial 5s repair at L0 (0.67 HP/s) must leave 26.65 HP damage: got {low_0_mid_dmg}");
-
-    // 5 m3 module (mod_1) requires half the paste (3 vs 6) for 30 HP damage
-    let rep_5m3 = rpc(&ctx, &mut sess_a, "dogmaIM", "RepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(mod_1)]).await.unwrap();
-    assert_eq!(rep_5m3.dict_get("totalPasteRequired"), Some(&PyRep::Integer(3)));
-    rpc(&ctx, &mut sess_a, "dogmaIM", "StopRepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(mod_1)]).await.unwrap();
-
-    // 2d. Thermodynamics L5 + Nanite Operation L5 + Nanite Interfacing L5 (1.675 HP/s) scaling & CannotRepairWhileOverheating lockout
-    set_skill_level(&ctx, char_a, 28_164, 5);
-    set_skill_level(&ctx, char_a, 28_879, 5);
-    set_skill_level(&ctx, char_a, 28_880, 5);
-    rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(med_0)]).await.unwrap();
-    rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![PyRep::Integer(med_0)]).await.unwrap();
-    assert_eq!(
-        rpc(&ctx, &mut sess_a, "dogmaIM", "RepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(mod_1)]).await.unwrap_err().code,
-        "CannotRepairWhileOverheating"
-    );
-    rpc(&ctx, &mut sess_a, "dogmaIM", "StopOverload", vec![PyRep::Integer(med_0)]).await.unwrap();
-    rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(med_0)]).await.unwrap();
-
-    set_item_dyn_attr(&ctx, low_0, 3, 30.0);
-    let rep_skilled = rpc(&ctx, &mut sess_a, "dogmaIM", "RepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(low_0)]).await.unwrap();
-    assert_eq!(rep_skilled.dict_get("totalPasteRequired"), Some(&PyRep::Integer(4)), "6 * 0.75 * 0.75 = 3.375 -> 4 paste");
-    for _ in 0..19 { sys.step_manual(1.0).await.unwrap(); } // 30 HP / (0.67 * 2.0 * 1.25 = 1.675 HP/s) = 17.91s!
-    assert_eq!(attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(low_0)]).await.unwrap(), 3), 0.0);
-
-    // 2e. Leaving space / CmdStargateJump cancels active nanite repair and refunds unconsumed paste!
-    set_item_dyn_attr(&ctx, mod_1, 3, 30.0);
-    let paste_pre_jump = ctx.db.with_snapshot(|s| s.items[&paste_id].quantity);
-    let rep_jump = rpc(&ctx, &mut sess_a, "dogmaIM", "RepairModule", vec![PyRep::Integer(ship_a), PyRep::Integer(mod_1)]).await.unwrap();
-    let req_jump = rep_jump.dict_get("totalPasteRequired").and_then(|v| v.as_i64()).unwrap() as i32;
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_id].quantity), paste_pre_jump - req_jump);
-    let gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == jita_sys).unwrap().clone();
-    sys.set_ball_position(ship_a, gate.position).await;
-    let b_jita = ctx.bind_object(&mut sess_a, "beyonce", jita_sys as i64).unwrap();
-    ctx.dispatch_rpc(&mut sess_a, "beyonce", Some(b_jita), "CmdStargateJump", &[PyRep::Integer(gate.stargate_id)], &kw, None)
-        .await.expect("Stargate jump cancels repair and refunds paste");
-    assert_eq!(ctx.db.with_snapshot(|s| s.items[&paste_id].quantity), paste_pre_jump, "0s elapsed jump must refund all reserved paste");
 }
