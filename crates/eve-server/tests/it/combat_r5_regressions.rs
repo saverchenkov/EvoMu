@@ -489,6 +489,7 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
                 solar_system_id: sys_id, position: [0.0, 0.0, 0.0], destination: [0.0, 0.0, 0.0],
                 range_step: 1, scan_range_m: 149_597_870_700.0, base_sensor_strength: 40.0,
                 max_flight_time_s: 3600.0, launched_at_unix: ctx.now_unix(), state: 1,
+                warp_end_ft: None,
             },
         );
         map.insert(
@@ -498,6 +499,7 @@ async fn test_r5_210_211_probe_full_cargo_preservation_and_hacking_cloak_ghost_q
                 solar_system_id: sys_id, position: [0.0, 0.0, 0.0], destination: [0.0, 0.0, 0.0],
                 range_step: 1, scan_range_m: 149_597_870_700.0, base_sensor_strength: 40.0,
                 max_flight_time_s: 3600.0, launched_at_unix: ctx.now_unix(), state: -1,
+                warp_end_ft: None,
             },
         );
     }

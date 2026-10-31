@@ -376,7 +376,7 @@ fn parse_rooms_from_pyrep(
                         .dict_get("actionGroup")
                         .and_then(|v| v.as_i64())
                         .unwrap_or(2) as u8;
-                    let obj_idx = t_rep
+                    let _obj_idx = t_rep
                         .dict_get("targetObjectIndex")
                         .and_then(|v| v.as_i64())
                         .unwrap_or(0)
@@ -384,49 +384,6 @@ fn parse_rooms_from_pyrep(
                     let action = match action_str {
                         "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
                         "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
-                        "CameraInterest" => DungeonTriggerAction::CameraInterest {
-                            obj_idx,
-                            speed_milli: t_rep
-                                .dict_get("speedMilli")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(1500),
-                            duration_ms: t_rep
-                                .dict_get("durationMs")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(4000),
-                        },
-                        "AmbientSound" => DungeonTriggerAction::AmbientSound {
-                            sound_id: t_rep
-                                .dict_get("soundID")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("amb_dungeon_relay_loop")
-                                .to_string(),
-                            obj_idx,
-                        },
-                        "Audio" => DungeonTriggerAction::Audio {
-                            audio_url: t_rep
-                                .dict_get("audioUrl")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("wise:/dungeon_relay_alert_play")
-                                .to_string(),
-                        },
-                        "Message" => DungeonTriggerAction::Message {
-                            message_type: t_rep
-                                .dict_get("messageType")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("popup")
-                                .to_string(),
-                            message_id: t_rep
-                                .dict_get("messageID")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(i64::from(dungeon_id) * 10 + 1),
-                        },
-                        "Music" => DungeonTriggerAction::Music {
-                            music_trigger_id: t_rep
-                                .dict_get("musicTriggerID")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(i64::from(dungeon_id) * 10 + 2),
-                        },
                         _ => DungeonTriggerAction::UnlockGate,
                     };
                     let kind = match kind_str.as_str() {

@@ -870,9 +870,6 @@ pub async fn handle(
             .get(&sys_id)
             .map(|s| s.security_status)
             .unwrap_or(1.0);
-        crate::services::notify_emitters_batch10::emit_system_dynamic_bounty_state_changed(
-            ctx, sys_id, 1.35,
-        );
         let dbs_active = sec <= 0.0 && sys_id < 31_000_000;
         let output = ctx.db.with_snapshot(|snap| {
             snap.system_states

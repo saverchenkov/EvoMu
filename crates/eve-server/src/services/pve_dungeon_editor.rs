@@ -397,16 +397,6 @@ pub async fn handle_gm_dungeon_editor_op(
             Ok(dungeon_id.map(PyRep::Integer).unwrap_or(PyRep::None))
         }
         "EditDungeon" | "PlayDungeon" => {
-            if method == "PlayDungeon" && kwargs.contains_key("rooms") {
-                return crate::services::pve_dungeon_runtime::spawn_dungeon_instance(
-                    ctx,
-                    char_id,
-                    sys_id_opt,
-                    args,
-                    kwargs,
-                )
-                .await;
-            }
             let sys_id = sys_id_opt.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
             let dungeon_id = kw_or_arg_i64(args, kwargs, 0, &["dungeonID", "dungeonVID"])
                 .filter(|&id| id > 0)

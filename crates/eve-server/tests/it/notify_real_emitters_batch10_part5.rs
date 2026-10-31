@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const PILOT_A: i64 = 90_000_001;
-const PILOT_B: i64 = 90_000_002;
 const SYS_JITA: u32 = 30_000_142;
 
 fn make_item(
@@ -148,7 +147,6 @@ async fn setup_pilot_in_space(
 /// parity: notify:DoDestinyUpdates
 /// parity: notify:DoSimClockRebase
 /// parity: notify:OnDestinationChange
-/// parity: notify:OnServerMapDataPush
 /// parity: notify:OnSystemActivityUpdated
 /// parity: notify:OnCharacterEnergyChanged
 /// parity: notify:OnAnalysisKreditsChange
@@ -281,75 +279,6 @@ async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
             PyRep::Bool(false),
         ]
     );
-
-    // 4. OnServerMapDataPush via live map.GetHistory([1, 24])
-    // Negative: when killmails table is empty, map.GetHistory returns empty rowset and emits zero OnServerMapDataPush
-    ctx.db.with_mut_snapshot(|snap| snap.killmails.clear());
-    rpc(
-        &ctx,
-        &mut sess,
-        "map",
-        "GetHistory",
-        &[PyRep::Integer(1), PyRep::Integer(24)],
-    )
-    .await
-    .unwrap();
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess, PILOT_A),
-        "OnServerMapDataPush"
-    ));
-
-    // Positive: with recorded killmail in SYS_JITA, map.GetHistory([1, 24]) pushes TriColors + 5-tuples
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.killmails.insert(
-            1,
-            KillmailRecord {
-                kill_id: 1,
-                victim_character_id: PILOT_B,
-                attacker_character_id: PILOT_A,
-                solar_system_id: SYS_JITA,
-                ship_type_id: 587,
-                total_value_isk: 1_500_000.0,
-                killed_unix: now_u,
-                victim_corp_id: 1_000_009,
-                victim_alliance_id: None,
-                attacker_corp_id: 1_000_009,
-                attacker_alliance_id: None,
-            },
-        );
-    });
-    rpc(
-        &ctx,
-        &mut sess,
-        "map",
-        "GetHistory",
-        &[PyRep::Integer(1), PyRep::Integer(24)],
-    )
-    .await
-    .unwrap();
-    let map_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    let mdp = find_notif(&map_notifs, "OnServerMapDataPush");
-    assert_eq!(mdp.len(), 2);
-    match &mdp[0] {
-        PyRep::List(colors) => assert_eq!(colors.len(), 3),
-        other => panic!("expected 3 TriColor tuples, got {other:?}"),
-    }
-    match &mdp[1] {
-        PyRep::List(rows) => {
-            assert_eq!(rows.len(), 1);
-            match &rows[0] {
-                PyRep::Tuple(cols) => {
-                    assert_eq!(cols.len(), 5);
-                    assert_eq!(cols[0], PyRep::Integer(i64::from(SYS_JITA)));
-                    assert_eq!(cols[1], PyRep::Integer(1));
-                    assert_eq!(cols[2], PyRep::Integer(0));
-                    assert_eq!(cols[3], PyRep::Real(1_500_000.0));
-                }
-                other => panic!("expected 5-tuple map row, got {other:?}"),
-            }
-        }
-        other => panic!("expected List of 5-tuples, got {other:?}"),
-    }
 
     // 5. OnSystemActivityUpdated via live industryManager.InstallJob
     // Negative: undocked pilot calling InstallJob fails with NotDocked and emits zero OnSystemActivityUpdated

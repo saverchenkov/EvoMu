@@ -326,11 +326,6 @@ pub fn handle(
                     })
                     .collect()
             });
-            if stat_type == 1 {
-                if let Some(cid) = session.character_id.filter(|&id| id > 0) {
-                    let _ = crate::services::notify_emitters_batch10::emit_server_map_data_push_from_killmails(ctx, cid);
-                }
-            }
             Some(Ok(desc.build_crowset(rows)))
         }
 

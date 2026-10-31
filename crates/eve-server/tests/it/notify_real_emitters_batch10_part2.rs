@@ -136,11 +136,6 @@ async fn setup_pilot_in_space(ctx: &ServerContext, char_id: i64, ship_id: i64, g
 
 /// parity: notify:OnDungeonEdit
 /// parity: notify:OnDungeonValues
-/// parity: notify:OnDungeonCameraInterest
-/// parity: notify:OnDungeonTriggerAmbientSound
-/// parity: notify:OnDungeonTriggerAudio
-/// parity: notify:OnDungeonTriggerMessage
-/// parity: notify:OnDungeonTriggerMusic
 #[tokio::test]
 async fn batch10_dungeon_editor_values_and_room_triggers() {
     let ctx = ServerContext::new();
@@ -172,73 +167,23 @@ async fn batch10_dungeon_editor_values_and_room_triggers() {
         other => panic!("expected 3-tuple roomPos, got {other:?}"),
     }
 
-    // 2. Spawn gated dungeon instance with all 5 room triggers via live keeper.SpawnDungeonInstance
-    let room_py = PyRep::keyval([
-        ("roomName", PyRep::String("Relay Vault".into())),
-        ("position", PyRep::Tuple(vec![PyRep::Real(500_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
-        ("gateLocked", PyRep::Bool(false)),
-        (
-            "objects",
-            PyRep::List(vec![PyRep::keyval([
-                ("typeID", PyRep::Integer(23)),
-                ("name", PyRep::String("Ancient Relay".into())),
-                ("position", PyRep::Tuple(vec![PyRep::Real(505_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
-            ])]),
-        ),
-        (
-            "triggers",
-            PyRep::List(vec![
-                PyRep::keyval([
-                    ("kind", PyRep::String("approach".into())),
-                    ("targetObjectIndex", PyRep::Integer(0)),
-                    ("radius", PyRep::Real(2_000.0)),
-                    ("action", PyRep::String("CameraInterest".into())),
-                    ("objectIndex", PyRep::Integer(0)),
-                    ("speedMilli", PyRep::Integer(1_500)),
-                    ("durationMs", PyRep::Integer(4_000)),
-                ]),
-                PyRep::keyval([
-                    ("kind", PyRep::String("approach".into())),
-                    ("targetObjectIndex", PyRep::Integer(0)),
-                    ("radius", PyRep::Real(2_000.0)),
-                    ("action", PyRep::String("AmbientSound".into())),
-                    ("objectIndex", PyRep::Integer(0)),
-                    ("soundID", PyRep::String("amb_dungeon_relay_loop".into())),
-                ]),
-                PyRep::keyval([
-                    ("kind", PyRep::String("approach".into())),
-                    ("targetObjectIndex", PyRep::Integer(0)),
-                    ("radius", PyRep::Real(2_000.0)),
-                    ("action", PyRep::String("Audio".into())),
-                    ("audioUrl", PyRep::String("wise:/dungeon_relay_alert_play".into())),
-                ]),
-                PyRep::keyval([
-                    ("kind", PyRep::String("approach".into())),
-                    ("targetObjectIndex", PyRep::Integer(0)),
-                    ("radius", PyRep::Real(2_000.0)),
-                    ("action", PyRep::String("Message".into())),
-                    ("messageType", PyRep::String("popup".into())),
-                    ("messageID", PyRep::Integer(555_001)),
-                ]),
-                PyRep::keyval([
-                    ("kind", PyRep::String("approach".into())),
-                    ("targetObjectIndex", PyRep::Integer(0)),
-                    ("radius", PyRep::Real(2_000.0)),
-                    ("action", PyRep::String("Music".into())),
-                    ("musicTriggerID", PyRep::Integer(777_002)),
-                ]),
-            ]),
-        ),
-    ]);
-    let mut spawn_kw = HashMap::new();
-    spawn_kw.insert("dungeonID".into(), PyRep::Integer(2005));
-    spawn_kw.insert("hasEntryGate".into(), PyRep::Bool(true));
-    spawn_kw.insert("position".into(), PyRep::Tuple(vec![PyRep::Real(100_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]));
-    spawn_kw.insert("rooms".into(), PyRep::List(vec![room_py]));
-    let inst_rep = rpc_kw(&ctx, &mut gm_sess, "keeper", "PlayDungeon", &[], &spawn_kw)
-        .await
-        .expect("PlayDungeon");
-    let entry_gate_id = inst_rep.dict_get("entryGateBallID").and_then(|v| v.as_i64()).expect("entryGateBallID");
+    // 2. Spawn normal SDE dungeon instance with entry gate and verify OnDungeonValues
+    let inst_id = eve_server::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
+        &ctx,
+        PILOT_A,
+        SYS_JITA,
+        1420,
+        "Deadspace",
+        [100_000.0, 0.0, 0.0],
+        true,
+    )
+    .await
+    .expect("spawn_sde_dungeon_runtime_instance");
+    let state_rep = eve_server::services::pve_dungeon_runtime_rpc::get_dungeon_instance_state(&ctx, inst_id).unwrap();
+    let entry_gate_id = state_rep
+        .dict_get("entryGateBallID")
+        .and_then(|v| v.as_i64())
+        .expect("entryGateBallID");
     let _ = drain_all(&ctx, &mut non_gm, PILOT_B);
 
     // Negative: Pilot B is >2500m from entry gate -> ActivateAccelerationGate fails, zero OnDungeonValues
@@ -253,66 +198,14 @@ async fn batch10_dungeon_editor_values_and_room_triggers() {
     let jita_sys = ctx.systems.get_or_spawn(SYS_JITA);
     let (_, gate_ball) = jita_sys.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap();
     let _ = jita_sys.set_ball_position(700_202, gate_ball.position).await;
-    let room_enter_rep = rpc(&ctx, &mut non_gm, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)])
+    let _room_enter_rep = rpc(&ctx, &mut non_gm, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)])
         .await
         .expect("ActivateAccelerationGate");
     let gate_notifs = drain_all(&ctx, &mut non_gm, PILOT_B);
     let dv_args = find_notif(&gate_notifs, "OnDungeonValues");
     assert_eq!(dv_args.len(), 2);
-    assert_eq!(dv_args[0], PyRep::Integer(2005));
+    assert_eq!(dv_args[0], PyRep::Integer(1420));
     assert_eq!(dv_args[1].dict_get("currentWave").and_then(|v| v.as_i64()), Some(1));
-    // Pilot arrived at gateDestinationPos (15km away from Ancient Relay at 505,000), so 0 triggers fired yet!
-    for ev in [
-        "OnDungeonCameraInterest",
-        "OnDungeonTriggerAmbientSound",
-        "OnDungeonTriggerAudio",
-        "OnDungeonTriggerMessage",
-        "OnDungeonTriggerMusic",
-    ] {
-        assert!(!has_notif(&gate_notifs, ev), "unexpected early {ev}");
-    }
-
-    // Negative: UpdateStateRequest while still outside 2,000m trigger radius fires zero room triggers
-    rpc(&ctx, &mut non_gm, "beyonce", "UpdateStateRequest", &[]).await.unwrap();
-    let outside_notifs = drain_all(&ctx, &mut non_gm, PILOT_B);
-    assert!(!has_notif(&outside_notifs, "OnDungeonCameraInterest"));
-    assert!(!has_notif(&outside_notifs, "OnDungeonTriggerAudio"));
-
-    // Positive: move Pilot B within 2,000m of Ancient Relay object and call UpdateStateRequest
-    let inst_id = inst_rep.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
-    let state_rep = eve_server::services::pve_dungeon_runtime_rpc::get_dungeon_instance_state(&ctx, inst_id).unwrap();
-    let relay_ball_id = match state_rep.dict_get("rooms") {
-        Some(PyRep::List(rooms)) => match rooms[0].dict_get("objectBallIDs") {
-            Some(PyRep::List(ids)) => ids[0].as_i64().unwrap(),
-            other => panic!("expected objectBallIDs list, got {other:?}"),
-        },
-        other => panic!("expected rooms list, got {other:?}"),
-    };
-    let _ = room_enter_rep;
-    let (_, relay_ball) = jita_sys.get_ball_snapshot(relay_ball_id).await.unwrap().unwrap();
-    let _ = jita_sys.set_ball_position(700_202, relay_ball.position).await;
-    rpc(&ctx, &mut non_gm, "beyonce", "UpdateStateRequest", &[]).await.unwrap();
-    let trig_notifs = drain_all(&ctx, &mut non_gm, PILOT_B);
-    assert_eq!(
-        find_notif(&trig_notifs, "OnDungeonCameraInterest"),
-        &[PyRep::Integer(relay_ball_id), PyRep::Real(1.5), PyRep::Real(4.0)]
-    );
-    assert_eq!(
-        find_notif(&trig_notifs, "OnDungeonTriggerAmbientSound"),
-        &[PyRep::Integer(2005), PyRep::String("amb_dungeon_relay_loop".into()), PyRep::Integer(relay_ball_id)]
-    );
-    assert_eq!(
-        find_notif(&trig_notifs, "OnDungeonTriggerAudio"),
-        &[PyRep::Integer(2005), PyRep::String("wise:/dungeon_relay_alert_play".into())]
-    );
-    assert_eq!(
-        find_notif(&trig_notifs, "OnDungeonTriggerMessage"),
-        &[PyRep::String("popup".into()), PyRep::Integer(555_001)]
-    );
-    assert_eq!(
-        find_notif(&trig_notifs, "OnDungeonTriggerMusic"),
-        &[PyRep::Integer(2005), PyRep::Integer(777_002)]
-    );
 }
 
 /// parity: notify:OnSignalTrackerFullState
@@ -388,7 +281,13 @@ async fn batch10_expedition_signatures_signal_tracker_and_probes() {
     .await
     .unwrap();
     let scan_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    let pwe_args = find_notif(&scan_notifs, "OnProbeWarpEnd");
+    assert!(has_notif(&scan_notifs, "OnProbeWarpStart"));
+    assert!(!has_notif(&scan_notifs, "OnProbeWarpEnd"));
+
+    // Advance clock past warp_ft (1000ms = 1s) -> OnProbeWarpEnd(probeID) fires
+    ctx.advance_secs(2);
+    let after_warp_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let pwe_args = find_notif(&after_warp_notifs, "OnProbeWarpEnd");
     assert_eq!(pwe_args, &[PyRep::Integer(first_probe_id)]);
 
     // 3. OnCosmicSignatureAdded, OnDungeonInstanceAdded, OnDungeonInstanceRemoved via live keeper.EnterNextDungeonRoom

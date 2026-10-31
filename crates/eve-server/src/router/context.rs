@@ -106,6 +106,8 @@ pub struct ActiveScannerProbe {
     pub probe_id: i64, pub probe_type_id: u32, pub owner_char_id: i64, pub ship_id: i64, pub launcher_module_id: i64,
     pub solar_system_id: u32, pub position: [f64; 3], pub destination: [f64; 3], pub range_step: i32,
     pub scan_range_m: f64, pub base_sensor_strength: f64, pub max_flight_time_s: f64, pub launched_at_unix: u64, pub state: i32,
+    #[serde(default)]
+    pub warp_end_ft: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1124,7 +1126,7 @@ impl ServerContext {
                 || existing.projected_ewar != active_projected;
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
-            crate::services::combat_crimewatch::with_combat_ephemeral(self, |rt| {
+            crate::services::combat_crimewatch::with_mut_combat_ephemeral(self, |rt| {
                 for d in rt.active_drones_in_space.values() {
                     if d.parent_ship_id == ship_id && !d.is_abandoned {
                         if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {

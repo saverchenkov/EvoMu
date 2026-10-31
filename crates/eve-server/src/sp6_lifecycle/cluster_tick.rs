@@ -641,6 +641,7 @@ fn execute_due_abyssal_collapse_sync(
 /// by `secs` seconds (or when `tick_background_cluster` runs with `secs == 0`).
 pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
     crate::services::notify_emitters_batch10::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
+    crate::services::space_destiny::space_probe_scanning::tick_probe_warp_end(ctx);
     let now_unix = ctx.now_unix();
 
     // 0. Sweep expired market orders and check season transitions across cluster ticks.

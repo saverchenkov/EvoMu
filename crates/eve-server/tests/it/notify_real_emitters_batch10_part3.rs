@@ -144,11 +144,7 @@ async fn setup_pilot_in_space(
     sess
 }
 
-/// parity: notify:OnProgressionRoomJoined
-/// parity: notify:OnProgressionTaskWidgetUpdate
 /// parity: notify:OnProgressionTaskCompleted
-/// parity: notify:OnProgressionAdvanced
-/// parity: notify:OnStartConversation
 /// parity: notify:OnProgressionLeft
 #[tokio::test]
 async fn batch10_progression_and_conversations() {
