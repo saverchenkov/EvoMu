@@ -181,6 +181,9 @@ pub fn facility_tax_note_id(facility_id: i64) -> i64 {
     -(1_000_000_000_000_i64.saturating_add(facility_id.abs()))
 }
 
+/// DERIVED: Default NPC station industry facility tax rate (0.25%), shared with ESI `/industry/facilities` and `InstallJob`.
+pub(crate) const NPC_STATION_INDUSTRY_TAX_RATE: f64 = 0.0025;
+
 pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) -> HashMap<u8, f64> {
     let nid = facility_tax_note_id(facility_id);
     if let Some(note) = snap.owner_notes.get(&nid) {
@@ -194,7 +197,7 @@ pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) 
             .get(&facility_id)
             .map(|it| matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836))
             .unwrap_or(false);
-    let default_rate = if is_upwell { 0.05 } else { 0.0025 };
+    let default_rate = if is_upwell { 0.05 } else { NPC_STATION_INDUSTRY_TAX_RATE };
     let mut map = HashMap::new();
     for act in [1_u8, 3, 4, 5, 8, 9] {
         map.insert(act, default_rate);
@@ -489,7 +492,7 @@ pub fn compute_industry_job_costs_for_char(
         .get(&activity_id)
         .or_else(|| taxes.get(&1))
         .copied()
-        .unwrap_or(0.0025);
+        .unwrap_or(NPC_STATION_INDUSTRY_TAX_RATE);
     let raw_facility_tax_isk = ((total_eiv * facility_tax_rate) * 100.0).round() / 100.0;
     let is_enemy_militia = char_id
         .and_then(|cid| snap.characters.get(&cid))

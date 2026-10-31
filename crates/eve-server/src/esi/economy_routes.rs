@@ -306,6 +306,9 @@ pub fn dispatch_economy_route(
                                 recent_30.iter().map(|d| d.average).sum::<f64>()
                                     / (recent_30.len() as f64)
                             };
+                            // DERIVED: adjusted_price is approximated via a 28-day clamped EMA over daily market history
+                            // (falling back to SDE base_price / active-order volume-weighted average when history is absent)
+                            // rather than CCP's internal 28-day adjusted price formula.
                             let recent_28 = &days[days.len().saturating_sub(28)..];
                             let mut rolling_adj = recent_28[0].average;
                             for d in &recent_28[1..] {
@@ -327,6 +330,7 @@ pub fn dispatch_economy_route(
                         return None;
                     }
                     let avg = sum_wv / (sum_v as f64);
+                    // DERIVED: adjusted_price falls back to active-order volume-weighted average when daily history is absent
                     Some(json!({
                         "type_id": tid as i64,
                         "average_price": avg,

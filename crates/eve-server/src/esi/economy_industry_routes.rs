@@ -131,7 +131,8 @@ pub fn dispatch_economy_industry_route(
                         "region_id": st.region_id as i64,
                         "solar_system_id": st.solar_system_id as i64,
                         "type_id": st.station_type_id as i64,
-                        "tax": 0.0025,
+                        // DERIVED: NPC station industry facility tax rate shared with InstallJob cost calculation
+                        "tax": crate::services::industry_pi::industry_facilities_bps::NPC_STATION_INDUSTRY_TAX_RATE,
                     }),
                 );
             }
@@ -148,7 +149,8 @@ pub fn dispatch_economy_industry_route(
                             "region_id": st.region_id as i64,
                             "solar_system_id": st.solar_system_id as i64,
                             "type_id": st.station_type_id as i64,
-                            "tax": 0.0025,
+                            // DERIVED: NPC station industry facility tax rate shared with InstallJob cost calculation
+                            "tax": crate::services::industry_pi::industry_facilities_bps::NPC_STATION_INDUSTRY_TAX_RATE,
                         }),
                     );
                 }
