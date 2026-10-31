@@ -359,7 +359,7 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
     );
     assert_eq!(
         rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetDefaultHomePage", &[]).await.unwrap(),
-        PyRep::String("https://community.eveonline.com".to_string())
+        PyRep::String("https://www.eveonline.com/".to_string())
     );
     assert_eq!(
         rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesList", &[]).await.unwrap(),
@@ -367,13 +367,14 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
     );
     let h0 = rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesHash", &[]).await.unwrap();
 
-    // Persist updated policy in CosmeticsUiExtendedState and verify RPCs reflect it
+    // Persist updated policy and verify RPCs reflect it
     ctx.db.with_mut_snapshot(|snap| {
-        let mut st = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        st.browser_lockdown = true;
-        st.browser_default_home_page = Some("https://forums.eveonline.com".to_string());
-        st.browser_flagged_sites = vec!["https://phishing.example.test".to_string()];
-        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &st);
+        eve_server::services::notify_emitters_batch9_part2::set_browser_lockdown_policy(
+            snap,
+            true,
+            "https://forums.eveonline.com",
+            vec![("https://phishing.example.test".to_string(), 2)],
+        );
     });
 
     assert_eq!(
@@ -386,7 +387,10 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
     );
     assert_eq!(
         rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesList", &[]).await.unwrap(),
-        PyRep::List(vec![PyRep::String("https://phishing.example.test".to_string())])
+        PyRep::List(vec![PyRep::Dict(vec![
+            (PyRep::String("siteUrl".into()), PyRep::String("https://phishing.example.test".into())),
+            (PyRep::String("siteFlag".into()), PyRep::Integer(2)),
+        ])])
     );
     let h1 = rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesHash", &[]).await.unwrap();
     assert_ne!(h0, h1);
