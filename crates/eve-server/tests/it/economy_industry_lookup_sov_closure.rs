@@ -253,8 +253,8 @@ async fn test_sov_structures_info_for_solar_system_filters_to_sov_structures() {
         .await
         .expect("GetSovStructuresInfoForSolarSystem");
 
-    let Some(PyRep::List(structs)) = dict_get(&res, "structures") else {
-        panic!("expected structures list in GetSovStructuresInfoForSolarSystem");
+    let PyRep::List(structs) = &res else {
+        panic!("expected top-level structures list in GetSovStructuresInfoForSolarSystem");
     };
     assert!(
         structs.iter().any(|s| dict_get(s, "structureID") == Some(&PyRep::Integer(hub_id))),
