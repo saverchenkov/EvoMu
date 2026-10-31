@@ -9186,8 +9186,10 @@
     "quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj",
     "quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj",
     "rpc:posMgr.AnchorOrbital",
+    "rpc:posMgr.AnchorStructure",
     "rpc:posMgr.OnlineOrbital",
     "rpc:posMgr.UnanchorOrbital",
+    "sde:res:/localizationfsd/localization_fsd_en-us.pickle",
     "sde:res:/staticdata/challengeconditions.fsdbinary",
     "sde:res:/staticdata/challengeevents.fsdbinary",
     "sde:res:/staticdata/challenges.fsdbinary",
@@ -9196,6 +9198,21 @@
     "sde:res:/staticdata/surveys.fsdbinary"
   ],
   "fake_done": [
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 899-915) injects ContractRecord (6_301, 6_302) directly into snap.contracts via ctx.db.with_mut_snapshot (:780-867) with zero contractMgr.CreateContract RPCs.",
+      "id": "esi:GET /characters/{character_id}/contracts",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 927-938) injects synthetic bid_history on ContractRecord 6_301 directly into snap.contracts via ctx.db.with_mut_snapshot (:815-822) with zero contractMgr.PlaceBid RPCs.",
+      "id": "esi:GET /characters/{character_id}/contracts/{contract_id}/bids",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 916-926) injects ContractRecord 6_301 and InventoryItemRecord 880_621 (with InventoryFlag::Hangar rather than contract escrow) directly into snap.contracts and snap.items via ctx.db.with_mut_snapshot (:780-814) with zero contractMgr RPCs.",
+      "id": "esi:GET /characters/{character_id}/contracts/{contract_id}/items",
+      "flagged_by_audit": "20261030-160120"
+    },
     {
       "evidence": "The only tagged test, test_esi_faction_warfare_routes_reflect_live_state (crates/eve-server/tests/it/esi_universe_fw_complete.rs:313-332), hand-writes FwCharacterStatsRecord (rank 3/4, kills 2/5/12, VP 400/1200/3400) straight into snap.fw_character_stats via ctx.db.with_mut_snapshot, and asserts those same numbers back at :389-400. The 'live update' at :584-596 also mutates the snapshot directly (+1 kill, +150 VP), and :614-615 asserts 13/3550. No FW kill, complex capture or enlistment RPC ever drives these stats. This is the injection pattern behind the existing fake flags on esi:GET /fw/stats, /fw/leaderboards/characters and /fw/leaderboards/corporations, which share this test.",
       "id": "esi:GET /characters/{character_id}/fw/stats",
@@ -9207,6 +9224,81 @@
       "flagged_by_audit": "20261029-182230"
     },
     {
+      "evidence": "Sole tagged test test_esi6_industry_and_mining_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:986, 1104-1119, 1220-1234) pushes two MiningLedgerRecord structs straight into snap.mining_ledger via ctx.db.with_mut_snapshot (:1104-1119) and reads them back over HTTP (:1220-1234) without executing any mining cycle or RPC.",
+      "id": "esi:GET /characters/{character_id}/mining",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:168-201, 580-612, 684-696) injects MarketOrderRecord and MarketOrderMeta (order 6201) directly into snap.market_orders and snap.market_order_meta via ctx.db.with_mut_snapshot with zero marketProxy order-placement RPCs.",
+      "id": "esi:GET /characters/{character_id}/orders",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:168-201, 580-612, 698-715) injects MarketOrderRecord and MarketOrderMeta (order 6202 with state: Some(\"cancelled\")) directly into snap.market_orders and snap.market_order_meta via ctx.db.with_mut_snapshot with zero marketProxy order-placement, fulfilment, or cancellation RPCs.",
+      "id": "esi:GET /characters/{character_id}/orders/history",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1307-1398, 1429-1444) writes PlanetaryColonyRecord directly into snap.planetary_colonies via ctx.db.with_mut_snapshot (:1334-1343) without creating a colony via planetMgr RPCs.",
+      "id": "esi:GET /characters/{character_id}/planets",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1307-1398, 1446-1461) writes PlanetaryColonyLayoutRecord (pins, routes, links) directly into snap.planetary_colony_layouts via ctx.db.with_mut_snapshot (:1344-1398) without building colony pins/routes/links via planetMgr.UserUpdateNetwork.",
+      "id": "esi:GET /characters/{character_id}/planets/{planet_id}",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 978-982) injects synthetic bid_history on public ContractRecord 6_301 directly into snap.contracts via ctx.db.with_mut_snapshot (:815-822) with zero contractMgr.PlaceBid RPCs.",
+      "id": "esi:GET /contracts/public/bids/{contract_id}",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 972-977) injects public ContractRecord 6_301 and InventoryItemRecord 880_621 directly into snap.contracts and snap.items via ctx.db.with_mut_snapshot (:780-814) with zero contractMgr RPCs.",
+      "id": "esi:GET /contracts/public/items/{contract_id}",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 962-971) injects public ContractRecord 6_301 directly into snap.contracts via ctx.db.with_mut_snapshot (:787-824) with zero contractMgr.CreateContract RPCs.",
+      "id": "esi:GET /contracts/public/{region_id}",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Station_Manager role (rejecting Station Managers with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 (is_operation_implemented) omits /corporation/{corporation_id}/mining/extractions, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1213-1244 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporation/{corporation_id}/mining/extractions",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Accountant role (rejecting Accountants with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporation/{corporation_id}/mining/observers from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1246-1270 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporation/{corporation_id}/mining/observers",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Accountant role (rejecting Accountants with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporation/{corporation_id}/mining/observers/{observer_id} from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1271-1305 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 939-949) injects corporation ContractRecord 6_302 directly into snap.contracts via ctx.db.with_mut_snapshot (:826-866) with zero contractMgr.CreateContract RPCs.",
+      "id": "esi:GET /corporations/{corporation_id}/contracts",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 956-961) injects corporation ContractRecord 6_302 directly into snap.contracts via ctx.db.with_mut_snapshot (:826-866) with zero contractMgr.PlaceBid RPCs.",
+      "id": "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 950-955) injects corporation ContractRecord 6_302 and item_ids directly into snap.contracts and snap.items via ctx.db.with_mut_snapshot (:780-866) with zero contractMgr RPCs.",
+      "id": "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/items",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Station_Manager role (rejecting Station Managers with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporations/{corporation_id}/customs_offices from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1350, 1480-1522 tests only ROLE_DIRECTOR.",
+      "id": "esi:GET /corporations/{corporation_id}/customs_offices",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
       "evidence": "Same test and same seeding (esi_universe_fw_complete.rs:302-333). The corp kills/VP asserted at :428-438 (2/5/12, 400/1200/3400) are just the hand-written character record summed over a one-member corp seeded via with_mut_snapshot, and enlisted_on comes from a directly inserted snap.fw_corp_enlisted_on (:333). No FW gameplay path produces the values. The sibling rows esi:GET /fw/stats and /fw/leaderboards/corporations are already FLAGGED_FAKE for this exact test.",
       "id": "esi:GET /corporations/{corporation_id}/fw/stats",
       "flagged_by_audit": "20261030-070046"
@@ -9215,6 +9307,16 @@
       "evidence": "crates/eve-server/src/esi/economy_industry_routes.rs:294-357 hardcodes location_id: j.facility_id, blueprint_location_id: j.facility_id, and output_location_id: j.facility_id (:330-341, labelled DERIVED) instead of corp hangar division or container item IDs, and omits cost, licensed_runs, probability, completed_date, and completed_character_id. Tested in crates/eve-server/tests/it/esi_market_industry_pi.rs:1157-1165, asserting only array length and job_id.",
       "id": "esi:GET /corporations/{corporation_id}/industry/jobs",
       "flagged_by_audit": "20261029-182230"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces a hardcoded blanket ROLE_DIRECTOR (1) gate across every {corporation_id} ESI route instead of OpenAPI's Accountant / Junior_Accountant / Trader roles, rejecting non-Director role holders with 403; crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 207-244 tests only a ROLE_DIRECTOR caller.",
+      "id": "esi:GET /corporations/{corporation_id}/orders",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces a hardcoded blanket ROLE_DIRECTOR (1) gate instead of OpenAPI's Accountant / Junior_Accountant / Trader roles, rejecting non-Director role holders with 403; crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 245-268 tests only a ROLE_DIRECTOR caller.",
+      "id": "esi:GET /corporations/{corporation_id}/orders/history",
+      "flagged_by_audit": "20261030-001553"
     },
     {
       "evidence": "crates/eve-server/tests/it/esi_universe_fw_complete.rs:313-348,584-596 (test_esi_faction_warfare_routes_reflect_live_state) directly injects snap.fw_character_stats and snap.fw_corp_stats via ctx.db.with_mut_snapshot without earning any FW kill or complex capture victory point through gameplay RPCs.",
@@ -9260,6 +9362,11 @@
       "evidence": "crates/eve-server/src/esi/economy_routes.rs:265-300. average_price is the plain mean of the price field of every open order, buy and sell mixed, across all regions (:267-283). It is not derived from market history. adjusted_price is the static SDE base_price, explicitly labelled DERIVED (:284-291), instead of CCP's rolling adjusted price. Both fields therefore carry invented values that industry cost and insurance consumers rely on.",
       "id": "esi:GET /markets/prices",
       "flagged_by_audit": "20261029-085904"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/economy_routes.rs:500-514 checks only character_has_structure_acl_access (docking ACL in crates/eve-server/src/esi/universe_routes.rs:45-86) without verifying that an online Standup Market Hub service module is fitted or checking market-service ACL access; in crates/eve-server/tests/it/esi_market_industry_pi.rs:284-302, 470-503, a bare Astrahus (35832) with zero fitted/online Market Hub module returns 200 OK.",
+      "id": "esi:GET /markets/structures/{structure_id}",
+      "flagged_by_audit": "20261030-001553"
     },
     {
       "evidence": "crates/eve-server/tests/it/esi_market_industry_pi.rs:351-357,440-455 (test_esi6_market_public_and_structure_routes) injects a hand-crafted MarketHistoryDayRecord (date '2025-12-15', average 5.8, volume 850000) directly into snap.market_history via ctx.db.with_mut_snapshot instead of executing market orders and verifying server-aggregated OHLCV history.",
@@ -9377,14 +9484,49 @@
       "flagged_by_audit": "20261026-170000"
     },
     {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 916-938) populates snap.contracts (including synthetic bid_history) and snap.items directly via ctx.db.with_mut_snapshot instead of creating contracts and placing bids through contractMgr RPCs.",
+      "id": "feat:esi.contracts.char-items-bids",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 899-915) populates snap.contracts directly via ctx.db.with_mut_snapshot instead of creating contracts through contractMgr RPCs.",
+      "id": "feat:esi.contracts.char-list",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 939-961) populates snap.contracts and snap.items directly via ctx.db.with_mut_snapshot instead of creating and bidding on corporation contracts through contractMgr RPCs.",
+      "id": "feat:esi.contracts.corp",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 962-982) populates snap.contracts and snap.items directly via ctx.db.with_mut_snapshot instead of creating and bidding on public contracts through contractMgr RPCs.",
+      "id": "feat:esi.contracts.public",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
       "evidence": "Closed by the same GET /characters/{character_id}/industry/jobs handler (crates/eve-server/src/esi/economy_industry_routes.rs:192-244) and test (crates/eve-server/tests/it/esi_market_industry_pi.rs:1129-1141) that synthesize blueprint_location_id and output_location_id as j.facility_id (:222-233, labelled DERIVED) and omit job cost, probability, and completion metadata.",
       "id": "feat:esi.industry.char-jobs",
       "flagged_by_audit": "20261029-182230"
     },
     {
+      "evidence": "Sole tagged test test_esi6_industry_and_mining_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:986, 1104-1119, 1220-1234) pushes two MiningLedgerRecord structs straight into snap.mining_ledger via ctx.db.with_mut_snapshot (:1104-1119) and reads them back over HTTP (:1220-1234) rather than recording real character mining activity through mining laser/strip miner cycles.",
+      "id": "feat:esi.industry.char-mining",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Closed by GET /corporation/{corporation_id}/mining/extractions behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Station_Manager role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1213-1244.",
+      "id": "feat:esi.industry.corp-extractions",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
       "evidence": "Closed by the same GET /corporations/{corporation_id}/industry/jobs handler (crates/eve-server/src/esi/economy_industry_routes.rs:294-357) and test (crates/eve-server/tests/it/esi_market_industry_pi.rs:1157-1165) that synthesize location_id, blueprint_location_id, and output_location_id as j.facility_id (:330-341, labelled DERIVED) and omit job cost and completion metadata.",
       "id": "feat:esi.industry.corp-jobs",
       "flagged_by_audit": "20261029-182230"
+    },
+    {
+      "evidence": "Closed by GET /corporation/{corporation_id}/mining/observers and /{observer_id} behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Accountant role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1246-1305.",
+      "id": "feat:esi.industry.corp-observers",
+      "flagged_by_audit": "20261030-001553"
     },
     {
       "evidence": "Closed by the same GET /industry/facilities handler (crates/eve-server/src/esi/economy_industry_routes.rs:95-134) and test (crates/eve-server/tests/it/esi_market_industry_pi.rs:1095-1107) that omit SDE NPC industry stations without seeded jobs and substitute st.reprocessing_stations_take (:125-128, labelled DERIVED) for NPC station industry tax (wiki:Manufacturing).",
@@ -9397,6 +9539,16 @@
       "flagged_by_audit": "20261028-144025"
     },
     {
+      "evidence": "Sole tagged test test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:168-201, 580-612, 684-715) populates snap.market_orders and snap.market_order_meta directly via ctx.db.with_mut_snapshot instead of placing and cancelling/filling orders through marketProxy RPCs.",
+      "id": "feat:esi.market.char-orders",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Closed by GET /corporations/{corporation_id}/orders and /orders/history behind the blanket ROLE_DIRECTOR-only check in crates/eve-server/src/esi/router.rs:619-675 (rejecting Accountant, Junior_Accountant, and Trader role holders with 403) and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 207-268.",
+      "id": "feat:esi.market.corp-orders",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
       "evidence": "crates/eve-server/tests/it/esi_market_industry_pi.rs:351-357,440-455 seeds snap.market_history directly via ctx.db.with_mut_snapshot with hardcoded OHLCV numbers instead of executing market trades and verifying daily history aggregation.",
       "id": "feat:esi.market.history",
       "flagged_by_audit": "20261029-225602"
@@ -9405,6 +9557,26 @@
       "evidence": "Closed by the same /markets/prices handler (crates/eve-server/src/esi/economy_routes.rs:7,21,265-300). It serves a mixed buy/sell open-order mean as average_price and the static SDE base_price (labelled DERIVED) as adjusted_price.",
       "id": "feat:esi.market.prices",
       "flagged_by_audit": "20261029-085904"
+    },
+    {
+      "evidence": "Closed by GET /markets/structures/{structure_id} in crates/eve-server/src/esi/economy_routes.rs:500-514 and tested in crates/eve-server/tests/it/esi_market_industry_pi.rs:284-302, 470-503 on a bare Astrahus (35832) with no online Standup Market Hub service module and no market-service ACL check.",
+      "id": "feat:esi.market.structure-orders",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1307-1343, 1429-1444) injects PlanetaryColonyRecord directly into snap.planetary_colonies via ctx.db.with_mut_snapshot with zero planetMgr RPCs.",
+      "id": "feat:esi.planetary-interaction.colonies",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "Closed by GET /corporations/{corporation_id}/customs_offices behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Station_Manager role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1350, 1480-1522.",
+      "id": "feat:esi.planetary-interaction.customs",
+      "flagged_by_audit": "20261030-001553"
+    },
+    {
+      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1398, 1446-1461) injects PlanetaryColonyLayoutRecord directly into snap.planetary_colony_layouts via ctx.db.with_mut_snapshot with zero planetMgr RPCs.",
+      "id": "feat:esi.planetary-interaction.layout",
+      "flagged_by_audit": "20261030-160120"
     },
     {
       "evidence": "Acceptance: when the boss leaves or disconnects, boss passes automatically and all members are notified. The tagged test fleet_tactical_movement_closure.rs:242-268 covers only a manual fleetObjectHandler.MakeLeader success and a non-boss error. No leave or disconnect triggers an automatic handover, and no notification is asserted.",
@@ -9465,11 +9637,6 @@
       "evidence": "industry_jobs.rs:377 treats `matches!(fac_type_id, 35826|35827|35833|35834)` (any Azbel, Sotiyo, Fortizar or Keepstar) as capital-capable with no Standup Capital Shipyard fitted. wiki:Manufacturing:241 requires the shipyard module. Freighters (group 513) and jump freighters (902) are on the high-sec capital ban list at :365-376, but wiki:Manufacturing:237 says freighters and the Orca can be built in any facility. Test economy_industry_pi_extended.rs:449-571 never tries a low- or null-sec structure without a capital service.",
       "id": "feat:industry.capital-construction-restrictions",
       "flagged_by_audit": "20261029-100543"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/industry_facilities_bps.rs:278-285 and :313-320 hand-type the engineering-complex and refinery bonuses as a match on type id: Raitaru 0.99/0.85/0.97, Azbel 0.99/0.80/0.96, Sotiyo 0.99/0.70/0.95, Athanor 1.00/0.80/0.96, Tatara 1.00/0.75/0.95. They are not read from the structure types' dogma attributes in the SDE. The Athanor gets an invented -20% reaction time and a 4% cost bonus. NPC stations get fixed 1.0/1.0/1.0 (:343-345). The facility rows served to the client (build_facility_pyrep :538-559) carry these synthesized multipliers.",
-      "id": "feat:industry.facilities",
-      "flagged_by_audit": "20261029-093338"
     },
     {
       "evidence": "crates/eve-server/src/services/industry_facilities_bps.rs:181-191 load_facility_taxes defaults NPC stations to 0.10 (10%) and Upwell structures to 0.05. compute_industry_job_costs_for_char (:441-446) and build_facility_pyrep (:504) fall back to 0.10 again. wiki:Manufacturing:93 says 'Facility tax: Fixed at 0.25% for NPC stations' (owner-set and capped at 10% for structures, :99). The tax is also charged on the wrong base: facility_tax = base_job_cost_isk * rate (:447) instead of Estimated Item Value * rate (wiki:Manufacturing:70).",
@@ -9592,9 +9759,34 @@
       "flagged_by_audit": "20261026-170000"
     },
     {
+      "evidence": "Acceptance requires CEQ Cost Modifier scaling of link energy cost, system Signal Interference capping daily links (up to 3 consecutive or 25 per day) decaying over ~25h, and system-wide Cynosural Jammers blocking CRAB link activation. crates/eve-server/src/services/pve_special_sites.rs:246-284 hardcodes a flat 30 CEQ cost and a synthetic 12-activation cap (13th refused at crates/eve-server/tests/it/pve_crab_and_storms_closure.rs:530-534), and pve_crab_and_storms_closure.rs:420-567 never tests CEQ Cost Modifier scaling or system-wide Cynosural Jammer blocking.",
+      "id": "feat:pve.crab-ceq-signal-interference",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_crab_beacons.rs:41-45 uses explicitly DERIVED Rogue Drone wave and loot tables (CRAB_ROGUE_DRONE_WAVES, CRAB_LOOT_TABLE). The sole tagged test crates/eve-server/tests/it/pve_crab_and_storms_closure.rs:161, 183, 236, 377-399 injects the beacon via with_mut_snapshot, bypasses Rogue Drone combat by deleting balls via internal lowsec_handle.remove_ball(bid) + tick_all_crab_beacons(&ctx) (:377-382), and checks deployer loot exclusivity only via internal Rust helper validate_single_item_can_be_opened (:393-399) instead of client invbroker loot RPCs.",
+      "id": "feat:pve.crab-link-activation",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_daily_goals.rs:15, 202-215 seeds 4 hardcoded DERIVED templates (DEFAULT_DAILY_GOAL_TEMPLATES, labelled // DERIVED) granting 5,000 SP per goal, contradicting wiki:AIR_Daily_Goals.md:20-27, 56 (each goal grants 500 EverMarks duplicated to the player's corp, completing 2 goals grants 10,000 SP, plus the 12-milestone monthly reward track). crates/eve-server/tests/it/quasar_daily_goals_remediation.rs asserts those synthetic 5,000 SP fixtures while feat:quasar.dailygoal and quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj remain FLAGGED_FAKE.",
+      "id": "feat:pve.daily-goals",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
       "evidence": "crates/eve-server/src/services/pve_special_sites.rs:439-476 is a hand-written table: 5 hives with invented room names ('Perimeter Approach', 'Assembler Chamber', 'Hive Sanctuary'), fixed NPC types per room and synthetic ball IDs (1_898_000_000 + did*100). The 'Sentinel Hive' is placed in 31_000_005, which this codebase itself treats as Thera (space_docking_cloaking.rs K162 -> Thera 31_000_005). The reward is a fixed 1 element plus 5x type 30745 placed into cargo (:924-933). NPC HP is clamped to at most 10,000 (:526-540), far below Drifter battleship HP. None of this comes from client dungeon data.",
       "id": "feat:pve.drifter-hives",
       "flagged_by_audit": "20261029-142409"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_hacking_board.rs:493-582 deals 2,000..=5,000 HP AoE ship explosion damage when failing a standard Data/Relic container twice in low/null/WH space, contradicting wiki:Hacking.md:151-154 (standard Data/Relic cans self-destruct harmlessly with loot lost; only Ghost Site covert cans explode for ship damage). crates/eve-server/tests/it/pve_hacking_parity_closure.rs:362-382, 416-423, 435-453 mutates g.virus_coherence and g.tiles[1] via internal with_pve_exploration_reg, asserts ship explosion damage on a standard container (:379-382), and asserts Crius-2014-removed spewedContainers mini-container spew (:435, 450-453).",
+      "id": "feat:pve.hacking-failure-outcome",
+      "flagged_by_audit": "20261030-160120"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_hacking_board.rs:425-427 implements SelfRepair as an instant one-shot +30 Coherence heal clamped to max_virus_coherence (min(120)), contradicting wiki:Hacking.md:184 (Self-Repair heals 5-10 Coherence per turn for 3 turns and Virus Coherence has no maximum cap). pve_hacking_board.rs:281-282 also spawns RestorationNode and VirusSuppressor unconditionally on diff == 1 and diff == 2 boards (wiki:Hacking.md:86-105: Very Easy/Easy difficulties do not spawn Restoration Nodes or Suppressors). crates/eve-server/tests/it/pve_hacking_parity_closure.rs:214-221, 297-303, 526-534 overwrites g.tiles = build_controlled_v24_board(), g.virus_coherence = 120, and g.utilities directly via internal with_pve_exploration_reg and asserts the wrong instant capped +30 heal.",
+      "id": "feat:pve.hacking-node-types",
+      "flagged_by_audit": "20261030-160120"
     },
     {
       "evidence": "crates/eve-server/src/services/pve_homefront_sites.rs:36-45 hard-codes a list of 8 candidate dungeon IDs. Every high-sec system gets exactly 2 sites, picked by sys_id % 8 (:48-49). Every boss is a Triglavian Damavik (48090/48092), even for Blood Raider and Sansha-themed operations (:65, :79, :91). Payouts are fixed constants labelled DERIVED: 17,230,000 and 15,500,000 ISK (:63-64, :75, :87). The fleet-size multiplier is invented: linear below the optimum, a flat 0.75 above it (pve_special_sites.rs:976-982). Boss HP is clamped to 600..10,000 regardless of the type's attributes (pve_special_sites.rs:526-540). The test (npc_spawns_pve_closure_part2.rs:539-544) asserts only that the balance went up.",
@@ -9610,6 +9802,11 @@
       "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:35-37 hardcodes DEFAULT_LOGIN_CAMPAIGN_ID = 2261 ('Capsuleer Day XXI', a seasonal event track). Every character gets it through unwrap_or(DEFAULT_LOGIN_CAMPAIGN_ID) at :386-388 and :474-476, so which daily campaign is active never comes from a live schedule or from static data. The 'once per day' boundary is UTC midnight, today = now_unix()/86_400 (:381, :469), not EVE downtime. The claim path falls back to the hardcoded Jita station 60_003_760 (:492). The tagged test admits the gap itself, '// DATA GAP: requires live login campaign schedule' (crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:72), and only checks campaign 2261 rewards after advancing a pinned clock by 86_400 s (:193). Rows backed by an invented active-campaign choice stay open under AGENTS.md.",
       "id": "feat:pve.login-campaign",
       "flagged_by_audit": "20261026-174136"
+    },
+    {
+      "evidence": "Acceptance requires 8 roaming null-sec storms (2 each of Gamma, Electrical, Plasma, Exotic) with strong core + weak periphery (2-3 jumps) and overlapping storms applying both effect sets. crates/eve-server/tests/it/pve_crab_and_storms_closure.rs:581-680 never verifies 8 storms (2 per weather type) or weak periphery vs strong core ship attribute magnitudes; for overlapping storms (:650-680), it overwrites reg.roaming_storms directly via internal with_pve_special_reg (:650-672) with next_move_at_sec: u64::MAX and calls internal Rust helper apply_active_dbuffs_and_system_effects_to_ship_attrs on a synthetic HashMap::from([(55, 100.0), (263, 1_000.0)]) (:674-680) instead of live ship dogma state.",
+      "id": "feat:pve.metaliminal-storm-movement",
+      "flagged_by_audit": "20261030-160120"
     },
     {
       "evidence": "Acceptance (ledger.json:61606): 'Completion pays ISK, time bonus, LP and standings; items rewarded.' The ISK and time-bonus amounts come from crates/eve-server/src/services/agents_missions_helpers.rs:306-311, labelled '// DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)': base_isk = base_lp.saturating_mul(1_000), and the time bonus is bonus_reward = isk_reward / 2. Both are invented, not from client or static data. The same code is the reason plan:E-5 and feat:pve.mission-lp-isk-reward-formula are already flagged fake in auditor_rows.json. A completion row that pays from this formula can't be DONE while those flags stand. Also, :303-304 scales the LP reward by the division 'Connections' skill. That skill doesn't change LP rewards in EVE (wiki:Loyalty_Points).",
@@ -10243,18 +10440,8 @@
       "flagged_by_audit": "20261026-073033"
     },
     {
-      "evidence": "crates/eve-server/src/services/wallet_services_ext.rs:1152-1165 is deterministic rather than random: it iterates 0..r.ticket_count in ascending order and assigns the lowest unsold ticket numbers sequentially. Tested in crates/eve-server/tests/it/rpc_petitioner_raffle.rs:372-430.",
-      "id": "rpc:raffleProxy.BuyRandomTickets",
-      "flagged_by_audit": "20261028-193006"
-    },
-    {
       "evidence": "crates/eve-server/src/services/wallet_services_ext.rs:121-136, 982 consumes HyperCores via the invented DERIVED formula ceil(est_value * (ticket_count/512)^0.25 / 5_000_000), permits creation in Upwell structures, and falls back to hardcoded Jita 60_003_760 when undocked rather than requiring a docked non-wormhole NPC station. Tested in crates/eve-server/tests/it/rpc_petitioner_raffle.rs:283-370 and crates/eve-server/tests/it/serverops_hypernet_gaps.rs:46-155.",
       "id": "rpc:raffleProxy.CreateRaffle",
-      "flagged_by_audit": "20261028-193006"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/wallet_services_ext.rs:967-976 ignores both active raffle prices and regional market history, returning identical (sde_base_price.max(100.0), sde_base_price.max(100.0)) from static types.base_price. Tested in crates/eve-server/tests/it/rpc_petitioner_raffle.rs:283-310.",
-      "id": "rpc:raffleProxy.GetActiveHistoricPrices",
       "flagged_by_audit": "20261028-193006"
     },
     {
@@ -10378,86 +10565,6 @@
       "evidence": "crates/eve-server/src/services/wallet_services_ext.rs:260-285 serves quasar_payment_store::read_store_catalog, which is empty in production unless populated by common::seed_test_nes_store_catalog (already FLAGGED_FAKE on feat:wallet.nes-store and quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj). Tested only against that seeded fixture in crates/eve-server/tests/it/rpc_store_cosmetics.rs:58-96.",
       "id": "rpc:storeManager.get_products",
       "flagged_by_audit": "20261028-193006"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Station_Manager role (rejecting Station Managers with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 (is_operation_implemented) omits /corporation/{corporation_id}/mining/extractions, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1213-1244 tests only ROLE_DIRECTOR.",
-      "id": "esi:GET /corporation/{corporation_id}/mining/extractions",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Accountant role (rejecting Accountants with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporation/{corporation_id}/mining/observers from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1246-1270 tests only ROLE_DIRECTOR.",
-      "id": "esi:GET /corporation/{corporation_id}/mining/observers",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Accountant role (rejecting Accountants with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporation/{corporation_id}/mining/observers/{observer_id} from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1271-1305 tests only ROLE_DIRECTOR.",
-      "id": "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces hardcoded ROLE_DIRECTOR (1) instead of OpenAPI's Station_Manager role (rejecting Station Managers with 403), crates/eve-server/src/esi/sample_routes.rs:390-526 omits /corporations/{corporation_id}/customs_offices from is_operation_implemented, and crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1350, 1480-1522 tests only ROLE_DIRECTOR.",
-      "id": "esi:GET /corporations/{corporation_id}/customs_offices",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces a hardcoded blanket ROLE_DIRECTOR (1) gate across every {corporation_id} ESI route instead of OpenAPI's Accountant / Junior_Accountant / Trader roles, rejecting non-Director role holders with 403; crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 207-244 tests only a ROLE_DIRECTOR caller.",
-      "id": "esi:GET /corporations/{corporation_id}/orders",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/router.rs:619-675 enforces a hardcoded blanket ROLE_DIRECTOR (1) gate instead of OpenAPI's Accountant / Junior_Accountant / Trader roles, rejecting non-Director role holders with 403; crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 245-268 tests only a ROLE_DIRECTOR caller.",
-      "id": "esi:GET /corporations/{corporation_id}/orders/history",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/economy_routes.rs:250-258 (// DERIVED: sde_market_groups stores group name only (no separate description column in SDE)) echoes mg.name into \"description\": mg.name instead of importing descriptionID from res:/staticdata/marketgroups.fsdbinary, and the tagged test (crates/eve-server/tests/it/esi_market_industry_pi.rs:374-388) never asserts \"description\", \"types\", or \"parent_group_id\".",
-      "id": "esi:GET /markets/groups/{market_group_id}",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/esi/economy_routes.rs:500-514 checks only character_has_structure_acl_access (docking ACL in crates/eve-server/src/esi/universe_routes.rs:45-86) without verifying that an online Standup Market Hub service module is fitted or checking market-service ACL access; in crates/eve-server/tests/it/esi_market_industry_pi.rs:284-302, 470-503, a bare Astrahus (35832) with zero fitted/online Market Hub module returns 200 OK.",
-      "id": "esi:GET /markets/structures/{structure_id}",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "Closed by GET /corporation/{corporation_id}/mining/extractions behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Station_Manager role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1213-1244.",
-      "id": "feat:esi.industry.corp-extractions",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "Closed by GET /corporation/{corporation_id}/mining/observers and /{observer_id} behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Accountant role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1002-1007, 1246-1305.",
-      "id": "feat:esi.industry.corp-observers",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "Closed by GET /corporations/{corporation_id}/orders and /orders/history behind the blanket ROLE_DIRECTOR-only check in crates/eve-server/src/esi/router.rs:619-675 (rejecting Accountant, Junior_Accountant, and Trader role holders with 403) and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:148-155, 207-268.",
-      "id": "feat:esi.market.corp-orders",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "Closed by GET /markets/groups/{market_group_id} in crates/eve-server/src/esi/economy_routes.rs:250-258 (labelled // DERIVED), which copies mg.name into \"description\" instead of reading the SDE market group description from res:/staticdata/marketgroups.fsdbinary; crates/eve-server/tests/it/esi_market_industry_pi.rs:365-391 omits value assertions on \"description\", \"types\", and \"parent_group_id\".",
-      "id": "feat:esi.market.groups",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "Closed by GET /markets/structures/{structure_id} in crates/eve-server/src/esi/economy_routes.rs:500-514 and tested in crates/eve-server/tests/it/esi_market_industry_pi.rs:284-302, 470-503 on a bare Astrahus (35832) with no online Standup Market Hub service module and no market-service ACL check.",
-      "id": "feat:esi.market.structure-orders",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "Closed by GET /corporations/{corporation_id}/customs_offices behind the hardcoded ROLE_DIRECTOR gate in crates/eve-server/src/esi/router.rs:619-675 (rejecting Station_Manager role holders with 403), omitted from is_operation_implemented in crates/eve-server/src/esi/sample_routes.rs:390-526, and tested only with ROLE_DIRECTOR in crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1350, 1480-1522.",
-      "id": "feat:esi.planetary-interaction.customs",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/industry_pi.rs:687-719 (pi_schematic_recipe, labelled // DERIVED) ignores ctx.sde.planet_schematics (already imported in SdeRegistry, cf. crates/eve-server/src/esi/sample_routes.rs:1059) and hardcodes a 26-arm match where (65..=79) maps every P1 schematic to 3000 default_p0 -> 20x Water (3645) and _ => (3600, vec![(3645, 40)], 2329, 5) (:717) turns ~42 P2/P3/P4 schematics into 40x Water -> 5x Biocells; meanwhile GetPin in crates/eve-server/src/services/pi_colonies.rs:276-281 hardcodes if (65..=135).contains(&schem_id) { 1800 } (reporting 30m cycle time for 60m P2/P3/P4 schematics). Tagged tests (crates/eve-server/tests/it/industry_pi_complete_part2.rs:234 and crates/eve-server/tests/it/economy_industry_pi_extended_part2.rs:490-559) cherry-pick only hardcoded schematic IDs (65, 66, 83, 119).",
-      "id": "feat:pi.factory-cycles",
-      "flagged_by_audit": "20261030-001553"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/industry_pi.rs:687-719 (pi_schematic_recipe, labelled // DERIVED) uses a hand-written lookup table instead of reading SDE schematic input/output type quantities (planetschematicspinmap / planetschematicstypemap): schematics 67..=79 all consume default_p0 to produce Water (3645), and ~42 P2/P3/P4 schematics hit the _ wildcard (:717, 40x Water -> 5x Biocells). Tagged test crates/eve-server/tests/it/economy_industry_pi_extended_part2.rs:490-559 exercises only cherry-picked hardcoded IDs 66, 83, and 119.",
-      "id": "feat:pi.schematic-input-output-routing",
-      "flagged_by_audit": "20261030-001553"
     },
     {
       "evidence": "Acceptance (ledger.json:62432-62442) says belts must hold the correct ore set for each security band and region. The production code is crates/eve-sde/src/static_domain_loaders.rs (new SdeRegistry::belt_ores_for_security_and_region, diff.patch:10-49), which its own comment labels 'DERIVED (OF-36)'. Every published base ore is put into a band by unit volume: highsec <= 0.35 m3, lowsec 0.35..=3.0, nullsec 3.0..=40.0. The only region check is Pochven 10_000_070. There is no Amarr/Caldari/Gallente/Minmatar quarter and no null-sec security class. wiki:Asteroids_and_ore (wikitext/Asteroids_and_ore.wiki:55-75, articles/Asteroids_and_ore.md:94-140) gives a different table. 1.0 systems hold only Veldspar and Scordite. Pyroxeres and Plagioclase appear by quarter at 0.9-0.5, and Caldari gets Plagioclase only at <=0.7. Lowsec ore sets differ per quarter (Amarr: Pyroxeres/Kernite/Jaspet; Gallente: Omber/Jaspet). Null classes F-J include Kernite at <=0.0. The tests enshrine the guess: crates/eve-server/tests/it/action_plan_mining.rs:83 accepts all of 1230/1228/1224/18 in Perimeter. The new mining_mn_closure.rs test (diff.patch:415-429) asserts 'volume <= 0.35' for highsec and 'volume > 3.0' for 0.0 null, so the volume rule is checked against itself. The claims file (claims.md:9) admits real regional/quarter tables are not wired, and the old code comment that kept this row open was deleted in this diff (diff.patch:254-261).",
