@@ -552,3 +552,4 @@ mod open_feats_and_rpcs_b22_corp;
 mod open_feats_and_rpcs_b22_mining;
 mod open_feats_and_rpcs_b22_structures_modules;
 mod quasar_b22_closure;
+mod notify_live_rpc_closure;

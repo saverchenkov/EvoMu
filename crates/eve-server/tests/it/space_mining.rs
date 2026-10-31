@@ -127,8 +127,8 @@ async fn test_sp3_spatial_grid_bubbles_dynamic_transitions_and_warp_curves() {
 
 #[tokio::test]
 async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
-    // parity: feat:mining.depletion, feat:mining.belt-respawn
-    eve_testkit::attest(&["feat:mining.depletion", "feat:mining.belt-respawn"]);
+    // parity: plan:C-5, feat:mining.depletion, feat:mining.belt-respawn
+    eve_testkit::attest(&["plan:C-5", "feat:mining.depletion", "feat:mining.belt-respawn"]);
     let ctx = ServerContext::new();
     let perim = ctx.systems.get_or_spawn(30_000_144);
 
@@ -379,8 +379,8 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
 
 #[tokio::test]
 async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
-    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&[]);
+    // parity: plan:MN-01, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&["plan:MN-01"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(961);
