@@ -73,6 +73,9 @@ async fn notify_batch9_alpha_and_non_diminishing_injectors() {
     ]);
 
     let ctx = new_ctx();
+    let base_unix: u64 = 1_800_000_000;
+    let clock = std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(base_unix));
+    ctx.set_clock(clock.clone());
     let mut sess_a = login_docked(&ctx, 9_101, "demo", "demo-secret", PILOT_A, JITA_STATION).await;
     let mut sess_b = login_docked(&ctx, 9_102, "other", "other-secret", PILOT_B, JITA_STATION).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -86,22 +89,59 @@ async fn notify_batch9_alpha_and_non_diminishing_injectors() {
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
 
-    // 1. OnAlphaInjectionAvailable: Alpha pilot queries GetNextAvailableInjection when ready
+    // 1. OnAlphaInjectionAvailable: GetNextAvailableInjection is strictly read-only
     let next_avail = rpc(&ctx, &mut sess_a, "alphaInjectorMgr", "GetNextAvailableInjection", &[])
         .await
         .expect("GetNextAvailableInjection alpha");
     assert_eq!(next_avail, PyRep::Integer(0));
+    let query_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert!(!query_notifs.iter().any(|(e, _)| e == "OnAlphaInjectionAvailable"));
+
+    // Consume a Daily Alpha Injector (47414) to start the 24h cooldown
+    let daily_inj_id = 910_000_049_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            daily_inj_id,
+            make_item(daily_inj_id, 47414, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, false),
+        );
+    });
+    let _ = rpc(&ctx, &mut sess_a, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(daily_inj_id)])
+        .await
+        .expect("InjectSkillpoints daily alpha");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+
+    let cd_avail = rpc(&ctx, &mut sess_a, "alphaInjectorMgr", "GetNextAvailableInjection", &[])
+        .await
+        .expect("GetNextAvailableInjection on cooldown");
+    assert!(matches!(cd_avail, PyRep::Integer(v) if v > 0));
+
+    // Negative 1a: Sweep before ALPHA_INJECTOR_COOLDOWN_TICKS expires does NOT emit OnAlphaInjectionAvailable
+    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+        &ctx,
+        base_unix,
+    );
+    assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
+        .iter()
+        .any(|(e, _)| e == "OnAlphaInjectionAvailable"));
+
+    // Positive: Advance clock past ALPHA_INJECTOR_COOLDOWN_TICKS (24h = 86_400s) and run sweep
+    eve_db::ServerClock::advance_secs(&*clock, 86_401);
+    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+        &ctx,
+        base_unix + 86_401,
+    );
     let alpha_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert!(alpha_notifs.iter().any(|(e, a)| e == "OnAlphaInjectionAvailable" && a.is_empty()));
 
-    // Negative 1a: Repeated query while already notified does not duplicate OnAlphaInjectionAvailable
-    let _ = rpc(&ctx, &mut sess_a, "alphaInjectorMgr", "GetNextAvailableInjection", &[])
-        .await
-        .expect("GetNextAvailableInjection repeat");
+    // Negative 1b: Repeated sweep after notification does not duplicate OnAlphaInjectionAvailable
+    eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
+        &ctx,
+        base_unix + 86_402,
+    );
     let repeat_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert!(!repeat_notifs.iter().any(|(e, _)| e == "OnAlphaInjectionAvailable"));
 
-    // Negative 1b: Omega pilot does NOT receive OnAlphaInjectionAvailable
+    // Negative 1c: Omega pilot does NOT receive OnAlphaInjectionAvailable
     let _ = rpc(&ctx, &mut sess_b, "alphaInjectorMgr", "GetNextAvailableInjection", &[])
         .await
         .expect("GetNextAvailableInjection omega");

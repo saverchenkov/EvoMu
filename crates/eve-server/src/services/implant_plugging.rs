@@ -1110,23 +1110,16 @@ pub fn handle_skill_notifications_and_injections(
                 Err(e) => return Some(Err(e)),
             };
             let now_ft = ctx.now_blueos_filetime_ticks();
-            let (next_available, is_alpha) = ctx.db.with_snapshot(|snap| {
-                let is_alpha = snap.characters.get(&char_id).is_some_and(|c| c.clone_grade <= 1);
+            let next_available = ctx.db.with_snapshot(|snap| {
                 let cooldowns = load_alpha_injector_cooldowns(snap);
                 if let Some(&last_ft) = cooldowns.get(&char_id) {
                     let cd_end = last_ft + ALPHA_INJECTOR_COOLDOWN_TICKS;
                     if now_ft < cd_end {
-                        return (cd_end, is_alpha);
+                        return cd_end;
                     }
                 }
-                (0, is_alpha)
+                0
             });
-            crate::services::notify_emitters_batch9::maybe_emit_alpha_injection_available(
-                ctx,
-                char_id,
-                is_alpha,
-                next_available,
-            );
             Some(Ok(PyRep::Integer(next_available)))
         }
         _ => None,

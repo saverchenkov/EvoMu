@@ -587,8 +587,6 @@ pub(crate) async fn handle_dogma_im(
                 "charid",
                 vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
             );
-            // V24 `godma.Godma.OnMultiEvent` collects `OnTarget` events and derives `OnTargets`.
-            let _ = ctx.notify_target_events(char_id, &[("add", target_id, "")]);
 
             // Passive Targeter (`group_id == 82`, `feat:modules.passive-targeter`) suppresses `"targetedBy"` yellow-box notification!
             let has_active_passive_targeter = fit.modules.values().any(|fm| {

@@ -41,8 +41,8 @@ pub fn emit_priming_needed_for_trade_items(
 
 /// Counts how many items in a multi-sell order are assembled and damaged (hull, armor, or fitted module/heat damage).
 pub fn count_damaged_sell_items(
-    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
+    damaged_fitted_ships: &std::collections::HashSet<i64>,
     char_id: i64,
     caller_corp_id: i64,
     use_corp: bool,
@@ -78,15 +78,7 @@ pub fn count_damaged_sell_items(
                         .copied()
                         .unwrap_or(0.0)
                         > 0.0;
-                let module_dmg = ctx
-                    .ship_fittings
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&item.item_id)
-                    .is_some_and(|fit| {
-                        fit.rack_heat.iter().any(|&h| h > 0.0)
-                            || fit.modules.values().any(|m| m.damage_hp > 0.0)
-                    });
+                let module_dmg = damaged_fitted_ships.contains(&item.item_id);
                 if hull_or_armor_dmg || module_dmg {
                     damaged_count += 1;
                 }

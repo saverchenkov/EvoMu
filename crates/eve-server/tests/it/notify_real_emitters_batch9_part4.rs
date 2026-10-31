@@ -432,22 +432,15 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .await
         .is_err());
 
-    // Positive: AddTarget(ship_b) emits OnMultiEvent([("OnTarget", "add", ship_b, ""), 0]) on lock start and lock completion
+    // Positive: AddTarget(ship_b) does NOT emit OnMultiEvent OnTarget add before lock completes,
+    // and emits exactly one OnMultiEvent([("OnTarget", "add", ship_b, ""), 0]) on lock completion
     let _ = rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_b)])
         .await
         .expect("AddTarget");
     let pre_lock_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(
-        find_notif(&pre_lock_notifs, "OnMultiEvent"),
-        &[PyRep::List(vec![PyRep::Tuple(vec![
-            PyRep::Tuple(vec![
-                PyRep::String("OnTarget".into()),
-                PyRep::String("add".into()),
-                PyRep::Integer(ship_b),
-                PyRep::String(String::new()),
-            ]),
-            PyRep::Integer(0),
-        ])])]
+    assert!(
+        !pre_lock_notifs.iter().any(|(e, _)| e == "OnMultiEvent"),
+        "OnMultiEvent OnTarget add must not be emitted before lock completes"
     );
     ctx.systems
         .get_or_spawn(SYS_JITA)
@@ -455,6 +448,11 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .await
         .expect("step_manual");
     let target_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        target_notifs.iter().filter(|(e, _)| e == "OnMultiEvent").count(),
+        1,
+        "expected exactly one OnMultiEvent after lock completion"
+    );
     assert_eq!(
         find_notif(&target_notifs, "OnMultiEvent"),
         &[PyRep::List(vec![PyRep::Tuple(vec![

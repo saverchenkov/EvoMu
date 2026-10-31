@@ -47,41 +47,6 @@ pub fn clear_alpha_avail_notified(snap: &mut WorldStateSnapshot, char_id: i64) {
     }
 }
 
-/// Emits `OnAlphaInjectionAvailable()` (`0` args, `id_type = "charid"`) once per ready window for Alpha clones.
-// parity: notify:OnAlphaInjectionAvailable
-pub fn maybe_emit_alpha_injection_available(
-    ctx: &ServerContext,
-    char_id: i64,
-    is_alpha: bool,
-    next_available: i64,
-) {
-    if !is_alpha || next_available != 0 {
-        return;
-    }
-    let already_notified = ctx.db.with_snapshot(|snap| {
-        load_alpha_avail_notified(snap)
-            .get(&char_id)
-            .copied()
-            .unwrap_or(false)
-    });
-    if already_notified {
-        return;
-    }
-    let should_emit = ctx.db.with_mut_snapshot(|snap| {
-        let mut map = load_alpha_avail_notified(snap);
-        if map.get(&char_id).copied().unwrap_or(false) {
-            false
-        } else {
-            map.insert(char_id, true);
-            save_alpha_avail_notified(snap, &map);
-            true
-        }
-    });
-    if should_emit {
-        emit_alpha_injection_available(ctx, char_id);
-    }
-}
-
 /// Emits `OnNonDiminishingInjectionsAdded(amount)` (`1` arg, `id_type = "charid"`).
 // parity: notify:OnNonDiminishingInjectionsAdded
 pub fn emit_non_diminishing_injections_added(ctx: &ServerContext, char_id: i64, added_qty: i64) {

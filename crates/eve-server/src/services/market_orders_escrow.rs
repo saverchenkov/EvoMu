@@ -168,6 +168,17 @@ pub fn handle_orders_escrow(
 
             let now_unix = ctx.now_unix();
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
+            let damaged_fitted_ships: std::collections::HashSet<i64> = ctx
+                .ship_fittings
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(_, fit)| {
+                    fit.rack_heat.iter().any(|&h| h > 0.0)
+                        || fit.modules.values().any(|m| m.damage_hp > 0.0)
+                })
+                .map(|(&ship_id, _)| ship_id)
+                .collect();
             // Execute the entire multi-sell batch atomically inside a single snapshot transaction
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let caller_corp_id = snap
@@ -239,7 +250,7 @@ pub fn handle_orders_escrow(
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 
-                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(ctx, snap, char_id, caller_corp_id, use_corp, &parsed_items);
+                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(snap, &damaged_fitted_ships, char_id, caller_corp_id, use_corp, &parsed_items);
                 if damaged_count > 0 {
                     return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string() });
                 }
