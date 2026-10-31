@@ -643,6 +643,10 @@ pub async fn populate_npc_wreck_on_turret_kill(
     if let Some((special_tid, is_bpc)) = resolve_officer_or_commander_sde_drop(ctx, npc_type_id) {
         loot_to_insert.push((special_tid, 1, is_bpc));
     }
+    crate::services::insurgency_complex_ops::append_insurgency_npc_wreck_loot(
+        npc_type_id,
+        &mut loot_to_insert,
+    );
     if archetype == "Sleeper" {
         loot_to_insert.push((30744, 1, false));
         loot_to_insert.push((30259, 1, false));
@@ -694,6 +698,15 @@ pub async fn populate_npc_wreck_on_turret_kill(
         ctx,
         solar_system_id,
         npc_ball_id,
+        killer_char_id,
+    )
+    .await;
+    crate::services::insurgency_complex_ops::on_insurgency_npc_destroyed(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        npc_type_id,
+        wreck_id,
         killer_char_id,
     )
     .await;

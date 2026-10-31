@@ -47,6 +47,7 @@ pub mod hypernet_raffle_ops;
 pub mod implant_plugging;
 pub mod ingamereport_ops;
 pub mod industry_pi;
+pub mod insurgency_complex_ops;
 pub mod insurgency_services;
 pub mod inventory_bound;
 pub mod inventory_fitting;

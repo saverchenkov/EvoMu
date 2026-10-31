@@ -1237,6 +1237,9 @@ impl SystemHandle {
         let sup_dead = crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
         );
+        let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark(
+            &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
+        );
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut destroyed = step_cycles_and_capacitor(
@@ -1245,6 +1248,7 @@ impl SystemHandle {
             sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         destroyed.extend(sup_dead.into_iter().map(|bid| (bid, None)));
+        destroyed.extend(pg_dead.into_iter().map(|bid| (bid, None)));
         for &(target_ball_id, owner_char_id) in &destroyed {
             if let Some(db) = db_opt.as_ref() {
                 crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
