@@ -329,7 +329,7 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
     );
     assert_eq!(res_complete.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
 
-    // IsClientLinkedToReserveBank should now be false
+    // IsClientLinkedToReserveBank remains true across pulses while pulses_remaining > 0 (14 remaining)
     let linked_after = ctx
         .dispatch_rpc(
             &mut sess,
@@ -341,8 +341,8 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
             None,
         )
         .await
-        .expect("IsClientLinkedToReserveBank after robbery");
-    assert_eq!(linked_after, PyRep::Bool(false));
+        .expect("IsClientLinkedToReserveBank after first pulse");
+    assert_eq!(linked_after, PyRep::Bool(true));
 
     // 4. GetReserveBankTheftsForClientSolarSystem: verify recorded theft
     let reserve_thefts = ctx

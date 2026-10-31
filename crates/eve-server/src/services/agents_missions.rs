@@ -169,11 +169,7 @@ pub async fn handle(
             let now = ctx.now_unix();
             let (missions, research) = ctx.db.with_mut_snapshot(|snap| {
                 // Sweep and transition any expired offers or accepted missions (feat:pve.mission-expiration)
-                let char_mids: Vec<u32> = snap.active_missions.values().filter(|m| {
-                        m.character_id == char_id
-                            && matches!(m.state.as_str(), "Offered" | "Accepted")
-                    }).map(|m| m.mission_id)
-                    .collect();
+                let char_mids: Vec<u32> = snap.active_missions.values().filter(|m| m.character_id == char_id && matches!(m.state.as_str(), "Offered" | "Accepted")).map(|m| m.mission_id).collect();
                 for mid in char_mids {
                     if let Some(meta) = load_mission_meta(snap, char_id, mid) {
                         let st = snap.active_missions.get(&(char_id, mid)).map(|m| m.state.clone()).unwrap_or_default();
@@ -959,10 +955,10 @@ pub async fn handle(
                             .as_ref()
                             .and_then(|m| ctx.sde.agents.get(&m.agent_id))
                             .is_some_and(is_rnd_agent);
-                        let is_trade = tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
-                        let is_courier = !is_trade && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || meta_opt.as_ref().and_then(|mt| mt.destination_station_id).is_some());
-                        let is_kill = tmpl.content_template.as_deref().unwrap_or_default().contains("Kill")
-                            || tmpl.content_template.as_deref().unwrap_or_default().contains("Encounter");
+                        let is_dc = ctx.sde.agents.get(&m.agent_id).is_some_and(|a| a.agent_type_id == 5);
+                        let is_trade = !is_dc && tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
+                        let is_courier = !is_trade && !is_dc && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || meta_opt.as_ref().and_then(|mt| mt.destination_station_id).is_some());
+                        let is_kill = !is_dc && (tmpl.content_template.as_deref().unwrap_or_default().contains("Kill") || tmpl.content_template.as_deref().unwrap_or_default().contains("Encounter"));
                         let is_mining_mission = !is_rnd && !is_kill && !is_trade && !is_courier && {
                             let agent_div = ctx.sde.agents.get(&m.agent_id).map(|a| a.division_id).unwrap_or(0);
                             agent_div == 23 || {
@@ -1203,7 +1199,8 @@ pub async fn handle(
                         let mut resolved_storyline_level = ctx.sde.agents.get(&m_agent_id).map_or(1, |a| a.level.clamp(1, 5));
                         let (t, storyline) = if (!is_storyline && tmpl.has_standing_rewards) || is_rnd {
                             let sl_opt = ctx.sde.agents.get(&m_agent_id).and_then(|ca| crate::services::pve_open_feats_b36::record_mission_completion_and_resolve_storyline(ctx, snap, char_id, ca));
-                            let t = if crate::services::pve_open_feats_b36::is_interbus_or_militia_corp(&ctx.sde, corp_id) {
+                            let qualifies = ctx.sde.agents.get(&m_agent_id).is_some_and(|ca| crate::services::pve_open_feats_b36::is_storyline_qualifying_agent_type(ca.agent_type_id)) && !crate::services::pve_open_feats_b36::is_interbus_or_militia_corp(&ctx.sde, corp_id);
+                            let t = if !qualifies {
                                 snap.mission_tally.get(&char_id).copied().unwrap_or(0)
                             } else {
                                 let count = snap.mission_tally.entry(char_id).or_insert(0); *count += 1; *count

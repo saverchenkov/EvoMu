@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use eve_db::{BookmarkRecord, FleetRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_db::{
+    BookmarkRecord, FleetRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord,
+    UpwellStructureRecord,
+};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -63,11 +66,8 @@ async fn step_until_stopped(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
 
 #[tokio::test]
 async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
-    // parity: feat:pve.abyssal-activation-restrictions, feat:pve.deadspace-pocket-rules
-    eve_testkit::attest(&[
-        "feat:pve.abyssal-activation-restrictions",
-        "feat:pve.deadspace-pocket-rules",
-    ]);
+    // parity: feat:pve.abyssal-activation-restrictions
+    eve_testkit::attest(&["feat:pve.abyssal-activation-restrictions"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -231,6 +231,41 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     );
     sys_h.try_remove_ball(950_010);
 
+    // 3b. Within 1,000 km of an Upwell structure in snap.structures -> ProximityRestriction
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            950_020,
+            UpwellStructureRecord {
+                structure_id: 950_020,
+                type_id: 35_832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: low_sys,
+                name: "Test Astrahus".into(),
+                position: (open_pos + DVec3::new(500_000.0, 0.0, 0.0)).to_array(),
+                state: "ShieldVulnerable".into(),
+                shield_hp: 10_000_000.0,
+                armor_hp: 10_000_000.0,
+                hull_hp: 10_000_000.0,
+                fuel_blocks: 5_000,
+                quantum_core_installed: true,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "ProximityRestriction"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.remove(&950_020);
+    });
+
     // 4. Safe-logoff timer -> LogoffTimerActive; 15m capsuleer PvP log-off timer -> PvpTimerActive
     ctx.advance_secs(301);
     ctx.dispatch_rpc(&mut sess, "ship", None, "SafeLogoff", &[], &kw, None)
@@ -299,13 +334,14 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     );
     ctx.advance_secs(901);
 
-    // 5. Deploy 1st Abyssal Trace in open space (succeeds), then < 1,000 km from trace -> ProximityRestriction
+    // 5. Deploy 1st Abyssal Trace in open space (succeeds), then < 1,000 km from trace -> ProximityRestriction,
+    // and activate trace gate via AbyssalEntranceGateActivation to enter Abyssal Deadspace (32_000_000..=32_999_999)
     let dep = kv_map(
         &ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
             .await
             .expect("Open space AbyssalEntranceDeployment"),
     );
-    assert!(dep.contains_key("traceBallID"));
+    let trace_ball_id = dep["traceBallID"].as_i64().expect("traceBallID");
     let _ = sys_h.set_ball_position(ship_id, open_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
     assert_eq!(
         ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
@@ -313,6 +349,22 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
             .unwrap_err()
             .code,
         "ProximityRestriction"
+    );
+    let _ = sys_h.set_ball_position(ship_id, open_pos).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "abyssalMgr",
+        None,
+        "AbyssalEntranceGateActivation",
+        &[PyRep::Integer(trace_ball_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AbyssalEntranceGateActivation enters Abyssal space");
+    assert!(
+        (32_000_000..=32_999_999).contains(&sess.solar_system_id.unwrap()),
+        "Ship must transition into Abyssal solar system"
     );
 
     // 6. Real SDE-seeded Deadspace complex (DSG-30000142): acceleration gate entry, warp block, MWD SDE rule, and ShipInDungeon!
@@ -344,6 +396,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         snap.items.insert(950_105, make_item(950_105, 2881, char_id, rifter_id, InventoryFlag::HiSlot0, 1, true));
         snap.items.insert(950_106, make_item(950_106, 21898, char_id, rifter_id, InventoryFlag::HiSlot0, 2_000, false));
         snap.items.insert(fil_rifter, make_item(fil_rifter, FIL_T1_ELEC, char_id, rifter_id, InventoryFlag::Cargo, 6, false));
+        snap.items.insert(950_107, make_item(950_107, 50_008, char_id, rifter_id, InventoryFlag::Cargo, 2, false));
         snap.module_online_states.insert(mwd_id, true);
         snap.module_online_states.insert(ab_id, false);
         snap.module_online_states.insert(950_105, true);
@@ -465,9 +518,16 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     let landed_r1 = jita_h.get_ball_snapshot(rifter_id).await.unwrap().unwrap().1.position;
     assert!(landed_r1.distance(r1_dest) < 1.0);
 
-    // Inside deadspace pocket Room 1 -> Abyssal filament activation refused with ShipInDungeon!
+    // Inside deadspace pocket Room 1 -> both Abyssal and random jump filaments refused with ShipInDungeon!
     assert_eq!(
         ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_rifter)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "ShipInDungeon"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "randomJumpMgr", None, "ActivateRandomJumpFilament", &[PyRep::Integer(950_107)], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -481,10 +541,13 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         .unwrap_err();
     assert_eq!(err_cross.code, "NaturalPhenomenaDisruptingWarp");
 
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
-        .await
-        .expect("MWD allowed when SDE room data permits it");
-    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())], &kw, None).await;
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotAllowedInDeadspace"
+    );
 
     let PyRep::List(r1_npcs) = &g1["npcBallIDs"] else { panic!() };
     for nid in r1_npcs {

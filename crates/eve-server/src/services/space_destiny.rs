@@ -678,13 +678,12 @@ pub async fn handle(
                     }
                 }
                 let pulses = duration_mins as u32;
-                let prev_pulse = get_ess_reserve_pulses(snap, sys_id);
                 let pulse_st = EssReservePulseState {
                     pulses_total: pulses,
                     pulses_remaining: pulses,
                     last_pulse_sec: None,
-                    reserve_linked_character_id: prev_pulse.reserve_linked_character_id,
-                    reserve_link_started_tick: prev_pulse.reserve_link_started_tick,
+                    reserve_linked_character_id: None,
+                    reserve_link_started_tick: None,
                 };
                 set_ess_reserve_pulses(snap, sys_id, &pulse_st);
                 Ok((key_type_id, duration_mins))
@@ -696,21 +695,32 @@ pub async fn handle(
                     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                         rt.ess_reserve_unlocked_until.insert(sys_id, unlock_until);
                     });
-                    if let Some(reg_id) = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) {
-                        for (&s_id, s_info) in &ctx.sde.solar_systems {
-                            if s_info.region_id == reg_id {
-                                ctx.notify(
-                                    crate::router::NotificationTarget::SolarSystem(s_id),
-                                    "OnReserveBankUnlock",
-                                    "solarsystemid",
-                                    vec![PyRep::Integer(sys_id as i64), PyRep::Integer(char_id), PyRep::Integer(unlock_until as i64)],
-                                );
-                            }
+                    let reg_id = ctx
+                        .sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .map(|s| s.region_id as i64)
+                        .unwrap_or(0);
+                    let unlock_payload = PyRep::keyval([
+                        ("regionID", PyRep::Integer(reg_id)),
+                        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("unlockUntilUnix", PyRep::Integer(unlock_until as i64)),
+                        ("durationMinutes", PyRep::Integer(duration_mins as i64)),
+                    ]);
+                    for (&s_id, s_info) in &ctx.sde.solar_systems {
+                        if s_info.region_id as i64 == reg_id {
+                            ctx.notify(
+                                crate::router::NotificationTarget::SolarSystem(s_id),
+                                "OnReserveBankUnlock",
+                                "solarsystemid",
+                                vec![unlock_payload.clone()],
+                            );
                         }
                     }
                     session.push_notification(
                         "OnReserveBankUnlock",
-                        vec![PyRep::Integer(sys_id as i64), PyRep::Integer(char_id), PyRep::Integer(unlock_until as i64)],
+                        vec![unlock_payload],
                     );
                     Some(Ok(PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),

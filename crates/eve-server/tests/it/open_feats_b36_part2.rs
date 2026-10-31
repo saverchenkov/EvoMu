@@ -190,7 +190,7 @@ async fn complete_live_fw_mission(
         )
         .await;
     for nid in npc_ids {
-        let _ = sys_h.set_ball_position(nid, DVec3::new(5_000.0, 0.0, 0.0)).await;
+        let _ = sys_h.set_ball_position(nid, DVec3::new(1_000.0, 0.0, 0.0)).await;
         ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(nid)], &kw, None)
             .await
             .expect("AddTarget FW mission NPC");
@@ -215,12 +215,14 @@ async fn complete_live_fw_mission(
             if sys_h.get_ball_snapshot(nid).await.unwrap().is_none() {
                 break;
             }
+            let _ = sys_h.set_ball_position(nid, DVec3::new(1_000.0, 0.0, 0.0)).await;
             let _ = sys_h.step_manual(1.0).await;
         }
         assert!(
             sys_h.get_ball_snapshot(nid).await.unwrap().is_none(),
             "FW mission NPC {nid} must be destroyed"
         );
+        let _ = sys_h.remove_module_cycle(ship_id, 820_002).await;
     }
     dock_at_station(ctx, sess, char_id, sys_id, fw_agent.station_id);
     ctx.dispatch_rpc(
@@ -273,7 +275,7 @@ async fn test_b36_storyline_offer_counter() {
             weapon_id,
             InventoryItemRecord {
                 item_id: weapon_id,
-                type_id: 2961,
+                type_id: 2929,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::HiSlot0,
@@ -286,15 +288,19 @@ async fn test_b36_storyline_offer_counter() {
             ammo_id,
             InventoryItemRecord {
                 item_id: ammo_id,
-                type_id: 21894,
+                type_id: 21906,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::HiSlot0,
-                quantity: 5_000,
+                quantity: 50_000,
                 singleton: false,
                 ..Default::default()
             },
         );
+        snap.weapon_banks
+            .entry(ship_id)
+            .or_default()
+            .insert(weapon_id, vec![weapon_id; 8]);
         snap.module_online_states.insert(weapon_id, true);
         let sk = snap.skills.entry(char_id).or_default();
         for sid in [3300_u32, 3302, 3305, 3308, 3310, 3311, 3312, 3315, 3316, 3318, 3334, 3413, 3418, 3426, 20327, 21667] {
@@ -307,7 +313,7 @@ async fn test_b36_storyline_offer_counter() {
                 },
             );
         }
-        for tid in [639_u32, 2961, 21894] {
+        for tid in [639_u32, 2929, 21906] {
             if let Some(t) = ctx.sde.types.get(&tid) {
                 for sa in [182_u16, 183, 184] {
                     if let Some(&req_f) = t.default_attributes.get(&sa) {
@@ -377,6 +383,88 @@ async fn test_b36_storyline_offer_counter() {
         complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, &fw_agent).await;
     }
     assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+
+    // 2b. Career (agent_type_id == 12), COSMOS (agent_type_id == 8), and Data Center (agent_type_id == 5)
+    // agents: 16 live completions across non-qualifying agent types -> 0 storyline offers and 0 tally!
+    let career_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 12 && a.level == 1 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("L1 Career agent")
+        .clone();
+    let cosmos_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 8 && a.level == 1 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("L1 COSMOS agent")
+        .clone();
+    let dc_agent = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| a.agent_type_id == 5 && a.level == 1 && a.solar_system_id.is_some())
+        .min_by_key(|a| a.agent_id)
+        .expect("L1 Data Center agent")
+        .clone();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            for cid in [career_agent.corporation_id, cosmos_agent.corporation_id, dc_agent.corporation_id] {
+                ch.standings.insert(cid, 6.0);
+            }
+        }
+    });
+    for (idx, non_qual_agent) in [
+        &career_agent, &career_agent, &career_agent, &career_agent, &career_agent, &career_agent,
+        &cosmos_agent, &cosmos_agent, &cosmos_agent, &cosmos_agent, &cosmos_agent,
+        &dc_agent, &dc_agent, &dc_agent, &dc_agent, &dc_agent,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if non_qual_agent.agent_type_id == 5 {
+            let dc_sys = non_qual_agent.solar_system_id.unwrap();
+            let dc_sta = non_qual_agent.station_id.or_else(|| ctx.sde.solar_systems[&dc_sys].stations.first().map(|s| s.station_id)).unwrap_or(60_003_760);
+            dock_at_station(&ctx, &mut sess, char_id, dc_sys, Some(dc_sta));
+            let tag_iid = 825_000 + idx as i64;
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.insert(
+                    tag_iid,
+                    InventoryItemRecord {
+                        item_id: tag_iid,
+                        type_id: 17_202,
+                        owner_id: char_id,
+                        location_id: dc_sta,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 1,
+                        singleton: false,
+                        ..Default::default()
+                    },
+                );
+            });
+            let off = kv_map(
+                &ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(non_qual_agent.agent_id)], &kw, None)
+                    .await
+                    .expect("Offer Data Center mission"),
+            );
+            let mid = off["missionID"].as_i64().unwrap();
+            ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &kw, None).await.unwrap();
+            ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid)], &kw, None).await.unwrap();
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.active_missions.remove(&(char_id, mid as u32));
+            });
+        } else {
+            complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, non_qual_agent).await;
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.active_missions.retain(|_, m| m.agent_id != non_qual_agent.agent_id);
+            });
+        }
+    }
+    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+    assert_eq!(ctx.db.with_snapshot(|s| s.mission_tally.get(&char_id).copied().unwrap_or(0)), 0);
 
     // 3. Separate (faction, level) counters: 15 L3 + 1 L1 Caldari high-sec missions -> 0 offers; 16th L3 -> triggers L3 Storyline!
     let caldari_l3 = ctx.sde.agents[&3_008_423].clone();

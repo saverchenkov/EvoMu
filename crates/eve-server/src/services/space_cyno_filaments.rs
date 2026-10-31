@@ -412,6 +412,14 @@ async fn handle_random_jump_filament(
         return Err(BridgeRpcError { code: "ShipCapitalRestricted".into(), message: "Random jump filaments cannot be activated on capital ships".into() });
     }
 
+    let caller_pos = current_ball.position;
+    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+        ctx, old_sys, ship_id, "filament",
+    )
+    .await?;
+    crate::services::pve_abyssal_hazards::check_not_in_deadspace_pocket(ctx, old_sys, caller_pos)
+        .await?;
+
     let fleet_members: Vec<i64> = ctx.db.with_snapshot(|snap| {
         snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.members.clone())
     }).ok_or_else(|| BridgeRpcError {
@@ -419,7 +427,6 @@ async fn handle_random_jump_filament(
         message: "Random jump filaments require being in a fleet".into(),
     })?;
 
-    let caller_pos = current_ball.position;
     let too_close = |pos: DVec3| caller_pos.distance(pos) < 1_000_000.0;
     let station_close = ctx.sde.stations.values().any(|s| s.solar_system_id == old_sys && too_close(s.position));
     let gate_close = ctx.sde.stargates().values().any(|g| g.from_solar_system_id == old_sys && too_close(g.position));

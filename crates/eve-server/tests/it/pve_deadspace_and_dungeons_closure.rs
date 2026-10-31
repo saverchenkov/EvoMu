@@ -261,7 +261,7 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
         .expect_err("Direct bookmark warp into gated Room 2 must fail");
     assert_eq!(warp_bm_err.code, WARP_DISRUPTED_ERR);
 
-    // 3. Activate entry acceleration gate from warp landing spot -> lands in Room 1; MWD allowed in Room 1
+    // 3. Activate entry acceleration gate from warp landing spot -> lands in Room 1; MWD disallowed in deadspace pocket unless overridden
     let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
     let eg_pos = sys_handle.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap().1.position;
     let ship_landed_pos = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position;
@@ -271,9 +271,9 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
         .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)], &kw, None)
         .await
         .expect("Activate entry acceleration gate");
-    assert_eq!(gate1_res.dict_get("disallowMWD"), Some(&PyRep::Bool(false)));
+    assert_eq!(gate1_res.dict_get("disallowMWD"), Some(&PyRep::Bool(true)));
 
-    ctx.dispatch_rpc(
+    let r1_mwd_err = ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",
         None,
@@ -283,18 +283,8 @@ async fn test_deadspace_pocket_rules_and_mwd_restriction() {
         None,
     )
     .await
-    .expect("MWD allowed in outer Room 1");
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dogmaIM",
-            None,
-            "Deactivate",
-            &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
-            &kw,
-            None,
-        )
-        .await;
+    .expect_err("MWD disallowed in deadspace Room 1 by default");
+    assert_eq!(r1_mwd_err.code, "ModuleNotAllowedInDeadspace");
 
     // Clear Room 1 guards to unlock the Room 1 -> Room 2 gate, approach gate via CmdFollowBall, and enter Room 2
     let PyRep::List(r1_npcs) = gate1_res.dict_get("npcBallIDs").unwrap() else { panic!() };

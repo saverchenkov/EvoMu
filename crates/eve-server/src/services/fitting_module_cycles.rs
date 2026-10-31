@@ -196,7 +196,7 @@ pub(crate) async fn handle_module_cycles(
                 );
             }
 
-            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type).await {
+            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
                 return Some(Err(e));
             }
             if mod_type.group_id == 330 {
@@ -718,7 +718,8 @@ pub(crate) async fn handle_module_cycles(
                     .unwrap_or(0);
 
                 let is_mwd = mod_type.group_id == 46
-                    && (mod_type.default_attributes.get(&554).copied().unwrap_or(0.0) > 0.0
+                    && (mod_type.effect_ids.contains(&6730)
+                        || mod_type.default_attributes.get(&554).copied().unwrap_or(0.0) > 0.0
                         || mod_type.name.contains("Microwarpdrive"));
                 let is_mjd = mod_type.group_id == 1189
                     || mod_type.group_id == 4769

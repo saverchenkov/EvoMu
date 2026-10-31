@@ -353,21 +353,20 @@ pub fn handle_rnd_buy_datacores(
             format!("R&D agent {agent_id} does not exist in SDE"),
         ));
     };
-    if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
-        || (session.station_id.is_some()
-            && agent_info.station_id.is_some()
-            && agent_info.station_id != session.station_id)
+    if session.station_id.is_none()
+        || agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
+        || agent_info.station_id != session.station_id
     {
         return Err(err(
             "AgentNotCoLocated",
-            format!("Must be co-located with R&D agent {agent_id} to redeem datacores"),
+            format!("Must be docked in R&D agent {agent_id}'s station to redeem datacores"),
         ));
     }
     let now_unix = ctx.now_unix();
-    let Some(station_id) = agent_info.station_id.or(session.station_id) else {
+    let Some(station_id) = session.station_id else {
         return Err(err(
-            "AgentLocationUnknown",
-            format!("Cannot resolve station location for R&D agent {agent_id}"),
+            "AgentNotCoLocated",
+            format!("Must be docked in R&D agent {agent_id}'s station to redeem datacores"),
         ));
     };
     let (item_id, dc_type_id, rem_rp, bal_after_isk) = ctx.db.try_with_mut_snapshot(|snap| {
@@ -378,14 +377,23 @@ pub fn handle_rnd_buy_datacores(
                 format!("No active R&D research with agent {agent_id}"),
             ));
         };
+        let Some(dc_type_id) = super::pve_open_feats_b36::resolve_datacore_for_research_skill(
+            &ctx.sde,
+            entry.research_type_id,
+        ) else {
+            return Err(err(
+                "InvalidResearchSkill",
+                format!("Research field {} does not produce a redeemable SDE datacore", entry.research_type_id),
+            ));
+        };
         let elapsed_days = (now_unix.saturating_sub(entry.started_unix) as f64) / 86_400.0;
         let total_rp = entry.initial_points + entry.points_per_day * elapsed_days;
-        // DERIVED: 50 RP per datacore (V24 R&D datacore redemption cost)
-        let rp_cost = 50.0 * (qty as f64);
-        if total_rp + 1e-6 < rp_cost {
+        let max_offered = super::pve_open_feats_b36::max_affordable_datacores(total_rp);
+        let rp_cost = 100.0 * (qty as f64);
+        if qty > max_offered || total_rp + 1e-6 < rp_cost {
             return Err(err(
                 "InsufficientResearchPoints",
-                format!("Buying {qty} datacore(s) requires {rp_cost:.1} RP, character has {total_rp:.1} RP"),
+                format!("Buying {qty} datacore(s) requires {rp_cost:.1} RP, character has {total_rp:.1} RP (max {max_offered})"),
             ));
         }
         // DERIVED: 10,000 ISK per datacore redemption fee
@@ -412,38 +420,6 @@ pub fn handle_rnd_buy_datacores(
         let rem_rp = (total_rp - rp_cost).max(0.0);
         entry.initial_points = rem_rp;
         entry.started_unix = now_unix;
-        let skill_name = ctx
-            .sde
-            .types
-            .get(&entry.research_type_id)
-            .map(|t| t.name.as_str())
-            .ok_or_else(|| {
-                err(
-                    "UnknownResearchSkill",
-                    format!("Research skill {} not found in SDE", entry.research_type_id),
-                )
-            })?;
-        let expected_dc_name = format!("Datacore - {skill_name}");
-        let dc_type_id: TypeId = ctx
-            .sde
-            .types
-            .values()
-            .find(|t| t.name == expected_dc_name)
-            .or_else(|| {
-                ctx.sde.types.values().find(|t| {
-                    t.group_id == 333
-                        && t.default_attributes
-                            .get(&182)
-                            .is_some_and(|&req_sk| (req_sk.round() as u32) == entry.research_type_id)
-                })
-            })
-            .map(|t| t.type_id)
-            .ok_or_else(|| {
-                err(
-                    "UnknownDatacoreType",
-                    format!("Datacore type '{expected_dc_name}' not found in SDE"),
-                )
-            })?;
         super::agents_missions::save_rnd_research_entries(snap, char_id, &entries);
         snap.next_entity_id += 1;
         let item_id = snap.next_entity_id;

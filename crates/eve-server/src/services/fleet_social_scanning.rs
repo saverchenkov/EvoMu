@@ -724,7 +724,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 );
             }
             if let Some(res) = crate::services::pve_open_feats_b36::try_activate_ess_acceleration_gate(
-                ctx, sys_id, ship_id, gate_id,
+                ctx, char_id, sys_id, ship_id, gate_id,
             )
             .await
             {

@@ -313,9 +313,8 @@ pub async fn handle_ess_link(
     let unlocked_until = with_combat_runtime(ctx, |rt| {
         rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
     });
-    let is_unlocked = unlocked_until > now_unix;
 
-    let (payout, link_started_only, unlocked_until_new, clear_unlock) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (payout, link_started_only, unlocked_until_new, clear_unlock, new_bal_f64) = ctx.db.try_with_mut_snapshot(|snap| {
         let is_reserve = method == "AttemptLinkToReserveBank";
         let mut unlocked_until_new: Option<u64> = None;
         let mut clear_unlock = false;
@@ -323,6 +322,7 @@ pub async fn handle_ess_link(
             &snap.service_state_blobs,
             sys_id,
         );
+        let is_unlocked = unlocked_until > now_unix || pulse_st.pulses_remaining > 0;
         if is_reserve {
             if let Some(other) = pulse_st.reserve_linked_character_id {
                 if other != char_id {
@@ -439,7 +439,7 @@ pub async fn handle_ess_link(
                 st.ess_linked_character_id = Some(char_id);
                 st.ess_link_started_tick = Some(current_tick);
             }
-            return Ok((0.0, true, unlocked_until_new, false));
+            return Ok((0.0, true, unlocked_until_new, false, None));
         }
         let start_tick = if is_reserve {
             pulse_st.reserve_link_started_tick.unwrap_or(current_tick)
@@ -468,19 +468,21 @@ pub async fn handle_ess_link(
                     message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
                 });
             }
-            pulse_st.reserve_linked_character_id = None;
-            pulse_st.reserve_link_started_tick = None;
-            if st.ess_linked_character_id == Some(char_id) {
-                st.ess_linked_character_id = None;
-                st.ess_link_started_tick = None;
-            }
             let rem = pulse_st.pulses_remaining.max(1) as i64;
             let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
             st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
             pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
             pulse_st.last_pulse_sec = Some(now_unix);
-            if pulse_st.pulses_remaining == 0 {
-                clear_unlock = true;
+            if pulse_st.pulses_remaining == 0 || st.ess_reserve_bank.0 <= 0 {
+                pulse_st.reserve_linked_character_id = None;
+                pulse_st.reserve_link_started_tick = None;
+                if st.ess_linked_character_id == Some(char_id) {
+                    st.ess_linked_character_id = None;
+                    st.ess_link_started_tick = None;
+                }
+                if pulse_st.pulses_remaining == 0 {
+                    clear_unlock = true;
+                }
             }
             crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
                 &mut snap.service_state_blobs,
@@ -498,10 +500,25 @@ pub async fn handle_ess_link(
             b
         };
 
+        let mut bal_wire = None;
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.balance = ch.balance.checked_add(bank).unwrap_or(ch.balance);
+            let bal_after = ch.balance;
+            bal_wire = Some(bal_after.to_wire_f64());
+            let (entry_type, desc) = if is_reserve {
+                (
+                    "ESSReserveBankPayout",
+                    format!("ESS Reserve Bank pulse payout in system {sys_id}"),
+                )
+            } else {
+                (
+                    "ESSMainBankTheft",
+                    format!("ESS Main Bank hack payout in system {sys_id}"),
+                )
+            };
+            snap.append_journal(char_id, entry_type, bank, bal_after, desc);
         }
-        Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock))
+        Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock, bal_wire))
     })?;
 
     if let Some(until) = unlocked_until_new {
@@ -526,16 +543,22 @@ pub async fn handle_ess_link(
         });
     }
 
-    // Linking to an ESS Main/Reserve Bank activates a 15-minute Suspect Timer (`feat:crimewatch.suspect-timer-looting-ess`)
+    // Linking to an ESS Main/Reserve Bank activates a 15-minute Suspect Timer and 60s Weapons Timer
     let suspect_until = now_unix.saturating_add(900);
+    let weapon_until = now_unix.saturating_add(60);
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(char_id);
-        st.suspect_flag_until_unix = suspect_until;
+        st.suspect_flag_until_unix = st.suspect_flag_until_unix.max(suspect_until);
+        st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(suspect_until);
+        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(weapon_until);
     }
     emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
 
     if payout > 0.0 {
+        if let Some(bal_f64) = new_bal_f64 {
+            ctx.notify_account_change(char_id, "cash", char_id, bal_f64);
+        }
         let now_u = ctx.now_unix();
         with_mut_combat_runtime(ctx, |rt| {
             let list = if method == "AttemptLinkToReserveBank" {

@@ -36,11 +36,34 @@ pub const SKILL_RESEARCH_PROJECT_MANAGEMENT: TypeId = 12179;
 pub const SKILL_NEGOTIATION: TypeId = 3356;
 
 pub const ESS_INTRUSION_BUBBLE_RADIUS_M: f64 = 75_000.0;
+pub const ESS_NO_CLOAK_RADIUS_M: f64 = 500_000.0;
 pub const ESS_MAIN_BANK_AUTOPAYOUT_SECS: u64 = 9_900; // 2h45m
 pub const ESS_BEACON_ID_BASE: i64 = 820_000_000;
 pub const ESS_GATE_ID_BASE: i64 = 821_000_000;
 pub const ESS_BEACON_TYPE_ID: TypeId = 32882;
 pub const ESS_GATE_TYPE_ID: TypeId = 17831;
+
+/// SDE combat ship `group_id`s eligible for the null-sec ESS acceleration gate:
+/// Tactical Destroyers (`1305`), Cruisers/HACs/Logistics/Recons/HICs/T3Cs/Flag Cruisers
+/// (`26, 358, 832, 833, 894, 906, 963, 1972`), Battlecruisers/Command Ships (`419, 540, 1201`),
+/// and Battleships (`27`). Excludes Marauders (`900`), Black Ops (`898`), Mining Barges/Exhumers (`463, 543`),
+/// Hauler/Transport industrials (`28, 380, 1202`), Corvettes/Frigates/non-T3 Destroyers, and Capitals.
+pub const ESS_ALLOWED_SHIP_GROUP_IDS: &[u32] = &[
+    26, 27, 358, 419, 540, 832, 833, 894, 906, 963, 1201, 1305, 1972,
+];
+
+pub fn is_ess_gate_eligible_hull(sde: &SdeRegistry, ship_type_id: TypeId) -> bool {
+    sde.types
+        .get(&ship_type_id)
+        .is_some_and(|t| ESS_ALLOWED_SHIP_GROUP_IDS.contains(&t.group_id))
+}
+
+/// Returns `true` only for regular Security/Distribution/Mining (`2`), Tutorial (`3`), and R&D (`4`)
+/// agents that increment the 16-mission Storyline counter (`feat:pve.storyline-offer-counter`),
+/// excluding Career (`12`), COSMOS (`8`), Data Center (`5`, `9`), Storyline (`6`, `7`), and Epic Arc (`10`, `11`).
+pub fn is_storyline_qualifying_agent_type(agent_type_id: u32) -> bool {
+    matches!(agent_type_id, 2..=4)
+}
 
 fn skill_level(snap: &WorldStateSnapshot, char_id: CharacterId, type_id: TypeId) -> u8 {
     snap.skills
@@ -397,7 +420,9 @@ pub fn record_mission_completion_and_resolve_storyline(
     completed_agent: &AgentInfo,
 ) -> Option<(i64, u8)> {
     record_agent_mission_completed(snap, char_id, completed_agent.agent_id);
-    if is_interbus_or_militia_corp(&ctx.sde, completed_agent.corporation_id) {
+    if !is_storyline_qualifying_agent_type(completed_agent.agent_type_id)
+        || is_interbus_or_militia_corp(&ctx.sde, completed_agent.corporation_id)
+    {
         return None;
     }
     let faction_id = ctx
@@ -615,10 +640,12 @@ pub async fn ensure_ess_intrusion_site_balls(ctx: &ServerContext, sys_id: SolarS
 }
 
 /// Handles `ActivateAccelerationGate` for a null-sec ESS intrusion site gate (`821_000_000 + sys_id`),
-/// enforcing `<= 2,500 m` gate proximity and Cruiser/Battlecruiser/Battleship (`rigSize` `2..=3`)
-/// hull eligibility before sliding the ship onto the ESS grid (`feat:pve.ess-grid-warp-mwd-restrictions`).
+/// enforcing tackle/immobilization/warp/session-change checks, `<= 2,500 m` gate proximity, and
+/// combat hull group eligibility (`ESS_ALLOWED_SHIP_GROUP_IDS`), decloaking the ship and warping it
+/// onto the ESS grid (`feat:pve.ess-grid-warp-mwd-restrictions`).
 pub async fn try_activate_ess_acceleration_gate(
     ctx: &ServerContext,
+    char_id: CharacterId,
     sys_id: SolarSystemId,
     ship_id: ItemId,
     gate_id: ItemId,
@@ -628,12 +655,40 @@ pub async fn try_activate_ess_acceleration_gate(
     }
     ensure_ess_intrusion_site_balls(ctx, sys_id).await;
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+    let Some((current_tick, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Some(Err(BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Ship is not in space".into(),
         }));
     };
+    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+        return Some(Err(BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot activate ESS acceleration gate while ship is in warp".into(),
+        }));
+    }
+    if crate::services::space_destiny::check_session_change_timer_active(
+        ctx,
+        char_id,
+        ctx.now_unix(),
+        Some((sys_id, current_tick)),
+    )
+    .is_some()
+    {
+        return Some(Err(BridgeRpcError::user_error("SessionChangeInProgress")));
+    }
+    if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp") {
+        return Some(Err(e));
+    }
+    if let Err(e) = crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp") {
+        return Some(Err(e));
+    }
+    if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Some(Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot activate ESS acceleration gate while warp scrambled".into(),
+        }));
+    }
     let Some((_, gate_ball)) = sys_handle.get_ball_snapshot(gate_id).await.ok().flatten() else {
         return Some(Err(BridgeRpcError {
             code: "GateNotFound".into(),
@@ -647,17 +702,25 @@ pub async fn try_activate_ess_acceleration_gate(
             message: format!("Ship is {dist:.1} m from ESS gate (must be <= 2500 m)"),
         }));
     }
-    let rig_size = ctx
-        .sde
-        .types
-        .get(&ship_ball.type_id)
-        .and_then(|t| t.default_attributes.get(&1547).copied())
-        .unwrap_or(0.0);
-    if !matches!(rig_size as u32, 2 | 3) {
+    if !is_ess_gate_eligible_hull(&ctx.sde, ship_ball.type_id) {
         return Some(Err(BridgeRpcError {
             code: "ShipRestrictedByEssGate".into(),
-            message: "ESS acceleration gate admits only Cruiser, Battlecruiser, and Battleship hulls".into(),
+            message: "ESS acceleration gate admits only eligible combat Tactical Destroyer, Cruiser, Battlecruiser, and Battleship hulls".into(),
         }));
+    }
+    if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+        if cs.is_cloaked {
+            cs.is_cloaked = false;
+            cs.is_covert_cloak = false;
+            cs.cloak_stabilization_remaining_s = 0.0;
+            let _ = sys_handle.set_combat_state(ship_id, cs).await;
+            crate::services::notify_emitters_batch3_space::emit_cloak_module_force_deactivated(
+                ctx,
+                char_id,
+                "DecloakProximityOrDeactivation",
+                2000.0,
+            );
+        }
     }
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let ess_pos = balls
@@ -666,8 +729,11 @@ pub async fn try_activate_ess_acceleration_gate(
         .map(|b| b.position)
         .unwrap_or_else(|| gate_ball.position - DVec3::new(200_000.0, 0.0, 0.0));
     let landing_pos = ess_pos + DVec3::new(1_500.0, 0.0, 0.0);
-    let _ = sys_handle.set_ball_position(ship_id, landing_pos).await;
-    let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let mut warp_mode = MovementMode::new_warp(ship_ball.position, landing_pos, 3.0);
+    if let MovementMode::Warp { ref mut phase, .. } = warp_mode {
+        *phase = eve_destiny::WarpPhase::Accelerating;
+    }
+    let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.item_positions.insert(ship_id, landing_pos.to_array());
     });
@@ -707,8 +773,8 @@ pub async fn check_ess_warp_destination_allowed(
     Ok(())
 }
 
-/// Checks if a ship is inside the 75 km ESS intrusion bubble (`feat:pve.ess-grid-warp-mwd-restrictions`),
-/// which blocks warping, Microwarpdrives, Micro Jump Drives, cloaking, and cyno lighting.
+/// Checks if a ship is inside the ESS intrusion bubble (`75 km` for warp/MWD/MJD/cyno/filament,
+/// `500 km` for cloaking; `feat:pve.ess-grid-warp-mwd-restrictions`).
 pub async fn check_ess_intrusion_bubble_restriction(
     ctx: &ServerContext,
     sys_id: SolarSystemId,
@@ -722,10 +788,14 @@ pub async fn check_ess_intrusion_bubble_restriction(
     let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
         return Ok(());
     };
+    let radius = if action == "cloak" {
+        ESS_NO_CLOAK_RADIUS_M
+    } else {
+        ESS_INTRUSION_BUBBLE_RADIUS_M
+    };
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let in_bubble = balls.iter().any(|b| {
-        is_ess_beacon_ball(b, sys_id)
-            && b.position.distance(ship_ball.position) <= ESS_INTRUSION_BUBBLE_RADIUS_M
+        is_ess_beacon_ball(b, sys_id) && b.position.distance(ship_ball.position) <= radius
     });
     if !in_bubble {
         return Ok(());
@@ -745,7 +815,7 @@ pub async fn check_ess_intrusion_bubble_restriction(
         ),
         "cloak" => (
             "EssIntrusionBubbleCloakBlocked",
-            "Cloaking is disabled inside the 75 km ESS intrusion bubble",
+            "Cloaking is disabled within 500 km of the ESS beacon",
         ),
         "cyno" => (
             "EssIntrusionBubbleCynoBlocked",
@@ -767,14 +837,21 @@ pub async fn check_ess_module_activation_allowed(
     sys_id: SolarSystemId,
     ship_id: ItemId,
     mod_type: &eve_sde::InvType,
+    effect_name: &str,
 ) -> Result<(), BridgeRpcError> {
+    let is_mwd = effect_name == "moduleBonusMicrowarpdrive"
+        || (mod_type.group_id == 46
+            && (mod_type.effect_ids.contains(&6730)
+                || mod_type.default_attributes.get(&554).copied().unwrap_or(0.0) > 0.0
+                || mod_type.default_attributes.get(&986).copied().unwrap_or(0.0) > 0.0
+                || mod_type.name.contains("Microwarpdrive")));
     let action = if mod_type.group_id == 330 {
         Some("cloak")
     } else if mod_type.group_id == 658 || mod_type.name.contains("Cynosural") {
         Some("cyno")
     } else if matches!(mod_type.group_id, 1189 | 1310) || mod_type.name.contains("Micro Jump") {
         Some("mjd")
-    } else if mod_type.group_id == 46 && mod_type.name.contains("Microwarpdrive") {
+    } else if is_mwd {
         Some("mwd")
     } else {
         None
@@ -804,89 +881,95 @@ pub fn record_ess_main_bank_contribution(
 /// Distributes accumulated ESS Main Bank ISK every 2h45m (`9_900` s) when not currently being hacked
 /// (`feat:pve.ess-main-bank-autopayout`), conserving 100% of ISK cents across valid contributors.
 pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usize {
-    let paid_events: Vec<(SolarSystemId, f64, f64)> = ctx.db.with_mut_snapshot(|snap| {
-        let sys_ids: Vec<SolarSystemId> = snap
-            .system_states
-            .iter()
-            .filter(|(_, st)| {
-                !st.ess_main_bank_contributors.is_empty()
-                    && st.ess_cycle_started_unix > 0
-                    && now_unix.saturating_sub(st.ess_cycle_started_unix) >= ESS_MAIN_BANK_AUTOPAYOUT_SECS
-            })
-            .map(|(&sid, _)| sid)
-            .collect();
-        let mut events = Vec::new();
-        for sys_id in sys_ids {
-            let valid_chars = |cid: CharacterId| snap.characters.contains_key(&cid);
-            let existing_contribs: Vec<(CharacterId, i64)> = snap
+    let (paid_events, acct_changes): (Vec<(SolarSystemId, f64, f64)>, Vec<(CharacterId, f64)>) =
+        ctx.db.with_mut_snapshot(|snap| {
+            let sys_ids: Vec<SolarSystemId> = snap
                 .system_states
-                .get(&sys_id)
-                .map(|st| {
-                    st.ess_main_bank_contributors
-                        .iter()
-                        .filter(|(&cid, &c)| c > 0 && valid_chars(cid))
-                        .map(|(&cid, &c)| (cid, c))
-                        .collect()
+                .iter()
+                .filter(|(_, st)| {
+                    !st.ess_main_bank_contributors.is_empty()
+                        && st.ess_cycle_started_unix > 0
+                        && now_unix.saturating_sub(st.ess_cycle_started_unix) >= ESS_MAIN_BANK_AUTOPAYOUT_SECS
                 })
-                .unwrap_or_default();
-            let total_contrib: i128 = existing_contribs.iter().map(|&(_, c)| i128::from(c)).sum();
-            let Some((pool, post_reserve)) = snap.system_states.get_mut(&sys_id).and_then(|st| {
-                if st.ess_linked_character_id.is_some() || st.ess_main_bank.0 <= 0 {
-                    return None;
-                }
-                if total_contrib <= 0 {
+                .map(|(&sid, _)| sid)
+                .collect();
+            let mut events = Vec::new();
+            let mut changes = Vec::new();
+            for sys_id in sys_ids {
+                let valid_chars = |cid: CharacterId| snap.characters.contains_key(&cid);
+                let existing_contribs: Vec<(CharacterId, i64)> = snap
+                    .system_states
+                    .get(&sys_id)
+                    .map(|st| {
+                        st.ess_main_bank_contributors
+                            .iter()
+                            .filter(|(&cid, &c)| c > 0 && valid_chars(cid))
+                            .map(|(&cid, &c)| (cid, c))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let total_contrib: i128 = existing_contribs.iter().map(|&(_, c)| i128::from(c)).sum();
+                let Some((pool, post_reserve)) = snap.system_states.get_mut(&sys_id).and_then(|st| {
+                    if st.ess_linked_character_id.is_some() || st.ess_main_bank.0 <= 0 {
+                        return None;
+                    }
+                    if total_contrib <= 0 {
+                        st.ess_main_bank_contributors.clear();
+                        st.ess_cycle_started_unix = 0;
+                        return None;
+                    }
+                    let pool = st.ess_main_bank.0;
+                    st.ess_main_bank = IskCents(0);
+                    let post_reserve = st.ess_reserve_bank.to_wire_f64();
                     st.ess_main_bank_contributors.clear();
                     st.ess_cycle_started_unix = 0;
-                    return None;
-                }
-                let pool = st.ess_main_bank.0;
-                st.ess_main_bank = IskCents(0);
-                let post_reserve = st.ess_reserve_bank.to_wire_f64();
-                st.ess_main_bank_contributors.clear();
-                st.ess_cycle_started_unix = 0;
-                Some((pool, post_reserve))
-            }) else {
-                continue;
-            };
+                    Some((pool, post_reserve))
+                }) else {
+                    continue;
+                };
 
-            let mut payouts: Vec<(CharacterId, i64)> = existing_contribs
-                .iter()
-                .map(|&(cid, contrib)| {
-                    let share = ((i128::from(pool) * i128::from(contrib)) / total_contrib) as i64;
-                    (cid, share)
-                })
-                .collect();
-            let distributed: i64 = payouts.iter().map(|&(_, s)| s).sum();
-            let rem = pool.saturating_sub(distributed);
-            if rem > 0 {
-                if let Some((top_idx, _)) = existing_contribs
+                let mut payouts: Vec<(CharacterId, i64)> = existing_contribs
                     .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, &(cid, c))| (c, Reverse(cid)))
-                {
-                    payouts[top_idx].1 = payouts[top_idx].1.saturating_add(rem);
-                }
-            }
-
-            for (cid, share) in payouts {
-                if share > 0 {
-                    if let Some(ch) = snap.characters.get_mut(&cid) {
-                        ch.balance = ch.balance.checked_add(IskCents(share)).unwrap_or(ch.balance);
-                        let bal_after = ch.balance;
-                        snap.append_journal(
-                            cid,
-                            "ESSMainBankPayout",
-                            IskCents(share),
-                            bal_after,
-                            format!("ESS Main Bank 2h45m autopayout in system {sys_id}"),
-                        );
+                    .map(|&(cid, contrib)| {
+                        let share = ((i128::from(pool) * i128::from(contrib)) / total_contrib) as i64;
+                        (cid, share)
+                    })
+                    .collect();
+                let distributed: i64 = payouts.iter().map(|&(_, s)| s).sum();
+                let rem = pool.saturating_sub(distributed);
+                if rem > 0 {
+                    if let Some((top_idx, _)) = existing_contribs
+                        .iter()
+                        .enumerate()
+                        .max_by_key(|&(_, &(cid, c))| (c, Reverse(cid)))
+                    {
+                        payouts[top_idx].1 = payouts[top_idx].1.saturating_add(rem);
                     }
                 }
+
+                for (cid, share) in payouts {
+                    if share > 0 {
+                        if let Some(ch) = snap.characters.get_mut(&cid) {
+                            ch.balance = ch.balance.checked_add(IskCents(share)).unwrap_or(ch.balance);
+                            let bal_after = ch.balance;
+                            snap.append_journal(
+                                cid,
+                                "ESSMainBankPayout",
+                                IskCents(share),
+                                bal_after,
+                                format!("ESS Main Bank 2h45m autopayout in system {sys_id}"),
+                            );
+                            changes.push((cid, bal_after.to_wire_f64()));
+                        }
+                    }
+                }
+                events.push((sys_id, 0.0, post_reserve));
             }
-            events.push((sys_id, 0.0, post_reserve));
-        }
-        events
-    });
+            (events, changes)
+        });
+    for &(cid, bal_f64) in &acct_changes {
+        ctx.notify_account_change(cid, "cash", cid, bal_f64);
+    }
     for &(sys_id, post_main, post_reserve) in &paid_events {
         let ess_data = PyRep::keyval([
             ("solarSystemID", PyRep::Integer(sys_id as i64)),
