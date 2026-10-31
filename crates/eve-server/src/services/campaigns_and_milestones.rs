@@ -678,8 +678,15 @@ fn handle_seasonal_login_get_active_campaign(
             .get(&char_id)
             .and_then(|m| m.get(&sched.campaign_id))
             .map_or(0, |v| v.len() as i64);
-        let num_remaining_rewards = (campaign.track_length() - claimed_count).max(0);
-        let end_date_ordinal = GREGORIAN_EPOCH_ORDINAL + (sched.end_unix / 86_400) as i64;
+        let end_date_ordinal = seasonal_reward_date_ordinal(sched.end_unix, sched.turnover_secs);
+        let today_ordinal = seasonal_reward_date_ordinal(now, sched.turnover_secs);
+        let claimed_today = ext
+            .seasonal_claim_history
+            .get(&char_id)
+            .and_then(|m| m.get(&sched.campaign_id))
+            .is_some_and(|v| v.iter().any(|&(ord, _)| ord == today_ordinal));
+        let days_remaining = (end_date_ordinal - today_ordinal + i64::from(!claimed_today)).max(0);
+        let num_remaining_rewards = (campaign.track_length() - claimed_count).max(0).min(days_remaining);
         let turnover_time_str = format_turnover_hms(sched.turnover_secs);
 
         Ok(PyRep::Tuple(vec![

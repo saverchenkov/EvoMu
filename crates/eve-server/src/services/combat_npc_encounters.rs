@@ -946,5 +946,17 @@ pub fn record_npc_kill_progression(
         1,
         npc_type_id.map(|t| t as i64),
     );
+    let tid = npc_type_id.unwrap_or(0);
+    let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
+    let params = [("typeID", tid.to_string()), ("groupID", gid.to_string())];
+    for ev in ["somethingExplode", "destroyHostileNPC", "entityGroupDestroyed"] {
+        crate::services::operations_manager_helpers::record_server_operation_event(
+            ctx,
+            killer_char_id,
+            ev,
+            &params,
+            1,
+        );
+    }
 }
 

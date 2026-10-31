@@ -262,21 +262,6 @@ pub fn ensure_character_challenges_with_limit(
     now_ft: i64,
     season_end_ft: i64,
     max_active: usize,
-<<<<<<< HEAD
-) -> Vec<(i64, PyRep)> {
-    let mut expired = Vec::new();
-    let def_map: HashMap<i64, &SeasonalChallengeDef> = defs.iter().map(|d| (d.challenge_id, d)).collect();
-    let cur_pts = st.season_points;
-    for (cid, existing) in st.challenges.iter_mut() {
-        if existing.expiration_date > 0 && now_ft >= existing.expiration_date {
-            if let Some(def) = def_map.get(cid) {
-                let expired_id = existing.challenge_id;
-                let mut fresh = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
-                fresh.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
-                let fresh_kv = challenge_to_keyval(&fresh, cur_pts);
-                *existing = fresh;
-                expired.push((expired_id, fresh_kv));
-=======
 ) -> Vec<(i64, CharacterChallenge)> {
     let max_active = max_active.max(1);
     let def_map: HashMap<i64, &SeasonalChallengeDef> = defs.iter().map(|d| (d.challenge_id, d)).collect();
@@ -292,7 +277,6 @@ pub fn ensure_character_challenges_with_limit(
         if let Some(ch) = st.challenges.remove(&cid) {
             if def_map.get(&cid).is_some_and(|d| d.should_only_appear_once_per_season) {
                 st.completed_once_per_season_ids.insert(cid);
->>>>>>> da73870b (feat(pve,structures): close batch 37 parity rows and seasonManager R-SM-P1-1..4)
             }
             st.claimed_challenges.insert(cid, ch);
         }
@@ -345,15 +329,10 @@ pub fn ensure_character_challenges_with_limit(
             active_count += 1;
         }
     }
-<<<<<<< HEAD
-    expired
-=======
-
     expired_ids
         .into_iter()
         .zip(newly_inserted)
         .collect()
->>>>>>> da73870b (feat(pve,structures): close batch 37 parity rows and seasonManager R-SM-P1-1..4)
 }
 
 pub fn ensure_character_challenges(
@@ -362,13 +341,8 @@ pub fn ensure_character_challenges(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     now_ft: i64,
-<<<<<<< HEAD
-) -> Vec<(i64, PyRep)> {
-    ensure_character_challenges_with_limit(
-=======
 ) {
     let _ = ensure_character_challenges_with_limit(
->>>>>>> da73870b (feat(pve,structures): close batch 37 parity rows and seasonManager R-SM-P1-1..4)
         st,
         defs,
         snap,
@@ -376,7 +350,7 @@ pub fn ensure_character_challenges(
         now_ft,
         now_ft + 30 * 86_400 * 10_000_000,
         4,
-    )
+    );
 }
 
 pub fn ensure_challenges_with_defs(st: &mut CharacterSeasonState, defs: &[SeasonalChallengeDef], now_ft: i64) {
@@ -594,15 +568,7 @@ pub fn handle_season_manager(
                     ("seasonID", PyRep::Integer(season_id)),
                     ("season_points", PyRep::Integer(st.season_points)),
                     ("seasonPoints", PyRep::Integer(st.season_points)),
-                    (
-                        "challenges",
-                        PyRep::List(
-                            st.challenges
-                                .values()
-                                .map(|c| challenge_to_keyval(c, st.season_points))
-                                .collect(),
-                        ),
-                    ),
+                    ("challenges", PyRep::Dict(sorted_challenge_dict(st))),
                 ]);
                 Ok((season_data_kv, character_progress_kv))
             });
@@ -676,21 +642,12 @@ pub fn handle_season_manager(
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
                 let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
-<<<<<<< HEAD
-                Ok((sorted_challenge_keyvals(st), expired))
-            });
-            match res {
-                Ok((challenges, expired)) => {
-                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
-                    Some(Ok(PyRep::List(challenges)))
-=======
                 Ok((sorted_challenge_dict(st), st.season_points, expired))
             });
             match res {
                 Ok((challenges, pts, expired)) => {
                     emit_expired_challenges(ctx, char_id, pts, &expired);
                     Some(Ok(PyRep::Dict(challenges)))
->>>>>>> da73870b (feat(pve,structures): close batch 37 parity rows and seasonManager R-SM-P1-1..4)
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -896,30 +853,6 @@ pub fn handle_season_manager(
                         }
                     }
                 }
-<<<<<<< HEAD
-                let is_client_driven = def_opt.map(|d| d.client_event_driven).unwrap_or(ch.client_event_driven);
-
-                if !is_client_driven {
-                    return Err(BridgeRpcError {
-                        code: "InvalidChallengeEvent".into(),
-                        message: "Server-side activity challenge cannot be progressed via client events".into(),
-                    });
-                }
-                let was_completed = ch.completed;
-                let step = amount.min(1);
-                ch.progress = ch.progress.saturating_add(step).min(ch.max_progress);
-                if ch.progress >= ch.max_progress {
-                    ch.completed = true;
-                }
-                Ok((ch_id, ch.progress, !was_completed && ch.completed, expired))
-            });
-            match res {
-                Ok((cid, new_prog, newly_completed, expired)) => {
-                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnChallengeProgressUpdate", "charid", vec![PyRep::Integer(cid), PyRep::Integer(new_prog)]);
-                    if newly_completed {
-                        ctx.notify(NotificationTarget::Character(char_id), "OnChallengeCompleted", "charid", vec![PyRep::Integer(cid)]);
-=======
                 Ok((expired, st.season_points, updates))
             });
             match res {
@@ -930,7 +863,6 @@ pub fn handle_season_manager(
                         if newly_completed {
                             ctx.notify(NotificationTarget::Character(char_id), "OnChallengeCompleted", "charid", vec![PyRep::Integer(cid)]);
                         }
->>>>>>> da73870b (feat(pve,structures): close batch 37 parity rows and seasonManager R-SM-P1-1..4)
                     }
                     Some(Ok(PyRep::None))
                 }
@@ -1080,13 +1012,6 @@ pub fn handle_season_manager(
                     ("seasonPoints", PyRep::Integer(pts)), ("rewardGranted", PyRep::Bool(true)),
                     ("rewardPoints", PyRep::Integer(reward_pts)), ("deliveredItemID", delivered_rep),
                 ]);
-<<<<<<< HEAD
-                Ok((rep, season_id, prev_pts, pts, is_omega, expired))
-            });
-            match res {
-                Ok((rep, season_id, prev_pts, pts, is_omega, expired)) => {
-                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
-=======
                 Ok((rep, season_id, prev_pts, pts, is_omega, expired, new_balance_cents, created_item_notif, enqueued_redeem))
             });
             match res {
@@ -1124,7 +1049,6 @@ pub fn handle_season_manager(
                     if enqueued_redeem {
                         ctx.notify(NotificationTarget::Character(char_id), "OnRedeemingTokensUpdated", "charid", vec![]);
                     }
->>>>>>> da73870b (feat(pve,structures): close batch 37 parity rows and seasonManager R-SM-P1-1..4)
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
                     // DATA GAP: V24 seasonselection.fsdbinary ships no static reward-track point thresholds or clone-grade requirements

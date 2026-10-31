@@ -6,28 +6,23 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use eve_db::{
-    CharacterRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    UpwellStructureRecord, WorldRepository, corp_roles,
-};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+use eve_db::{CharacterRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, UpwellStructureRecord, WorldRepository, corp_roles};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{SessionState, service_roles};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SdeRegistry;
 use eve_server::router::ServerContext;
-use eve_server::services::account_services;
-use eve_server::services::operations_manager_helpers::{
-    get_operation_defs, record_server_operation_event,
-};
-use eve_server::services::station_structure::structure_lifecycle::sync_all_structures;
-use eve_server::services::station_structure::structure_upwell_ops::{
-    PROFILE_CHANGE_DELAY_SECS, evaluate_character_structure_access, load_ext_state, save_ext_state,
+use eve_server::services::{
+    account_services,
+    combat_crimewatch::combat_npc_ai::{destroy_specialized_npc_and_queue_bounty, spawn_specialized_npc_entity},
+    operations_manager_helpers::{OperationDefinitions, get_operation_defs},
+    station_structure::{
+        structure_lifecycle::sync_all_structures,
+        structure_upwell_ops::{PROFILE_CHANGE_DELAY_SECS, evaluate_character_structure_access, load_ext_state, save_ext_state},
+    },
 };
 use glam::DVec3;
-
 use super::common;
 
 const PILOT_1: i64 = 90_000_001;
@@ -38,8 +33,7 @@ const JITA_STATION: i64 = 60_003_760;
 
 fn new_ctx() -> ServerContext {
     let sde = Arc::new(SdeRegistry::open(&SdeRegistry::default_db_path()).expect("open SDE"));
-    let db = Arc::new(WorldRepository::with_demo_seed());
-    ServerContext::with_sde_and_repository(sde, db)
+    ServerContext::with_sde_and_repository(sde, Arc::new(WorldRepository::with_demo_seed()))
 }
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, m: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -58,75 +52,43 @@ async fn login_demo_pilot(ctx: &ServerContext, char_id: i64) -> SessionState {
     sess.solar_system_id = Some(JITA_SYS);
     sess.station_id = Some(JITA_STATION);
     sess.structure_id = None;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = JITA_SYS;
-            ch.station_id = Some(JITA_STATION);
-            ch.structure_id = None;
-            ch.home_station_id = JITA_STATION;
-        }
+    ctx.advance_secs(15);
+    ctx.db.with_mut_snapshot(|snap| if let Some(ch) = snap.characters.get_mut(&char_id) {
+        ch.solar_system_id = JITA_SYS; ch.station_id = Some(JITA_STATION); ch.structure_id = None; ch.home_station_id = JITA_STATION;
     });
     sess
 }
 
 fn seed_corp_and_pilots(ctx: &ServerContext, corp_id: i64, ceo_id: i64, members_with_roles: &[(i64, u64, &str)]) {
-    let uid_map: HashMap<i64, u64> = members_with_roles
-        .iter()
-        .map(|&(cid, _, _)| (cid, ctx.db.provision_player_account(&format!("b37_{cid}"), "b37-pw")))
-        .collect();
+    let uid_map: HashMap<i64, u64> = members_with_roles.iter().map(|&(cid, _, _)| (cid, ctx.db.provision_player_account(&format!("b37_{cid}"), "b37-pw"))).collect();
     ctx.db.with_mut_snapshot(|snap| {
         let base_char = snap.characters.get(&PILOT_1).expect("demo pilot 1").clone();
-        let mut member_ids = HashSet::new();
-        let mut role_map = HashMap::new();
+        let (mut member_ids, mut role_map) = (HashSet::new(), HashMap::new());
         for &(cid, roles, name) in members_with_roles {
-            let uid = uid_map[&cid];
+            let (uid, ship_id) = (uid_map[&cid], 770_000_000 + cid);
             member_ids.insert(cid);
             role_map.insert(cid, roles);
-            let ship_id = 770_000_000 + cid;
-            snap.items.entry(ship_id).or_insert(InventoryItemRecord {
-                item_id: ship_id, type_id: 587, owner_id: cid, location_id: i64::from(JITA_SYS),
-                flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
-            });
+            snap.items.entry(ship_id).or_insert(InventoryItemRecord { item_id: ship_id, type_id: 587, owner_id: cid, location_id: i64::from(JITA_SYS), flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
             let ch = snap.characters.entry(cid).or_insert_with(|| CharacterRecord {
-                character_id: cid, user_id: uid, name: name.to_string(), corporation_id: corp_id,
-                solar_system_id: JITA_SYS, constellation_id: 20_000_020, region_id: 10_000_002,
-                active_ship_id: ship_id, home_station_id: JITA_STATION, balance: IskCents(100_000_000_00),
-                race_id: 1, bloodline_id: 1, ancestry_id: 1, clone_grade: 2, ..base_char.clone()
+                character_id: cid, user_id: uid, name: name.to_string(), corporation_id: corp_id, solar_system_id: JITA_SYS, constellation_id: 20_000_020,
+                region_id: 10_000_002, active_ship_id: ship_id, home_station_id: JITA_STATION, balance: IskCents(100_000_000_00), race_id: 1, bloodline_id: 1, ancestry_id: 1, clone_grade: 2, ..base_char.clone()
             });
-            ch.user_id = uid;
-            ch.corporation_id = corp_id;
-            ch.solar_system_id = JITA_SYS;
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_id;
+            ch.user_id = uid; ch.corporation_id = corp_id; ch.solar_system_id = JITA_SYS; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = ship_id;
         }
         snap.corporations.insert(corp_id, CorporationRecord {
-            corporation_id: corp_id, name: format!("Corp {corp_id}"), ticker: "TST".into(),
-            ceo_id, hq_station_id: Some(JITA_STATION), members: member_ids, member_roles: role_map,
-            master_wallet: IskCents(500_000_000_00), ..Default::default()
+            corporation_id: corp_id, name: format!("Corp {corp_id}"), ticker: "TST".into(), ceo_id, hq_station_id: Some(JITA_STATION),
+            members: member_ids, member_roles: role_map, master_wallet: IskCents(500_000_000_00), ..Default::default()
         });
     });
 }
 
 async fn make_space_session(ctx: &ServerContext, char_id: i64, corp_id: i64, corp_role: u64) -> SessionState {
-    let (uid, ship_id) = ctx.db.with_snapshot(|s| {
-        let ch = s.characters.get(&char_id).unwrap();
-        (ch.user_id, ch.active_ship_id)
-    });
+    let (uid, ship_id) = ctx.db.with_snapshot(|s| { let ch = s.characters.get(&char_id).unwrap(); (ch.user_id, ch.active_ship_id) });
     let _ = ctx.db.acquire_online_lock(uid, char_id as u64, Some(char_id), true, ctx.now_unix());
-    let _ = ctx.systems.get_or_spawn(JITA_SYS).spawn_ball(Ball {
-        id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO,
-        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await;
+    let _ = ctx.systems.get_or_spawn(JITA_SYS).spawn_ball(Ball { id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     let mut sess = SessionState::new(char_id as u64);
-    sess.user_id = Some(uid);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.corp_role = corp_role;
-    sess.solar_system_id = Some(JITA_SYS);
-    sess.constellation_id = Some(20_000_020);
-    sess.region_id = Some(10_000_002);
-    sess.ship_id = Some(ship_id);
+    sess.user_id = Some(uid); sess.character_id = Some(char_id); sess.corporation_id = Some(corp_id); sess.corp_role = corp_role;
+    sess.solar_system_id = Some(JITA_SYS); sess.constellation_id = Some(20_000_020); sess.region_id = Some(10_000_002); sess.ship_id = Some(ship_id);
     sess
 }
 
@@ -134,30 +96,38 @@ async fn seed_structure_with_services(ctx: &ServerContext, structure_id: i64, ow
     let now = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(structure_id, UpwellStructureRecord {
-            structure_id, type_id: 35_832, owner_corp_id, solar_system_id: JITA_SYS, name: name.to_string(),
-            position: [1_000.0, 0.0, 0.0], state: state.to_string(), fuel_blocks: 2_400, quantum_core_installed: true,
-            shield_hp: 1_000_000.0, armor_hp: 1_000_000.0, hull_hp: 1_000_000.0,
-            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+            structure_id, type_id: 35_833, owner_corp_id, solar_system_id: JITA_SYS, name: name.to_string(), position: [1_000.0, 0.0, 0.0], state: state.to_string(),
+            fuel_blocks: 2_400, quantum_core_installed: true, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0, hull_hp: 1_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
         let mut ext = load_ext_state(snap);
         let lf = ext.lifecycle.entry(structure_id).or_default();
         lf.last_fuel_tick_unix = Some(now);
         for &(item_id, type_id, flag, online) in modules {
-            snap.items.insert(item_id, InventoryItemRecord {
-                item_id, type_id, owner_id: owner_corp_id, location_id: structure_id, flag,
-                quantity: 1, singleton: true, version: 1, ..Default::default()
-            });
+            snap.items.insert(item_id, InventoryItemRecord { item_id, type_id, owner_id: owner_corp_id, location_id: structure_id, flag, quantity: 1, singleton: true, version: 1, ..Default::default() });
             snap.module_online_states.insert(item_id, online);
-            if online && !lf.online_modules.contains(&item_id) {
-                lf.online_modules.push(item_id);
-            }
+            if online && !lf.online_modules.contains(&item_id) { lf.online_modules.push(item_id); }
         }
         save_ext_state(snap, &ext);
     });
-    let _ = ctx.systems.get_or_spawn(JITA_SYS).spawn_ball(Ball {
-        id: structure_id, type_id: 35_832, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
-        max_velocity: 0.0, inertia: 1.0, mass: 1.0e9, radius: 5_000.0, speed_fraction: 0.0, mode: MovementMode::Rigid,
-    }).await;
+    let _ = ctx.systems.get_or_spawn(JITA_SYS).spawn_ball(Ball { id: structure_id, type_id: 35_833, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1.0e9, radius: 5_000.0, speed_fraction: 0.0, mode: MovementMode::Rigid }).await;
+}
+
+fn pick_sde_type_matching(ctx: &ServerContext, conds: &HashMap<String, Vec<String>>, default_tid: u32) -> u32 {
+    if let Some(tid) = conds.get("typeID").and_then(|v| v.first()).and_then(|s| s.parse::<u32>().ok()) { return tid; }
+    if let Some(gid) = conds.get("groupID").and_then(|v| v.first()).and_then(|s| s.parse::<u32>().ok()) {
+        if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.group_id == gid) { return tid; }
+    }
+    default_tid
+}
+
+fn insert_ship_item(ctx: &ServerContext, char_id: i64, type_id: u32, flag: InventoryFlag, qty: i32, active: bool) {
+    ctx.db.with_mut_snapshot(|s| {
+        let ship_id = s.characters.get(&char_id).unwrap().active_ship_id;
+        s.next_entity_id += 1;
+        let id = s.next_entity_id;
+        s.items.insert(id, InventoryItemRecord { item_id: id, type_id, owner_id: char_id, location_id: ship_id, flag, quantity: qty, singleton: qty == 1, version: 1, ..Default::default() });
+        if active { s.module_active_states.insert(id); }
+    });
 }
 
 async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64, op_id: i64) {
@@ -170,19 +140,84 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
         if ev.starts_with("client_") {
             let py_conds: Vec<(PyRep, PyRep)> = conds.iter().filter_map(|(k, vs)| {
                 let v = vs.first()?;
-                let pv = v.parse::<i64>().map(PyRep::Integer).unwrap_or_else(|_| PyRep::String(v.clone()));
-                Some((PyRep::String(k.clone()), pv))
+                Some((PyRep::String(k.clone()), v.parse::<i64>().map(PyRep::Integer).unwrap_or_else(|_| PyRep::String(v.clone()))))
             }).collect();
             let mut kw = HashMap::new();
             if !py_conds.is_empty() { kw.insert("extra_data".into(), PyRep::Dict(py_conds)); }
-            for _ in 0..target {
-                rpc_kw(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev.clone())], &kw).await.unwrap();
-            }
-        } else {
-            let owned: Vec<(String, String)> = conds.into_iter().filter_map(|(k, vs)| Some((k, vs.into_iter().next()?))).collect();
-            let refs: Vec<(&str, String)> = owned.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-            record_server_operation_event(ctx, char_id, &ev, &refs, target);
+            for _ in 0..target { rpc_kw(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev.clone())], &kw).await.unwrap(); }
+            continue;
         }
+        let saved_dock = sess.station_id;
+        match ev.as_str() {
+            "dockInStation" => {
+                sess.station_id = Some(JITA_STATION); sess.structure_id = None;
+                ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = Some(JITA_STATION));
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("dockInStation".into())]).await.unwrap();
+            }
+            "undockFromStation" => {
+                sess.station_id = None; sess.structure_id = None;
+                ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = None);
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("undockFromStation".into())]).await.unwrap();
+            }
+            "shipBoarded" => {
+                let stid = pick_sde_type_matching(ctx, &conds, 587);
+                sess.station_id = Some(JITA_STATION);
+                let sid = ctx.db.with_mut_snapshot(|s| {
+                    s.characters.get_mut(&char_id).unwrap().station_id = Some(JITA_STATION);
+                    s.next_entity_id += 1;
+                    let id = s.next_entity_id;
+                    s.items.insert(id, InventoryItemRecord { item_id: id, type_id: stid, owner_id: char_id, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
+                    id
+                });
+                ctx.advance_secs(15);
+                rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(sid)]).await.unwrap();
+            }
+            "dungeonEntered" => {
+                sess.station_id = None; sess.structure_id = None;
+                ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = None);
+                let site_id = defs.op_site_ids.get(&op_id).copied().or_else(|| conds.get("dungeonID").and_then(|v| v.first()).and_then(|s| s.parse::<i64>().ok())).unwrap_or(1);
+                rpc(ctx, sess, "operationsManager", "start_site", &[PyRep::Integer(op_id), PyRep::Integer(site_id)]).await.unwrap();
+            }
+            "fitItemCount" => {
+                let mtid = pick_sde_type_matching(ctx, &conds, 439);
+                for i in 0..target { insert_ship_item(ctx, char_id, mtid, InventoryFlag::from_u16(11 + (i as u16 % 8)), 1, false); }
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("fitItemCount".into())]).await.unwrap();
+            }
+            "loadChargesCount" => {
+                insert_ship_item(ctx, char_id, pick_sde_type_matching(ctx, &conds, 182), InventoryFlag::HiSlot0, target as i32, false);
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("loadChargesCount".into())]).await.unwrap();
+            }
+            "skillTrainingStarted" => {
+                ctx.db.with_mut_snapshot(|s| s.skill_queues.entry(char_id).or_default().push(eve_db::SkillQueueEntry { type_id: 3_300, target_level: 1, start_sp: 0.0, end_sp: 250.0, duration_seconds: 600.0, started_at_unix: Some(1_700_000_000) }));
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("skillTrainingStarted".into())]).await.unwrap();
+            }
+            "timesWarped" | "warpToLocation" => {
+                ctx.db.with_mut_snapshot(|s| {
+                    let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(s);
+                    if !ext.characters_warped.contains(&char_id) { ext.characters_warped.push(char_id); }
+                    eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(s, &ext);
+                });
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev)]).await.unwrap();
+            }
+            "moduleActivate" | "activateModule" | "moduleActivated" | "activateShipModule" => {
+                insert_ship_item(ctx, char_id, pick_sde_type_matching(ctx, &conds, 439), InventoryFlag::MedSlot0, 1, true);
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev)]).await.unwrap();
+            }
+            "lootItemCount" => {
+                insert_ship_item(ctx, char_id, pick_sde_type_matching(ctx, &conds, 34), InventoryFlag::Cargo, target as i32, false);
+                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("lootItemCount".into())]).await.unwrap();
+            }
+            "somethingExplode" | "destroyHostileNPC" | "entityGroupDestroyed" => {
+                let npc_tid = pick_sde_type_matching(ctx, &conds, 10_042);
+                for _ in 0..target {
+                    let bid = spawn_specialized_npc_entity(ctx, JITA_SYS, npc_tid, "BeltRat", 0, DVec3::ZERO).await;
+                    let _ = destroy_specialized_npc_and_queue_bounty(ctx, JITA_SYS, bid, char_id).await;
+                }
+            }
+            other => panic!("Unhandled SDE operation task event: {other}"),
+        }
+        sess.station_id = saved_dock;
+        ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = saved_dock);
     }
 }
 
@@ -201,19 +236,30 @@ async fn complete_tree_ops(ctx: &ServerContext, sess: &mut SessionState, char_id
     }
 }
 
+fn is_supported_op(defs: &OperationDefinitions, oid: i64) -> bool {
+    let ok_one = |id: i64| defs.op_tasks.get(&id).is_some_and(|ts| ts.iter().all(|t| defs.task_event_names.get(t).is_some_and(|ev| {
+        ev.starts_with("client_") || matches!(ev.as_str(), "dockInStation" | "undockFromStation" | "shipBoarded" | "dungeonEntered"
+            | "fitItemCount" | "loadChargesCount" | "skillTrainingStarted" | "timesWarped" | "warpToLocation" | "moduleActivate"
+            | "activateModule" | "moduleActivated" | "activateShipModule" | "lootItemCount" | "somethingExplode" | "destroyHostileNPC" | "entityGroupDestroyed")
+    })));
+    ok_one(oid) && defs.op_prerequisites.get(&oid).into_iter().flatten().chain(defs.op_tree_parents.get(&oid).into_iter().flatten()).all(|&p| ok_one(p))
+}
+
 async fn unlock_prereqs_for_op(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64, target_op: i64) {
     let defs = get_operation_defs(&ctx.sde);
     let PyRep::List(dl) = rpc(ctx, sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
-    let mut done: HashSet<i64> = dl.iter().filter_map(|x| x.as_i64()).collect();
-    let mut candidates: Vec<i64> = defs.cat_operation_trees.get(&cat_id).cloned().unwrap_or_else(|| defs.sde_operations.iter().copied().collect());
-    candidates.sort_unstable();
+    let (mut done, mut candidates, mut stack) = (dl.iter().filter_map(|x| x.as_i64()).collect::<HashSet<i64>>(), Vec::new(), vec![target_op]);
+    while let Some(cur) = stack.pop() {
+        for &p in defs.op_prerequisites.get(&cur).into_iter().flatten().chain(defs.op_tree_parents.get(&cur).into_iter().flatten()) {
+            if !candidates.contains(&p) { candidates.push(p); stack.push(p); }
+        }
+    }
     for _ in 0..candidates.len().max(1) {
         if defs.are_prerequisites_met(target_op, &done) { return; }
         for &oid in &candidates {
-            if oid != target_op && !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) {
+            if !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) {
                 complete_op_authoritatively(ctx, sess, char_id, cat_id, oid).await;
                 done.insert(oid);
-                if defs.are_prerequisites_met(target_op, &done) { return; }
             }
         }
     }
@@ -225,14 +271,11 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     eve_testkit::attest(&["feat:pve.operations-tutorial"]);
     let ctx = new_ctx();
     common::pin_clock(&ctx);
-
     let mut anon = SessionState::new(77);
     assert!(rpc(&ctx, &mut anon, "operationsManager", "get_character_progress", &[]).await.is_err());
 
     let mut sess = login_demo_pilot(&ctx, PILOT_1).await;
     let defs = get_operation_defs(&ctx.sde);
-
-    // Negative guards: unknown SDE op/category, wrong solar system, cross-character checks, and unmet prerequisites
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(999_999)]).await.unwrap_err().code, "CustomInfo");
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(999_999)]).await.unwrap_err().code, "CustomInfo");
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(i64::from(AMARR_SYS)), PyRep::Integer(31)]).await.unwrap_err().code, "CustomInfo");
@@ -251,8 +294,8 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnOperationCategoryChanged" && n.args == vec![PyRep::Integer(31), PyRep::Integer(157)]));
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[]).await.unwrap(), PyRep::Integer(31));
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Integer(2));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(157), PyRep::Integer(1)]).await.unwrap_err().code, "CustomInfo");
 
-    // Block task 344 -> event rejected; unblock & skip_task(344) (SDE clientSkipConditions) -> partial progress
     rpc(&ctx, &mut sess, "operationsManager", "block_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap();
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("dockInStation".into())]).await.unwrap(), PyRep::Bool(false));
     rpc(&ctx, &mut sess, "operationsManager", "unblock_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap();
@@ -261,22 +304,25 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     let PyRep::Dict(prog_mid) = rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.unwrap() else { panic!("Dict") };
     assert!((1..100).contains(&prog_mid.iter().find(|(k, _)| k.as_i64() == Some(157)).and_then(|(_, v)| v.as_i64()).unwrap_or(0)));
 
-    // Task 345 is non-skippable and rejects spoofed client events; server-verified shipBoarded completes it
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(345)]).await.unwrap_err().code, "TaskNotSkippable"); // rpc-lint: allow error code assertion
-    let mut spoof_kw = HashMap::new();
-    spoof_kw.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("task_id".into()), PyRep::Integer(345))]));
+    let spoof_kw = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String("task_id".into()), PyRep::Integer(345))]))]);
     assert_eq!(rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_progress".into())], &spoof_kw).await.unwrap(), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("operation_completed".into())]).await.unwrap(), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_claim_rewards_btn_click".into())]).await.unwrap(), PyRep::Bool(false));
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.unwrap(), PyRep::Bool(true));
+    let board_sid = ctx.db.with_mut_snapshot(|s| {
+        s.next_entity_id += 1;
+        let id = s.next_entity_id;
+        s.items.insert(id, InventoryItemRecord { item_id: id, type_id: 587, owner_id: PILOT_1, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
+        id
+    });
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(board_sid)]).await.expect("ship.Board");
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnOperationTaskCompleted" && n.args == vec![PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(345)]));
 
-    // Task 346 (client_agencyContentExpanded) enforces contentPieceType == 18
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())]).await.unwrap(), PyRep::Bool(false));
-    let mut bad_kw = HashMap::new();
-    bad_kw.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(99))]));
+    let bad_kw = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(99))]))]);
     assert_eq!(rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &bad_kw).await.unwrap(), PyRep::Bool(false));
-    let mut ok_kw = HashMap::new();
-    ok_kw.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
+    let ok_kw = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]))]);
     assert_eq!(rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ok_kw).await.unwrap(), PyRep::Bool(true));
     let PyRep::List(done_157) = rpc(&ctx, &mut sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
     assert!(done_157.contains(&PyRep::Integer(157)));
@@ -288,7 +334,6 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Integer(3));
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Bool(true));
 
-    // Authoritative server-verified SDE item/ISK rewards (docked OnItemChange vs undocked OnRedeemingTokensUpdated) & category ISK gate
     let p1_race = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().race_id);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_2).unwrap().race_id = p1_race);
     let rw_item_op = defs.sde_operations.iter().copied().filter(|&oid| {
@@ -307,10 +352,9 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     complete_op_authoritatively(&ctx, &mut sess, PILOT_1, rw_op_cat, rw_item_op).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).count()), items_after);
 
-    // Undocked PILOT_2 receives SDE item/skill rewards in redeeming queue + OnRedeemingTokensUpdated
     let mut sess2 = login_demo_pilot(&ctx, PILOT_2).await;
     sess2.station_id = None;
-    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_2).unwrap().station_id = None);
+    ctx.db.with_mut_snapshot(|s| { let ch = s.characters.get_mut(&PILOT_2).unwrap(); ch.station_id = None; ch.home_station_id = 0; });
     unlock_prereqs_for_op(&ctx, &mut sess2, PILOT_2, rw_op_cat, rw_item_op).await;
     let uid2 = sess2.user_id.unwrap();
     let toks_before = ctx.db.with_snapshot(|s| account_services::load_store(s).redeem_tokens.get(&uid2).map_or(0, Vec::len));
@@ -319,11 +363,11 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     assert!(ctx.db.with_snapshot(|s| account_services::load_store(s).redeem_tokens.get(&uid2).map_or(0, Vec::len)) > toks_before);
     assert!(ctx.drain_notifications_for_char(PILOT_2).iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
 
-    // Authoritative ISK operation payout + OnAccountChange (when present in SDE) & multi-op category tree gate
     let PyRep::List(done_p2_list) = rpc(&ctx, &mut sess2, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
     let done_p2: HashSet<i64> = done_p2_list.iter().filter_map(|x| x.as_i64()).collect();
-    if let Some((&rw_isk_op, &op_isk)) = defs.op_isk_rewards.iter().filter(|(oid, isk)| {
-        **isk > 0 && !done_p2.contains(oid) && defs.op_tasks.get(oid).is_some_and(|ts| ts.iter().any(|t| defs.task_event_names.get(t).is_some_and(|e| !e.starts_with("client_"))))
+    if let Some((&rw_isk_op, &op_isk)) = defs.op_isk_rewards.iter().filter(|(&oid, &isk)| {
+        isk > 0 && !done_p2.contains(&oid) && is_supported_op(defs, oid)
+            && defs.op_tasks.get(&oid).is_some_and(|ts| ts.iter().any(|t| defs.task_event_names.get(t).is_some_and(|e| !e.starts_with("client_"))))
     }).min_by_key(|(oid, _)| *oid) {
         let isk_cat = defs.op_default_category.get(&rw_isk_op).copied().unwrap_or(31);
         unlock_prereqs_for_op(&ctx, &mut sess2, PILOT_2, isk_cat, rw_isk_op).await;
@@ -333,8 +377,8 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
         assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_2).unwrap().balance.0) - bal_pre, (op_isk as i64) * 100);
         assert!(ctx.drain_notifications_for_char(PILOT_2).iter().any(|n| n.event == "OnAccountChange"));
     }
-    let rw_cat_id = defs.cat_isk_rewards.iter().filter(|(cid, isk)| **isk > 0 && defs.cat_operation_trees.get(cid).is_some_and(|t| !t.is_empty())).map(|(c, _)| *c).min()
-        .or_else(|| defs.cat_operation_trees.iter().filter(|(&cid, t)| cid != 31 && t.len() >= 2).min_by_key(|(_, t)| t.len()).map(|(&c, _)| c)).expect("multi-op SDE category");
+    let rw_cat_id = defs.cat_isk_rewards.iter().filter(|(cid, isk)| **isk > 0 && defs.cat_operation_trees.get(cid).is_some_and(|t| !t.is_empty() && t.iter().all(|&o| is_supported_op(defs, o)))).map(|(c, _)| *c).min()
+        .or_else(|| defs.cat_operation_trees.iter().filter(|(&cid, t)| cid != 31 && t.len() >= 2 && t.iter().all(|&o| is_supported_op(defs, o))).min_by_key(|(_, t)| t.len()).map(|(&c, _)| c)).expect("multi-op SDE category");
     let cat_isk = defs.cat_isk_rewards.get(&rw_cat_id).copied().unwrap_or(0);
     let bal_pre_cat = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(rw_cat_id)]).await.unwrap_err().code, "OperationCategoryIncomplete"); // rpc-lint: allow error code assertion
@@ -354,40 +398,31 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
 async fn test_seasonal_login_campaign_active_claim_and_history() {
     eve_testkit::attest(&["feat:pve.seasonal-login"]);
     let ctx = new_ctx();
-    // 1_700_044_800 = 2023-11-15 10:40:00 UTC (20 minutes before 11:00:00 UTC daily downtime turnover)
     ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_700_044_800)));
 
-    // Negative 1: unauthenticated session rejected
     let mut anon = SessionState::new(88);
     assert!(rpc(&ctx, &mut anon, "seasonalLoginCampaignManager", "get_active_campaign", &[]).await.is_err());
 
     let mut sess = login_demo_pilot(&ctx, PILOT_1).await;
     let uid = sess.user_id.expect("authenticated user_id");
-
-    // Unscheduled campaign returns exact V24 4-tuple (None, None, None, None) and rejects claim_reward
     assert_eq!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_active_campaign", &[]).await.unwrap(), PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None, PyRep::None]));
-    let e_unsched = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap_err();
-    assert!(e_unsched.message.to_ascii_lowercase().contains("no seasonal campaign"));
+    assert!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap_err().message.to_ascii_lowercase().contains("no seasonal campaign"));
 
-    // Negative 2 & 3: non-GM cannot schedule /campaign; GM scheduling unknown SDE campaign ID fails
     assert_eq!(rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())]).await.unwrap_err().code, "InsufficientRole");
     let mut gm_sess = login_demo_pilot(&ctx, PILOT_2).await;
     gm_sess.role = service_roles::ROLE_GML | service_roles::ROLE_ADMIN;
     assert_eq!(rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 99999999 30 11:00:00".into())]).await.unwrap_err().code, "CampaignNotFound");
 
-    // GM schedules real SDE campaign 2323 for 30 days with 11:00:00 UTC turnover
     rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())]).await.expect("GM schedule 2323");
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&PILOT_1).unwrap().clone_grade = 1);
 
     let PyRep::Tuple(active_fields) = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_active_campaign", &[]).await.unwrap() else { panic!("Tuple") };
     assert_eq!(active_fields.len(), 4);
     assert_eq!(active_fields[0], PyRep::Integer(2323));
-    assert!(active_fields[1].as_i64().unwrap_or(0) > 730_000);
     assert_eq!(active_fields[2], PyRep::String("11:00:00".into()));
     let initial_rem = active_fields[3].as_i64().expect("num_remaining_rewards");
     assert!(initial_rem > 0);
 
-    // Alpha Day 0 claim: delivers SDE Day 0 Alpha reward (87900) to hangar, withholds Omega reward (49809), no redeem token notification while docked
     let _ = ctx.drain_notifications_for_char(PILOT_1);
     assert_eq!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap(), PyRep::Bool(true));
     assert!(ctx.db.with_snapshot(|s| s.items.values().any(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION && i.type_id == 87_900)));
@@ -397,32 +432,25 @@ async fn test_seasonal_login_campaign_active_claim_and_history() {
     let PyRep::Dict(hist_day0) = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_claim_history", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(hist_day0.len(), 1);
     let ord0 = hist_day0[0].0.as_i64().unwrap();
+    assert_eq!(active_fields[1], PyRep::Integer(ord0 + 30), "end_date_ordinal before 11:00:00 UTC turnover must honor turnover_secs");
     assert_eq!(hist_day0[0].1, PyRep::Integer(0), "Alpha claim state must be CLONE_STATE_ALPHA (0)");
     let PyRep::Tuple(after_d0) = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_active_campaign", &[]).await.unwrap() else { panic!("Tuple") };
     assert_eq!(after_d0[3], PyRep::Integer(initial_rem - 1));
 
-    // Negative 4: duplicate claim before 11:00:00 UTC turnover (10:50:00 UTC) is rejected
     ctx.advance_secs(600);
-    let e_dup = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap_err();
-    assert!(e_dup.message.to_ascii_lowercase().contains("already claimed"));
+    assert!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap_err().message.to_ascii_lowercase().contains("already claimed"));
 
-    // Advance across 11:00:00 UTC turnover (11:10:00 UTC = Day 1), upgrade pilot to Omega (clone_grade = 2) and undock to space
     ctx.advance_secs(1_200);
     sess.station_id = None;
-    ctx.db.with_mut_snapshot(|snap| {
-        let ch = snap.characters.get_mut(&PILOT_1).unwrap();
-        ch.clone_grade = 2;
-        ch.station_id = None;
-    });
+    ctx.db.with_mut_snapshot(|snap| { let ch = snap.characters.get_mut(&PILOT_1).unwrap(); ch.clone_grade = 2; ch.station_id = None; });
     let tokens_before = ctx.db.with_snapshot(|s| account_services::load_store(s).redeem_tokens.get(&uid).map_or(0, Vec::len));
     let _ = ctx.drain_notifications_for_char(PILOT_1);
 
     assert_eq!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
-    let has_retro_omega_token = ctx.db.with_snapshot(|s| {
+    assert!(ctx.db.with_snapshot(|s| {
         let toks = account_services::load_store(s).redeem_tokens.get(&uid).cloned().unwrap_or_default();
         toks.len() > tokens_before && toks.iter().any(|t| t.type_id == 49_809)
-    });
-    assert!(has_retro_omega_token, "Undocked Omega claim with retro_claim=true must enqueue Day 0 Omega reward 49809 into redeeming queue");
+    }));
     assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
 
     let PyRep::Dict(hist_day1) = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_claim_history", &[]).await.unwrap() else { panic!("Dict") };
@@ -430,11 +458,9 @@ async fn test_seasonal_login_campaign_active_claim_and_history() {
     assert_eq!(hist_day1.iter().find(|(k, _)| k.as_i64() == Some(ord0)).and_then(|(_, v)| v.as_i64()), Some(1));
     assert_eq!(hist_day1.iter().find(|(k, _)| k.as_i64() == Some(ord0 + 1)).and_then(|(_, v)| v.as_i64()), Some(1));
 
-    // Advance past 30-day campaign end -> campaign expires cleanly
     ctx.advance_secs(31 * 86_400);
     assert_eq!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_active_campaign", &[]).await.unwrap(), PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None, PyRep::None]));
-    let e_exp = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap_err();
-    assert!(e_exp.message.to_ascii_lowercase().contains("no seasonal campaign"));
+    assert!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap_err().message.to_ascii_lowercase().contains("no seasonal campaign"));
 }
 
 #[tokio::test]
@@ -443,7 +469,6 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     eve_testkit::attest(&["feat:structures.profiles"]);
     let ctx = new_ctx();
     common::pin_clock(&ctx);
-
     const CORP_OWNER: i64 = 98_600_001;
     const CORP_GUEST: i64 = 98_600_002;
     const DIR_PILOT: i64 = 95_600_001;
@@ -468,29 +493,23 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     let mut pub_sess = make_space_session(&ctx, PUB_PILOT, CORP_GUEST, 0).await;
     let mut blk_sess = make_space_session(&ctx, BLOCKED_CORP_PILOT, CORP_GUEST, 0).await;
     let mut out_sess = make_space_session(&ctx, OUTSIDER_PILOT, 98_600_003, corp_roles::ROLE_DIRECTOR).await;
-
-    // Negative 1: non-director corp member cannot create profiles
     assert_eq!(rpc(&ctx, &mut grunt_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Unauthorized".into()), PyRep::String("".into())]).await.unwrap_err().code, "InsufficientCorpRoles");
 
     let vip_acl = rpc(&ctx, &mut dir_sess, "ownerGroupManager", "Create", &[PyRep::String("VIP ACL".into()), PyRep::String("".into())]).await.unwrap().dict_get("groupID").unwrap().as_i64().unwrap();
     let pub_acl = rpc(&ctx, &mut dir_sess, "ownerGroupManager", "Create", &[PyRep::String("Public ACL".into()), PyRep::String("".into())]).await.unwrap().dict_get("groupID").unwrap().as_i64().unwrap();
     let def_acl = rpc(&ctx, &mut dir_sess, "ownerGroupManager", "Create", &[PyRep::String("Gunners ACL".into()), PyRep::String("".into())]).await.unwrap().dict_get("groupID").unwrap().as_i64().unwrap();
-
     rpc(&ctx, &mut dir_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(vip_acl), PyRep::List(vec![PyRep::Integer(VIP_PILOT)])]).await.unwrap();
     rpc(&ctx, &mut dir_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(pub_acl), PyRep::List(vec![PyRep::Integer(CORP_GUEST)]), PyRep::Bool(false)]).await.unwrap();
     rpc(&ctx, &mut dir_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(pub_acl), PyRep::List(vec![PyRep::Integer(BLOCKED_CORP_PILOT)]), PyRep::Bool(true)]).await.unwrap();
     rpc(&ctx, &mut dir_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(def_acl), PyRep::List(vec![PyRep::Integer(VIP_PILOT)])]).await.unwrap();
 
     let prof_1 = rpc(&ctx, &mut dir_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Tiered Trade".into()), PyRep::String("ACL tiered".into())]).await.unwrap().as_i64().unwrap();
-
-    // Negative 2, 3 & 4: cross-corp SaveProfileSettings rejected; percentage tax > 1.0 rejected; negative flat ISK fee rejected
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), PyRep::Dict(vec![])]).await.unwrap_err().code, "StructureOwnershipViolation");
     let bad_tax = PyRep::Dict(vec![(PyRep::Integer(1), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(1.5))])]))]);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), bad_tax]).await.unwrap_err().code, "InvalidStructureTaxRate");
     let bad_flat_fee = PyRep::Dict(vec![(PyRep::Integer(23), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(-10.0))])]))]);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), bad_flat_fee]).await.unwrap_err().code, "InvalidStructureTaxRate");
 
-    // Save V24 Dict<settingID, List<KeyVal(groupID, value)>> mapping docking (19), multi-ACL market tax (1), flat-ISK Clone Bay (23 -> svc 2), flat-ISK Corp Office (21 -> svc 10), and defense (17)
     let v24_settings = PyRep::Dict(vec![
         (PyRep::Integer(19), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Integer(1))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Integer(1))])])),
         (PyRep::Integer(1), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(0.01))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Real(0.05))])])),
@@ -510,7 +529,6 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     assert_eq!(saved_cfg.len(), 5);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "DeleteProfile", &[PyRep::Integer(dup_id)]).await.unwrap(), PyRep::Bool(true));
 
-    // Initial profile assignment applies immediately and emits OnProfileSettingsChange([prof_1]) + OnDockingAccessChangedForCurrentSolarSystem
     let _ = ctx.drain_notifications_for_char(DIR_PILOT);
     let _ = ctx.drain_notifications_for_char(VIP_PILOT);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(ST_ID)]), PyRep::Integer(prof_1)]).await.unwrap(), PyRep::Bool(true));
@@ -518,7 +536,6 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     assert!(ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "DeleteProfile", &[PyRep::Integer(prof_1)]).await.unwrap_err().code, "ProfileInUse");
 
-    // Verify Capsuleer > Corporation specificity on docking, tiered Market tax (1% vs 5%), flat-ISK Clone Bay (500k) & Corp Office (1M), and Defense control (17)
     assert_eq!(rpc(&ctx, &mut blk_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "StructureDockingAccessDenied");
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "StructureDockingAccessDenied");
     rpc(&ctx, &mut vip_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.expect("VIP docks");
@@ -531,11 +548,23 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap(), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(10)]).await.unwrap(), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap_err().code, "StructureServiceAccessDenied");
+
+    let owner_wal_0 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
+    rpc(&ctx, &mut vip_sess, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(ST_ID), PyRep::Integer(34), PyRep::Real(100.0), PyRep::Integer(100), PyRep::Integer(90)]).await.expect("VIP PlaceBuyOrder");
+    let owner_wal_1 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
+    assert_eq!(owner_wal_1 - owner_wal_0, 100_00);
+    rpc(&ctx, &mut pub_sess, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(ST_ID), PyRep::Integer(34), PyRep::Real(100.0), PyRep::Integer(100), PyRep::Integer(90)]).await.expect("Pub PlaceBuyOrder");
+    let owner_wal_2 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
+    assert_eq!(owner_wal_2 - owner_wal_1, 500_00);
+    assert_eq!(rpc(&ctx, &mut pub_sess, "corpStationMgr", "GetPriceQuote", &[]).await.unwrap_err().code, "OfficeRentalAccessDenied");
+    assert_eq!(rpc(&ctx, &mut vip_sess, "corpStationMgr", "GetPriceQuote", &[]).await.unwrap(), PyRep::Real(1_000_000.0));
+    rpc(&ctx, &mut vip_sess, "corpStationMgr", "RentOffice", &[PyRep::Integer(ST_ID)]).await.expect("VIP RentOffice");
+    assert_eq!(ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0) - owner_wal_2, 1_000_000_00);
+
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "DefenseAccessDenied");
     rpc(&ctx, &mut vip_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.expect("VIP gunner TakeControl");
     rpc(&ctx, &mut vip_sess, "structureControl", "ReleaseControl", &[PyRep::Integer(ST_ID)]).await.expect("VIP ReleaseControl");
 
-    // In-place ACL mutation on operational structure stages behind PROFILE_CHANGE_DELAY_SECS (300s) without premature docking notification
     let _ = ctx.drain_notifications_for_char(PUB_PILOT);
     rpc(&ctx, &mut dir_sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(pub_acl), PyRep::List(vec![PyRep::Integer(CORP_GUEST)])]).await.unwrap();
     assert!(!ctx.drain_notifications_for_char(PUB_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
@@ -543,11 +572,10 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     assert!(ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)));
     assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
     ctx.advance_secs(185);
-    assert!(!ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)), "non-RPC access check must enforce due pending profile at now_unix");
+    assert!(!ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)));
     sync_all_structures(&ctx);
     assert!(ctx.drain_notifications_for_char(PUB_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
 
-    // Switch active structure to restrictive corp-only profile -> OnProfileSettingsChange([prof_locked]), delayed apply & due notification
     let prof_locked = rpc(&ctx, &mut dir_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Lockdown".into()), PyRep::String("Corp only".into())]).await.unwrap().as_i64().unwrap();
     rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_locked), PyRep::Dict(vec![(PyRep::String("corpOnly".into()), PyRep::Bool(true))])]).await.unwrap();
     let _ = ctx.drain_notifications_for_char(DIR_PILOT);
@@ -557,6 +585,8 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     assert!(!ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
 
     ctx.advance_secs(PROFILE_CHANGE_DELAY_SECS - 180);
+    let prof_1_edit = PyRep::Dict(vec![(PyRep::Integer(19), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Integer(1))])]))]);
+    rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), prof_1_edit]).await.unwrap();
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_ID)])]).await.unwrap(), PyRep::List(vec![PyRep::Integer(ST_ID)]));
 
     ctx.advance_secs(185);
@@ -573,39 +603,26 @@ async fn test_structure_directory_accessible_structures_and_services() {
     eve_testkit::attest(&["feat:structures.structure-directory"]);
     let ctx = new_ctx();
     common::pin_clock(&ctx);
-
-    const CORP_OWNER: i64 = 98_700_001;
-    const CORP_ALLY: i64 = 98_700_002;
-    const DIR_ID: i64 = 95_700_001;
-    const GRUNT_ID: i64 = 95_700_002;
-    const VIP_ID: i64 = 95_700_003;
-    const MKT_ONLY_ID: i64 = 95_700_004;
-    const OUT_ID: i64 = 95_700_005;
-    const ST_HUB: i64 = 1_046_000_000_001;
-    const ST_ANCHORING: i64 = 1_046_000_000_002;
-    const ST_PRIVATE: i64 = 1_046_000_000_003;
+    const CORP_OWNER: i64 = 98_700_001; const CORP_ALLY: i64 = 98_700_002;
+    const DIR_ID: i64 = 95_700_001; const GRUNT_ID: i64 = 95_700_002; const VIP_ID: i64 = 95_700_003; const MKT_ONLY_ID: i64 = 95_700_004; const OUT_ID: i64 = 95_700_005;
+    const ST_HUB: i64 = 1_046_000_000_001; const ST_ANCHORING: i64 = 1_046_000_000_002; const ST_PRIVATE: i64 = 1_046_000_000_003;
 
     seed_corp_and_pilots(&ctx, CORP_OWNER, DIR_ID, &[(DIR_ID, corp_roles::ROLE_DIRECTOR, "Dir"), (GRUNT_ID, 0, "Grunt")]);
     seed_corp_and_pilots(&ctx, CORP_ALLY, VIP_ID, &[(VIP_ID, corp_roles::ROLE_DIRECTOR, "VIP"), (MKT_ONLY_ID, 0, "MarketOnly")]);
     seed_corp_and_pilots(&ctx, 98_700_003, OUT_ID, &[(OUT_ID, corp_roles::ROLE_DIRECTOR, "Outsider")]);
-
     seed_structure_with_services(&ctx, ST_HUB, CORP_OWNER, "Public Trade Hub", "ShieldVulnerable", &[
         (890_001, 35_892, InventoryFlag::ServiceSlot0, true),  // Market (1) online
         (890_002, 35_899, InventoryFlag::ServiceSlot1, true),  // Reprocessing (3) online
         (890_003, 35_894, InventoryFlag::ServiceSlot2, false), // Clone Bay (2) OFFLINE
     ]).await;
     seed_structure_with_services(&ctx, ST_ANCHORING, CORP_OWNER, "Anchoring Raitaru", "Anchoring", &[]).await;
-    seed_structure_with_services(&ctx, ST_PRIVATE, CORP_OWNER, "Private Sotiyo", "ShieldVulnerable", &[
-        (890_004, 35_878, InventoryFlag::ServiceSlot0, true), // Manufacturing (4) online
-    ]).await;
+    seed_structure_with_services(&ctx, ST_PRIVATE, CORP_OWNER, "Private Sotiyo", "ShieldVulnerable", &[(890_004, 35_878, InventoryFlag::ServiceSlot0, true)]).await;
 
     let mut dir_sess = make_space_session(&ctx, DIR_ID, CORP_OWNER, corp_roles::ROLE_DIRECTOR).await;
     let mut grunt_sess = make_space_session(&ctx, GRUNT_ID, CORP_OWNER, 0).await;
     let mut vip_sess = make_space_session(&ctx, VIP_ID, CORP_ALLY, corp_roles::ROLE_DIRECTOR).await;
     let mut mkt_sess = make_space_session(&ctx, MKT_ONLY_ID, CORP_ALLY, 0).await;
     let mut out_sess = make_space_session(&ctx, OUT_ID, 98_700_003, corp_roles::ROLE_DIRECTOR).await;
-
-    // Negative 1: unauthenticated session rejected
     let mut anon = SessionState::new(99);
     assert!(rpc(&ctx, &mut anon, "structureDirectory", "GetMyCharacterStructures", &[]).await.is_err());
 
@@ -623,13 +640,11 @@ async fn test_structure_directory_accessible_structures_and_services() {
     rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p_hub), hub_cfg]).await.unwrap();
     rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(ST_HUB)]), PyRep::Integer(p_hub)]).await.unwrap();
 
-    // Negative 2 & 3: remote outsider denied GetStructureInfo on private structure; unknown structure returns StructureNotFound
     out_sess.solar_system_id = Some(AMARR_SYS);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&OUT_ID).unwrap().solar_system_id = AMARR_SYS);
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(ST_PRIVATE)]).await.unwrap_err().code, "StructureAccessDenied");
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(999_999_999)]).await.unwrap_err().code, "StructureNotFound");
 
-    // Director sees all 3 corp structures; non-operational ST_ANCHORING has empty services and is excluded from dockable lists
     let PyRep::Dict(corp_map) = rpc(&ctx, &mut dir_sess, "structureDirectory", "GetMyCorporationStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(corp_map.len(), 3);
     let hub_dir = &corp_map.iter().find(|(k, _)| k.as_i64() == Some(ST_HUB)).unwrap().1;
@@ -638,22 +653,15 @@ async fn test_structure_directory_accessible_structures_and_services() {
     assert_eq!(hub_dir.dict_get("profileID"), Some(&PyRep::Integer(p_hub)));
     let anch_dir = &corp_map.iter().find(|(k, _)| k.as_i64() == Some(ST_ANCHORING)).unwrap().1;
     assert_eq!(anch_dir.dict_get("services"), Some(&PyRep::Dict(vec![])));
-    assert_eq!(
-        rpc(&ctx, &mut dir_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(),
-        PyRep::List(vec![PyRep::Integer(ST_HUB), PyRep::Integer(ST_PRIVATE)])
-    );
-
-    // Non-director corp member has fuelBlocks masked
+    assert_eq!(rpc(&ctx, &mut dir_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(), PyRep::List(vec![PyRep::Integer(ST_HUB), PyRep::Integer(ST_PRIVATE)]));
     assert_eq!(rpc(&ctx, &mut grunt_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(ST_HUB)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));
 
-    // VIP guest sees ONLY ST_HUB with online accessible services {1: 1, 3: 1} (offline Clone Bay 2 omitted)
     let PyRep::Dict(vip_map) = rpc(&ctx, &mut vip_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(vip_map.len(), 1);
     assert_eq!(vip_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1)), (PyRep::Integer(3), PyRep::Integer(1))])));
     assert_eq!(vip_map[0].1.dict_get("profileID"), Some(&PyRep::None));
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "GetMyCorporationStructures", &[]).await.unwrap(), PyRep::Dict(vec![]));
 
-    // Market-only guest sees ST_HUB in character directory & map data with ONLY service 1 (Reprocessing 3 filtered out by service ACL!)
     let PyRep::Dict(mkt_map) = rpc(&ctx, &mut mkt_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(mkt_map.len(), 1);
     assert_eq!(mkt_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1))])));
@@ -662,7 +670,6 @@ async fn test_structure_directory_accessible_structures_and_services() {
     assert_eq!(map_rows[0].dict_get("itemID"), Some(&PyRep::Integer(ST_HUB)));
     assert_eq!(map_rows[0].dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1))])));
 
-    // Outsider gets empty results across directory, dockable, docking check, and map data RPCs
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap(), PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(), PyRep::List(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_HUB), PyRep::Integer(ST_PRIVATE)])]).await.unwrap(), PyRep::List(vec![]));

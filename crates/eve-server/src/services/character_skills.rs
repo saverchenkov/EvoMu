@@ -677,6 +677,13 @@ pub fn handle(
                 Ok((tid, lvl, esp, dur)) => {
                     let _ =
                         ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
+                    crate::services::operations_manager_helpers::record_server_operation_event(
+                        ctx,
+                        char_id,
+                        "skillTrainingStarted",
+                        &[("typeID", tid.to_string())],
+                        1,
+                    );
                     Some(Ok(PyRep::keyval([
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("targetLevel", PyRep::Integer(lvl as i64)),

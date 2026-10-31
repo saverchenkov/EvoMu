@@ -566,20 +566,9 @@ pub(crate) async fn handle_dogma_im(
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: format!("Target distance ({dist:.1} m) exceeds maxTargetRange ({max_range:.1} m)") }));
             }
 
-            let triage_bonus: usize = fit
-                .modules
-                .values()
-                .filter(|fm| {
-                    matches!(
-                        fm.state,
-                        eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
-                    )
-                })
-                .map(|fm| match fm.type_id {
-                    27951 => 4usize,
-                    4294 => 5usize,
-                    _ => 0usize,
-                })
+            let triage_bonus: usize = fit.modules.values()
+                .filter(|fm| matches!(fm.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded))
+                .map(|fm| match fm.type_id { 27951 => 4usize, 4294 => 5usize, _ => 0usize })
                 .sum();
             let ship_max = (fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize) + triage_bonus;
             let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
@@ -591,11 +580,7 @@ pub(crate) async fn handle_dogma_im(
             }
 
             let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
-            let raw_sig = sys
-                .get_combat_state(target_id)
-                .await
-                .ok()
-                .flatten()
+            let raw_sig = sys.get_combat_state(target_id).await.ok().flatten()
                 .map(|cs| cs.base_signature_radius.unwrap_or(cs.signature_radius))
                 .filter(|&s| s > 0.0)
                 .unwrap_or(0.0)
@@ -606,16 +591,17 @@ pub(crate) async fn handle_dogma_im(
             let lock_time_ms = lock_sec * 1000.0;
 
             let lock = eve_destiny::TargetLock {
-                target_id,
-                lock_time_ms,
-                remaining_lock_ms: lock_time_ms,
-                locked: false,
-                max_range_m: Some(max_range + surface_offset),
+                target_id, lock_time_ms, remaining_lock_ms: lock_time_ms, locked: false, max_range_m: Some(max_range + surface_offset),
             };
             if let Err(e) = sys.add_target_lock(ship_id, lock).await {
                 return Some(Err(BridgeRpcError { code: "TargetingFailed".into(), message: e }));
             }
             crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+            let t_gid = ctx.sde.types.get(&target_ball.type_id).map(|t| t.group_id).unwrap_or(0);
+            let t_params = [("typeID", target_ball.type_id.to_string()), ("groupID", t_gid.to_string())];
+            for ev in ["lockTarget", "targetLocked", "lockTargetCount", "hostileTargetLocked"] {
+                crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, ev, &t_params, 1);
+            }
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

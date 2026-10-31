@@ -265,6 +265,14 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert_eq!(p2_skip_ev.args[1], PyRep::Integer(op_id), "op_id must resolve to 157 via SDE task mapping, not 34 via task_id / 10");
 
     // 5. Start site (must be a valid SDE dungeon or operation site ID)
+    p1.station_id = None;
+    p1.structure_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&P1) {
+            c.station_id = None;
+            c.structure_id = None;
+        }
+    });
     assert!(rpc(&ctx, &mut p1, "operationsManager", "start_site", &[PyRep::Integer(999_999_999)]).await.is_err(), "start_site must reject non-existent dungeon IDs");
     let start = rpc(&ctx, &mut p1, "operationsManager", "start_site", &[PyRep::Integer(4087)]).await.expect("start_site");
     assert_eq!(start, PyRep::Bool(true));

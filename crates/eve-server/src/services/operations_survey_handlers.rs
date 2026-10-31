@@ -442,21 +442,19 @@ pub fn handle_survey_claim_rewards(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
+    let (uid, char_id) = ServerContext::require_character(session)?;
     let explicit_survey_id = args.first().and_then(|a| a.as_i64());
     let now = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
-        let home_station_id = snap
+        let delivery_loc = snap
             .characters
             .get(&char_id)
+            .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))
             .map(|c| {
-                if c.home_station_id > 0 {
-                    c.home_station_id
-                } else {
-                    c.station_id.unwrap_or(60_003_760)
-                }
-            })
-            .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))?;
+                c.station_id
+                    .or(c.structure_id)
+                    .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
+            })?;
         let mut store = load_store_pub(snap);
         let catalog = combined_survey_catalog(&ctx.sde, &store.custom_surveys);
         let item_rewards = {
@@ -510,26 +508,38 @@ pub fn handle_survey_claim_rewards(
             if amount == 0 {
                 continue;
             }
-            snap.next_entity_id += 1;
-            let item_id = snap.next_entity_id;
-            snap.items.insert(
-                item_id,
-                eve_db::InventoryItemRecord {
+            if let Some(loc_id) = delivery_loc {
+                snap.next_entity_id += 1;
+                let item_id = snap.next_entity_id;
+                snap.items.insert(
                     item_id,
+                    eve_db::InventoryItemRecord {
+                        item_id,
+                        type_id,
+                        owner_id: char_id,
+                        location_id: loc_id,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: amount as i32,
+                        singleton: amount == 1,
+                        version: 1,
+                        dynamic_attributes: HashMap::new(),
+                        source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0,
+                        is_blueprint_copy: false,
+                        blueprint_runs_remaining: None,
+                    },
+                );
+            } else {
+                crate::services::account_services::enqueue_redeem_token_in_snapshot(
+                    snap,
+                    uid,
                     type_id,
-                    owner_id: char_id,
-                    location_id: home_station_id,
-                    flag: eve_db::InventoryFlag::Hangar,
-                    quantity: amount as i32,
-                    singleton: amount == 1,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
+                    amount as i32,
+                    "Survey reward".into(),
+                    None,
+                    None,
+                );
+            }
         }
         Ok(PyRep::Bool(true))
     })

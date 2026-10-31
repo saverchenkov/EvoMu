@@ -113,11 +113,24 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .await;
     assert!(bad_sel.is_err(), "select_season with invalid ID must fail");
 
-    // Valid season ID selection succeeds and returns true
+    // Valid season ID selection succeeds, returns true, and emits OnSeasonSelected with Dict challenges
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     let sel_res = rpc(&ctx, &mut sess, "seasonManager", "select_season", &[PyRep::Integer(1)])
         .await
         .expect("select_season 1");
     assert_eq!(sel_res, PyRep::Bool(true));
+    let sel_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    let on_sel = sel_notifs
+        .iter()
+        .find(|n| n.event == "OnSeasonSelected")
+        .expect("OnSeasonSelected emitted");
+    assert!(
+        matches!(
+            on_sel.args.get(2).and_then(|cp| cp.dict_get("challenges")),
+            Some(PyRep::Dict(_))
+        ),
+        "OnSeasonSelected character_progress.challenges must be a PyRep::Dict"
+    );
 
     // After selection, get_season_data_for_character returns selected season KeyVal with concrete fields
     let selected_data = rpc(&ctx, &mut sess, "seasonManager", "get_season_data_for_character", &[])

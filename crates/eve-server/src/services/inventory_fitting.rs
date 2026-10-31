@@ -1121,6 +1121,14 @@ pub async fn handle(
                         crate::services::notify_emitters_batch3::emit_fleet_loot_event_if_in_fleet(ctx, char_id, fid, &[(moved_tid, moved_qty)]);
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, orig_source_loc_id).await;
                     }
+                    let (m_gid, m_cat) = ctx.sde.types.get(&moved_tid).map(|t| (t.group_id, ctx.sde.groups.get(&t.group_id).map_or(t.category_id, |g| g.category_id))).unwrap_or((0, 0));
+                    let i_params = [("typeID", moved_tid.to_string()), ("groupID", m_gid.to_string())];
+                    if is_fitting_slot {
+                        let ev = if m_cat == 8 { "loadChargesCount" } else { "fitItemCount" };
+                        crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, ev, &i_params, moved_qty.max(1) as u32);
+                    } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 && flag == InventoryFlag::Cargo {
+                        crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, "lootItemCount", &i_params, moved_qty.max(1) as u32);
+                    }
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
                     if let Some((cid, entry)) = pending_alsc_take {
                         fitting_containers_ships::write_container_ship_state(ctx, |st| {
@@ -1229,31 +1237,18 @@ pub async fn handle(
                         )
                         .await;
                     }
-                    fitting_containers_ships::record_container_add_log(
-                        ctx,
-                        char_id,
-                        updated.item_id,
-                        updated.type_id,
-                        updated.quantity,
-                        updated.location_id,
-                    );
+                    let (u_gid, u_cat) = ctx.sde.types.get(&updated.type_id).map(|t| (t.group_id, ctx.sde.groups.get(&t.group_id).map_or(t.category_id, |g| g.category_id))).unwrap_or((0, 0));
+                    let u_params = [("typeID", updated.type_id.to_string()), ("groupID", u_gid.to_string())];
+                    if is_fitting_slot {
+                        let ev = if u_cat == 8 { "loadChargesCount" } else { "fitItemCount" };
+                        crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, ev, &u_params, updated.quantity.max(1) as u32);
+                    } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 && flag == InventoryFlag::Cargo {
+                        crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, "lootItemCount", &u_params, updated.quantity.max(1) as u32);
+                    }
+                    fitting_containers_ships::record_container_add_log(ctx, char_id, updated.item_id, updated.type_id, updated.quantity, updated.location_id);
                     if pending_alsc_take.is_none() && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
-                        fitting_containers_ships::record_container_take_log(
-                            ctx,
-                            char_id,
-                            updated.item_id,
-                            updated.type_id,
-                            updated.quantity,
-                            orig_source_loc_id,
-                        );
-                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
-                            ctx,
-                            char_id,
-                            session.solar_system_id,
-                            orig_source_loc_id,
-                            updated.type_id,
-                        )
-                        .await;
+                        fitting_containers_ships::record_container_take_log(ctx, char_id, updated.item_id, updated.type_id, updated.quantity, orig_source_loc_id);
+                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, updated.type_id).await;
                     }
                     write_container_ship_state(ctx, |st| {
                         if let Some((cid, entry)) = pending_alsc_take {

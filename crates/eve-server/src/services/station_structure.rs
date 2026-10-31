@@ -523,6 +523,7 @@ pub async fn handle(
             }
             let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["undockFromStation"], 1, ctx.now_unix(), &ctx.quasar_gateway);
+            crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, "undockFromStation", &[], 1);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnInvulunOnUndockingUpdated",
