@@ -1303,6 +1303,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let _ = regenerate_unattacked_fw_ihub(ctx, sys);
     }
 
-    // 5. Advance Pirate Insurgency campaigns.
+    // 5. Advance Pirate Insurgency campaigns and complex timers.
     tick_insurgency_campaigns(ctx, now_unix).await;
+    crate::services::insurgency_complex_ops::tick_insurgency_complex_ops(ctx, now_unix).await;
 }

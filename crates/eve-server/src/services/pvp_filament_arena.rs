@@ -6,15 +6,84 @@
 use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use crate::services::pve_abyssal_hazards::resolve_character_home_station_and_system;
+use crate::services::pve_abyssal_pylons::destroy_pod_and_respawn_faction_corvette_in_snap;
 use crate::services::pvp_filament_mgr::{
     build_character_statistics_dict_for_event, build_leaderboard_rows_dict_for_event,
-    load_pvp_store, lookup_sde_event_ids, save_pvp_store, PvpArenaMatchInstance,
-    PvpFilamentStore,
+    get_pvp_filament_match_spec, load_pvp_store, lookup_sde_event_ids, save_pvp_store,
+    PvpArenaMatchInstance, PvpFilamentStore,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
+
+pub const PROVING_ARENA_BOUNDARY_RADIUS_M: f64 = 75_000.0;
+pub const PROVING_ARENA_DURATION_SECS: u64 = 900;
+
+pub fn credit_proving_grounds_match_rewards_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    filament_type_id: u32,
+    winning_pilots: &[i64],
+) {
+    if winning_pilots.is_empty() {
+        return;
+    }
+    let mut rewards = sde_opt
+        .filter(|_| filament_type_id > 0)
+        .map(|sde| get_pvp_filament_match_spec(sde, filament_type_id).rewards)
+        .unwrap_or_default();
+    if rewards.is_empty() {
+        rewards.push((52_996, 1_000_000));
+    }
+    for &cid in winning_pilots {
+        let home_station_id = if let Some(sde) = sde_opt {
+            resolve_character_home_station_and_system(snap, sde, cid).0
+        } else {
+            snap.characters
+                .get(&cid)
+                .map(|c| c.home_station_id)
+                .filter(|&h| h > 0)
+                .unwrap_or(60_000_004)
+        };
+        for &(reward_type_id, amount) in &rewards {
+            if amount == 0 {
+                continue;
+            }
+            if reward_type_id == 52_996 {
+                let isk = eve_db::IskCents::from_isk(i64::from(amount));
+                if let Some(ch) = snap.characters.get_mut(&cid) {
+                    ch.balance = eve_db::IskCents(ch.balance.0.saturating_add(isk.0));
+                    let bal = ch.balance;
+                    snap.append_journal(
+                        cid,
+                        "ProvingGroundsReward",
+                        isk,
+                        bal,
+                        "Abyssal Proving Grounds match victory reward",
+                    );
+                }
+            } else {
+                snap.next_entity_id += 1;
+                let iid = snap.next_entity_id;
+                snap.items.insert(
+                    iid,
+                    eve_db::InventoryItemRecord {
+                        item_id: iid,
+                        type_id: reward_type_id,
+                        owner_id: cid,
+                        location_id: home_station_id,
+                        flag: eve_db::InventoryFlag::Hangar,
+                        quantity: amount as i32,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+}
 
 pub fn effective_match_teams(store: &PvpFilamentStore, m: &PvpArenaMatchInstance) -> Vec<Vec<i64>> {
     if let Some(teams) = store.match_teams.get(&m.match_id) {
@@ -47,9 +116,11 @@ pub fn are_opposing_in_match(
 /// only when at most one team has surviving (non-eliminated) pilots.
 pub fn record_proving_grounds_combat_result_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
     winner_char_id: i64,
     loser_char_id: i64,
     damage_done: f64,
+    _now_unix: u64,
 ) -> Result<(i64, Vec<i64>), BridgeRpcError> {
     if winner_char_id == loser_char_id {
         return Err(BridgeRpcError {
@@ -74,6 +145,7 @@ pub fn record_proving_grounds_combat_result_in_snap(
     }
 
     let mut affected_pilots = vec![winner_char_id, loser_char_id];
+    let mut reward_winners: Option<(u32, Vec<i64>)> = None;
     let matched_event_id = if let Some(mid) = active_mid {
         let teams = store
             .active_matches
@@ -121,6 +193,10 @@ pub fn record_proving_grounds_combat_result_in_snap(
             if let Some(m) = store.active_matches.get_mut(&mid) {
                 m.active = false;
                 m.winner_char_id = Some(winner_char_id);
+            }
+            let fil_tid = store.match_filament_types.get(&mid).copied().unwrap_or(0);
+            if let Some(w_team) = teams.get(win_team_idx) {
+                reward_winners = Some((fil_tid, w_team.clone()));
             }
             for (t_idx, team) in teams.iter().enumerate() {
                 for &cid in team {
@@ -184,7 +260,225 @@ pub fn record_proving_grounds_combat_result_in_snap(
     };
 
     save_pvp_store(snap, &store);
+    if let Some((fil_tid, winners)) = reward_winners {
+        credit_proving_grounds_match_rewards_in_snap(snap, sde_opt, fil_tid, &winners);
+    }
     Ok((matched_event_id, affected_pilots))
+}
+
+/// Real-time 1 Hz Proving Grounds arena boundary (`75 km` sphere around each match's `arena_offset`)
+/// and arena collapse timer (`900 s`) escalating environmental damage tick.
+pub fn step_proving_grounds_arena_hazards_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&eve_sde::SdeRegistry>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    solar_system_id: eve_sde::SolarSystemId,
+) -> Vec<i64> {
+    let mut destroyed_balls = Vec::new();
+    if solar_system_id != 32_000_001 {
+        return destroyed_balls;
+    }
+    let Some(db) = db_opt else {
+        return destroyed_balls;
+    };
+    let now_unix = db.clock().now_unix_secs();
+
+    crate::sp6_lifecycle::with_mut_sp6_state(db, |sp6, snap| {
+        let mut store = load_pvp_store(snap);
+        if store.active_matches.is_empty() {
+            return;
+        }
+        let match_ids: Vec<i64> = store
+            .active_matches
+            .values()
+            .filter(|m| m.arena_solar_system_id == 32_000_001)
+            .map(|m| m.match_id)
+            .collect();
+        let mut store_dirty = false;
+        let mut pending_rewards: Vec<(u32, Vec<i64>)> = Vec::new();
+
+        for mid in match_ids {
+            let Some(m_snap) = store.active_matches.get(&mid).cloned() else {
+                continue;
+            };
+            let teams = effective_match_teams(&store, &m_snap);
+            let center = store
+                .match_arena_offsets
+                .get(&mid)
+                .copied()
+                .map(DVec3::from_array)
+                .or_else(|| ballpark.balls.get(&m_snap.end_gate_id).map(|b| b.position))
+                .unwrap_or(DVec3::ZERO);
+            let exceeded_timer = m_snap.active
+                && now_unix > m_snap.started_unix.saturating_add(PROVING_ARENA_DURATION_SECS);
+
+            let mut newly_eliminated: Vec<(i64, i64, u32, DVec3)> = Vec::new();
+            for &cid in teams.iter().flatten() {
+                if m_snap.exited_pilots.contains(&cid)
+                    || store
+                        .match_eliminated
+                        .get(&mid)
+                        .is_some_and(|e| e.contains(&cid))
+                {
+                    continue;
+                }
+                let Some(ship_id) = snap
+                    .characters
+                    .get(&cid)
+                    .filter(|c| c.solar_system_id == 32_000_001)
+                    .map(|c| c.active_ship_id)
+                    .filter(|&sid| sid > 0)
+                else {
+                    continue;
+                };
+                let Some((ship_pos, ship_type_id)) = ballpark
+                    .balls
+                    .get(&ship_id)
+                    .map(|b| (b.position, b.type_id))
+                else {
+                    continue;
+                };
+                let outside_sphere = ship_pos.distance(center) > PROVING_ARENA_BOUNDARY_RADIUS_M;
+                if !outside_sphere && !exceeded_timer {
+                    if store.hazard_ticks.remove(&ship_id).is_some() {
+                        store_dirty = true;
+                    }
+                    continue;
+                }
+                let next_tick = store.hazard_ticks.get(&ship_id).copied().unwrap_or(0) + 1;
+                store.hazard_ticks.insert(ship_id, next_tick);
+                store_dirty = true;
+
+                let mut rem_dmg = 250.0 * (1.0 + 0.5 * f64::from(next_tick - 1));
+                let mut ship_dead = false;
+                if let Some(cs) = ballpark.combat_states.get_mut(&ship_id) {
+                    let sh = rem_dmg.min(cs.shield_hp.max(0.0));
+                    cs.shield_hp = (cs.shield_hp - sh).max(0.0);
+                    rem_dmg -= sh;
+                    if rem_dmg > 0.0 {
+                        let ar = rem_dmg.min(cs.armor_hp.max(0.0));
+                        cs.armor_hp = (cs.armor_hp - ar).max(0.0);
+                        rem_dmg -= ar;
+                    }
+                    if rem_dmg > 0.0 {
+                        cs.structure_hp = (cs.structure_hp - rem_dmg).max(0.0);
+                    }
+                    if cs.structure_hp <= 0.0 {
+                        ship_dead = true;
+                    }
+                }
+                if ship_dead {
+                    store.hazard_ticks.remove(&ship_id);
+                    ballpark.remove_ball(ship_id);
+                    destroyed_balls.push(ship_id);
+                    newly_eliminated.push((cid, ship_id, ship_type_id, ship_pos));
+                }
+            }
+
+            if newly_eliminated.is_empty() {
+                continue;
+            }
+            for (cid, ship_id, ship_type_id, pos) in newly_eliminated {
+                let base_price = sde_opt
+                    .and_then(|sde| sde.types.get(&ship_type_id))
+                    .map(|t| t.base_price)
+                    .unwrap_or(250_000.0);
+                snap.items.remove(&ship_id);
+                snap.item_positions.remove(&ship_id);
+                snap.module_online_states.remove(&ship_id);
+                sp6.ship_combat_hp.remove(&ship_id);
+                snap.items.retain(|_, it| it.location_id != ship_id);
+                if ship_type_id != 670 {
+                    snap.next_entity_id += 1;
+                    let kid = snap.next_entity_id;
+                    snap.record_killmail(
+                        eve_db::KillmailRecord {
+                            kill_id: kid,
+                            victim_character_id: cid,
+                            attacker_character_id: 0,
+                            attacker_corp_id: 1_000_298,
+                            solar_system_id: 32_000_001,
+                            ship_type_id,
+                            total_value_isk: base_price,
+                            ..Default::default()
+                        },
+                        now_unix,
+                    );
+                }
+                let _ = destroy_pod_and_respawn_faction_corvette_in_snap(
+                    snap,
+                    sde_opt,
+                    cid,
+                    32_000_001,
+                    [pos.x, pos.y, pos.z],
+                    now_unix,
+                );
+                store.match_eliminated.entry(mid).or_default().insert(cid);
+                store.queue.remove(&cid);
+            }
+
+            if m_snap.active {
+                let elim = store.match_eliminated.get(&mid).cloned().unwrap_or_default();
+                let surviving_team_indices: Vec<usize> = teams
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, t)| t.iter().any(|&c| !elim.contains(&c)).then_some(idx))
+                    .collect();
+                if surviving_team_indices.len() <= 1 {
+                    let win_team_idx = surviving_team_indices.first().copied();
+                    let winner_cid = win_team_idx.and_then(|ti| {
+                        teams[ti]
+                            .iter()
+                            .copied()
+                            .find(|c| !elim.contains(c))
+                            .or_else(|| teams[ti].first().copied())
+                    });
+                    if let Some(m) = store.active_matches.get_mut(&mid) {
+                        m.active = false;
+                        m.winner_char_id = winner_cid;
+                    }
+                    let ev_id = m_snap.event_id;
+                    for (t_idx, team) in teams.iter().enumerate() {
+                        let is_win = win_team_idx == Some(t_idx);
+                        for &cid in team {
+                            store.queue.remove(&cid);
+                            let st = store.stats.entry(cid).or_insert((0, 0, 0, 0, 0.0));
+                            let est = store
+                                .event_stats
+                                .entry(ev_id)
+                                .or_default()
+                                .entry(cid)
+                                .or_insert((0, 0, 0, 0, 0.0));
+                            if is_win {
+                                st.0 += 1;
+                                st.2 += 100;
+                                est.0 += 1;
+                                est.2 += 100;
+                            } else {
+                                st.1 += 1;
+                                st.2 += 25;
+                                est.1 += 1;
+                                est.2 += 25;
+                            }
+                        }
+                    }
+                    if let Some(ti) = win_team_idx {
+                        let fil_tid = store.match_filament_types.get(&mid).copied().unwrap_or(0);
+                        pending_rewards.push((fil_tid, teams[ti].clone()));
+                    }
+                }
+            }
+        }
+
+        if store_dirty {
+            save_pvp_store(snap, &store);
+        }
+        for (fil_tid, winners) in pending_rewards {
+            credit_proving_grounds_match_rewards_in_snap(snap, sde_opt, fil_tid, &winners);
+        }
+    });
+
+    destroyed_balls
 }
 
 pub fn notify_pvp_stats_for_pilots(ctx: &ServerContext, event_id: i64, pilots: &[i64]) {

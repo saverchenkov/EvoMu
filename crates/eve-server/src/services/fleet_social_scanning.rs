@@ -683,6 +683,16 @@ pub(super) async fn handle_scanning_and_wormholes(
                     .await,
                 );
             }
+            if ctx.db.with_snapshot(|snap| {
+                crate::services::insurgency_complex_ops::is_outpost_raid_gate(snap, gate_id)
+            }) {
+                return Some(
+                    crate::services::insurgency_complex_ops::activate_outpost_raid_gate_in_space(
+                        ctx, char_id, ship_id, sys_id, gate_id,
+                    )
+                    .await,
+                );
+            }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
                 return Some(Err(BridgeRpcError {

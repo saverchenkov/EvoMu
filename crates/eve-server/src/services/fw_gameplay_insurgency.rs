@@ -991,6 +991,7 @@ pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
             for (sys, c_st, s_st) in sys_stages {
                 sync_insurgency_system_npcs(ctx, p_fac, e_fac, sys, c_st, s_st).await;
             }
+            crate::services::insurgency_complex_ops::sync_insurgency_complex_sites_and_facilities(ctx, now_unix).await;
         }
 
         if let Some((systems, p_fac, fob_sys)) = notify_active {
@@ -1093,23 +1094,23 @@ async fn sync_insurgency_system_npcs(
     use crate::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity;
     use crate::services::combat_crimewatch::with_mut_combat_runtime;
 
-    let desired_pirate: Option<u32> = if c_st < 2 {
-        None
-    } else {
-        select_insurgency_roamer_type(
-            ctx,
-            4637,
-            Some(pirate_fac as u32),
-            usize::from(c_st - 2),
-            3,
+    let desired_pirate: Option<u32> =
+        crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
+            ctx, 4637, pirate_fac, c_st, s_st,
         )
-    };
+        .or_else(|| {
+            (c_st >= 2).then(|| {
+                select_insurgency_roamer_type(ctx, 4637, Some(pirate_fac as u32), usize::from(c_st - 2), 3)
+            }).flatten()
+        });
 
-    let desired_enforcer: Option<u32> = if s_st < 3 {
-        None
-    } else {
-        select_insurgency_roamer_type(ctx, 4638, None, usize::from(s_st - 3), 2)
-    };
+    let desired_enforcer: Option<u32> =
+        crate::services::insurgency_complex_ops::select_named_or_regular_roamer_type(
+            ctx, 4638, pirate_fac, c_st, s_st,
+        )
+        .or_else(|| {
+            (s_st >= 3).then(|| select_insurgency_roamer_type(ctx, 4638, None, usize::from(s_st - 3), 2)).flatten()
+        });
 
     let (stale_balls, has_pirate, has_enforcer, has_ci_sentry, idle_roamers) =
         with_mut_combat_runtime(ctx, |rt| {
@@ -1227,6 +1228,11 @@ async fn sync_insurgency_system_npcs(
                 spawn_pos,
             )
             .await;
+            with_mut_combat_runtime(ctx, |rt| {
+                if let Some(npc) = rt.npc_entities.get_mut(&bid) {
+                    npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
+                }
+            });
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let _ = bp.goto_point(bid, next_pos);
         }
@@ -1244,6 +1250,11 @@ async fn sync_insurgency_system_npcs(
                 spawn_pos,
             )
             .await;
+            with_mut_combat_runtime(ctx, |rt| {
+                if let Some(npc) = rt.npc_entities.get_mut(&bid) {
+                    npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
+                }
+            });
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let _ = bp.goto_point(bid, next_pos);
         }
@@ -1337,4 +1348,5 @@ async fn cleanup_ended_campaign_sites_and_roamers(
     for (sys_id, bid) in to_remove {
         let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(bid).await;
     }
+    crate::services::insurgency_complex_ops::cleanup_orphan_insurgency_complex_ops(ctx, &orphan_systems).await;
 }

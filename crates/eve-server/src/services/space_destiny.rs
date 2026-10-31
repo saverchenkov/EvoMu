@@ -1102,6 +1102,12 @@ async fn handle_call_component_from_client(
             ),
         });
     }
+    crate::services::insurgency_complex_ops::check_insurgency_laundering_access(
+        ctx,
+        char_id,
+        sys_id,
+        trader_type_id,
+    )?;
 
     let recipes_table = ctx
         .sde
@@ -1160,7 +1166,7 @@ async fn handle_call_component_from_client(
         .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
         .filter(|&c| c > 0.0);
     let cost_cents = eve_db::IskCents::from_f64_isk(input_isk);
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let trade_rep = ctx.db.try_with_mut_snapshot(|snap| {
         if cost_cents.0 > 0 {
             let bal = snap
                 .characters
@@ -1316,5 +1322,13 @@ async fn handle_call_component_from_client(
             PyRep::Bool(true),
             PyRep::List(delivered_ids),
         ]))
-    })
+    })?;
+    crate::services::insurgency_complex_ops::on_insurgency_laundering_trade_completed(
+        ctx,
+        char_id,
+        sys_id,
+        trader_type_id,
+        multiplier,
+    );
+    Ok(trade_rep)
 }
