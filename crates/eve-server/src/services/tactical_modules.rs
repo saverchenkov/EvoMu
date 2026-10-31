@@ -776,7 +776,7 @@ pub async fn activate_superweapon_with_args(
             let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
             st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
             for &vid in &hit_targets {
-                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 60);
+                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
             }
         }
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
@@ -933,6 +933,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
     let Some(ship_pos) = ballpark.balls.get(&cycle.ship_id).map(|b| b.position) else { return };
     let beam_dir = cycle.lance_beam_dir.unwrap_or(DVec3::X);
     let beam_len = 300_000.0;
+    // DERIVED: Titan Lance Doomsday beam cylinder radius (20 km cone/cylinder)
     let beam_radius = 20_000.0;
     let candidates: Vec<(i64, u32, DVec3)> = ballpark
         .balls

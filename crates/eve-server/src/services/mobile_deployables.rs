@@ -568,6 +568,11 @@ pub fn step_mobile_deployables_in_actor(
                             rec.reinforced_until_unix = None;
                         }
                     }
+                    if !rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0 {
+                        if now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs) {
+                            rec.anchor_completed = true;
+                        }
+                    }
                     if rec.group_id == GROUP_MOBILE_OBSERVATORY
                         && !rec.is_unanchored
                         && now_unix >= rec.anchor_start_unix.saturating_add(OBSERVATORY_DEPLOY_SECS)
@@ -600,6 +605,16 @@ pub fn step_mobile_deployables_in_actor(
             }
             st.mmju_spools = remaining_spools;
         });
+        for meta in snap.sp6_lifecycle.space_object_meta.values_mut() {
+            if !meta.anchor_completed {
+                if let Some(start) = meta.anchor_start_unix {
+                    let delay = meta.anchoring_delay_secs as u64;
+                    if now_unix >= start.saturating_add(delay) {
+                        meta.anchor_completed = true;
+                    }
+                }
+            }
+        }
     });
 
     for (ship_id, mju_pos_arr) in ready_mmju_jumps {
@@ -979,6 +994,14 @@ pub fn handle_ball_damage_in_actor(
                 if now_unix < reinf_until {
                     return Some((0.0, false, ball_snap));
                 }
+            }
+
+            // Mobile Depot is invulnerable during its 60s anchoring countdown (`feat:modules.mobile-depot-deployment-and-refitting`)
+            let is_anchoring = !rec.is_unanchored
+                && !rec.anchor_completed
+                && (rec.anchor_start_unix > 0 && now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs));
+            if is_anchoring && rec.group_id == GROUP_MOBILE_DEPOT {
+                return Some((0.0, false, ball_snap));
             }
 
             // Anchoring phase or unanchored: takes direct damage, never reinforces!

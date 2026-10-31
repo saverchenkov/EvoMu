@@ -57,6 +57,8 @@ pub(crate) fn seed_pilot(
         ch.station_id = if docked { Some(JITA_STATION) } else { None };
         ch.structure_id = None;
         ch.active_ship_id = ship_id;
+        ch.jump_cooldown_until_unix = 0;
+        ch.jump_fatigue_until_unix = 0;
         snap.characters.insert(char_id, ch);
         snap.skills.insert(char_id, all_skills_l5);
         snap.items.insert(

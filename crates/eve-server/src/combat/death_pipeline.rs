@@ -105,6 +105,7 @@ pub fn execute_death_pipeline_sync_inner(
         victim_ship_id,
         sys_id,
     );
+    crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, victim_ship_id);
 
     let is_pod = victim_ship_type_id == 670
         || victim_ship_type_id == 33328

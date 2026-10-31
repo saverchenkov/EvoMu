@@ -1026,7 +1026,7 @@ pub(crate) fn step_cycles_and_capacitor(
     finished_indices.dedup();
     for idx in finished_indices.into_iter().rev() {
         let finished = active_module_cycles.remove(idx);
-        if finished.effect_name == "superWeaponLanceWarmup" {
+        if finished.effect_name == "superWeaponLanceWarmup" && finished.elapsed_s >= finished.duration_s {
             crate::services::tactical_modules::fire_lance_warmup_in_ballpark(ballpark, &finished, sde_opt, db_opt, tactical_state, &mut destroyed_balls);
         }
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
