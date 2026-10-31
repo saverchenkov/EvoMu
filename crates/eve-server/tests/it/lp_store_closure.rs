@@ -18,14 +18,23 @@ use std::collections::HashMap;
 const CHAR_ID: i64 = 90_000_001;
 const CORP_ID: i64 = 98_000_001;
 const JITA_CALDARI_STATION: i64 = 60_003_760; // Owner: 1000035 (Caldari Navy)
-const POINEN_FEDERATION_STATION: i64 = 60_003_934; // Owner: 1000036 (Federation Navy)
+const ALGOGILLE_FED_NAVY_STATION: i64 = 60_011_734; // Owner: 1000120 (Federation Navy)
+const DAMAGED_BUREAU_NO_LP_STATION: i64 = 60_004_723; // Lacks SERVICE_LOYALTY_POINT_STORE
 
 const CALDARI_NAVY_CORP: i64 = 1_000_035;
-const FEDERATION_NAVY_CORP: i64 = 1_000_036;
+const FEDERATION_NAVY_CORP: i64 = 1_000_120;
+const EMPTY_CUSTODIANS_CORP: i64 = 1_000_438;
 
-const TRITANIUM_TYPE_ID: u32 = 34;
-const CARACAL_TYPE_ID: u32 = 621;
-const BALLISTIC_CONTROL_TYPE_ID: u32 = 15_810;
+// Real Tranquility Caldari Navy offers in `data/esi_lp_store_offers.json`:
+// - Offer 3414: type_id 9943, qty 1, lp_cost 5250, isk_cost 5_250_000, req_items []
+// - Offer 3565: type_id 27361 (Caldari Navy Iron Charge S), qty 5000, lp_cost 2400,
+//               isk_cost 2_400_000, req_items [(210, 5000)] (210 = Iron Charge S)
+const CALDARI_NO_REQ_OFFER_ID: i64 = 3_414;
+const CALDARI_NO_REQ_REWARD_TYPE_ID: u32 = 9_943;
+const CALDARI_TRADEIN_OFFER_ID: i64 = 3_565;
+const CALDARI_TRADEIN_REWARD_TYPE_ID: u32 = 27_361;
+const IRON_CHARGE_S_TYPE_ID: u32 = 210;
+const FED_NAVY_EXCLUSIVE_OFFER_ID: i64 = 3_616;
 const CONDOR_SHIP_TYPE_ID: u32 = 583;
 
 async fn rpc(
@@ -35,15 +44,27 @@ async fn rpc(
     method: &str,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
+        .await
 }
 
-async fn setup_docked_pilot(ctx: &ServerContext, char_id: i64, station_id: i64, ship_id: i64) -> SessionState {
+async fn setup_docked_pilot(
+    ctx: &ServerContext,
+    char_id: i64,
+    station_id: i64,
+    ship_id: i64,
+) -> SessionState {
     let mut sess = SessionState::new(5501);
     common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
-    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
-        .await
-        .expect("SelectCharacterID");
+    rpc(
+        ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+    )
+    .await
+    .expect("SelectCharacterID");
 
     sess.station_id = Some(station_id);
     sess.ship_id = Some(ship_id);
@@ -58,9 +79,11 @@ async fn setup_docked_pilot(ctx: &ServerContext, char_id: i64, station_id: i64, 
         ch.balance = IskCents::from_isk(50_000_000);
         ch.loyalty_points.insert(CALDARI_NAVY_CORP, 100_000);
         ch.loyalty_points.insert(FEDERATION_NAVY_CORP, 50_000);
-        ch.standings.insert(CALDARI_NAVY_CORP, 0.0);
+        ch.loyalty_points.insert(EMPTY_CUSTODIANS_CORP, 10_000);
+        ch.standings.insert(EMPTY_CUSTODIANS_CORP, 0.0);
 
-        snap.items.retain(|_, it| !(it.owner_id == char_id && it.type_id == TRITANIUM_TYPE_ID));
+        snap.items
+            .retain(|_, it| !(it.owner_id == char_id && it.type_id == IRON_CHARGE_S_TYPE_ID));
 
         snap.items.insert(
             ship_id,
@@ -83,102 +106,145 @@ async fn setup_docked_pilot(ctx: &ServerContext, char_id: i64, station_id: i64, 
 
 #[tokio::test]
 async fn test_lp_store_offers_browsing_and_station_corp_resolution() {
-    // DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available
-    // DATA GAP: requires SDE/live store catalog import (feat:lp.lp-store-offers)
-    // DATA GAP: requires server-only offer catalog (rpc:LPStoreMgr.GetAvailableOffersFromCorp)
+    // parity: feat:lp.lp-store-offers
+    // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
+    eve_testkit::attest(&[
+        "feat:lp.lp-store-offers",
+        "rpc:LPStoreMgr.GetAvailableOffersFromCorp",
+    ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
+    // Negative path 1: unauthenticated session rejected
+    let mut anon = SessionState::new(5500);
+    let anon_err = rpc(&ctx, &mut anon, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
+        .await
+        .expect_err("unauthenticated GetAvailableOffersFromCorp must fail");
+    assert_eq!(anon_err.code, "Unauthorized");
+
     let ship_id = 95_000_001;
     let mut sess = setup_docked_pilot(&ctx, CHAR_ID, JITA_CALDARI_STATION, ship_id).await;
 
-    // Seed test offers for Caldari Navy and Federation Navy
+    // Negative path 2: station lacking SERVICE_LOYALTY_POINT_STORE rejects default browsing
+    sess.station_id = Some(DAMAGED_BUREAU_NO_LP_STATION);
     ctx.db.with_mut_snapshot(|snap| {
-        register_lp_store_offer(snap, LPOffer {
-            offer_id: 10_001,
-            corp_id: CALDARI_NAVY_CORP,
-            type_id: BALLISTIC_CONTROL_TYPE_ID,
-            quantity: 1,
-            lp_cost: 2_400,
-            isk_cost: IskCents::from_isk(2_400_000),
-            req_items: vec![(TRITANIUM_TYPE_ID, 100)],
-            ak_cost: 0,
-            min_standing: Some(1.5),
-        });
-        register_lp_store_offer(snap, LPOffer {
-            offer_id: 10_002,
-            corp_id: FEDERATION_NAVY_CORP,
-            type_id: CARACAL_TYPE_ID,
-            quantity: 1,
-            lp_cost: 15_000,
-            isk_cost: IskCents::from_isk(15_000_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: None,
-        });
+        snap.characters.get_mut(&CHAR_ID).unwrap().station_id = Some(DAMAGED_BUREAU_NO_LP_STATION);
+    });
+    let no_svc_err = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
+        .await
+        .expect_err("station without LP store service must reject GetAvailableOffersFromCorp");
+    assert_eq!(no_svc_err.code, "StationServiceUnavailable");
+
+    // Restore docking at Jita 4-4 (Caldari Navy station)
+    sess.station_id = Some(JITA_CALDARI_STATION);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&CHAR_ID).unwrap().station_id = Some(JITA_CALDARI_STATION);
     });
 
-    // 1. Browsing with empty args while docked at Jita (Caldari Navy station) resolves Caldari Navy offers
+    // 1. Browsing with empty args at Jita 4-4 resolves unseeded Tranquility Caldari Navy offers (310 offers)
     let def_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
         .await
         .expect("GetAvailableOffersFromCorp with station default");
-
     let PyRep::List(ref def_offers) = def_rep else {
         panic!("expected PyRep::List of offers");
     };
+    assert_eq!(def_offers.len(), 310, "Caldari Navy has 310 Tranquility LP offers");
+
     let caldari_offer = def_offers
         .iter()
-        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(10_001))
-        .expect("offer 10001 should be present in Caldari Navy catalog");
-
+        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(CALDARI_TRADEIN_OFFER_ID))
+        .expect("Tranquility offer 3565 should be present in Caldari Navy catalog");
     assert_eq!(caldari_offer.dict_get("corpID").and_then(|v| v.as_i64()), Some(CALDARI_NAVY_CORP));
-    assert_eq!(caldari_offer.dict_get("typeID").and_then(|v| v.as_i64()), Some(BALLISTIC_CONTROL_TYPE_ID as i64));
+    assert_eq!(
+        caldari_offer.dict_get("typeID").and_then(|v| v.as_i64()),
+        Some(CALDARI_TRADEIN_REWARD_TYPE_ID as i64)
+    );
+    assert_eq!(caldari_offer.dict_get("quantity").and_then(|v| v.as_i64()), Some(5_000));
     assert_eq!(caldari_offer.dict_get("lpCost").and_then(|v| v.as_i64()), Some(2_400));
     let isk_cost = caldari_offer.dict_get("iskCost").and_then(|v| v.as_f64()).expect("iskCost");
     assert!((isk_cost - 2_400_000.0).abs() < 0.01);
-    let min_st = caldari_offer.dict_get("minStanding").and_then(|v| v.as_f64()).expect("minStanding");
-    assert!((min_st - 1.5).abs() < 0.01);
 
-    let PyRep::List(ref req_items) = caldari_offer.dict_get("reqItems").expect("reqItems should be list") else {
+    let PyRep::List(ref req_items) = caldari_offer.dict_get("reqItems").expect("reqItems list") else {
         panic!("reqItems must be a list");
     };
     assert_eq!(req_items.len(), 1);
-    assert_eq!(req_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(TRITANIUM_TYPE_ID as i64));
-    assert_eq!(req_items[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(100));
+    assert_eq!(req_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(IRON_CHARGE_S_TYPE_ID as i64));
+    assert_eq!(req_items[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(5_000));
 
-    // 2. Querying explicit corp ID 1000036 (Federation Navy) returns Federation Navy offers
-    let fed_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(FEDERATION_NAVY_CORP)])
-        .await
-        .expect("GetAvailableOffersFromCorp explicit corp");
-
+    // 2. Querying explicit corp ID 1000120 (Federation Navy) returns Federation Navy offers (including 3616)
+    let fed_rep = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "GetAvailableOffersFromCorp",
+        &[PyRep::Integer(FEDERATION_NAVY_CORP)],
+    )
+    .await
+    .expect("GetAvailableOffersFromCorp explicit Federation Navy");
     let PyRep::List(ref fed_offers) = fed_rep else {
         panic!("expected PyRep::List of offers");
     };
+    assert_eq!(fed_offers.len(), 319);
     let fed_offer = fed_offers
         .iter()
-        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(10_002))
-        .expect("offer 10002 should be present in Federation Navy catalog");
+        .find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(FED_NAVY_EXCLUSIVE_OFFER_ID))
+        .expect("Federation Navy exclusive offer 3616 present");
     assert_eq!(fed_offer.dict_get("corpID").and_then(|v| v.as_i64()), Some(FEDERATION_NAVY_CORP));
 
-    // 3. Docking at Poinen station (Federation Navy station) resolves Federation Navy offers by default
-    sess.station_id = Some(POINEN_FEDERATION_STATION);
+    // 3. Docking at Algogille Federation Navy station resolves Federation Navy offers by default
+    sess.station_id = Some(ALGOGILLE_FED_NAVY_STATION);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&CHAR_ID).unwrap().station_id = Some(POINEN_FEDERATION_STATION);
+        snap.characters.get_mut(&CHAR_ID).unwrap().station_id = Some(ALGOGILLE_FED_NAVY_STATION);
     });
     let def_fed_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
         .await
-        .expect("GetAvailableOffersFromCorp default at Fed Navy station");
+        .expect("GetAvailableOffersFromCorp default at Federation Navy station");
     let PyRep::List(ref def_fed_offers) = def_fed_rep else {
         panic!("expected PyRep::List");
     };
-    assert!(def_fed_offers.iter().any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(10_002)));
+    assert!(def_fed_offers
+        .iter()
+        .any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(FED_NAVY_EXCLUSIVE_OFFER_ID)));
 
-    // 4. Querying an unknown corp returns an empty list
-    let empty_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(999_888_777)])
+    // 4. Empire FW, Pirate Insurgency (Angel/Guristas), and CONCORD catalogs are populated unseeded
+    for &(corp_id, min_len) in &[
+        (1_000_125_i64, 200usize),
+        (1_000_179, 350),
+        (1_000_180, 350),
+        (1_000_181, 350),
+        (1_000_182, 350),
+        (1_000_138, 250),
+        (1_000_436, 350),
+        (1_000_127, 300),
+        (1_000_437, 350),
+    ] {
+        let rep = rpc(
+            &ctx,
+            &mut sess,
+            "LPStoreMgr",
+            "GetAvailableOffersFromCorp",
+            &[PyRep::Integer(corp_id)],
+        )
         .await
-        .expect("GetAvailableOffersFromCorp unknown corp");
-    assert_eq!(empty_rep, PyRep::List(vec![]));
+        .expect("GetAvailableOffersFromCorp faction corp");
+        let PyRep::List(list) = rep else { panic!("expected list") };
+        assert!(list.len() >= min_len, "corp {corp_id} expected >= {min_len} offers, got {}", list.len());
+    }
+
+    // 5. Empty LP-table NPC corp and unknown corp ID return empty list
+    for empty_id in [EMPTY_CUSTODIANS_CORP, 999_888_777] {
+        let empty_rep = rpc(
+            &ctx,
+            &mut sess,
+            "LPStoreMgr",
+            "GetAvailableOffersFromCorp",
+            &[PyRep::Integer(empty_id)],
+        )
+        .await
+        .expect("GetAvailableOffersFromCorp empty/unknown corp");
+        assert_eq!(empty_rep, PyRep::List(vec![]));
+    }
 }
 
 #[tokio::test]
@@ -196,135 +262,97 @@ async fn test_lp_store_character_purchase_costs_standings_and_cargo_consumption(
     let ship_id = 95_000_002;
     let mut sess = setup_docked_pilot(&ctx, CHAR_ID, JITA_CALDARI_STATION, ship_id).await;
 
-    // Register offers:
-    // - 20001: standard offer without trade-in items
-    // - 20002: standing-gated offer (requires standing >= 2.0)
-    // - 20003: requires trade-in items (50x Tritanium)
+    // 1. Validation against real Tranquility offer 3414 (5,250 LP, 5,250,000 ISK, no req_items)
     ctx.db.with_mut_snapshot(|snap| {
-        register_lp_store_offer(snap, LPOffer {
-            offer_id: 20_001,
-            corp_id: CALDARI_NAVY_CORP,
-            type_id: BALLISTIC_CONTROL_TYPE_ID,
-            quantity: 1,
-            lp_cost: 2_000,
-            isk_cost: IskCents::from_isk(1_000_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: None,
-        });
-        register_lp_store_offer(snap, LPOffer {
-            offer_id: 20_002,
-            corp_id: CALDARI_NAVY_CORP,
-            type_id: BALLISTIC_CONTROL_TYPE_ID,
-            quantity: 1,
-            lp_cost: 1_000,
-            isk_cost: IskCents::from_isk(500_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: Some(2.0),
-        });
-        register_lp_store_offer(snap, LPOffer {
-            offer_id: 20_003,
-            corp_id: CALDARI_NAVY_CORP,
-            type_id: BALLISTIC_CONTROL_TYPE_ID,
-            quantity: 1,
-            lp_cost: 1_500,
-            isk_cost: IskCents::from_isk(800_000),
-            req_items: vec![(TRITANIUM_TYPE_ID, 50)],
-            ak_cost: 0,
-            min_standing: None,
-        });
-    });
-
-    // 1. Validation: InsufficientLoyaltyPoints
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&CHAR_ID).unwrap().loyalty_points.insert(CALDARI_NAVY_CORP, 500); // Need 2000
+        snap.characters.get_mut(&CHAR_ID).unwrap().loyalty_points.insert(CALDARI_NAVY_CORP, 500);
     });
     let err_lp = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(20_001), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_NO_REQ_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
     .unwrap_err();
     assert_eq!(err_lp.code, "InsufficientLoyaltyPoints");
 
-    // Restore LP, then validate InsufficientFunds
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&CHAR_ID).unwrap();
         ch.loyalty_points.insert(CALDARI_NAVY_CORP, 50_000);
-        ch.balance = IskCents::from_isk(100); // Need 1,000,000 ISK
+        ch.balance = IskCents::from_isk(100);
     });
     let err_fund = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(20_001), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_NO_REQ_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
     .unwrap_err();
     assert_eq!(err_fund.code, "InsufficientFunds");
 
-    // Restore ISK balance
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&CHAR_ID).unwrap().balance = IskCents::from_isk(50_000_000);
     });
 
-    // 2. Validation: Standing gate (min_standing = 2.0, character has 0.0)
-    let err_stand = rpc(
+    // Purchase real Tranquility offer 3414 (no trade-in items)
+    let pass_3414 = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(20_002), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_NO_REQ_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
-    .unwrap_err();
-    assert_eq!(err_stand.code, "InsufficientStanding");
+    .expect("Tranquility offer 3414 purchase should succeed");
+    assert_eq!(pass_3414.dict_get("offerID").and_then(|v| v.as_i64()), Some(CALDARI_NO_REQ_OFFER_ID));
+    assert_eq!(
+        pass_3414.dict_get("deliveredTypeID").and_then(|v| v.as_i64()),
+        Some(CALDARI_NO_REQ_REWARD_TYPE_ID as i64)
+    );
 
-    // Boost standing to 3.5 -> offer 20002 succeeds
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&CHAR_ID).unwrap().standings.insert(CALDARI_NAVY_CORP, 3.5);
-    });
-    let pass_stand = rpc(
-        &ctx,
-        &mut sess,
-        "LPStoreMgr",
-        "TakeOfferForCharacter",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(20_002), PyRep::Integer(1)],
-    )
-    .await
-    .expect("standing gated purchase should succeed");
-    assert_eq!(pass_stand.dict_get("offerID").and_then(|v| v.as_i64()), Some(20_002));
-
-    // 3. Validation: MissingRequiredItems
+    // 2. Validation: MissingRequiredItems on real Tranquility offer 3565 (needs 5,000x Iron Charge S)
     let err_missing = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(20_003), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_TRADEIN_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
     .unwrap_err();
     assert_eq!(err_missing.code, "MissingRequiredItems");
 
-    // 4. Trade-in consumption from ACTIVE SHIP CARGO
-    // Put 50x Tritanium in active ship cargo (location_id == ship_id, flag == Cargo)
-    let cargo_trit_id = 96_000_001;
+    // 3. Trade-in consumption from ACTIVE SHIP CARGO using 2-arg TakeOfferForCharacter (station default corp)
+    let cargo_ammo_id = 96_000_001;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
-            cargo_trit_id,
+            cargo_ammo_id,
             InventoryItemRecord {
-                item_id: cargo_trit_id,
-                type_id: TRITANIUM_TYPE_ID,
+                item_id: cargo_ammo_id,
+                type_id: IRON_CHARGE_S_TYPE_ID,
                 owner_id: CHAR_ID,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
-                quantity: 50,
+                quantity: 5_000,
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -332,46 +360,42 @@ async fn test_lp_store_character_purchase_costs_standings_and_cargo_consumption(
         );
     });
 
-    // Call TakeOfferForCharacter with 2 args (offer_id, quantity), verifying default station corp resolution
     let buy_cargo_rep = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[PyRep::Integer(20_003), PyRep::Integer(1)],
+        &[PyRep::Integer(CALDARI_TRADEIN_OFFER_ID), PyRep::Integer(1)],
     )
     .await
     .expect("TakeOfferForCharacter taking trade-in from active ship cargo");
-
     let delivered_id = buy_cargo_rep
         .dict_get("deliveredItemID")
         .and_then(|v| v.as_i64())
         .expect("deliveredItemID");
 
-    // Verify trade-in item in cargo was consumed
     ctx.db.with_snapshot(|snap| {
-        assert!(!snap.items.contains_key(&cargo_trit_id), "trade-in item in ship cargo must be consumed");
+        assert!(!snap.items.contains_key(&cargo_ammo_id), "trade-in item in ship cargo must be consumed");
         let delivered_item = snap.items.get(&delivered_id).expect("delivered item must exist");
         assert_eq!(delivered_item.owner_id, CHAR_ID);
         assert_eq!(delivered_item.location_id, JITA_CALDARI_STATION);
         assert_eq!(delivered_item.flag, InventoryFlag::Hangar);
-        assert_eq!(delivered_item.type_id, BALLISTIC_CONTROL_TYPE_ID as eve_sde::TypeId);
-        assert_eq!(delivered_item.quantity, 1);
+        assert_eq!(delivered_item.type_id, CALDARI_TRADEIN_REWARD_TYPE_ID);
+        assert_eq!(delivered_item.quantity, 5_000);
     });
 
-    // 5. Trade-in consumption from STATION HANGAR
-    // Put 100x Tritanium in station hangar (location_id == JITA_CALDARI_STATION, flag == Hangar)
-    let hangar_trit_id = 96_000_002;
+    // 4. Trade-in consumption from STATION HANGAR (10,000 - 5,000 = 5,000 remaining)
+    let hangar_ammo_id = 96_000_002;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
-            hangar_trit_id,
+            hangar_ammo_id,
             InventoryItemRecord {
-                item_id: hangar_trit_id,
-                type_id: TRITANIUM_TYPE_ID,
+                item_id: hangar_ammo_id,
+                type_id: IRON_CHARGE_S_TYPE_ID,
                 owner_id: CHAR_ID,
                 location_id: JITA_CALDARI_STATION,
                 flag: InventoryFlag::Hangar,
-                quantity: 100,
+                quantity: 10_000,
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -384,25 +408,97 @@ async fn test_lp_store_character_purchase_costs_standings_and_cargo_consumption(
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCharacter",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(20_003), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_TRADEIN_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
     .expect("TakeOfferForCharacter taking trade-in from station hangar");
-
     let hangar_delivered_id = buy_hangar_rep
         .dict_get("deliveredItemID")
         .and_then(|v| v.as_i64())
         .expect("deliveredItemID");
 
     ctx.db.with_snapshot(|snap| {
-        let remaining_trit = snap.items.get(&hangar_trit_id).expect("hangar trit remaining item");
-        assert_eq!(remaining_trit.quantity, 50, "100 - 50 = 50 tritanium remaining in station hangar");
-
+        let remaining_ammo = snap.items.get(&hangar_ammo_id).expect("hangar ammo remaining item");
+        assert_eq!(remaining_ammo.quantity, 5_000);
         let delivered = snap.items.get(&hangar_delivered_id).expect("hangar delivered item");
         assert_eq!(delivered.owner_id, CHAR_ID);
         assert_eq!(delivered.location_id, JITA_CALDARI_STATION);
         assert_eq!(delivered.flag, InventoryFlag::Hangar);
+        assert_eq!(delivered.type_id, CALDARI_TRADEIN_REWARD_TYPE_ID);
     });
+
+    // 5. Cross-station, Upwell structure, standing gate, and 2-arg offer_id collision checks
+    const FULCRUM_STATION: i64 = 60_015_187;
+    ctx.db.with_mut_snapshot(|snap| {
+        for (oid, lp, isk, min_st) in [
+            (920_002, 1_000, 500_000, Some(2.0)),
+            (CALDARI_NAVY_CORP, 500, 100_000, None), // collides numerically with NPC corp ID
+        ] {
+            register_lp_store_offer(
+                snap,
+                LPOffer {
+                    offer_id: oid,
+                    corp_id: EMPTY_CUSTODIANS_CORP,
+                    type_id: CALDARI_NO_REQ_REWARD_TYPE_ID,
+                    quantity: 1,
+                    lp_cost: lp,
+                    isk_cost: IskCents::from_isk(isk),
+                    req_items: vec![],
+                    ak_cost: 0,
+                    min_standing: min_st,
+                },
+            );
+        }
+    });
+
+    // Cross-station NPC LP purchase while docked at Jita 4-4 (Caldari Navy 1_000_035) must be rejected
+    let err_cross_fed = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(FEDERATION_NAVY_CORP), PyRep::Integer(FED_NAVY_EXCLUSIVE_OFFER_ID), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_cross_fed.code, "InvalidStationCorpForLPStore");
+    let err_cross_cust = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_cross_cust.code, "InvalidStationCorpForLPStore");
+    let err_two_arg_foreign = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(920_002), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_two_arg_foreign.code, "OfferNotFound");
+
+    // Player-owned Upwell structure (>= 1_000_000_000_000) must reject NPC LP store redemptions
+    sess.station_id = None;
+    sess.structure_id = Some(1_000_000_777_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&CHAR_ID).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(1_000_000_777_001);
+    });
+    let err_upwell = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(CALDARI_NO_REQ_OFFER_ID), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_upwell.code, "StationServiceUnavailable");
+
+    // Dock at The Fulcrum (60_015_187, owned by Deathless Custodians 1_000_438 with service 25)
+    sess.structure_id = None;
+    sess.station_id = Some(FULCRUM_STATION);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&CHAR_ID).unwrap();
+        ch.station_id = Some(FULCRUM_STATION);
+        ch.structure_id = None;
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = FULCRUM_STATION; }
+    });
+
+    let err_stand = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_stand.code, "InsufficientStanding");
+
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&CHAR_ID).unwrap().standings.insert(EMPTY_CUSTODIANS_CORP, 3.5); });
+    let pass_stand = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)]).await.expect("standing-gated purchase should succeed");
+    assert_eq!(pass_stand.dict_get("offerID").and_then(|v| v.as_i64()), Some(920_002));
+
+    let pass_two_arg_high_oid = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(920_002), PyRep::Integer(2)]).await.expect("2-arg offer_id > 100_000 should succeed");
+    assert_eq!(pass_two_arg_high_oid.dict_get("offerID").and_then(|v| v.as_i64()), Some(920_002));
+    assert_eq!(pass_two_arg_high_oid.dict_get("quantity").and_then(|v| v.as_i64()), Some(2));
+
+    let pass_two_arg_corp_collision = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(2)]).await.expect("2-arg offer_id == corp_id must parse as (offer_id, qty)");
+    assert_eq!(pass_two_arg_corp_collision.dict_get("corpID").and_then(|v| v.as_i64()), Some(EMPTY_CUSTODIANS_CORP));
+    assert_eq!(pass_two_arg_corp_collision.dict_get("offerID").and_then(|v| v.as_i64()), Some(CALDARI_NAVY_CORP));
+    assert_eq!(pass_two_arg_corp_collision.dict_get("quantity").and_then(|v| v.as_i64()), Some(2));
 }
 
 #[tokio::test]
@@ -416,16 +512,16 @@ async fn test_lp_store_corporation_purchase_and_delivery() {
     let ship_id = 95_000_003;
     let mut sess = setup_docked_pilot(&ctx, CHAR_ID, JITA_CALDARI_STATION, ship_id).await;
 
-    // Setup player corporation with wallet & LP balance
+    // Setup player corporation with wallet, LP balance, and trade-in ammo for real Tranquility offer 3565
     ctx.db.with_mut_snapshot(|snap| {
         let mut corp = eve_db::types::CorporationRecord {
             corporation_id: CORP_ID,
             name: "Parity Test Corp".into(),
             ticker: "PTC".into(),
-            ceo_id: CHAR_ID + 9999, // Character is not CEO so role check applies
+            ceo_id: CHAR_ID + 9999,
             alliance_id: None,
             tax_rate: 0.0,
-            master_wallet: IskCents::from_isk(100_000_000),
+            master_wallet: IskCents::from_isk(50_000_000),
             members: [CHAR_ID].into_iter().collect(),
             member_roles: HashMap::new(),
             applications: HashMap::new(),
@@ -442,28 +538,15 @@ async fn test_lp_store_corporation_purchase_and_delivery() {
         corp_lp.insert(CALDARI_NAVY_CORP, 40_000);
         save_corp_lp_balances(snap, CORP_ID, &corp_lp);
 
-        register_lp_store_offer(snap, LPOffer {
-            offer_id: 30_001,
-            corp_id: CALDARI_NAVY_CORP,
-            type_id: BALLISTIC_CONTROL_TYPE_ID,
-            quantity: 1,
-            lp_cost: 5_000,
-            isk_cost: IskCents::from_isk(5_000_000),
-            req_items: vec![(TRITANIUM_TYPE_ID, 200)],
-            ak_cost: 0,
-            min_standing: None,
-        });
-
-        // Put 200x Tritanium in corp hangar (owner_id == CORP_ID, flag == Hangar)
         snap.items.insert(
             97_000_001,
             InventoryItemRecord {
                 item_id: 97_000_001,
-                type_id: TRITANIUM_TYPE_ID,
+                type_id: IRON_CHARGE_S_TYPE_ID,
                 owner_id: CORP_ID,
                 location_id: JITA_CALDARI_STATION,
                 flag: InventoryFlag::Hangar,
-                quantity: 200,
+                quantity: 5_000,
                 singleton: false,
                 version: 1,
                 ..Default::default()
@@ -471,56 +554,73 @@ async fn test_lp_store_corporation_purchase_and_delivery() {
         );
     });
 
-    // 1. Role verification: pilot lacking Director/Accountant role fails
+    // 1. Negative path 1: pilot lacking Director/Accountant role fails
     sess.corp_role = 0;
     let err_role = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCorporation",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(30_001), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_TRADEIN_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
     .unwrap_err();
     assert_eq!(err_role.code, "InsufficientCorporationRole");
 
-    // 2. Grant Director role and execute purchase
+    // 2. Negative path 2: OfferNotFound on non-existent offer ID
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let err_not_found = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(999_999_999), PyRep::Integer(1)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_not_found.code, "OfferNotFound");
+
+    // 3. Execute corporate purchase of real Tranquility offer 3565 (2,400 LP, 2,400,000 ISK, 5,000x type 210)
     let corp_buy_rep = rpc(
         &ctx,
         &mut sess,
         "LPStoreMgr",
         "TakeOfferForCorporation",
-        &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(30_001), PyRep::Integer(1)],
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(CALDARI_TRADEIN_OFFER_ID),
+            PyRep::Integer(1),
+        ],
     )
     .await
-    .expect("TakeOfferForCorporation purchase");
+    .expect("TakeOfferForCorporation purchase of Tranquility offer 3565");
 
-    assert_eq!(corp_buy_rep.dict_get("offerID").and_then(|v| v.as_i64()), Some(30_001));
+    assert_eq!(
+        corp_buy_rep.dict_get("offerID").and_then(|v| v.as_i64()),
+        Some(CALDARI_TRADEIN_OFFER_ID)
+    );
     let corp_deliv_id = corp_buy_rep
         .dict_get("deliveredItemID")
         .and_then(|v| v.as_i64())
         .expect("deliveredItemID");
 
-    // 3. Verify state effects:
-    // - Corp LP balance deducted: 40_000 - 5_000 = 35_000
-    // - Corp ISK deducted: 50M - 5M = 45M
-    // - Corp trade-in items consumed
-    // - Delivered item owned by CORP_ID and flagged CorpDeliveries in station
     ctx.db.with_snapshot(|snap| {
         let balances = load_corp_lp_balances(snap, CORP_ID);
-        assert_eq!(balances.get(&CALDARI_NAVY_CORP).copied(), Some(35_000));
+        assert_eq!(balances.get(&CALDARI_NAVY_CORP).copied(), Some(37_600));
 
         let corp = snap.corporations.get(&CORP_ID).unwrap();
-        assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(45_000_000));
-
+        assert_eq!(corp.wallet_divisions[0].balance, IskCents::from_isk(47_600_000));
         assert!(!snap.items.contains_key(&97_000_001), "corp trade-in item must be consumed");
 
         let delivered = snap.items.get(&corp_deliv_id).expect("delivered item");
         assert_eq!(delivered.owner_id, CORP_ID);
         assert_eq!(delivered.location_id, JITA_CALDARI_STATION);
         assert_eq!(delivered.flag, InventoryFlag::CorpDeliveries);
-        assert_eq!(delivered.type_id, BALLISTIC_CONTROL_TYPE_ID as eve_sde::TypeId);
-        assert_eq!(delivered.quantity, 1);
+        assert_eq!(delivered.type_id, CALDARI_TRADEIN_REWARD_TYPE_ID);
+        assert_eq!(delivered.quantity, 5_000);
     });
 }

@@ -351,7 +351,9 @@ pub fn dispatch_character_mail_routes(
                 RouteExecutionResult::ok_json(json!(out), 3600)
             }))
         }
-        // DATA GAP: NPC corporation LP store offer catalogs are server-only in modern EVE and absent from V24 client FSD (SharedCache); all 6 LP store rows remain open until authoritative data is available.
+        // Public corporation loyalty store offers resolved via `get_corp_lp_offers_with_sde`
+        // (dynamic runtime overrides -> Paragon V24 SDE emblems -> Tranquility ESI LP catalog).
+        // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
         ("GET", "/loyalty/stores/{corporation_id}/offers") => {
             let corp_id = match parse_path_i64(path_params, "corporation_id") {
                 Ok(v) => v,

@@ -820,9 +820,12 @@ async fn test_r4_194_take_offer_for_corporation_deducts_analysis_kredits() {
     .unwrap();
     sess.corporation_id = Some(corp_id);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    sess.station_id = Some(60_012_256); // Yulai IX - CONCORD Bureau (1_000_125)
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&char_id).unwrap().corporation_id = corp_id;
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(60_012_256);
         let mut corp = CorporationRecord {
             corporation_id: corp_id,
             name: "LP 194 Corp".into(),

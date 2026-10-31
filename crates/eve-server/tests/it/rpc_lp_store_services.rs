@@ -163,7 +163,13 @@ async fn test_lp_store_offers_and_purchases() {
         assert_eq!(it.flag, InventoryFlag::Hangar);
     });
 
-    // 5. Spend FW LP in militia LP store (`feat:fw.fw-lp`: spent in militia LP stores)
+    // 5. Spend FW LP in militia LP store (`feat:fw.fw-lp`: spent in militia LP stores at State Protectorate station 60_015_067)
+    sess.station_id = Some(60_015_067);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(60_015_067);
+        }
+    });
     let take_fw_rep = rpc(
         &ctx,
         &mut sess,
@@ -177,6 +183,12 @@ async fn test_lp_store_offers_and_purchases() {
     )
     .await
     .expect("TakeOfferForCharacter militia offer 7002");
+    sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
     assert_eq!(
         get_dict_entry(&take_fw_rep, "remainingLP").and_then(|v| v.as_i64()),
         Some(20_000 - 10_000)

@@ -522,6 +522,17 @@ pub fn with_mut_combat_runtime<R>(
     })
 }
 
+pub fn with_mut_combat_ephemeral<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut CombatRuntimeState) -> R,
+) -> R {
+    let mut guard = ctx
+        .combat_ephemeral
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
 /// Evaluates the effective signature radius of a ship in space (`feat:dogma.signature-radius`),
 /// combining base hull signature radius (`attr 552`), active Microwarpdrive bloom (`attr 554`),
 /// shield extender bonuses, and projected Target Painter effects (`group_id == 379`).

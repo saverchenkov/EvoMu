@@ -377,22 +377,22 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
     };
     assert!(
         offers.len() > 800,
-        "Expected >800 V24 SDE Paragon ship emblem offers, got {}",
+        "Expected >800 Paragon ship emblem offers (Tranquility ESI + supplementary V24 SDE), got {}",
         offers.len()
     );
-    let rifter_offer_id = 600_000 + 72_964;
-    let slasher_alliance_offer_id = 600_000 + 73_394;
+    let rifter_offer_id = 17_208;
+    let slasher_alliance_offer_id = 17_221;
     let rifter_offer = offers
         .iter()
         .find(|o| {
             o.dict_get("offerID") == Some(&PyRep::Integer(rifter_offer_id))
                 && o.dict_get("typeID") == Some(&PyRep::Integer(72964))
         })
-        .expect("Rifter emblem offer present from shipcosmeticlicenses.fsdbinary");
+        .expect("Tranquility Rifter emblem offer 17208 present");
     let Some(PyRep::Integer(rifter_lp_cost)) = rifter_offer.dict_get("lpCost") else {
         panic!("expected integer lpCost on Rifter emblem offer");
     };
-    assert!(*rifter_lp_cost > 0);
+    assert_eq!(*rifter_lp_cost, 5_000);
     assert_eq!(rifter_offer.dict_get("iskCost"), Some(&PyRep::Real(0.0)));
 
     let slasher_offer = offers
@@ -401,11 +401,11 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
             o.dict_get("offerID") == Some(&PyRep::Integer(slasher_alliance_offer_id))
                 && o.dict_get("typeID") == Some(&PyRep::Integer(73394))
         })
-        .expect("Slasher alliance emblem offer present from shipcosmeticlicenses.fsdbinary");
+        .expect("Tranquility Slasher alliance emblem offer 17221 present");
     let Some(PyRep::Integer(slasher_lp_cost)) = slasher_offer.dict_get("lpCost") else {
         panic!("expected integer lpCost on Slasher alliance emblem offer");
     };
-    assert!(*slasher_lp_cost > 0);
+    assert_eq!(*slasher_lp_cost, 5_000);
     assert_eq!(slasher_offer.dict_get("iskCost"), Some(&PyRep::Real(0.0)));
 
     // Verify ESI GET /v1/loyalty/stores/1000419/offers exposes the same V24 SDE catalog
@@ -557,7 +557,10 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         1_000
     );
 
-    // 4. Redeem Rifter Corporation Emblem (72964) from V24 SDE Paragon catalog
+    // 4. Redeem Rifter Corporation Emblem (72964, offer 17208, 5,000 LP) from Tranquility Paragon catalog
+    ctx.db.with_mut_snapshot(|s| {
+        *s.characters.get_mut(&char_id).unwrap().loyalty_points.entry(PARAGON_CORP_ID).or_insert(0) += 4_500;
+    });
     let take_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -577,6 +580,6 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
     assert_eq!(take_res.dict_get("deliveredTypeID"), Some(&PyRep::Integer(72964)));
     assert_eq!(
         take_res.dict_get("remainingLP"),
-        Some(&PyRep::Integer(1_000 - *rifter_lp_cost))
+        Some(&PyRep::Integer(5_500 - *rifter_lp_cost))
     );
 }

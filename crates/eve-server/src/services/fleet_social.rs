@@ -193,7 +193,10 @@ fn handle_office_manager(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = session.corporation_id.unwrap_or(0);
+    let corp_id = session
+        .corporation_id
+        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id)))
+        .unwrap_or(0);
     let default_station_id = session
         .station_id
         .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id)))
@@ -223,16 +226,33 @@ fn handle_office_manager(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if station_id <= 0
+                    || (station_id >= 1_000_000_000_000
+                        && !snap.structures.contains_key(&station_id))
+                {
+                    return Err(BridgeRpcError {
+                        code: "StationNotFound".into(),
+                        message: format!("Station or structure {station_id} not found"),
+                    });
+                }
                 if station_id == 60_015_187 {
-                    let is_pirate = snap
-                        .characters
-                        .get(&char_id)
-                        .and_then(|c| c.war_faction_id)
-                        .is_some_and(|fid| matches!(fid, 500_010 | 500_011));
-                    if !is_pirate {
+                    // Corporation offices at The Fulcrum require the renting corporation itself
+                    // to be enlisted in a pirate insurgency militia (`500_010` Guristas | `500_011` Angels).
+                    let corp_fac = snap
+                        .fw_runtime
+                        .corp_war_factions
+                        .get(&corp_id)
+                        .copied()
+                        .or_else(|| {
+                            ctx.sde
+                                .npc_corporations
+                                .get(&corp_id)
+                                .and_then(|c| c.faction_id.map(i64::from))
+                        });
+                    if !matches!(corp_fac, Some(500_010 | 500_011)) {
                         return Err(BridgeRpcError {
                             code: "FulcrumOfficeRequiresPirateEnlistment".into(),
-                            message: "Renting an office at The Fulcrum requires pirate insurgency enlistment".into(),
+                            message: "Renting a corporation office at The Fulcrum requires a pirate-enlisted corporation".into(),
                         });
                     }
                 }

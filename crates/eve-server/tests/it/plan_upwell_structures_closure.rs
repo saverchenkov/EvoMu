@@ -214,11 +214,21 @@ async fn test_upwell_lifecycle_asset_safety_abandoned_and_leave_space() {
     ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&item_5d).map(|i| (i.location_id, i.flag)), Some((dst_id, InventoryFlag::Deliveries))));
 
     // 4. Lazy 20-day auto-delivery triggered directly via ESI GET /characters/{id}/assets/ & GET /corporations/{id}/assets/ (with NO prior structure RPC!).
-    let item_20d = grant(&ctx, OWNER, src_id, 34, InventoryFlag::Hangar, 20_000);
-    let wrap_20d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect("wrap 20d"), "wrapID");
-    let corp_item_20d = grant(&ctx, corp_id, src_id, 34, InventoryFlag::CorpSAG1, 10_000);
+    // Destroying a structure in stationless null-sec (HED-GP) triggers cross-system auto-delivery to the nearest lowsec NPC station (st_null) at 15% fee.
+    let (null_sys_id, null_st_id) = (HED_GP, 990_000_077i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(null_st_id, UpwellStructureRecord {
+            structure_id: null_st_id, owner_corp_id: corp_id, type_id: 35832, solar_system_id: null_sys_id,
+            name: "Null Safety Source".into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+            shield_hp: 10_000.0, armor_hp: 10_000.0, hull_hp: 10_000.0, fuel_blocks: 100, reinforced_until_unix: 0,
+            last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None, quantum_core_installed: true,
+        });
+    });
+    let item_20d = grant(&ctx, OWNER, null_st_id, 34, InventoryFlag::Hangar, 20_000);
+    let wrap_20d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(null_st_id)]).await.expect("wrap 20d"), "wrapID");
+    let corp_item_20d = grant(&ctx, corp_id, null_st_id, 34, InventoryFlag::CorpSAG1, 10_000);
     ctx.db.with_mut_snapshot(|snap| { if let Some(m) = snap.characters.get_mut(&HACKER) { m.active_ship_id = 0; } });
-    let corp_wrap_20d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect("corp wrap 20d"), "wrapID");
+    let corp_wrap_20d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(null_st_id)]).await.expect("corp wrap 20d"), "wrapID");
 
     ctx.advance_virtual_clock(life::ASSET_SAFETY_AUTO_DELIVERY_SECS + 10);
     let esi_router = EsiRouter::new(Arc::clone(&ctx));
@@ -226,24 +236,24 @@ async fn test_upwell_lifecycle_asset_safety_abandoned_and_leave_space() {
     let char_resp = esi_router.handle_request(&EsiHttpRequest::new("GET", format!("/v5/characters/{OWNER}/assets/")).with_bearer_token(&token));
     assert_eq!(char_resp.status_code, 200);
     let char_json: Value = serde_json::from_slice(&char_resp.body).unwrap();
-    assert!(char_json.as_array().unwrap().iter().any(|a| a["item_id"].as_i64() == Some(wrap_20d) && a["location_id"].as_i64() == Some(st_high)), "ESI character assets must lazily auto-deliver 20d wrap to nearest NPC station");
+    assert!(char_json.as_array().unwrap().iter().any(|a| a["item_id"].as_i64() == Some(wrap_20d) && a["location_id"].as_i64() == Some(st_null)), "ESI character assets must lazily auto-deliver 20d wrap to nearest NPC station");
     let corp_resp = esi_router.handle_request(&EsiHttpRequest::new("GET", format!("/v5/corporations/{corp_id}/assets/")).with_bearer_token(&token));
     assert_eq!(corp_resp.status_code, 200);
     let corp_json: Value = serde_json::from_slice(&corp_resp.body).unwrap();
-    assert!(corp_json.as_array().unwrap().iter().any(|a| a["item_id"].as_i64() == Some(corp_wrap_20d) && a["location_id"].as_i64() == Some(st_high)), "ESI corporation assets must lazily auto-deliver 20d corp wrap to nearest NPC station");
+    assert!(corp_json.as_array().unwrap().iter().any(|a| a["item_id"].as_i64() == Some(corp_wrap_20d) && a["location_id"].as_i64() == Some(st_null)), "ESI corporation assets must lazily auto-deliver 20d corp wrap to nearest NPC station");
 
     let est_val_20d = ctx.sde.types.get(&34).unwrap().base_price * 20_000.0;
-    let deliv_20d = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_20d), PyRep::Integer(st_high)]).await.expect("retrieve 20d");
+    let deliv_20d = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_20d), PyRep::Integer(st_null)]).await.expect("retrieve 20d");
     assert!((deliv_20d.dict_get("feePaidISK").and_then(|v| v.as_f64()).unwrap_or(-1.0) - est_val_20d * 0.15).abs() < 1.0);
-    ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&item_20d).map(|i| (i.location_id, i.flag)), Some((st_high, InventoryFlag::Deliveries))));
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&item_20d).map(|i| (i.location_id, i.flag)), Some((st_null, InventoryFlag::Deliveries))));
 
     // Corporate asset safety retrieval debits corp wallet division 1 and records BOTH wallet_journal and corp_wallet_journals.
     ctx.db.with_mut_snapshot(|snap| snap.corporations.get_mut(&corp_id).unwrap().set_division_balance(1, eve_db::IskCents::from_f64_isk(50_000_000.0)));
-    let corp_deliv = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(corp_wrap_20d), PyRep::Integer(st_high)]).await.expect("retrieve corp 20d");
+    let corp_deliv = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(corp_wrap_20d), PyRep::Integer(st_null)]).await.expect("retrieve corp 20d");
     let corp_fee = corp_deliv.dict_get("feePaidISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!(corp_fee > 0.0);
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.items.get(&corp_item_20d).map(|i| i.location_id), Some(st_high));
+        assert_eq!(snap.items.get(&corp_item_20d).map(|i| i.location_id), Some(st_null));
         let cj = snap.corp_wallet_journals.get(&(corp_id, 1)).expect("corp_wallet_journals division 1");
         assert!(cj.iter().any(|e| e.ref_type == "AssetSafetyRecoveryTax" && (e.amount + corp_fee).abs() < 1e-2));
     });
