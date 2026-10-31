@@ -10,7 +10,6 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::notify_emitters_batch8::broadcast_char_event;
 use crate::services::operations_manager::{
     load_store, save_store, CharacterOperationsRecord,
 };
@@ -369,7 +368,7 @@ where
     out
 }
 
-fn deactivate_operation_for_char(ctx: &ServerContext, char_id: i64) -> Result<PyRep, BridgeRpcError> {
+pub(crate) fn deactivate_operation_for_char(ctx: &ServerContext, char_id: i64) -> Result<PyRep, BridgeRpcError> {
     let now = ctx.now_unix();
     let prev_op = ctx.db.try_with_mut_snapshot(|snap| {
         with_character_operations_record(snap, char_id, now, |rec| {
@@ -380,12 +379,7 @@ fn deactivate_operation_for_char(ctx: &ServerContext, char_id: i64) -> Result<Py
         })
     })?;
     stop_active_operation_node_graph_for_category(ctx, char_id, prev_op);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnOperationDeactivated",
-        "charid",
-        vec![],
-    );
+    crate::services::notify_emitters_b23::emit_operation_deactivated(ctx, char_id);
     Ok(PyRep::Bool(true))
 }
 
@@ -424,7 +418,7 @@ fn replay_operation_for_char(
     Ok(PyRep::Bool(true))
 }
 
-fn skip_operation_for_char(
+pub(crate) fn skip_operation_for_char(
     ctx: &ServerContext,
     char_id: i64,
     cat_id: i64,
@@ -452,16 +446,11 @@ fn skip_operation_for_char(
         });
     });
     stop_active_operation_node_graph_for_category(ctx, char_id, op_id);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnOperationSkipped",
-        "charid",
-        vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)],
-    );
+    crate::services::notify_emitters_b23::emit_operation_skipped(ctx, char_id, cat_id, op_id);
     Ok(PyRep::Bool(true))
 }
 
-fn reset_operations_progress_for_char(
+pub(crate) fn reset_operations_progress_for_char(
     ctx: &ServerContext,
     char_id: i64,
 ) -> Result<PyRep, BridgeRpcError> {
@@ -497,24 +486,17 @@ fn reset_operations_progress_for_char(
         });
     });
     stop_all_client_node_graphs_for_char(ctx, char_id);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnOperationsProgressReset",
-        "charid",
-        vec![
-            PyRep::List(Vec::new()),
-            PyRep::List(Vec::new()),
-            PyRep::Tuple(vec![
-                PyRep::Integer(first_cat_id),
-                PyRep::Integer(first_op_id),
-                PyRep::Integer(first_task_id),
-            ]),
-        ],
+    crate::services::notify_emitters_b23::emit_operations_progress_reset(
+        ctx,
+        char_id,
+        first_cat_id,
+        first_op_id,
+        first_task_id,
     );
     Ok(PyRep::Bool(true))
 }
 
-fn reload_operations_fsd_data(
+pub(crate) fn reload_operations_fsd_data(
     ctx: &ServerContext,
     session: &SessionState,
     char_id: i64,
@@ -527,7 +509,7 @@ fn reload_operations_fsd_data(
         ));
     }
     let _ = load_operation_definitions(&ctx.sde);
-    broadcast_char_event(ctx, "OnOperationsServerFSDReload", vec![], Some(char_id));
+    crate::services::notify_emitters_b23::emit_operations_server_fsd_reload(ctx, char_id);
     Ok(PyRep::Bool(true))
 }
 

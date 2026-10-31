@@ -47,6 +47,26 @@ pub enum DungeonTriggerAction {
     UnlockGate,
     SpawnNpcGroup(u8),
     CompleteDungeon,
+    CameraInterest {
+        item_id: i64,
+        speed_bits: u64,
+        duration_bits: u64,
+    },
+    TriggerAmbientSound {
+        sound_id: i64,
+        entity_item_id: i64,
+        emitter_id: i64,
+    },
+    TriggerAudio {
+        audio_url: String,
+    },
+    TriggerMessage {
+        message_type: i64,
+        message_id: i64,
+    },
+    TriggerMusic {
+        music_trigger_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1039,6 +1059,7 @@ async fn apply_dungeon_trigger_actions_core(
     let mut complete_now = false;
     let mut progression_events = Vec::new();
     let mut recipient_char = char_id;
+    let mut notify_batch: Option<(i64, Vec<i64>, Vec<DungeonTriggerAction>)> = None;
 
     with_dungeon_runtime_store_db(db, |store| {
         let Some(inst) = store.instances.get_mut(&instance_id) else {
@@ -1052,6 +1073,8 @@ async fn apply_dungeon_trigger_actions_core(
         }
         if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
             let room_id = room.room_id;
+            let obj_ids: Vec<i64> = room.objects.iter().map(|o| o.ball_id).collect();
+            let mut n_acts = Vec::new();
             for (trig_id, act) in actions {
                 fired_count += 1;
                 let task_id = room_id * 100 + i64::from(trig_id);
@@ -1069,8 +1092,15 @@ async fn apply_dungeon_trigger_actions_core(
                         complete_now = true;
                         room_id * 10 + 99
                     }
+                    other => {
+                        n_acts.push(other);
+                        room_id * 10 + i64::from(trig_id)
+                    }
                 };
                 progression_events.push((task_id, next_obj_id));
+            }
+            if !n_acts.is_empty() {
+                notify_batch = Some((i64::from(inst.dungeon_id), obj_ids, n_acts));
             }
         }
         crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
@@ -1085,6 +1115,17 @@ async fn apply_dungeon_trigger_actions_core(
             notify_tx,
             recipient_char,
             &progression_events,
+        );
+    }
+    if let Some((did, obj_ids, n_acts)) = notify_batch {
+        crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_trigger_notify_actions(
+            db,
+            pending_notifications,
+            notify_tx,
+            recipient_char,
+            did,
+            &obj_ids,
+            n_acts,
         );
     }
 

@@ -722,6 +722,29 @@ pub fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
 
+        ("operationsManager", "deactivate_operation") => Some(
+            ServerContext::require_character(session).and_then(|(_, char_id)| {
+                crate::services::notify_emitters_batch8_ops::deactivate_operation_for_char(ctx, char_id)
+            }),
+        ),
+        ("operationsManager", "skip_operation") => Some(
+            ServerContext::require_character(session).and_then(|(_, char_id)| {
+                let cat_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError::user_error("CustomInfo"))?;
+                let op_id = args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError::user_error("CustomInfo"))?;
+                crate::services::notify_emitters_batch8_ops::skip_operation_for_char(ctx, char_id, cat_id, op_id)
+            }),
+        ),
+        ("operationsManager", "reset_progress") => Some(
+            ServerContext::require_character(session).and_then(|(_, char_id)| {
+                crate::services::notify_emitters_batch8_ops::reset_operations_progress_for_char(ctx, char_id)
+            }),
+        ),
+        ("operationsManager", "reload_fsd_data") => Some(
+            ServerContext::require_character(session).and_then(|(_, char_id)| {
+                crate::services::notify_emitters_batch8_ops::reload_operations_fsd_data(ctx, session, char_id)
+            }),
+        ),
+
         ("operationsManager", "start_site") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -700,6 +700,13 @@ async fn handle_cmd_stargate_jump(
         });
     }
 
+    crate::services::notify_emitters_b23::try_enqueue_jump_queue(
+        ctx,
+        char_id,
+        jump.to_solar_system_id,
+        now_unix,
+    )?;
+
     if matches!(current_ball.mode, MovementMode::Warp { .. }) {
         return Err(BridgeRpcError {
             code: "ShipInWarp".into(),

@@ -1168,5 +1168,13 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
     }
     if cloak_now != cloak_before {
         emit_cloak_transition(ctx, sys_id, ship_id, cloak_now).await;
+        if cloak_before && !cloak_now && in_abyssal && active_cloak.is_some() {
+            crate::services::notify_emitters_b23::emit_cloak_module_force_deactivated(
+                ctx,
+                char_id,
+                "AbyssalDeadspaceCloakBlocked",
+                0.0,
+            );
+        }
     }
 }

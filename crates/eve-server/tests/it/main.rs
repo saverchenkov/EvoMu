@@ -441,6 +441,7 @@ mod notify_real_emitters_batch10_part2;
 mod notify_real_emitters_batch10_part3;
 mod notify_real_emitters_batch10_part4;
 mod notify_real_emitters_batch10_part5;
+mod notify_b23_closure;
 mod rpc_lp_store_and_travel_closure;
 mod client_bug_reporting_suite;
 mod pi_and_evermarks_remediation;
