@@ -142,71 +142,97 @@ async fn test_q5_q6_social_and_economy_package_closure() {
         "eve_public.freelance.project.api.GetCreationLimitsResponse"
     );
 
-    // 4. Verify every quasar: row in Q-5 and Q-6 packages is DONE or NA in .evomu-reviews/parity.json (if present)
+    // 4. Verify every quasar: row in Q-5 and Q-6 packages is DONE or NA in parity.json
     let q5_q6_packages = [
+        // Q-5: Social and organization
         "corporation",
         "corporationgoal",
         "freelance",
         "alliance",
         "contact",
+        "standing",
         "mail",
         "chat",
-        "calendar",
-        "war",
-        "standing",
         "notification",
+        "calendar",
+        "fleet",
+        "medal",
         "presence",
         "search",
+        "bookmark",
+        "tag",
+        "war",
+        "duel",
+        "securitystatus",
+        // Q-6: Economy and industry
         "market",
         "contract",
         "industry",
-        "inventory",
+        "blueprint",
+        "asset",
         "assetholding",
-        "entitlement",
+        "inventory",
+        "container",
         "accounting",
         "loyaltypoints",
-        "medal",
-        "moon",
-        "ore",
         "planet",
         "planetinteraction",
-        "securitystatus",
+        "ore",
+        "moon",
+        "asteroidbelt",
     ];
     let candidate_paths = [
         std::path::PathBuf::from(".evomu-reviews/parity.json"),
+        std::path::PathBuf::from(".evomu-reviews/preflight/parity.json"),
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.evomu-reviews/parity.json"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.evomu-reviews/preflight/parity.json"),
     ];
-    if let Some(parity_path) = candidate_paths.into_iter().find(|p| p.exists()) {
-        let raw = std::fs::read_to_string(&parity_path).expect("read parity.json");
-        let val: serde_json::Value = serde_json::from_str(&raw).expect("parse parity.json");
-        let rows_val = val.get("rows").unwrap_or(&val);
-        let check_row = |id: &str, status: &str| {
-            if let Some(rest) = id.strip_prefix("quasar:") {
-                let pkg = rest
-                    .split('/')
-                    .find(|seg| *seg != "eve_public" && !seg.ends_with(".pyj") && !seg.ends_with(".py"))
-                    .or_else(|| rest.strip_prefix("eve_public.").and_then(|s| s.split('.').next()));
-                if let Some(pkg) = pkg {
-                    if q5_q6_packages.contains(&pkg) {
-                        assert!(
-                            matches!(status, "DONE" | "NA"),
-                            "Q-5/Q-6 quasar row {id} (pkg={pkg}) must be DONE or NA, got {status}"
-                        );
-                    }
+    let parity_path = candidate_paths
+        .into_iter()
+        .find(|p| p.exists())
+        .expect("parity.json must exist in .evomu-reviews/parity.json or .evomu-reviews/preflight/parity.json");
+    let raw = std::fs::read_to_string(&parity_path).expect("read parity.json");
+    let val: serde_json::Value = serde_json::from_str(&raw).expect("parse parity.json");
+    let rows_val = val.get("rows").unwrap_or(&val);
+    let mut checked_rows = 0usize;
+    let mut check_row = |id: &str, status: &str| {
+        if let Some(rest) = id.strip_prefix("quasar:") {
+            let segs: Vec<&str> = rest.split('/').collect();
+            let pkg = segs
+                .iter()
+                .position(|&s| s == "eve_public" || s == "eve")
+                .and_then(|idx| segs.get(idx + 1).copied())
+                .filter(|seg| !seg.ends_with(".pyj") && !seg.ends_with(".py"))
+                .or_else(|| {
+                    rest.strip_prefix("eve_public.")
+                        .or_else(|| rest.strip_prefix("eve."))
+                        .and_then(|s| s.split('.').next())
+                });
+            if let Some(pkg) = pkg {
+                if q5_q6_packages.contains(&pkg) {
+                    checked_rows += 1;
+                    assert!(
+                        matches!(status, "DONE" | "NA"),
+                        "Q-5/Q-6 quasar row {id} (pkg={pkg}) must be DONE or NA, got {status}"
+                    );
                 }
             }
-        };
-        if let Some(obj) = rows_val.as_object() {
-            for (k, v) in obj {
-                let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                check_row(k, status);
-            }
-        } else if let Some(arr) = rows_val.as_array() {
-            for item in arr {
-                let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("");
-                let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                check_row(id, status);
-            }
+        }
+    };
+    if let Some(obj) = rows_val.as_object() {
+        for (k, v) in obj {
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            check_row(k, status);
+        }
+    } else if let Some(arr) = rows_val.as_array() {
+        for item in arr {
+            let id = item.get("id").and_then(|s| s.as_str()).unwrap_or("");
+            let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            check_row(id, status);
         }
     }
+    assert!(
+        checked_rows > 0,
+        "expected at least one Q-5/Q-6 quasar row in parity.json"
+    );
 }

@@ -279,11 +279,32 @@ async fn test_sov_mgr_structures_and_fuel_access() {
             1_000_000_090_002,
             eve_db::UpwellStructureRecord {
                 structure_id: 1_000_000_090_002,
-                type_id: 81826, // Sovereignty Hub
+                type_id: 32458, // Sovereignty Hub
                 owner_corp_id: 98_000_001,
                 solar_system_id: NULLSEC_SYS_ID,
                 name: "Sov Hub".into(),
                 position: [1000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            1_000_000_090_003,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_090_003,
+                type_id: 81826, // Metenox Moon Drill (non-sov Upwell structure)
+                owner_corp_id: 98_000_001,
+                solar_system_id: NULLSEC_SYS_ID,
+                name: "Metenox Moon Drill".into(),
+                position: [2000.0, 0.0, 0.0],
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
                 fuel_blocks: 100,
@@ -314,11 +335,15 @@ async fn test_sov_mgr_structures_and_fuel_access() {
     };
     assert!(
         sov_structs.iter().all(|s| get_kv(s, "typeID") != Some(&PyRep::Integer(35832))),
-        "Non-sov Upwell structures must be excluded from GetSovStructuresInfoForSolarSystem"
+        "Non-sov Astrahus must be excluded from GetSovStructuresInfoForSolarSystem"
     );
     assert!(
-        sov_structs.iter().any(|s| get_kv(s, "typeID") == Some(&PyRep::Integer(81826))),
-        "Sovereignty Hub must be returned by GetSovStructuresInfoForSolarSystem"
+        sov_structs.iter().all(|s| get_kv(s, "typeID") != Some(&PyRep::Integer(81826))),
+        "Non-sov Metenox Moon Drill must be excluded from GetSovStructuresInfoForSolarSystem"
+    );
+    assert!(
+        sov_structs.iter().any(|s| get_kv(s, "typeID") == Some(&PyRep::Integer(32458))),
+        "Sovereignty Hub (32458) must be returned by GetSovStructuresInfoForSolarSystem"
     );
 
     let local_structures = ctx

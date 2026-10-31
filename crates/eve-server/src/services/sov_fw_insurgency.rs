@@ -954,7 +954,7 @@ pub async fn handle(
                     .values()
                     .filter(|s| {
                         s.solar_system_id == sys_id
-                            && matches!(s.type_id, 32226 | 32458 | 81826)
+                            && matches!(s.type_id, 32226 | 32458 | 81080)
                     })
                     .map(|s| {
                         let vuln = snap
