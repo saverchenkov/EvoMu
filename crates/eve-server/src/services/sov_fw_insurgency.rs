@@ -947,6 +947,7 @@ pub async fn handle(
                     message: "GetSovStructuresInfoForSolarSystem requires a valid solarSystemID argument or active session solar system".into(),
                 }));
             };
+            let now_unix = ctx.now_unix();
             let structs_list = ctx.db.with_snapshot(|snap| {
                 let is_sov_struct = |type_id: u32| -> bool {
                     matches!(type_id, 32226 | 32458 | 81080)
