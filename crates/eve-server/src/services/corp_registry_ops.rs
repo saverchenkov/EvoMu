@@ -933,7 +933,26 @@ pub fn handle(
             PyRep::String("ticker".into()),
         ]))),
 
-        "itervalues" => Some(Ok(PyRep::List(Vec::new()))),
+        "itervalues" => {
+            let mut corps: Vec<(i64, String, String)> = ctx.db.with_snapshot(|snap| {
+                snap.corporations
+                    .values()
+                    .map(|c| (c.corporation_id, c.name.clone(), c.ticker.clone()))
+                    .collect()
+            });
+            corps.sort_by_key(|(id, _, _)| *id);
+            let rows = corps
+                .into_iter()
+                .map(|(id, name, ticker)| {
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(id),
+                        PyRep::String(name),
+                        PyRep::String(ticker),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(rows)))
+        }
 
         _ => None,
     }
