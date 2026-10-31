@@ -682,71 +682,10 @@ pub fn handle(
             Some(res.map(|()| PyRep::None))
         }
 
-        // parity: rpc:posMgr.RunMoonProcessCycleforTower
-        ("posMgr", "RunMoonProcessCycleforTower") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(tower_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-                return Some(Err(rpc_err("InvalidTowerID", "towerID must be a positive integer")));
-            };
-            let now_unix = ctx.now_unix();
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                check_starbase_auth(snap, session, char_id, tower_id)?;
-                let owner_id = snap
-                    .structures
-                    .get(&tower_id)
-                    .map(|s| s.owner_corp_id)
-                    .ok_or_else(|| rpc_err("InvalidTowerID", format!("Tower {tower_id} not found")))?;
-                let linked = snap
-                    .starbase_settings
-                    .get(&tower_id)
-                    .map(|s| s.linked_resources.clone())
-                    .unwrap_or_default();
-                if linked.is_empty() {
-                    return Err(rpc_err(
-                        "NoLinkedResources",
-                        format!("Tower {tower_id} has no linked moon harvesting or silo resources"),
-                    ));
-                }
-                for res_id in linked {
-                    let provision_type = snap
-                        .orbital_provision_types
-                        .get(&res_id)
-                        .copied()
-                        .unwrap_or(16634) as u32;
-                    if let Some(existing) = snap
-                        .items
-                        .values_mut()
-                        .find(|it| it.location_id == res_id && it.type_id == provision_type)
-                    {
-                        existing.quantity += 100;
-                    } else {
-                        let new_id = snap.items.keys().max().copied().unwrap_or(100_000_000) + 1;
-                        snap.items.insert(
-                            new_id,
-                            eve_db::InventoryItemRecord {
-                                item_id: new_id,
-                                type_id: provision_type,
-                                owner_id,
-                                location_id: res_id,
-                                flag: eve_db::InventoryFlag::Hangar,
-                                quantity: 100,
-                                singleton: false,
-                                version: 1,
-                                dynamic_attributes: std::collections::HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
-                            },
-                        );
-                    }
-                }
-                snap.service_state_blobs
-                    .insert(format!("pos:moon_cycle:{tower_id}"), now_unix.to_string());
-                Ok(())
-            });
-            Some(res.map(|()| PyRep::None))
-        }
+        ("posMgr", "RunMoonProcessCycleforTower") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "posMgr.RunMoonProcessCycleforTower is not implemented".into(),
+        })),
 
         ("posMgr", "ChangeStructureProvisionType") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

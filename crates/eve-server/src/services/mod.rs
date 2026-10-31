@@ -156,7 +156,6 @@ pub mod pve_fob_observatory;
 pub mod quasar_space_services;
 pub mod quasar_b2_services;
 pub mod quasar_b34_services;
-pub mod quasar_tactical_space;
 pub mod season_fsd;
 pub mod season_manager;
 pub mod security_mgr;
