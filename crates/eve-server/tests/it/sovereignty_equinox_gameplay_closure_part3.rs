@@ -25,15 +25,15 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_tenebrex() {
-    // DATA GAP: feat:sovereignty.sov-hub-fuel / sov-hub-upgrades — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §7)
-    // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §7)
-    // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §7)
+    // DATA GAP: feat:sovereignty.sov-hub-fuel / sov-hub-upgrades — 44 wiki-derived (build 3538132) upgrade definitions & 0 startup-cost placeholder pending V24.01 SDE import (docs/BLOCKERS.md §9)
+    // DATA GAP: feat:sovereignty.sov-power — server-only celestial power table (docs/BLOCKERS.md §9)
+    // DATA GAP: feat:sovereignty.sov-workforce — server-only celestial workforce table (docs/BLOCKERS.md §9)
     // parity: feat:sovereignty.sov-upgrade-sites
     // parity: feat:sovereignty.sov-hub-hacking
     // parity: feat:sovereignty.sov-structures-flex
     // parity: feat:modules.cynosural-field-jammer-structure
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §7)
+    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §9)
     // parity: notify:OnSovHubHacked
     // parity: notify:OnCynoJammerChanged
     eve_testkit::attest(&[

@@ -94,7 +94,6 @@ pub mod pve_homefront_sites;
 pub mod pve_incursion_lifecycle;
 pub mod pve_incursion_sites;
 pub mod pve_metaliminal_storms;
-pub mod insurgency_ice_heist_fob;
 pub mod pve_sleeper_caches;
 pub mod pve_abyssal_hazards;
 pub mod pve_abyssal_lifecycle;

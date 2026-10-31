@@ -1076,13 +1076,6 @@ pub async fn handle_legacy_and_ess(
                             .checked_add(reserve_cents)
                             .unwrap_or(st.ess_reserve_bank);
                     }
-                    crate::services::encounter_surveillance_system::record_ess_main_bank_contribution(
-                        snap,
-                        sys_id,
-                        char_id,
-                        main_cents.0,
-                        ctx.now_unix(),
-                    );
                 }
 
                 // Decrement npcs_remaining only on the specific active ("Accepted") mission that spawned `target_ball_id` (or a destroyed Vorton secondary arc target)

@@ -193,8 +193,6 @@ mod sovereignty_equinox_gameplay_closure_part4;
 mod sovereignty_mercden_parity_closure;
 mod sovereignty_mercden_parity_closure_part2;
 mod sovereignty_mercden_parity_closure_part3;
-mod fw_ess_structures_parity_closure;
-mod fw_ess_structures_parity_closure_part2;
 mod regressions_b01_b15;
 mod regressions_b01_b15_part2;
 mod regressions_r6;

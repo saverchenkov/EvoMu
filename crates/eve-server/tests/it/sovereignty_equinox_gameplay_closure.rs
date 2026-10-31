@@ -419,7 +419,7 @@ pub(crate) fn find_nullsec_planets(ctx: &ServerContext) -> (u32, i64, i64, i64, 
 #[tokio::test]
 async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() {
     // parity: feat:sovereignty.skyhook-acquire
-    // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §7)
+    // DATA GAP: feat:sovereignty.sov-reagents — server-only planetary reagent yield table (docs/BLOCKERS.md §9)
     // parity: feat:sovereignty.skyhook-reagent-maturity
     // parity: feat:sovereignty.skyhook-theft
     // parity: notify:OnSkyhookFirstActivation

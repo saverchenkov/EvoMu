@@ -36,18 +36,6 @@ pub(crate) async fn handle_module_cycles(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));
             };
-            if let Some(mod_type_id) = ctx.db.with_snapshot(|snap| snap.items.get(&raw_module_id).map(|i| i.type_id)) {
-                if let Err(e) = crate::services::encounter_surveillance_system::check_ess_module_activation_allowed(
-                    ctx,
-                    sys_id,
-                    ship_id,
-                    mod_type_id,
-                )
-                .await
-                {
-                    return Some(Err(e));
-                }
-            }
             let sys = ctx.systems.get_or_spawn(sys_id);
 
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {

@@ -43,7 +43,7 @@ fn timestamp_secs(msg: &DynamicQuasarMessage, field: u32) -> Option<u64> {
 }
 
 fn encode_planet_definitions(out: &mut Vec<u8>) {
-    // DERIVED (synthetic): server-only planetary Power/Workforce & Reagent yield tables (see docs/BLOCKERS.md §7).
+    // DERIVED (synthetic): server-only planetary Power/Workforce & Reagent yield tables (see docs/BLOCKERS.md §9).
     let hourly_reagent = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
     for &(type_id, _name, power, workforce) in PLANET_RESOURCE_TABLE.iter() {
         let mut def_buf = Vec::new();
@@ -178,7 +178,7 @@ pub fn register_handlers(
                         encode_varint_field(2, power, &mut cfg_buf);
                         encode_varint_field(3, workforce, &mut cfg_buf);
                         if let Some(reagent_type) = super::sov_gameplay::planet_reagent_type(cel.type_id) {
-                            // DERIVED (synthetic): server-only planetary reagent yield table (see docs/BLOCKERS.md §7).
+                            // DERIVED (synthetic): server-only planetary reagent yield table (see docs/BLOCKERS.md §9).
                             let hourly_reagent = super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD;
                             let mut r_cfg = Vec::new();
                             encode_id_field(1, u64::from(reagent_type), &mut r_cfg);

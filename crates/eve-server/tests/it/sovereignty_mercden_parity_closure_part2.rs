@@ -254,7 +254,7 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
 
 #[tokio::test]
 async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
-    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §8)
+    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §10)
 
     let db_path = temp_sqlite_path("sov_mercden_evo");
     let ctx = open_sqlite_ctx(&db_path, true);
@@ -390,14 +390,14 @@ async fn test_mercenary_den_lifecycle_evolution_and_anarchy_parity() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_all_seven_protos_parity() {
-    // DATA GAP: feat:quasar.sovereignty — server-only celestial resource tables (docs/BLOCKERS.md §7)
+    // DATA GAP: feat:quasar.sovereignty — server-only celestial resource tables (docs/BLOCKERS.md §9)
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj — server-only planet resource table (docs/BLOCKERS.md §7)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §7)
+    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj — server-only planet resource table (docs/BLOCKERS.md §9)
+    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj — server-only star power table (docs/BLOCKERS.md §9)
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",

@@ -188,7 +188,7 @@ fn split_tier(name: &str) -> (&str, u64) {
 /// DERIVED: Builds the definition of an SDE Sovereignty Hub upgrade type from the `44`
 /// upgrade rows transcribed from `eve-wiki/articles/Sovereignty.md:155-198` (SDE build
 /// `3538132`, not yet imported into `data/evomu_sde.sqlite`), with `fuel_startup: 0` as a
-/// `DERIVED` placeholder pending V24.01 client/SDE startup-cost data (`docs/BLOCKERS.md` §7).
+/// `DERIVED` placeholder pending V24.01 client/SDE startup-cost data (`docs/BLOCKERS.md` §9).
 pub fn upgrade_definition(sde: &SdeRegistry, type_id: u32) -> Option<UpgradeDefinition> {
     let t = sde.types.get(&type_id)?;
     if !t.published || !SOV_HUB_UPGRADE_GROUPS.contains(&t.group_id) {
@@ -291,7 +291,7 @@ pub fn star_power(sde: &SdeRegistry, star_type_id: u32) -> u64 {
 /// `resource.planet.api.GetAllDefinitionsRequest` and the hub resource computation.
 ///
 /// DERIVED (synthetic — the client `sovereignty resource planet definitions` table is not part of
-/// the EvoMu SDE import; see `docs/BLOCKERS.md` §7): Temperate / Oceanic / Barren planets yield
+/// the EvoMu SDE import; see `docs/BLOCKERS.md` §9): Temperate / Oceanic / Barren planets yield
 /// workforce, Plasma > Storm > Gas planets yield power (`Sovereignty.md:107-110`), and Ice /
 /// Oceanic (`Superionic Ice`) plus Lava (`Magmatic Gas`) yield colony reagents via Orbital Skyhooks.
 pub const PLANET_RESOURCE_TABLE: [(u32, &str, u64, u64); 8] = [

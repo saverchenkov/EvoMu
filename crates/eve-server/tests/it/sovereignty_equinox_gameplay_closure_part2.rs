@@ -24,7 +24,7 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() {
-    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §8)
+    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §10)
     // parity: feat:sovereignty.mercenary-den-anchoring
     // DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)
     // parity: feat:sovereignty.mercenary-den-reinforcement-loot
