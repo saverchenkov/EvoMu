@@ -264,6 +264,10 @@ async fn test_esi6_industry_and_mining_routes() {
     let perim_job_rep =
         rpc_call(&ctx, &mut char_sess, "industryManager", "InstallJob", &[perim_dict]).await;
     let perim_job_id = perim_job_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let perim_tax_isk = match perim_job_rep.dict_get("facilityTaxISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("missing facilityTaxISK in perim_job_rep: {other:?}"),
+    };
     ctx.db.clock().advance_secs(10_000);
     rpc_call(&ctx, &mut char_sess, "industryManager", "CompleteJob", &[PyRep::Integer(perim_job_id)])
         .await;
@@ -281,6 +285,10 @@ async fn test_esi6_industry_and_mining_routes() {
     let jita_job_rep =
         rpc_call(&ctx, &mut char_sess, "industryManager", "InstallJob", &[jita_dict]).await;
     let jita_job_id = jita_job_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let jita_tax_isk = match jita_job_rep.dict_get("facilityTaxISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("missing facilityTaxISK in jita_job_rep: {other:?}"),
+    };
 
     other_sess.station_id = Some(dodixie_stn);
     other_sess.solar_system_id = Some(30_002_659);
@@ -305,12 +313,38 @@ async fn test_esi6_industry_and_mining_routes() {
 
     let facilities = get_json(&router, &spec, "/v1/industry/facilities/", None);
     let fac_arr = facilities.as_array().unwrap();
-    assert!(fac_arr.iter().any(|f| {
-        f["facility_id"] == json!(struct_id)
-            && f["owner_id"] == json!(corp_id)
-            && f["solar_system_id"] == json!(30_000_144)
-            && f["tax"] == json!(0.08)
-    }));
+    let perim_fac = fac_arr
+        .iter()
+        .find(|f| f["facility_id"] == json!(struct_id))
+        .expect("Perimeter structure in /industry/facilities");
+    assert_eq!(perim_fac["owner_id"], json!(corp_id));
+    assert_eq!(perim_fac["solar_system_id"], json!(30_000_144));
+    // Upwell structure facility tax defaults to 0.05 (distinct from corp.tax_rate = 0.08) and matches InstallJob
+    let perim_reported_tax = perim_fac["tax"].as_f64().unwrap();
+    assert!((perim_reported_tax - 0.05).abs() < 1e-9);
+    let expected_eiv = jita_tax_isk / 0.0025;
+    let expected_perim_tax_isk = ((expected_eiv * perim_reported_tax) * 100.0).round() / 100.0;
+    assert!((perim_tax_isk - expected_perim_tax_isk).abs() < 1e-6);
+
+    // Updating the structure's configured facility tax is reflected in /industry/facilities
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut taxes = eve_server::services::industry_pi::industry_facilities_bps::load_facility_taxes(
+            snap, struct_id,
+        );
+        taxes.insert(1, 0.035);
+        eve_server::services::industry_pi::industry_facilities_bps::save_facility_taxes(
+            snap, struct_id, &taxes,
+        );
+    });
+    let facilities_updated = get_json(&router, &spec, "/v1/industry/facilities/", None);
+    let perim_fac_updated = facilities_updated
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["facility_id"] == json!(struct_id))
+        .unwrap();
+    assert!((perim_fac_updated["tax"].as_f64().unwrap() - 0.035).abs() < 1e-9);
+
     assert!(fac_arr
         .iter()
         .any(|f| f["facility_id"] == json!(jita_stn) && f["solar_system_id"] == json!(30_000_142)));
