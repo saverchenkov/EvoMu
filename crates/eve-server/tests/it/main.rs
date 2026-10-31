@@ -465,3 +465,5 @@ mod quasar_sov_workforce_transit;
 mod quasar_faction_payment_schedule;
 mod capital_combat_sp7_closure;
 mod capital_combat_sp7_closure_part2;
+mod capital_combat_sp7_closure_part3;
+mod capital_combat_sp7_closure_part4;

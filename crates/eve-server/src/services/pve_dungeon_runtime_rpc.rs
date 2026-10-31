@@ -1130,3 +1130,96 @@ pub fn dispatch_dungeon_notify_actions(
         }
     }
 }
+
+/// Returns `true` if `ship_pos` in `sys_id` is inside an active deadspace dungeon pocket whose
+/// dungeon or room data disallows Microwarpdrive activation (`feat:pve.deadspace-pocket-rules`).
+pub fn is_ship_in_mwd_disallowed_dungeon_pocket(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_pos: DVec3,
+) -> bool {
+    with_dungeon_runtime_store(ctx, |store| {
+        for inst in store.instances.values() {
+            if inst.solar_system_id != sys_id || inst.current_room_index == 0 {
+                continue;
+            }
+            if let Some(room) = inst.rooms.get(inst.current_room_index - 1) {
+                let room_pos = DVec3::from_array(room.position);
+                let gate_dest = DVec3::from_array(room.gate_destination_pos);
+                if ship_pos.distance(room_pos) <= 250_000.0
+                    || ship_pos.distance(gate_dest) <= 250_000.0
+                {
+                    return room.disallow_mwd.unwrap_or(inst.disallow_mwd);
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Refuses direct `CmdWarpToStuff` into a gated deadspace dungeon room that has not yet been
+/// unlocked/entered via its acceleration gate (`feat:pve.deadspace-pocket-rules`).
+pub fn check_warp_target_blocked_by_gated_dungeon_room(
+    ctx: &ServerContext,
+    sys_id: u32,
+    target_pos: DVec3,
+    target_ball_id: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let blocked = with_dungeon_runtime_store(ctx, |store| {
+        for inst in store.instances.values() {
+            if inst.solar_system_id != sys_id {
+                continue;
+            }
+            for (r_idx, room) in inst.rooms.iter().enumerate() {
+                // Room 0 with entry gate or any later room (r_idx > 0) not yet entered via gate
+                let is_gated = r_idx > 0 || inst.entry_gate_ball_id.is_some();
+                if !is_gated || inst.current_room_index > r_idx {
+                    continue;
+                }
+                let matches_ball = target_ball_id.is_some_and(|tid| {
+                    room.objects.iter().any(|o| o.ball_id == tid)
+                        || room.gate_ball_id == Some(tid)
+                });
+                let room_pos = DVec3::from_array(room.position);
+                let gate_dest = DVec3::from_array(room.gate_destination_pos);
+                let matches_pos = target_pos.distance(room_pos) <= 150_000.0
+                    || target_pos.distance(gate_dest) <= 150_000.0;
+                if matches_ball || matches_pos {
+                    return true;
+                }
+            }
+        }
+        false
+    });
+
+    if blocked {
+        return Err(BridgeRpcError {
+            code: "WarpBlockedByDeadspacePocket".into(),
+            message: "Cannot warp directly into a gated deadspace pocket; use the acceleration gate".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Checks if `ship_id` in `sys_id` is inside a deadspace pocket that disallows MWD activation.
+pub async fn check_deadspace_mwd_disallowed(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    ship_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let ship_pos = sys
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position)
+        .unwrap_or(DVec3::ZERO);
+    if is_ship_in_mwd_disallowed_dungeon_pocket(ctx, sys_id, ship_pos) {
+        return Err(BridgeRpcError {
+            code: "MicroWarpdriveDisallowedInDeadspace".into(),
+            message: "Microwarpdrive activation is disallowed in this deadspace pocket".into(),
+        });
+    }
+    Ok(())
+}

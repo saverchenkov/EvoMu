@@ -395,6 +395,14 @@ async fn handle_cmd_warp_to_stuff(
             }
         }
     }
+    if let Some(dest_pos) = resolved_pos {
+        crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
+            ctx,
+            sys_id,
+            dest_pos,
+            (target_id > 0).then_some(target_id),
+        )?;
+    }
     let Some(anchor_pos) = resolved_pos else {
         return Err(BridgeRpcError {
             code: "InvalidWarpDestination".into(),

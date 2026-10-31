@@ -1144,6 +1144,10 @@ pub async fn handle_pve_special_sites(
             let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
             Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
         }
+        ("slash", "SlashCmd") => {
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
+            handle_pve_slash_cmd(ctx, session, cmd).await
+        }
 
         // parity: feat:pve.metaliminal-storms, rpc:map.GetAllRoamingWeatherSystems
         ("map", "GetAllRoamingWeatherSystems") => {
@@ -1225,6 +1229,70 @@ pub async fn handle_pve_special_sites(
             Some(Ok(local_state))
         }
 
+        _ => None,
+    }
+}
+
+pub async fn handle_pve_slash_cmd(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    cmd: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    match parts.first().copied() {
+        Some("/iceheist") => {
+            let sub = parts.get(1).copied().unwrap_or("");
+            let sys_id: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            match sub {
+                "spawn" => Some(crate::services::ice_heist_ops::dispatch_ice_heist_rpc(ctx, session, "SpawnIceHeistInstance", &[PyRep::Integer(sys_id)]).await),
+                "escort" => {
+                    let is_pirate = parts.get(3).copied() == Some("pirate");
+                    Some(crate::services::ice_heist_ops::dispatch_ice_heist_rpc(ctx, session, "EscortIceHeistTanker", &[PyRep::Integer(sys_id), PyRep::Bool(is_pirate)]).await)
+                }
+                _ => None,
+            }
+        }
+        Some("/fob") => {
+            let sub = parts.get(1).copied().unwrap_or("");
+            let id1: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let parse_csv = |s: &str| -> Vec<PyRep> {
+                s.split(',').filter_map(|x| x.parse::<i64>().ok()).map(PyRep::Integer).collect()
+            };
+            match sub {
+                "spawn" => {
+                    let fid: i64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(500_010);
+                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "SpawnPirateFob", &[PyRep::Integer(id1), PyRep::Integer(fid)]).await)
+                }
+                "defense" => {
+                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
+                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "TriggerFobDefenseResponse", &[PyRep::Integer(id1), PyRep::List(list)]).await)
+                }
+                "destroy" => {
+                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
+                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "DestroyPirateFob", &[PyRep::Integer(id1), PyRep::List(list)]).await)
+                }
+                _ => None,
+            }
+        }
+        Some("/observatory") => {
+            let sub = parts.get(1).copied().unwrap_or("");
+            let id1: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let parse_csv = |s: &str| -> Vec<PyRep> {
+                s.split(',').filter_map(|x| x.parse::<i64>().ok()).map(PyRep::Integer).collect()
+            };
+            match sub {
+                "spawn" => Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "SpawnObservatoryFlashpoint", &[PyRep::Integer(id1)]).await),
+                "enter" => {
+                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
+                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "EnterObservatoryFlashpoint", &[PyRep::Integer(id1), PyRep::List(list)]).await)
+                }
+                "complete" => {
+                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
+                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "CompleteObservatoryFlashpoint", &[PyRep::Integer(id1), PyRep::List(list)]).await)
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

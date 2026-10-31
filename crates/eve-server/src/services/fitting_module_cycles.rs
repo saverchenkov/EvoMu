@@ -714,6 +714,11 @@ pub(crate) async fn handle_module_cycles(
                         return Some(Err(BridgeRpcError::user_error("CannotActivateCloaked")));
                     }
                 }
+                if is_mwd {
+                    if let Err(e) = crate::services::pve_dungeon_runtime_rpc::check_deadspace_mwd_disallowed(ctx, &sys, sys_id, ship_id).await {
+                        return Some(Err(e));
+                    }
+                }
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                         if cs.is_mwd_mjd_disabled || (is_mjd && cs.is_warp_scrambled()) {
