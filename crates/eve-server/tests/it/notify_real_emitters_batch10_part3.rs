@@ -144,15 +144,13 @@ async fn setup_pilot_in_space(
     sess
 }
 
-/// parity: notify:OnProgressionTaskCompleted
 /// parity: notify:OnProgressionLeft
 #[tokio::test]
 async fn batch10_progression_and_conversations() {
     let ctx = ServerContext::new();
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_401, false).await;
 
-    // 1. OnProgressionRoomJoined via operationsManager.start_site
-    // Negative: non-existent SDE dungeon ID fails and emits zero OnProgressionRoomJoined
+    // 1. Start an operation site via operationsManager.start_site (sets active_site_id)
     assert!(
         rpc(
             &ctx,
@@ -164,10 +162,6 @@ async fn batch10_progression_and_conversations() {
         .await
         .is_err()
     );
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess, PILOT_A),
-        "OnProgressionRoomJoined"
-    ));
 
     let valid_did = i64::from(*ctx.sde.dungeons.keys().min().expect("SDE dungeon"));
     rpc(
@@ -179,50 +173,9 @@ async fn batch10_progression_and_conversations() {
     )
     .await
     .unwrap();
-    let site_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    let prj = find_notif(&site_notifs, "OnProgressionRoomJoined");
-    assert_eq!(prj.len(), 5);
-    assert_eq!(prj[0], PyRep::Integer(valid_did));
-    assert_eq!(prj[1], PyRep::Integer(1));
-    assert!(matches!(prj[2], PyRep::List(_)));
-    assert!(matches!(prj[3], PyRep::List(_)));
-    assert_eq!(prj[4], PyRep::Integer(valid_did * 100 + 1));
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
 
-    // 2. OnStartConversation & OnProgressionLeft via operationsManager.process_client_event
-    // Negative: invalid tutorial state (<= 0) fails and emits zero OnStartConversation
-    assert!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "operationsManager",
-            "process_client_event",
-            &[PyRep::String("start_tutorial".into()), PyRep::Integer(0)]
-        )
-        .await
-        .is_err()
-    );
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess, PILOT_A),
-        "OnStartConversation"
-    ));
-
-    // Positive: start_tutorial with state_id = 5 emits OnStartConversation(473005, true)
-    rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("start_tutorial".into()), PyRep::Integer(5)],
-    )
-    .await
-    .unwrap();
-    let conv_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&conv_notifs, "OnStartConversation"),
-        &[PyRep::Integer(473_005), PyRep::Bool(true)]
-    );
-
-    // Positive: skip_tutorial while tutorial/site is active emits OnProgressionLeft() (0 args)
+    // 2. Positive: skip_tutorial while tutorial/site is active emits OnProgressionLeft() (0 args)
     rpc(
         &ctx,
         &mut sess,
@@ -235,7 +188,7 @@ async fn batch10_progression_and_conversations() {
     let left_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&left_notifs, "OnProgressionLeft"), &[]);
 
-    // Negative: calling skip_tutorial again when no tutorial/site is active emits zero OnProgressionLeft
+    // 3. Negative: calling skip_tutorial again when no tutorial/site is active emits zero OnProgressionLeft
     rpc(
         &ctx,
         &mut sess,
@@ -245,44 +198,8 @@ async fn batch10_progression_and_conversations() {
     )
     .await
     .unwrap();
-    assert!(!has_notif(
-        &drain_all(&ctx, &mut sess, PILOT_A),
-        "OnProgressionLeft"
-    ));
-
-    // 3. OnProgressionTaskWidgetUpdate, OnProgressionTaskCompleted, OnProgressionAdvanced
-    // Negative: process_client_event with empty args completes nothing and emits zero task notifications
-    rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[])
-        .await
-        .unwrap();
-    let empty_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert!(!has_notif(&empty_notifs, "OnProgressionTaskWidgetUpdate"));
-    assert!(!has_notif(&empty_notifs, "OnProgressionTaskCompleted"));
-    assert!(!has_notif(&empty_notifs, "OnProgressionAdvanced"));
-
-    // Positive: complete task 10 via live process_client_event
-    rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("complete_task".into()), PyRep::Integer(10)],
-    )
-    .await
-    .unwrap();
-    let task_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&task_notifs, "OnProgressionTaskWidgetUpdate"),
-        &[PyRep::Integer(10), PyRep::Integer(10), PyRep::Integer(2)]
-    );
-    assert_eq!(
-        find_notif(&task_notifs, "OnProgressionTaskCompleted"),
-        &[PyRep::Integer(10)]
-    );
-    let adv_args = find_notif(&task_notifs, "OnProgressionAdvanced");
-    assert_eq!(adv_args.len(), 2);
-    assert!(adv_args[0].as_i64().unwrap_or(0) >= 2);
-    assert_eq!(adv_args[1], PyRep::Integer(10));
+    let repeat_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(repeat_notifs.len(), 0);
 }
 
 /// parity: notify:OnTaleData

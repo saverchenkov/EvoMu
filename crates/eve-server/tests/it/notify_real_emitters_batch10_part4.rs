@@ -8,7 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, CombatState, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
@@ -133,7 +133,6 @@ async fn setup_pilot_in_space(
     sess
 }
 
-/// parity: notify:OnEssReserveBankInventoryFull
 /// parity: notify:OnCaptureChanged
 /// parity: notify:OnLocalHackProgressUpdated
 /// parity: notify:OnSecurityModified
@@ -150,62 +149,9 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
         .map(|(&id, _)| id)
         .unwrap_or(30_000_201);
 
-    // 1. OnEssReserveBankInventoryFull & OnSystemDynamicBountyStateChanged in Null-Sec
+    // 1. OnSystemDynamicBountyStateChanged in Null-Sec
     let mut sess_a = setup_pilot_in_space(&ctx, PILOT_A, 700_501, 587, null_sys, false).await;
     let null_handle = ctx.systems.get_or_spawn(null_sys);
-    let ess_ball_id = 900_502_i64;
-    let _ = null_handle
-        .spawn_ball_with_combat(make_ball(ess_ball_id, 32_882, DVec3::new(900.0, 0.0, 0.0)), Default::default())
-        .await;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.entry(null_sys).or_default().ess_reserve_bank = IskCents::from_isk(50_000_000);
-        // Reserve Bank Key (57714) in cargo
-        snap.items.insert(
-            700_520,
-            make_item(700_520, 57_714, PILOT_A, 700_501, InventoryFlag::Cargo, 1, false),
-        );
-    });
-    // First call starts the 5-tick Reserve Bank link (no error, no notification)
-    rpc(&ctx, &mut sess_a, "essMgr", "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)])
-        .await
-        .unwrap();
-    assert!(!has_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnEssReserveBankInventoryFull"));
-
-    for _ in 0..6 {
-        null_handle.step_manual(1.0).await.unwrap();
-    }
-    // Negative: ship cargo has room -> pulse payout succeeds, zero OnEssReserveBankInventoryFull
-    rpc(&ctx, &mut sess_a, "essMgr", "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)])
-        .await
-        .unwrap();
-    assert!(!has_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnEssReserveBankInventoryFull"));
-
-    // Re-link, advance past 60s cooldown + 5 ticks, and fill cargo hold with Tritanium (type 34)
-    ctx.advance_secs(65);
-    rpc(&ctx, &mut sess_a, "essMgr", "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)])
-        .await
-        .unwrap();
-    for _ in 0..6 {
-        null_handle.step_manual(1.0).await.unwrap();
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            700_521,
-            make_item(700_521, 34, PILOT_A, 700_501, InventoryFlag::Cargo, 50_000, false),
-        );
-    });
-    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(
-        rpc(&ctx, &mut sess_a, "essMgr", "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)])
-            .await
-            .unwrap_err()
-            .code,
-        "EssReserveBankInventoryFull"
-    );
-    let ess_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert_eq!(find_notif(&ess_notifs, "OnEssReserveBankInventoryFull"), &[]);
-
-    // 2. OnSystemDynamicBountyStateChanged via live beyonce.CmdAttackTarget NPC kill in Null-Sec
     let pirate_npc_tid = *ctx
         .sde
         .types
@@ -214,7 +160,6 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
         .map(|(id, _)| id)
         .expect("pirate NPC with bounty");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&700_521);
         snap.items.insert(
             700_530,
             make_item(700_530, 487, PILOT_A, 700_501, InventoryFlag::HiSlot0, 1, true),

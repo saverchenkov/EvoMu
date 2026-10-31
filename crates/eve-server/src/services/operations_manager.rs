@@ -761,7 +761,7 @@ pub fn handle(
                     .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
             });
             let now = ctx.now_unix();
-            let (op_id, widgets, history) = ctx.db.with_mut_snapshot(|snap| {
+            ctx.db.with_mut_snapshot(|snap| {
                 if let (Some(ch), Some(sys)) = (snap.characters.get_mut(&char_id), char_sys) {
                     ch.solar_system_id = sys;
                 }
@@ -772,15 +772,8 @@ pub fn handle(
                 if let Some(sys) = char_sys {
                     rec.active_operation_system_id = Some(sys);
                 }
-                let oid = rec.active_operation_id.unwrap_or(1);
-                let w: Vec<(i64, i64, i64)> = rec.completed_tasks.iter().copied().map(|t| (t, t, 2)).collect();
-                let h: Vec<i64> = rec.completed_operations.iter().copied().collect();
                 save_store(snap, &store, now);
-                (oid, w, h)
             });
-            crate::services::notify_emitters_batch10::emit_progression_room_joined(
-                ctx, char_id, site_id, op_id, widgets, history, site_id * 100 + 1,
-            );
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -902,9 +895,6 @@ pub fn handle(
                     npe.current_node_id = 1;
                 });
                 crate::services::notify_emitters_batch8_ops::on_tutorial_started(ctx, char_id, state_id);
-                crate::services::notify_emitters_batch10::emit_start_conversation(
-                    ctx, char_id, 473_000 + state_id, true,
-                );
                 return Some(Ok(PyRep::Bool(true)));
             }
 
@@ -1125,9 +1115,6 @@ pub fn handle(
                         PyRep::Integer(op_id),
                         PyRep::Integer(tid),
                     ],
-                );
-                crate::services::notify_emitters_batch10::emit_progression_task_and_objective_updates(
-                    ctx, char_id, op_id + 1, tid,
                 );
                 Some(Ok(PyRep::Bool(true)))
             } else if !args.is_empty() || !kwargs.is_empty() {
