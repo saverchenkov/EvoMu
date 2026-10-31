@@ -514,3 +514,4 @@ mod open_feats_and_rpcs_b9;
 mod open_feats_and_rpcs_b34;
 mod open_feats_and_rpcs_b34_part2;
 mod open_feats_and_rpcs_batch2_part2;
+mod quasar_b2_closure;

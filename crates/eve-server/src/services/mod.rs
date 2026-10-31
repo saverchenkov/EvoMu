@@ -153,6 +153,7 @@ pub mod doomsday_aoe_tick;
 pub mod ice_heist_ops;
 pub mod pve_fob_observatory;
 pub mod quasar_space_services;
+pub mod quasar_b2_services;
 pub mod quasar_b34_services;
 pub mod season_fsd;
 pub mod season_manager;
