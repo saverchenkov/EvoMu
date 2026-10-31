@@ -376,9 +376,57 @@ fn parse_rooms_from_pyrep(
                         .dict_get("actionGroup")
                         .and_then(|v| v.as_i64())
                         .unwrap_or(2) as u8;
+                    let obj_idx = t_rep
+                        .dict_get("targetObjectIndex")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        .max(0) as usize;
                     let action = match action_str {
                         "SpawnNpcGroup" => DungeonTriggerAction::SpawnNpcGroup(action_grp),
                         "CompleteDungeon" => DungeonTriggerAction::CompleteDungeon,
+                        "CameraInterest" => DungeonTriggerAction::CameraInterest {
+                            obj_idx,
+                            speed_milli: t_rep
+                                .dict_get("speedMilli")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(1500),
+                            duration_ms: t_rep
+                                .dict_get("durationMs")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(4000),
+                        },
+                        "AmbientSound" => DungeonTriggerAction::AmbientSound {
+                            sound_id: t_rep
+                                .dict_get("soundID")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("amb_dungeon_relay_loop")
+                                .to_string(),
+                            obj_idx,
+                        },
+                        "Audio" => DungeonTriggerAction::Audio {
+                            audio_url: t_rep
+                                .dict_get("audioUrl")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("wise:/dungeon_relay_alert_play")
+                                .to_string(),
+                        },
+                        "Message" => DungeonTriggerAction::Message {
+                            message_type: t_rep
+                                .dict_get("messageType")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("popup")
+                                .to_string(),
+                            message_id: t_rep
+                                .dict_get("messageID")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(i64::from(dungeon_id) * 10 + 1),
+                        },
+                        "Music" => DungeonTriggerAction::Music {
+                            music_trigger_id: t_rep
+                                .dict_get("musicTriggerID")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(i64::from(dungeon_id) * 10 + 2),
+                        },
                         _ => DungeonTriggerAction::UnlockGate,
                     };
                     let kind = match kind_str.as_str() {
@@ -1097,5 +1145,94 @@ pub async fn on_dungeon_item_looted(
 
     for (sys_id, inst_id, r_idx, actions) in pending_actions {
         let _ = apply_dungeon_trigger_actions(ctx, sys_id, inst_id, r_idx, actions, char_id).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_dungeon_notify_actions(
+    db: &eve_db::WorldRepository,
+    pending_notifications: Option<
+        &std::sync::RwLock<
+            HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+        >,
+    >,
+    notify_tx: Option<
+        &tokio::sync::broadcast::Sender<(
+            i64,
+            crate::router::cache_notifications::PendingMachoNotification,
+        )>,
+    >,
+    char_id: i64,
+    dungeon_id: i64,
+    obj_ball_ids: &[i64],
+    actions: Vec<DungeonTriggerAction>,
+) {
+    for act in actions {
+        match act {
+            DungeonTriggerAction::CameraInterest {
+                obj_idx,
+                speed_milli,
+                duration_ms,
+            } => {
+                if let Some(&bid) = obj_ball_ids.get(obj_idx).filter(|&&b| b > 0) {
+                    crate::services::notify_emitters_batch10::emit_dungeon_camera_interest_core(
+                        db,
+                        pending_notifications,
+                        notify_tx,
+                        char_id,
+                        bid,
+                        (speed_milli as f64) / 1000.0,
+                        (duration_ms as f64) / 1000.0,
+                    );
+                }
+            }
+            DungeonTriggerAction::AmbientSound { sound_id, obj_idx } => {
+                if let Some(&bid) = obj_ball_ids.get(obj_idx).filter(|&&b| b > 0) {
+                    crate::services::notify_emitters_batch10::emit_dungeon_trigger_ambient_sound_core(
+                        db,
+                        pending_notifications,
+                        notify_tx,
+                        char_id,
+                        dungeon_id,
+                        &sound_id,
+                        bid,
+                    );
+                }
+            }
+            DungeonTriggerAction::Audio { audio_url } => {
+                crate::services::notify_emitters_batch10::emit_dungeon_trigger_audio_core(
+                    db,
+                    pending_notifications,
+                    notify_tx,
+                    char_id,
+                    dungeon_id,
+                    &audio_url,
+                );
+            }
+            DungeonTriggerAction::Message {
+                message_type,
+                message_id,
+            } => {
+                crate::services::notify_emitters_batch10::emit_dungeon_trigger_message_core(
+                    db,
+                    pending_notifications,
+                    notify_tx,
+                    char_id,
+                    &message_type,
+                    message_id,
+                );
+            }
+            DungeonTriggerAction::Music { music_trigger_id } => {
+                crate::services::notify_emitters_batch10::emit_dungeon_trigger_music_core(
+                    db,
+                    pending_notifications,
+                    notify_tx,
+                    char_id,
+                    dungeon_id,
+                    music_trigger_id,
+                );
+            }
+            _ => {}
+        }
     }
 }

@@ -1,7 +1,8 @@
 //! Real production server-to-client `notify:On*` emission integration tests (Batch 10, Part 2).
 //!
-//! Covers Anomalies/Signatures, Signal Tracker, Probes, Progression, Conversations,
-//! Tales, Incursions, System Effects, Dynamic Bounty, ESS, FW, and Hacking.
+//! Covers Dungeon Editor, Dungeon Values, all 5 Dungeon Room Triggers, Signal Tracker full state,
+//! Scanner Probe repositioning (`OnProbeWarpEnd`), and Escalation Expeditions
+//! (`OnCosmicSignatureAdded`, `OnDungeonInstanceAdded`, `OnDungeonInstanceRemoved`).
 
 #![forbid(unsafe_code)]
 
@@ -14,6 +15,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
 const SYS_JITA: u32 = 30_000_142;
 
 fn make_item(
@@ -49,6 +51,18 @@ async fn rpc(
         .await
 }
 
+async fn rpc_kw(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, kwargs, None)
+        .await
+}
+
 fn drain_all(ctx: &ServerContext, sess: &mut SessionState, char_id: i64) -> Vec<(String, Vec<PyRep>)> {
     let mut out = sess.drain_notifications();
     for n in ctx.drain_notifications_for_char(char_id) {
@@ -66,6 +80,10 @@ fn find_notif<'a>(notifs: &'a [(String, Vec<PyRep>)], event: &str) -> &'a [PyRep
             let seen: Vec<&str> = notifs.iter().map(|(e, _)| e.as_str()).collect();
             panic!("expected notification {event}, got {seen:?}")
         })
+}
+
+fn has_notif(notifs: &[(String, Vec<PyRep>)], event: &str) -> bool {
+    notifs.iter().any(|(ev, _)| ev == event)
 }
 
 async fn setup_pilot_in_space(ctx: &ServerContext, char_id: i64, ship_id: i64, gm: bool) -> SessionState {
@@ -100,7 +118,8 @@ async fn setup_pilot_in_space(ctx: &ServerContext, char_id: i64, ship_id: i64, g
         )
         .await;
     let mut sess = SessionState::new(char_id as u64);
-    crate::common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
+    let (user, pass) = if char_id == PILOT_A { ("demo", "demo-secret") } else { ("other", "other-secret") };
+    crate::common::login_pilot(ctx, &mut sess, user, pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)])
         .await
         .expect("SelectCharacterID");
@@ -115,215 +134,358 @@ async fn setup_pilot_in_space(ctx: &ServerContext, char_id: i64, ship_id: i64, g
     sess
 }
 
-/// parity: notify:OnCosmicAnomalyAdded
+/// parity: notify:OnDungeonEdit
+/// parity: notify:OnDungeonValues
+/// parity: notify:OnDungeonCameraInterest
+/// parity: notify:OnDungeonTriggerAmbientSound
+/// parity: notify:OnDungeonTriggerAudio
+/// parity: notify:OnDungeonTriggerMessage
+/// parity: notify:OnDungeonTriggerMusic
+#[tokio::test]
+async fn batch10_dungeon_editor_values_and_room_triggers() {
+    let ctx = ServerContext::new();
+    let mut gm_sess = setup_pilot_in_space(&ctx, PILOT_A, 700_201, true).await;
+    let mut non_gm = setup_pilot_in_space(&ctx, PILOT_B, 700_202, false).await;
+
+    // 1. OnDungeonEdit via keeper.EditDungeon
+    // Negative: non-GM cannot EditDungeon, and GM PlayDungeon (godmode=0) does NOT emit OnDungeonEdit
+    assert!(rpc(&ctx, &mut non_gm, "keeper", "EditDungeon", &[PyRep::Integer(1420)]).await.is_err());
+    assert!(!has_notif(&drain_all(&ctx, &mut non_gm, PILOT_B), "OnDungeonEdit"));
+
+    let mut play_kw = HashMap::new();
+    play_kw.insert("dungeonID".into(), PyRep::Integer(1420));
+    play_kw.insert("godmode".into(), PyRep::Integer(0));
+    rpc_kw(&ctx, &mut gm_sess, "keeper", "PlayDungeon", &[], &play_kw).await.unwrap();
+    assert!(!has_notif(&drain_all(&ctx, &mut gm_sess, PILOT_A), "OnDungeonEdit"));
+
+    // Positive: GM EditDungeon emits OnDungeonEdit(dungeonID, roomID, (x, y, z))
+    let mut edit_kw = HashMap::new();
+    edit_kw.insert("dungeonID".into(), PyRep::Integer(1420));
+    rpc_kw(&ctx, &mut gm_sess, "keeper", "EditDungeon", &[], &edit_kw).await.unwrap();
+    let edit_notifs = drain_all(&ctx, &mut gm_sess, PILOT_A);
+    let edit_args = find_notif(&edit_notifs, "OnDungeonEdit");
+    assert_eq!(edit_args.len(), 3);
+    assert_eq!(edit_args[0], PyRep::Integer(1420));
+    assert!(edit_args[1].as_i64().unwrap_or(0) > 0);
+    match &edit_args[2] {
+        PyRep::Tuple(coords) => assert_eq!(coords.len(), 3),
+        other => panic!("expected 3-tuple roomPos, got {other:?}"),
+    }
+
+    // 2. Spawn gated dungeon instance with all 5 room triggers via live keeper.SpawnDungeonInstance
+    let room_py = PyRep::keyval([
+        ("roomName", PyRep::String("Relay Vault".into())),
+        ("position", PyRep::Tuple(vec![PyRep::Real(500_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+        ("gateLocked", PyRep::Bool(false)),
+        (
+            "objects",
+            PyRep::List(vec![PyRep::keyval([
+                ("typeID", PyRep::Integer(23)),
+                ("name", PyRep::String("Ancient Relay".into())),
+                ("position", PyRep::Tuple(vec![PyRep::Real(505_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])),
+            ])]),
+        ),
+        (
+            "triggers",
+            PyRep::List(vec![
+                PyRep::keyval([
+                    ("kind", PyRep::String("approach".into())),
+                    ("targetObjectIndex", PyRep::Integer(0)),
+                    ("radius", PyRep::Real(2_000.0)),
+                    ("action", PyRep::String("CameraInterest".into())),
+                    ("objectIndex", PyRep::Integer(0)),
+                    ("speedMilli", PyRep::Integer(1_500)),
+                    ("durationMs", PyRep::Integer(4_000)),
+                ]),
+                PyRep::keyval([
+                    ("kind", PyRep::String("approach".into())),
+                    ("targetObjectIndex", PyRep::Integer(0)),
+                    ("radius", PyRep::Real(2_000.0)),
+                    ("action", PyRep::String("AmbientSound".into())),
+                    ("objectIndex", PyRep::Integer(0)),
+                    ("soundID", PyRep::String("amb_dungeon_relay_loop".into())),
+                ]),
+                PyRep::keyval([
+                    ("kind", PyRep::String("approach".into())),
+                    ("targetObjectIndex", PyRep::Integer(0)),
+                    ("radius", PyRep::Real(2_000.0)),
+                    ("action", PyRep::String("Audio".into())),
+                    ("audioUrl", PyRep::String("wise:/dungeon_relay_alert_play".into())),
+                ]),
+                PyRep::keyval([
+                    ("kind", PyRep::String("approach".into())),
+                    ("targetObjectIndex", PyRep::Integer(0)),
+                    ("radius", PyRep::Real(2_000.0)),
+                    ("action", PyRep::String("Message".into())),
+                    ("messageType", PyRep::String("popup".into())),
+                    ("messageID", PyRep::Integer(555_001)),
+                ]),
+                PyRep::keyval([
+                    ("kind", PyRep::String("approach".into())),
+                    ("targetObjectIndex", PyRep::Integer(0)),
+                    ("radius", PyRep::Real(2_000.0)),
+                    ("action", PyRep::String("Music".into())),
+                    ("musicTriggerID", PyRep::Integer(777_002)),
+                ]),
+            ]),
+        ),
+    ]);
+    let mut spawn_kw = HashMap::new();
+    spawn_kw.insert("dungeonID".into(), PyRep::Integer(2005));
+    spawn_kw.insert("hasEntryGate".into(), PyRep::Bool(true));
+    spawn_kw.insert("position".into(), PyRep::Tuple(vec![PyRep::Real(100_000.0), PyRep::Real(0.0), PyRep::Real(0.0)]));
+    spawn_kw.insert("rooms".into(), PyRep::List(vec![room_py]));
+    let inst_rep = rpc_kw(&ctx, &mut gm_sess, "keeper", "PlayDungeon", &[], &spawn_kw)
+        .await
+        .expect("PlayDungeon");
+    let entry_gate_id = inst_rep.dict_get("entryGateBallID").and_then(|v| v.as_i64()).expect("entryGateBallID");
+    let _ = drain_all(&ctx, &mut non_gm, PILOT_B);
+
+    // Negative: Pilot B is >2500m from entry gate -> ActivateAccelerationGate fails, zero OnDungeonValues
+    assert!(
+        rpc(&ctx, &mut non_gm, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)])
+            .await
+            .is_err()
+    );
+    assert!(!has_notif(&drain_all(&ctx, &mut non_gm, PILOT_B), "OnDungeonValues"));
+
+    // Positive: move Pilot B within 2500m of entry gate and activate -> warps into Room 1 and emits OnDungeonValues
+    let jita_sys = ctx.systems.get_or_spawn(SYS_JITA);
+    let (_, gate_ball) = jita_sys.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap();
+    let _ = jita_sys.set_ball_position(700_202, gate_ball.position).await;
+    let room_enter_rep = rpc(&ctx, &mut non_gm, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)])
+        .await
+        .expect("ActivateAccelerationGate");
+    let gate_notifs = drain_all(&ctx, &mut non_gm, PILOT_B);
+    let dv_args = find_notif(&gate_notifs, "OnDungeonValues");
+    assert_eq!(dv_args.len(), 2);
+    assert_eq!(dv_args[0], PyRep::Integer(2005));
+    assert_eq!(dv_args[1].dict_get("currentWave").and_then(|v| v.as_i64()), Some(1));
+    // Pilot arrived at gateDestinationPos (15km away from Ancient Relay at 505,000), so 0 triggers fired yet!
+    for ev in [
+        "OnDungeonCameraInterest",
+        "OnDungeonTriggerAmbientSound",
+        "OnDungeonTriggerAudio",
+        "OnDungeonTriggerMessage",
+        "OnDungeonTriggerMusic",
+    ] {
+        assert!(!has_notif(&gate_notifs, ev), "unexpected early {ev}");
+    }
+
+    // Negative: UpdateStateRequest while still outside 2,000m trigger radius fires zero room triggers
+    rpc(&ctx, &mut non_gm, "beyonce", "UpdateStateRequest", &[]).await.unwrap();
+    let outside_notifs = drain_all(&ctx, &mut non_gm, PILOT_B);
+    assert!(!has_notif(&outside_notifs, "OnDungeonCameraInterest"));
+    assert!(!has_notif(&outside_notifs, "OnDungeonTriggerAudio"));
+
+    // Positive: move Pilot B within 2,000m of Ancient Relay object and call UpdateStateRequest
+    let inst_id = inst_rep.dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
+    let state_rep = eve_server::services::pve_dungeon_runtime_rpc::get_dungeon_instance_state(&ctx, inst_id).unwrap();
+    let relay_ball_id = match state_rep.dict_get("rooms") {
+        Some(PyRep::List(rooms)) => match rooms[0].dict_get("objectBallIDs") {
+            Some(PyRep::List(ids)) => ids[0].as_i64().unwrap(),
+            other => panic!("expected objectBallIDs list, got {other:?}"),
+        },
+        other => panic!("expected rooms list, got {other:?}"),
+    };
+    let _ = room_enter_rep;
+    let (_, relay_ball) = jita_sys.get_ball_snapshot(relay_ball_id).await.unwrap().unwrap();
+    let _ = jita_sys.set_ball_position(700_202, relay_ball.position).await;
+    rpc(&ctx, &mut non_gm, "beyonce", "UpdateStateRequest", &[]).await.unwrap();
+    let trig_notifs = drain_all(&ctx, &mut non_gm, PILOT_B);
+    assert_eq!(
+        find_notif(&trig_notifs, "OnDungeonCameraInterest"),
+        &[PyRep::Integer(relay_ball_id), PyRep::Real(1.5), PyRep::Real(4.0)]
+    );
+    assert_eq!(
+        find_notif(&trig_notifs, "OnDungeonTriggerAmbientSound"),
+        &[PyRep::Integer(2005), PyRep::String("amb_dungeon_relay_loop".into()), PyRep::Integer(relay_ball_id)]
+    );
+    assert_eq!(
+        find_notif(&trig_notifs, "OnDungeonTriggerAudio"),
+        &[PyRep::Integer(2005), PyRep::String("wise:/dungeon_relay_alert_play".into())]
+    );
+    assert_eq!(
+        find_notif(&trig_notifs, "OnDungeonTriggerMessage"),
+        &[PyRep::String("popup".into()), PyRep::Integer(555_001)]
+    );
+    assert_eq!(
+        find_notif(&trig_notifs, "OnDungeonTriggerMusic"),
+        &[PyRep::Integer(2005), PyRep::Integer(777_002)]
+    );
+}
+
+/// parity: notify:OnSignalTrackerFullState
+/// parity: notify:OnProbeWarpEnd
 /// parity: notify:OnCosmicSignatureAdded
 /// parity: notify:OnDungeonInstanceAdded
 /// parity: notify:OnDungeonInstanceRemoved
-/// parity: notify:OnSignalTrackerFullState
-/// parity: notify:OnProbeWarpEnd
 #[tokio::test]
-async fn batch10_anomalies_signatures_signal_tracker_and_probes() {
+async fn batch10_expedition_signatures_signal_tracker_and_probes() {
     let ctx = ServerContext::new();
     let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_301, false).await;
 
-    // 1. SignalTrackerRegister emits OnSignalTrackerFullState, OnCosmicAnomalyAdded, OnCosmicSignatureAdded
-    let _ = rpc(&ctx, &mut sess, "scanMgr", "SignalTrackerRegister", &[]).await.unwrap();
-    let scan_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&scan_notifs, "OnSignalTrackerFullState").len(), 3);
-    assert_eq!(find_notif(&scan_notifs, "OnCosmicAnomalyAdded").len(), 1);
-    assert_eq!(find_notif(&scan_notifs, "OnCosmicSignatureAdded").len(), 1);
+    // 1. OnSignalTrackerFullState via scanMgr.SignalTrackerRegister
+    // Negative: session with solar_system_id = None returns NoSolarSystem and emits zero notifications
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_A).unwrap().solar_system_id = 0);
+    sess.solar_system_id = None;
+    assert_eq!(
+        rpc(&ctx, &mut sess, "scanMgr", "SignalTrackerRegister", &[]).await.unwrap_err().code,
+        "NoSolarSystem"
+    );
+    assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnSignalTrackerFullState"));
 
-    // 2. DungeonInstanceAdded & DungeonInstanceRemoved via pve_expeditions
-    ctx.set_mechanic_rng_seed(Some(42));
-    let entry1 = eve_server::services::pve_expeditions::create_escalation_expedition(
-        &ctx,
-        PILOT_A,
-        SYS_JITA,
-        1001,
-        "Guristas Scout Outpost",
-        [1000.0, 0.0, 1000.0],
-    )
-    .await
-    .unwrap();
-    let _ = ctx.db.set_character_solar_system(PILOT_A, entry1.destination_solar_system_id, &ctx.sde);
-    sess.solar_system_id = Some(entry1.destination_solar_system_id);
-    ctx.sync_session(&mut sess);
-    let _ = rpc(&ctx, &mut sess, "beyonce", "UpdateStateRequest", &[]).await;
-    let _ = drain_all(&ctx, &mut sess, PILOT_A);
-    ctx.set_mechanic_rng_seed(Some(42));
-    let entry = eve_server::services::pve_expeditions::create_escalation_expedition(
-        &ctx,
-        PILOT_A,
-        SYS_JITA,
-        1001,
-        "Guristas Scout Outpost",
-        [1000.0, 0.0, 1000.0],
-    )
-    .await
-    .unwrap();
-    let add_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&add_notifs, "OnDungeonInstanceAdded").len(), 2);
-
-    let mut cur_entry = entry;
-    for _ in 0..4 {
-        let _ = ctx.db.set_character_solar_system(PILOT_A, cur_entry.destination_solar_system_id, &ctx.sde);
-        sess.solar_system_id = Some(cur_entry.destination_solar_system_id);
-        ctx.sync_session(&mut sess);
-        let _ = rpc(&ctx, &mut sess, "beyonce", "UpdateStateRequest", &[]).await;
-        match eve_server::services::pve_expeditions::advance_expedition_step(
-            &ctx,
-            PILOT_A,
-            cur_entry.instance_id,
-        )
-        .await
-        {
-            Ok(Some(next)) if next.step_index <= next.total_steps && next.destination_solar_system_id != cur_entry.destination_solar_system_id => {
-                cur_entry = next;
-            }
-            _ => break,
-        }
+    // Positive: in-space pilot registers and receives 3-arg OnSignalTrackerFullState with 4-tuple fullState
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_A).unwrap().solar_system_id = SYS_JITA);
+    sess.solar_system_id = Some(SYS_JITA);
+    rpc(&ctx, &mut sess, "scanMgr", "SignalTrackerRegister", &[]).await.unwrap();
+    let st_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let st_args = find_notif(&st_notifs, "OnSignalTrackerFullState");
+    assert_eq!(st_args.len(), 3);
+    assert_eq!(st_args[0], PyRep::Integer(i64::from(SYS_JITA)));
+    match &st_args[1] {
+        PyRep::Tuple(parts) => assert_eq!(parts.len(), 4),
+        other => panic!("expected 4-tuple fullState, got {other:?}"),
     }
-    let rem_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&rem_notifs, "OnDungeonInstanceRemoved").len(), 4);
+    assert_eq!(st_args[2], PyRep::Bool(true));
 
-    // 3. ProbeWarpEnd via scanMgr.RequestScans
+    // 2. OnProbeWarpEnd via scanSvc / dogmaIM probe launch + RequestScans
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             700_310,
-            make_item(700_310, 17938, PILOT_A, 700_301, InventoryFlag::HiSlot0, 1, true),
+            make_item(700_310, 17_938, PILOT_A, 700_301, InventoryFlag::HiSlot0, 1, true),
         );
         snap.items.insert(
             700_311,
-            make_item(700_311, 30013, PILOT_A, 700_301, InventoryFlag::Cargo, 8, false),
+            make_item(700_311, 30_013, PILOT_A, 700_301, InventoryFlag::HiSlot0, 8, false),
         );
     });
-    let _ = crate::common::probe_scan(&ctx, &mut sess, DVec3::ZERO, 1.0e11).await;
-    let probe_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&probe_notifs, "OnProbeWarpEnd").len(), 1);
-}
+    ctx.invalidate_ship_fitting(700_301);
+    let _ = rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(700_301), PyRep::Integer(700_310)]).await;
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(700_310), PyRep::String("launchProbes".into())])
+        .await
+        .unwrap();
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
 
-/// parity: notify:OnProgressionRoomJoined
-/// parity: notify:OnProgressionAdvanced
-/// parity: notify:OnProgressionTaskCompleted
-/// parity: notify:OnProgressionTaskWidgetUpdate
-/// parity: notify:OnProgressionLeft
-/// parity: notify:OnStartConversation
-#[tokio::test]
-async fn batch10_progression_and_conversations() {
-    let ctx = ServerContext::new();
-    let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_401, false).await;
+    // Negative: RequestScans without moving probe coordinates does NOT emit OnProbeWarpEnd
+    rpc(&ctx, &mut sess, "scanMgr", "RequestScans", &[]).await.unwrap();
+    assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnProbeWarpEnd"));
 
-    let _ = rpc(
+    // Positive: RequestScans with new probe coordinates repositions probe and emits OnProbeWarpEnd(probeID)
+    let first_probe_id = ctx.active_scanner_probes.read().unwrap().keys().min().copied().expect("launched probe");
+    rpc(
         &ctx,
         &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("progression_room_joined".into()), PyRep::Integer(3001)],
+        "scanMgr",
+        "RequestScans",
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Real(250_000.0),
+            PyRep::Real(100_000.0),
+            PyRep::Real(-50_000.0),
+            PyRep::Integer(4),
+        ])])],
     )
-    .await;
-    let _ = rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("progression_task_widget_update".into()), PyRep::Integer(1)],
-    )
-    .await;
-    let _ = rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("progression_task_completed".into()), PyRep::Integer(101)],
-    )
-    .await;
-    let _ = rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("progression_advanced".into()), PyRep::Integer(101)],
-    )
-    .await;
-    let _ = rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("progression_left".into())],
-    )
-    .await;
+    .await
+    .unwrap();
+    let scan_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let pwe_args = find_notif(&scan_notifs, "OnProbeWarpEnd");
+    assert_eq!(pwe_args, &[PyRep::Integer(first_probe_id)]);
 
-    let notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&notifs, "OnProgressionRoomJoined").len(), 5);
-    assert_eq!(find_notif(&notifs, "OnStartConversation").len(), 2);
-    assert_eq!(find_notif(&notifs, "OnProgressionTaskWidgetUpdate").len(), 3);
-    assert_eq!(find_notif(&notifs, "OnProgressionTaskCompleted").len(), 1);
-    assert_eq!(find_notif(&notifs, "OnProgressionAdvanced").len(), 2);
-    assert_eq!(find_notif(&notifs, "OnProgressionLeft").len(), 0);
-}
+    // 3. OnCosmicSignatureAdded, OnDungeonInstanceAdded, OnDungeonInstanceRemoved via live keeper.EnterNextDungeonRoom
+    let dest_sys = eve_server::services::pve_expeditions::find_escalation_destination_system(&ctx, SYS_JITA);
+    let mut obs_sess = setup_pilot_in_space(&ctx, PILOT_B, 700_302, false).await;
+    let _ = ctx.db.set_character_solar_system(PILOT_B, dest_sys, &ctx.sde);
+    obs_sess.solar_system_id = Some(dest_sys);
+    ctx.sync_session(&mut obs_sess);
+    let _ = rpc(&ctx, &mut obs_sess, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    let _ = drain_all(&ctx, &mut obs_sess, PILOT_B);
 
-/// parity: notify:OnTaleData
-/// parity: notify:OnTaleRemove
-/// parity: notify:OnInfluenceUpdate
-/// parity: notify:OnSystemEffectStarted
-/// parity: notify:OnSystemWideEffectStop
-/// parity: notify:OnComponentRemovedSystemEnvironment
-/// parity: notify:OnSystemDynamicBountyStateChanged
-/// parity: notify:OnEssReserveBankInventoryFull
-/// parity: notify:OnSecurityModified
-/// parity: notify:OnCaptureChanged
-/// parity: notify:OnLocalHackProgressUpdated
-#[tokio::test]
-async fn batch10_tales_system_effects_ess_fw_and_security() {
-    let ctx = ServerContext::new();
-    let mut sess = setup_pilot_in_space(&ctx, PILOT_A, 700_501, true).await;
+    // Negative: advancing wave 1 -> 2 of a 2-wave anomaly does NOT complete or spawn an expedition
+    let _ = rpc(&ctx, &mut sess, "scanSvc", "GetCombatAnomalyInstances", &[]).await.unwrap();
+    let site_id = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        let sites = reg.sites_by_system.get_mut(&SYS_JITA).unwrap();
+        let s = sites.iter_mut().find(|s| s.site_category == "CombatAnomaly").unwrap();
+        s.current_wave = 1;
+        s.total_waves = 2;
+        s.cleared = false;
+        s.active_npc_ball_ids.clear();
+        s.site_id.clone()
+    });
+    rpc(&ctx, &mut sess, "keeper", "EnterNextDungeonRoom", &[PyRep::String(site_id.clone())]).await.unwrap();
+    let wave1_obs = drain_all(&ctx, &mut obs_sess, PILOT_B);
+    assert!(!has_notif(&wave1_obs, "OnCosmicSignatureAdded"));
+    assert!(!has_notif(&wave1_obs, "OnDungeonInstanceAdded"));
 
-    // 1. Tales & Influence
-    let _ = rpc(&ctx, &mut sess, "taleMgr", "GetGlobalWorldEventTales", &[]).await.unwrap();
-    let tale_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&tale_notifs, "OnTaleData").len(), 2);
-    assert_eq!(find_notif(&tale_notifs, "OnInfluenceUpdate").len(), 2);
-    assert_eq!(find_notif(&tale_notifs, "OnTaleRemove").len(), 3);
-
-    // 2. Metaliminal Storms / System Effects
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        eve_server::services::pve_metaliminal_storms::init_roaming_storms(&ctx, reg);
-        if let Some(s) = reg.roaming_storms.first_mut() {
-            s.strong_core_systems.push(SYS_JITA);
+    // Positive: find deterministic RNG seed that rolls <= 0.20 escalation on final wave completion
+    let mut esc_seed = 0_u64;
+    for candidate in 1..200_u64 {
+        let rng = eve_server::rng::MechanicRng::seeded(candidate);
+        if rng.roll(0.20) {
+            esc_seed = candidate;
+            break;
+        }
+    }
+    ctx.set_mechanic_rng_seed(Some(esc_seed));
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        if let Some(s) = reg.sites_by_system.get_mut(&SYS_JITA).and_then(|l| l.iter_mut().find(|x| x.site_id == site_id)) {
+            s.active_npc_ball_ids.clear();
         }
     });
-    eve_server::services::pve_metaliminal_storms::sync_metaliminal_storm_effects_and_sites(&ctx);
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        for s in &mut reg.roaming_storms {
-            s.strong_core_systems.clear();
-            s.weak_periphery_systems.clear();
+    let clear_rep = rpc(&ctx, &mut sess, "keeper", "EnterNextDungeonRoom", &[PyRep::String(site_id)])
+        .await
+        .unwrap();
+    let inst_id = clear_rep.dict_get("escalationInstanceID").and_then(|v| v.as_i64()).expect("escalationInstanceID");
+
+    let add_obs = drain_all(&ctx, &mut obs_sess, PILOT_B);
+    let sig_args = find_notif(&add_obs, "OnCosmicSignatureAdded");
+    assert_eq!(sig_args.len(), 1);
+    let sig_id = sig_args[0].as_str().expect("signatureID string").to_string();
+    assert_eq!(sig_id.len(), 7);
+    assert_eq!(sig_id.as_bytes()[3], b'-');
+
+    let di_add = find_notif(&add_obs, "OnDungeonInstanceAdded");
+    assert_eq!(di_add.len(), 2);
+    assert_eq!(di_add[0], PyRep::Integer(i64::from(dest_sys)));
+    assert_eq!(di_add[1].dict_get("signatureID").and_then(|v| v.as_str()), Some(sig_id.as_str()));
+    let exp_did = di_add[1].dict_get("dungeonID").and_then(|v| v.as_i64()).expect("expedition dungeonID");
+    assert!(exp_did > 0);
+    assert!(di_add[1].dict_get("scanStrengthValue").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+
+    // Move Pilot A to dest_sys to run Step 1 of the expedition
+    let _ = ctx.db.set_character_solar_system(PILOT_A, dest_sys, &ctx.sde);
+    sess.solar_system_id = Some(dest_sys);
+    ctx.sync_session(&mut sess);
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    let _ = drain_all(&ctx, &mut obs_sess, PILOT_B);
+
+    // Negative: non-existent expedition site fails and emits zero OnDungeonInstanceRemoved
+    assert!(
+        rpc(&ctx, &mut sess, "keeper", "EnterNextDungeonRoom", &[PyRep::String("EXP-999999-S1".into())])
+            .await
+            .is_err()
+    );
+    assert!(!has_notif(&drain_all(&ctx, &mut obs_sess, PILOT_B), "OnDungeonInstanceRemoved"));
+
+    // Positive: clearing final wave of EXP-{inst_id}-1 advances expedition and emits OnDungeonInstanceRemoved
+    let exp_site_id = format!("EXP-{inst_id}-1");
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        if let Some(s) = reg.sites_by_system.get_mut(&dest_sys).and_then(|l| l.iter_mut().find(|x| x.site_id == exp_site_id)) {
+            s.current_wave = s.total_waves;
+            s.active_npc_ball_ids.clear();
         }
     });
-    eve_server::services::pve_metaliminal_storms::sync_metaliminal_storm_effects_and_sites(&ctx);
-    let storm_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&storm_notifs, "OnSystemEffectStarted").len(), 1);
-    assert_eq!(find_notif(&storm_notifs, "OnSystemWideEffectStop").len(), 3);
-    assert_eq!(find_notif(&storm_notifs, "OnComponentRemovedSystemEnvironment").len(), 1);
-
-    // 3. Dynamic Bounty, ESS, Security, FW Capture, Hacking
-    let _ = rpc(&ctx, &mut sess, "dynamicBountyMgr", "GetOutputForClientSolarSystem", &[]).await;
-    let _ = rpc(&ctx, &mut sess, "essMgr", "AttemptLinkToReserveBank", &[]).await;
-    eve_server::services::security_mgr::sync_corruption_security_status_change(&ctx, SYS_JITA, 4, 5);
-    let _ = eve_server::services::fw_gameplay::activate_fw_complex_gate_in_space(
-        &ctx,
-        PILOT_A,
-        700_501,
-        SYS_JITA,
-        900_501,
-    )
-    .await;
-    let _ = rpc(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(900_502)]).await;
-
-    let misc_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&misc_notifs, "OnSystemDynamicBountyStateChanged").len(), 2);
-    assert_eq!(find_notif(&misc_notifs, "OnEssReserveBankInventoryFull").len(), 0);
-    assert_eq!(find_notif(&misc_notifs, "OnSecurityModified").len(), 3);
-    assert_eq!(find_notif(&misc_notifs, "OnCaptureChanged").len(), 6);
-    assert_eq!(find_notif(&misc_notifs, "OnLocalHackProgressUpdated").len(), 2);
+    rpc(&ctx, &mut sess, "keeper", "EnterNextDungeonRoom", &[PyRep::String(exp_site_id)])
+        .await
+        .unwrap();
+    let rem_obs = drain_all(&ctx, &mut obs_sess, PILOT_B);
+    let rem_args = find_notif(&rem_obs, "OnDungeonInstanceRemoved");
+    assert_eq!(
+        rem_args,
+        &[
+            PyRep::Integer(i64::from(dest_sys)),
+            PyRep::Integer(inst_id),
+            PyRep::String(sig_id),
+            PyRep::Integer(exp_did),
+        ]
+    );
 }

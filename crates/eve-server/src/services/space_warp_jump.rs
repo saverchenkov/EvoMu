@@ -795,14 +795,6 @@ async fn handle_cmd_stargate_jump(
             code: "SystemTransitionFailed".into(),
             message: e.to_string(),
         })?;
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    crate::services::notify_emitters_batch10::emit_sim_clock_rebase(
-        ctx,
-        char_id,
-        now_ft - 10_000_000,
-        now_ft,
-    );
-    crate::services::notify_emitters_batch10::emit_space_white_out_start(ctx, char_id, dest_sys_id);
 
     // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
     // Applied only after system transition succeeds; rolls back transition on toll failure.

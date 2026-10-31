@@ -751,6 +751,7 @@ async fn handle_request_scans(
                 let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
                 let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
                 let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(1000)]);
+                crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, pid);
             }
         }
     }
@@ -1046,9 +1047,6 @@ async fn handle_request_scans(
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(ctx.now_blueos_filetime_ticks()), PyRep::Integer(4000), PyRep::List(scan_probe_ids.clone())]);
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows.clone()), PyRep::List(Vec::new())]);
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
-    for p in &active_probes {
-        crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, p.probe_id);
-    }
 
     Some(Ok(PyRep::List(rows)))
 }

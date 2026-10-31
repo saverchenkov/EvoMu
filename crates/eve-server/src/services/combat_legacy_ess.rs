@@ -13,7 +13,7 @@ pub fn step_dynamic_bounty_multiplier(
     ratting_isk_destroyed: f64,
     pvp_isk_destroyed: f64,
 ) -> f64 {
-    let rate = ctx.db.with_mut_snapshot(|snap| {
+    let (old_rate, rate) = ctx.db.with_mut_snapshot(|snap| {
         let st = snap
             .system_states
             .entry(solar_system_id)
@@ -40,6 +40,7 @@ pub fn step_dynamic_bounty_multiplier(
                 last_fw_capture_tick: 0,
                 last_sov_claim_tick: 0,
             });
+        let prev = st.dbs_multiplier;
         let rat_decay = (ratting_isk_destroyed.max(0.0) / 50_000_000.0) * 0.10;
         let pvp_boost = (pvp_isk_destroyed.max(0.0) / 25_000_000.0) * 0.15;
         let eq_drift = if ratting_isk_destroyed == 0.0 && pvp_isk_destroyed == 0.0 {
@@ -48,13 +49,15 @@ pub fn step_dynamic_bounty_multiplier(
             0.0
         };
         st.dbs_multiplier = (st.dbs_multiplier - rat_decay + pvp_boost + eq_drift).clamp(0.50, 2.00);
-        st.dbs_multiplier
+        (prev, st.dbs_multiplier)
     });
-    crate::services::notify_emitters_batch6::emit_system_dynamic_bounty_state_changed(
-        ctx,
-        solar_system_id as i64,
-        rate,
-    );
+    if (rate - old_rate).abs() > 1e-9 {
+        crate::services::notify_emitters_batch6::emit_system_dynamic_bounty_state_changed(
+            ctx,
+            solar_system_id as i64,
+            rate,
+        );
+    }
     rate
 }
 
@@ -1170,16 +1173,21 @@ pub async fn handle_legacy_and_ess(
             });
 
             match res {
-                Ok((kill_id, wreck_id)) => Some(Ok(PyRep::keyval([
-                    ("targetID", PyRep::Integer(target_id)),
-                    ("appliedDamage", PyRep::Real(applied_dmg)),
-                    ("isWreckingShot", PyRep::Bool(is_wrecking)),
-                    ("destroyed", PyRep::Bool(true)),
-                    ("bountyPayoutISK", PyRep::Real(pilot_isk)),
-                    ("killID", PyRep::Integer(kill_id)),
-                    ("wreckItemID", PyRep::Integer(wreck_id)),
-                    ("wreckTypeID", PyRep::Integer(26557)),
-                ]))),
+                Ok((kill_id, wreck_id)) => {
+                    if is_kspace_nullsec && npc_base_bounty > 0.0 {
+                        step_dynamic_bounty_multiplier(ctx, sys_id, npc_base_bounty, 0.0);
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("targetID", PyRep::Integer(target_id)),
+                        ("appliedDamage", PyRep::Real(applied_dmg)),
+                        ("isWreckingShot", PyRep::Bool(is_wrecking)),
+                        ("destroyed", PyRep::Bool(true)),
+                        ("bountyPayoutISK", PyRep::Real(pilot_isk)),
+                        ("killID", PyRep::Integer(kill_id)),
+                        ("wreckItemID", PyRep::Integer(wreck_id)),
+                        ("wreckTypeID", PyRep::Integer(26557)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

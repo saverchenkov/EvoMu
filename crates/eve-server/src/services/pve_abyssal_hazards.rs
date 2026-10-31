@@ -775,18 +775,6 @@ pub async fn evaluate_abyssal_spatial_clouds_for_ship(
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let (_, ship_ball) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten()?;
-    if let Some(owner_id) = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id)) {
-        crate::services::notify_emitters_batch10::emit_deathzone_state_update(
-            ctx,
-            owner_id,
-            sys_id,
-            ship_id,
-            eve_proto::PyRep::keyval([(
-                "endTime",
-                eve_proto::PyRep::Integer(ctx.now_blueos_filetime_ticks() + 600_000_000),
-            )]),
-        );
-    }
     let is_excluded_ship = ctx.db.with_snapshot(|snap| {
         let pvp = crate::services::pvp_filament_mgr::load_pvp_store(snap);
         let in_pvp = pvp.active_matches.values().any(|m| {

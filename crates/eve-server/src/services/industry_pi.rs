@@ -756,6 +756,17 @@ pub(crate) fn emit_industry_job(
         "ownerID",
         vec![PyRep::Integer(eff_owner)],
     );
+    if status == 1 {
+        let fac_sys = ctx.db.with_snapshot(|snap| {
+            snap.industry_jobs.get(&job_id).and_then(|j| {
+                resolve_facility_modifiers_and_system(ctx, snap, j.facility_id)
+                    .map(|(_, _, sys, _, _, _, _)| sys)
+            })
+        });
+        if let Some(sys_id) = fac_sys {
+            crate::services::notify_emitters_batch10::emit_system_activity_updated(ctx, sys_id);
+        }
+    }
 }
 
 pub(crate) fn handle_industry_job_queries(

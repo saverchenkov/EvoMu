@@ -639,7 +639,8 @@ fn execute_due_abyssal_collapse_sync(
 
 /// Runs all time-driven SP-6 / SP-7 lifecycle progressions when server time advances from `prev_unix`
 /// by `secs` seconds (or when `tick_background_cluster` runs with `secs == 0`).
-pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
+pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
+    crate::services::notify_emitters_batch10::emit_sim_clock_rebase_if_advanced(ctx, prev_unix, secs);
     let now_unix = ctx.now_unix();
 
     // 0. Sweep expired market orders and check season transitions across cluster ticks.
@@ -1304,6 +1305,9 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
+        }
+        if (32_000_000..=32_999_999).contains(&sys_id) || sys_id == 30_100_000 {
+            crate::services::notify_emitters_batch10::sync_deathzone_state_notifications(ctx, sys_id);
         }
         let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::step_wreck_and_jetcan_decay(

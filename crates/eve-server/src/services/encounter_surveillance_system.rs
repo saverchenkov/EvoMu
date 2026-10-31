@@ -235,9 +235,6 @@ pub async fn handle_ess_link(
             message: "Session has no active solar system".into(),
         });
     };
-    if method == "AttemptLinkToReserveBank" {
-        crate::services::notify_emitters_batch10::emit_ess_reserve_bank_inventory_full(ctx, sys_id);
-    }
     let sys_sec = ctx
         .sde
         .solar_systems
@@ -471,6 +468,32 @@ pub async fn handle_ess_link(
                     message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
                 });
             }
+            let ship_cap = snap
+                .items
+                .get(&ship_id)
+                .and_then(|sh| ctx.sde.types.get(&sh.type_id))
+                .and_then(|t| t.default_attributes.get(&38).copied())
+                .unwrap_or(100.0);
+            let used_cargo: f64 = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                .map(|i| {
+                    let vol = ctx
+                        .sde
+                        .types
+                        .get(&i.type_id)
+                        .map(|t| t.volume)
+                        .unwrap_or(0.01);
+                    vol * (i.quantity.max(1) as f64)
+                })
+                .sum();
+            if ship_cap > 0.0 && used_cargo + 0.01 > ship_cap {
+                return Err(BridgeRpcError {
+                    code: "EssReserveBankInventoryFull".into(),
+                    message: format!("Active ship {ship_id} cargo hold is full"),
+                });
+            }
             pulse_st.reserve_linked_character_id = None;
             pulse_st.reserve_link_started_tick = None;
             if st.ess_linked_character_id == Some(char_id) {
@@ -503,6 +526,12 @@ pub async fn handle_ess_link(
             ch.balance = ch.balance.checked_add(bank).unwrap_or(ch.balance);
         }
         Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock))
+    }).inspect_err(|e| {
+        if e.code == "EssReserveBankInventoryFull" {
+            crate::services::notify_emitters_batch10::emit_ess_reserve_bank_inventory_full(
+                ctx, char_id,
+            );
+        }
     })?;
 
     if let Some(until) = unlocked_until_new {

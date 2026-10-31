@@ -288,14 +288,6 @@ pub fn handle(
         }
 
         ("map", "GetHistory") => {
-            if let Some(char_id) = session.character_id {
-                crate::services::notify_emitters_batch10::emit_server_map_data_push(
-                    ctx,
-                    char_id,
-                    vec![(1.0, 0.2, 0.2)],
-                    vec![(30_000_142, 0.0, 0.0, 0.0, (1.0, 0.2, 0.2))],
-                );
-            }
             let stat_type = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let desc = DBRowDescriptor::new([
                 ("solarSystemID", DbColumnType::I4),
@@ -334,6 +326,11 @@ pub fn handle(
                     })
                     .collect()
             });
+            if stat_type == 1 {
+                if let Some(cid) = session.character_id.filter(|&id| id > 0) {
+                    let _ = crate::services::notify_emitters_batch10::emit_server_map_data_push_from_killmails(ctx, cid);
+                }
+            }
             Some(Ok(desc.build_crowset(rows)))
         }
 
@@ -424,9 +421,6 @@ pub fn handle(
         }
 
         ("map", "GetRecentSovActivity") => {
-            if let Some(char_id) = session.character_id {
-                crate::services::notify_emitters_batch10::emit_system_activity_updated(ctx, char_id);
-            }
             let list = ctx.db.with_snapshot(|snap| {
                 snap.system_states
                     .iter()

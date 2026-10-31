@@ -42,17 +42,30 @@ pub async fn handle(
         ("tourneyMgr", "AbortCountdown") => {
             let caller_cid = require_cid!(session);
             let target_match_id = extract_id(args, 0);
-            ctx.db.try_with_mut_snapshot(|snap| {
+            let mut notify_info = None;
+            let r = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_match_id)?;
                 check_referee_auth(session, caller_cid, m)?;
+                let changed = m.state == TourneyMatchState::Countdown;
                 m.countdown_active = false;
-                if m.state == TourneyMatchState::Countdown {
+                if changed {
                     m.state = TourneyMatchState::Setup;
+                    let r_ids: Vec<i64> = m.red_players.iter().map(|p| p.character_id).collect();
+                    let b_ids: Vec<i64> = m.blue_players.iter().map(|p| p.character_id).collect();
+                    notify_info = Some((m.red_score, m.blue_score, 0_i64, r_ids, b_ids, m.referees.clone()));
                 }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
-            })
+            });
+            if r.is_ok() {
+                if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
+                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                        ctx, rs, bs, st, &r_ids, &b_ids, &refs,
+                    );
+                }
+            }
+            r
         }
         ("tourneyMgr", "AddPlayer") => {
             let caller_cid = require_cid!(session);
@@ -409,14 +422,21 @@ pub async fn handle(
             let target_mid = extract_id(args, 0);
             let mut beacons_to_remove = Vec::new();
             let mut match_sys = solarsystem_id;
+            let mut notify_info = None;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
+                let changed = m.state != TourneyMatchState::Completed;
                 m.state = TourneyMatchState::Completed;
                 m.countdown_active = false;
                 match_sys = m.solar_system_id;
                 beacons_to_remove = std::mem::take(&mut m.beacon_ids);
+                if changed {
+                    let r_ids: Vec<i64> = m.red_players.iter().map(|p| p.character_id).collect();
+                    let b_ids: Vec<i64> = m.blue_players.iter().map(|p| p.character_id).collect();
+                    notify_info = Some((m.red_score, m.blue_score, 4_i64, r_ids, b_ids, m.referees.clone()));
+                }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
@@ -425,9 +445,11 @@ pub async fn handle(
                     let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
                     for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
                 }
-                crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
-                    ctx, caller_cid, 100, 50, 1, 2,
-                );
+                if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
+                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                        ctx, rs, bs, st, &r_ids, &b_ids, &refs,
+                    );
+                }
             }
             res
         }
@@ -578,14 +600,9 @@ pub async fn handle(
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
-            if res.is_ok() {
-                if !beacons_to_remove.is_empty() {
-                    let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                    for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
-                }
-                crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
-                    ctx, caller_cid, 100, 50, 1, 2,
-                );
+            if res.is_ok() && !beacons_to_remove.is_empty() {
+                let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
+                for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
             }
             res
         }
@@ -716,16 +733,31 @@ pub async fn handle(
         ("tourneyMgr", "StartCountdown") => {
             let caller_cid = require_cid!(session);
             let target_mid = extract_id(args, 0);
-            ctx.db.try_with_mut_snapshot(|snap| {
+            let mut notify_info = None;
+            let r = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
+                let changed = m.state != TourneyMatchState::Countdown;
                 m.countdown_active = true;
                 m.countdown_start_unix = now_unix;
                 m.state = TourneyMatchState::Countdown;
+                if changed {
+                    let r_ids: Vec<i64> = m.red_players.iter().map(|p| p.character_id).collect();
+                    let b_ids: Vec<i64> = m.blue_players.iter().map(|p| p.character_id).collect();
+                    notify_info = Some((m.red_score, m.blue_score, 2_i64, r_ids, b_ids, m.referees.clone()));
+                }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
-            })
+            });
+            if r.is_ok() {
+                if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
+                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                        ctx, rs, bs, st, &r_ids, &b_ids, &refs,
+                    );
+                }
+            }
+            r
         }
         ("tourneyMgr", "TeleportPlayers") => {
             let caller_cid = require_cid!(session);

@@ -1093,7 +1093,8 @@ pub fn emit_local_hack_progress_updated(
     );
 }
 
-/// Emits `OnMatchFound()` and `OnAddExpiryDurationForAbyssalPvpContent(endTimeFt)` to matched pilots.
+/// Emits `OnMatchFound()`, `OnProvingGroundsMatchFound()`, and
+/// `OnAddExpiryDurationForAbyssalPvpContent(endTimeFt)` to matched pilots.
 pub fn emit_pvp_match_found_and_expiry(ctx: &ServerContext, char_id: i64, expires_at_unix: u64) {
     let end_ft = (expires_at_unix as i64)
         .saturating_mul(10_000_000)
@@ -1104,6 +1105,7 @@ pub fn emit_pvp_match_found_and_expiry(ctx: &ServerContext, char_id: i64, expire
         "charid",
         vec![],
     );
+    crate::services::notify_emitters_batch10::emit_proving_grounds_match_found(ctx, char_id);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnAddExpiryDurationForAbyssalPvpContent",

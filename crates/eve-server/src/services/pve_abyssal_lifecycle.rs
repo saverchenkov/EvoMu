@@ -127,6 +127,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     });
 
     let eff_pocket_sys = pocket_cleanup.as_ref().map(|c| c.0).unwrap_or(abyssal_sys);
+    crate::services::notify_emitters_batch10::emit_space_white_out_start(ctx, char_id, eff_pocket_sys);
     let handle = ctx.systems.get_or_spawn(eff_pocket_sys);
     handle.try_remove_ball(ship_id);
     if let Some((_, origin_sys, any_other_alive, ref trace_ids, ref markers, ref caches, ref env_balls, ref npcs)) =
@@ -569,6 +570,11 @@ pub fn evacuate_void_space_session_sync(
                 ]),
             )]),
         ],
+    );
+    crate::services::notify_emitters_batch10::emit_space_white_out_start(
+        ctx,
+        char_id,
+        VOID_SPACE_SYSTEM_ID,
     );
     // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
     ctx.notify(

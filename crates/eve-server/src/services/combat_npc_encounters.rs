@@ -488,6 +488,14 @@ pub fn flush_npc_bounty_tick(
             });
         }
     });
+    if is_kspace_nullsec && raw_bounty > 0.0 {
+        let _ = crate::services::combat_crimewatch::step_dynamic_bounty_multiplier(
+            ctx,
+            solar_system_id,
+            raw_bounty,
+            0.0,
+        );
+    }
 
     (pilot_isk, main_ess, reserve_ess)
 }

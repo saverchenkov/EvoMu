@@ -1124,7 +1124,7 @@ impl ServerContext {
                 || existing.projected_ewar != active_projected;
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
-            crate::services::combat_crimewatch::with_combat_runtime(self, |rt| {
+            crate::services::combat_crimewatch::with_combat_ephemeral(self, |rt| {
                 for d in rt.active_drones_in_space.values() {
                     if d.parent_ship_id == ship_id && !d.is_abandoned {
                         if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {

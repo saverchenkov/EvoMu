@@ -47,6 +47,11 @@ pub enum DungeonTriggerAction {
     UnlockGate,
     SpawnNpcGroup(u8),
     CompleteDungeon,
+    CameraInterest { obj_idx: usize, speed_milli: i64, duration_ms: i64 },
+    AmbientSound { sound_id: String, obj_idx: usize },
+    Audio { audio_url: String },
+    Message { message_type: String, message_id: i64 },
+    Music { music_trigger_id: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1028,6 +1033,7 @@ async fn apply_dungeon_trigger_actions_core(
     let mut fired_count = 0usize;
     let mut groups_to_spawn = Vec::new();
     let mut complete_now = false;
+    let mut notify_batch: Option<(i64, Vec<i64>, Vec<DungeonTriggerAction>)> = None;
 
     with_dungeon_runtime_store_db(db, |store| {
         let Some(inst) = store.instances.get_mut(&instance_id) else {
@@ -1039,22 +1045,29 @@ async fn apply_dungeon_trigger_actions_core(
         let Some(room) = inst.rooms.get_mut(room_vec_idx) else {
             return;
         };
+        let obj_ids: Vec<i64> = room.objects.iter().map(|o| o.ball_id).collect();
+        let mut n_acts = Vec::new();
         for act in actions {
             fired_count += 1;
             match act {
-                DungeonTriggerAction::UnlockGate => {
-                    room.gate_locked = false;
-                }
-                DungeonTriggerAction::SpawnNpcGroup(grp_id) => {
-                    groups_to_spawn.push(grp_id);
-                }
+                DungeonTriggerAction::UnlockGate => room.gate_locked = false,
+                DungeonTriggerAction::SpawnNpcGroup(grp_id) => groups_to_spawn.push(grp_id),
                 DungeonTriggerAction::CompleteDungeon => {
                     room.cleared = true;
                     complete_now = true;
                 }
+                other => n_acts.push(other),
             }
         }
+        if !n_acts.is_empty() {
+            notify_batch = Some((i64::from(inst.dungeon_id), obj_ids, n_acts));
+        }
     });
+    if let Some((did, obj_ids, n_acts)) = notify_batch {
+        crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(
+            db, pending_notifications, notify_tx, char_id, did, &obj_ids, n_acts,
+        );
+    }
 
     if !groups_to_spawn.is_empty() {
         let spawn_list = db.with_mut_snapshot(|snap| {

@@ -761,7 +761,7 @@ pub fn handle(
                     .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
             });
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let (op_id, widgets, history) = ctx.db.with_mut_snapshot(|snap| {
                 if let (Some(ch), Some(sys)) = (snap.characters.get_mut(&char_id), char_sys) {
                     ch.solar_system_id = sys;
                 }
@@ -772,8 +772,15 @@ pub fn handle(
                 if let Some(sys) = char_sys {
                     rec.active_operation_system_id = Some(sys);
                 }
+                let oid = rec.active_operation_id.unwrap_or(1);
+                let w: Vec<(i64, i64, i64)> = rec.completed_tasks.iter().copied().map(|t| (t, t, 2)).collect();
+                let h: Vec<i64> = rec.completed_operations.iter().copied().collect();
                 save_store(snap, &store, now);
+                (oid, w, h)
             });
+            crate::services::notify_emitters_batch10::emit_progression_room_joined(
+                ctx, char_id, site_id, op_id, widgets, history, site_id * 100 + 1,
+            );
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -804,7 +811,6 @@ pub fn handle(
                 });
 
             let now = ctx.now_unix();
-            crate::services::notify_emitters_batch10::handle_operation_progression_event(ctx, char_id, &event_name, amount);
 
             if event_name == "set_career_path" {
                 let path_id = extra_data
@@ -868,6 +874,9 @@ pub fn handle(
                         args.get(2).and_then(|a| a.as_i64()),
                     ),
                 };
+                if state_id <= 0 {
+                    return Some(Err(BridgeRpcError::user_error("InvalidTutorialState")));
+                }
                 ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
@@ -893,13 +902,18 @@ pub fn handle(
                     npe.current_node_id = 1;
                 });
                 crate::services::notify_emitters_batch8_ops::on_tutorial_started(ctx, char_id, state_id);
+                crate::services::notify_emitters_batch10::emit_start_conversation(
+                    ctx, char_id, 473_000 + state_id, true,
+                );
                 return Some(Ok(PyRep::Bool(true)));
             }
 
             if event_name == "skip_tutorial" {
-                ctx.db.with_mut_snapshot(|snap| {
+                let had_active = ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
+                    let had_site = rec.active_site_id.take().is_some();
+                    let active = rec.tutorial_finished == Some(false) || had_site;
                     rec.tutorial_skipped = true;
                     rec.tutorial_finished = Some(true);
                     push_operation_event(rec, event_name, 0);
@@ -916,8 +930,12 @@ pub fn handle(
                     });
                     npe.completed = true;
                     npe.current_node_id = 4;
+                    active
                 });
                 crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
+                if had_active {
+                    crate::services::notify_emitters_batch10::emit_progression_left(ctx, char_id);
+                }
                 return Some(Ok(PyRep::Bool(true)));
             }
 
@@ -1107,6 +1125,9 @@ pub fn handle(
                         PyRep::Integer(op_id),
                         PyRep::Integer(tid),
                     ],
+                );
+                crate::services::notify_emitters_batch10::emit_progression_task_and_objective_updates(
+                    ctx, char_id, op_id + 1, tid,
                 );
                 Some(Ok(PyRep::Bool(true)))
             } else if !args.is_empty() || !kwargs.is_empty() {

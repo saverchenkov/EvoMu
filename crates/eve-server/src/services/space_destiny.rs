@@ -412,9 +412,6 @@ pub async fn handle(
             Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args, kwargs).await)
         }
         ("beyonce", "UpdateStateRequest") => {
-            if let Some(sys_id) = session.solar_system_id {
-                crate::services::notify_emitters_batch10::emit_destiny_updates(ctx, sys_id, vec![]);
-            }
             Some(handle_update_state_request(ctx, session, bound_entry).await)
         }
         ("beyonce", "AdminGetBubbleID") => {
@@ -915,11 +912,15 @@ pub(crate) async fn handle_update_state_request(
     handle
         .push_set_state(ship_id)
         .await
-        .map(|_tick| PyRep::None)
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
-        })
+        })?;
+    if let Ok((_, _, PyRep::List(updates))) = handle.get_set_state(ship_id).await {
+        crate::services::notify_emitters_batch3_space::emit_destiny_updates(ctx, char_id, updates);
+    }
+    crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(ctx, sys_id);
+    Ok(PyRep::None)
 }
 
 async fn handle_admin_get_bubble_id(
