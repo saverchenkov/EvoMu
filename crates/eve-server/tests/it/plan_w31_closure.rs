@@ -1,6 +1,5 @@
-//! Live integration tests closing 12 open `plan:` rows (`C-5`, `MN-01`, `MN-02`, `MN-17`,
-//! `MN-18`, `SO-5`, `D-6`, `T-8`, `T-9`, `Q-3`, `Q-4`, `Q-5`) plus `feat:invariant.single-source-of-truth`
-//! and `feat:invariant.atomic-rollback-all-stores`.
+//! Smoke integration tests for mining SDE, asteroid belt balls, NPC mining convoys,
+//! agent/scan RPCs, SQLite persistence, and Quasar gateway endpoints.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -89,7 +88,6 @@ async fn quasar_rpc(
 
 #[tokio::test]
 async fn test_plan_c5_mn01_mn02_mining_sde_and_belt_balls() {
-    // parity: plan:C-5, plan:MN-01
     let ctx = ServerContext::new();
     let sde = &ctx.sde;
 
@@ -223,7 +221,6 @@ async fn test_plan_so5_exploration_anomalies_probes_dscan_and_dungeons() {
 
 #[tokio::test]
 async fn test_plan_d6_single_source_of_truth_and_sqlite_restart() {
-    // parity: plan:D-6, feat:invariant.single-source-of-truth
     let db_path = std::env::temp_dir().join(format!("plan_w31_d6_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
 
@@ -298,7 +295,6 @@ async fn test_plan_d6_single_source_of_truth_and_sqlite_restart() {
 
 #[tokio::test]
 async fn test_plan_t8_t9_atomic_rollback_and_crash_restart_invariants() {
-    // parity: plan:T-8, plan:T-9, feat:invariant.atomic-rollback-all-stores
     let db_path = std::env::temp_dir().join(format!("plan_w31_t8_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
 
@@ -355,7 +351,6 @@ async fn test_plan_t8_t9_atomic_rollback_and_crash_restart_invariants() {
 
 #[tokio::test]
 async fn test_plan_q3_q4_q5_quasar_gateway_domains() {
-    // parity: plan:Q-3, plan:Q-4, plan:Q-5
     let ctx = ServerContext::new();
 
     // Negative/auth check: unauthenticated Quasar request must return STATUS_UNAUTHORIZED
@@ -409,7 +404,6 @@ async fn test_plan_q3_q4_q5_quasar_gateway_domains() {
 
 #[tokio::test]
 async fn test_plan_q6_q7_q8_t10_quasar_and_client_oracle() {
-    // parity: plan:Q-6, plan:Q-7, plan:Q-8, plan:T-10
     let ctx = ServerContext::new();
     let mut authed = authed_demo_session(&ctx, 7601).await;
 

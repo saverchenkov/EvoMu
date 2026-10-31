@@ -948,23 +948,16 @@ pub async fn handle(
                 }));
             };
             let structs_list = ctx.db.with_snapshot(|snap| {
-                let aid = snap
-                    .system_states
-                    .get(&sys_id)
-                    .and_then(|s| s.sov_alliance_id);
                 let is_sov_struct = |type_id: u32| -> bool {
-                    type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
-                        || matches!(type_id, 32226 | 32458 | 81080)
-                        || ctx
-                            .sde
-                            .types
-                            .get(&type_id)
-                            .and_then(|t| ctx.sde.groups.get(&t.group_id))
-                            .is_some_and(|g| {
-                                g.name == "Sovereignty Hub"
-                                    || g.name == "Territorial Claim Unit"
-                                    || g.name == "Infrastructure Hub"
-                            })
+                    ctx.sde
+                        .types
+                        .get(&type_id)
+                        .and_then(|t| ctx.sde.groups.get(&t.group_id))
+                        .is_some_and(|g| {
+                            g.name == "Sovereignty Hub"
+                                || g.name == "Territorial Claim Unit"
+                                || g.name == "Infrastructure Hub"
+                        })
                 };
                 snap.structures
                     .values()
@@ -982,8 +975,7 @@ pub async fn handle(
                         let struct_aid = snap
                             .corporations
                             .get(&s.owner_corp_id)
-                            .and_then(|c| c.alliance_id)
-                            .or(aid);
+                            .and_then(|c| c.alliance_id);
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),
