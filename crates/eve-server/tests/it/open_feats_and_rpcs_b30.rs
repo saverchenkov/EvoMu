@@ -442,7 +442,13 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     rpc_kw(&ctx, &mut s1, "planetOrbitalRegistryBroker", "UpdateSettings", &[PyRep::Integer(JITA_PLANET_ID)], &[("taxRateValues", PyRep::keyval([("corporation", PyRep::Real(0.075))]))]).await.unwrap();
 
     let rnd = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.station_id.is_some()).min_by_key(|a| a.agent_id).cloned().unwrap();
-    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; } });
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; }
+        let sk = s.skills.entry(P1).or_default();
+        for sid in [3402_u32, 3392_u32, 11448_u32] {
+            sk.insert(sid, eve_db::TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+    });
     s1.solar_system_id = rnd.solar_system_id;
     s1.station_id = rnd.station_id;
     rpc(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(12), PyRep::Integer(rnd.agent_id), PyRep::Integer(11448)]).await.unwrap();

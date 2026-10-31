@@ -258,6 +258,9 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     let ctx2 = open_ctx_at(&db_path, base_u + 100);
     common::seed_test_lp_store_offers(&ctx2);
     let mut s1_re = login_select(&ctx2, 9402, "demo", "demo-secret", P1).await;
+    let cn_station = ctx2.sde.stations.values().find(|s| s.owner_corporation_id == 1_000_035 && eve_server::services::station_structure::npc_station_offers_service(&ctx2.sde, s.station_id, 25)).unwrap().station_id;
+    ctx2.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(cn_station); } });
+    s1_re.station_id = Some(cn_station);
     assert_eq!(rpc(&ctx2, &mut s1_re, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[]).await.unwrap(), corp_lp_before);
     assert_eq!(rpc(&ctx2, &mut s1_re, "rewardMgr", "GetRewardLPLogs", &[]).await.unwrap(), logs_before);
 
