@@ -252,6 +252,19 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
             &mut sess_a,
             "localizationServer",
             "UpdateLocalizationQAWrap",
+            &[PyRep::Bool(true)],
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "UnimplementedRPC"
+    );
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut sess_a,
+            "localizationServer",
+            "UpdateLocalizationQAWrap",
             &[PyRep::Dict(vec![(
                 PyRep::Integer(42_001),
                 PyRep::String("[QA] Warp Drive Active".into()),

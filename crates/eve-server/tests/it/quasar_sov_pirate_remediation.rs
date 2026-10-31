@@ -559,12 +559,15 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
         snap.structures.insert(1_000_000_052, structure(1_000_000_052, 98_000_002, sys_id, TYPE_ORBITAL_SKYHOOK));
     });
 
-    // Star configurations come from the SDE star celestial of the caller's system (Jita - Star).
+    // Star configurations come from all SDE star celestials, including Jita - Star (40_009_076).
     let stars = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await.payload.expect("stars").value;
-    let star = fields(&stars, 1);
-    assert_eq!(star.len(), 1);
-    assert_eq!(field(&star[0], 1).and_then(|i| varint(&i, 1)), Some(40_009_076));
-    assert_eq!(varint(&star[0], 2), Some(800), "O-class star power");
+    let all_stars = fields(&stars, 1);
+    assert_eq!(all_stars.len(), ctx.sde.all_stars().len());
+    let jita_star = all_stars
+        .iter()
+        .find(|cfg| field(cfg, 1).and_then(|i| varint(&i, 1)) == Some(40_009_076))
+        .expect("Jita - Star configuration");
+    assert_eq!(varint(jita_star, 2), Some(800), "O-class star power");
 
     // ModifyReagents: ownership + director role enforced; state mutated on success.
     let mut reag = Vec::new();
