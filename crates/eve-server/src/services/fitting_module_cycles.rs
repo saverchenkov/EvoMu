@@ -112,9 +112,6 @@ pub(crate) async fn handle_module_cycles(
                 if method == "Activate" && args.len() == 1 && raw_module_id > 0 && has_online_weapon {
                     return None;
                 }
-                if crate::services::mobile_deployables::read_deployable_state(ctx).deployables.get(&module_id).is_some_and(|d| d.group_id == crate::services::mobile_deployables::GROUP_MOBILE_MICRO_JUMP_UNIT) {
-                    return Some(crate::services::mobile_deployables::handle_activate_micro_jump_unit(ctx, session, args).await);
-                }
                 return Some(Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Module {module_id} not found on ship") }));
             };
             if let Err(e) = check_module_reloading(ctx, ship_id, module_id) {
@@ -1289,6 +1286,9 @@ pub(crate) async fn handle_module_cycles(
                 }
             });
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+            if mod_type.group_id == 330 || m.type_id == 83485 {
+                crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
             let is_cycle_gated = matches!(
                 mod_type.group_id,
                 72 | 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353

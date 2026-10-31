@@ -76,17 +76,19 @@ pub struct StructureAccessProfile {
     #[serde(default)] pub defense_blocked_characters: HashSet<i64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)] #[serde(default)]
+pub struct InFlightGuidedBombRecord { pub bomb_id: i64, pub structure_id: i64, pub structure_corp_id: i64, pub gunner_char_id: i64, pub solar_system_id: u32, pub target_id: i64, pub bomb_type_id: u32, pub remaining_flight_s: f64 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)] #[serde(default)]
 pub struct StructureExtendedState {
     pub unanchoring_until_unix: HashMap<i64, u64>, pub descriptions: HashMap<i64, String>, pub active_pilot_by_structure: HashMap<i64, i64>,
     pub pending_reinforce_schedule: HashMap<i64, (u8, u8, u64)>, pub asset_safety_wraps: HashMap<i64, AssetSafetyWrapRecord>,
     pub lifecycle: HashMap<i64, StructureLifecycleState>, pub war_hq_structures: std::collections::HashSet<i64>,
     pub jump_bridge_links: HashMap<i64, i64>, pub access_profiles: HashMap<i64, StructureAccessProfile>,
     pub profiles_by_id: HashMap<i64, StructureAccessProfile>, pub structure_profile_id: HashMap<i64, i64>, pub owner_groups: HashMap<i64, AccessGroupRecord>,
-    #[serde(default)] pub hacked_reinforce_reveals: HashMap<i64, HashSet<i64>>,
-    #[serde(default)] pub pending_profile_applications: HashMap<i64, (i64, u64)>,
-    #[serde(default)] pub previous_ship_by_structure: HashMap<i64, i64>,
+    #[serde(default)] pub hacked_reinforce_reveals: HashMap<i64, HashSet<i64>>, #[serde(default)] pub pending_profile_applications: HashMap<i64, (i64, u64)>,
+    #[serde(default)] pub previous_ship_by_structure: HashMap<i64, i64>, #[serde(default)] pub standup_module_cycle_until_unix: HashMap<i64, u64>,
+    #[serde(default)] pub gunner_immobilized_until_unix: HashMap<i64, u64>, #[serde(default)] pub in_flight_guided_bombs: HashMap<i64, InFlightGuidedBombRecord>,
 }
 
 pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {

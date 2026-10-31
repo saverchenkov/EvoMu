@@ -69,31 +69,10 @@ pub async fn handle_weapons(
             };
 
             if controlling_structure {
-                if let Some((mod_type_id, charge_tid)) = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .get(&module_id)
-                        .filter(|i| i.location_id == ship_id)
-                        .map(|item_rec| {
-                            let c_tid = snap
-                                .items
-                                .values()
-                                .find(|i| {
-                                    i.location_id == ship_id
-                                        && i.flag == item_rec.flag
-                                        && i.item_id != module_id
-                                        && i.quantity > 0
-                                })
-                                .map(|i| i.type_id);
-                            (item_rec.type_id, c_tid)
-                        })
-                }) {
-                    if let Some(mod_type) = ctx.sde.types.get(&mod_type_id) {
-                        if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
-                            ctx, &sys_handle, char_id, ship_id, sys_id, module_id, mod_type, charge_tid, target_id_opt, &attacker_ball,
-                        ).await {
-                            return Some(res);
-                        }
-                    }
+                if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
+                    ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
+                ).await {
+                    return Some(res);
                 }
             }
 
@@ -163,7 +142,7 @@ pub async fn handle_weapons(
                 }));
             };
             if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
-                ctx, &sys_handle, char_id, ship_id, sys_id, module_id, mod_type, m.charge_type_id, target_id_opt, &attacker_ball,
+                ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
             ).await {
                 return Some(res);
             }

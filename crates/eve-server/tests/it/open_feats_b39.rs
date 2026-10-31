@@ -1,7 +1,7 @@
-//! Batch 39 open `feat:` parity integration tests (`feat:structures.*`, `feat:fw.*`, `feat:ships.*`, `feat:modules.*`).
+//! Batch 39 open `feat:` parity integration tests (part 1: Mobile Cyno Beacon, Mobile Micro Jump Unit, Mobile Observatory).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord};
-use eve_destiny::{Ball, MovementMode};
+use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -11,6 +11,26 @@ use eve_server::services::mobile_deployables::{
 };
 use glam::DVec3;
 use std::collections::HashMap;
+
+fn dict_int_lookup(rep: &PyRep, key: i64) -> Option<i64> {
+    match rep {
+        PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_i64() == Some(key)).and_then(|(_, v)| v.as_i64()),
+        _ => None,
+    }
+}
+
+fn kv_get(rep: &PyRep, key: &str) -> Option<PyRep> {
+    match rep {
+        PyRep::Dict(_) => rep.dict_get(key).cloned(),
+        PyRep::KeyVal(map) => map.get(key).cloned(),
+        PyRep::Object { args, .. } => args.dict_get(key).cloned(),
+        _ => None,
+    }
+}
+
+fn mk_item(id: i64, tid: u32, owner: i64, loc: i64, flag: InventoryFlag, qty: i32, singleton: bool) -> InventoryItemRecord {
+    InventoryItemRecord { item_id: id, type_id: tid, owner_id: owner, location_id: loc, flag, quantity: qty, singleton, ..Default::default() }
+}
 
 async fn setup_pilot(
     ctx: &ServerContext,
@@ -36,43 +56,21 @@ async fn setup_pilot(
         ch.security_status = 0.0;
         ch.balance = IskCents::from_isk(500_000_000);
         s.characters.insert(char_id, ch);
-        s.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: ship_type_id,
-                owner_id: char_id,
-                location_id: sys_id as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        s.items.insert(ship_id, mk_item(ship_id, ship_type_id, char_id, sys_id as i64, InventoryFlag::None, 1, true));
         s.item_positions.insert(ship_id, [pos.x, pos.y, pos.z]);
     });
     sess.character_id = Some(char_id);
     sess.corporation_id = Some(corp_id);
     sess.solar_system_id = Some(sys_id);
     sess.ship_id = Some(ship_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-
     let ship_type = ctx.sde.types.get(&ship_type_id);
     let handle = ctx.systems.get_or_spawn(sys_id);
     let _ = handle
         .spawn_ball_with_combat(
             Ball {
-                id: ship_id,
-                type_id: ship_type_id,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 250.0,
-                inertia: 0.5,
-                mass: ship_type.map(|t| t.mass).unwrap_or(1_500_000.0),
-                radius: ship_type.map(|t| t.radius).unwrap_or(50.0),
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
+                id: ship_id, type_id: ship_type_id, position: pos, velocity: DVec3::ZERO,
+                max_velocity: 250.0, inertia: 0.5, mass: ship_type.map(|t| t.mass).unwrap_or(1_500_000.0),
+                radius: ship_type.map(|t| t.radius).unwrap_or(50.0), speed_fraction: 0.0, mode: MovementMode::Stop,
             },
             ctx.build_type_combat_state(ship_type_id),
         )
@@ -81,421 +79,181 @@ async fn setup_pilot(
 }
 
 #[tokio::test]
-async fn test_b39_fulcrum_alignment_services() {
-    // parity: feat:structures.fulcrum-alignment-services
-    eve_testkit::attest(&["feat:structures.fulcrum-alignment-services"]);
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let zarzakh_sys = 30_100_000_u32;
-    let fulcrum_id = 60_015_187_i64;
-    let char_id = 91_000_001_i64;
-    let ship_id = 101_000_001_i64;
-
-    let fulcrum_pos = ctx
-        .sde
-        .stations
-        .get(&fulcrum_id)
-        .map(|s| s.position)
-        .unwrap_or(DVec3::ZERO);
-    let mut sess = setup_pilot(
-        &ctx,
-        char_id,
-        ship_id,
-        621,
-        zarzakh_sys,
-        fulcrum_pos + DVec3::new(100.0, 0.0, 0.0),
-        1_000_009,
-    )
-    .await;
-    let beyonce_id = ctx.bind_object(&mut sess, "beyonce", zarzakh_sys as i64).unwrap();
-
-    // 1. Fulcrum refuses docking to Empire militia (500001 Caldari) & active retribution timer
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001);
-    });
-    let militia_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdDock",
-            &[PyRep::Integer(fulcrum_id), PyRep::Integer(ship_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Empire militia refused docking at Fulcrum");
-    assert_eq!(militia_err.code, "FulcrumRefusesEmpireMilitia");
-
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&char_id).unwrap().war_faction_id = None;
-    });
-    let now = ctx.now_unix();
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(char_id, now + 300);
-    });
-    let timer_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "beyonce",
-            Some(beyonce_id),
-            "CmdDock",
-            &[PyRep::Integer(fulcrum_id), PyRep::Integer(ship_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Active timer refused docking at Fulcrum");
-    assert_eq!(timer_err.code, "FulcrumRefusesTimerActive");
-
-    // 2. Neutral character docks and gets repair, fitting, market, insurance, industry
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.remove(&char_id);
-    });
-    ctx.dispatch_rpc(
-        &mut sess,
-        "beyonce",
-        Some(beyonce_id),
-        "CmdDock",
-        &[PyRep::Integer(fulcrum_id), PyRep::Integer(ship_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Neutral pilot docks at Fulcrum");
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 13)); // Repair Facilities
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 17)); // Fitting
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 7));  // Market
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 21)); // Insurance
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_id, 14)); // Industry (Factory)
-
-    // 3. Jump cloning requires pirate enlistment; corp offices require pirate-enlisted corp; Angel/Guristas LP stores
-    sess.station_id = Some(fulcrum_id);
-    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
-    let clone_err = ctx
-        .dispatch_rpc(&mut sess, "jumpCloneSvc", None, "InstallCloneInStation", &[], &kw, None)
-        .await
-        .expect_err("Neutral clone install refused");
-    assert_eq!(clone_err.code, "FulcrumCloneRequiresPirateEnlistment");
-
-    let office_err = ctx
-        .dispatch_rpc(&mut sess, "officeManager", None, "RentOffice", &[PyRep::Integer(fulcrum_id)], &kw, None)
-        .await
-        .expect_err("Neutral corp office rental refused at Fulcrum");
-    assert_eq!(office_err.code, "FulcrumOfficeRequiresPirateEnlistment");
-
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_010);
-        s.corporations.insert(
-            1_000_009,
-            eve_db::CorporationRecord {
-                corporation_id: 1_000_009,
-                name: "Fulcrum Pirates".into(),
-                ticker: "FCRP".into(),
-                ceo_id: char_id,
-                master_wallet: IskCents::from_isk(10_000_000),
-                ..Default::default()
-            },
-        );
-        s.skills.entry(char_id).or_default().insert(
-            24242,
-            TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 },
-        );
-    });
-    ctx.dispatch_rpc(&mut sess, "jumpCloneSvc", None, "InstallCloneInStation", &[], &kw, None)
-        .await
-        .expect("Pirate pilot installs clone at Fulcrum");
-    ctx.dispatch_rpc(&mut sess, "officeManager", None, "RentOffice", &[PyRep::Integer(fulcrum_id)], &kw, None)
-        .await
-        .expect("Pirate-enlisted corp rents office at Fulcrum");
-
-    ctx.db.with_mut_snapshot(|s| {
-        use eve_db::LoyaltyStoreOfferRecord;
-        s.loyalty_store_offers.insert(1_000_124, vec![LoyaltyStoreOfferRecord { offer_id: 1001, type_id: 17926, quantity: 1, lp_cost: 1000, isk_cost: 1000, ak_cost: None, required_items: Vec::new() }]);
-        s.loyalty_store_offers.insert(1_000_127, vec![LoyaltyStoreOfferRecord { offer_id: 1002, type_id: 17928, quantity: 1, lp_cost: 1000, isk_cost: 1000, ak_cost: None, required_items: Vec::new() }]);
-    });
-
-    // Angel Cartel (1000124) and Guristas (1000127) LP stores available
-    let angel_lp = ctx
-        .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_124)], &kw, None)
-        .await
-        .expect("Angel Cartel LP store offers");
-    let angel_offers = match &angel_lp {
-        PyRep::List(l) => l,
-        _ => panic!("angel offers list"),
-    };
-    assert!(!angel_offers.is_empty(), "Angel LP store offers should not be empty");
-    let guristas_lp = ctx
-        .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_127)], &kw, None)
-        .await
-        .expect("Guristas LP store offers");
-    let guristas_offers = match &guristas_lp {
-        PyRep::List(l) => l,
-        _ => panic!("guristas offers list"),
-    };
-    assert!(!guristas_offers.is_empty(), "Guristas LP store offers should not be empty");
-}
-
-#[tokio::test]
-async fn test_b39_mobile_cyno_beacon_and_micro_jump_unit() {
-    // parity: feat:structures.mobile-cyno-beacon, feat:structures.mobile-micro-jump-unit
-    eve_testkit::attest(&[
-        "feat:structures.mobile-cyno-beacon",
-        "feat:structures.mobile-micro-jump-unit",
-    ]);
+async fn test_b39_mobile_cyno_beacon_and_covert_variant() {
+    // parity: feat:structures.mobile-cyno-beacon
+    eve_testkit::attest(&["feat:structures.mobile-cyno-beacon"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let origin_sys = 30_000_014_u32; // Shamahi (2.10 LY from Asabona)
-    let dest_sys = 30_000_012_u32; // Low-sec (Asabona)
-    let c1 = 91_000_011_i64;
-    let s1 = 101_000_011_i64;
-    let c2 = 91_000_012_i64;
-    let s2 = 101_000_012_i64;
+    let dest_sys = 30_000_012_u32;   // Asabona (low-sec)
 
+    let (c1, s1) = (91_000_011_i64, 101_000_011_i64);
+    let (c_carrier, s_carrier) = (91_000_012_i64, 101_000_012_i64);
+    let (c_blops, s_blops) = (91_000_016_i64, 101_000_016_i64);
     let mut sess1 = setup_pilot(&ctx, c1, s1, 587, dest_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_009).await;
-    let mut sess2 = setup_pilot(&ctx, c2, s2, 23915, origin_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_009).await; // Chimera carrier
+    let mut sess_carrier = setup_pilot(&ctx, c_carrier, s_carrier, 23915, origin_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_009).await;
+    let mut sess_blops = setup_pilot(&ctx, c_blops, s_blops, 22428, origin_sys, DVec3::new(505_000.0, 0.0, 0.0), 1_000_009).await;
 
-    // 1. Mobile Cyno Beacon requires Anchoring III and fleet membership
-    let beacon_id = 101_000_099_i64;
+    let (beacon_id, cov_beacon_id) = (101_000_099_i64, 101_000_100_i64);
     ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(
-            beacon_id,
-            InventoryItemRecord {
-                item_id: beacon_id,
-                type_id: TYPE_MOBILE_CYNO_BEACON,
-                owner_id: c1,
-                location_id: s1,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        s.skills.entry(c1).or_default().insert(
-            SKILL_ANCHORING,
-            TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 2, skill_points: 10_000.0 },
-        );
-    });
-    let no_skill_err = ctx
-        .dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None)
-        .await
-        .expect_err("Anchoring II must be rejected");
-    assert_eq!(no_skill_err.code, "SkillMissing");
-
-    ctx.db.with_mut_snapshot(|s| {
-        s.skills.get_mut(&c1).unwrap().get_mut(&SKILL_ANCHORING).unwrap().level = 3;
-    });
-    let no_fleet_err = ctx
-        .dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None)
-        .await
-        .expect_err("Non-fleet deployment must be rejected");
-    assert_eq!(no_fleet_err.code, "MustBeInFleet");
-
-    // Put both pilots in fleet 777
-    sess1.fleet_id = Some(777);
-    sess2.fleet_id = Some(777);
-    ctx.db.with_mut_snapshot(|s| {
-        s.fleets.insert(
-            777,
-            eve_db::FleetRecord {
-                fleet_id: 777,
-                boss_id: c1,
-                members: vec![c1, c2],
-                ..Default::default()
-            },
-        );
+        s.items.insert(beacon_id, mk_item(beacon_id, TYPE_MOBILE_CYNO_BEACON, c1, s1, InventoryFlag::Cargo, 1, true));
+        s.items.insert(cov_beacon_id, mk_item(cov_beacon_id, TYPE_COVERT_MOBILE_CYNO_BEACON, c1, s1, InventoryFlag::Cargo, 1, true));
+        s.skills.entry(c1).or_default().insert(SKILL_ANCHORING, TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 2, skill_points: 10_000.0 });
+        for (cid, sid, iso_tid, iid) in [(c_carrier, s_carrier, 17888_u32, 101_000_098_i64), (c_blops, s_blops, 16274_u32, 101_000_108_i64)] {
+            s.skills.entry(cid).or_default().insert(3456, TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 });
+            s.skills.entry(cid).or_default().insert(21610, TrainedSkillRecord { type_id: 21610, level: 4, skill_points: 90_510.0 });
+            s.items.insert(iid, mk_item(iid, iso_tid, cid, sid, InventoryFlag::SpecializedFuelBay, 50_000, false));
+        }
     });
 
-    ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None)
-        .await
-        .expect("Deploy Mobile Cyno Beacon");
+    // 1. Negative cases: Anchoring II rejected & non-fleet pilot rejected
+    let no_skill = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None).await.unwrap_err();
+    assert_eq!(no_skill.code, "SkillMissing");
+    ctx.db.with_mut_snapshot(|s| { s.skills.get_mut(&c1).unwrap().get_mut(&SKILL_ANCHORING).unwrap().level = 3; });
 
-    // While spooling (1 minute), jump is refused
-    let spool_err = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "beyonce",
-            None,
-            "CmdJumpToFleetDeployableBeacon",
-            &[PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Spooling beacon not yet active");
-    assert_eq!(spool_err.code, "NoActiveBeacon");
+    let no_fleet = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None).await.unwrap_err();
+    assert_eq!(no_fleet.code, "MustBeInFleet");
 
-    // Advance 61s + give Chimera fuel & Jump Drive Calibration V -> single-use jump succeeds and consumes beacon
+    for s in [&mut sess1, &mut sess_carrier, &mut sess_blops] {
+        s.fleet_id = Some(777);
+    }
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(777, eve_db::FleetRecord { fleet_id: 777, boss_id: c1, members: vec![c1, c_carrier, c_blops], ..Default::default() });
+    });
+
+    // 2. Deploy standard Mobile Cyno Beacon (57319): 1m spool + 60m active (despawnUnix - anchorUntilUnix == 3600), single-use
+    let t0 = ctx.now_unix();
+    let anchor_rep = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None).await.expect("Deploy Mobile Cyno Beacon");
+    let despawn0 = kv_get(&anchor_rep, "despawnUnix").and_then(|v| v.as_i64()).unwrap();
+    assert!(((t0 + 3_660) as i64..=(t0 + 3_662) as i64).contains(&despawn0));
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(beacon_id)], &kw, None).await.unwrap_err().code, "CannotScoop");
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "entity", None, "CmdUnanchor", &[PyRep::Integer(beacon_id)], &kw, None).await.unwrap_err().code, "CannotUnanchor");
+
+    // During 1m spool: not counted on map.GetBeaconCount and jump fails
+    let map_spool = ctx.dispatch_rpc(&mut sess1, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
+    assert!(dict_int_lookup(&map_spool, dest_sys as i64).is_none());
+    let j_args = [PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess_carrier, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &j_args, &kw, None).await.unwrap_err().code, "NoActiveBeacon");
+
+    // After 61s spool: counted on map, fleet carrier jumps, non-fleet carrier rejected
     ctx.advance_secs(61);
-    ctx.db.with_mut_snapshot(|s| {
-        s.skills.entry(c2).or_default().insert(
-            3456,
-            TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 },
-        );
-        s.items.insert(
-            101_000_098,
-            InventoryItemRecord {
-                item_id: 101_000_098,
-                type_id: 17888, // Nitrogen Isotopes
-                owner_id: c2,
-                location_id: s2,
-                flag: InventoryFlag::SpecializedFuelBay,
-                quantity: 50_000,
-                singleton: false,
-                ..Default::default()
-            },
-        );
-    });
-    ctx.dispatch_rpc(
-        &mut sess2,
-        "beyonce",
-        None,
-        "CmdJumpToFleetDeployableBeacon",
-        &[PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Jump to Mobile Cyno Beacon succeeds");
+    let map_active = ctx.dispatch_rpc(&mut sess1, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
+    assert_eq!(dict_int_lookup(&map_active, dest_sys as i64), Some(1));
 
-    // Verify beacon stays active after first jump (60m lifetime, covert 30m + lower HP), fleet-only, and early destruction
-    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&beacon_id)), "Beacon remains active for 60m lifetime");
-    let dep_rec = eve_server::services::mobile_deployables::read_deployable_state(&ctx)
-        .deployables
-        .get(&beacon_id)
-        .cloned()
-        .unwrap();
-    assert_eq!(dep_rec.expires_at_unix - dep_rec.anchor_start_unix, 60 + 3_600);
-    let cov_dur = eve_server::services::mobile_deployables::COVERT_CYNO_BEACON_DURATION_SECS;
-    assert_eq!(cov_dur, 1_800, "Covert cyno beacon duration is 30 minutes");
-    let norm_cs = ctx.build_type_combat_state(TYPE_MOBILE_CYNO_BEACON);
-    let cov_cs = ctx.build_type_combat_state(TYPE_COVERT_MOBILE_CYNO_BEACON);
+    let mut sess_out = setup_pilot(&ctx, 91_000_013, 101_000_013, 23915, origin_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_010).await;
+    assert_eq!(ctx.dispatch_rpc(&mut sess_out, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &j_args, &kw, None).await.unwrap_err().code, "NoActiveBeacon");
+    ctx.dispatch_rpc(&mut sess_carrier, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &j_args, &kw, None).await.expect("Fleet carrier jumps");
+
+    // Early destruction via HP damage removes beacon and blocks subsequent jumps
+    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
+    let norm_cs = dest_handle.get_combat_state(beacon_id).await.unwrap().unwrap();
+    let _ = dest_handle.apply_damage(beacon_id, DamageVector { em: 200_000.0, thermal: 200_000.0, kinetic: 200_000.0, explosive: 200_000.0 }).await;
+    assert!(dest_handle.get_ball_snapshot(beacon_id).await.unwrap().is_none());
+    assert_eq!(ctx.dispatch_rpc(&mut sess_blops, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &j_args, &kw, None).await.unwrap_err().code, "NoActiveBeacon");
+
+    // 3. Deploy Covert Mobile Cyno Beacon (59630, Tech II -> Anchoring V + Cynosural Field Theory V): 1m spool + 30m active, lower HP, hidden from map, Black Ops only
+    let _ = dest_handle.set_ball_position(s1, DVec3::new(900_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.item_positions.insert(s1, [900_000.0, 0.0, 0.0]);
+        let sk = s.skills.entry(c1).or_default();
+        sk.insert(SKILL_ANCHORING, TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 5, skill_points: 256_000.0 });
+        sk.insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
+    });
+    let t_cov = ctx.now_unix();
+    let cov_rep = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(cov_beacon_id)], &kw, None).await.expect("Deploy Covert Mobile Cyno Beacon");
+    let despawn_cov = kv_get(&cov_rep, "despawnUnix").and_then(|v| v.as_i64()).unwrap();
+    assert!(((t_cov + 1_860) as i64..=(t_cov + 1_862) as i64).contains(&despawn_cov));
+
+    let cov_cs = dest_handle.get_combat_state(cov_beacon_id).await.unwrap().unwrap();
     let norm_hp = norm_cs.max_shield_hp + norm_cs.max_armor_hp + norm_cs.max_structure_hp;
     let cov_hp = cov_cs.max_shield_hp + cov_cs.max_armor_hp + cov_cs.max_structure_hp;
-    assert!(cov_hp < norm_hp, "Covert Mobile Cyno Beacon has lower HP ({cov_hp} < {norm_hp})");
+    assert!(cov_hp < norm_hp, "Covert Mobile Cyno Beacon has lower total HP ({cov_hp} < {norm_hp})");
 
-    // Non-fleet pilot cannot jump to fleet-only beacon
-    let c_outsider = 91_000_013_i64;
-    let s_outsider = 101_000_013_i64;
-    let mut sess_out = setup_pilot(&ctx, c_outsider, s_outsider, 23915, origin_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_010).await;
-    let out_err = ctx
-        .dispatch_rpc(
-            &mut sess_out,
-            "beyonce",
-            None,
-            "CmdJumpToFleetDeployableBeacon",
-            &[PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Non-fleet pilot cannot use fleet mobile cyno beacon");
-    assert_eq!(out_err.code, "NoActiveBeacon");
+    ctx.advance_secs(61);
+    let map_cov = ctx.dispatch_rpc(&mut sess1, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
+    assert!(dict_int_lookup(&map_cov, dest_sys as i64).is_none(), "Covert Mobile Cyno Beacon is hidden from map");
 
-    // Early destruction via damage removes the beacon
-    let dest_handle = ctx.systems.get_or_spawn(dest_sys);
-    let _ = dest_handle
-        .apply_damage(
-            beacon_id,
-            eve_destiny::DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
-        )
-        .await;
-    assert!(dest_handle.get_ball_snapshot(beacon_id).await.unwrap().is_none(), "Destroyed beacon removed from space");
+    let mut sess_dread = setup_pilot(&ctx, 91_000_017, 101_000_017, 19720, origin_sys, DVec3::new(510_000.0, 0.0, 0.0), 1_000_009).await;
+    sess_dread.fleet_id = Some(777);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.get_mut(&777).unwrap().members.push(91_000_017);
+        s.skills.entry(91_000_017).or_default().insert(3456, TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 });
+    });
+    let cov_args = [PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(cov_beacon_id)];
+    assert_eq!(ctx.dispatch_rpc(&mut sess_dread, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &cov_args, &kw, None).await.unwrap_err().code, "ShipCannotJumpToBeacon");
+    ctx.dispatch_rpc(&mut sess_blops, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &cov_args, &kw, None).await.expect("Black Ops jumps to Covert Mobile Cyno Beacon");
+}
 
-    // 2. Mobile Micro Jump Unit: 1m activation delay, 2d lifetime, can't be scooped, 12s spool -> 100km jump, mass < 1B kg
+#[tokio::test]
+async fn test_b39_mobile_micro_jump_unit_v24_component() {
+    // parity: feat:structures.mobile-micro-jump-unit
+    eve_testkit::attest(&["feat:structures.mobile-micro-jump-unit"]);
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let sys_id = 30_000_012_u32;
+    let (c1, s1) = (91_000_021_i64, 101_000_021_i64);
+    let mut sess1 = setup_pilot(&ctx, c1, s1, 587, sys_id, DVec3::new(500_000.0, 0.0, 0.0), 1_000_009).await;
+    let beyonce1 = ctx.bind_object(&mut sess1, "beyonce", sys_id as i64).unwrap();
+    let handle = ctx.systems.get_or_spawn(sys_id);
+
     let mju_id = 101_000_097_i64;
     ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(
-            mju_id,
-            InventoryItemRecord {
-                item_id: mju_id,
-                type_id: TYPE_MOBILE_MJU,
-                owner_id: c1,
-                location_id: s1,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        s.items.insert(mju_id, mk_item(mju_id, TYPE_MOBILE_MJU, c1, s1, InventoryFlag::Cargo, 1, true));
+        s.skills.entry(c1).or_default().insert(SKILL_ANCHORING, TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 1, skill_points: 1_000.0 });
     });
-    ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect("Deploy MMJU");
-    let mju_rec = eve_server::services::mobile_deployables::read_deployable_state(&ctx)
-        .deployables
-        .get(&mju_id)
-        .cloned()
-        .unwrap();
-    assert_eq!(mju_rec.expires_at_unix - mju_rec.anchor_start_unix, 2 * 86_400);
-    let scoop_err = ctx
-        .dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect_err("MMJU cannot be scooped");
-    assert_eq!(scoop_err.code, "CannotScoop");
 
-    // Early activation (< 1 minute after deploy) is refused
+    let t0 = ctx.now_unix();
+    let anchor_rep = ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mju_id)], &kw, None).await.expect("Deploy MMJU");
+    let despawn_mju = kv_get(&anchor_rep, "despawnUnix").and_then(|v| v.as_i64()).unwrap();
+    assert!(((t0 + 60 + 2 * 86_400) as i64..=(t0 + 62 + 2 * 86_400) as i64).contains(&despawn_mju));
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "ship", None, "Scoop", &[PyRep::Integer(mju_id)], &kw, None).await.unwrap_err().code, "CannotScoop");
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "entity", None, "CmdUnanchor", &[PyRep::Integer(mju_id)], &kw, None).await.unwrap_err().code, "CannotUnanchor");
+
+    let mju_call = [PyRep::Integer(mju_id), PyRep::String("microJumpDriver".into()), PyRep::String("ActivateMicroJumpDrive".into())];
     ctx.advance_secs(30);
-    let early_err = ctx
-        .dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect_err("Early activation (before 1 minute) rejected");
-    assert_eq!(early_err.code, "DeployableAnchoring");
-
-    // Advance past the 1-minute activation delay
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "beyonce", Some(beyonce1), "CallComponentFromClient", &mju_call, &kw, None).await.unwrap_err().code, "DeployableAnchoring");
     ctx.advance_secs(31);
 
-    // Heavy ship (> 1,000,000,000 kg) is refused
-    let c_heavy = 91_000_015_i64;
-    let s_heavy = 101_000_015_i64;
-    let mut sess_heavy = setup_pilot(&ctx, c_heavy, s_heavy, 11567, dest_sys, DVec3::new(500_200.0, 0.0, 0.0), 1_000_009).await;
-    let heavy_err = ctx
-        .dispatch_rpc(&mut sess_heavy, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect_err("Heavy ship (>1B kg) rejected");
-    assert_eq!(heavy_err.code, "ShipTooHeavy");
-    let _ = dest_handle.remove_ball(s_heavy).await;
+    // Dynamic evaluated mass check: Charon (20185, base 960M kg < 1B) + online 25000mm Steel Plates I (40348, +80M kg -> 1.04B kg) rejected!
+    let (c_charon, s_charon, plate_id) = (91_000_022_i64, 101_000_022_i64, 101_000_096_i64);
+    let mut sess_charon = setup_pilot(&ctx, c_charon, s_charon, 20185, sys_id, DVec3::new(500_300.0, 0.0, 0.0), 1_000_009).await;
+    let beyonce_charon = ctx.bind_object(&mut sess_charon, "beyonce", sys_id as i64).unwrap();
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(plate_id, mk_item(plate_id, 40348, c_charon, s_charon, InventoryFlag::LoSlot0, 1, true));
+        s.module_online_states.insert(plate_id, true);
+    });
+    ctx.invalidate_ship_fitting(s_charon);
+    assert_eq!(ctx.dispatch_rpc(&mut sess_charon, "beyonce", Some(beyonce_charon), "CallComponentFromClient", &mju_call, &kw, None).await.unwrap_err().code, "ShipTooHeavy");
 
-    let (_, before_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
-    ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect("Activate MMJU");
-    // Duplicate spool rejected
-    let dup_err = ctx
-        .dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect_err("Duplicate MMJU spool rejected");
-    assert_eq!(dup_err.code, "MicroJumpAlreadySpooling");
+    // Non-default facing directions (+Y on owner, -Z on hostile) + concurrent activation + 12s warm-up + zero use cooldown
+    let (c_hostile, s_hostile) = (91_000_023_i64, 101_000_023_i64);
+    let mut sess_hostile = setup_pilot(&ctx, c_hostile, s_hostile, 587, sys_id, DVec3::new(500_400.0, 0.0, 0.0), 1_000_011).await;
+    let beyonce_hostile = ctx.bind_object(&mut sess_hostile, "beyonce", sys_id as i64).unwrap();
 
-    // Hostile (different corp/fleet) ship can activate concurrently
-    let c_hostile = 91_000_014_i64;
-    let s_hostile = 101_000_014_i64;
-    let mut sess_hostile = setup_pilot(&ctx, c_hostile, s_hostile, 587, dest_sys, DVec3::new(500_500.0, 0.0, 0.0), 1_000_011).await;
-    let (_, h_before) = dest_handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap();
-    ctx.dispatch_rpc(&mut sess_hostile, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect("Hostile ship activates MMJU concurrently");
+    ctx.dispatch_rpc(&mut sess1, "beyonce", Some(beyonce1), "CmdGotoDirection", &[PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess_hostile, "beyonce", Some(beyonce_hostile), "CmdGotoDirection", &[PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(-1.0)], &kw, None).await.unwrap();
+    handle.step_manual(1.0).await.unwrap();
 
-    // At 10s + 1s step = 11s, 12s warm-up has not completed yet
+    let (_, s1_before) = handle.get_ball_snapshot(s1).await.unwrap().unwrap();
+    let (_, sh_before) = handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap();
+    ctx.dispatch_rpc(&mut sess1, "beyonce", Some(beyonce1), "CallComponentFromClient", &mju_call, &kw, None).await.expect("Owner MMJU spool");
+    ctx.dispatch_rpc(&mut sess_hostile, "beyonce", Some(beyonce_hostile), "CallComponentFromClient", &mju_call, &kw, None).await.expect("Hostile MMJU spool");
+
     ctx.advance_secs(10);
-    dest_handle.step_manual(1.0).await.expect("step at 11s");
-    let (_, mid_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
-    assert!((mid_ball.position - before_ball.position).length() < 10.0, "Ship has not jumped before 12s warm-up");
+    handle.step_manual(0.5).await.unwrap();
+    let (_, s1_mid) = handle.get_ball_snapshot(s1).await.unwrap().unwrap();
+    assert!((s1_mid.position - s1_before.position).length() < 1_000.0);
 
-    // At 12s+, both ships jump 100 km, and there is no use cooldown
     ctx.advance_secs(3);
-    dest_handle.step_manual(1.0).await.expect("step MMJU jump");
-    let (_, after_ball) = dest_handle.get_ball_snapshot(s1).await.unwrap().unwrap();
-    let jumped_dist = (after_ball.position - before_ball.position).length();
-    assert!((jumped_dist - 100_000.0).abs() < 100.0, "Ship jumped 100 km (got {jumped_dist})");
-    let (_, h_after) = dest_handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap();
-    assert!(((h_after.position - h_before.position).length() - 100_000.0).abs() < 100.0, "Hostile ship jumped 100 km");
+    handle.step_manual(0.5).await.unwrap();
+    let d1 = handle.get_ball_snapshot(s1).await.unwrap().unwrap().1.position - s1_before.position;
+    let dh = handle.get_ball_snapshot(s_hostile).await.unwrap().unwrap().1.position - sh_before.position;
+    assert!(d1.y > 99_000.0 && d1.x.abs() < 1_000.0, "Owner jumped 100 km along +Y: {d1:?}");
+    assert!(dh.z < -99_000.0 && dh.x.abs() < 1_000.0, "Hostile jumped 100 km along -Z: {dh:?}");
 
-    // No use cooldown: can reactivate MMJU immediately after returning to range
-    let _ = dest_handle.set_ball_position(s1, DVec3::from_array(mju_rec.position)).await;
-    ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(mju_id)], &kw, None)
-        .await
-        .expect("Immediate reactivation after jump succeeds (no use cooldown)");
+    let mju_pos = eve_server::services::mobile_deployables::read_deployable_state(&ctx).deployables.get(&mju_id).unwrap().position;
+    let _ = handle.set_ball_position(s1, DVec3::from_array(mju_pos)).await;
+    ctx.dispatch_rpc(&mut sess1, "beyonce", Some(beyonce1), "CallComponentFromClient", &mju_call, &kw, None).await.expect("Zero cooldown reuse");
 }
 
 #[tokio::test]
@@ -504,174 +262,124 @@ async fn test_b39_mobile_observatory_decloak_ping() {
     eve_testkit::attest(&["feat:structures.mobile-observatory-decloak-ping"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
-    let hisec_sys = 30_000_142_u32;
-    let lowsec_sys = 30_000_012_u32; // Asabona (0.32)
-    let c1 = 91_000_021_i64;
-    let s1 = 101_000_021_i64;
-
+    let (hisec_sys, wh_sys, abyss_sys, pochven_sys, lowsec_sys) = (30_000_142_u32, 31_000_007_u32, 32_000_001_u32, 30_000_021_u32, 30_000_012_u32);
+    let (c1, s1, obs_id) = (91_000_031_i64, 101_000_031_i64, 101_000_090_i64);
     let mut sess = setup_pilot(&ctx, c1, s1, 587, hisec_sys, DVec3::new(600_000.0, 0.0, 0.0), 1_000_009).await;
-    let obs_id = 101_000_090_i64;
-    // Anchoring II refusal
+
     ctx.db.with_mut_snapshot(|s| {
-        s.skills.entry(c1).or_default().insert(
-            SKILL_ANCHORING,
-            TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 2, skill_points: 10_000.0 },
-        );
-        s.items.insert(
-            obs_id,
-            InventoryItemRecord {
-                item_id: obs_id,
-                type_id: TYPE_MOBILE_OBSERVATORY,
-                owner_id: c1,
-                location_id: s1,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        s.skills.entry(c1).or_default().insert(SKILL_ANCHORING, TrainedSkillRecord { type_id: SKILL_ANCHORING, level: 2, skill_points: 10_000.0 });
+        s.items.insert(obs_id, mk_item(obs_id, TYPE_MOBILE_OBSERVATORY, c1, s1, InventoryFlag::Cargo, 1, true));
     });
+
+    // 1. Anchoring II rejected + high-sec, wormhole, Abyssal, Pochven, and deadspace rejected
     let sk_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err();
     assert!(matches!(sk_err.code.as_str(), "SkillRequired" | "SkillMissing"));
-    ctx.db.with_mut_snapshot(|s| {
-        s.skills.get_mut(&c1).unwrap().get_mut(&SKILL_ANCHORING).unwrap().level = 3;
-    });
+    ctx.db.with_mut_snapshot(|s| { s.skills.get_mut(&c1).unwrap().get_mut(&SKILL_ANCHORING).unwrap().level = 3; });
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err().code, "CannotDeployInHighSec");
 
-    // 1. Mobile Observatory refused in high-sec, wormhole, Abyssal, and deadspace
-    let hisec_err = ctx
-        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
-        .await
-        .expect_err("Observatory refused in high-sec");
-    assert_eq!(hisec_err.code, "CannotDeployInHighSec");
+    for (rsys, code) in [(wh_sys, "CannotDeployInWormhole"), (abyss_sys, "CannotDeployInAbyssalSpace"), (pochven_sys, "CannotDeployInPochven")] {
+        ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = rsys; s.items.get_mut(&s1).unwrap().location_id = rsys as i64; });
+        let h = ctx.systems.get_or_spawn(rsys);
+        let _ = h.spawn_ball(Ball { id: s1, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+        sess.solar_system_id = Some(rsys);
+        assert_eq!(ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err().code, code);
+        let _ = h.remove_ball(s1).await;
+    }
 
-    let wh_sys = 31_000_007_u32;
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = wh_sys; s.items.get_mut(&s1).unwrap().location_id = wh_sys as i64; });
-    let wh_h = ctx.systems.get_or_spawn(wh_sys);
-    let _ = wh_h.spawn_ball(Ball { id: s1, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
-    sess.solar_system_id = Some(wh_sys);
-    let wh_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.expect_err("Observatory refused in wormhole");
-    assert_eq!(wh_err.code, "CannotDeployInWormhole");
-    let _ = wh_h.remove_ball(s1).await;
-
-    let abyss_sys = 32_000_001_u32;
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = abyss_sys; s.items.get_mut(&s1).unwrap().location_id = abyss_sys as i64; });
-    let ab_h = ctx.systems.get_or_spawn(abyss_sys);
-    let _ = ab_h.spawn_ball(Ball { id: s1, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
-    sess.solar_system_id = Some(abyss_sys);
-    let abyss_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.expect_err("Observatory refused in Abyssal space");
-    assert_eq!(abyss_err.code, "CannotDeployInAbyssalSpace");
-    let _ = ab_h.remove_ball(s1).await;
-
-    // Move to low-sec and test deadspace refusal
-    ctx.db.with_mut_snapshot(|s| {
-        s.characters.get_mut(&c1).unwrap().solar_system_id = lowsec_sys;
-        s.items.get_mut(&s1).unwrap().location_id = lowsec_sys as i64;
-    });
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&c1).unwrap().solar_system_id = lowsec_sys; s.items.get_mut(&s1).unwrap().location_id = lowsec_sys as i64; });
     sess.solar_system_id = Some(lowsec_sys);
     let low_handle = ctx.systems.get_or_spawn(lowsec_sys);
-    let _ = low_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: s1,
-                type_id: 587,
-                position: DVec3::new(1_000_000_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 250.0,
-                inertia: 0.5,
-                mass: 1_000_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_type_combat_state(587),
-        )
-        .await;
-
+    let _ = low_handle.spawn_ball_with_combat(
+        Ball { id: s1, type_id: 587, position: DVec3::new(5_000_000_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        ctx.build_type_combat_state(587),
+    ).await;
     eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
-        reg.sites_by_system.entry(lowsec_sys).or_default().push(eve_server::services::pve_exploration::PveSiteInstance {
-            dungeon_id: 1234, position: [1_000_000_000.0, 0.0, 0.0], ..Default::default()
-        });
+        reg.sites_by_system.entry(lowsec_sys).or_default().push(eve_server::services::pve_exploration::PveSiteInstance { dungeon_id: 1234, position: [5_000_000_000.0, 0.0, 0.0], ..Default::default() });
     });
-    let ds_err = ctx
-        .dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
-        .await
-        .expect_err("Observatory refused in deadspace");
-    assert_eq!(ds_err.code, "CannotDeployInDeadspace");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err().code, "CannotDeployInDeadspace");
     eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| { reg.sites_by_system.remove(&lowsec_sys); });
 
-    ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None)
-        .await
-        .expect("Deploy Mobile Observatory in low-sec");
-    let scoop_err = ctx
-        .dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(obs_id)], &kw, None)
-        .await
-        .expect_err("Observatory cannot be scooped");
-    assert_eq!(scoop_err.code, "CannotScoop");
+    // 2. Activate real Prototype Cloaking Device I (11370) on 12 ships outside star radius and step 901s so their 15m cloak stabilization expires
+    let mut cloaked_sessions = Vec::new();
+    for i in 0..12_i64 {
+        let (cid, sid, mid) = (91_001_100 + i, 101_001_100 + i, 101_002_100 + i);
+        let mut csess = setup_pilot(&ctx, cid, sid, 11188, lowsec_sys, DVec3::new(5_100_000_000.0 + (i as f64) * 20_000.0, 0.0, 0.0), 1_000_010).await;
+        ctx.db.with_mut_snapshot(|s| {
+            s.items.insert(mid, mk_item(mid, 11370, cid, sid, InventoryFlag::HiSlot0, 1, true));
+            s.module_online_states.insert(mid, true);
+        });
+        ctx.invalidate_ship_fitting(sid);
+        ctx.dispatch_rpc(&mut csess, "dogmaIM", None, "Activate", &[PyRep::Integer(mid)], &kw, None).await.expect("Cloak ship");
+        cloaked_sessions.push((cid, sid, mid, csess));
+    }
+    for _ in 0..16 {
+        low_handle.step_manual(60.0).await.unwrap();
+    }
 
-    // Spawn 1 ship within cloak stabilization timer (immune) and 10 ships past stabilization timer
-    let tid_immune = 101_000_299_i64;
-    let mut cs_immune = ctx.build_type_combat_state(587);
-    cs_immune.is_cloaked = true;
-    cs_immune.cloak_stabilization_remaining_s = 60.0;
+    // Deploy Observatory: 10m deploy + 2h active, cannot scoop or unanchor
+    let t_dep = ctx.now_unix();
+    let dep_rep = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(obs_id)], &kw, None).await.expect("Deploy Observatory");
+    let despawn_obs = kv_get(&dep_rep, "despawnUnix").and_then(|v| v.as_i64()).unwrap();
+    assert!(((t_dep + 7_800) as i64..=(t_dep + 7_802) as i64).contains(&despawn_obs));
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err().code, "CannotScoop");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "entity", None, "CmdUnanchor", &[PyRep::Integer(obs_id)], &kw, None).await.unwrap_err().code, "CannotUnanchor");
+
+    // 1 ship inside cloak stabilization timer + 1 gate-cloaked ship (both immune)
+    ctx.advance_secs(540);
+    let (c_stab, s_stab, m_stab) = (91_001_200_i64, 101_001_200_i64, 101_002_200_i64);
+    let mut sess_stab = setup_pilot(&ctx, c_stab, s_stab, 11188, lowsec_sys, DVec3::new(5_200_000_000.0, 0.0, 0.0), 1_000_010).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(m_stab, mk_item(m_stab, 11370, c_stab, s_stab, InventoryFlag::HiSlot0, 1, true));
+        s.module_online_states.insert(m_stab, true);
+    });
+    ctx.invalidate_ship_fitting(s_stab);
+    ctx.dispatch_rpc(&mut sess_stab, "dogmaIM", None, "Activate", &[PyRep::Integer(m_stab)], &kw, None).await.unwrap();
+
+    let s_gate = 101_001_201_i64;
+    let mut cs_gate = ctx.build_type_combat_state(587);
+    cs_gate.is_cloaked = true;
+    cs_gate.gate_cloak_remaining_ticks = 50;
     let _ = low_handle.spawn_ball_with_combat(
-        Ball { id: tid_immune, type_id: 587, position: DVec3::new(1_000_040_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
-        cs_immune,
+        Ball { id: s_gate, type_id: 587, position: DVec3::new(5_220_000_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        cs_gate,
     ).await;
 
-    for i in 0..10_i64 {
-        let tid = 101_000_200 + i;
-        let mut cs = ctx.build_type_combat_state(587);
-        cs.is_cloaked = true;
-        cs.cloak_stabilization_remaining_s = 0.0;
-        let _ = low_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id: tid,
-                    type_id: 587,
-                    position: DVec3::new(1_000_050_000.0 + (i as f64) * 5_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 250.0,
-                    inertia: 0.5,
-                    mass: 1_000_000.0,
-                    radius: 50.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await;
+    low_handle.step_manual(1.0).await.unwrap();
+    assert!(eve_server::services::mobile_deployables::read_deployable_state(&ctx).deployables.get(&obs_id).unwrap().last_ping_unix.is_none());
+
+    ctx.mechanic_rng.set_seed(Some(42));
+    for (cid, _, _, _) in &cloaked_sessions {
+        let _ = ctx.pending_notifications.write().unwrap().remove(cid);
     }
-    assert!(
-        low_handle.get_combat_state(101_000_200).await.unwrap().unwrap().is_cloaked,
-        "Ship 0 should be cloaked before observatory ping"
-    );
-    ctx.advance_secs(601);
-    low_handle.step_manual(1.0).await.expect("step observatory ping");
-    assert!(low_handle.get_combat_state(tid_immune).await.unwrap().unwrap().is_cloaked, "Ship within cloak stabilization is immune");
-    let mut decloaked = 0;
-    for i in 0..10_i64 {
-        let tid = 101_000_200 + i;
-        if let Some(cs) = low_handle.get_combat_state(tid).await.unwrap() {
-            if !cs.is_cloaked {
-                decloaked += 1;
-            }
+    ctx.advance_secs(61);
+    low_handle.step_manual(1.0).await.unwrap();
+
+    assert!(low_handle.get_combat_state(s_stab).await.unwrap().unwrap().is_cloaked);
+    assert!(low_handle.get_combat_state(s_gate).await.unwrap().unwrap().is_cloaked);
+
+    let mut decloaked_idx = Vec::new();
+    for (idx, (cid, sid, mid, _)) in cloaked_sessions.iter().enumerate() {
+        let cs = low_handle.get_combat_state(*sid).await.unwrap().unwrap();
+        if !cs.is_cloaked {
+            decloaked_idx.push(idx);
+            assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(mid)));
+            assert!(cs.decloak_targeting_delay_remaining_s > 0.0);
+            let notes = ctx.pending_notifications.write().unwrap().remove(cid).unwrap_or_default();
+            assert!(notes.iter().any(|n| n.event == "OnGodmaShipEffect"));
+            assert!(notes.iter().any(|n| n.event == "OnSpecialFX" && n.args.len() == 14));
         }
     }
-    assert!(decloaked > 0 && decloaked < 10, "40% independent decloak ping decloaked {decloaked}/10 ships");
+    assert!(!decloaked_idx.is_empty() && decloaked_idx.len() < 12, "Decloaked {}/12 ships", decloaked_idx.len());
 
-    // Second ping every 10 minutes
+    let (_, _, d_mid, ref mut d_sess) = cloaked_sessions[decloaked_idx[0]];
+    let recloak_err = ctx.dispatch_rpc(d_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(d_mid)], &kw, None).await.unwrap_err();
+    assert!(matches!(recloak_err.code.as_str(), "ModuleReactivationDelay" | "ModuleInReactivationCooldown" | "CloakReactivationDelay"));
+
     ctx.advance_secs(600);
-    low_handle.step_manual(1.0).await.expect("step second observatory ping");
-    let dep_st = eve_server::services::mobile_deployables::read_deployable_state(&ctx);
-    let obs_rec = dep_st.deployables.get(&obs_id).unwrap();
-    assert!(obs_rec.last_ping_unix.unwrap() >= 1200, "Second ping executed after another 10 minutes");
+    low_handle.step_manual(1.0).await.unwrap();
+    assert!(eve_server::services::mobile_deployables::read_deployable_state(&ctx).deployables.get(&obs_id).unwrap().last_ping_unix.unwrap() >= t_dep + 1_200);
 
-    // 2. Mobile Observatory expires after 2 hours
     ctx.advance_secs(7_201);
-    low_handle.step_manual(1.0).await.expect("step observatory expiry");
-    assert!(
-        low_handle.get_ball_snapshot(obs_id).await.unwrap().is_none(),
-        "Mobile Observatory expired and removed after 2 hours"
-    );
+    low_handle.step_manual(1.0).await.unwrap();
+    assert!(low_handle.get_ball_snapshot(obs_id).await.unwrap().is_none());
 }
-

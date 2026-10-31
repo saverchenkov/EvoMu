@@ -1018,12 +1018,20 @@ impl SystemRegistry {
                                     });
                                     crate::services::mobile_deployables::step_mobile_deployables_in_actor(
                                         &mut ballpark,
+                                        active_module_cycles,
+                                        &mechanic_rng,
+                                        deact_guard.as_ref(),
                                         sde_opt.as_deref(),
                                         db_opt.as_ref(),
                                         solar_system_id,
                                         dt,
                                         step_now_unix,
                                     );
+                                    let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
+                                    mod_guard.clear();
+                                    for c in active_module_cycles.iter() {
+                                        mod_guard.insert(c.ship_id);
+                                    }
                                 }
                                 if let Some(db) = &db_opt {
                                     crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(

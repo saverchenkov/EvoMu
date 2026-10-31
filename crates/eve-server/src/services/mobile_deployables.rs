@@ -14,6 +14,7 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// parity: feat:structures.mobile-cyno-beacon, feat:structures.mobile-micro-jump-unit, feat:structures.mobile-observatory-decloak-ping
 // Well-known Mobile Deployable Groups
 pub const GROUP_MOBILE_DEPOT: u32 = 1246;
 pub const GROUP_MOBILE_TRACTOR: u32 = 1250;
@@ -272,6 +273,12 @@ pub fn check_mobile_deployment_restrictions(
                 message: "Mobile Observatory cannot be deployed in Abyssal space".into(),
             });
         }
+        if ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070) {
+            return Err(BridgeRpcError {
+                code: "CannotDeployInPochven".into(),
+                message: "Mobile Observatory cannot be deployed in Pochven".into(),
+            });
+        }
         let sys_sec = ctx
             .sde
             .solar_systems
@@ -414,7 +421,7 @@ pub fn register_mobile_deployable(
     let lifetime_secs = match group_id {
         GROUP_MOBILE_DEPOT => DEPOT_LIFETIME_SECS,
         GROUP_MOBILE_TRACTOR => MTU_LIFETIME_SECS,
-        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_LIFETIME_SECS,
+        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_ACTIVATION_DELAY_SECS.saturating_add(MMJU_LIFETIME_SECS),
         GROUP_MOBILE_CYNO_BEACON => {
             let active_dur = if type_id == TYPE_COVERT_MOBILE_CYNO_BEACON {
                 COVERT_CYNO_BEACON_DURATION_SECS
@@ -501,6 +508,9 @@ pub fn record_scooped_deployable_damage(
 /// Executes automated expiry sweeps and MTU automated tractoring & hold-capacity looting.
 pub fn step_mobile_deployables_in_actor(
     ballpark: &mut eve_destiny::Ballpark,
+    active_module_cycles: &mut Vec<crate::system_actor::ActiveModuleCycle>,
+    mechanic_rng: &crate::rng::MechanicRng,
+    deactivation_hook: Option<&crate::system_actor::ModuleDeactivationHook>,
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
     solar_system_id: u32,
@@ -593,18 +603,38 @@ pub fn step_mobile_deployables_in_actor(
     });
 
     for (ship_id, mju_pos_arr) in ready_mmju_jumps {
-        let pilot_still_in_ship = db.with_snapshot(|snap| {
-            snap.characters
+        let (pilot_still_in_ship, dyn_mass_add) = db.with_snapshot(|snap| {
+            let ok = snap
+                .characters
                 .values()
-                .any(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none())
+                .any(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none());
+            let plate_add: f64 = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.location_id == ship_id
+                        && matches!(i.flag as u16, 11..=34 | 92..=99 | 125..=132)
+                        && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+                })
+                .filter_map(|i| {
+                    let t = sde.types.get(&i.type_id)?;
+                    let m_act = snap.module_active_states.contains(&i.item_id);
+                    let base = if t.group_id == 46 && !m_act { 0.0 } else { t.default_attributes.get(&796).copied().unwrap_or(0.0) };
+                    let active_add = if m_act { t.default_attributes.get(&67).copied().unwrap_or(0.0) } else { 0.0 };
+                    Some(base + active_add)
+                })
+                .sum();
+            (ok, plate_add)
         });
         if !pilot_still_in_ship {
             continue;
         }
         let mju_pos = DVec3::from_array(mju_pos_arr);
         let ship_valid = ballpark.balls.get(&ship_id).is_some_and(|b| {
+            let base_hull_mass = sde.types.get(&b.type_id).map(|t| t.mass).unwrap_or(b.mass);
+            let effective_mass = b.mass.max(base_hull_mass + dyn_mass_add);
             !matches!(b.mode, eve_destiny::MovementMode::Warp { .. })
-                && b.mass < MMJU_MAX_SHIP_MASS_KG
+                && effective_mass < MMJU_MAX_SHIP_MASS_KG
                 && (b.position - mju_pos).length() <= 2_500.0
         }) && !ballpark
             .combat_states
@@ -621,28 +651,110 @@ pub fn step_mobile_deployables_in_actor(
         }
     }
 
-    for obs_id in observatory_pings {
-        let cloaked_ships: Vec<i64> = ballpark
+    for _obs_id in observatory_pings {
+        let mut cloaked_ships: Vec<i64> = ballpark
             .combat_states
             .iter()
-            .filter(|(_, cs)| cs.is_cloaked && cs.cloak_stabilization_remaining_s <= 0.0)
+            .filter(|(_, cs)| {
+                cs.is_cloaked
+                    && cs.gate_cloak_remaining_ticks == 0
+                    && cs.cloak_stabilization_remaining_s <= 0.0
+            })
             .map(|(&sid, _)| sid)
             .collect();
+        cloaked_ships.sort_unstable();
         for sid in cloaked_ships {
-            let mixed = now_unix
-                .wrapping_add(1)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ (obs_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
-                ^ (sid as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
-            let roll = ((mixed ^ (mixed >> 30)) >> 32) as f64 / 4_294_967_296.0;
-            if roll < OBSERVATORY_DECLOAK_CHANCE {
-                if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
-                    cs.is_cloaked = false;
-                    cs.is_covert_cloak = false;
-                    cs.cloak_stabilization_remaining_s = 0.0;
+            if !mechanic_rng.roll(OBSERVATORY_DECLOAK_CHANCE) {
+                continue;
+            }
+            let mut removed_cloaks = Vec::new();
+            let mut kept_cycles = Vec::with_capacity(active_module_cycles.len());
+            for cyc in active_module_cycles.drain(..) {
+                let is_cloak = cyc.ship_id == sid
+                    && (cyc.effect_name.to_ascii_lowercase().contains("cloak")
+                        || sde.types.get(&cyc.module_type_id).is_some_and(|t| t.group_id == 330));
+                if is_cloak {
+                    removed_cloaks.push(cyc);
+                } else {
+                    kept_cycles.push(cyc);
                 }
-                if let Some(meta) = ballpark.ball_slim_meta.get_mut(&sid) {
-                    meta.is_cloaked = false;
+            }
+            *active_module_cycles = kept_cycles;
+
+            let (pilot_opt, fallback_cloak_mod) = db.with_mut_snapshot(|snap| {
+                for rc in &removed_cloaks {
+                    snap.module_active_states.remove(&rc.module_id);
+                    snap.module_active_charges.remove(&rc.module_id);
+                }
+                let pilot = snap
+                    .characters
+                    .values()
+                    .find(|c| c.active_ship_id == sid)
+                    .map(|c| c.character_id)
+                    .or_else(|| snap.items.get(&sid).map(|i| i.owner_id));
+                let fb = if removed_cloaks.is_empty() {
+                    let found = snap
+                        .items
+                        .values()
+                        .find(|i| {
+                            i.location_id == sid
+                                && sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
+                        })
+                        .map(|i| (i.item_id, i.type_id));
+                    if let Some((mid, _)) = found {
+                        snap.module_active_states.remove(&mid);
+                    }
+                    found
+                } else {
+                    None
+                };
+                (pilot, fb)
+            });
+
+            if removed_cloaks.is_empty() {
+                if let Some((mid, mtid)) = fallback_cloak_mod {
+                    removed_cloaks.push(crate::system_actor::ActiveModuleCycle {
+                        ship_id: sid,
+                        module_id: mid,
+                        module_type_id: mtid,
+                        owner_char_id: pilot_opt,
+                        effect_name: "effects.Cloak".to_string(),
+                        repeat: 1,
+                        duration_s: 5.0,
+                        ..Default::default()
+                    });
+                }
+            }
+
+            let cloak_mod_id_opt = removed_cloaks.first().map(|c| c.module_id);
+            let sde_tgt_delay_s = removed_cloaks
+                .first()
+                .and_then(|c| sde.types.get(&c.module_type_id))
+                .and_then(|t| t.default_attributes.get(&560).copied())
+                .map(|ms| if ms > 200.0 { ms / 1000.0 } else { ms })
+                .unwrap_or(0.0);
+            if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
+                if cs.cloak_configured_targeting_delay_s <= 0.0 && sde_tgt_delay_s > 0.0 {
+                    cs.cloak_configured_targeting_delay_s = sde_tgt_delay_s;
+                }
+            }
+            ballpark.deactivate_cloak(sid);
+            if let Some(mut meta) = ballpark.ball_slim_meta.get(&sid).cloned() {
+                meta.is_cloaked = false;
+                ballpark.change_slim_item(sid, meta);
+            }
+            ballpark.emit_event(
+                Some(sid),
+                eve_destiny::DestinyEvent::OnSpecialFX {
+                    ball_id: sid,
+                    module_id: cloak_mod_id_opt,
+                    guid: "effects.Cloak".to_string(),
+                    is_active: false,
+                },
+            );
+            if let (Some(cid), Some(hook)) = (pilot_opt, deactivation_hook) {
+                for rc in &removed_cloaks {
+                    hook(cid, rc);
                 }
             }
         }
@@ -1014,6 +1126,24 @@ pub fn handle_ball_damage_in_actor(
         return Some((applied, destroyed, ball_opt));
     }
 
+    if matches!(
+        it_grp,
+        GROUP_MOBILE_CYNO_BEACON | GROUP_MOBILE_MICRO_JUMP_UNIT | GROUP_MOBILE_OBSERVATORY
+    ) {
+        let (applied, destroyed, ball_opt) = ballpark.apply_damage_to_ball(ball_id, damage)?;
+        if destroyed {
+            db.with_mut_snapshot(|snap| {
+                snap.items.remove(&ball_id);
+                snap.item_positions.remove(&ball_id);
+                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                write_deployable_state_snap(snap, |st| {
+                    st.deployables.remove(&ball_id);
+                });
+            });
+        }
+        return Some((applied, destroyed, ball_opt));
+    }
+
     None
 }
 
@@ -1023,9 +1153,9 @@ pub fn handle_ball_damage_in_actor(
 pub async fn handle_activate_micro_jump_unit(
     ctx: &ServerContext,
     session: &SessionState,
-    args: &[eve_proto::PyRep],
+    mju_id: i64,
 ) -> Result<eve_proto::PyRep, BridgeRpcError> {
-    let (_, _char_id) = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
         code: "NoActiveShip".into(),
         message: "Session has no active ship".into(),
@@ -1034,10 +1164,12 @@ pub async fn handle_activate_micro_jump_unit(
         code: "NoSolarSystem".into(),
         message: "Session has no active solar system".into(),
     })?;
-    let mju_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
-        code: "MissingItemID".into(),
-        message: "ActivateMicroJumpUnit requires mjuID".into(),
-    })?;
+    if mju_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "MissingItemID".into(),
+            message: "microJumpDriver.ActivateMicroJumpDrive requires target mjuID".into(),
+        });
+    }
 
     let now_unix = ctx.now_unix();
     let rec = read_deployable_state(ctx)
@@ -1085,12 +1217,44 @@ pub async fn handle_activate_micro_jump_unit(
             message: "Ship must be within 2,500m of the Mobile Micro Jump Unit".into(),
         });
     }
-    if ship_ball.mass >= MMJU_MAX_SHIP_MASS_KG {
+    let dyn_mass_add: f64 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && matches!(i.flag as u16, 11..=34 | 92..=99 | 125..=132)
+                    && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+            })
+            .filter_map(|i| {
+                let t = ctx.sde.types.get(&i.type_id)?;
+                let m_act = snap.module_active_states.contains(&i.item_id);
+                let base = if t.group_id == 46 && !m_act { 0.0 } else { t.default_attributes.get(&796).copied().unwrap_or(0.0) };
+                let active_add = if m_act { t.default_attributes.get(&67).copied().unwrap_or(0.0) } else { 0.0 };
+                Some(base + active_add)
+            })
+            .sum()
+    });
+    let base_hull_mass = ctx
+        .db
+        .with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id))
+        .and_then(|tid| ctx.sde.types.get(&tid))
+        .map(|t| t.mass)
+        .unwrap_or(ship_ball.mass);
+    let eval_mass = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+        let ev = fit.evaluated_context(&ctx.sde);
+        ev.ship
+            .get_attribute(eve_dogma::attr_ids::MASS, &ctx.sde)
+            .max(ship_ball.mass)
+            .max(base_hull_mass + dyn_mass_add)
+    } else {
+        ship_ball.mass.max(base_hull_mass + dyn_mass_add)
+    };
+    if eval_mass >= MMJU_MAX_SHIP_MASS_KG {
         return Err(BridgeRpcError {
             code: "ShipTooHeavy".into(),
             message: format!(
                 "Ship mass {:.0} kg exceeds Mobile Micro Jump Unit limit of {:.0} kg",
-                ship_ball.mass, MMJU_MAX_SHIP_MASS_KG
+                eval_mass, MMJU_MAX_SHIP_MASS_KG
             ),
         });
     }

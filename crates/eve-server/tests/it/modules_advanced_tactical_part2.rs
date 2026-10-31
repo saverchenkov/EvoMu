@@ -233,7 +233,10 @@ async fn command_bursts_industrial_core_and_clone_vat_bay() {
         "Industrial Core II must boost Mining Foreman Burst range"
     );
 
-    // Clone Vat Bay I offer & accept jump clone installation consuming 1 Liquid Ozone (16273)
+    // Clone Vat Bay I activation, offer & accept jump clone installation consuming 1 Liquid Ozone (16273)
+    rpc(&ctx, &mut rorq_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71038)])
+        .await
+        .expect("activate Clone Vat Bay I");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(fl) = snap.fleets.get_mut(&5001) {
             fl.members.push(91035);

@@ -349,6 +349,7 @@ pub fn handle_eject_from_structure(
                 format!("Character {char_id} is not boarding/controlling structure {structure_id}"),
             ));
         }
+        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())?;
         ext.active_pilot_by_structure.remove(&structure_id);
         let saved_prev = ext.previous_ship_by_structure.remove(&structure_id).unwrap_or(0);
         save_ext_state(snap, &ext);
@@ -434,6 +435,7 @@ pub fn handle_release_control(
                 format!("Character {char_id} does not control structure {structure_id}"),
             ));
         }
+        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())?;
         ext.active_pilot_by_structure.remove(&structure_id);
         let saved_prev = ext.previous_ship_by_structure.remove(&structure_id).unwrap_or(0);
         save_ext_state(snap, &ext);

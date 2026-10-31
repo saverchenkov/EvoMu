@@ -100,11 +100,23 @@ pub fn handle(
                         *counts.entry(i64::from(s.solar_system_id)).or_insert(0) += 1;
                     }
                 }
+                let now_unix = ctx.now_unix();
+                let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(snap);
                 for it in snap.items.values() {
-                    if matches!(it.type_id, 21096 | 28646 | 28650 | 49746 | 56099)
-                        && (30_000_000..40_000_000).contains(&it.location_id)
-                    {
+                    if !(30_000_000..40_000_000).contains(&it.location_id) {
+                        continue;
+                    }
+                    if matches!(it.type_id, 21096 | 49746 | 56099) {
                         *counts.entry(it.location_id).or_insert(0) += 1;
+                    } else if it.type_id == 57319 {
+                        if let Some(rec) = dep_state.deployables.get(&it.item_id) {
+                            if !rec.is_unanchored
+                                && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                                && now_unix < rec.expires_at_unix
+                            {
+                                *counts.entry(it.location_id).or_insert(0) += 1;
+                            }
+                        }
                     }
                 }
             });

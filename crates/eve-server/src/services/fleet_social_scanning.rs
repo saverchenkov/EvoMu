@@ -408,11 +408,22 @@ pub(super) async fn handle_scanning_and_wormholes(
                 .unwrap_or(DVec3::new(0.0, 0.0, 1.0));
 
             let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
+            let caller_bubble = if let Some(sid) = caller_ship {
+                sys_handle.get_bubble_id_for_ball(sid).await.ok().flatten()
+            } else {
+                None
+            };
             let balls = sys_handle.list_balls().await.unwrap_or_default();
             let mut rows = Vec::new();
             for ball in balls {
                 if Some(ball.id) == caller_ship {
                     continue;
+                }
+                if crate::services::inventory_fitting::fitting_cyno_portal::is_covert_beacon_type(ball.type_id) {
+                    let b_bub = sys_handle.get_bubble_id_for_ball(ball.id).await.ok().flatten();
+                    if caller_bubble.is_none() || b_bub != caller_bubble {
+                        continue;
+                    }
                 }
                 let dist = ball.position.distance(caller_pos);
                 if dist > scan_range {

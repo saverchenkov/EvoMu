@@ -1,31 +1,177 @@
-//! `structure_standup_weapons` — Upwell Structure Standup Weapon Modules (`feat:structures.point-defense-system`,
-//! `feat:structures.standup-point-defense-battery`, `feat:structures.standup-guided-bomb-launcher`,
-//! `feat:structures.standup-superweapon-arcing-vorton`).
+//! `structure_standup_weapons` — Upwell Structure Standup Weapon Modules (`feat:structures.standup-point-defense-battery`,
+//! `feat:structures.standup-guided-bomb-launcher`, `feat:structures.standup-superweapon-arcing-vorton`).
 
 #![forbid(unsafe_code)]
 
 use crate::formulas::vorton_arc_targets_with_cap;
 use crate::router::ServerContext;
+use crate::services::combat_crimewatch::{with_combat_runtime, SafetyLevel};
+use crate::services::station_structure::structure_upwell_ops::{
+    load_ext_state, save_ext_state, InFlightGuidedBombRecord,
+};
+use crate::services::station_structure::structure_lifecycle::{structure_profile, HullClass};
 use crate::system_actor::SystemHandle;
-use eve_destiny::{Ball, DamageVector};
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldStateSnapshot};
+use eve_destiny::{Ball, CombatState, DamageVector, MovementMode};
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
 
+// parity: feat:structures.standup-guided-bomb-launcher, feat:structures.standup-point-defense-battery, feat:structures.standup-superweapon-arcing-vorton
 pub const GROUP_STANDUP_GUIDED_BOMB_LAUNCHER: u32 = 1328;
 pub const GROUP_STANDUP_POINT_DEFENSE_BATTERY: u32 = 1330;
 pub const GROUP_STANDUP_ARCING_VORTON: u32 = 1333;
+pub const GROUP_STANDUP_GUIDED_BOMB: u32 = 1548;
+pub const GROUP_STANDUP_FLAK_AMMO: u32 = 4186;
 pub const TYPE_KEEPSTAR: u32 = 35834;
+pub const TYPE_PALATINE_KEEPSTAR: u32 = 40340;
 
-fn immobilized_gunners() -> &'static RwLock<HashMap<(usize, i64), u64>> {
-    static STATE: OnceLock<RwLock<HashMap<(usize, i64), u64>>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(HashMap::new()))
+fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError { code: code.into(), message: message.into() }
 }
 
-fn standup_module_cycles() -> &'static RwLock<HashMap<(usize, i64), u64>> {
-    static CYCLES: OnceLock<RwLock<HashMap<(usize, i64), u64>>> = OnceLock::new();
-    CYCLES.get_or_init(|| RwLock::new(HashMap::new()))
+/// Blocks `ReleaseControl`, `EjectFromStructure`, and `Undock` while a structure gunner is immobilized by a superweapon cycle.
+pub fn ensure_gunner_not_immobilized(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) -> Result<(), BridgeRpcError> {
+    let ext = load_ext_state(snap);
+    let immobilized = ext.active_pilot_by_structure.iter().any(|(sid, &pid)| {
+        pid == char_id
+            && ext
+                .gunner_immobilized_until_unix
+                .get(sid)
+                .is_some_and(|&until| now_unix < until)
+    });
+    if immobilized {
+        return Err(err(
+            "GunnerImmobilized",
+            "Structure gunner is immobilized by an active Standup superweapon cycle",
+        ));
+    }
+    Ok(())
+}
+
+fn read_omni_damage(t: &eve_sde::InvType) -> DamageVector {
+    DamageVector {
+        em: t.default_attributes.get(&114).copied().unwrap_or(0.0),
+        thermal: t.default_attributes.get(&118).copied().unwrap_or(0.0),
+        kinetic: t.default_attributes.get(&117).copied().unwrap_or(0.0),
+        explosive: t.default_attributes.get(&116).copied().unwrap_or(0.0),
+    }
+}
+
+fn is_structure_ammo_bay(item: &InventoryItemRecord, st_corp_id: i64, mod_flag: InventoryFlag) -> bool {
+    item.flag == mod_flag
+        || (item.owner_id == st_corp_id
+            && matches!(
+                item.flag,
+                InventoryFlag::StructureFuel
+                    | InventoryFlag::Cargo
+                    | InventoryFlag::SpecializedAmmoHold
+                    | InventoryFlag::CorpSAG1
+                    | InventoryFlag::CorpSAG2
+                    | InventoryFlag::CorpSAG3
+                    | InventoryFlag::CorpSAG4
+                    | InventoryFlag::CorpSAG5
+                    | InventoryFlag::CorpSAG6
+                    | InventoryFlag::CorpSAG7
+            ))
+}
+
+fn find_structure_charge_type(
+    ctx: &ServerContext,
+    structure_id: i64,
+    st_corp_id: i64,
+    module_id: i64,
+    mod_flag: InventoryFlag,
+    charge_group: u32,
+    min_qty: i32,
+    preferred_type: Option<u32>,
+) -> Option<u32> {
+    ctx.db.with_snapshot(|snap| {
+        let matches_item = |i: &&InventoryItemRecord| {
+            i.location_id == structure_id
+                && i.item_id != module_id
+                && i.quantity >= min_qty
+                && is_structure_ammo_bay(i, st_corp_id, mod_flag)
+                && preferred_type.is_none_or(|pt| i.type_id == pt)
+                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == charge_group)
+        };
+        snap.items
+            .values()
+            .find(|i| i.flag == mod_flag && matches_item(i))
+            .or_else(|| snap.items.values().find(matches_item))
+            .map(|i| i.type_id)
+    })
+}
+
+fn consume_structure_charge(
+    ctx: &ServerContext,
+    structure_id: i64,
+    st_corp_id: i64,
+    module_id: i64,
+    mod_flag: InventoryFlag,
+    charge_tid: u32,
+    qty_needed: i32,
+) -> bool {
+    ctx.db.with_mut_snapshot(|snap| {
+        let candidate_id = snap
+            .items
+            .values()
+            .find(|i| {
+                i.location_id == structure_id
+                    && i.item_id != module_id
+                    && i.flag == mod_flag
+                    && i.type_id == charge_tid
+                    && i.quantity >= qty_needed
+            })
+            .or_else(|| {
+                snap.items.values().find(|i| {
+                    i.location_id == structure_id
+                        && i.item_id != module_id
+                        && is_structure_ammo_bay(i, st_corp_id, mod_flag)
+                        && i.type_id == charge_tid
+                        && i.quantity >= qty_needed
+                })
+            })
+            .map(|i| i.item_id);
+        let Some(cid) = candidate_id else {
+            return false;
+        };
+        let remove = if let Some(it) = snap.items.get_mut(&cid) {
+            it.quantity -= qty_needed;
+            it.quantity <= 0
+        } else {
+            false
+        };
+        if remove {
+            snap.items.remove(&cid);
+        }
+        true
+    })
+}
+
+fn resolve_victim_owner(ctx: &ServerContext, ball_id: i64) -> (Option<i64>, bool) {
+    if let Some(dc) = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&ball_id).map(|d| d.owner_char_id)) {
+        return (Some(dc), true);
+    }
+    if let Some(fc) = ctx.active_fighters.read().ok().and_then(|af| af.get(&ball_id).map(|f| f.owner_char_id)) {
+        return (Some(fc), true);
+    }
+    let ch_opt = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .find(|c| c.active_ship_id == ball_id)
+            .map(|c| c.character_id)
+            .or_else(|| {
+                snap.items
+                    .get(&ball_id)
+                    .map(|i| i.owner_id)
+                    .filter(|oid| snap.characters.contains_key(oid))
+            })
+    });
+    (ch_opt, false)
 }
 
 fn is_hostile_to_structure(
@@ -34,35 +180,59 @@ fn is_hostile_to_structure(
     structure_corp_id: i64,
     gunner_char_id: i64,
     sys_id: u32,
-    ball_id: i64,
+    ball: &Ball,
 ) -> bool {
-    if ball_id == structure_id || ball_id < 100_000_000 {
+    if ball.id == structure_id {
         return false;
     }
+    let is_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id));
+    let is_drone = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.contains_key(&ball.id));
+    if let Some(bt) = ctx.sde.types.get(&ball.type_id) {
+        if bt.group_id == GROUP_STANDUP_GUIDED_BOMB {
+            return false;
+        }
+        if !is_fighter && !is_drone && !matches!(bt.category_id, 6 | 11 | 18 | 22 | 87) {
+            return false;
+        }
+    } else if !is_fighter && !is_drone {
+        return false;
+    }
+
     let now_unix = ctx.now_unix();
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    let (victim_char, _) = resolve_victim_owner(ctx, ball.id);
+    let (st_alliance, gunner_fleet, target_corp, target_alliance, target_fleet) =
+        ctx.db.with_snapshot(|snap| {
+            let st_all = snap.corporations.get(&structure_corp_id).and_then(|c| c.alliance_id);
+            let g_flt = snap.fleets.values().find(|f| f.members.contains(&gunner_char_id)).map(|f| f.fleet_id);
+            let (t_corp, t_all, t_flt) = if let Some(vc) = victim_char {
+                let c_rec = snap.characters.get(&vc);
+                let corp = c_rec.map(|c| c.corporation_id);
+                let all = c_rec.and_then(|c| c.alliance_id).or_else(|| corp.and_then(|cid| snap.corporations.get(&cid).and_then(|co| co.alliance_id)));
+                let flt = snap.fleets.values().find(|f| f.members.contains(&vc)).map(|f| f.fleet_id);
+                (corp, all, flt)
+            } else if let Some(it) = snap.items.get(&ball.id) {
+                let corp = snap.corporations.contains_key(&it.owner_id).then_some(it.owner_id);
+                let all = corp.and_then(|cid| snap.corporations.get(&cid).and_then(|co| co.alliance_id));
+                (corp, all, None)
+            } else {
+                (None, None, None)
+            };
+            (st_all, g_flt, t_corp, t_all, t_flt)
+        });
 
-    let (target_char, target_corp) = ctx.db.with_snapshot(|snap| {
-        if let Some(ch) = snap.characters.values().find(|c| c.active_ship_id == ball_id) {
-            return (Some(ch.character_id), Some(ch.corporation_id));
-        }
-        if let Some(it) = snap.items.get(&ball_id) {
-            if let Some(ch) = snap.characters.get(&it.owner_id) {
-                return (Some(ch.character_id), Some(ch.corporation_id));
-            }
-            if snap.corporations.contains_key(&it.owner_id) {
-                return (None, Some(it.owner_id));
-            }
-        }
-        (None, None)
-    });
-
-    if target_corp.is_some_and(|c| c == structure_corp_id) {
+    if target_corp == Some(structure_corp_id) {
+        return false;
+    }
+    if st_alliance.is_some() && target_alliance == st_alliance {
+        return false;
+    }
+    if gunner_fleet.is_some() && target_fleet == gunner_fleet {
         return false;
     }
 
-    if let Some(tc) = target_char {
-        if tc == gunner_char_id {
+    if let Some(tc) = victim_char {
+        if tc == gunner_char_id || crate::services::space_destiny::is_location_change_invulnerable(ctx, tc, now_unix) {
             return false;
         }
         let is_suspect_or_crim = {
@@ -70,43 +240,219 @@ fn is_hostile_to_structure(
             let st = cw.get_or_create(tc);
             st.is_suspect(now_unix) || st.is_criminal(now_unix)
         };
-        if is_suspect_or_crim {
-            return true;
-        }
         let is_war = ctx.db.with_snapshot(|snap| {
             crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, gunner_char_id, tc, now_unix)
         });
-        if is_war {
-            return true;
-        }
-        let has_le = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.has_limited_engagement_with(tc, gunner_char_id, now_unix)
-        });
-        if has_le {
+        let has_le = with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(tc, gunner_char_id, now_unix));
+        if is_suspect_or_crim || is_war || has_le {
             return true;
         }
         if sys_sec >= 0.45 {
             return false;
         }
+        if sys_sec > 0.0 {
+            let safety = with_combat_runtime(ctx, |rt| {
+                rt.safety_levels.get(&gunner_char_id).copied().unwrap_or(SafetyLevel::Red)
+            });
+            if safety == SafetyLevel::Green || (safety == SafetyLevel::Yellow && ball.type_id == 670) {
+                return false;
+            }
+        }
         return true;
     }
 
-    if sys_sec >= 0.45 {
-        return false;
+    sys_sec < 0.45
+}
+
+async fn apply_standup_hit(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    structure_id: i64,
+    gunner_char_id: i64,
+    sys_id: u32,
+    ball: &Ball,
+    dmg: DamageVector,
+    cycle_secs: f64,
+    now_unix: u64,
+) -> Option<(f64, bool)> {
+    if sys_handle.get_combat_state(ball.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+        return None;
     }
-    true
+    let (applied, destroyed, _) =
+        crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+            ctx, sys_handle, sys_id, gunner_char_id, ball.id, dmg, cycle_secs, now_unix,
+        )
+        .await
+        .ok()??;
+    if ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id)) {
+        crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, ball.id, dmg).await;
+    }
+    let (victim_char_opt, is_sub_unit) = resolve_victim_owner(ctx, ball.id);
+    if let Some(vcid) = victim_char_opt.filter(|&v| v != gunner_char_id) {
+        let cw_target = if is_sub_unit { vcid } else { ball.id };
+        let _ = crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+            ctx,
+            gunner_char_id,
+            structure_id,
+            sys_id,
+            cw_target,
+            ball.type_id == 670,
+        );
+    } else if applied > 0.0 {
+        crate::sp6_lifecycle::record_npc_aggression_timer(ctx, gunner_char_id, now_unix);
+    }
+    Some((applied, destroyed))
 }
 
-fn read_omni_damage(mod_type: &eve_sde::InvType) -> DamageVector {
-    let em = mod_type.default_attributes.get(&114).copied().unwrap_or(0.0);
-    let exp = mod_type.default_attributes.get(&116).copied().unwrap_or(0.0);
-    let kin = mod_type.default_attributes.get(&117).copied().unwrap_or(0.0);
-    let therm = mod_type.default_attributes.get(&118).copied().unwrap_or(0.0);
-    DamageVector { em, thermal: therm, kinetic: kin, explosive: exp }
+async fn check_and_prepare_structure_cap(
+    ctx: &ServerContext,
+    sys_handle: &SystemHandle,
+    structure_id: i64,
+    st_type_id: u32,
+    mod_type: &eve_sde::InvType,
+) -> Result<(f64, f64), BridgeRpcError> {
+    let cap_need = mod_type.default_attributes.get(&6).copied().unwrap_or(0.0);
+    let sde_max_cap = ctx
+        .sde
+        .types
+        .get(&st_type_id)
+        .and_then(|t| t.default_attributes.get(&482).copied())
+        .filter(|&c| c > 0.0)
+        .unwrap_or(600_000.0);
+    let mut cs = sys_handle.get_combat_state(structure_id).await.ok().flatten().unwrap_or_default();
+    if cs.max_capacitor <= 0.0 {
+        cs.max_capacitor = sde_max_cap;
+        cs.capacitor = sde_max_cap;
+        let _ = sys_handle.set_combat_state(structure_id, cs.clone()).await;
+    }
+    if cs.capacitor + 1e-6 < cap_need {
+        return Err(err(
+            "NotEnoughCapacitor",
+            format!("Structure {structure_id} has {:.1} GJ capacitor; module requires {:.1} GJ", cs.capacitor, cap_need),
+        ));
+    }
+    Ok((cs.capacitor, cap_need))
 }
 
-/// Handles `dogmaIM.Activate` for Standup Point Defense Battery (1330),
-/// Standup Guided Bomb Launcher (1328), and Standup Arcing Vorton Projector (1333).
+/// Steps in-flight Standup Guided Bombs (`group 1548`) in `sys_id` and detonates them on impact.
+pub async fn step_guided_bombs_in_system(ctx: &ServerContext, sys_id: u32, dt: f64) {
+    let bombs: Vec<InFlightGuidedBombRecord> = ctx.db.with_snapshot(|snap| {
+        load_ext_state(snap)
+            .in_flight_guided_bombs
+            .values()
+            .filter(|b| b.solar_system_id == sys_id)
+            .cloned()
+            .collect()
+    });
+    if bombs.is_empty() {
+        return;
+    }
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let now_unix = ctx.now_unix();
+    let mut finished_ids = Vec::new();
+    let mut updated = Vec::new();
+
+    for mut rec in bombs {
+        let Some(bomb_type) = ctx.sde.types.get(&rec.bomb_type_id) else {
+            finished_ids.push(rec.bomb_id);
+            let _ = sys_handle.remove_ball(rec.bomb_id).await;
+            continue;
+        };
+        let bomb_snap = sys_handle.get_ball_snapshot(rec.bomb_id).await.ok().flatten();
+        let bomb_dead = sys_handle
+            .get_combat_state(rec.bomb_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|cs| cs.max_structure_hp > 0.0 && cs.structure_hp <= 0.0);
+        if bomb_snap.is_none() || bomb_dead {
+            finished_ids.push(rec.bomb_id);
+            let _ = sys_handle.remove_ball(rec.bomb_id).await;
+            continue;
+        }
+        let (_, bomb_ball) = bomb_snap.unwrap();
+        let Some((_, target_ball)) = sys_handle.get_ball_snapshot(rec.target_id).await.ok().flatten() else {
+            finished_ids.push(rec.bomb_id);
+            let _ = sys_handle.remove_ball(rec.bomb_id).await;
+            continue;
+        };
+
+        let det_range = bomb_type.default_attributes.get(&108).copied().unwrap_or(50.0);
+        let surface_dist = ((bomb_ball.position - target_ball.position).length()
+            - target_ball.radius
+            - bomb_ball.radius)
+            .max(0.0);
+        rec.remaining_flight_s -= dt;
+
+        if surface_dist <= det_range.max(1_200.0) {
+            finished_ids.push(rec.bomb_id);
+            let _ = sys_handle.remove_ball(rec.bomb_id).await;
+            let impact_pos = target_ball.position;
+            let aoe_radius = bomb_type.default_attributes.get(&99).copied().filter(|&r| r > 0.0).unwrap_or(20_000.0);
+            let exp_radius = bomb_type.default_attributes.get(&654).copied().filter(|&r| r > 0.0).unwrap_or(400.0);
+            let base_dmg = read_omni_damage(bomb_type);
+            let neut_amt = bomb_type.default_attributes.get(&97).copied().unwrap_or(0.0);
+            let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+
+            for b in &all_balls {
+                if (b.position - impact_pos).length() > aoe_radius {
+                    continue;
+                }
+                if !is_hostile_to_structure(ctx, rec.structure_id, rec.structure_corp_id, rec.gunner_char_id, sys_id, b) {
+                    continue;
+                }
+                let sig = sys_handle
+                    .get_combat_state(b.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|cs| cs.signature_radius)
+                    .filter(|&s| s > 0.0)
+                    .or_else(|| ctx.sde.types.get(&b.type_id).and_then(|t| t.default_attributes.get(&552).copied()))
+                    .unwrap_or_else(|| b.radius.max(35.0));
+                let scale = (sig / exp_radius).clamp(0.05, 1.0);
+                if base_dmg.total() > 0.0 {
+                    let _ = apply_standup_hit(
+                        ctx,
+                        &sys_handle,
+                        rec.structure_id,
+                        rec.gunner_char_id,
+                        sys_id,
+                        b,
+                        base_dmg.scaled(scale),
+                        12.0,
+                        now_unix,
+                    )
+                    .await;
+                }
+                if neut_amt > 0.0 {
+                    if let Ok(Some(cs)) = sys_handle.get_combat_state(b.id).await {
+                        let _ = sys_handle.set_capacitor(b.id, (cs.capacitor - neut_amt * scale).max(0.0)).await;
+                    }
+                }
+            }
+        } else if rec.remaining_flight_s <= 0.0 {
+            finished_ids.push(rec.bomb_id);
+            let _ = sys_handle.remove_ball(rec.bomb_id).await;
+        } else {
+            updated.push(rec);
+        }
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        for bid in finished_ids {
+            ext.in_flight_guided_bombs.remove(&bid);
+        }
+        for rec in updated {
+            ext.in_flight_guided_bombs.insert(rec.bomb_id, rec);
+        }
+        save_ext_state(snap, &ext);
+    });
+}
+
+/// Handles `dogmaIM.Activate` for Standup Point Defense Battery (`1330`),
+/// Standup Guided Bomb Launcher (`1328`), and Standup Arcing Vorton Projector (`1333`).
 #[allow(clippy::too_many_arguments)]
 pub async fn try_activate_standup_weapon(
     ctx: &ServerContext,
@@ -115,71 +461,116 @@ pub async fn try_activate_standup_weapon(
     structure_id: i64,
     sys_id: u32,
     module_id: i64,
-    mod_type: &eve_sde::InvType,
-    charge_type_id: Option<u32>,
     target_id_opt: Option<i64>,
     attacker_ball: &Ball,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if !matches!(
-        mod_type.group_id,
-        GROUP_STANDUP_POINT_DEFENSE_BATTERY
-            | GROUP_STANDUP_GUIDED_BOMB_LAUNCHER
-            | GROUP_STANDUP_ARCING_VORTON
-    ) {
-        return None;
+    let now_unix = ctx.now_unix();
+    let lookup = ctx.db.with_snapshot(|snap| {
+        let item_rec = snap.items.get(&module_id)?;
+        let mod_type = ctx.sde.types.get(&item_rec.type_id)?;
+        if !matches!(
+            mod_type.group_id,
+            GROUP_STANDUP_POINT_DEFENSE_BATTERY
+                | GROUP_STANDUP_GUIDED_BOMB_LAUNCHER
+                | GROUP_STANDUP_ARCING_VORTON
+        ) {
+            return None;
+        }
+        let online = snap.module_online_states.get(&module_id).copied().unwrap_or(false);
+        let charge_tid = snap
+            .items
+            .values()
+            .find(|i| {
+                i.location_id == structure_id
+                    && i.flag == item_rec.flag
+                    && i.item_id != module_id
+                    && i.quantity > 0
+            })
+            .map(|i| i.type_id);
+        let ext = load_ext_state(snap);
+        let active_gunner = ext.active_pilot_by_structure.get(&structure_id).copied();
+        let immob_until = ext.gunner_immobilized_until_unix.get(&structure_id).copied().unwrap_or(0);
+        let mod_until = ext.standup_module_cycle_until_unix.get(&module_id).copied().unwrap_or(0);
+        let st_info = snap.structures.get(&structure_id).map(|s| (s.type_id, s.owner_corp_id, s.state.clone()));
+        Some((
+            item_rec.location_id,
+            item_rec.flag,
+            mod_type.clone(),
+            online,
+            charge_tid,
+            active_gunner,
+            immob_until,
+            mod_until,
+            st_info,
+        ))
+    })?;
+
+    let (mod_loc_id, mod_flag, mod_type, is_online, slot_charge_tid, active_gunner, immob_until, mod_until, st_info) =
+        lookup;
+
+    let Some((st_type_id, st_corp_id, st_state)) = st_info else {
+        return Some(Err(err("StructureNotFound", format!("Structure {structure_id} not found"))));
+    };
+    if st_state == "Destroyed" {
+        return Some(Err(err("StructureDestroyed", format!("Structure {structure_id} is destroyed"))));
+    }
+    if active_gunner != Some(char_id) {
+        return Some(Err(err("NotControllingStructure", "Character is not the active gunner of this structure")));
+    }
+    if mod_loc_id != structure_id || !(27..=34).contains(&(mod_flag as i32)) {
+        return Some(Err(err("ModuleNotFitted", "Standup weapon must be fitted to a structure high slot")));
+    }
+    if !is_online {
+        return Some(Err(err("ModuleNotOnline", format!("Module {module_id} is offline"))));
     }
 
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     if sys_sec >= 0.45 && mod_type.default_attributes.get(&1970).is_some_and(|&v| v > 0.0) {
-        return Some(Err(BridgeRpcError {
-            code: "CannotActivateInHighSec".into(),
-            message: format!("{} cannot be activated in high-security space", mod_type.name),
-        }));
+        return Some(Err(err(
+            "CannotActivateInHighSec",
+            format!("{} cannot be activated in high-security space", mod_type.name),
+        )));
     }
-
-    let now_unix = ctx.now_unix();
-    let gunner_key = (ctx.instance_id as usize, structure_id);
-    if let Ok(guard) = immobilized_gunners().read() {
-        if let Some(&until) = guard.get(&gunner_key) {
-            if now_unix < until {
-                return Some(Err(BridgeRpcError {
-                    code: "WeaponCycleImmobilized".into(),
-                    message: "Structure gunner weapon cycle is currently immobilized".into(),
-                }));
-            }
-        }
+    if now_unix < immob_until {
+        return Some(Err(err(
+            "WeaponCycleImmobilized",
+            "Structure gunner weapon cycle is currently immobilized",
+        )));
     }
-
-    let mod_key = (ctx.instance_id as usize, module_id);
-    if let Ok(guard) = standup_module_cycles().read() {
-        if let Some(&until) = guard.get(&mod_key) {
-            if now_unix < until {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleAlreadyCycling".into(),
-                    message: format!("Module {module_id} is already cycling"),
-                }));
-            }
-        }
+    if now_unix < mod_until {
+        return Some(Err(err("ModuleAlreadyCycling", format!("Module {module_id} is already cycling"))));
     }
-
-    let (st_type_id, st_corp_id) = match ctx.db.with_snapshot(|snap| {
-        snap.structures
-            .get(&structure_id)
-            .map(|s| (s.type_id, s.owner_corp_id))
-    }) {
-        Some(v) => v,
-        None => {
-            return Some(Err(BridgeRpcError {
-                code: "StructureNotFound".into(),
-                message: format!("Structure {structure_id} not found"),
-            }));
-        }
-    };
-
-    let all_balls = sys_handle.list_balls().await.unwrap_or_default();
 
     match mod_type.group_id {
         GROUP_STANDUP_POINT_DEFENSE_BATTERY => {
+            if !structure_profile(ctx, st_type_id).is_some_and(|p| p.hull_class == HullClass::XLarge) {
+                return Some(Err(err(
+                    "RequiresXLStructure",
+                    "Standup Point Defense Battery can only be activated on an XL Upwell structure",
+                )));
+            }
+            let charge_group = mod_type.default_attributes.get(&604).copied().unwrap_or(GROUP_STANDUP_FLAK_AMMO as f64) as u32;
+            let charge_rate = mod_type.default_attributes.get(&56).copied().unwrap_or(200.0).ceil().max(1.0) as i32;
+            let Some(flak_tid) = find_structure_charge_type(
+                ctx, structure_id, st_corp_id, module_id, mod_flag, charge_group, charge_rate, slot_charge_tid,
+            ) else {
+                return Some(Err(err(
+                    "NoAmmoLoaded",
+                    "Standup Point Defense Battery requires Standup Flak Rounds loaded in the weapon or structure ammo bay",
+                )));
+            };
+            let Some(flak_type) = ctx.sde.types.get(&flak_tid) else {
+                return Some(Err(err("IncompatibleAmmo", "Unknown Standup Flak Round charge type")));
+            };
+            let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, flak_tid, charge_rate) {
+                return Some(Err(err("NoAmmoLoaded", "Insufficient Standup Flak Rounds remaining")));
+            }
+            let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
+
             let aoe_radius = mod_type
                 .default_attributes
                 .get(&99)
@@ -192,8 +583,10 @@ pub async fn try_activate_standup_weapon(
                 .get(&73)
                 .map(|&ms| (ms / 1000.0).ceil() as u64)
                 .unwrap_or(12);
+            let dmg_mult = mod_type.default_attributes.get(&64).copied().filter(|&m| m > 0.0).unwrap_or(1.0);
+            let pulse_dmg = read_omni_damage(flak_type).scaled(dmg_mult);
 
-            let dmg = DamageVector { em: 250.0, thermal: 250.0, kinetic: 250.0, explosive: 250.0 };
+            let all_balls = sys_handle.list_balls().await.unwrap_or_default();
             let mut targets_hit = 0_i64;
             let mut total_applied = 0.0_f64;
             let mut destroyed_count = 0_i64;
@@ -202,10 +595,14 @@ pub async fn try_activate_standup_weapon(
                 if (b.position - attacker_ball.position).length() > aoe_radius {
                     continue;
                 }
-                if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b.id) {
+                if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b) {
                     continue;
                 }
-                if let Ok(Some((applied, destroyed, _))) = sys_handle.apply_damage(b.id, dmg).await {
+                if let Some((applied, destroyed)) = apply_standup_hit(
+                    ctx, sys_handle, structure_id, char_id, sys_id, b, pulse_dmg, cycle_secs as f64, now_unix,
+                )
+                .await
+                {
                     targets_hit += 1;
                     total_applied += applied;
                     if destroyed {
@@ -214,14 +611,17 @@ pub async fn try_activate_standup_weapon(
                 }
             }
 
-            if let Ok(mut guard) = standup_module_cycles().write() {
-                guard.insert(mod_key, now_unix.saturating_add(cycle_secs));
-            }
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut ext = load_ext_state(snap);
+                ext.standup_module_cycle_until_unix.insert(module_id, now_unix.saturating_add(cycle_secs));
+                save_ext_state(snap, &ext);
+            });
 
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("structureID", PyRep::Integer(structure_id)),
                 ("gunnerID", PyRep::Integer(char_id)),
+                ("chargeTypeID", PyRep::Integer(flak_tid as i64)),
                 ("aoeRadius", PyRep::Real(aoe_radius)),
                 ("targetsHit", PyRep::Integer(targets_hit)),
                 ("appliedDamage", PyRep::Real(total_applied)),
@@ -232,214 +632,243 @@ pub async fn try_activate_standup_weapon(
 
         GROUP_STANDUP_GUIDED_BOMB_LAUNCHER => {
             let Some(tid) = target_id_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetRequired".into(),
-                    message: "Standup Guided Bomb Launcher requires a locked target".into(),
-                }));
+                return Some(Err(err("TargetRequired", "Standup Guided Bomb Launcher requires a locked target")));
             };
             let locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
             if !locks.iter().any(|l| l.target_id == tid && l.locked) {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotLocked".into(),
-                    message: format!("Target {tid} is not locked"),
-                }));
+                return Some(Err(err("TargetNotLocked", format!("Target {tid} is not locked"))));
             }
             let Some((_, target_ball)) = sys_handle.get_ball_snapshot(tid).await.ok().flatten() else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: format!("Target {tid} not in space"),
-                }));
+                return Some(Err(err("TargetNotFound", format!("Target {tid} not in space"))));
             };
 
-            // Evaluate crimewatch & safety on primary target
+            let Some(bomb_tid) = find_structure_charge_type(
+                ctx, structure_id, st_corp_id, module_id, mod_flag, GROUP_STANDUP_GUIDED_BOMB, 1, slot_charge_tid,
+            ) else {
+                return Some(Err(err(
+                    "NoAmmoLoaded",
+                    "Standup Guided Bomb Launcher requires a guided bomb loaded in the weapon or structure ammo bay",
+                )));
+            };
+            let Some(bomb_type) = ctx.sde.types.get(&bomb_tid).filter(|t| t.group_id == GROUP_STANDUP_GUIDED_BOMB) else {
+                return Some(Err(err("IncompatibleAmmo", "Loaded charge is not a Standup Guided Bomb")));
+            };
+
+            let bomb_vel = bomb_type.default_attributes.get(&37).copied().filter(|&v| v > 0.0).unwrap_or(2_500.0);
+            let exp_delay_s = bomb_type.default_attributes.get(&281).copied().map(|ms| ms / 1000.0).filter(|&s| s > 0.0).unwrap_or(400.0);
+            let max_range = bomb_vel * exp_delay_s;
+            let dist = (target_ball.position - attacker_ball.position).length();
+            if dist > max_range {
+                return Some(Err(err(
+                    "TargetOutOfRange",
+                    format!("Target distance {:.0} m exceeds guided bomb maximum flight range {:.0} m", dist, max_range),
+                )));
+            }
+            if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
+                return Some(Err(err("CantDoInCurrentSafetyLevel", "Cannot launch Standup Guided Bomb at friendly or safety-protected target")));
+            }
+            let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if let Err(e) = crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
-                ctx, char_id, structure_id, sys_id, tid, false,
+                ctx, char_id, structure_id, sys_id, tid, target_ball.type_id == 670,
             ) {
                 return Some(Err(e));
             }
-
-            // Require loaded guided bomb charge (group 1548)
-            let bomb_tid = match charge_type_id.or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.items.values().find(|i| {
-                        i.location_id == structure_id && i.quantity > 0 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 1548)
-                    }).map(|i| i.type_id)
-                })
-            }) {
-                Some(t) => t,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoAmmoLoaded".into(),
-                        message: "Standup Guided Bomb Launcher requires a loaded guided bomb charge".into(),
-                    }));
-                }
-            };
-            let bomb_type = match ctx.sde.types.get(&bomb_tid) {
-                Some(t) if t.group_id == 1548 => t,
-                _ => {
-                    return Some(Err(BridgeRpcError {
-                        code: "IncompatibleAmmo".into(),
-                        message: "Loaded charge is not a guided bomb".into(),
-                    }));
-                }
-            };
-
-            let consumed = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.values_mut().find(|i| i.location_id == structure_id && i.type_id == bomb_tid && i.quantity > 0) {
-                    it.quantity -= 1;
-                    true
-                } else {
-                    false
-                }
-            });
-            if !consumed {
-                return Some(Err(BridgeRpcError {
-                    code: "NoAmmoLoaded".into(),
-                    message: "No guided bombs remaining in structure".into(),
-                }));
+            if !consume_structure_charge(ctx, structure_id, st_corp_id, module_id, mod_flag, bomb_tid, 1) {
+                return Some(Err(err("NoAmmoLoaded", "No guided bombs remaining in structure")));
             }
+            let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
 
-            let aoe_radius = bomb_type
-                .default_attributes
-                .get(&99)
-                .copied()
-                .filter(|&r| r > 0.0)
-                .unwrap_or(20_000.0);
-            let explosion_radius = bomb_type
-                .default_attributes
-                .get(&654)
-                .copied()
-                .filter(|&r| r > 0.0)
-                .unwrap_or(400.0);
-            let base_dmg = read_omni_damage(bomb_type);
+            let aoe_radius = bomb_type.default_attributes.get(&99).copied().filter(|&r| r > 0.0).unwrap_or(20_000.0);
             let cycle_secs = mod_type
                 .default_attributes
                 .get(&51)
                 .or_else(|| mod_type.default_attributes.get(&73))
                 .map(|&ms| (ms / 1000.0).ceil() as u64)
                 .unwrap_or(60);
+            let bomb_hp = bomb_type.default_attributes.get(&9).copied().filter(|&h| h > 0.0).unwrap_or(4_000_000.0);
+            let bomb_sig = bomb_type.default_attributes.get(&552).copied().filter(|&s| s > 0.0).unwrap_or(500.0);
+            let dir = (target_ball.position - attacker_ball.position).normalize_or_zero();
 
-            let mut targets_hit = 0_i64;
-            let mut total_applied = 0.0_f64;
-            let mut primary_sig_scale = 1.0_f64;
+            let (bomb_id, st_alliance) = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let bid = snap.next_entity_id;
+                let all_id = snap.corporations.get(&st_corp_id).and_then(|c| c.alliance_id).unwrap_or(-1);
+                let mut ext = load_ext_state(snap);
+                ext.standup_module_cycle_until_unix.insert(module_id, now_unix.saturating_add(cycle_secs));
+                ext.in_flight_guided_bombs.insert(
+                    bid,
+                    InFlightGuidedBombRecord {
+                        bomb_id: bid,
+                        structure_id,
+                        structure_corp_id: st_corp_id,
+                        gunner_char_id: char_id,
+                        solar_system_id: sys_id,
+                        target_id: tid,
+                        bomb_type_id: bomb_tid,
+                        remaining_flight_s: exp_delay_s,
+                    },
+                );
+                save_ext_state(snap, &ext);
+                (bid, all_id)
+            });
 
-            for b in &all_balls {
-                if (b.position - target_ball.position).length() > aoe_radius {
-                    continue;
-                }
-                if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b.id) {
-                    continue;
-                }
-                let sig = ctx
-                    .sde
-                    .types
-                    .get(&b.type_id)
-                    .and_then(|t| t.default_attributes.get(&552).copied())
-                    .unwrap_or(125.0);
-                let scale = (sig / explosion_radius).clamp(0.05, 1.0);
-                if b.id == tid {
-                    primary_sig_scale = scale;
-                }
-                let scaled_dmg = DamageVector {
-                    em: base_dmg.em * scale,
-                    thermal: base_dmg.thermal * scale,
-                    kinetic: base_dmg.kinetic * scale,
-                    explosive: base_dmg.explosive * scale,
-                };
-                if let Ok(Some((applied, _, _))) = sys_handle.apply_damage(b.id, scaled_dmg).await {
-                    targets_hit += 1;
-                    total_applied += applied;
-                }
-            }
-
-            if let Ok(mut guard) = standup_module_cycles().write() {
-                guard.insert(mod_key, now_unix.saturating_add(cycle_secs));
-            }
+            let bomb_ball = Ball {
+                id: bomb_id,
+                type_id: bomb_tid,
+                position: attacker_ball.position,
+                velocity: dir * bomb_vel,
+                max_velocity: bomb_vel,
+                inertia: 0.05,
+                mass: bomb_type.mass.max(1.0),
+                radius: bomb_type.radius.max(25.0),
+                speed_fraction: 1.0,
+                mode: MovementMode::Follow { target_id: tid, range: 0.0 },
+            };
+            let bomb_cs = CombatState {
+                structure_hp: bomb_hp,
+                max_structure_hp: bomb_hp,
+                signature_radius: bomb_sig,
+                ..CombatState::default()
+            };
+            let _ = sys_handle.spawn_ball_with_meta(
+                bomb_ball,
+                bomb_cs,
+                eve_destiny::SlimItemMeta {
+                    group_id: GROUP_STANDUP_GUIDED_BOMB,
+                    category_id: 8,
+                    owner_id: st_corp_id,
+                    char_id: Some(char_id),
+                    corp_id: st_corp_id,
+                    alliance_id: st_alliance,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                },
+            ).await;
 
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
+                ("bombID", PyRep::Integer(bomb_id)),
                 ("targetID", PyRep::Integer(tid)),
                 ("chargeTypeID", PyRep::Integer(bomb_tid as i64)),
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                ("maxRange", PyRep::Real(max_range)),
                 ("aoeRadius", PyRep::Real(aoe_radius)),
-                ("signatureScale", PyRep::Real(primary_sig_scale)),
-                ("targetsHit", PyRep::Integer(targets_hit)),
-                ("appliedDamage", PyRep::Real(total_applied)),
+                ("inFlight", PyRep::Bool(true)),
                 ("cycleDurationSeconds", PyRep::Integer(cycle_secs as i64)),
             ])))
         }
 
         GROUP_STANDUP_ARCING_VORTON => {
-            if st_type_id != TYPE_KEEPSTAR {
-                return Some(Err(BridgeRpcError {
-                    code: "CantFitToStructure".into(),
-                    message: "Standup Arcing Vorton Projector can only be operated on a Keepstar".into(),
-                }));
+            if !matches!(st_type_id, TYPE_KEEPSTAR | TYPE_PALATINE_KEEPSTAR) {
+                return Some(Err(err(
+                    "CantFitToStructure",
+                    "Standup Arcing Vorton Projector can only be operated on a Keepstar",
+                )));
             }
             let Some(tid) = target_id_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetRequired".into(),
-                    message: "Standup Arcing Vorton Projector requires a locked primary target".into(),
-                }));
+                return Some(Err(err("TargetRequired", "Standup Arcing Vorton Projector requires a locked primary target")));
             };
             let locks = sys_handle.get_target_locks(structure_id).await.unwrap_or_default();
             if !locks.iter().any(|l| l.target_id == tid && l.locked) {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotLocked".into(),
-                    message: format!("Target {tid} is not locked"),
-                }));
+                return Some(Err(err("TargetNotLocked", format!("Target {tid} is not locked"))));
             }
             let Some((_, target_ball)) = sys_handle.get_ball_snapshot(tid).await.ok().flatten() else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetNotFound".into(),
-                    message: format!("Target {tid} not in space"),
-                }));
+                return Some(Err(err("TargetNotFound", format!("Target {tid} not in space"))));
             };
 
-            // Evaluate crimewatch & safety
+            let max_range = ctx
+                .sde
+                .types
+                .get(&st_type_id)
+                .and_then(|t| t.default_attributes.get(&76).copied())
+                .filter(|&r| r > 0.0)
+                .unwrap_or(400_000.0);
+            let dist = (target_ball.position - attacker_ball.position).length();
+            if dist > max_range {
+                return Some(Err(err(
+                    "TargetOutOfRange",
+                    format!("Primary target distance {:.0} m exceeds Keepstar maximum range {:.0} m", dist, max_range),
+                )));
+            }
+            if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
+                return Some(Err(err("CantDoInCurrentSafetyLevel", "Cannot fire Standup Arcing Vorton Projector at friendly or safety-protected target")));
+            }
+            let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if let Err(e) = crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
-                ctx, char_id, structure_id, sys_id, tid, false,
+                ctx, char_id, structure_id, sys_id, tid, target_ball.type_id == 670,
             ) {
                 return Some(Err(e));
             }
+            let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
 
             let jump_radius = mod_type
                 .default_attributes
-                .get(&99)
+                .get(&2105)
+                .or_else(|| mod_type.default_attributes.get(&99))
                 .copied()
                 .filter(|&r| r > 0.0)
-                .unwrap_or(50_000.0);
+                .unwrap_or(20_000.0);
+            let max_total = mod_type.default_attributes.get(&2104).copied().unwrap_or(5.0).max(1.0) as usize;
+            let max_secondary = max_total.saturating_sub(1);
+            let loss_per_hop = mod_type.default_attributes.get(&2106).copied().filter(|&l| l > 0.0).unwrap_or(0.85);
             let cycle_secs = mod_type
                 .default_attributes
                 .get(&73)
                 .or_else(|| mod_type.default_attributes.get(&51))
                 .map(|&ms| (ms / 1000.0).ceil() as u64)
                 .unwrap_or(600);
-            let dmg = read_omni_damage(mod_type);
+            let immob_secs = mod_type
+                .default_attributes
+                .get(&1579)
+                .map(|&ms| (ms / 1000.0).ceil() as u64)
+                .filter(|&s| s > 0)
+                .unwrap_or(cycle_secs);
+            let base_dmg = read_omni_damage(&mod_type);
 
-            let candidates: Vec<(i64, DVec3)> = all_balls
-                .iter()
-                .filter(|b| b.id != tid && is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b.id))
-                .map(|b| (b.id, b.position))
-                .collect();
-            let hit_ids = vorton_arc_targets_with_cap(tid, target_ball.position, &candidates, jump_radius, 4);
+            let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+            let ball_map: std::collections::HashMap<i64, Ball> = all_balls.into_iter().map(|b| (b.id, b)).collect();
+            let mut candidates: Vec<(i64, DVec3)> = Vec::new();
+            for b in ball_map.values() {
+                if b.id == tid || !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b) {
+                    continue;
+                }
+                if sys_handle.get_combat_state(b.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                    continue;
+                }
+                candidates.push((b.id, b.position));
+            }
+            let hit_ids = vorton_arc_targets_with_cap(tid, target_ball.position, &candidates, jump_radius, max_secondary);
 
             let mut total_applied = 0.0_f64;
             let mut targets_hit = 0_i64;
-            for hid in &hit_ids {
-                if let Ok(Some((applied, _, _))) = sys_handle.apply_damage(*hid, dmg).await {
+            for (hop_idx, hid) in hit_ids.iter().enumerate() {
+                let Some(hb) = ball_map.get(hid) else {
+                    continue;
+                };
+                let hop_dmg = base_dmg.scaled(loss_per_hop.powi(hop_idx as i32));
+                if let Some((applied, _)) = apply_standup_hit(
+                    ctx, sys_handle, structure_id, char_id, sys_id, hb, hop_dmg, cycle_secs as f64, now_unix,
+                )
+                .await
+                {
                     targets_hit += 1;
                     total_applied += applied;
                 }
             }
 
-            let immobilized_until = now_unix.saturating_add(cycle_secs);
-            if let Ok(mut guard) = immobilized_gunners().write() {
-                guard.insert(gunner_key, immobilized_until);
-            }
-            if let Ok(mut guard) = standup_module_cycles().write() {
-                guard.insert(mod_key, immobilized_until);
-            }
+            let immobilized_until = now_unix.saturating_add(immob_secs);
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut ext = load_ext_state(snap);
+                ext.gunner_immobilized_until_unix.insert(structure_id, immobilized_until);
+                ext.standup_module_cycle_until_unix.insert(module_id, now_unix.saturating_add(cycle_secs));
+                save_ext_state(snap, &ext);
+            });
 
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),

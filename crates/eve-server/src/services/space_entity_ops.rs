@@ -947,6 +947,13 @@ async fn handle_cmd_unanchor(
             message: format!("Character {char_id} does not own entity {target_id}"),
         });
     }
+    let target_grp = ctx.sde.types.get(&target_ball.type_id).map(|t| t.group_id).unwrap_or(0);
+    if !crate::services::mobile_deployables::can_deployable_be_scooped(target_grp) {
+        return Err(BridgeRpcError {
+            code: "CannotUnanchor".into(),
+            message: "This single-use mobile deployable cannot be unanchored or scooped".into(),
+        });
+    }
 
     let _ = sys_handle.set_movement_mode(target_id, MovementMode::Stop).await;
     let _ = sys_handle

@@ -114,6 +114,8 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     });
     s1.ship_id = Some(rorq_id);
     s1.solar_system_id = Some(SYS_JITA);
+    call(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(cvb_id)]).await;
+    ctx.drain_notifications_for_char(P1);
 
     call(&ctx, &mut s1, "jumpCloneSvc", "OfferShipCloneInstallation", &[PyRep::Integer(P2)]).await;
     let n_offer_p2 = ctx.drain_notifications_for_char(P2);

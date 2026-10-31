@@ -402,6 +402,7 @@ async fn test_home_station_and_jump_clones_parity() {
     let cvb_mod_id = 930_002i64;
     seed_test_item(&ctx, host_ship_id, 28352, PILOT1, SYS_JITA as i64, InventoryFlag::None, 1);
     seed_test_item(&ctx, cvb_mod_id, 23735, PILOT1, host_ship_id, InventoryFlag::HiSlot0, 1);
+    seed_test_item(&ctx, 930_003, 16273, PILOT1, host_ship_id, InventoryFlag::Cargo, 10);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(cvb_mod_id, true);
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
@@ -416,6 +417,9 @@ async fn test_home_station_and_jump_clones_parity() {
     });
     s1.ship_id = Some(host_ship_id);
     s1.solar_system_id = Some(SYS_JITA);
+    rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(cvb_mod_id)])
+        .await
+        .expect("Activate Clone Vat Bay I");
 
     ctx.drain_notifications_for_char(PILOT1);
     ctx.drain_notifications_for_char(PILOT2);

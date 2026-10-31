@@ -420,6 +420,8 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
     });
 
     let mut sess_rorq = make_session(pilot1, None, None, Some(rorq_id));
+    sess_rorq.solar_system_id = Some(30_000_142);
+    rpc(&ctx, &mut sess_rorq, "dogmaIM", "Activate", vec![PyRep::Integer(cvb_mod_id)]).await.expect("Activate CVB");
     let mut sess2 = make_session(pilot2, Some(jita_st_id), None, None);
 
     // Caller must pilot/own host ship
@@ -436,7 +438,7 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
     let PyRep::Rowset { rows, .. } = ship_state else { panic!("Rowset expected") };
     assert!(rows.iter().any(|r| r.get(1) == Some(&PyRep::Integer(pilot2))));
 
-    // AcceptShipCloneInstallation fails with InsufficientLiquidOzone when host ship lacks liquid ozone
+    // Clone Vat Bay activation fails without Liquid Ozone, blocking OfferShipCloneInstallation with NoActiveCloneVatBay
     let (rorq_no_oz, cvb_no_oz) = (93_000_035_i64, 93_000_036_i64);
     ctx.db.with_mut_snapshot(|snap| {
         seed_item(snap, rorq_no_oz, 28352, pilot1, 30_000_144, InventoryFlag::None);
@@ -447,9 +449,11 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
         }
     });
     let mut sess_no_oz = make_session(pilot1, None, None, Some(rorq_no_oz));
-    rpc(&ctx, &mut sess_no_oz, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot2), PyRep::Integer(rorq_no_oz)]).await.unwrap();
-    let err_oz = rpc(&ctx, &mut sess2, "jumpCloneSvc", "AcceptShipCloneInstallation", vec![PyRep::Integer(rorq_no_oz)]).await.unwrap_err();
-    assert_eq!(err_oz.code, "InsufficientLiquidOzone");
+    sess_no_oz.solar_system_id = Some(30_000_142);
+    let err_oz = rpc(&ctx, &mut sess_no_oz, "dogmaIM", "Activate", vec![PyRep::Integer(cvb_no_oz)]).await.unwrap_err();
+    assert!(matches!(err_oz.code.as_str(), "NotEnoughFuel" | "InsufficientLiquidOzone"));
+    let err_inactive = rpc(&ctx, &mut sess_no_oz, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot2), PyRep::Integer(rorq_no_oz)]).await.unwrap_err();
+    assert_eq!(err_inactive.code, "NoActiveCloneVatBay");
 
     // 4. Clones in destroyed structure moved home and lose implants
     let (destr_struct_id, clone_in_destr_id) = (1_000_000_000_806_i64, 8305_i64);
