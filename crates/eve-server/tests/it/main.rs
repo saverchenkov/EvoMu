@@ -77,6 +77,8 @@ mod journeys_core_part1;
 mod journeys_core_part2;
 mod journeys_core_part3;
 mod journeys_core_part4;
+mod journeys_core_part5;
+mod journeys_core_part6;
 mod economy_contracts;
 mod economy_contracts_market_closure;
 mod economy_contracts_market_closure_part2;
