@@ -145,16 +145,18 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     let dmg_after_station = ctx.db.with_snapshot(|s| s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     assert!(dmg_after_station <= 1e-6, "Station repair service must clear burned-out module damage");
 
-    // Burn out again and repair via Upwell structure tether / RepairItemsInStructure
+    // Burn out again in space and repair via real in-space Upwell structure tethering (leaving burned-out module offline until manually onlined)
     let astra_id = 981_301;
     let corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(1000009));
     give_item(&ctx, 981_302, 35892, corp_id, astra_id, InventoryFlag::ServiceSlot0, 1);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(981_302, true);
+        snap.module_online_states.insert(mod_5m3, false);
         snap.items.get_mut(&mod_5m3).unwrap().dynamic_attributes.insert(3, 40.0);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
-            ch.structure_id = Some(astra_id);
+            ch.structure_id = None;
+            ch.solar_system_id = NULL_SYS;
         }
         snap.structures.insert(
             astra_id,
@@ -179,10 +181,24 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
         );
     });
     sess.station_id = None;
-    sess.structure_id = Some(astra_id);
-    ctx.dispatch_rpc(&mut sess, "repairSvc", None, "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(mod_5m3)])], &kw, None).await.expect("Repair burned-out module in Upwell structure");
-    let dmg_after_struct = ctx.db.with_snapshot(|s| s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
-    assert!(dmg_after_struct <= 1e-6, "Upwell structure repair must clear burned-out module damage");
+    sess.structure_id = None;
+    sess.solar_system_id = Some(NULL_SYS);
+    let _ = sys.set_ball_position(ship_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_5m3)], &kw, None).await.unwrap_err().code,
+        "ModuleBurnedOut",
+        "100% burned-out module must be rejected by InitiateModuleRepair in space"
+    );
+    eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, char_id, NULL_SYS, ship_id).await;
+    let _ = sys.step_manual(1.0).await;
+    assert!(sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered, "Ship must be tethered in space to the operational Astrahus");
+    let (dmg_after_tether, is_online_after_tether) = ctx.db.with_snapshot(|s| {
+        let dmg = s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0);
+        let onl = s.module_online_states.get(&mod_5m3).copied().unwrap_or(true);
+        (dmg, onl)
+    });
+    assert!(dmg_after_tether <= 1e-6, "In-space Upwell structure tethering must clear burned-out module heat damage");
+    assert!(!is_online_after_tether, "Tether-repaired burned-out module must remain offline until manually onlined by pilot");
 }
 
 #[tokio::test]

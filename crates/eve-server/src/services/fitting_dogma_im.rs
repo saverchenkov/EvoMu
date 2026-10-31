@@ -362,13 +362,25 @@ pub(crate) async fn handle_dogma_im(
         }
 
         ("dogmaIM", "DestroyFitting") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DestroyFitting requires itemID".into() }));
             };
+            let undocked = session.station_id.is_none() && session.structure_id.is_none();
+            if undocked {
+                let now_unix = ctx.now_unix_secs();
+                let has_weapons_timer = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|cw| cw.is_weapon_timer_active(now_unix));
+                if has_weapons_timer {
+                    return Some(Err(BridgeRpcError { code: "CannotRefitWithWeaponsTimer".into(), message: "Cannot destroy fitted modules or rigs in space while weapons timer is active".into() }));
+                }
+                let near_fitting_service = match (session.solar_system_id, session.ship_id) {
+                    (Some(sys_id), Some(ship_id)) => is_near_in_space_fitting_service(ctx, sys_id, ship_id).await,
+                    _ => false,
+                };
+                if !near_fitting_service {
+                    return Some(Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Destroying fittings in space requires being within range of an anchored, non-reinforced Mobile Depot or capital SMA".into() }));
+                }
+            }
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(item) = snap.items.get(&item_id) {
                     let loc = item.location_id;
@@ -385,24 +397,18 @@ pub(crate) async fn handle_dogma_im(
                         }
                     } else if item.owner_id != char_id {
                         return Err(BridgeRpcError { code: "ItemNotOwnedByCharacter".into(), message: "Cannot destroy an item not owned by character".into() });
+                    } else if undocked && (Some(loc) != session.ship_id || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)) {
+                        return Err(BridgeRpcError { code: "ItemNotFittedToActiveShip".into(), message: "In-space DestroyFitting requires a fitted item on the active ship".into() });
                     }
                     if (125..=129).contains(&flag_u16) {
                         let has_fitted_modules = snap.items.values().any(|other| {
-                            other.location_id == loc
-                                && other.item_id != item_id
-                                && (11..=34).contains(&(other.flag as u16))
-                                && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)
+                            other.location_id == loc && other.item_id != item_id && (11..=34).contains(&(other.flag as u16)) && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)
                         });
                         if has_fitted_modules {
                             return Err(BridgeRpcError { code: "SubsystemHasFittedModules".into(), message: "Cannot destroy a T3 Strategic Cruiser subsystem while modules are fitted".into() });
                         }
                     }
-                    let found = (
-                        loc,
-                        item.flag as i64,
-                        item.type_id as i64,
-                        item.quantity as i64,
-                    );
+                    let found = (loc, item.flag as i64, item.type_id as i64, item.quantity as i64);
                     snap.items.remove(&item_id);
                     snap.module_online_states.remove(&item_id);
                     snap.module_active_states.remove(&item_id);
@@ -412,10 +418,7 @@ pub(crate) async fn handle_dogma_im(
                     Ok(None)
                 }
             });
-            let loc_opt = match destroy_res {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let loc_opt = match destroy_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if let Some((loc, flag, type_id, qty)) = loc_opt {
                 if let Some(sys_id) = session.solar_system_id {
                     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -444,10 +447,7 @@ pub(crate) async fn handle_dogma_im(
                 // V24 client derives `OnModuleUnfitted` from this `OnItemChange` (`ixFlag` change).
                 let _ = ctx.notify_fitted_item_trashed(char_id, item_id, type_id, qty, loc, flag);
             }
-            Some(Ok(PyRep::keyval([
-                ("itemID", PyRep::Integer(item_id)),
-                ("destroyed", PyRep::Bool(true)),
-            ])))
+            Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(item_id)), ("destroyed", PyRep::Bool(true))])))
         }
 
         ("dogmaIM", "SetModuleOnline") => {

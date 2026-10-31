@@ -688,6 +688,9 @@ pub async fn activate_superweapon_with_args(
     if sys_sec >= 0.45 {
         return Err(BridgeRpcError { code: "CannotActivateDoomsdayInHighSec".into(), message: format!("Superweapons and Disruptive Lances cannot be activated in high-sec (system {sys_id} security {sys_sec:.2})") });
     }
+    if !is_lancer && sys_sec > 0.0 {
+        return Err(BridgeRpcError { code: "CannotActivateLanceInLowSec".into(), message: format!("Titan superweapons and AoE Lances can only be activated in null-sec or wormhole space (system {sys_id} security {sys_sec:.2})") });
+    }
     let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
         return Err(BridgeRpcError { code: "ModuleNotFound".into(), message: format!("Superweapon module {module_id} not found on ship") });
     };
@@ -847,6 +850,14 @@ pub async fn activate_superweapon_with_args(
         None
     };
 
+    if is_slash {
+        for raw_arg in [args.get(1), args.get(2)].into_iter().flatten() {
+            if matches!(raw_arg, PyRep::Tuple(_) | PyRep::List(_)) && parse_vec3_arg(Some(raw_arg)).is_none() {
+                return Err(BridgeRpcError { code: "InvalidDirectionVector".into(), message: "Lance direction vector coordinates must be finite".into() });
+            }
+        }
+    }
+
     let fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
     let fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(50_000);
     let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
@@ -854,10 +865,7 @@ pub async fn activate_superweapon_with_args(
         match cand {
             Some((fid, avail)) if avail >= fuel_qty => {
                 let mut rem = 0;
-                if let Some(it) = snap.items.get_mut(&fid) {
-                    it.quantity -= fuel_qty;
-                    rem = it.quantity;
-                }
+                if let Some(it) = snap.items.get_mut(&fid) { it.quantity -= fuel_qty; rem = it.quantity; }
                 if rem == 0 { snap.items.remove(&fid); }
                 Ok(fuel_qty)
             }
@@ -878,17 +886,9 @@ pub async fn activate_superweapon_with_args(
     let total_raw_damage = dmg_vec.em + dmg_vec.thermal + dmg_vec.kinetic + dmg_vec.explosive;
 
     let mut hit_targets = Vec::new();
-    let default_fwd = ship_ball
-        .as_ref()
-        .map(|b| if b.velocity.length_squared() > 1e-4 { b.velocity.normalize() } else { DVec3::X })
-        .unwrap_or(DVec3::X);
+    let default_fwd = ship_ball.as_ref().map(|b| if b.velocity.length_squared() > 1e-4 { b.velocity.normalize() } else { DVec3::X }).unwrap_or(DVec3::X);
 
     if is_slash {
-        for raw_arg in [args.get(1), args.get(2)].into_iter().flatten() {
-            if matches!(raw_arg, PyRep::Tuple(_) | PyRep::List(_)) && parse_vec3_arg(Some(raw_arg)).is_none() {
-                return Err(BridgeRpcError { code: "InvalidDirectionVector".into(), message: "Lance direction vector coordinates must be finite".into() });
-            }
-        }
         // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule(moduleID, startDir, endDir)`): 300km directional beam after 15s warmup
         let raw_dir = match (parse_vec3_arg(args.get(1)), parse_vec3_arg(args.get(2))) {
             (Some(p0), Some(p1)) if (p1 - p0).length_squared() > 1e-4 => Some(p1 - p0),

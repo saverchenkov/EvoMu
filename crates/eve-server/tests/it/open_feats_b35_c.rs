@@ -128,13 +128,22 @@ async fn test_b35_11_cloak_velocity_penalty() {
     ctx.db.with_mut_snapshot(|s| { s.items.remove(&illegal_cov); });
     ctx.invalidate_ship_fitting(s_clk);
 
-    // 1. Prototype Cloaking Device I (11370): -90% velocity (0.10x), persists across ticks, restored on live Deactivate
+    // 1. Prototype Cloaking Device I (11370): -90% velocity (0.10x), propulsion blocked while cloaked, persists across ticks, restored on live Deactivate
     let proto_clk = 973_101;
+    let ab_mod = 973_109;
+    set_skill(&ctx, c_clk, 3449, 5); // Navigation V
+    set_skill(&ctx, c_clk, 3450, 5); // Afterburner V
     give_item(&ctx, proto_clk, 11370, c_clk, s_clk, InventoryFlag::HiSlot0, 1);
+    give_item(&ctx, ab_mod, 12058, c_clk, s_clk, InventoryFlag::MedSlot0, 1); // 100MN Afterburner II
     ctx.invalidate_ship_fitting(s_clk);
     ctx.dispatch_rpc(&mut sess_clk, "dogmaIM", None, "Activate", &[PyRep::Integer(proto_clk), PyRep::String("cloaking".into()), PyRep::None, PyRep::Integer(1)], &kw, None).await.expect("Activate Prototype Cloak");
     let (_, b_cloaked) = sys.get_ball_snapshot(s_clk).await.unwrap().unwrap();
     assert!((b_cloaked.max_velocity - base_vmax * 0.10).abs() < 1e-3, "Prototype cloak must reduce max velocity by 90% (got {} vs {})", b_cloaked.max_velocity, base_vmax * 0.10);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_clk, "dogmaIM", None, "Activate", &[PyRep::Integer(ab_mod), PyRep::String("moduleBonusAfterburner".into()), PyRep::None, PyRep::Integer(1)], &kw, None).await.unwrap_err().code,
+        "CannotActivateCloaked",
+        "Activating Afterburner while cloaked under Prototype Cloak must be rejected"
+    );
     let _ = sys.step_manual(3.0).await;
     let (_, b_cloaked_3s) = sys.get_ball_snapshot(s_clk).await.unwrap().unwrap();
     assert!((b_cloaked_3s.max_velocity - base_vmax * 0.10).abs() < 1e-3, "Cloak velocity penalty must remain enforced across server ticks");
@@ -144,12 +153,17 @@ async fn test_b35_11_cloak_velocity_penalty() {
     let (_, b_unclk) = sys.get_ball_snapshot(s_clk).await.unwrap().unwrap();
     assert!((b_unclk.max_velocity - base_vmax).abs() < 1e-3, "Deactivating cloak must restore max velocity");
 
-    // 2. Improved Cloaking Device II (11577): -75% velocity (0.25x), restored on live Deactivate
+    // 2. Improved Cloaking Device II (11577): -75% velocity (0.25x), propulsion blocked while cloaked, restored on live Deactivate
     ctx.advance_time_seconds(35);
     let imp_clk = 973_102;
     give_item(&ctx, imp_clk, 11577, c_clk, s_clk, InventoryFlag::HiSlot1, 1);
     ctx.invalidate_ship_fitting(s_clk);
     ctx.dispatch_rpc(&mut sess_clk, "dogmaIM", None, "Activate", &[PyRep::Integer(imp_clk), PyRep::String("cloaking".into()), PyRep::None, PyRep::Integer(1)], &kw, None).await.expect("Activate Improved Cloak");
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_clk, "dogmaIM", None, "Activate", &[PyRep::Integer(ab_mod), PyRep::String("moduleBonusAfterburner".into()), PyRep::None, PyRep::Integer(1)], &kw, None).await.unwrap_err().code,
+        "CannotActivateCloaked",
+        "Activating Afterburner while cloaked under Improved Cloak must be rejected"
+    );
     let (_, b_imp) = sys.get_ball_snapshot(s_clk).await.unwrap().unwrap();
     assert!((b_imp.max_velocity - base_vmax * 0.25).abs() < 1e-3, "Improved cloak must reduce max velocity by 75%");
     ctx.dispatch_rpc(&mut sess_clk, "dogmaIM", None, "Deactivate", &[PyRep::Integer(imp_clk), PyRep::String("cloaking".into())], &kw, None).await.expect("Deactivate Improved Cloak");

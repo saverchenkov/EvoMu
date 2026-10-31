@@ -692,6 +692,17 @@ pub(crate) async fn handle_module_cycles(
                     || mod_type.name.contains("Micro Jump Drive");
                 let is_mwd_or_mjd = is_mwd || is_mjd;
 
+                if mod_type.group_id == 46 || is_mjd {
+                    let ship_cloaked = sys.get_combat_state(ship_id).await.ok().flatten()
+                        .is_some_and(|cs| cs.is_cloaked || cs.cloak_original_max_velocity.is_some())
+                        || ctx.db.with_snapshot(|s| s.items.values().any(|it| {
+                            it.location_id == ship_id && s.module_active_states.contains(&it.item_id)
+                                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
+                        }));
+                    if ship_cloaked {
+                        return Some(Err(BridgeRpcError::user_error("CannotActivateCloaked")));
+                    }
+                }
                 if is_mwd_or_mjd {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
                         if cs.is_mwd_mjd_disabled || (is_mjd && cs.is_warp_scrambled()) {
@@ -699,52 +710,18 @@ pub(crate) async fn handle_module_cycles(
                         }
                     }
                 }
-
-
                 let EwarCapitalPrep {
-                    warp_scramble_points,
-                    disables_target_mwd_mjd,
-                    warp_core_stab_bonus,
-                    hic_bubble_radius_m,
-                    hic_velocity_multiplier,
-                    hic_sig_multiplier,
-                    hic_mass_addition,
-                    mjd_jump_distance_m,
-                    grants_interdiction_nullification,
-                    target_velocity_multiplier,
-                    immobilize_self,
-                    self_disallow_assistance,
-                    self_ewar_immune,
-                    self_disable_mwd_mjd,
-                    self_mass_multiplier,
-                    is_adc,
-                    remote_shield_amount,
-                    remote_armor_amount,
-                    remote_hull_amount,
-                    remote_cap_amount,
-                    remote_optimal,
-                    remote_falloff,
-                    mutadaptive_spool_step,
-                    mutadaptive_spool_max,
+                    warp_scramble_points, disables_target_mwd_mjd, warp_core_stab_bonus,
+                    hic_bubble_radius_m, hic_velocity_multiplier, hic_sig_multiplier, hic_mass_addition,
+                    mjd_jump_distance_m, grants_interdiction_nullification, target_velocity_multiplier,
+                    immobilize_self, self_disallow_assistance, self_ewar_immune, self_disable_mwd_mjd,
+                    self_mass_multiplier, is_adc, remote_shield_amount, remote_armor_amount,
+                    remote_hull_amount, remote_cap_amount, remote_optimal, remote_falloff,
+                    mutadaptive_spool_step, mutadaptive_spool_max,
                 } = match prepare_ewar_and_capital_module(
-                    ctx,
-                    &sys, sys_id,
-                    char_id,
-                    ship_id,
-                    ship_group_id,
-                    module_id,
-                    &m,
-                    mod_type,
-                    &mod_state,
-                    &fit,
-                    target_id_opt,
-                    is_overloaded,
-                    is_mwd,
-                    is_mjd,
-                    kwargs,
-                )
-                .await
-                {
+                    ctx, &sys, sys_id, char_id, ship_id, ship_group_id, module_id, &m, mod_type,
+                    &mod_state, &fit, target_id_opt, is_overloaded, is_mwd, is_mjd, kwargs,
+                ).await {
                     Some(Ok(v)) => v,
                     Some(Err(e)) => return Some(Err(e)),
                     None => unreachable!(),
@@ -764,13 +741,7 @@ pub(crate) async fn handle_module_cycles(
                     ctx.sde.effects.get(&eid).is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
                 });
                 let vel_mod = mod_state.get_attribute(306, &ctx.sde);
-                if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 {
-                    0.0
-                } else if vel_mod > 0.0 && vel_mod < 1.0 {
-                    vel_mod - 1.0
-                } else {
-                    0.0
-                }
+                if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 { 0.0 } else if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }
             } else if speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };
             let raw_shield = mod_state.get_attribute(68, &ctx.sde);
             let raw_armor = mod_state.get_attribute(84, &ctx.sde);

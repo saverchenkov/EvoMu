@@ -109,19 +109,13 @@ pub(crate) fn step_cycles_and_capacitor(
     // Exponential rack heat dissipation when no modules in a rack are overloaded (`feat:dogma.heat-rack-thermodynamics`)
     let ship_ids_with_heat: Vec<BallId> = ship_rack_heat.keys().copied().collect();
     for sid in ship_ids_with_heat {
-        let Some(racks) = ship_rack_heat.get_mut(&sid) else {
-            continue;
-        };
+        let Some(racks) = ship_rack_heat.get_mut(&sid) else { continue };
         let mut changed = false;
         for (r_idx, rack_val) in racks.iter_mut().enumerate() {
-            let has_ovl = active_module_cycles
-                .iter()
-                .any(|c| c.ship_id == sid && c.rack_idx == r_idx && c.is_overloaded);
+            let has_ovl = active_module_cycles.iter().any(|c| c.ship_id == sid && c.rack_idx == r_idx && c.is_overloaded);
             if !has_ovl && *rack_val > 0.0 {
                 *rack_val = eve_dogma::thermodynamics::step_rack_heat(*rack_val, 0.0, 0.01, dt);
-                if *rack_val < 1e-6 {
-                    *rack_val = 0.0;
-                }
+                if *rack_val < 1e-6 { *rack_val = 0.0; }
                 changed = true;
             }
         }
@@ -138,6 +132,20 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
+    // Upwell structure tethering repairs fitted module heat damage (including burned-out modules, leaving them offline) (`feat:modules.nanite-repair-paste-in-space`)
+    let tethered_ships: Vec<BallId> = ballpark.combat_states.iter().filter_map(|(&bid, cs)| cs.is_tethered.then_some(bid)).collect();
+    if !tethered_ships.is_empty() {
+        if let Some(db_ref) = db_opt {
+            db_ref.with_mut_snapshot(|snap| {
+                for it in snap.items.values_mut() {
+                    if tethered_ships.contains(&it.location_id) && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171) {
+                        it.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
+                    }
+                }
+            });
+        }
+    }
+
     // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`)
     active_nanite_repairs.retain_mut(|nr| {
         if !ballpark.balls.contains_key(&nr.ship_id)
@@ -147,12 +155,7 @@ pub(crate) fn step_cycles_and_capacitor(
         }
         nr.elapsed_s += dt;
         let done = nr.elapsed_s + 1e-6 >= nr.duration_s;
-        let rem_dmg = if done {
-            0.0
-        } else {
-            let frac = (1.0 - nr.elapsed_s / nr.duration_s.max(0.1)).clamp(0.0, 1.0);
-            nr.initial_damage_hp * frac
-        };
+        let rem_dmg = if done { 0.0 } else { nr.initial_damage_hp * (1.0 - nr.elapsed_s / nr.duration_s.max(0.1)).clamp(0.0, 1.0) };
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 if let Some(m_item) = snap.items.get_mut(&nr.module_id) {
@@ -224,16 +227,8 @@ pub(crate) fn step_cycles_and_capacitor(
         if let Some(target_id) = cycle.target_id {
             let source_ball = ballpark.balls.get(&cycle.ship_id);
             let target_ball = ballpark.balls.get(&target_id);
-            let target_warping = target_ball
-                .map(|b| matches!(b.mode, MovementMode::Warp { .. }))
-                .unwrap_or(false);
-            let out_of_range = if let (Some(sb), Some(tb), Some(max_r)) =
-                (source_ball, target_ball, cycle.max_effective_range_m)
-            {
-                (sb.position - tb.position).length() > max_r
-            } else {
-                false
-            };
+            let target_warping = target_ball.is_some_and(|b| matches!(b.mode, MovementMode::Warp { .. }));
+            let out_of_range = matches!((source_ball, target_ball, cycle.max_effective_range_m), (Some(sb), Some(tb), Some(max_r)) if (sb.position - tb.position).length() > max_r);
             if target_ball.is_none() || target_warping || out_of_range {
                 finished_indices.push(idx);
                 continue;
@@ -241,11 +236,7 @@ pub(crate) fn step_cycles_and_capacitor(
         }
         cycle.elapsed_s += dt;
         if cycle.elapsed_s + 1e-6 >= cycle.duration_s {
-            let mod_grp = sde_opt
-                .as_ref()
-                .and_then(|sde| sde.types.get(&cycle.module_type_id))
-                .map(|t| t.group_id)
-                .unwrap_or(0);
+            let mod_grp = sde_opt.as_ref().and_then(|sde| sde.types.get(&cycle.module_type_id)).map(|t| t.group_id).unwrap_or(0);
             // 1. Local armor repair and hull repair healing at cycle completion (`t = duration_s`, `feat:combat.active-armor-repair-cycle-end`)
             //    (Shield boosters apply at cycle start `t = 0`, `feat:combat.active-shield-boost-cycle-start`)
             if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {

@@ -284,11 +284,19 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     let _ = ctx.drain_notifications_for_char(v_150_char);
 
     let origin_arg = PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]);
-    // Negative: non-finite direction vectors (NaN / INFINITY) rejected before consuming fuel
+    // Negative: Titan AoE Lance rejected in Low-Sec (0.0 < sys_sec < 0.45) and non-finite direction vectors (NaN / INFINITY) rejected before consuming fuel
+    let low_sys = ctx.sde.solar_systems.values().find(|s| s.security_status > 0.05 && s.security_status < 0.45).map(|s| s.solar_system_id).unwrap();
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&titan_char).unwrap().solar_system_id = low_sys);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), dir_arg.clone()], &kw, None).await.unwrap_err().code,
+        "CannotActivateLanceInLowSec"
+    );
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&titan_char).unwrap().solar_system_id = NULL_SYS);
     let nan_dir = PyRep::Tuple(vec![PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)]);
     let inf_dir = PyRep::Tuple(vec![PyRep::Real(f64::INFINITY), PyRep::Real(0.0), PyRep::Real(0.0)]);
-    assert!(ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), nan_dir], &kw, None).await.is_err(), "NaN direction vector must be rejected");
-    assert!(ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), inf_dir], &kw, None).await.is_err(), "INFINITY direction vector must be rejected");
+    assert_eq!(ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), nan_dir], &kw, None).await.unwrap_err().code, "InvalidDirectionVector");
+    assert_eq!(ctx.dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg.clone(), inf_dir], &kw, None).await.unwrap_err().code, "InvalidDirectionVector");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&970_105).unwrap().quantity), 500_000, "Rejected ActivateSlashModule calls must not consume any isotopes");
 
     let lance_res = ctx
         .dispatch_rpc(&mut titan_sess, "superWeaponMgr", None, "ActivateSlashModule", &[PyRep::Integer(lance_mod), origin_arg, dir_arg], &kw, None)
@@ -608,11 +616,16 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await.expect("Unfit module near Mobile Depot");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&mod_item).unwrap().flag), InventoryFlag::Cargo);
 
-    // (b) Fit rig (Large Trimark Armor Pump I 26302 -> RigSlot0 = 92) and destroy rig via dogmaIM.DestroyFitting
+    // (b) Fit rig (Large Trimark Armor Pump I 26302 -> RigSlot0 = 92) and test dogmaIM.DestroyFitting guards (Weapons Timer, >2,500m range) + destruction
     let rig_item = 971_211;
+    let rig_item_2 = 971_212;
     give_item(&ctx, rig_item, 26302, char_id, ship_id, InventoryFlag::Cargo, 1);
+    give_item(&ctx, rig_item_2, 26302, char_id, ship_id, InventoryFlag::RigSlot1, 1);
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(rig_item), PyRep::Integer(ship_id), PyRep::Integer(92)], &kw, None).await.expect("Fit rig near Mobile Depot");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&rig_item).unwrap().flag), InventoryFlag::RigSlot0);
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = ctx.now_unix_secs() + 60;
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rig_item)], &kw, None).await.unwrap_err().code, "CannotRefitWithWeaponsTimer", "Weapons Timer must block in-space DestroyFitting");
+    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = 0;
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rig_item)], &kw, None).await.expect("Destroy fitted rig");
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&rig_item)), "Removed rig must be destroyed");
 
@@ -639,13 +652,14 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
     ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(971_221), PyRep::Integer(t3_ship), PyRep::Integer(126)], &kw, None).await.expect("Fit new Tengu subsystem near Mobile Depot");
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&971_221).unwrap().flag), InventoryFlag::SubSystemSlot1);
 
-    // Switch back to Megathron and move > 2,500m (5,000m from depot): live invbroker.Add rejected!
+    // Switch back to Megathron and move > 2,500m (5,000m from depot): live invbroker.Add & dogmaIM.DestroyFitting rejected!
     ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&char_id) { ch.active_ship_id = ship_id; } });
     sess.ship_id = Some(ship_id);
     let _ = sys.set_ball_position(ship_id, target_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
     assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Live module fitting > 2,500m from Mobile Depot must fail");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rig_item_2)], &kw, None).await.unwrap_err().code, "CannotUnfitInSpace", "DestroyFitting > 2,500m from Mobile Depot must fail");
 
-    // Attacking anchored depot to 0% shield triggers 48h (172,800s) reinforced timer AND disables fitting service!
+    // Attacking anchored depot to 0% shield triggers 48h (172,800s) reinforced timer AND disables fitting service + DestroyFitting!
     let now_u = ctx.now_unix_secs();
     let _ = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
         &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), 10.0, now_u,
@@ -655,4 +669,6 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
     assert!(sys.get_combat_state(depot_item).await.unwrap().unwrap().shield_hp <= 1e-6, "Reinforcement must trigger at 0% shield");
     let _ = sys.set_ball_position(ship_id, target_pos + DVec3::new(500.0, 0.0, 0.0)).await;
     assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Refitting off a reinforced Mobile Depot must be disabled during 48h reinforcement");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rig_item_2)], &kw, None).await.unwrap_err().code, "CannotUnfitInSpace", "DestroyFitting off a reinforced Mobile Depot must fail");
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&rig_item_2)), "Rig must remain intact after rejected DestroyFitting");
 }

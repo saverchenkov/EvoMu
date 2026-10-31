@@ -243,17 +243,26 @@ pub(crate) fn handle_add_module_cycle(
     } else if cycle.speed_boost_factor.abs() > 1e-9 {
         if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
             if cycle.original_max_velocity.is_none() {
+                let is_cloak_cycle = cycle.effect_name.starts_with("cloaking");
+                let active_cloak_mult = active_module_cycles
+                    .iter()
+                    .find(|c| c.ship_id == cycle.ship_id && c.effect_name.starts_with("cloaking") && c.speed_boost_factor < 0.0)
+                    .map(|c| (1.0 + c.speed_boost_factor).max(0.0));
                 let orig_v = ballpark
                     .combat_states
                     .get(&cycle.ship_id)
                     .and_then(|cs| cs.cloak_original_max_velocity)
                     .unwrap_or(ball.max_velocity);
                 cycle.original_max_velocity = Some(orig_v);
-                ball.max_velocity = orig_v * (1.0 + cycle.speed_boost_factor).max(0.0);
-                if cycle.effect_name.starts_with("cloaking") {
+                if is_cloak_cycle {
+                    ball.max_velocity = orig_v * (1.0 + cycle.speed_boost_factor).max(0.0);
                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                         cs.cloak_original_max_velocity = Some(orig_v);
                     }
+                } else if let Some(cloak_mult) = active_cloak_mult {
+                    ball.max_velocity = orig_v * cloak_mult;
+                } else {
+                    ball.max_velocity = orig_v * (1.0 + cycle.speed_boost_factor).max(0.0);
                 }
             }
         }
