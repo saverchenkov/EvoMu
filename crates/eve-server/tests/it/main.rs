@@ -469,3 +469,4 @@ mod capital_combat_sp7_closure_part3;
 mod capital_combat_sp7_closure_part4;
 mod economy_industry_lookup_sov_closure;
 mod economy_market_lookup_social_closure;
+mod plan_w31_closure;
