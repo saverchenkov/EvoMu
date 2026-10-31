@@ -1072,5 +1072,6 @@ pub fn register_handlers(
         );
     }
 
-    super::quasar_space_domain::register_handlers(router, db, sde);
+    super::quasar_space_domain::register_handlers(router, db.clone(), sde.clone());
+    super::quasar_tactical_space::register_handlers(router, db, sde);
 }

@@ -1270,6 +1270,15 @@ pub async fn handle(
             });
             Some(Ok(events_rep))
         }
+
+        // parity: rpc:pvpFilamentMgr.values
+        ("pvpFilamentMgr", "values") => {
+            let values_rep = with_pvp_store_events(ctx, |store| {
+                PyRep::List(store.events.iter().map(event_to_keyval).collect())
+            });
+            Some(Ok(values_rep))
+        }
+
         ("pvpFilamentMgr", "GetActiveEvents") => {
             let now_i64 = now_unix as i64;
             let active_rep = with_pvp_store_events(ctx, |store| {

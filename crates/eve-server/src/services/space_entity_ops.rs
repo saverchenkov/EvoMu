@@ -59,6 +59,10 @@ pub async fn handle(
         ("entity", "OpenShippingUnitStorage") => {
             Some(handle_open_shipping_unit_storage(ctx, session, bound_entry, args, kwargs).await)
         }
+        // parity: rpc:entity.SetSessionCheck
+        ("entity", "SetSessionCheck") => {
+            Some(crate::services::nav_warp_interdiction::handle_set_session_check(ctx, session, args).await)
+        }
         ("beyonce", "CmdAbandonLoot") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_ids: Vec<i64> = match args.first() {
