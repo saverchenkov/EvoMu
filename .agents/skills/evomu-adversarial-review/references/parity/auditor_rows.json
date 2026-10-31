@@ -10762,6 +10762,51 @@
       "evidence": "The test notify_real_emitters_batch10_part3.rs:431-439 forces inc.state = 'Withdrawing' and meta.withdraw_until_sec = now+30 directly in the pve_special_sites registry. The withdrawal is never reached by defeating the HQ mothership or by the natural incursion lifecycle. After the tick it asserts the synthetic tale_id and INCURSION_TALE_TEMPLATE_ID (:453-462). That is the same synthetic incursion model already FLAGGED_FAKE under feat:pve.incursion-payout.",
       "id": "notify:OnTaleRemove",
       "flagged_by_audit": "20261031-094214"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/agents_standings_arcs.rs:911-950 ignores the agent's level, division, faction and mission pool. If the agent exists it pushes ctx.sde.missions.keys().take(25) (:922-925, :937), and with no agent it falls back to keys().take(15) (:944). So every agent returns the same first-N HashMap keys. Test rpc_agent_mgr_vote.rs:223-239 asserts only that the list is non-empty and holds at most 25 entries.",
+      "id": "rpc:agentMgr.GetPlausibleMissionIDs",
+      "flagged_by_audit": "20261031-110353"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/auth_cache.rs:215-237 returns a hand-typed 7-row roleID/roleName table: Director, Personnel Manager, Accountant, Security Officer, Factory Manager, Station Manager and Auditor. Live has the full corp-role set. Any other table name gets a synthetic single row (1, 'DefaultRole') (:230-234). Nothing comes from the client's static data or server state. Test rpc_missing_batch3_tests.rs:437-457 asserts only that the column names exist and the rows are non-empty.",
+      "id": "rpc:cache.Rowset",
+      "flagged_by_audit": "20261031-110353"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/macho_cluster_mgmt.rs:300-332 copies the caller's key/value pairs into state.config inside the 'load_service_state' blob. No load generator ever reads that config; it is only echoed back by the flagged GetTotalStats (:358-376). Test rpc_missing_batch3_tests.rs:337-350 asserts only that the reply is PyRep::None.",
+      "id": "rpc:loadService.SetConfig",
+      "flagged_by_audit": "20261031-110353"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/macho_cluster_mgmt.rs:273-298 only sets state.active=false and bumps a counter in the 'load_service_state' JSON blob. StartLoad (already FLAGGED_FAKE) never generates any load, so there is nothing to stop. The blob is read only by these handlers and the flagged GetTotalStats (:248-355; no other non-test reader in crates/). Tests rpc_missing_batch3_tests.rs:282-291 and notify_real_emitters_batch8_part5.rs:296-298 assert only the self-written active:false flag.",
+      "id": "rpc:loadService.StopLoad",
+      "flagged_by_audit": "20261031-110353"
+    },
+    {
+      "evidence": "crates/eve-server/src/system_actor/cycles.rs:421-427 drains only when src_pct < tgt_pct, i.e. it compares capacitor percentages. The live rule compares absolute capacitor. wiki:Capacitor_warfare (articles/Capacitor_warfare.md:164) says: 'Energy Nosferatu only transfer capacitor when the user's capacitor is less than the target's capacitor. This is measured in terms of absolute capacitor amount, not capacitor percentage, e.g. a capacitor with 120 GJ ... will always be able to transfer capacitor from a ship with 2000 GJ'. The tagged test crates/eve-server/tests/it/open_feats_b35.rs:449-461 locks in the opposite of live behaviour: an activator with 1,500 GJ (30%) drains a target with 150 GJ (50%). Live, nothing would transfer. The Sleeper exception is the hardcoded type_id range 30185..=30500 (cycles.rs:403-406), not SDE group data. The acceptance text in auditor_rows.json, which this row was built to, is itself wrong against the wiki.",
+      "id": "feat:modules.energy-nosferatu-relative-capacitor",
+      "flagged_by_audit": "20261031-111626"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/tactical_modules.rs:954-956 uses beam_len = 300_000 and a 'DERIVED' beam_radius = 20_000. Damage is applied once, via apply_damage_to_ball at :970. When the module lacks damage attributes, it falls back to a hand-written 600_000 per damage type (:874). wiki:Titans (articles/Titans.md:54) says: 'Lances target a 2.5km-radius, 200km long line, and, after a 15-second delay, deal up to 50,000 damage per second for 15 seconds', with a 5 km damage signature radius. :976-980 also puts a 300 s warp scramble and a tether break on every ship hit. Per Titans.md:40, the 5-minute dock/tether/jump lock applies to the titan itself, not to its victims. The test (open_feats_b35.rs:359-377) asserts the invented 20 km radius (any ship within it counts as hit), a single one-shot hit, and the victim suppression.",
+      "id": "feat:modules.lance-doomsday-directional-geometry",
+      "flagged_by_audit": "20261031-111626"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/mobile_deployables.rs:53 sets DEPOT_REINFORCE_SHIELD_THRESHOLD = 0.0, and the anchoring path makes the depot invulnerable for 60 s. Both contradict wiki:Mobile_structures (articles/Mobile_structures.md:26): reinforcement starts when the depot is 'damaged to 25% of its shield hitpoints', and 'During the anchoring period, the mobile depot can be targeted and destroyed. If it's damaged to 25% of its shield or less it will not go into reinforcement'. The tagged test crates/eve-server/tests/it/open_feats_b35.rs:581-584 asserts 0 damage while anchoring, and :666-673 asserts that reinforcement starts only at 0% shield. The test therefore locks in non-live behaviour.",
+      "id": "feat:modules.mobile-depot-deployment-and-refitting",
+      "flagged_by_audit": "20261031-111626"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/fitting_mining_lasers.rs:776-795 compute_nanite_repair_params uses invented constants: 'DERIVED: 4.0 paste per 5 m\u00b3 unit ... (synthesized)', volume/5 clamped to 1..=250, and 'DERIVED: 0.67 HP/s base repair rate per 5 m\u00b3'. It also cuts paste cost by 5% per level of Thermodynamics (:783). system_actor/cycles.rs:136-139 adds an invented 'DERIVED: 2.0 HP/s' tether repair rate. wiki:Overheating (articles/Overheating.md:163-168) says Thermodynamics reduces heat damage, not paste use. Only Nanite Operation (paste) and Nanite Interfacing (repair amount per second) affect paste repairs, and the wiki never mentions scaling by module volume. The test (open_feats_b35_d.rs:79-80, :133) asserts the synthesized paste counts 2/4/8, the 0.67/1.34/2.68 HP/s rates, and 'Thermodynamics V must reduce 8 paste to 6'. Under AGENTS.md, rows that rest on synthesized data stay open.",
+      "id": "feat:modules.nanite-repair-paste-in-space",
+      "flagged_by_audit": "20261031-111626"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/space_navigation_advanced.rs:450-453 gives every hazard number a 'DERIVED' label: 'DERIVED: 150 km Jovian safe-zone radius' and 'DERIVED: 50 HP/s unresisted environmental hull/structure bleed'. Safe anchors are partly found by matching type names: t.name.contains(\"Shipcaster\") || t.name.contains(\"Fulcrum\") (:445). wiki:Zarzakh (articles/Zarzakh.md:40) confirms that the hazard exists, but no client or wiki source gives any damage rate or radius. The tagged test (open_feats_b35_c.rs:269) asserts the invented 50 HP-per-tick figure exactly. Under AGENTS.md, rows that rest on synthesized data must stay open as a data gap.",
+      "id": "feat:navigation.gravity-hazard-safe-zones",
+      "flagged_by_audit": "20261031-111626"
     }
   ]
 }
