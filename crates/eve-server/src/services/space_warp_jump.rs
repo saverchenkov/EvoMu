@@ -558,8 +558,9 @@ async fn handle_cmd_warp_to_stuff(
         .into_iter()
         .find(|c| c.group_id == 9 && (c.celestial_id == target_id || c.position.distance(dest_pos) <= 200_000.0))
         .map(|c| c.celestial_id);
-    if target_belt_id.is_some() {
+    if let Some(belt_id) = target_belt_id {
         let _ = handle.populate_asteroid_belt_entities().await;
+        ctx.notify_warp_to_asteroid_belt(char_id, belt_id);
     }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
