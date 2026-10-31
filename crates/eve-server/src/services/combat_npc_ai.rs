@@ -297,6 +297,20 @@ pub fn is_candidate_hostile_to_edencom(
 /// `feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`, `feat:npc.drifters`, `feat:npc.triglavians`,
 /// `feat:npc.sleepers`, `feat:npc.edencom-npc`).
 pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
+    {
+        let rt = ctx
+            .combat_ephemeral
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if !rt.npc_scrambled_ships.contains_key(&solar_system_id)
+            && !rt
+                .npc_entities
+                .values()
+                .any(|n| n.solar_system_id == solar_system_id)
+        {
+            return;
+        }
+    }
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let ball_map: HashMap<i64, Ball> = sys_handle
         .ballpark

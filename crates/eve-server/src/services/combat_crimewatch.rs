@@ -510,16 +510,23 @@ pub fn with_mut_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,
 ) -> R {
-    ctx.db.with_mut_snapshot(|s| {
+    let old_p = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.clone());
+    let (out, new_p) = {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.sync_from_persisted(&s.combat_crimewatch_state);
+        guard.sync_from_persisted(&old_p);
         let out = f(&mut guard);
-        s.combat_crimewatch_state = guard.to_persisted();
-        out
-    })
+        let new_p = guard.to_persisted();
+        (out, new_p)
+    };
+    if new_p != old_p {
+        ctx.db.with_mut_snapshot(|s| {
+            s.combat_crimewatch_state = new_p;
+        });
+    }
+    out
 }
 
 /// Evaluates the effective signature radius of a ship in space (`feat:dogma.signature-radius`),

@@ -167,16 +167,19 @@ fn take_offer(
         Err(e) => return Some(Err(e)),
     };
 
+    let is_known_corp = |id: i64| {
+        ctx.sde.npc_corporations.contains_key(&id)
+            || ctx.db.with_snapshot(|snap| snap.corporations.contains_key(&id))
+    };
     let (explicit_corp_id, target_offer_id, qty) = if args.len() >= 3 {
         let cid = args[0].as_i64();
         let oid = args[1].as_i64().unwrap_or(0);
         let q = args[2].as_i64().unwrap_or(1);
         (cid, oid, q)
-    } else if args.len() >= 2 && args[0].as_i64().map(|id| id > 100_000).unwrap_or(false) {
+    } else if args.len() == 2 && args[0].as_i64().is_some_and(is_known_corp) {
         let cid = args[0].as_i64();
         let oid = args[1].as_i64().unwrap_or(0);
-        let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-        (cid, oid, q)
+        (cid, oid, 1)
     } else {
         let oid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
         let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
@@ -203,25 +206,15 @@ fn take_offer(
     let all_offers = ctx.db.with_snapshot(|snap| match target_corp_id {
         Some(cid) => {
             let corp_offers = get_corp_lp_offers_with_sde(&ctx.sde, snap, cid);
-            if corp_offers.is_empty() && explicit_corp_id.is_none() {
-                let mut fallback = load_lp_store_offers(snap);
-                if fallback.is_empty() {
-                    fallback.extend_from_slice(paragon_sde_evermark_offers(&ctx.sde));
-                    fallback.extend(esi_all_lp_offers(&ctx.sde));
-                }
-                fallback
+            if explicit_corp_id.is_none()
+                && !corp_offers.iter().any(|o| o.offer_id == target_offer_id)
+            {
+                get_all_lp_offers_with_sde(&ctx.sde, snap)
             } else {
                 corp_offers
             }
         }
-        None => {
-            let mut all = load_lp_store_offers(snap);
-            if all.is_empty() {
-                all.extend_from_slice(paragon_sde_evermark_offers(&ctx.sde));
-                all.extend(esi_all_lp_offers(&ctx.sde));
-            }
-            all
-        }
+        None => get_all_lp_offers_with_sde(&ctx.sde, snap),
     });
     let offer = match all_offers.into_iter().find(|o| {
         o.offer_id == target_offer_id

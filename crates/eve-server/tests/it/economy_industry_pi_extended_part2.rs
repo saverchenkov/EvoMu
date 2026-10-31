@@ -1063,36 +1063,30 @@ async fn test_wallet_evermarks_and_item_trader() {
     let em_earned = get_lp(&ctx, &mut sess, paragon_corp_id).await;
     assert_eq!(em_earned, mission_em + 1_000);
 
-    // Query Paragon V24 SDE EverMarks Ship Cosmetic Emblem catalog without synthetic seeding
+    // Query Paragon Tranquility ESI + V24 SDE EverMarks Ship Cosmetic Emblem catalog without synthetic seeding
     let paragon_offers = ctx
         .dispatch_rpc(&mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp", &[PyRep::Integer(paragon_corp_id)], &kw, None)
         .await
         .expect("Paragon SDE EverMarks offers");
     let PyRep::List(offer_list) = paragon_offers else { panic!("Expected List of Paragon offers") };
-    assert!(offer_list.len() > 800, "Expected >800 V24 SDE Paragon ship emblem offers, got {}", offer_list.len());
-    let rifter_emblem_offer_id = 600_000 + 72_964;
+    assert!(offer_list.len() > 800, "Expected >800 Paragon ship emblem offers, got {}", offer_list.len());
+    let rifter_emblem_offer_id = 17_208;
     let rifter_emblem_cost = offer_list
         .iter()
         .find(|o| o.dict_get("offerID") == Some(&PyRep::Integer(rifter_emblem_offer_id)) && o.dict_get("typeID") == Some(&PyRep::Integer(72964)))
         .and_then(|o| o.dict_get("lpCost"))
         .and_then(|v| v.as_i64())
-        .expect("Rifter emblem offer in Paragon catalog");
-    assert!(rifter_emblem_cost > 0, "DERIVED Paragon emblem EverMarks price must be positive");
+        .expect("Tranquility Rifter emblem offer 17208 in Paragon catalog");
+    assert_eq!(rifter_emblem_cost, 5_000);
+    let em_for_redemption = em_earned.max(rifter_emblem_cost + 500);
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().loyalty_points.insert(paragon_corp_id, em_for_redemption); });
 
     let take_emblem = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "LPStoreMgr",
-            None,
-            "TakeOfferForCharacter",
-            &[PyRep::Integer(paragon_corp_id), PyRep::Integer(rifter_emblem_offer_id), PyRep::Integer(1)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "LPStoreMgr", None, "TakeOfferForCharacter", &[PyRep::Integer(paragon_corp_id), PyRep::Integer(rifter_emblem_offer_id), PyRep::Integer(1)], &kw, None)
         .await
         .expect("Redeem EverMarks for ship emblem at Paragon store");
     assert_eq!(take_emblem.dict_get("deliveredTypeID"), Some(&PyRep::Integer(72964)));
-    assert_eq!(take_emblem.dict_get("remainingLP"), Some(&PyRep::Integer(em_earned - rifter_emblem_cost)));
+    assert_eq!(take_emblem.dict_get("remainingLP"), Some(&PyRep::Integer(em_for_redemption - rifter_emblem_cost)));
 
     // 2. In-space Item Trader (`beyonce.CallComponentFromClient` -> `itemTrader.ProcessTrade`)
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)

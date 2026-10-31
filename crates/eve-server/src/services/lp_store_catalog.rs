@@ -3,10 +3,10 @@
 //! Resolves NPC corporation LP store catalogs in priority order:
 //! 1. Dynamic runtime overrides persisted in `WorldStateSnapshot` (`service_state_blobs["lp_store_offers"]`
 //!    or `loyalty_store_offers`);
-//! 2. Paragon (`1_000_419`) Ship Cosmetic Emblem EverMark offers from V24
-//!    `res:/staticdata/shipcosmeticlicenses.fsdbinary`;
-//! 3. Authoritative CCP Tranquility ESI LP store catalogs imported into `data/esi_lp_store_offers.json`
-//!    for the 181 NPC corporations with `lp_offer_tables_json` in the V24 SDE.
+//! 2. Authoritative CCP Tranquility ESI LP store catalogs imported into `data/esi_lp_store_offers.json`
+//!    for the 181 NPC corporations with `lp_offer_tables_json` in the V24 SDE;
+//! 3. Supplementary Paragon (`1_000_419`) Ship Cosmetic Emblem EverMark fallback offers (`DERIVED`) from V24
+//!    `res:/staticdata/shipcosmeticlicenses.fsdbinary` for emblem types absent from the Tranquility catalog.
 
 #![forbid(unsafe_code)]
 
@@ -188,8 +188,9 @@ pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOf
 }
 
 /// Load all available LP store offers for a corporation:
-/// dynamic `WorldStateSnapshot` overrides first, then V24 SDE Paragon EverMarks offers for `1_000_419`,
-/// otherwise authoritative Tranquility ESI LP store offers for `corp_id`.
+/// dynamic `WorldStateSnapshot` overrides first, then authoritative Tranquility ESI LP store offers
+/// for `corp_id`, supplemented for Paragon (`1_000_419`) by any V24 SDE `shipcosmeticlicenses.fsdbinary`
+/// emblem types (`DERIVED` fallback) not already present by `type_id` / `offer_id`.
 pub fn get_corp_lp_offers_with_sde(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
@@ -199,10 +200,39 @@ pub fn get_corp_lp_offers_with_sde(
     if !offers.is_empty() {
         return offers;
     }
+    let mut esi_offers = esi_sde_lp_offers(sde, corp_id);
     if corp_id == PARAGON_CORP_ID {
-        return paragon_sde_evermark_offers(sde).to_vec();
+        for sde_offer in paragon_sde_evermark_offers(sde) {
+            if !esi_offers
+                .iter()
+                .any(|o| o.type_id == sde_offer.type_id || o.offer_id == sde_offer.offer_id)
+            {
+                esi_offers.push(sde_offer.clone());
+            }
+        }
     }
-    esi_sde_lp_offers(sde, corp_id)
+    esi_offers
+}
+
+/// Returns the combined LP store offer catalog across all corporations using the exact same
+/// resolution order as `get_corp_lp_offers_with_sde`.
+pub fn get_all_lp_offers_with_sde(
+    sde: &eve_sde::SdeRegistry,
+    snap: &eve_db::WorldStateSnapshot,
+) -> Vec<LPOffer> {
+    let mut corp_ids: Vec<i64> = esi_lp_catalog().keys().copied().collect();
+    corp_ids.push(PARAGON_CORP_ID);
+    for o in load_lp_store_offers(snap) {
+        corp_ids.push(o.corp_id);
+    }
+    corp_ids.extend(snap.loyalty_store_offers.keys().copied());
+    corp_ids.sort_unstable();
+    corp_ids.dedup();
+    let mut out = Vec::new();
+    for cid in corp_ids {
+        out.extend(get_corp_lp_offers_with_sde(sde, snap, cid));
+    }
+    out
 }
 
 /// Load dynamic LP store offer overrides for a corporation from `WorldStateSnapshot`.

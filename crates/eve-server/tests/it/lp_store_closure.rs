@@ -472,6 +472,19 @@ async fn test_lp_store_character_purchase_costs_standings_and_cargo_consumption(
     .await
     .expect("standing-gated purchase should succeed once standing >= 2.0");
     assert_eq!(pass_stand.dict_get("offerID").and_then(|v| v.as_i64()), Some(920_002));
+
+    // Legacy 2-arg (offer_id, qty) with offer_id > 100_000 must not misclassify offer_id as corp_id
+    let pass_two_arg_high_oid = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(920_002), PyRep::Integer(2)],
+    )
+    .await
+    .expect("2-arg TakeOfferForCharacter with offer_id > 100_000 should succeed");
+    assert_eq!(pass_two_arg_high_oid.dict_get("offerID").and_then(|v| v.as_i64()), Some(920_002));
+    assert_eq!(pass_two_arg_high_oid.dict_get("quantity").and_then(|v| v.as_i64()), Some(2));
 }
 
 #[tokio::test]

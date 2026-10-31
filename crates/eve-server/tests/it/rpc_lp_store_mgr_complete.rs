@@ -37,7 +37,7 @@ const REWARD_3565_TYPE_ID: u32 = 27_361;
 const OFFER_3415: i64 = 3_415;
 const FED_NAVY_ONLY_OFFER_3616: i64 = 3_616;
 const IRON_CHARGE_S_TYPE_ID: u32 = 210;
-const PARAGON_RIFTER_EMBLEM_OFFER: i64 = 672_964; // 600_000 + 72_964 (750 LP, 0 ISK)
+const PARAGON_RIFTER_EMBLEM_OFFER: i64 = 17_208; // Tranquility Paragon Rifter emblem offer (type 72_964, 5,000 LP, 0 ISK)
 
 fn k_i64(r: &PyRep, k: &str) -> Option<i64> {
     r.dict_get(k).and_then(|v| v.as_i64())
@@ -474,7 +474,7 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
 
         let mut corp_lp = HashMap::new();
         corp_lp.insert(CALDARI_NAVY_CORP, 60_000);
-        corp_lp.insert(PARAGON_CORP, 5_000);
+        corp_lp.insert(PARAGON_CORP, 7_500);
         eve_server::services::lp_store::save_corp_lp_balances(snap, CORP_ID, &corp_lp);
         snap.items
             .retain(|_, it| !(it.owner_id == CORP_ID && it.type_id == IRON_CHARGE_S_TYPE_ID));
@@ -628,7 +628,7 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
         ]
     );
 
-    // 6. Zero-ISK V24 SDE EverMarks offer for corp (Paragon Rifter emblem offer 672964: 750 LP, 0 ISK)
+    // 6. Zero-ISK Tranquility Paragon EverMarks offer for corp (Rifter emblem offer 17208: 5,000 LP, 0 ISK)
     let res_paragon = rpc(
         &ctx,
         &mut sess,
@@ -641,8 +641,8 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
         ],
     )
     .await
-    .expect("TakeOfferForCorporation Paragon 672964");
-    assert_eq!(k_i64(&res_paragon, "remainingLP"), Some(5_000 - 750));
+    .expect("TakeOfferForCorporation Paragon 17208");
+    assert_eq!(k_i64(&res_paragon, "remainingLP"), Some(7_500 - 5_000));
     let paragon_delivered_id = k_i64(&res_paragon, "deliveredItemID").expect("deliveredItemID");
 
     ctx.db.with_snapshot(|snap| {
@@ -651,6 +651,6 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
         assert_eq!(it.type_id, 72_964);
         assert_eq!(it.flag, InventoryFlag::CorpDeliveries);
         let corp_lp = eve_server::services::lp_store::load_corp_lp_balances(snap, CORP_ID);
-        assert_eq!(corp_lp.get(&PARAGON_CORP).copied(), Some(4_250));
+        assert_eq!(corp_lp.get(&PARAGON_CORP).copied(), Some(2_500));
     });
 }
