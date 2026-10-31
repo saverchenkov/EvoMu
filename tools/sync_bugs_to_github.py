@@ -18,6 +18,8 @@ Usage:
     python3 tools/sync_bugs_to_github.py [--dry-run] [--delete] [--repo saverchenkov/EvoMu]
 """
 
+from __future__ import annotations
+
 import argparse
 import glob
 import json
@@ -26,8 +28,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+# GitHub enforces a hard 65,536-character maximum on issue and comment bodies.
+MAX_GITHUB_BODY_CHARS = 62_000
 
 
 LABEL_SPECS: Dict[str, Tuple[str, str]] = {
@@ -99,9 +105,53 @@ def build_issue_title_and_labels(bundle: Dict[str, Any]) -> Tuple[str, List[str]
     return title, labels
 
 
-def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
-    """Formats an incident bundle (automatic crash or F12 manual bug report) into GitHub Markdown."""
+def _compact_bundle_for_raw_json(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarizes bulky fields already rendered in dedicated Markdown sections above."""
+    compact: Dict[str, Any] = {}
+    for k, v in bundle.items():
+        if k == "trace" and isinstance(v, str) and len(v) > 512:
+            compact[k] = f"<omitted: {len(v)} chars rendered in Client Python Traceback above>"
+        elif k in ("flight_recorder", "server_logs_before", "server_logs_after") and isinstance(v, list):
+            compact[k] = f"<omitted: {len(v)} entries rendered above>"
+        elif k == "manual_report" and isinstance(v, dict):
+            mc = dict(v)
+            for mk in ("client_logs_tail", "computer_info", "ship_fitting_eft"):
+                mv = mc.get(mk)
+                if isinstance(mv, list):
+                    mc[mk] = f"<omitted: {len(mv)} lines rendered above>"
+                elif isinstance(mv, str) and len(mv) > 512:
+                    mc[mk] = f"<omitted: {len(mv)} chars rendered above>"
+            compact[k] = mc
+        else:
+            compact[k] = v
+    return compact
+
+
+def _cap_markdown_body(body: str, limit: int = MAX_GITHUB_BODY_CHARS) -> str:
+    """Final safety guard ensuring body never exceeds GitHub's 65,536-character API limit."""
+    if len(body) <= limit:
+        return body
+    suffix = (
+        "\n\n```\n</details>\n\n---\n"
+        "*[Truncated to fit GitHub's 65,536-character issue body limit; "
+        "full diagnostic bundle is preserved locally in `.evomu-bugs/`.]*"
+    )
+    return body[: max(0, limit - len(suffix))] + suffix
+
+
+def _render_markdown_issue(
+    bundle: Dict[str, Any],
+    occurrences: int,
+    compact_raw_json: bool = False,
+    trim_sections: bool = False,
+) -> str:
     trace = bundle.get("trace", "").strip()
+    if trim_sections and len(trace) > 14_000:
+        trace = (
+            trace[:4_000]
+            + "\n# ... [middle of traceback truncated to fit GitHub body limit] ...\n"
+            + trace[-9_500:]
+        )
     stack_key = bundle.get("stack_key", "")
     stack_hash = bundle.get("stack_hash", 0)
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
@@ -127,9 +177,17 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
     else:
         location_desc = "Unknown location"
 
-    flight_recorder = bundle.get("flight_recorder", [])
-    logs_before = bundle.get("server_logs_before", [])
-    logs_after = bundle.get("server_logs_after", [])
+    flight_recorder = list(bundle.get("flight_recorder", []))
+    logs_before = list(bundle.get("server_logs_before", []))
+    logs_after = list(bundle.get("server_logs_after", []))
+    if trim_sections:
+        if len(flight_recorder) > 40:
+            flight_recorder = flight_recorder[-40:]
+        if len(logs_before) > 80:
+            logs_before = [f"# ... [{len(logs_before) - 80} earlier log lines omitted] ..."] + logs_before[-80:]
+        if len(logs_after) > 40:
+            logs_after = logs_after[:40] + [f"# ... [{len(logs_after) - 40} trailing log lines omitted] ..."]
+
     manual = bundle.get("manual_report") if is_manual_report(bundle) else None
 
     body_lines = [
@@ -157,6 +215,10 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
     if manual:
         desc = (manual.get("description") or "").strip() or "_No description provided._"
         repro = (manual.get("reproduction_steps") or "").strip()
+        if trim_sections and len(desc) > 6_000:
+            desc = desc[:6_000] + "\n\n_[Description truncated]_"
+        if trim_sections and len(repro) > 4_000:
+            repro = repro[:4_000] + "\n\n_[Steps truncated]_"
         body_lines.extend([
             "### 📝 Player Bug Report",
             "",
@@ -172,6 +234,8 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
             ])
 
         eft_fit = (manual.get("ship_fitting_eft") or "").strip()
+        if trim_sections and len(eft_fit) > 3_000:
+            eft_fit = eft_fit[:3_000] + "\n# [truncated]"
         if eft_fit:
             body_lines.extend([
                 "<details>",
@@ -185,14 +249,16 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
                 "",
             ])
 
-        client_logs = manual.get("client_logs_tail") or []
+        client_logs = list(manual.get("client_logs_tail") or [])
+        if trim_sections and len(client_logs) > 60:
+            client_logs = [f"... [{len(client_logs) - 60} earlier client log lines omitted] ..."] + client_logs[-60:]
         if client_logs:
             body_lines.extend([
                 "<details>",
                 f"<summary><b>🖥️ Client Log Tail ({len(client_logs)} lines from igbr.zip)</b></summary>",
                 "",
                 "```log",
-                "\n".join(client_logs),
+                "\n".join(str(ln) for ln in client_logs),
                 "```",
                 "",
                 "</details>",
@@ -208,6 +274,8 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
             body_lines.append("")
 
         comp_info = (manual.get("computer_info") or "").strip()
+        if trim_sections and len(comp_info) > 4_000:
+            comp_info = comp_info[:4_000] + "\n... [truncated]"
         if comp_info:
             body_lines.extend([
                 "<details>",
@@ -243,8 +311,10 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
             offset_str = f"{call.get('offset_ms', 0):+d}ms" if "offset_ms" in call else "-"
             svc = call.get("service", "-")
             method = call.get("method", "-")
-            args = call.get("args_summary", "()").replace("|", "\\|")
-            status = call.get("status", "-").replace("|", "\\|")
+            args = str(call.get("args_summary", "()")).replace("|", "\\|")
+            if trim_sections and len(args) > 120:
+                args = args[:117] + "..."
+            status = str(call.get("status", "-")).replace("|", "\\|")
             duration_us = call.get("duration_micros", 0)
             dur_str = f"{duration_us / 1000.0:.2f}ms" if duration_us else "-"
             body_lines.append(f"| `{offset_str}` | `{svc}` | `{method}` | `{args}` | `{status}` | `{dur_str}` |")
@@ -253,10 +323,10 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
     all_logs = []
     if logs_before:
         all_logs.append("# --- Server logs prior to report ---")
-        all_logs.extend(logs_before)
+        all_logs.extend(str(ln) for ln in logs_before)
     if logs_after:
         all_logs.append("# --- Trailing server logs (+1.5s window) ---")
-        all_logs.extend(logs_after)
+        all_logs.extend(str(ln) for ln in logs_after)
 
     if all_logs:
         body_lines.extend([
@@ -271,12 +341,13 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
             "",
         ])
 
+    raw_payload = _compact_bundle_for_raw_json(bundle) if compact_raw_json else bundle
     body_lines.extend([
         "<details>",
         "<summary><b>🔍 Raw Session & Diagnostics Metadata</b></summary>",
         "",
         "```json",
-        json.dumps(bundle, indent=2),
+        json.dumps(raw_payload, indent=2),
         "```",
         "",
         "</details>",
@@ -286,6 +357,18 @@ def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
     ])
 
     return "\n".join(body_lines)
+
+
+def format_markdown_issue(bundle: Dict[str, Any], occurrences: int = 1) -> str:
+    """Formats an incident bundle into GitHub Markdown bounded below GitHub's 65,536-char limit."""
+    body = _render_markdown_issue(bundle, occurrences, compact_raw_json=False, trim_sections=False)
+    if len(body) <= MAX_GITHUB_BODY_CHARS:
+        return body
+    body = _render_markdown_issue(bundle, occurrences, compact_raw_json=True, trim_sections=False)
+    if len(body) <= MAX_GITHUB_BODY_CHARS:
+        return body
+    body = _render_markdown_issue(bundle, occurrences, compact_raw_json=True, trim_sections=True)
+    return _cap_markdown_body(body, MAX_GITHUB_BODY_CHARS)
 
 
 def format_occurrence_comment(bundle: Dict[str, Any], total_occurrences: int) -> str:
@@ -328,7 +411,30 @@ def format_occurrence_comment(bundle: Dict[str, Any], total_occurrences: int) ->
             lines.append(f"| `{offset_str}` | `{svc}` | `{method}` | `{status}` | `{dur_str}` |")
         lines.extend(["", "</details>"])
 
-    return "\n".join(lines)
+    return _cap_markdown_body("\n".join(lines), MAX_GITHUB_BODY_CHARS)
+
+
+def _run_gh_with_body_file(base_cmd: List[str], body: str) -> subprocess.CompletedProcess[str]:
+    """Passes Markdown body via a closed UTF-8 temp file (`--body-file`) to avoid Windows
+    `CreateProcessW` 32,767-char command-line limits (`WinError 206`) and console codepage issues.
+    """
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".md", delete=False) as tf:
+        tf.write(body)
+        body_path = tf.name
+    try:
+        return subprocess.run(
+            base_cmd + ["--body-file", body_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    finally:
+        try:
+            os.remove(body_path)
+        except OSError:
+            pass
 
 
 def check_gh_installed() -> bool:
@@ -352,7 +458,7 @@ def ensure_github_labels(repo: str, labels: List[str], ensured_cache: Set[str]) 
             "--force",
         ]
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=False)
+            subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         except Exception:
             pass
         ensured_cache.add(label)
@@ -370,12 +476,12 @@ def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Op
             "gh", "issue", "list",
             "--repo", repo,
             "--state", "all",
-            "--search", term,
+            "--search", f'"{term}" in:body',
             "--json", "number,title,state",
             "--limit", "1",
         ]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             issues = json.loads(res.stdout.strip() or "[]")
             if issues:
                 return issues[0]["number"]
@@ -409,10 +515,9 @@ def create_or_update_issue(
             "gh", "issue", "comment",
             str(existing_number),
             "--repo", repo,
-            "--body", comment_body,
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            _run_gh_with_body_file(cmd, comment_body)
             print(f"[+] Added incident occurrence comment to issue #{existing_number}")
             return existing_number
         except subprocess.CalledProcessError as e:
@@ -430,21 +535,19 @@ def create_or_update_issue(
             "gh", "issue", "create",
             "--repo", repo,
             "--title", title,
-            "--body", issue_body,
             "--label", ",".join(labels),
         ]
         try:
-            res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            res = _run_gh_with_body_file(cmd, issue_body)
         except subprocess.CalledProcessError:
             # Fallback without custom labels if the user lacks label-creation permission
             fallback_cmd = [
                 "gh", "issue", "create",
                 "--repo", repo,
                 "--title", title,
-                "--body", issue_body,
             ]
             try:
-                res = subprocess.run(fallback_cmd, check=True, capture_output=True, text=True)
+                res = _run_gh_with_body_file(fallback_cmd, issue_body)
             except subprocess.CalledProcessError as e:
                 print(f"[error] Failed to create issue: {e.stderr}", file=sys.stderr)
                 return None
@@ -491,6 +594,11 @@ def archive_or_delete_attachments(
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="Sync EvoMu client bug reports from local queue to GitHub issues.")
     parser.add_argument("--queue-dir", default=".evomu-bugs/queue", help="Path to bug reports queue directory")
     parser.add_argument("--uploaded-dir", default=".evomu-bugs/uploaded", help="Path to archive uploaded bug reports")

@@ -12,6 +12,8 @@ In compliance with AGENTS.md ("Client-derived data and the public repository"):
   deterministic SHA-256 / MD5 checksums (zero client-derived strings or schema content).
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
@@ -23,18 +25,68 @@ import zipfile
 import zlib
 
 
-DEFAULT_SHARED_CACHE = os.path.expanduser(
-    "~/Library/Application Support/EVE Online/SharedCache"
-)
-DEFAULT_CODE_CCP = os.path.join(
-    DEFAULT_SHARED_CACHE,
-    "tq",
-    "EVE.app",
-    "Contents",
-    "Resources",
-    "build",
-    "code.ccp",
-)
+def _discover_windows_shared_caches() -> list[str]:
+    candidates: list[str] = []
+    env_sc = os.environ.get("EVOMU_SHARED_CACHE", "").strip()
+    if env_sc:
+        candidates.append(env_sc)
+    if sys.platform == "win32":
+        try:
+            import winreg  # type: ignore[import-not-found]
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\CCP\EVEONLINE") as key:
+                val, _ = winreg.QueryValueEx(key, "CACHEFOLDER")
+                if isinstance(val, str) and val.strip():
+                    candidates.append(val.strip())
+        except Exception:
+            pass
+        candidates.extend(
+            [
+                r"C:\Games\EVE",
+                r"C:\EVE\SharedCache",
+                r"C:\CCP\EVE\SharedCache",
+            ]
+        )
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "CCP", "EVE", "SharedCache"))
+        program_data = os.environ.get("PROGRAMDATA", "").strip()
+        if program_data:
+            candidates.append(os.path.join(program_data, "CCP", "EVE", "SharedCache"))
+    return candidates
+
+
+def resolve_code_ccp_from_shared_cache(shared_cache: str) -> str:
+    sc = os.path.expanduser(shared_cache)
+    candidates = [
+        os.path.join(sc, "tq", "code.ccp"),
+        os.path.join(sc, "tq", "EVE.app", "Contents", "Resources", "build", "code.ccp"),
+        os.path.join(sc, "code.ccp"),
+    ]
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    if sys.platform == "win32":
+        return candidates[0]
+    return candidates[1]
+
+
+def _discover_default_shared_cache() -> str:
+    env_sc = os.environ.get("EVOMU_SHARED_CACHE", "").strip()
+    if env_sc:
+        return os.path.expanduser(env_sc)
+    if sys.platform == "win32":
+        for cand in _discover_windows_shared_caches():
+            if os.path.isfile(os.path.join(cand, "tq", "code.ccp")) or os.path.isfile(
+                os.path.join(cand, "tq", "resfileindex.txt")
+            ):
+                return cand
+        return r"C:\Games\EVE"
+    return os.path.expanduser("~/Library/Application Support/EVE Online/SharedCache")
+
+
+DEFAULT_SHARED_CACHE = _discover_default_shared_cache()
+DEFAULT_CODE_CCP = resolve_code_ccp_from_shared_cache(DEFAULT_SHARED_CACHE)
 
 
 class RawPy27MarshalReader:
@@ -415,6 +467,11 @@ def extract_all_descriptors(
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     default_catalog = os.path.join(
         repo_root,
@@ -433,9 +490,14 @@ def main() -> int:
         description="Extract 1,455 Quasar FileDescriptorProto schemas from V24.01 code.ccp"
     )
     parser.add_argument(
+        "--shared-cache",
+        default=None,
+        help="Path to EVE SharedCache root (auto-discovers Windows tq/code.ccp or macOS EVE.app code.ccp)",
+    )
+    parser.add_argument(
         "--code-ccp",
-        default=os.environ.get("EVOMU_CODE_CCP_PATH", DEFAULT_CODE_CCP),
-        help="Path to V24.01 client code.ccp archive",
+        default=None,
+        help="Explicit path to V24.01 client code.ccp archive (overrides --shared-cache)",
     )
     parser.add_argument(
         "--catalog",
@@ -459,9 +521,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.code_ccp:
+        code_ccp_path = args.code_ccp
+    elif args.shared_cache:
+        code_ccp_path = resolve_code_ccp_from_shared_cache(args.shared_cache)
+    else:
+        code_ccp_path = os.environ.get("EVOMU_CODE_CCP_PATH") or DEFAULT_CODE_CCP
+
     manifest_path = None if args.no_manifest else args.manifest
     manifest = extract_all_descriptors(
-        code_ccp_path=args.code_ccp,
+        code_ccp_path=code_ccp_path,
         catalog_path=args.catalog,
         sqlite_out_path=args.out,
         manifest_out_path=manifest_path,
