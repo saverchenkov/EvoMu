@@ -207,7 +207,7 @@ pub fn dispatch_sov_route(
                         .sov_campaign_scores
                         .get(&st.structure_id)
                         .map(|s| (s.attackers_score, s.defender_score))
-                        .unwrap_or((0.4, 0.6));
+                        .unwrap_or((0.0, 1.0));
                     campaigns.push(json!({
                         "campaign_id": st.structure_id,
                         "constellation_id": sys.constellation_id as i64,
@@ -233,6 +233,11 @@ pub fn dispatch_sov_route(
                 .map(|inc| {
                     let infested: Vec<i64> =
                         inc.infested_solar_systems.iter().map(|&s| s as i64).collect();
+                    let state = match inc.state.to_ascii_lowercase().as_str() {
+                        "withdrawing" => "withdrawing",
+                        "mobilizing" => "mobilizing",
+                        _ => "established",
+                    };
                     json!({
                         "constellation_id": inc.constellation_id as i64,
                         "faction_id": inc.faction_id,
@@ -240,7 +245,7 @@ pub fn dispatch_sov_route(
                         "infested_solar_systems": infested,
                         "influence": inc.influence,
                         "staging_solar_system_id": inc.staging_solar_system_id as i64,
-                        "state": inc.state,
+                        "state": state,
                         "type": inc.incursion_type,
                     })
                 })
