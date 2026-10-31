@@ -138,21 +138,19 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
-    // Advance in-space Nanite Repair Paste jobs (`feat:fitting.nanite-repair-paste-consumption`)
-    let mut nr_idx = 0;
-    while nr_idx < active_nanite_repairs.len() {
-        active_nanite_repairs[nr_idx].elapsed_s += dt;
-        let done = active_nanite_repairs[nr_idx].elapsed_s + 1e-6 >= active_nanite_repairs[nr_idx].duration_s;
-        let mod_id = active_nanite_repairs[nr_idx].module_id;
+    // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`)
+    active_nanite_repairs.retain_mut(|nr| {
+        nr.elapsed_s += dt;
+        let done = nr.elapsed_s + 1e-6 >= nr.duration_s;
         let rem_dmg = if done {
             0.0
         } else {
-            let frac = (1.0 - active_nanite_repairs[nr_idx].elapsed_s / active_nanite_repairs[nr_idx].duration_s.max(0.1)).clamp(0.0, 1.0);
-            active_nanite_repairs[nr_idx].initial_damage_hp * frac
+            let frac = (1.0 - nr.elapsed_s / nr.duration_s.max(0.1)).clamp(0.0, 1.0);
+            nr.initial_damage_hp * frac
         };
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(m_item) = snap.items.get_mut(&mod_id) {
+                if let Some(m_item) = snap.items.get_mut(&nr.module_id) {
                     if rem_dmg <= 1e-6 {
                         m_item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
                     } else {
@@ -161,29 +159,24 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             });
         }
-        if done {
-            active_nanite_repairs.remove(nr_idx);
-        } else {
-            nr_idx += 1;
-        }
-    }
+        !done
+    });
 
-    let mut idx_d = 0;
-    while idx_d < pending_anchoring_disruptors.len() {
-        pending_anchoring_disruptors[idx_d].remaining_s -= dt;
-        if pending_anchoring_disruptors[idx_d].remaining_s <= 1e-6 {
-            let done = pending_anchoring_disruptors.remove(idx_d);
-            if let Some(ball) = ballpark.balls.get_mut(&done.id) {
+    pending_anchoring_disruptors.retain_mut(|d| {
+        d.remaining_s -= dt;
+        if d.remaining_s <= 1e-6 {
+            if let Some(ball) = ballpark.balls.get_mut(&d.id) {
                 ball.mode = MovementMode::Field;
-                ball.radius = done.radius.max(1.0);
+                ball.radius = d.radius.max(1.0);
             } else {
-                let _ = ballpark.add_mobile_warp_disruptor(done.id, done.position, done.radius);
+                let _ = ballpark.add_mobile_warp_disruptor(d.id, d.position, d.radius);
             }
-            ballpark.add_warp_bubble(done.id, done.position, done.radius);
+            ballpark.add_warp_bubble(d.id, d.position, d.radius);
+            false
         } else {
-            idx_d += 1;
+            true
         }
-    }
+    });
 
     // Count active Capital remote repairers per target for Capital Remote Assistance Impedance
     let mut cap_remote_rep_ranks: HashMap<(BallId, i64), usize> = HashMap::new();
@@ -1027,28 +1020,26 @@ pub(crate) fn step_cycles_and_capacitor(
     for idx in finished_indices.into_iter().rev() {
         let finished = active_module_cycles.remove(idx);
         if finished.effect_name == "superWeaponLanceWarmup" && finished.elapsed_s >= finished.duration_s {
-            crate::services::tactical_modules::fire_lance_warmup_in_ballpark(ballpark, &finished, sde_opt, db_opt, tactical_state, &mut destroyed_balls);
+            crate::services::tactical_modules::fire_lance_warmup_in_ballpark(
+                ballpark, &finished, sde_opt, db_opt, tactical_state, pending_cycle_actions, &mut destroyed_balls,
+            );
         }
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
         emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
     }
-    reconcile_tackle_and_bubbles(
-        ballpark,
-        active_module_cycles,
-        base_scramble_strengths,
-        base_core_strengths,
-    );
+        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
     destroyed_balls
 }
 
-pub(crate) fn cleanup_removed_module_cycle(
-    ballpark: &mut Ballpark,
-    removed: &ActiveModuleCycle,
-    db_opt: &Option<Arc<eve_db::WorldRepository>>,
-) {
+pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
     if let Some(orig_v) = removed.original_max_velocity {
         if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
             ball.max_velocity = orig_v;
+        }
+        if removed.effect_name.starts_with("cloaking") {
+            if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
+                cs.cloak_original_max_velocity = None;
+            }
         }
     }
     if let Some(orig_tv) = removed.target_original_max_velocity {
@@ -1276,21 +1267,25 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
-        destroyed.extend(sup_dead.into_iter().map(|bid| (bid, None)));
-        destroyed.extend(pg_dead.into_iter().map(|bid| (bid, None)));
+        destroyed.extend(sup_dead.into_iter().chain(pg_dead).map(|bid| (bid, None)));
+        destroyed.extend(
+            crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
+                &mut bp, sde_opt.as_deref(), self.solar_system_id,
+            )
+            .into_iter()
+            .map(|bid| (bid, None)),
+        );
+        let mut death_futs = Vec::new();
         for &(target_ball_id, owner_char_id) in &destroyed {
             if let Some(db) = db_opt.as_ref() {
                 crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
             }
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() { let _ = handle.spawn(fut); }
+                death_futs.push(fut);
             }
         }
         let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(hook) = step_hook_guard {
-            let fut = hook(self.solar_system_id, dt, destroyed);
-            if let Ok(handle) = tokio::runtime::Handle::try_current() { let _ = handle.spawn(fut); }
-        }
+        let step_fut = step_hook_guard.map(|hook| hook(self.solar_system_id, dt, destroyed));
         if let Some(db) = db_opt {
             crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
                 db,
@@ -1313,7 +1308,17 @@ impl SystemHandle {
         }
         let tick = bp.current_tick;
         let broadcast = crate::system_actor::build_tick_broadcast(self.solar_system_id, &mut bp, events);
+        drop(st);
+        drop(bp);
         let _ = self.event_tx.send(broadcast);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            for fut in death_futs {
+                let _ = handle.spawn(fut);
+            }
+            if let Some(fut) = step_fut {
+                let _ = handle.spawn(fut);
+            }
+        }
         tick
     }
 

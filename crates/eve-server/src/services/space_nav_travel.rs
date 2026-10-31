@@ -178,6 +178,7 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
         && !weapons_timer
         && !jump_timer
         && !scrambled
+        && cs.lance_disrupted_remaining_s <= 0.0
         && !has_locks
         && !has_fighters
         && !disallow_active
@@ -220,6 +221,31 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
 }
 
 /// Emits `CloakBall` and `OnShipStateUpdate` to the grid when the fitted cloak toggles (`destiny:CloakBall`, `destiny:OnShipStateUpdate`).
+async fn ensure_ship_not_immobilized(
+    ctx: &ServerContext,
+    handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if let Ok(Some((_, b))) = handle.get_ball_snapshot(ship_id).await {
+        if b.max_velocity <= 1e-9
+            && (crate::services::tactical_modules::has_lance_caster_lock(ctx, ship_id)
+                || crate::services::space_navigation_advanced::check_immobilizing_module_active(
+                    ctx, ship_id, "maneuver",
+                )
+                .is_err()
+                || crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(
+                    ctx, ship_id,
+                ))
+        {
+            return Err(BridgeRpcError {
+                code: "CantMoveWhileModuleActive".into(),
+                message: "Ship is immobilized while superweapon warmup, siege/bastion, or cynosural field is active".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship_id: i64, cloaked: bool) {
     let handle = ctx.systems.get_or_spawn(sys_id);
     let _ = handle
@@ -268,6 +294,7 @@ pub(crate) async fn handle_cmd_goto_point(
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
+    ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
         .goto_point(ship_id, DVec3::new(x, y, z))
@@ -624,6 +651,7 @@ pub(crate) async fn handle_cmd_goto_direction(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     handle
@@ -729,6 +757,9 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
+    if fraction > 0.0 {
+        ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
+    }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     if fraction > 0.0 {
         let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
@@ -810,6 +841,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     } else {
         MovementMode::Follow { target_id, range }
     };
+    ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
@@ -908,6 +940,7 @@ pub(crate) async fn handle_cmd_align_to(
     };
     let dir = (target_pos - current_ball.position).normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
+    ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;

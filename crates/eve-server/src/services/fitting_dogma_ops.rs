@@ -549,7 +549,7 @@ pub(crate) async fn handle_dogma_ops(
             let mut skipped = Vec::new();
 
             for module_id in mod_ids {
-                let (is_valid, is_active, cur_dmg, max_hp, base_paste_cost, nanite_op_lvl, nanite_interfacing_lvl) =
+                let (is_valid, is_active, cur_dmg, max_hp, mod_tid, thermo_lvl, nanite_op_lvl, nanite_interfacing_lvl) =
                     ctx.db.with_snapshot(|snap| {
                         let active = snap.module_active_states.contains(&module_id);
                         let m_opt = snap.items.get(&module_id);
@@ -581,15 +581,12 @@ pub(crate) async fn handle_dogma_ops(
                                     })
                             })
                             .unwrap_or(40.0);
-                        let base_cost = m_opt
-                            .and_then(|i| ctx.sde.types.get(&i.type_id))
-                            .and_then(|t| t.default_attributes.get(&1231).copied())
-                            .unwrap_or(4.0)
-                            .max(1.0);
+                        let mod_tid = m_opt.map(|i| i.type_id).unwrap_or(0);
                         let sk = snap.skills.get(&char_id);
+                        let thermo_lvl = sk.and_then(|m| m.get(&28164)).map(|r| r.level).unwrap_or(0);
                         let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
                         let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
-                        (is_valid, active, dmg, hp, base_cost, op_lvl, int_lvl)
+                        (is_valid, active, dmg, hp, mod_tid, thermo_lvl, op_lvl, int_lvl)
                     });
 
                 if !is_valid || is_active || cur_dmg >= max_hp - 1e-6 {
@@ -601,11 +598,15 @@ pub(crate) async fn handle_dogma_ops(
                     continue;
                 }
 
-                let effective_paste_per_hp =
-                    (base_paste_cost / max_hp.max(1.0)) * (1.0 - 0.05 * (nanite_op_lvl as f64));
-                let paste_needed =
-                    eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp)
-                        .max(1) as i32;
+                let (paste_needed, _rate, duration_s) =
+                    super::fitting_mining_lasers::compute_nanite_repair_params(
+                        ctx.sde.types.get(&mod_tid),
+                        cur_dmg,
+                        max_hp,
+                        thermo_lvl,
+                        nanite_op_lvl,
+                        nanite_interfacing_lvl,
+                    );
 
                 let deduct_ok = ctx.db.try_with_mut_snapshot(|snap| {
                     let paste_item_id = snap
@@ -631,15 +632,15 @@ pub(crate) async fn handle_dogma_ops(
                 });
 
                 if deduct_ok.is_ok() {
-                    let repair_rate_hp_per_s = 0.67 * (1.0 + 0.20 * (nanite_interfacing_lvl as f64));
-                    let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
                     if let Some(sys_id) = session.solar_system_id {
                         let sys = ctx.systems.get_or_spawn(sys_id);
                         let _ = sys
                             .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
+                                char_id,
                                 ship_id,
                                 module_id,
                                 initial_damage_hp: cur_dmg,
+                                paste_reserved: paste_needed,
                                 duration_s,
                                 elapsed_s: 0.0,
                             })

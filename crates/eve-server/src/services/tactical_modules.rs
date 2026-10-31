@@ -56,6 +56,17 @@ pub struct TacticalModulesState {
 fn db_key_of(ctx: &ServerContext) -> usize { db_ptr_key(&ctx.db) }
 pub(crate) fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_ptr(db) as usize }
 
+pub fn has_lance_caster_lock(ctx: &ServerContext, ship_id: i64) -> bool {
+    let now_unix = ctx.now_unix_secs();
+    let db_key = db_key_of(ctx);
+    ctx.tactical_state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .lance_caster_lock_until
+        .get(&(db_key, ship_id))
+        .is_some_and(|&until| now_unix < until)
+}
+
 /// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
@@ -869,31 +880,19 @@ pub async fn activate_superweapon_with_args(
         .unwrap_or(DVec3::X);
 
     if is_slash {
-        // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule`): 300km directional beam after 15s warmup
-        let beam_dir = parse_vec3_arg(args.get(1))
-            .map(|v| if v.length_squared() > 1e-4 { v.normalize() } else { default_fwd })
-            .unwrap_or(default_fwd);
-        let db_key = db_key_of(ctx);
-        ctx.tactical_state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .lance_caster_lock_until
-            .insert((db_key, ship_id), now_unix + 300);
-        let _ = sys
-            .add_module_cycle(crate::system_actor::ActiveModuleCycle {
-                ship_id,
-                module_id,
-                module_type_id: mod_type_id,
-                owner_char_id: Some(char_id),
-                effect_name: "superWeaponLanceWarmup".into(),
-                repeat: 0,
-                duration_s: 15.0,
-                immobilize_self: true,
-                damage_vector: dmg_vec,
-                lance_beam_dir: Some(beam_dir),
-                ..Default::default()
-            })
-            .await;
+        // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule(moduleID, startDir, endDir)`): 300km directional beam after 15s warmup
+        let raw_dir = match (parse_vec3_arg(args.get(1)), parse_vec3_arg(args.get(2))) {
+            (Some(p0), Some(p1)) if (p1 - p0).length_squared() > 1e-4 => Some(p1 - p0),
+            (Some(p0), Some(p1)) => Some(if p0.length_squared() > 1e-4 { p0 } else { p1 }),
+            (a, b) => a.or(b),
+        };
+        let beam_dir = raw_dir.map(|v| if v.length_squared() > 1e-4 { v.normalize() } else { default_fwd }).unwrap_or(default_fwd);
+        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key_of(ctx), ship_id), now_unix + 300);
+        let _ = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+            ship_id, module_id, module_type_id: mod_type_id, owner_char_id: Some(char_id),
+            effect_name: "superWeaponLanceWarmup".into(), repeat: 0, duration_s: 15.0,
+            immobilize_self: true, damage_vector: dmg_vec, lance_beam_dir: Some(beam_dir), ..Default::default()
+        }).await;
     } else if let Some(tb) = single_target_ball {
         let (app, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, tb.id, dmg_vec, 10.0, now_unix).await?.map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
         crate::services::combat_crimewatch::record_killmail_assist_action(ctx, tb.id, char_id, ship_type_id, mod_type_id, app, false, now_unix);
@@ -907,8 +906,17 @@ pub async fn activate_superweapon_with_args(
     ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
 
     ctx.notify(NotificationTarget::Character(char_id), "OnGodmaShipEffect", "charid", vec![PyRep::Integer(module_id), PyRep::String("superWeapon".into()), PyRep::Bool(true)]);
-    ctx.notify(NotificationTarget::Character(char_id), "OnDamageMessage", "charid", vec![PyRep::Integer(module_id), PyRep::Real(total_raw_damage)]);
-    ctx.notify(NotificationTarget::Character(char_id), "OnDamageMessages", "charid", vec![PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(module_id), PyRep::Real(total_raw_damage)])])]);
+    if !is_slash {
+        let tgt_id = hit_targets.first().copied().unwrap_or(0);
+        let dmg_dict = PyRep::Dict(vec![
+            (PyRep::String("damage".into()), PyRep::Real(total_raw_damage)), (PyRep::String("source".into()), PyRep::Integer(ship_id)),
+            (PyRep::String("attackerID".into()), PyRep::Integer(ship_id)), (PyRep::String("target".into()), PyRep::Integer(tgt_id)),
+            (PyRep::String("target_ID".into()), PyRep::Integer(tgt_id)), (PyRep::String("weapon".into()), PyRep::Integer(mod_type_id as i64)),
+            (PyRep::String("hitQuality".into()), PyRep::Integer(5)), (PyRep::String("attackType".into()), PyRep::String("me".into())),
+        ]);
+        ctx.notify(NotificationTarget::Character(char_id), "OnDamageMessage", "charid", vec![dmg_dict.clone()]);
+        ctx.notify(NotificationTarget::Character(char_id), "OnDamageMessages", "charid", vec![PyRep::List(vec![PyRep::Tuple(vec![dmg_dict])])]);
+    }
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(is_slash)),
@@ -928,9 +936,12 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     tactical_state: &std::sync::RwLock<TacticalModulesState>,
+    pending_cycle_actions: &mut Vec<crate::system_actor::PendingCycleAction>,
     destroyed_balls: &mut Vec<(i64, Option<i64>)>,
 ) {
-    let Some(ship_pos) = ballpark.balls.get(&cycle.ship_id).map(|b| b.position) else { return };
+    let Some(ship_ball) = ballpark.balls.get(&cycle.ship_id) else { return };
+    let ship_pos = ship_ball.position;
+    let attacker_ship_type_id = ship_ball.type_id;
     let beam_dir = cycle.lance_beam_dir.unwrap_or(DVec3::X);
     let beam_len = 300_000.0;
     // DERIVED: Titan Lance Doomsday beam cylinder radius (20 km cone/cylinder)
@@ -941,30 +952,44 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         .filter(|b| b.id != cycle.ship_id && is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), b.id, b.type_id))
         .map(|b| (b.id, b.type_id, b.position))
         .collect();
-    let mut hit_ids = Vec::new();
+    let mut hits = Vec::new();
     for (bid, _tid, bpos) in candidates {
         let to_b = bpos - ship_pos;
         let along = to_b.dot(beam_dir);
         let perp = (to_b - beam_dir * along).length();
         if along > 0.0 && along <= beam_len && perp <= beam_radius {
-            if let Some((_, destroyed, _)) = ballpark.apply_damage_to_ball(bid, cycle.damage_vector) {
+            let mut applied_dmg = 0.0;
+            if let Some((app, destroyed, _)) = ballpark.apply_damage_to_ball(bid, cycle.damage_vector) {
+                applied_dmg = app;
                 if destroyed {
                     destroyed_balls.push((bid, cycle.owner_char_id));
                 }
             }
             if let Some(v_cs) = ballpark.combat_states.get_mut(&bid) {
+                v_cs.lance_disrupted_remaining_s = 300.0;
+                v_cs.is_tethered = false;
                 v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
             }
-            hit_ids.push(bid);
+            hits.push((bid, applied_dmg));
         }
     }
     if let Some(db) = db_opt.as_ref() {
         let db_key = std::sync::Arc::as_ptr(db) as usize;
         let now_unix = db.clock().now_unix_secs();
         let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        for vid in hit_ids {
+        for &(vid, _) in &hits {
             st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
         }
+    }
+    if let Some(attacker_char_id) = cycle.owner_char_id {
+        pending_cycle_actions.push(crate::system_actor::PendingCycleAction::LanceBeamFired {
+            attacker_char_id,
+            attacker_ship_id: cycle.ship_id,
+            attacker_ship_type_id,
+            module_id: cycle.module_id,
+            module_type_id: cycle.module_type_id,
+            hits,
+        });
     }
 }
 

@@ -76,10 +76,14 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             .any(|c| c.ship_id == ball_id && c.grants_interdiction_nullification);
 
         if let Some(cs) = ballpark.combat_states.get_mut(&ball_id) {
-            cs.warp_scramble_strength = base_scram + mod_scram;
+            let lance_scram = if cs.lance_disrupted_remaining_s > 0.0 { 100 } else { 0 };
+            cs.warp_scramble_strength = base_scram + mod_scram + lance_scram;
             cs.warp_core_strength = base_core + mod_core;
             cs.is_mwd_mjd_disabled = mwd_disabled;
             cs.disallow_assistance = disallow_assist;
+            if lance_scram > 0 {
+                cs.is_tethered = false;
+            }
             if ewar_immune {
                 cs.ecm_jammed_remaining_s = 0.0;
             }
@@ -236,11 +240,21 @@ pub(crate) fn handle_add_module_cycle(
             cycle.original_max_velocity = Some(ball.max_velocity);
             ball.max_velocity *= vel_mult;
         }
-    } else if cycle.speed_boost_factor > 0.0 {
+    } else if cycle.speed_boost_factor.abs() > 1e-9 {
         if let Some(ball) = ballpark.balls.get_mut(&cycle.ship_id) {
             if cycle.original_max_velocity.is_none() {
-                cycle.original_max_velocity = Some(ball.max_velocity);
-                ball.max_velocity *= 1.0 + cycle.speed_boost_factor;
+                let orig_v = ballpark
+                    .combat_states
+                    .get(&cycle.ship_id)
+                    .and_then(|cs| cs.cloak_original_max_velocity)
+                    .unwrap_or(ball.max_velocity);
+                cycle.original_max_velocity = Some(orig_v);
+                ball.max_velocity = orig_v * (1.0 + cycle.speed_boost_factor).max(0.0);
+                if cycle.effect_name.starts_with("cloaking") {
+                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                        cs.cloak_original_max_velocity = Some(orig_v);
+                    }
+                }
             }
         }
     }

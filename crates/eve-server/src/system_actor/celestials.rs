@@ -1090,7 +1090,7 @@ impl SystemHandle {
         &self,
         ship_id: BallId,
         module_id: i64,
-    ) -> Result<Option<f64>, String> {
+    ) -> Result<Option<(f64, i32)>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SystemCommand::StopNaniteRepair {

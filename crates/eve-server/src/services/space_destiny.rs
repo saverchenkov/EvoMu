@@ -824,21 +824,33 @@ pub(crate) async fn handle_update_state_request(
                 return Ok(PyRep::None);
             };
             let ship_type = ctx.sde.types.get(&ship_item.type_id);
-            let max_vel = ctx
-                .get_or_rebuild_ship_fitting(char_id, ship_id)
-                .ok()
+            let fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            let max_vel = fit_opt
+                .as_ref()
                 .map(|f| f.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde))
+                .filter(|&v| v > 0.0)
                 .or_else(|| {
                     ship_type
                         .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY))
                         .copied()
                 })
                 .unwrap_or(100.0);
-            let inertia = ship_type
-                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
-                .copied()
+            let inertia = fit_opt
+                .as_ref()
+                .map(|f| f.ship.get_attribute(eve_sde::attr_ids::AGILITY, &ctx.sde))
+                .filter(|&v| v > 0.0)
+                .or_else(|| {
+                    ship_type
+                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
+                        .copied()
+                })
                 .unwrap_or(1.0);
-            let mass = ship_type.map(|t| t.mass).unwrap_or(1_000_000.0);
+            let mass = fit_opt
+                .as_ref()
+                .map(|f| f.ship.get_attribute(eve_sde::attr_ids::MASS, &ctx.sde))
+                .filter(|&v| v > 0.0)
+                .or_else(|| ship_type.map(|t| t.mass))
+                .unwrap_or(1_000_000.0);
             let radius = ship_type.map(|t| t.radius).unwrap_or(40.0);
             let spawn_pos = ctx
                 .db

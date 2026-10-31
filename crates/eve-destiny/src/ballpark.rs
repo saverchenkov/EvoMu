@@ -412,33 +412,15 @@ impl Ballpark {
         Some(removed)
     }
 
-    /// Applies incoming damage to `ball_id`, updates its [`CombatState`], emits
-    /// `DestinyEvent::OnDamageStateChange` to all observers in the entity's grid,
-    /// and if destroyed, queues `DestinyEvent::TerminalExplosion` and removes the ball.
-    pub fn apply_damage_to_ball(
+    fn emit_damage_and_destruction_events(
         &mut self,
         ball_id: BallId,
-        dmg: DamageVector,
-    ) -> Option<(f64, bool, Option<Ball>)> {
-        let ball_snap = self.balls.get(&ball_id).cloned();
-        let grid_id = self.ball_grid_ids.get(&ball_id).copied();
-        let cs = self.combat_states.entry(ball_id).or_default();
-        let (applied, destroyed) = cs.apply_damage(dmg);
-        let s_ratio = if cs.max_shield_hp > 0.0 {
-            (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let a_ratio = if cs.max_armor_hp > 0.0 {
-            (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let h_ratio = if cs.max_structure_hp > 0.0 {
-            (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        grid_id: Option<u64>,
+        s_ratio: f64,
+        a_ratio: f64,
+        h_ratio: f64,
+        destroyed: bool,
+    ) {
         let ev = DestinyEvent::OnDamageStateChange {
             ball_id,
             shield_ratio: s_ratio,
@@ -473,7 +455,59 @@ impl Ballpark {
             }
             let _ = self.remove_ball(ball_id);
         }
+    }
+
+    /// Applies incoming damage to `ball_id`, updates its [`CombatState`], emits
+    /// `DestinyEvent::OnDamageStateChange` to all observers in the entity's grid,
+    /// and if destroyed, queues `DestinyEvent::TerminalExplosion` and removes the ball.
+    pub fn apply_damage_to_ball(
+        &mut self,
+        ball_id: BallId,
+        dmg: DamageVector,
+    ) -> Option<(f64, bool, Option<Ball>)> {
+        let ball_snap = self.balls.get(&ball_id).cloned();
+        let grid_id = self.ball_grid_ids.get(&ball_id).copied();
+        let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
+            let cs = self.combat_states.entry(ball_id).or_default();
+            let (applied, destroyed) = cs.apply_damage(dmg);
+            let s = if cs.max_shield_hp > 0.0 { (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0) } else { 0.0 };
+            let a = if cs.max_armor_hp > 0.0 { (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0) } else { 0.0 };
+            let h = if cs.max_structure_hp > 0.0 { (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0) } else { 0.0 };
+            (applied, destroyed, s, a, h)
+        };
+        self.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
         Some((applied, destroyed, ball_snap))
+    }
+
+    /// Applies unresisted direct structure/hull HP damage to `ball_id`, leaving shield and armor
+    /// completely untouched (`feat:navigation.gravity-hazard-safe-zones`).
+    pub fn apply_direct_structure_damage_to_ball(
+        &mut self,
+        ball_id: BallId,
+        raw_hull_damage: f64,
+    ) -> Option<(f64, bool, Option<Ball>)> {
+        let ball_snap = self.balls.get(&ball_id).cloned()?;
+        let grid_id = self.ball_grid_ids.get(&ball_id).copied();
+        let (applied, destroyed, s_ratio, a_ratio, h_ratio) = {
+            let cs = self.combat_states.entry(ball_id).or_default();
+            if cs.is_tethered
+                || cs.gate_cloak_remaining_ticks > 0
+                || cs.undock_invulnerable_remaining_ticks > 0
+                || cs.warp_exit_invulnerable_remaining_ticks > 0
+            {
+                return Some((0.0, false, Some(ball_snap)));
+            }
+            let dmg = raw_hull_damage.max(0.0);
+            let applied = dmg.min(cs.structure_hp.max(0.0));
+            cs.structure_hp = (cs.structure_hp - dmg).max(0.0);
+            let destroyed = cs.structure_hp <= 1e-6;
+            let s = if cs.max_shield_hp > 0.0 { (cs.shield_hp / cs.max_shield_hp).clamp(0.0, 1.0) } else { 0.0 };
+            let a = if cs.max_armor_hp > 0.0 { (cs.armor_hp / cs.max_armor_hp).clamp(0.0, 1.0) } else { 0.0 };
+            let h = if cs.max_structure_hp > 0.0 { (cs.structure_hp / cs.max_structure_hp).clamp(0.0, 1.0) } else { 0.0 };
+            (applied, destroyed, s, a, h)
+        };
+        self.emit_damage_and_destruction_events(ball_id, grid_id, s_ratio, a_ratio, h_ratio, destroyed);
+        Some((applied, destroyed, Some(ball_snap)))
     }
 
     pub fn add_warp_bubble(&mut self, id: BallId, position: DVec3, radius: f64) {

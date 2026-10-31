@@ -126,9 +126,11 @@ pub struct ActiveModuleCycle {
 
 #[derive(Debug, Clone)]
 pub struct ActiveNaniteRepair {
+    pub char_id: CharacterId,
     pub ship_id: BallId,
     pub module_id: i64,
     pub initial_damage_hp: f64,
+    pub paste_reserved: i32,
     pub duration_s: f64,
     pub elapsed_s: f64,
 }
@@ -154,6 +156,14 @@ pub enum PendingCycleAction {
         effect_name: String,
         next_cycle_cap_deducted: bool,
         deducted_cap_gj: f64,
+    },
+    LanceBeamFired {
+        attacker_char_id: CharacterId,
+        attacker_ship_id: BallId,
+        attacker_ship_type_id: u32,
+        module_id: i64,
+        module_type_id: u32,
+        hits: Vec<(BallId, f64)>,
     },
     RepeatCycleStart {
         char_id: CharacterId,
@@ -458,7 +468,7 @@ pub enum SystemCommand {
     StopNaniteRepair {
         ship_id: BallId,
         module_id: i64,
-        reply: oneshot::Sender<Option<f64>>,
+        reply: oneshot::Sender<Option<(f64, i32)>>,
     },
     RecordIncomingArmorDamage {
         ship_id: BallId,

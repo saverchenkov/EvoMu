@@ -453,89 +453,51 @@ pub fn dispatch_universe_and_nav(
             RouteExecutionResult::ok_json(json!(ids), 3600)
         }
         ("GET", "/universe/categories/{category_id}") => {
-            let cat_id = match parse_path_i64(path_params, "category_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
+            let cat_id = match parse_path_i64(path_params, "category_id") { Ok(v) => v, Err(e) => return e };
             let Ok(cat_u32) = u32::try_from(cat_id) else {
                 return RouteExecutionResult::error(404, format!("Category {cat_id} not found"));
             };
             let Some(cat) = ctx.sde.categories.get(&cat_u32) else {
                 return RouteExecutionResult::error(404, format!("Category {cat_id} not found"));
             };
-            let mut groups: Vec<i64> = ctx
-                .sde
-                .groups
-                .values()
-                .filter(|g| g.category_id == cat_u32)
-                .map(|g| g.group_id as i64)
-                .collect();
+            let mut groups: Vec<i64> = ctx.sde.groups.values().filter(|g| g.category_id == cat_u32).map(|g| g.group_id as i64).collect();
             groups.sort_unstable();
-            RouteExecutionResult::ok_json(
-                json!({
-                    "category_id": cat.category_id as i64,
-                    "name": cat.name,
-                    "published": cat.published,
-                    "groups": groups,
-                }),
-                3600,
-            )
+            let lang = query_params.get("language").map(String::as_str).unwrap_or("en");
+            let name = if lang != "en" { ctx.sde.localized_category_name(lang, cat.category_id).unwrap_or_else(|| cat.name.clone()) } else { cat.name.clone() };
+            RouteExecutionResult::ok_json(json!({ "category_id": cat.category_id as i64, "name": name, "published": cat.published, "groups": groups }), 3600)
         }
         ("GET", "/universe/groups") => {
             let mut ids: Vec<i64> = ctx.sde.groups.keys().map(|&id| id as i64).collect();
             ids.sort_unstable();
             match paginate_slice(&ids, page, 1000) {
-                Ok((page_ids, total_pages)) => {
-                    RouteExecutionResult::ok_paginated(json!(page_ids), 3600, total_pages)
-                }
+                Ok((page_ids, total_pages)) => RouteExecutionResult::ok_paginated(json!(page_ids), 3600, total_pages),
                 Err(e) => e,
             }
         }
         ("GET", "/universe/groups/{group_id}") => {
-            let grp_id = match parse_path_i64(path_params, "group_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
+            let grp_id = match parse_path_i64(path_params, "group_id") { Ok(v) => v, Err(e) => return e };
             let Ok(grp_u32) = u32::try_from(grp_id) else {
                 return RouteExecutionResult::error(404, format!("Group {grp_id} not found"));
             };
             let Some(grp) = ctx.sde.groups.get(&grp_u32) else {
                 return RouteExecutionResult::error(404, format!("Group {grp_id} not found"));
             };
-            let mut types: Vec<i64> = ctx
-                .sde
-                .types
-                .values()
-                .filter(|t| t.group_id == grp_u32)
-                .map(|t| t.type_id as i64)
-                .collect();
+            let mut types: Vec<i64> = ctx.sde.types.values().filter(|t| t.group_id == grp_u32).map(|t| t.type_id as i64).collect();
             types.sort_unstable();
-            RouteExecutionResult::ok_json(
-                json!({
-                    "group_id": grp.group_id as i64,
-                    "category_id": grp.category_id as i64,
-                    "name": grp.name,
-                    "published": grp.published,
-                    "types": types,
-                }),
-                3600,
-            )
+            let lang = query_params.get("language").map(String::as_str).unwrap_or("en");
+            let name = if lang != "en" { ctx.sde.localized_group_name(lang, grp.group_id).unwrap_or_else(|| grp.name.clone()) } else { grp.name.clone() };
+            RouteExecutionResult::ok_json(json!({ "group_id": grp.group_id as i64, "category_id": grp.category_id as i64, "name": name, "published": grp.published, "types": types }), 3600)
         }
         ("GET", "/universe/types") => {
             let mut ids: Vec<i64> = ctx.sde.types.keys().map(|&id| id as i64).collect();
             ids.sort_unstable();
             match paginate_slice(&ids, page, 1000) {
-                Ok((page_ids, total_pages)) => {
-                    RouteExecutionResult::ok_paginated(json!(page_ids), 3600, total_pages)
-                }
+                Ok((page_ids, total_pages)) => RouteExecutionResult::ok_paginated(json!(page_ids), 3600, total_pages),
                 Err(e) => e,
             }
         }
         ("GET", "/universe/types/{type_id}") => {
-            let tid = match parse_path_i64(path_params, "type_id") {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
+            let tid = match parse_path_i64(path_params, "type_id") { Ok(v) => v, Err(e) => return e };
             let Ok(tid_u32) = u32::try_from(tid) else {
                 return RouteExecutionResult::error(404, format!("Type {tid} not found"));
             };
@@ -544,41 +506,20 @@ pub fn dispatch_universe_and_nav(
             };
             let mut attr_keys: Vec<_> = t.default_attributes.keys().copied().collect();
             attr_keys.sort_unstable();
-            let dogma_attributes: Vec<Value> = attr_keys
-                .into_iter()
-                .map(|aid| {
-                    json!({
-                        "attribute_id": aid as i64,
-                        "value": t.default_attributes[&aid],
-                    })
-                })
-                .collect();
+            let dogma_attributes: Vec<Value> = attr_keys.into_iter().map(|aid| json!({ "attribute_id": aid as i64, "value": t.default_attributes[&aid] })).collect();
             let mut eff_ids = t.effect_ids.clone();
             eff_ids.sort_unstable();
             eff_ids.dedup();
             let default_eid = t.default_effect_id;
-            let dogma_effects: Vec<Value> = eff_ids
-                .into_iter()
-                .map(|eid| {
-                    json!({
-                        "effect_id": eid as i64,
-                        "is_default": Some(eid) == default_eid,
-                    })
-                })
-                .collect();
+            let dogma_effects: Vec<Value> = eff_ids.into_iter().map(|eid| json!({ "effect_id": eid as i64, "is_default": Some(eid) == default_eid })).collect();
+            let lang = query_params.get("language").map(String::as_str).unwrap_or("en");
+            let name = if lang != "en" { ctx.sde.localized_type_name(lang, t.type_id).unwrap_or_else(|| t.name.clone()) } else { t.name.clone() };
+            let desc = if lang != "en" { ctx.sde.localized_type_description(lang, t.type_id).unwrap_or_else(|| t.description.clone()) } else { t.description.clone() };
             let mut obj = json!({
-                "type_id": t.type_id as i64,
-                "name": t.name,
-                "description": t.description,
-                "published": t.published,
-                "group_id": t.group_id as i64,
-                "mass": t.mass,
-                "volume": t.volume,
-                "capacity": t.capacity,
-                "portion_size": t.portion_size as i64,
-                "radius": t.radius,
-                "dogma_attributes": dogma_attributes,
-                "dogma_effects": dogma_effects,
+                "type_id": t.type_id as i64, "name": name, "description": desc, "published": t.published,
+                "group_id": t.group_id as i64, "mass": t.mass, "volume": t.volume, "capacity": t.capacity,
+                "portion_size": t.portion_size as i64, "radius": t.radius,
+                "dogma_attributes": dogma_attributes, "dogma_effects": dogma_effects,
             });
             if let Some(mg) = t.market_group_id {
                 obj["market_group_id"] = json!(mg as i64);

@@ -1220,7 +1220,10 @@ impl SystemRegistry {
                                 if let Some(pos) = active_nanite_repairs.iter().position(|r| r.ship_id == ship_id && r.module_id == module_id) {
                                     let r = active_nanite_repairs.remove(pos);
                                     let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
-                                    rem = Some(r.initial_damage_hp * (1.0 - frac));
+                                    let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
+                                    let paste_used = ((r.paste_reserved as f64) * frac).ceil() as i32;
+                                    let paste_refund = (r.paste_reserved - paste_used.clamp(0, r.paste_reserved)).max(0);
+                                    rem = Some((rem_dmg, paste_refund));
                                 }
                                 let _ = reply.send(rem);
                             }

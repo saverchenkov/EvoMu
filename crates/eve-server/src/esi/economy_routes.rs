@@ -247,13 +247,27 @@ pub fn dispatch_economy_route(
                 .map(|t| t.type_id as i64)
                 .collect();
             types.sort_unstable();
-            let description = ctx
-                .sde
-                .market_group_description(mg.market_group_id)
-                .unwrap_or_default();
+            let lang = query_params.get("language").map(String::as_str).unwrap_or("en");
+            let name = if lang != "en" {
+                ctx.sde
+                    .localized_market_group_name(lang, mg.market_group_id)
+                    .unwrap_or_else(|| mg.name.clone())
+            } else {
+                mg.name.clone()
+            };
+            let description = if lang != "en" {
+                ctx.sde
+                    .localized_market_group_description(lang, mg.market_group_id)
+                    .or_else(|| ctx.sde.market_group_description(mg.market_group_id))
+                    .unwrap_or_default()
+            } else {
+                ctx.sde
+                    .market_group_description(mg.market_group_id)
+                    .unwrap_or_default()
+            };
             let mut obj = json!({
                 "market_group_id": mg.market_group_id as i64,
-                "name": mg.name,
+                "name": name,
                 "description": description,
                 "types": types,
             });

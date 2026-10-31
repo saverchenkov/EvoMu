@@ -413,19 +413,13 @@ pub(crate) async fn handle_mining_and_deactivate(
                             .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
                     })
                     .unwrap_or(40.0);
-                let base_cost = ctx
-                    .sde
-                    .types
-                    .get(&m_item.type_id)
-                    .and_then(|t| t.default_attributes.get(&1231).copied())
-                    .unwrap_or(4.0)
-                    .max(1.0);
                 let sk = snap.skills.get(&char_id);
+                let thermo_lvl = sk.and_then(|m| m.get(&28164)).map(|r| r.level).unwrap_or(0);
                 let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
                 let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
-                Ok((active, dmg, hp, base_cost, op_lvl, int_lvl))
+                Ok((active, dmg, hp, m_item.type_id, thermo_lvl, op_lvl, int_lvl))
             });
-            let (is_active, cur_dmg, max_hp, base_paste_cost, nanite_op_lvl, nanite_interfacing_lvl) =
+            let (is_active, cur_dmg, max_hp, mod_type_id, thermo_lvl, nanite_op_lvl, nanite_interfacing_lvl) =
                 match mod_check {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
@@ -451,11 +445,14 @@ pub(crate) async fn handle_mining_and_deactivate(
                 ])));
             }
 
-            let effective_paste_per_hp =
-                (base_paste_cost / max_hp.max(1.0)) * (1.0 - 0.05 * (nanite_op_lvl as f64));
-            let paste_needed =
-                eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp)
-                    .max(1) as i32;
+            let (paste_needed, repair_rate_hp_per_s, duration_s) = compute_nanite_repair_params(
+                ctx.sde.types.get(&mod_type_id),
+                cur_dmg,
+                max_hp,
+                thermo_lvl,
+                nanite_op_lvl,
+                nanite_interfacing_lvl,
+            );
 
             let deduct_res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {
@@ -510,15 +507,15 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(e));
             }
 
-            let repair_rate_hp_per_s = 0.67 * (1.0 + 0.20 * (nanite_interfacing_lvl as f64));
-            let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys
                     .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
+                        char_id,
                         ship_id,
                         module_id,
                         initial_damage_hp: cur_dmg,
+                        paste_reserved: paste_needed,
                         duration_s,
                         elapsed_s: 0.0,
                     })
@@ -568,14 +565,70 @@ pub(crate) async fn handle_mining_and_deactivate(
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .unwrap_or(0);
             let mut stopped = false;
+            let mut rem_dmg_out = 0.0;
+            let mut paste_refunded = 0i32;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                stopped = sys
+                if let Some((rem_dmg, refund)) = sys
                     .stop_nanite_repair(ship_id, module_id)
                     .await
                     .ok()
                     .flatten()
-                    .is_some();
+                {
+                    stopped = true;
+                    rem_dmg_out = rem_dmg;
+                    paste_refunded = refund;
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(m_item) = snap.items.get_mut(&module_id) {
+                            if rem_dmg <= 1e-6 {
+                                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
+                            } else {
+                                m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
+                            }
+                        }
+                        if refund > 0 {
+                            let existing_pid = snap
+                                .items
+                                .values()
+                                .find(|i| {
+                                    i.owner_id == char_id
+                                        && i.location_id == ship_id
+                                        && i.flag == InventoryFlag::Cargo
+                                        && i.type_id == 28668
+                                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                                })
+                                .map(|i| i.item_id);
+                            if let Some(pid) = existing_pid {
+                                if let Some(p_item) = snap.items.get_mut(&pid) {
+                                    p_item.quantity += refund;
+                                    p_item.version += 1;
+                                }
+                            } else {
+                                snap.next_entity_id += 1;
+                                let new_id = snap.next_entity_id;
+                                snap.items.insert(
+                                    new_id,
+                                    eve_db::InventoryItemRecord {
+                                        item_id: new_id,
+                                        type_id: 28668,
+                                        owner_id: char_id,
+                                        location_id: ship_id,
+                                        flag: InventoryFlag::Cargo,
+                                        quantity: refund,
+                                        singleton: false,
+                                        version: 1,
+                                        dynamic_attributes: HashMap::new(),
+                                        source_mutaplasmid_id: None,
+                                        insured_payout_isk: 0.0,
+                                        is_blueprint_copy: false,
+                                        blueprint_runs_remaining: None,
+                                    },
+                                );
+                            }
+                        }
+                    });
+                    ctx.invalidate_ship_fitting(ship_id);
+                }
             }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -586,6 +639,8 @@ pub(crate) async fn handle_mining_and_deactivate(
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
                 ("stopped", PyRep::Bool(stopped)),
+                ("remainingDamage", PyRep::Real(rem_dmg_out)),
+                ("pasteRefunded", PyRep::Integer(paste_refunded as i64)),
             ])))
         }
 
@@ -689,4 +744,41 @@ pub(crate) async fn handle_mining_and_deactivate(
 
         _ => None,
     }
+}
+
+/// Computes `(paste_needed, repair_rate_hp_per_s, duration_s)` for in-space Nanite Repair Paste
+/// repair (`feat:modules.nanite-repair-paste-in-space`), scaling paste consumption with module
+/// volume (`volume / 5.0`), `Thermodynamics (28164)` (`-5%/lvl`), and `Nanite Operation (28879)`
+/// (`-5%/lvl`, SDE attr `1294`), and scaling repair speed with `Nanite Interfacing (28880)`
+/// (`+20%/lvl`, SDE attr `1295`).
+pub(crate) fn compute_nanite_repair_params(
+    mod_type: Option<&eve_sde::InvType>,
+    cur_dmg: f64,
+    max_hp: f64,
+    thermo_lvl: u8,
+    nanite_op_lvl: u8,
+    nanite_interfacing_lvl: u8,
+) -> (i32, f64, f64) {
+    let vol_scale = mod_type
+        .map(|t| (t.volume / 5.0).clamp(1.0, 250.0))
+        .unwrap_or(1.0);
+    let base_full_cost = mod_type
+        .and_then(|t| t.default_attributes.get(&1231).copied())
+        .unwrap_or(4.0 * vol_scale)
+        .max(1.0);
+    let skill_cost_mult = (1.0 - 0.05 * (nanite_op_lvl.min(5) as f64))
+        * (1.0 - 0.05 * (thermo_lvl.min(5) as f64));
+    let raw_paste = (cur_dmg.max(0.0) / max_hp.max(1.0)) * base_full_cost * skill_cost_mult;
+    let paste_needed = if cur_dmg <= 0.0 {
+        0
+    } else {
+        (raw_paste - 1e-9).ceil().max(1.0) as i32
+    };
+    let base_rate = mod_type
+        .and_then(|t| t.default_attributes.get(&1267).copied())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(0.67);
+    let repair_rate_hp_per_s = base_rate * (1.0 + 0.20 * (nanite_interfacing_lvl.min(5) as f64));
+    let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
+    (paste_needed, repair_rate_hp_per_s, duration_s)
 }

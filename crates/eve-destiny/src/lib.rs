@@ -269,6 +269,9 @@ pub struct CombatState {
     /// Per-entity deterministic PRNG state (`OF-31`).
     #[serde(default = "default_combat_rng_state")]
     pub rng_state: u64,
+    /// Remaining seconds of Disruptive Lance warp/jump/dock/tether suppression (`feat:modules.lance-doomsday-directional-geometry`).
+    #[serde(default)]
+    pub lance_disrupted_remaining_s: f64,
 }
 
 fn default_recharge_time_ms() -> f64 { 120_000.0 }
@@ -319,6 +322,7 @@ impl Default for CombatState {
             tracking_speed_multiplier: 1.0,
             shield_boost_multiplier: 1.0,
             rng_state: default_combat_rng_state(),
+            lance_disrupted_remaining_s: 0.0,
         }
     }
 }
@@ -530,6 +534,12 @@ impl Ball {
     #[inline]
     pub fn align_time_seconds(&self) -> f64 {
         -0.25_f64.ln() * self.time_constant()
+    }
+
+    /// Server 1 Hz tick count required to enter warp from rest (`ceil(align_time_seconds)`).
+    #[inline]
+    pub fn align_server_ticks(&self) -> u64 {
+        self.align_time_seconds().ceil().max(1.0) as u64
     }
 }
 

@@ -58,40 +58,7 @@ pub(crate) async fn handle_module_cycles(
                     .unwrap_or(0)
             };
 
-            let m_opt = fit.modules.get(&module_id).cloned().or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    let item = snap.items.get(&module_id)?;
-                    if item.location_id != ship_id || !matches!(item.flag as u16, 11..=34) {
-                        return None;
-                    }
-                    let is_online = snap.module_online_states.get(&module_id).copied().unwrap_or(true);
-                    let charge_tid = snap
-                        .items
-                        .values()
-                        .find(|c| {
-                            c.location_id == ship_id
-                                && c.flag == item.flag
-                                && c.item_id != module_id
-                                && c.quantity > 0
-                        })
-                        .map(|c| c.type_id);
-                    Some(eve_dogma::FittedModule {
-                        item_id: module_id,
-                        type_id: item.type_id,
-                        flag_id: item.flag as u16,
-                        state: if is_online {
-                            eve_dogma::ModuleState::Online
-                        } else {
-                            eve_dogma::ModuleState::Offline
-                        },
-                        charge_type_id: charge_tid,
-                        charge_quantity: 100,
-                        damage_hp: 0.0,
-                        max_hp: 40.0,
-                        dynamic_attribute_overrides: std::collections::HashMap::new(),
-                    })
-                })
-            });
+            let m_opt = fit.modules.get(&module_id).cloned();
             let Some(m) = m_opt else {
                 let has_online_weapon = fit.modules.values().any(|wm| {
                     (27..=34).contains(&wm.flag_id)
@@ -790,11 +757,14 @@ pub(crate) async fn handle_module_cycles(
             let mut cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
             let speed_factor = mod_state.get_attribute(attr_ids::SPEED_FACTOR, &ctx.sde);
             let speed_boost_factor = if mod_type.group_id == 330 {
+                let is_covert_cloak = mod_type.effect_ids.iter().any(|&eid| {
+                    ctx.sde.effects.get(&eid).is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
+                });
                 let vel_mod = mod_state.get_attribute(306, &ctx.sde);
-                if vel_mod > 0.0 && vel_mod < 1.0 {
+                if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 {
+                    0.0
+                } else if vel_mod > 0.0 && vel_mod < 1.0 {
                     vel_mod - 1.0
-                } else if vel_mod >= 1.0 && vel_mod < 100.0 {
-                    (vel_mod / 100.0) - 1.0
                 } else {
                     0.0
                 }
@@ -1103,7 +1073,7 @@ pub(crate) async fn handle_module_cycles(
                 owner_char_id: Some(char_id),
                 effect_name: effect_name.clone(),
                 target_id: target_id_opt,
-                repeat,
+                repeat: if mod_type.group_id == 330 { repeat.max(1) } else { repeat },
                 duration_s,
                 elapsed_s: 0.0,
                 cap_need_per_cycle: cap_need,
@@ -1298,6 +1268,9 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
             ctx.store_ship_fitting(ship_id, fit.clone());
+            if mod_type.group_id == 330 {
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
 
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
             let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
@@ -1319,8 +1292,21 @@ pub(crate) async fn handle_module_cycles(
                 let rep = handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await;
                 Some(Ok(rep))
             } else {
-                let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-                Some(Ok(PyRep::keyval([("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)), ("duration", PyRep::Real(duration_s))])))
+                let max_vel = if mod_type.group_id == 330 {
+                    sys.get_ball_snapshot(ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|(_, b)| b.max_velocity)
+                        .unwrap_or_else(|| fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde))
+                } else {
+                    fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde)
+                };
+                Some(Ok(PyRep::keyval([
+                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
+                    ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+                    ("duration", PyRep::Real(duration_s)),
+                ])))
             }
             }
         }

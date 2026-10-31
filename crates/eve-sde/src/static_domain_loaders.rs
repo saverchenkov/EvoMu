@@ -210,63 +210,10 @@ fn fsd_str(buf: &[u8], pos: usize) -> String {
         .to_string()
 }
 
-fn decode_pickle_unicode_escape(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    let mut raw_buf: Vec<u8> = Vec::new();
-    let flush_raw = |buf: &mut Vec<u8>, dst: &mut String| {
-        if !buf.is_empty() {
-            dst.push_str(&String::from_utf8_lossy(buf));
-            buf.clear();
-        }
-    };
-    let read_hex = |it: &mut std::iter::Copied<std::slice::Iter<'_, u8>>, n: usize| -> Option<u32> {
-        let mut val = 0u32;
-        for _ in 0..n {
-            let d = (it.next()? as char).to_digit(16)?;
-            val = (val << 4) | d;
-        }
-        Some(val)
-    };
-    let mut iter = bytes.iter().copied();
-    for _ in 0..bytes.len() {
-        let Some(b) = iter.next() else { break };
-        if b != b'\\' {
-            raw_buf.push(b);
-            continue;
-        }
-        flush_raw(&mut raw_buf, &mut out);
-        match iter.next() {
-            Some(b'\\') => out.push('\\'),
-            Some(b'\'') => out.push('\''),
-            Some(b'"') => out.push('"'),
-            Some(b'n') => out.push('\n'),
-            Some(b'r') => out.push('\r'),
-            Some(b't') => out.push('\t'),
-            Some(b'x') => {
-                if let Some(ch) = read_hex(&mut iter, 2).and_then(char::from_u32) {
-                    out.push(ch);
-                }
-            }
-            Some(b'u') => {
-                if let Some(ch) = read_hex(&mut iter, 4).and_then(char::from_u32) {
-                    out.push(ch);
-                }
-            }
-            Some(b'U') => {
-                if let Some(ch) = read_hex(&mut iter, 8).and_then(char::from_u32) {
-                    out.push(ch);
-                }
-            }
-            Some(other) => {
-                out.push('\\');
-                out.push(other as char);
-            }
-            None => out.push('\\'),
-        }
-    }
-    flush_raw(&mut raw_buf, &mut out);
-    out
-}
+#[path = "static_localization_loaders.rs"]
+mod static_localization_loaders;
+pub use static_localization_loaders::*;
+
 
 fn fsd_dict_entries(buf: &[u8], pos: usize, item_size: usize) -> Vec<(u32, usize)> {
     let body_start = pos + 4;
@@ -905,41 +852,6 @@ impl SdeRegistry {
             .collect())
     }
 
-    fn load_localized_messages_en_us(
-        &self,
-        needed_ids: &std::collections::HashSet<u32>,
-    ) -> Result<HashMap<u32, String>, SdeError> {
-        if needed_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let raw_loc =
-            self.read_fsd_static_bytes("res:/localizationfsd/localization_fsd_en-us.pickle")?;
-        let mut out = HashMap::with_capacity(needed_ids.len());
-        let lines: Vec<&[u8]> = raw_loc.split(|&b| b == b'\n').collect();
-        for pair in lines.windows(2) {
-            let Some(id_bytes) = pair[0].strip_prefix(b"sI") else {
-                continue;
-            };
-            let Ok(id_str) = std::str::from_utf8(id_bytes) else {
-                continue;
-            };
-            let Ok(msg_id) = id_str.parse::<u32>() else {
-                continue;
-            };
-            if !needed_ids.contains(&msg_id) {
-                continue;
-            }
-            let Some(val_bytes) = pair[1].strip_prefix(b"(V") else {
-                continue;
-            };
-            out.insert(msg_id, decode_pickle_unicode_escape(val_bytes));
-            if out.len() == needed_ids.len() {
-                break;
-            }
-        }
-        Ok(out)
-    }
-
     /// Loads `res:/staticdata/landmarks.static` (`45` universe landmarks).
     pub fn load_landmarks(&self) -> Result<HashMap<u32, LandmarkInfo>, SdeError> {
         let raw = self.read_fsd_static_bytes("res:/staticdata/landmarks.static")?;
@@ -1293,113 +1205,5 @@ impl SdeRegistry {
     pub fn secondary_sun_for_system(&self, solar_system_id: SolarSystemId) -> Option<SecondarySunInfo> {
         let map = SECONDARY_SUNS_CACHE.get_or_init(|| self.load_secondary_suns().unwrap_or_default());
         map.get(&solar_system_id).copied()
-    }
-
-    /// Loads localized English descriptions from `res:/staticdata/marketgroups.fsdbinary`
-    /// (`descriptionID`) resolved via `res:/localizationfsd/localization_fsd_en-us.pickle`.
-    pub fn load_market_group_descriptions(&self) -> Result<HashMap<u32, String>, SdeError> {
-        let raw = self.read_fsd_static_bytes("res:/staticdata/marketgroups.fsdbinary")?;
-        if raw.len() < 56 {
-            return Ok(HashMap::new());
-        }
-        let buckets = u64_le(&raw, 48) as usize;
-        if 56 + buckets * 8 > raw.len() {
-            return Ok(HashMap::new());
-        }
-        let mut desc_ids_by_mg = Vec::new();
-        let mut needed_ids = std::collections::HashSet::new();
-        for b_idx in 0..buckets {
-            let b_off = u64_le(&raw, 56 + b_idx * 8) as usize;
-            if b_off == 0 {
-                continue;
-            }
-            let abs_off = 32 + b_off;
-            if abs_off < 8 || abs_off > raw.len() {
-                continue;
-            }
-            let n_in_bucket = u64_le(&raw, abs_off - 8) as usize;
-            for i in 0..n_in_bucket {
-                let rec = abs_off + i * 28;
-                if rec + 28 > raw.len() {
-                    break;
-                }
-                let mgid = u32_le(&raw, rec);
-                let desc_id = u32_le(&raw, rec + 4);
-                let mask = u32_le(&raw, rec + 24);
-                if (mask & 1) != 0 && desc_id > 0 {
-                    desc_ids_by_mg.push((mgid, desc_id));
-                    needed_ids.insert(desc_id);
-                }
-            }
-        }
-        let localized = self
-            .load_localized_messages_en_us(&needed_ids)
-            .unwrap_or_default();
-        let mut out = HashMap::with_capacity(desc_ids_by_mg.len());
-        for (mgid, desc_id) in desc_ids_by_mg {
-            if let Some(text) = localized.get(&desc_id) {
-                if !text.is_empty() {
-                    out.insert(mgid, text.clone());
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Returns the cached localized English description for a market group ID, if present.
-    pub fn market_group_description(&self, market_group_id: u32) -> Option<String> {
-        static MG_DESCS: std::sync::OnceLock<HashMap<u32, String>> = std::sync::OnceLock::new();
-        let map = MG_DESCS.get_or_init(|| self.load_market_group_descriptions().unwrap_or_default());
-        map.get(&market_group_id).cloned()
-    }
-}
-
-impl crate::SdeRegistry {
-    // DERIVED (OF-36): security-band volume thresholds (`<= 0.35`, `<= 3.0`, `<= 40.0` m3) are derived
-    // server-side heuristics because regional/quarter belt ore tables and ice-belt spawn tables are
-    // server-only (`feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` are `DONE` in
-    // `parity.json` from pre-existing tests; `plan:MN-01` and `plan:MN-02` remain open until real
-    // regional/quarter and ice-belt spawn tables are wired).
-    pub fn belt_ores_for_security_and_region(&self, security_status: f64, region_id: u32) -> Vec<&crate::InvType> {
-        let is_pochven = region_id == 10_000_070;
-        let mut base_ores: Vec<&crate::InvType> = self
-            .types
-            .values()
-            .filter(|t| {
-                t.category_id == 25
-                    && t.published
-                    && ((450..=469).contains(&t.group_id) || (4029..=4031).contains(&t.group_id))
-                    && t.group_id != 465
-                    && self.groups.get(&t.group_id).is_some_and(|g| g.name == t.name)
-            })
-            .filter(|t| {
-                if is_pochven {
-                    (4029..=4031).contains(&t.group_id)
-                } else if (4029..=4031).contains(&t.group_id) {
-                    false
-                } else if security_status >= 0.45 {
-                    t.volume <= 0.35
-                } else if security_status >= 0.05 {
-                    t.volume > 0.35 && t.volume <= 3.0
-                } else {
-                    t.volume > 3.0 && t.volume <= 40.0
-                }
-            })
-            .collect();
-        base_ores.sort_by(|a, b| {
-            a.volume
-                .partial_cmp(&b.volume)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.type_id.cmp(&b.type_id))
-        });
-        base_ores
-    }
-
-    /// Returns the base asteroid ore types eligible to spawn in belts for `solar_system_id` (`MN-01`, `MN-02`).
-    pub fn belt_ores_for_system(&self, solar_system_id: crate::SolarSystemId) -> Vec<&crate::InvType> {
-        let Some(sys) = self.solar_systems.get(&solar_system_id) else {
-            return Vec::new();
-        };
-        self.belt_ores_for_security_and_region(sys.security_status, sys.region_id)
     }
 }

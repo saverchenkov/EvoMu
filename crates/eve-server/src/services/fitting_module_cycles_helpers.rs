@@ -1010,6 +1010,58 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                     }
                 }
             }
+            crate::system_actor::PendingCycleAction::LanceBeamFired {
+                attacker_char_id,
+                attacker_ship_id,
+                attacker_ship_type_id,
+                module_id: _,
+                module_type_id,
+                hits,
+            } => {
+                let now_unix = ctx.now_unix_secs();
+                let mut msg_tuples = Vec::new();
+                for (victim_id, applied_dmg) in hits {
+                    crate::services::combat_crimewatch::record_killmail_assist_action(
+                        ctx,
+                        victim_id,
+                        attacker_char_id,
+                        attacker_ship_type_id,
+                        module_type_id,
+                        applied_dmg,
+                        false,
+                        now_unix,
+                    );
+                    let dmg_dict = PyRep::Dict(vec![
+                        (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
+                        (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),
+                        (PyRep::String("attackerID".into()), PyRep::Integer(attacker_ship_id)),
+                        (PyRep::String("target".into()), PyRep::Integer(victim_id)),
+                        (PyRep::String("target_ID".into()), PyRep::Integer(victim_id)),
+                        (
+                            PyRep::String("owner".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(attacker_char_id)]),
+                        ),
+                        (PyRep::String("weapon".into()), PyRep::Integer(module_type_id as i64)),
+                        (PyRep::String("hitQuality".into()), PyRep::Integer(5)),
+                        (PyRep::String("attackType".into()), PyRep::String("me".into())),
+                    ]);
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(attacker_char_id),
+                        "OnDamageMessage",
+                        "charid",
+                        vec![dmg_dict.clone()],
+                    );
+                    msg_tuples.push(PyRep::Tuple(vec![dmg_dict]));
+                }
+                if !msg_tuples.is_empty() {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(attacker_char_id),
+                        "OnDamageMessages",
+                        "charid",
+                        vec![PyRep::List(msg_tuples)],
+                    );
+                }
+            }
             crate::system_actor::PendingCycleAction::RepeatCycleStart {
                 char_id,
                 ship_id,

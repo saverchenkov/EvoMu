@@ -813,6 +813,9 @@ impl Ballpark {
             if cs.ecm_jammed_remaining_s > 0.0 {
                 cs.ecm_jammed_remaining_s = (cs.ecm_jammed_remaining_s - dt).max(0.0);
             }
+            if cs.lance_disrupted_remaining_s > 0.0 {
+                cs.lance_disrupted_remaining_s = (cs.lance_disrupted_remaining_s - dt).max(0.0);
+            }
         }
 
         // Advance target locks and validate lock breaks (`DG-4`, `DG-5`).

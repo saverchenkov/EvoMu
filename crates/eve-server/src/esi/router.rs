@@ -274,7 +274,7 @@ impl EsiRouter {
                         body,
                         3600,
                         false,
-                        false,
+                        None,
                         None,
                     );
                 }
@@ -299,7 +299,7 @@ impl EsiRouter {
                         body,
                         3600,
                         false,
-                        false,
+                        None,
                         None,
                     );
                 }
@@ -319,7 +319,7 @@ impl EsiRouter {
                         body,
                         3600,
                         false,
-                        false,
+                        None,
                         None,
                     );
                 }
@@ -357,7 +357,7 @@ impl EsiRouter {
                         body,
                         60,
                         false,
-                        false,
+                        None,
                         None,
                     );
                 }
@@ -408,7 +408,7 @@ impl EsiRouter {
                         verify_body,
                         0,
                         true,
-                        false,
+                        None,
                         None,
                     );
                 }
@@ -496,7 +496,7 @@ impl EsiRouter {
                         mgr.sde_definitions_json.clone(),
                         3600,
                         false,
-                        false,
+                        None,
                         None,
                     );
                 }
@@ -738,12 +738,27 @@ impl EsiRouter {
             }
         }
 
+        let negotiated_lang = negotiate_esi_language(
+            req.header("accept-language"),
+            query_params.get("language").map(String::as_str),
+        );
+        let mut lang_query_params;
+        let dispatch_query_params = if negotiated_lang != "en"
+            && query_params.get("language").map(String::as_str) != Some(negotiated_lang)
+        {
+            lang_query_params = query_params.clone();
+            lang_query_params.insert("language".to_string(), negotiated_lang.to_string());
+            &lang_query_params
+        } else {
+            &query_params
+        };
+
         let exec: RouteExecutionResult = super::fleet_routes::dispatch_fleet_routes(
             &self.ctx,
             &op.method,
             &op.path_pattern,
             &matched.path_params,
-            &query_params,
+            dispatch_query_params,
             verified_claims.as_ref(),
             &req.body,
         )
@@ -754,7 +769,7 @@ impl EsiRouter {
                 &op.method,
                 &op.path_pattern,
                 &matched.path_params,
-                &query_params,
+                dispatch_query_params,
                 verified_claims.as_ref(),
                 page,
                 &req.body,
@@ -822,7 +837,7 @@ impl EsiRouter {
             body_bytes,
             exec.max_age_secs,
             is_authenticated_route,
-            needs_content_lang,
+            needs_content_lang.then_some(negotiated_lang),
             total_pages,
         )
     }
@@ -840,7 +855,7 @@ impl EsiRouter {
         body: Vec<u8>,
         max_age_secs: u64,
         is_private: bool,
-        needs_content_lang: bool,
+        content_lang: Option<&str>,
         total_pages: Option<usize>,
     ) -> EsiHttpResponse {
         let etag = compute_etag(&body);
@@ -854,16 +869,7 @@ impl EsiRouter {
         headers.insert("Cache-Control".to_string(), cache_control);
         headers.insert("Last-Modified".to_string(), last_modified);
         headers.insert("Expires".to_string(), expires);
-        if needs_content_lang {
-            let lang = req
-                .header("accept-language")
-                .filter(|l| {
-                    matches!(
-                        *l,
-                        "en" | "de" | "fr" | "ja" | "ru" | "zh" | "ko" | "es"
-                    )
-                })
-                .unwrap_or("en");
+        if let Some(lang) = content_lang {
             headers.insert("Content-Language".to_string(), lang.to_string());
         }
         if let Some(tp) = total_pages {
@@ -893,6 +899,20 @@ impl EsiRouter {
             headers,
             body,
         }
+    }
+}
+
+fn negotiate_esi_language(accept_lang: Option<&str>, query_lang: Option<&str>) -> &'static str {
+    let raw = query_lang.or(accept_lang).unwrap_or("en");
+    match eve_sde::normalize_localization_fsd_lang(raw) {
+        Some("de") => "de",
+        Some("es") => "es",
+        Some("fr") => "fr",
+        Some("ja") => "ja",
+        Some("ko") => "ko",
+        Some("ru") => "ru",
+        Some("zh") => "zh",
+        _ => "en",
     }
 }
 

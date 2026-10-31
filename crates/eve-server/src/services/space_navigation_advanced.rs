@@ -446,8 +446,8 @@ pub fn step_zarzakh_gravity_hazard_in_ballpark(
     }
     // DERIVED: 150 km Jovian safe-zone radius around Zarzakh stargates, The Fulcrum, and the Shipcaster.
     let safe_radius = 150_000.0;
-    // DERIVED: 150 HP/s environmental hull-bleed damage outside Jovian safe zones, routed through `apply_damage_to_ball`.
-    let hazard_dmg = eve_destiny::DamageVector::new(37.5, 37.5, 37.5, 37.5);
+    // DERIVED: 50 HP/s unresisted environmental hull/structure bleed outside Jovian safe zones (`apply_direct_structure_damage_to_ball`).
+    let hazard_hull_dmg = 50.0;
     let mut destroyed = Vec::new();
     let ship_ids: Vec<i64> = ballpark
         .balls
@@ -463,14 +463,7 @@ pub fn step_zarzakh_gravity_hazard_in_ballpark(
         if safe_centers.iter().any(|&c| pos.distance(c) <= safe_radius) {
             continue;
         }
-        let invuln = ballpark
-            .combat_states
-            .get(&bid)
-            .is_some_and(|cs| cs.undock_invulnerable_remaining_ticks > 0 || cs.is_tethered);
-        if invuln {
-            continue;
-        }
-        if let Some((_, is_destroyed, _)) = ballpark.apply_damage_to_ball(bid, hazard_dmg) {
+        if let Some((_, is_destroyed, _)) = ballpark.apply_direct_structure_damage_to_ball(bid, hazard_hull_dmg) {
             if is_destroyed {
                 destroyed.push(bid);
             }
