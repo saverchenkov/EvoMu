@@ -103,6 +103,49 @@ pub fn cancel_user_payment_schedule(
     removed
 }
 
+pub fn upsert_user_payment_schedule_in_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
+    uid: u64,
+    schedule_type: u32,
+    next_payment_unix: u64,
+    offer_id: &str,
+    interval_days: u32,
+    now_unix: u64,
+) -> u64 {
+    let mut scheds: Vec<PaymentScheduleRecord> = snap
+        .service_state_blobs
+        .get("payment_schedules")
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    let sched_id = if let Some(existing) = scheds
+        .iter_mut()
+        .find(|s| s.user_id == uid && s.schedule_type == schedule_type)
+    {
+        existing.next_payment_unix = next_payment_unix;
+        existing.offer_id = offer_id.to_string();
+        existing.interval_days = interval_days;
+        existing.id
+    } else {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id as u64;
+        scheds.push(PaymentScheduleRecord {
+            id,
+            user_id: uid,
+            schedule_type,
+            next_payment_unix,
+            offer_id: offer_id.to_string(),
+            interval_days,
+            created_unix: now_unix,
+        });
+        id
+    };
+    if let Ok(serialized) = serde_json::to_string(&scheds) {
+        snap.service_state_blobs
+            .insert("payment_schedules".to_string(), serialized);
+    }
+    sched_id
+}
+
 pub fn publish_quick_pay_added_notice(
     pending_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
     user_id: u64,

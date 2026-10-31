@@ -602,7 +602,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Int32(i) | DynamicValue::Enum(i) => Some(*i as u32),
                     _ => None,
                 })
                 .unwrap_or(1);
@@ -1160,6 +1160,7 @@ fn register_payment_token_and_purchase_handlers(
                             30 * 86_400 * u64::from(qty),
                             now_unix,
                         );
+                        upsert_user_payment_schedule_in_snapshot(snap, uid, 1, now_unix + 30 * 86_400 * u64::from(qty), &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
                         omega_notice = Some(notice);
                     }
 
