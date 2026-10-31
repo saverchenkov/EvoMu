@@ -372,6 +372,11 @@ pub async fn handle(
                     }))
                 }
             };
+            crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                ctx,
+                char_id,
+                ship.item_id,
+            );
 
             if kwargs
                 .get("onlineModules")
@@ -515,6 +520,7 @@ pub async fn handle(
                     .await;
             }
             let _ = sys_handle.push_set_state(ship.item_id).await;
+            crate::services::notify_emitters_batch8::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
 
             session.station_id = None;
             session.structure_id = None;
@@ -1264,6 +1270,11 @@ pub async fn handle(
                         message: e,
                     }));
                 }
+            }
+
+            if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
+                let fid = session.fleet_id.or_else(|| crate::services::notify_emitters_batch8::char_fleet_id(ctx, char_id));
+                crate::services::notify_emitters_batch3_space::emit_fleet_jump_beacon_deployable_change(ctx, fid, item_id, sys_id, char_id, true);
             }
 
             let despawn_unix = if let Some(exp) = crate::services::mobile_deployables::read_deployable_state(ctx)

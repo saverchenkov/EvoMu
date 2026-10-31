@@ -1172,19 +1172,28 @@ pub(crate) fn remove_all_ship_module_cycles(
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ship_id: i64,
     deactivation_hook: Option<&ModuleDeactivationHook>,
-) {
+) -> Vec<(ActiveModuleCycle, Option<i64>)> {
+    let reentrant_db = db_opt
+        .as_ref()
+        .is_some_and(|db| db.is_write_locked_by_current_thread());
+    let effective_db = if reentrant_db { &None } else { db_opt };
     let mut removed_cycles = Vec::new();
     let mut i = 0;
     while i < active_module_cycles.len() {
-        if active_module_cycles[i].ship_id == ship_id {
+        if active_module_cycles[i].ship_id == ship_id || active_module_cycles[i].target_id == Some(ship_id) {
             let removed = active_module_cycles.swap_remove(i);
-            cleanup_removed_module_cycle(ballpark, &removed, db_opt);
-            removed_cycles.push(removed);
+            cleanup_removed_module_cycle(ballpark, &removed, effective_db);
+            let char_id = removed.owner_char_id.or_else(|| {
+                ballpark.ball_slim_meta.get(&removed.ship_id).and_then(|m| {
+                    m.char_id.or(if m.owner_id > 0 { Some(m.owner_id) } else { None })
+                })
+            });
+            removed_cycles.push((removed, char_id));
         } else {
             i += 1;
         }
     }
-    if let Some(db_ref) = db_opt {
+    if let Some(db_ref) = effective_db {
         db_ref.with_mut_snapshot(|snap| {
             let ship_mod_ids: Vec<i64> = snap.items.values().filter(|it| it.location_id == ship_id).map(|it| it.item_id).collect();
             for mid in ship_mod_ids {
@@ -1195,10 +1204,13 @@ pub(crate) fn remove_all_ship_module_cycles(
     }
     if !removed_cycles.is_empty() {
         reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
-        for removed in &removed_cycles {
-            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+        if !reentrant_db {
+            for (removed, _) in &removed_cycles {
+                emit_cycle_deactivation(removed, ballpark, effective_db, deactivation_hook);
+            }
         }
     }
+    removed_cycles
 }
 
 impl SystemHandle {

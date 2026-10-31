@@ -150,9 +150,15 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 Err(e) => return Some(Err(e)),
             };
 
+            crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                ctx,
+                char_id,
+                old_ship_id,
+            );
             if dock_opt.is_none() {
                 if let Some(sys_id) = sys_opt {
                     let sys = ctx.systems.get_or_spawn(sys_id);
+                    let _ = sys.stop_non_warp_module_cycles(old_ship_id).await;
                     let old_pos = sys
                         .get_ball_snapshot(old_ship_id)
                         .await
@@ -377,6 +383,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     let prev_ship_id = session.ship_id;
                     if let Some(prev) = prev_ship_id {
                         ctx.invalidate_ship_fitting(prev);
+                        if prev != sid {
+                            crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                                ctx,
+                                char_id,
+                                prev,
+                            );
+                            if let Some(sys_id) = session.solar_system_id {
+                                let _ = ctx.systems.get_or_spawn(sys_id).stop_non_warp_module_cycles(prev).await;
+                            }
+                        }
                         if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
                             let was_capsule = ctx.db.with_mut_snapshot(|snap| {
                                 snap.items.get(&prev).is_some_and(|it| it.type_id == 670) && snap.items.remove(&prev).is_some()

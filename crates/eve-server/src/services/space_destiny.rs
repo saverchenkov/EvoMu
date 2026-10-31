@@ -99,10 +99,24 @@ pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, 
 }
 
 pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
-    ctx.location_change_invuln
+    let removed = ctx
+        .location_change_invuln
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&char_id);
+    if let Some(until) = removed {
+        if ctx.now_unix() < until {
+            let ship_id = ctx
+                .db
+                .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id))
+                .unwrap_or(0);
+            if ship_id > 0 {
+                crate::services::notify_emitters_batch3_space::emit_warp_cloak_or_invuln_cancelled(
+                    ctx, char_id, ship_id, false, true,
+                );
+            }
+        }
+    }
 }
 
 pub fn is_location_change_invulnerable(

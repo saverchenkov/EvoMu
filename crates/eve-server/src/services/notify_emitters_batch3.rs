@@ -450,7 +450,20 @@ pub fn emit_fleet_respawn_points_if_any(ctx: &ServerContext, fleet_id: i64) {
             .structures
             .values()
             .filter(|st| {
-                st.owner_corp_id == boss_corp && st.state != "destroyed" && st.state != "unanchored"
+                st.owner_corp_id == boss_corp
+                    && st.state != "destroyed"
+                    && st.state != "unanchored"
+                    && snap.items.values().any(|i| {
+                        i.location_id == st.structure_id
+                            && (i.type_id == 35_894
+                                || ctx
+                                    .sde
+                                    .types
+                                    .get(&i.type_id)
+                                    .is_some_and(|t| t.group_id == 1415 || t.name.contains("Cloning Center")))
+                            && i.flag.is_service_slot()
+                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false)
+                    })
             })
             .map(|st| st.structure_id)
             .collect();

@@ -317,6 +317,7 @@ pub async fn handle_weapons(
                         5_000.0
                     };
                     ctx.upsert_projected_ewar_on_ship(
+                        ship_id,
                         tid,
                         eve_dogma::ProjectedEwarEffect {
                             source_module_id: module_id,

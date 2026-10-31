@@ -819,6 +819,7 @@ pub async fn handle_npcs_drones(
                     PyRep::Integer(char_id), PyRep::None,
                 ];
                 ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
+                crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
                 count += 1;
                 with_mut_combat_runtime(ctx, |rt| {
                     rt.active_drones_in_space.insert(d.ball_id, d);
@@ -939,6 +940,7 @@ pub async fn handle_npcs_drones(
                     PyRep::Integer(char_id), PyRep::Integer(target_id),
                 ];
                 ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
+                crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
                 let next_ready = with_combat_runtime(ctx, |rt| {
                     rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)

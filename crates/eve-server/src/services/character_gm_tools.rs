@@ -1234,6 +1234,12 @@ pub async fn handle_gm_slash_ext(
     if cmd == "/survey" || cmd.starts_with("/survey ") {
         return crate::services::operations_manager::handle_survey_slash(ctx, cid, cmd);
     }
+    if cmd == "/season" || cmd.starts_with("/season ") {
+        return crate::services::notify_emitters_batch8::handle_season_slash(ctx, cid, cmd);
+    }
+    if cmd == "/operation" || cmd.starts_with("/operation ") {
+        return crate::services::notify_emitters_batch8_ops::handle_operation_slash(ctx, session, cid, cmd);
+    }
     if let Some(rest) = cmd.strip_prefix("/energy ") {
         let parts: Vec<&str> = rest.split_whitespace().collect();
         let (target_cid, new_energy) = match parts.as_slice() {

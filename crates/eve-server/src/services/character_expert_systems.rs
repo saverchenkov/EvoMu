@@ -418,6 +418,14 @@ pub fn handle(
 
             // DATA GAP: V24 operation node graph mappings and client node graph instance protocol are Tranquility server-only;
             // do not emit OnClientNodeGraphUpdate without active server-started graph instance.
+            crate::services::notify_emitters_batch8_ops::on_client_graph_message(
+                ctx,
+                char_id,
+                graph_id,
+                node_id,
+                msg_name,
+                &msg_data,
+            );
 
             Some(Ok(PyRep::None))
         }
@@ -441,9 +449,8 @@ pub fn start_client_node_graph_for_operation(
 
 /// Helper for AIR category completion; under DATA GAP no guessed client node graphs are stopped.
 // DATA GAP: V24 operation node graph mappings are Tranquility server-only
-pub fn stop_active_operation_node_graph(_ctx: &ServerContext, _char_id: i64, _cat_id: i64) {
-    // DATA GAP: V24 operation node graph mappings are Tranquility server-only;
-    // no active operation node graphs are started.
+pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_id: i64) {
+    crate::services::notify_emitters_batch8_ops::stop_active_operation_node_graph_for_category(ctx, char_id, cat_id);
 }
 
 /// Marks AIR NPE completed for `char_id` and removes any active NPE node-graph blackboard from `service_state_blobs`.
@@ -476,5 +483,6 @@ pub fn skip_air_npe_and_stop_graph(
     })?;
     // DATA GAP: V24 AIR NPE client node graph ID is Tranquility server-only;
     // do not emit OnStopClientNodeGraphById with invented graph IDs.
+    crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
     Ok((graph_id, curr_node, completed))
 }

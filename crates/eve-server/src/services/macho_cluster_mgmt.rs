@@ -17,7 +17,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::context::ServerContext;
+use crate::router::{context::ServerContext, NotificationTarget};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
@@ -25,11 +25,20 @@ use std::collections::{BTreeMap, HashMap};
 
 /// Cluster load service state persisted in `WorldStateSnapshot::service_state_blobs`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct LoadServiceState {
     pub active: bool,
     pub config: BTreeMap<String, PyRep>,
     pub runs_started: u64,
     pub total_requests: u64,
+    pub systems_stepped: u64,
+    pub sde_types_sampled: u64,
+    pub sde_solar_systems_sampled: u64,
+    pub world_items_sampled: u64,
+    pub world_characters_sampled: u64,
+    pub active_sessions_sampled: u64,
+    pub last_started_unix: u64,
+    pub last_stopped_unix: u64,
 }
 
 /// Cluster management and shutdown state tracked on `ServerContext`.
@@ -218,7 +227,22 @@ pub fn handle(
                 }));
             }
             let load_spec = args.first().cloned().unwrap_or(PyRep::None);
+            let target_sys = session.solar_system_id.unwrap_or(30_000_142);
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let _ = ctx.systems.get_or_spawn(target_sys);
+            }
+            let sde_types_len = ctx.sde.types.len() as u64;
+            let sde_systems_len = ctx.sde.solar_systems.len() as u64;
+            let active_systems_len = (ctx.systems.active_systems_count() as u64).max(1);
+            let active_sessions_len = ctx
+                .session_closers
+                .read()
+                .map(|g| g.len() as u64)
+                .unwrap_or(0);
+            let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
+                let items_len = snap.items.len() as u64;
+                let chars_len = snap.characters.len() as u64;
                 let mut state: LoadServiceState = snap
                     .service_state_blobs
                     .get("load_service_state")
@@ -227,7 +251,18 @@ pub fn handle(
                 state.active = true;
                 state.runs_started += 1;
                 state.total_requests += 1;
+                state.systems_stepped += active_systems_len;
+                state.sde_types_sampled = sde_types_len;
+                state.sde_solar_systems_sampled = sde_systems_len;
+                state.world_items_sampled = items_len;
+                state.world_characters_sampled = chars_len;
+                state.active_sessions_sampled = active_sessions_len;
+                state.last_started_unix = now;
                 state.config.insert("current_load_spec".into(), load_spec);
+                state.config.insert(
+                    "target_solar_system_id".into(),
+                    PyRep::Integer(i64::from(target_sys)),
+                );
                 if let Ok(json) = serde_json::to_string(&state) {
                     snap.service_state_blobs.insert("load_service_state".into(), json);
                 }
@@ -245,6 +280,7 @@ pub fn handle(
                     message: "NotAuthorized".into(),
                 }));
             }
+            let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut state: LoadServiceState = snap
                     .service_state_blobs
@@ -253,6 +289,7 @@ pub fn handle(
                     .unwrap_or_default();
                 state.active = false;
                 state.total_requests += 1;
+                state.last_stopped_unix = now;
                 if let Ok(json) = serde_json::to_string(&state) {
                     snap.service_state_blobs.insert("load_service_state".into(), json);
                 }
@@ -304,6 +341,14 @@ pub fn handle(
                     message: "NotAuthorized".into(),
                 }));
             }
+            let sde_types_len = ctx.sde.types.len() as i64;
+            let sde_systems_len = ctx.sde.solar_systems.len() as i64;
+            let active_systems_len = ctx.systems.active_systems_count() as i64;
+            let active_sessions_len = ctx
+                .session_closers
+                .read()
+                .map(|g| g.len() as i64)
+                .unwrap_or(0);
             let stats = ctx.db.with_snapshot(|snap| {
                 let state: LoadServiceState = snap
                     .service_state_blobs
@@ -319,6 +364,15 @@ pub fn handle(
                     (PyRep::String("active".into()), PyRep::Bool(state.active)),
                     (PyRep::String("runs_started".into()), PyRep::Integer(state.runs_started as i64)),
                     (PyRep::String("total_requests".into()), PyRep::Integer(state.total_requests as i64)),
+                    (PyRep::String("systems_stepped".into()), PyRep::Integer(state.systems_stepped as i64)),
+                    (PyRep::String("sde_types_count".into()), PyRep::Integer(sde_types_len)),
+                    (PyRep::String("sde_solar_systems_count".into()), PyRep::Integer(sde_systems_len)),
+                    (PyRep::String("world_items_count".into()), PyRep::Integer(snap.items.len() as i64)),
+                    (PyRep::String("world_characters_count".into()), PyRep::Integer(snap.characters.len() as i64)),
+                    (PyRep::String("active_sessions_count".into()), PyRep::Integer(active_sessions_len)),
+                    (PyRep::String("active_systems_count".into()), PyRep::Integer(active_systems_len)),
+                    (PyRep::String("last_started_unix".into()), PyRep::Integer(state.last_started_unix as i64)),
+                    (PyRep::String("last_stopped_unix".into()), PyRep::Integer(state.last_stopped_unix as i64)),
                     (PyRep::String("config".into()), PyRep::Dict(config_entries)),
                 ]
             });
@@ -389,9 +443,10 @@ pub fn handle(
         }
 
         ("raffleMgr", "QA_SeedRaffles") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let qa_or_gm = eve_machonet::service_roles::ROLE_QA | eve_db::service_roles::ROLE_ADMIN;
             if !session.has_gm_role() && (session.role & qa_or_gm) == 0 {
                 return Some(Err(BridgeRpcError {
@@ -399,78 +454,90 @@ pub fn handle(
                     message: "NotAuthorized".into(),
                 }));
             }
+            let Some(station_id) = session.station_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "CharacterNotDocked".into(),
+                }));
+            };
             let count = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 100) as usize;
+            // DERIVED: QA_SeedRaffles uses caller-supplied type_id (arg 1) or the lowest published frigate in SDE (Rifter 587).
+            let seed_type_id = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|tid| ctx.sde.types.contains_key(tid))
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .values()
+                        .filter(|t| t.group_id == 25 && t.published)
+                        .map(|t| t.type_id)
+                        .min()
+                })
+                .unwrap_or(587);
             let now = ctx.now_unix();
-            let mut seeded = Vec::new();
+            let mut records = Vec::with_capacity(count);
             ctx.db.with_mut_snapshot(|snap| {
                 for _ in 0..count {
+                    snap.next_entity_id += 1;
                     let raffle_id = snap.next_entity_id;
                     snap.next_entity_id += 1;
-                    // Negative item ID in dedicated keyspace to avoid colliding with player items (100_000_001+)
-                    let item_id = -9_000_000_000_i64.saturating_sub(raffle_id.abs());
+                    let item_id = snap.next_entity_id;
                     snap.items.insert(
                         item_id,
                         eve_db::InventoryItemRecord {
                             item_id,
-                            type_id: 587,
-                            owner_id: session.character_id.unwrap_or(90000001),
-                            location_id: 60003760,
-                            flag: eve_db::InventoryFlag::Hangar,
+                            type_id: seed_type_id,
+                            owner_id: -52_568,
+                            location_id: -52_568,
+                            flag: eve_db::InventoryFlag::Locked,
                             quantity: 1,
                             singleton: true,
                             version: 1,
                             ..Default::default()
                         },
                     );
-                    let note_id = -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()));
-                    let rec_json = serde_json::json!({
-                        "raffle_id": raffle_id,
-                        "creator_id": session.character_id.unwrap_or(90000001),
-                        "station_id": 60003760_i64,
-                        "item_id": item_id,
-                        "type_id": 587,
-                        "ticket_count": 100,
-                        "ticket_price_cents": 100_000,
-                        "hypercores_used": 10,
-                        "created_unix": now,
-                        "expires_unix": now + 86400 * 3,
-                        "sold_tickets": {},
-                        "winning_ticket": null,
-                        "winner_id": null,
-                        "item_awarded": false,
-                        "expired": false,
-                    });
-                    snap.owner_notes.insert(
-                        note_id,
-                        eve_db::OwnerNoteRecord {
-                            note_id,
-                            character_id: -74,
-                            item_id: raffle_id,
-                            label: format!("raffle:{raffle_id}"),
-                            note: rec_json.to_string(),
-                            timestamp_unix: now,
-                        },
+                    let rec = crate::services::hypernet_raffle_ops::RaffleStateRecord {
+                        raffle_id,
+                        creator_id: char_id,
+                        station_id,
+                        item_id,
+                        type_id: seed_type_id,
+                        ticket_count: 8,
+                        ticket_price_cents: 100_000,
+                        hypercores_used: 10,
+                        created_unix: now,
+                        expires_unix: now + crate::services::hypernet_raffle_ops::RAFFLE_DURATION_SECS,
+                        sold_tickets: BTreeMap::new(),
+                        winning_ticket: None,
+                        winner_id: None,
+                        item_awarded: false,
+                        expired: false,
+                    };
+                    crate::services::wallet_services_ext::save_json_note(
+                        snap,
+                        crate::services::hypernet_raffle_ops::raffle_note_id(raffle_id),
+                        -74,
+                        raffle_id,
+                        format!("raffle:{raffle_id}"),
+                        &rec,
+                        now,
                     );
-                    seeded.push(PyRep::keyval([
-                        ("raffle_id", PyRep::Integer(raffle_id)),
-                        ("raffleID", PyRep::Integer(raffle_id)),
-                        ("owner_id", PyRep::Integer(session.character_id.unwrap_or(90000001))),
-                        ("location_id", PyRep::Integer(60003760)),
-                        ("item_id", PyRep::Integer(item_id)),
-                        ("type_id", PyRep::Integer(587)),
-                        ("ticket_count", PyRep::Integer(100)),
-                        ("tickets_remaining", PyRep::Integer(100)),
-                        ("ticket_price", PyRep::Real(1000.0)),
-                        ("hypercores_used", PyRep::Integer(10)),
-                        ("expiration_time", PyRep::Integer((now + 86400 * 3) as i64)),
-                        ("winning_ticket", PyRep::None),
-                        ("winner_id", PyRep::None),
-                        ("is_expired", PyRep::Bool(false)),
-                        ("is_finished", PyRep::Bool(false)),
-                        ("item_awarded", PyRep::Bool(false)),
-                    ]));
+                    records.push(rec);
                 }
             });
+            let mut seeded = Vec::with_capacity(records.len());
+            for rec in &records {
+                let kv = crate::services::hypernet_raffle_ops::raffle_to_keyval(rec);
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnRaffleCreatedServer",
+                    "charid",
+                    vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+                );
+                seeded.push(kv);
+            }
             Some(Ok(PyRep::List(seeded)))
         }
 

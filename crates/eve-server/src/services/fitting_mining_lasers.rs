@@ -39,12 +39,67 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "No active ship in session".into(),
                 }));
             };
+            // Validate ship and fitted-module ownership BEFORE mutating any EWAR, remote-assist,
+            // cycle, or module_active_states state so a target cannot deactivate an attacker's module.
+            let mod_type_opt = match ctx.db.with_snapshot(|snap| {
+                let Some(ship_item) = snap.items.get(&ship_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ShipNotFound".into(),
+                        message: format!("Active ship {ship_id} not found"),
+                    });
+                };
+                if ship_item.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "ShipOwnershipViolation".into(),
+                        message: format!("Ship {ship_id} is not owned by character {char_id}"),
+                    });
+                }
+                let Some(mod_item) = snap.items.get(&module_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ModuleNotFound".into(),
+                        message: format!("Module {module_id} not found"),
+                    });
+                };
+                let flag_u16 = mod_item.flag as u16;
+                let is_fitted_slot = matches!(flag_u16, 11..=34 | 125..=129 | 158 | 159..=163);
+                if mod_item.owner_id != char_id || mod_item.location_id != ship_id || !is_fitted_slot {
+                    return Err(BridgeRpcError {
+                        code: "ModuleNotOwnedByShip".into(),
+                        message: format!("Module {module_id} is not fitted to active ship {ship_id}"),
+                    });
+                }
+                Ok(mod_item.type_id)
+            }) {
+                Ok(tid) => Some(tid),
+                Err(e) => return Some(Err(e)),
+            };
+            let is_mining = mod_type_opt
+                .and_then(|tid| ctx.sde.types.get(&tid))
+                .map(|t| matches!(t.group_id, 54 | 464 | 483 | 737 | 2004 | 4138) || t.default_attributes.contains_key(&77))
+                .unwrap_or(false);
+
             let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
-            let affected_ewar_ships = ctx.remove_projected_ewar_by_module(module_id);
+            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
+            };
+            let deact_res = fit.deactivate_module(module_id, &ctx.sde);
+            if let Err(e) = deact_res {
+                if removed_cycle_delay.is_none() && !is_mining {
+                    return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
+                }
+            }
+            let affected_ewar_ships = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                ship_id,
+                module_id,
+            );
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 for tid in affected_ewar_ships {
@@ -70,7 +125,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     }
                 }
             }
-            crate::services::tactical_modules::remove_projected_remote_assistance(ctx, module_id);
+            crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, module_id);
             crate::services::combat_weapons_spool::clear_entropic_spool(ctx, ship_id, module_id);
 
             ctx.notify(
@@ -90,23 +145,6 @@ pub(crate) async fn handle_mining_and_deactivate(
                 snap.module_active_states.remove(&module_id);
                 snap.module_active_charges.remove(&module_id);
             });
-
-            let items = ctx.db.get_items_for_character(char_id);
-            let mod_item_opt = items.iter().find(|i| i.item_id == module_id && i.owner_id == char_id);
-            let is_mining = mod_item_opt.and_then(|m| ctx.sde.types.get(&m.type_id))
-                .map(|t| matches!(t.group_id, 54 | 464 | 483 | 737 | 2004 | 4138) || t.default_attributes.contains_key(&77))
-                .unwrap_or(false);
-
-            let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
-                Ok(f) => f,
-                Err(e) => return Some(Err(e)),
-            };
-            let deact_res = fit.deactivate_module(module_id, &ctx.sde);
-            if let Err(e) = deact_res {
-                if !is_mining {
-                    return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
-                }
-            }
             if let Some(m_entry) = fit.modules.get(&module_id) {
                 let mod_state = fit.build_effective_module_state(module_id, m_entry.type_id, false, &ctx.sde);
                 let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
@@ -126,9 +164,12 @@ pub(crate) async fn handle_mining_and_deactivate(
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
+            if let Some(sys_id) = session.solar_system_id {
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
 
-            if mod_item_opt
-                .and_then(|m| ctx.sde.types.get(&m.type_id))
+            if mod_type_opt
+                .and_then(|tid| ctx.sde.types.get(&tid))
                 .is_some_and(|t| t.group_id == 1815)
             {
                 if let Some(sys_id) = session.solar_system_id {
@@ -202,6 +243,9 @@ pub(crate) async fn handle_mining_and_deactivate(
             fit.recalculate_stats(&ctx.sde);
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
+            if let Some(sys_id) = session.solar_system_id {
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

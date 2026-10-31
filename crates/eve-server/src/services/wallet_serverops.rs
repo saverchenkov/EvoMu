@@ -909,11 +909,7 @@ pub fn handle(
             let div_id = (from_account_key - 999) as u8;
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let corp_id = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let nid = bill_note_id(bill_id);
                 let Some(note) = snap.owner_notes.get(&nid) else {
                     return Err(rpc_err("BillNotFound", format!("Bill {bill_id} not found")));
@@ -927,9 +923,7 @@ pub fn handle(
                     return Err(rpc_err("AccessDenied", "Bill does not belong to caller corporation"));
                 }
                 let amt = IskCents(bill.amount_cents);
-                let corp = snap
-                    .corporations
-                    .get_mut(&corp_id)
+                let corp = snap.corporations.get_mut(&corp_id)
                     .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
                 let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
                 if corp.ceo_id != char_id
@@ -940,17 +934,8 @@ pub fn handle(
                     return Err(rpc_err("CorpRoleRequired", "Accountant role required to pay corporation bills"));
                 }
                 corp.ensure_wallet_divisions();
-                let div_bal = corp
-                    .wallet_divisions
-                    .iter()
-                    .find(|d| d.division_id == div_id)
-                    .map(|d| {
-                        if div_id == 1 {
-                            d.balance.min(corp.master_wallet)
-                        } else {
-                            d.balance
-                        }
-                    })
+                let div_bal = corp.wallet_divisions.iter().find(|d| d.division_id == div_id)
+                    .map(|d| if div_id == 1 { d.balance.min(corp.master_wallet) } else { d.balance })
                     .unwrap_or(IskCents(0));
                 if div_bal.0 < amt.0 {
                     return Err(rpc_err("NotEnoughMoney", "Insufficient corporation division ISK to pay bill"));
@@ -963,13 +948,7 @@ pub fn handle(
                     d.balance = d.balance.checked_sub(amt).unwrap_or(IskCents(0));
                     bal_after = d.balance;
                 }
-                snap.append_journal(
-                    corp_id,
-                    "BillPayment",
-                    amt,
-                    bal_after,
-                    format!("Paid corporation bill {bill_id}"),
-                );
+                snap.append_journal(corp_id, "BillPayment", amt, bal_after, format!("Paid corporation bill {bill_id}"));
                 if let Some(cred) = snap.corporations.get_mut(&bill.creditor_id) {
                     cred.master_wallet = cred.master_wallet.checked_add(amt).unwrap_or(cred.master_wallet);
                 }
@@ -986,27 +965,15 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let rep = ctx.db.with_snapshot(|snap| {
-                let corp_id = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
-                let ap = snap
-                    .owner_notes
-                    .get(&autopay_note_id(corp_id))
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let ap = snap.owner_notes.get(&autopay_note_id(corp_id))
                     .and_then(|n| serde_json::from_str::<CorpAutoPaySettings>(&n.note).ok())
-                    .unwrap_or(CorpAutoPaySettings {
-                        division_id: 1000,
-                        enabled_bill_types: BTreeMap::new(),
-                    });
-                let mut inner = Vec::new();
-                for (bt, enabled) in ap.enabled_bill_types {
-                    inner.push((PyRep::Integer(bt), PyRep::Bool(enabled)));
-                }
-                inner.push((
-                    PyRep::String("divisionID".into()),
-                    PyRep::Integer(ap.division_id.max(1000) as i64),
-                ));
+                    .unwrap_or(CorpAutoPaySettings { division_id: 1000, enabled_bill_types: BTreeMap::new() });
+                let mut inner: Vec<(PyRep, PyRep)> = ap.enabled_bill_types
+                    .into_iter()
+                    .map(|(bt, enabled)| (PyRep::Integer(bt), PyRep::Bool(enabled)))
+                    .collect();
+                inner.push((PyRep::String("divisionID".into()), PyRep::Integer(ap.division_id.max(1000) as i64)));
                 PyRep::Dict(vec![(PyRep::Integer(corp_id), PyRep::Dict(inner))])
             });
             Some(Ok(rep))
@@ -1018,14 +985,8 @@ pub fn handle(
             };
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let corp_id = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
-                let corp = snap
-                    .corporations
-                    .get(&corp_id)
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let corp = snap.corporations.get(&corp_id)
                     .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
                 let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
                 if corp.ceo_id != char_id
@@ -1033,49 +994,31 @@ pub fn handle(
                     && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
                     && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
                 {
-                    return Err(rpc_err(
-                        "CorpRoleRequired",
-                        "Accountant or Director role required to configure automatic bill payment",
-                    ));
+                    return Err(rpc_err("CorpRoleRequired", "Accountant or Director role required to configure automatic bill payment"));
                 }
-                let mut ap = snap
-                    .owner_notes
-                    .get(&autopay_note_id(corp_id))
+                let mut ap = snap.owner_notes.get(&autopay_note_id(corp_id))
                     .and_then(|n| serde_json::from_str::<CorpAutoPaySettings>(&n.note).ok())
-                    .unwrap_or(CorpAutoPaySettings {
-                        division_id: 1000,
-                        enabled_bill_types: BTreeMap::new(),
-                    });
+                    .unwrap_or(CorpAutoPaySettings { division_id: 1000, enabled_bill_types: BTreeMap::new() });
                 if let Some(PyRep::Dict(entries)) = args.first() {
                     for (k, v) in entries {
                         if let Some(bt) = k.as_i64() {
                             if let PyRep::Dict(inner) = v {
                                 for (ik, iv) in inner {
                                     if let Some(ibt) = ik.as_i64() {
-                                        ap.enabled_bill_types
-                                            .insert(ibt, iv.as_bool().unwrap_or(false));
+                                        ap.enabled_bill_types.insert(ibt, iv.as_bool().unwrap_or(false));
                                     } else if ik.as_str() == Some("divisionID") {
                                         ap.division_id = iv.as_i64().unwrap_or(1000).clamp(1000, 1006) as u16;
                                     }
                                 }
                             } else {
-                                ap.enabled_bill_types
-                                    .insert(bt, v.as_bool().unwrap_or(false));
+                                ap.enabled_bill_types.insert(bt, v.as_bool().unwrap_or(false));
                             }
                         } else if k.as_str() == Some("divisionID") {
                             ap.division_id = v.as_i64().unwrap_or(1000).clamp(1000, 1006) as u16;
                         }
                     }
                 }
-                save_json_note(
-                    snap,
-                    autopay_note_id(corp_id),
-                    -72,
-                    corp_id,
-                    format!("autopay:{corp_id}"),
-                    &ap,
-                    now,
-                );
+                save_json_note(snap, autopay_note_id(corp_id), -72, corp_id, format!("autopay:{corp_id}"), &ap, now);
                 Ok(())
             });
             if let Err(e) = res {
@@ -1106,7 +1049,21 @@ pub fn handle(
                 }));
             }
             let pickle_name = args.first().and_then(|a| a.as_str()).unwrap_or("all");
+            let fsd_resources = ctx.sde.resources.len();
+            let localized_entries = ctx.sde.types.values().filter(|t| !t.name.is_empty()).count()
+                + ctx.sde.groups.values().filter(|g| !g.name.is_empty()).count()
+                + ctx.sde.categories.values().filter(|c| !c.name.is_empty()).count()
+                + ctx.sde.missions.values().filter(|m| !m.title.is_empty()).count()
+                + ctx.sde.dungeons.values().filter(|d| !d.name.is_empty()).count();
+            let now_unix = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
+                if let Some(note) = snap.owner_notes.get_mut(&LOCALIZATION_NOTE_ID) {
+                    if let Ok(mut ov) = serde_json::from_str::<BTreeMap<i64, String>>(&note.note) {
+                        ov.retain(|_, txt| !txt.is_empty());
+                        note.note = serde_json::to_string(&ov).unwrap_or_default();
+                        note.timestamp_unix = now_unix;
+                    }
+                }
                 let mut data: BTreeMap<String, serde_json::Value> = snap
                     .service_state_blobs
                     .get("localization:fsd_pickle_reloads")
@@ -1115,12 +1072,14 @@ pub fn handle(
                 let count = data.get("reload_count").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
                 data.insert("reload_count".into(), serde_json::json!(count));
                 data.insert("last_pickle".into(), serde_json::json!(pickle_name));
-                data.insert("timestamp_unix".into(), serde_json::json!(ctx.now_unix()));
+                data.insert("fsd_resources_count".into(), serde_json::json!(fsd_resources));
+                data.insert("localized_entries_count".into(), serde_json::json!(localized_entries));
+                data.insert("timestamp_unix".into(), serde_json::json!(now_unix));
                 if let Ok(json) = serde_json::to_string(&data) {
                     snap.service_state_blobs.insert("localization:fsd_pickle_reloads".into(), json);
                 }
             });
-            Some(Ok(PyRep::Bool(true)))
+            Some(Ok(PyRep::Bool(localized_entries > 0)))
         }
         ("clientStatLogger", "LogString") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -1146,14 +1105,7 @@ pub fn handle(
         }
         ("eveguard_report", "heartbeat_started") | ("eveguard_report", "heartbeat_stopped") => {
             // const-ok: fire-and-forget client telemetry sink returns None after logging
-            debug!(
-                session_id = session.session_id,
-                char_id = ?session.character_id,
-                service,
-                method,
-                arg_count = args.len(),
-                "client telemetry received"
-            );
+            debug!(session_id = session.session_id, char_id = ?session.character_id, service, method, arg_count = args.len(), "client telemetry received");
             Some(Ok(PyRep::None))
         }
         _ => None,
@@ -1166,9 +1118,7 @@ fn give_cash(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let to_id = args
-        .first()
-        .and_then(|a| a.as_i64())
+    let to_id = args.first().and_then(|a| a.as_i64())
         .ok_or_else(|| rpc_err("InvalidArgument", "GiveCash requires toID"))?;
     let amount_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
     let reason = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
@@ -1185,20 +1135,12 @@ fn give_cash(
         if !target_is_char && !snap.corporations.contains_key(&to_id) {
             return Err(rpc_err("InvalidRecipient", format!("Recipient {to_id} not found")));
         }
-        let sender = snap
-            .characters
-            .get_mut(&char_id)
+        let sender = snap.characters.get_mut(&char_id)
             .ok_or_else(|| rpc_err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        let new_sender_bal = sender
-            .balance
-            .checked_sub(amount)
+        let new_sender_bal = sender.balance.checked_sub(amount)
             .ok_or_else(|| rpc_err("NotEnoughMoney", "Not enough ISK in wallet for this transfer"))?;
         sender.balance = new_sender_bal;
-        let journal_reason = if reason.is_empty() {
-            format!("Player donation to {to_id}")
-        } else {
-            format!("Player donation to {to_id}: {reason}")
-        };
+        let journal_reason = if reason.is_empty() { format!("Player donation to {to_id}") } else { format!("Player donation to {to_id}: {reason}") };
         let meta = eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::PLAYER_DONATION, char_id, to_id, now)
             .with_context(eve_db::ledger::JournalContext::Character, char_id);
         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
@@ -1219,11 +1161,7 @@ fn give_cash(
             corp.master_wallet = corp.master_wallet.checked_add(amount).unwrap_or(corp.master_wallet);
             corp.master_wallet
         };
-        let rec_reason = if reason.is_empty() {
-            format!("Player donation from {char_id}")
-        } else {
-            format!("Player donation from {char_id}: {reason}")
-        };
+        let rec_reason = if reason.is_empty() { format!("Player donation from {char_id}") } else { format!("Player donation from {char_id}: {reason}") };
         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
             owner_id: to_id,
             entry_type: "PlayerDonation",
@@ -1251,9 +1189,7 @@ fn set_contact_cost(
     let cost = match args.first() {
         None | Some(PyRep::None) => None,
         Some(v) => {
-            let isk = v
-                .as_f64()
-                .ok_or_else(|| rpc_err("InvalidArgument", "SetContactCost expects an ISK amount or None"))?;
+            let isk = v.as_f64().ok_or_else(|| rpc_err("InvalidArgument", "SetContactCost expects an ISK amount or None"))?;
             if !isk.is_finite() || isk < 0.0 {
                 return Err(rpc_err("InvalidArgument", "CSPA charge must be a non-negative ISK amount"));
             }
@@ -1261,12 +1197,8 @@ fn set_contact_cost(
         }
     };
     ctx.db.with_mut_snapshot(|snap| match cost {
-        Some(c) if c.0 > 0 => {
-            snap.character_cspa_charges.insert(char_id, c);
-        }
-        _ => {
-            snap.character_cspa_charges.remove(&char_id);
-        }
+        Some(c) if c.0 > 0 => { snap.character_cspa_charges.insert(char_id, c); }
+        _ => { snap.character_cspa_charges.remove(&char_id); }
     });
     Ok(PyRep::None)
 }
@@ -1299,14 +1231,8 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
             }
         }
     });
-    let pilots = totals
-        .iter()
-        .map(|(sys, (total, _))| (PyRep::Integer(*sys), PyRep::Integer(*total)))
-        .collect();
-    let docked = totals
-        .iter()
-        .map(|(sys, (_, d))| (PyRep::Integer(*sys), PyRep::Integer(*d)))
-        .collect();
+    let pilots = totals.iter().map(|(sys, (total, _))| (PyRep::Integer(*sys), PyRep::Integer(*total))).collect();
+    let docked = totals.iter().map(|(sys, (_, d))| (PyRep::Integer(*sys), PyRep::Integer(*d))).collect();
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
 }
 
@@ -1329,10 +1255,7 @@ fn get_all_text_changes(
             Ok(PyRep::None)
         } else {
             Ok(PyRep::Dict(
-                overrides
-                    .into_iter()
-                    .map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt)))
-                    .collect(),
+                overrides.into_iter().map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt))).collect(),
             ))
         }
     })
@@ -1344,6 +1267,29 @@ fn update_localization_qa_wrap(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
+    let bool_arg = args.first().and_then(|a| {
+        a.as_bool().or_else(|| match a {
+            PyRep::Integer(0) => Some(false),
+            PyRep::Integer(1) => Some(true),
+            _ => None,
+        })
+    });
+    if let Some(enabled) = bool_arg {
+        let key_id = session.character_id.unwrap_or(session.session_id as i64);
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut map: BTreeMap<i64, bool> = snap
+                .service_state_blobs
+                .get("localization:qa_wrap_sessions")
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            map.insert(key_id, enabled);
+            if let Ok(json) = serde_json::to_string(&map) {
+                snap.service_state_blobs
+                    .insert("localization:qa_wrap_sessions".into(), json);
+            }
+        });
+        return Ok(PyRep::Bool(enabled));
+    }
     let qa_roles = eve_db::service_roles::ROLE_GMH
         | eve_db::service_roles::ROLE_GML
         | eve_machonet::service_roles::ROLE_PROGRAMMER
@@ -1354,24 +1300,22 @@ fn update_localization_qa_wrap(
             message: "localizationServer.UpdateLocalizationQAWrap requires GM or Content/Programmer role".into(),
         });
     }
+    let Some(PyRep::Dict(entries)) = args.first() else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "UpdateLocalizationQAWrap requires a boolean flag or dict of overrides".into(),
+        });
+    };
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut overrides: BTreeMap<i64, String> = snap
             .owner_notes
             .get(&LOCALIZATION_NOTE_ID)
             .and_then(|n| serde_json::from_str(&n.note).ok())
             .unwrap_or_default();
-        if let Some(PyRep::Dict(entries)) = args.first() {
-            for (k, v) in entries {
-                if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
-                    overrides.insert(msg_id, text.to_string());
-                }
+        for (k, v) in entries {
+            if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
+                overrides.insert(msg_id, text.to_string());
             }
-        } else if args.first().and_then(PyRep::as_bool).is_some() {
-            // Fixes R1-P1-4: Reject fabricated message 1 overrides; boolean QA-wrap toggle is not supported
-            return Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: "Boolean QA-wrap toggle is not supported in UpdateLocalizationQAWrap".into(),
-            });
         }
         snap.owner_notes.insert(
             LOCALIZATION_NOTE_ID,

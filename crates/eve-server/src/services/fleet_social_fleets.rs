@@ -730,6 +730,7 @@ pub(super) async fn handle_fleets(
                     notify::sync_fleet_join_requests_to_db(ctx);
                     session.fleet_id = Some(fleet_id);
                     notify::emit_join(ctx, fleet_id, char_id);
+                    crate::services::notify_emitters_batch3::emit_fleet_respawn_points_if_any(ctx, fleet_id);
                     let sys_id = session.solar_system_id.or_else(|| {
                         ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
                     }).unwrap_or(0);

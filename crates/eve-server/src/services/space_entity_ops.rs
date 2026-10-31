@@ -969,6 +969,7 @@ async fn handle_cmd_unanchor(
         }
     });
 
+    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, session.fleet_id, target_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&target_id) {
             meta.anchor_start_unix = None;

@@ -1313,6 +1313,7 @@ pub(crate) async fn ship_scoop_and_store(
     if let Ok(Some(cs)) = sys.get_combat_state(item_id).await {
         crate::services::mobile_deployables::record_scooped_deployable_damage(ctx, item_id, &cs);
     }
+    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, session.fleet_id, item_id);
     crate::services::mobile_deployables::write_deployable_state(ctx, |st| {
         st.deployables.remove(&item_id);
     });

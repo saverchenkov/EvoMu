@@ -509,7 +509,7 @@ pub fn emit_drone_activity_change(
     );
 }
 
-/// Emits `OnGodmaEffectInfo`, `OnGodmaPrimeItem`, and `OnEffectMessage` when a module activates.
+/// Emits `OnGodmaEffectInfo` and `OnGodmaPrimeItem` when a module activates.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_module_activation_godma_notifications(
     ctx: &ServerContext,
@@ -521,13 +521,14 @@ pub fn emit_module_activation_godma_notifications(
     duration_s: f64,
     target_id_opt: Option<i64>,
 ) {
-    let now_ft = ctx.now_blueos_filetime_ticks();
-    let effect_id = crate::router::binding::effect_id_for_module_sde(
+    let Some(effect_id) = crate::router::binding::effect_id_for_module_sde(
         &ctx.sde,
         module_type_id,
         Some(effect_name),
-    )
-    .unwrap_or(16);
+    ) else {
+        return;
+    };
+    let now_ft = ctx.now_blueos_filetime_ticks();
     let dur_ms = (duration_s.max(1.0)) * 1_000.0;
     let active_effect_line = PyRep::List(vec![
         PyRep::Integer(module_id),
@@ -590,22 +591,6 @@ pub fn emit_module_activation_godma_notifications(
             vec![PyRep::Integer(ship_id), prime_row],
         );
     }
-
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnEffectMessage",
-        "charid",
-        vec![
-            PyRep::String("ModuleEffectActivated".into()),
-            PyRep::Dict(vec![
-                (
-                    PyRep::String("module".into()),
-                    PyRep::Integer(i64::from(module_type_id)),
-                ),
-                (PyRep::String("duration".into()), PyRep::Real(dur_ms)),
-            ]),
-        ],
-    );
 }
 
 /// Emits `OnGodmaFlushLocationProfile(shipID, ("effect", moduleID))` and, for projected EWAR modules,
@@ -631,56 +616,194 @@ pub fn flush_module_profile_and_ewar_end(
             ],
         );
     }
-    let projected_targets: Vec<(i64, u32)> = {
+    let started_targets = ctx
+        .active_ewar_starts
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(ship_id, module_id))
+        .unwrap_or_default();
+    let ewar_targets: Vec<(i64, &'static str)> = if !started_targets.is_empty() {
+        started_targets
+    } else {
+        let source_matches = ctx
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&module_id)
+            .copied()
+            .map(|sid| sid == ship_id)
+            .unwrap_or_else(|| {
+                ctx.db
+                    .with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.location_id == ship_id))
+            });
+        let projected_targets: Vec<(i64, u32, Option<u32>, bool)> = if source_matches {
+            let guard = ctx
+                .projected_ewar
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut out = Vec::new();
+            for (&target_sid, list) in guard.iter() {
+                for eff in list {
+                    if eff.source_module_id == module_id {
+                        let disables_mwd = ctx
+                            .sde
+                            .types
+                            .get(&eff.source_module_type_id)
+                            .is_some_and(|t| t.group_id == 52)
+                            && eve_dogma::eval_warp_scrambler_effects(
+                                &[&eff.effective_module],
+                                &[0.0],
+                                &ctx.sde,
+                            )
+                            .blocks_mwd;
+                        out.push((
+                            target_sid,
+                            eff.source_module_type_id,
+                            eff.charge_type_id,
+                            disables_mwd,
+                        ));
+                    }
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        };
+        projected_targets
+            .into_iter()
+            .map(|(target_sid, mod_tid, charge_tid, disables_mwd)| {
+                let jamming_type = ctx
+                    .sde
+                    .types
+                    .get(&mod_tid)
+                    .and_then(|mod_type| {
+                        crate::services::inventory_fitting::fitting_ewar_capital::ewar_jamming_type(
+                            mod_type,
+                            charge_tid,
+                            disables_mwd,
+                            None,
+                        )
+                    })
+                    .unwrap_or("electronic");
+                (target_sid, jamming_type)
+            })
+            .collect()
+    };
+    let affected_projected = ctx.remove_projected_ewar_by_module(ship_id, module_id);
+    for (target_sid, jamming_type) in ewar_targets {
+        let ewar_args = vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(module_id),
+            PyRep::Integer(target_sid),
+            PyRep::String(jamming_type.into()),
+        ];
+        let mut notified = false;
+        if char_id > 0 {
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnEwarEnd",
+                "charid",
+                ewar_args.clone(),
+            );
+            notified = true;
+        }
+        let target_owner = ctx
+            .db
+            .with_snapshot(|snap| snap.items.get(&target_sid).map(|i| i.owner_id))
+            .unwrap_or(0);
+        if target_owner > 0 && target_owner != char_id {
+            ctx.notify(
+                NotificationTarget::Character(target_owner),
+                "OnEwarEnd",
+                "charid",
+                ewar_args.clone(),
+            );
+            notified = true;
+        }
+        if !notified {
+            if let Some(sys_id) = solar_system_id {
+                ctx.notify(
+                    NotificationTarget::SolarSystem(sys_id),
+                    "OnEwarEnd",
+                    "solarsystemid",
+                    ewar_args,
+                );
+            }
+        }
+    }
+    affected_projected
+}
+
+/// Flushes all active EWAR projections and remote assistance originating from OR targeting `ship_id`,
+/// emitting `OnEwarEnd` to both attacker and victim.
+pub fn flush_ship_all_ewar_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    ship_id: i64,
+) -> Vec<(i64, i64)> {
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    {
         let guard = ctx
-            .projected_ewar
+            .active_ewar_starts
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        let mut out = Vec::new();
-        for (&target_sid, list) in guard.iter() {
-            for eff in list {
-                if eff.source_module_id == module_id {
-                    out.push((target_sid, eff.source_module_type_id));
+        for (&(src_sid, mod_id), targets) in guard.iter() {
+            if src_sid == ship_id || targets.iter().any(|&(tid, _)| tid == ship_id) {
+                if !pairs.contains(&(src_sid, mod_id)) {
+                    pairs.push((src_sid, mod_id));
                 }
             }
         }
-        out
-    };
-    let affected = ctx.remove_projected_ewar_by_module(module_id);
-    if let Some(sys_id) = solar_system_id {
-        for (target_sid, mod_tid) in projected_targets {
-            let grp = ctx.sde.types.get(&mod_tid).map(|t| t.group_id).unwrap_or(0);
-            let jamming_type = match grp {
-                52 | 899 => "warpScrambler",
-                65 | 1672 => "ewar_webify",
-                379 => "ewar_target_painter",
-                208 => "ewar_sensor_damp",
-                291 => "ewar_tracking_disrupt",
-                842 | 1245 => "ewar_guidance_disrupt",
-                _ => "electronic",
-            };
-            ctx.notify(
-                NotificationTarget::SolarSystem(sys_id),
-                "OnEwarEnd",
-                "solarsystemid",
-                vec![
-                    PyRep::Integer(ship_id),
-                    PyRep::Integer(module_id),
-                    PyRep::Integer(target_sid),
-                    PyRep::String(jamming_type.into()),
-                ],
-            );
+    }
+    {
+        let src_guard = ctx
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for (&mod_id, &src_sid) in src_guard.iter() {
+            if src_sid == ship_id && !pairs.contains(&(src_sid, mod_id)) {
+                pairs.push((src_sid, mod_id));
+            }
+        }
+        let pe_guard = ctx
+            .projected_ewar
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = pe_guard.get(&ship_id) {
+            for eff in list {
+                let mod_id = eff.source_module_id;
+                let src_sid = src_guard.get(&mod_id).copied().unwrap_or_else(|| {
+                    ctx.db
+                        .with_snapshot(|s| s.items.get(&mod_id).map(|i| i.location_id))
+                        .unwrap_or(0)
+                });
+                if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
+                    pairs.push((src_sid, mod_id));
+                }
+            }
         }
     }
-    affected
+    for &(src_sid, mod_id) in &pairs {
+        let src_char = if src_sid == ship_id && char_id > 0 {
+            char_id
+        } else {
+            ctx.db
+                .with_snapshot(|s| s.items.get(&src_sid).map(|i| i.owner_id))
+                .unwrap_or(0)
+        };
+        let _ = flush_module_profile_and_ewar_end(ctx, src_char, solar_system_id, src_sid, mod_id);
+        crate::services::tactical_modules::remove_projected_remote_assistance(ctx, src_sid, mod_id);
+    }
+    pairs
 }
 
 /// Emits `OnJamStart(sourceBallID, moduleID, targetBallID, "electronic", startTime, durationMs)`
-/// and `OnCombatMessage` when an ECM jam cycle lands on `target_id`.
+/// when an ECM jam cycle lands on `target_id`.
 pub fn emit_ecm_jam_landed(
     ctx: &ServerContext,
     sys_id: u32,
-    attacker_char_id: i64,
+    _attacker_char_id: i64,
     attacker_ship_id: i64,
     module_id: i64,
     target_id: i64,
@@ -700,19 +823,6 @@ pub fn emit_ecm_jam_landed(
             PyRep::Integer(now_ft),
             PyRep::Real(duration_ms),
         ],
-    );
-    let msg_args = PyRep::Dict(vec![
-        (
-            PyRep::String("attacker".into()),
-            PyRep::Integer(attacker_ship_id),
-        ),
-        (PyRep::String("target".into()), PyRep::Integer(target_id)),
-    ]);
-    ctx.notify(
-        NotificationTarget::Character(attacker_char_id),
-        "OnCombatMessage",
-        "charid",
-        vec![PyRep::String("EcmJamSuccess".into()), msg_args],
     );
 }
 

@@ -49,7 +49,7 @@ pub struct RaffleStateRecord {
     pub expired: bool,
 }
 
-fn raffle_note_id(raffle_id: i64) -> i64 {
+pub(crate) fn raffle_note_id(raffle_id: i64) -> i64 {
     -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()))
 }
 
@@ -453,7 +453,7 @@ pub fn handle(
                 if let Some(it) = snap.items.get_mut(&item_id) {
                     it.owner_id = -52_568;
                     it.location_id = -52_568;
-                    it.flag = InventoryFlag::Hangar;
+                    it.flag = InventoryFlag::Locked;
                     it.version += 1;
                 }
                 snap.next_entity_id += 1;
@@ -493,7 +493,7 @@ pub fn handle(
                         NotificationTarget::Character(char_id),
                         "OnRaffleCreatedServer",
                         "charid",
-                        vec![kv.clone()],
+                        vec![PyRep::Integer(rec.raffle_id), kv.clone()],
                     );
                     Some(Ok(kv))
                 }
@@ -623,19 +623,63 @@ pub fn handle(
             match res {
                 Ok(r) => {
                     let kv = raffle_to_keyval(&r);
+                    let sold_dict = PyRep::Dict(vec![(
+                        PyRep::Integer(r.raffle_id),
+                        PyRep::Integer(r.sold_tickets.len() as i64),
+                    )]);
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnRaffleUpdatedServer",
                         "charid",
-                        vec![kv.clone()],
+                        vec![PyRep::Integer(r.raffle_id), kv.clone()],
                     );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnTicketsUpdatedServer",
+                        "charid",
+                        vec![sold_dict.clone()],
+                    );
+                    if r.creator_id != char_id {
+                        ctx.notify(
+                            NotificationTarget::Character(r.creator_id),
+                            "OnRaffleUpdatedServer",
+                            "charid",
+                            vec![PyRep::Integer(r.raffle_id), kv.clone()],
+                        );
+                        ctx.notify(
+                            NotificationTarget::Character(r.creator_id),
+                            "OnTicketsUpdatedServer",
+                            "charid",
+                            vec![sold_dict],
+                        );
+                    }
                     if let Some(winner_id) = r.winner_id {
+                        let win_ticket_rep = r
+                            .winning_ticket
+                            .map(|t| PyRep::Integer(i64::from(t)))
+                            .unwrap_or(PyRep::None);
                         ctx.notify(
                             NotificationTarget::Character(winner_id),
                             "OnRaffleFinishedServer",
                             "charid",
-                            vec![PyRep::Integer(r.raffle_id), PyRep::Integer(winner_id)],
+                            vec![PyRep::Integer(r.raffle_id), win_ticket_rep.clone()],
                         );
+                        if r.creator_id != winner_id {
+                            ctx.notify(
+                                NotificationTarget::Character(r.creator_id),
+                                "OnRaffleFinishedServer",
+                                "charid",
+                                vec![PyRep::Integer(r.raffle_id), win_ticket_rep.clone()],
+                            );
+                        }
+                        if char_id != winner_id && char_id != r.creator_id {
+                            ctx.notify(
+                                NotificationTarget::Character(char_id),
+                                "OnRaffleFinishedServer",
+                                "charid",
+                                vec![PyRep::Integer(r.raffle_id), win_ticket_rep],
+                            );
+                        }
                     }
                     Some(Ok(kv))
                 }

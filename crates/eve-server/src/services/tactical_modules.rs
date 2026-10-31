@@ -121,8 +121,8 @@ pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_
     }
 }
 
-/// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `source_module_id`.
-pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id: i64) {
+/// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `(source_ship_id, source_module_id)`.
+pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_ship_id: i64, source_module_id: i64) {
     let db_key = db_key_of(ctx);
     let mut affected = Vec::new();
     {
@@ -130,7 +130,7 @@ pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id:
         for (&(k, tid), list) in st.remote_assistance.iter_mut() {
             if k == db_key {
                 let before = list.len();
-                list.retain(|e| e.module_id != source_module_id);
+                list.retain(|e| !(e.source_ship_id == source_ship_id && e.module_id == source_module_id));
                 if list.len() != before { affected.push(tid); }
             }
         }
@@ -1215,6 +1215,7 @@ pub async fn activate_command_burst(
         ctx.invalidate_ship_fitting(member_sid);
         ctx.notify(NotificationTarget::Character(member_cid), "OnDbuffUpdated", "charid", vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())]);
     }
+    crate::services::notify_emitters_batch3_space::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("chargeTypeID", PyRep::Integer(c_tid as i64)),

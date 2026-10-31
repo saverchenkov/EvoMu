@@ -31,9 +31,6 @@ pub struct BoundObjectEntry {
 }
 
 static NEXT_CTX_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-pub(crate) fn next_ctx_instance_id() -> u64 {
-    NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
 
 pub struct ServerContext {
     pub instance_id: u64,
@@ -54,7 +51,9 @@ pub struct ServerContext {
     pub map_landmarks: RwLock<Vec<(i64, String, f64, f64, f64)>>,
     pub session_closers: RwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>>,
     pub ship_fittings: Arc<RwLock<HashMap<i64, ShipFittingEngine>>>,
-    pub projected_ewar: RwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>,
+    pub projected_ewar: Arc<RwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>>,
+    pub projected_ewar_sources: Arc<RwLock<HashMap<i64, i64>>>,
+    pub active_ewar_starts: Arc<RwLock<HashMap<(i64, i64), Vec<(i64, &'static str)>>>>,
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
     pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
@@ -129,8 +128,12 @@ impl ServerContext {
             serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
+        let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pending_notifications = Arc::new(RwLock::new(HashMap::new()));
         let ship_fittings = Arc::new(RwLock::new(HashMap::new()));
+        let projected_ewar = Arc::new(RwLock::new(HashMap::new()));
+        let projected_ewar_sources = Arc::new(RwLock::new(HashMap::new()));
+        let active_ewar_starts = Arc::new(RwLock::new(HashMap::new()));
         let invention_roll_override = Arc::new(RwLock::new(None));
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
         let tactical_state = Arc::new(RwLock::new(
@@ -215,18 +218,25 @@ impl ServerContext {
         );
         let module_reactivation_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let active_fighters = Arc::new(RwLock::new(HashMap::new()));
-        let (step_cd_w, step_af_w) = (Arc::downgrade(&module_reactivation_cooldowns), Arc::downgrade(&active_fighters));
+        let (step_cd_w, step_af_w, step_pe_w, step_pes_w, step_aes_w, step_tac_w) = (
+            Arc::downgrade(&module_reactivation_cooldowns), Arc::downgrade(&active_fighters),
+            Arc::downgrade(&projected_ewar), Arc::downgrade(&projected_ewar_sources),
+            Arc::downgrade(&active_ewar_starts), Arc::downgrade(&tactical_state),
+        );
         systems.set_system_step_hook(Arc::new(move |sys_id, dt, destroyed_balls| {
-            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw, cdw, afw) = (
+            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw, cdw, afw, pew, pesw, aesw, tacw) = (
                 step_sys_w.clone(), step_db_w.clone(), step_sde_w.clone(), step_rng_w.clone(),
-                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(), step_cd_w.clone(), step_af_w.clone(),
+                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(),
+                step_cd_w.clone(), step_af_w.clone(), step_pe_w.clone(), step_pes_w.clone(), step_aes_w.clone(), step_tac_w.clone(),
             );
             Box::pin(async move {
-                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map), Some(af_map)) = (
-                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(), afw.upgrade(),
+                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map), Some(af_map), Some(pe), Some(pes), Some(aes), Some(tac)) = (
+                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(), afw.upgrade(), pew.upgrade(), pesw.upgrade(), aesw.upgrade(), tacw.upgrade(),
                 ) else { return; };
-                let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map);
+                let ctx = ServerContext::from_step_components(instance_id, sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map, pe, pes, aes, tac);
                 for (tid, killer_opt) in destroyed_balls {
+                    crate::services::notify_emitters_batch8::on_deployable_deactivated(&ctx, None, tid);
+                    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
                     if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
                         let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;
@@ -253,7 +263,6 @@ impl ServerContext {
             list.sort_by_key(|r| r.notification_id);
             list
         });
-        let instance_id = NEXT_CTX_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if db.is_ephemeral_in_memory() {
             db.with_mut_snapshot(|snap| {
                 snap.next_corporation_id = snap.next_corporation_id.max(98_100_000 + (instance_id as i64) * 10_000);
@@ -284,7 +293,9 @@ impl ServerContext {
             map_landmarks: RwLock::new(Vec::new()),
             session_closers: RwLock::new(HashMap::new()),
             ship_fittings,
-            projected_ewar: RwLock::new(HashMap::new()),
+            projected_ewar,
+            projected_ewar_sources,
+            active_ewar_starts,
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
             fighter_charge_state: RwLock::new(HashMap::new()),
@@ -1073,59 +1084,6 @@ impl ServerContext {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(ship_id, fit);
-    }
-
-    pub fn upsert_projected_ewar_on_ship(
-        &self,
-        target_ship_id: i64,
-        effect: eve_dogma::ProjectedEwarEffect,
-    ) {
-        {
-            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
-            let list = guard.entry(target_ship_id).or_default();
-            if let Some(existing) = list
-                .iter_mut()
-                .find(|e| e.source_module_id == effect.source_module_id)
-            {
-                *existing = effect.clone();
-            } else {
-                list.push(effect.clone());
-            }
-        }
-        if let Some(fit) = self
-            .ship_fittings
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&target_ship_id)
-        {
-            fit.upsert_projected_ewar(effect, &self.sde);
-        }
-    }
-
-    pub fn remove_projected_ewar_by_module(&self, source_module_id: i64) -> Vec<i64> {
-        let mut affected_ships = Vec::new();
-        {
-            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
-            for (&ship_id, list) in guard.iter_mut() {
-                let before = list.len();
-                list.retain(|e| e.source_module_id != source_module_id);
-                if list.len() < before {
-                    affected_ships.push(ship_id);
-                }
-            }
-        }
-        if !affected_ships.is_empty() {
-            let mut fit_guard = self
-                .ship_fittings
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for &ship_id in &affected_ships {
-                if let Some(fit) = fit_guard.get_mut(&ship_id) {
-                    fit.remove_projected_ewar(source_module_id, &self.sde);
-                }
-            }
-        }
-        affected_ships
     }
 
     pub fn get_or_rebuild_ship_fitting(

@@ -792,12 +792,23 @@ impl ServerContext {
     /// (e.g. entering warp, target out of range, or target leaving the ballpark).
     /// Emits `OnGodmaShipEffect` (with `isActive = 0`) to the pilot and invalidates the cached ship fitting.
     pub fn wire_module_deactivation_hook(&self) {
+        let instance_id = self.instance_id;
+        let systems_w = Arc::downgrade(&self.systems);
         let sde = Arc::clone(&self.sde);
         let db = Arc::clone(&self.db);
+        let rng = Arc::clone(&self.mechanic_rng);
         let pending = Arc::clone(&self.pending_notifications);
         let notify_tx = self.notify_tx.clone();
         let ship_fittings = Arc::clone(&self.ship_fittings);
+        let combat_ephemeral = Arc::clone(&self.combat_ephemeral);
+        let quasar_gateway = Arc::clone(&self.quasar_gateway);
+        let inv_roll = Arc::clone(&self.invention_roll_override);
         let cd_map = Arc::clone(&self.module_reactivation_cooldowns);
+        let active_fighters = Arc::clone(&self.active_fighters);
+        let projected_ewar = Arc::clone(&self.projected_ewar);
+        let projected_ewar_sources = Arc::clone(&self.projected_ewar_sources);
+        let active_ewar_starts = Arc::clone(&self.active_ewar_starts);
+        let tactical_state = Arc::clone(&self.tactical_state);
 
         self.systems.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
             ship_fittings
@@ -829,6 +840,46 @@ impl ServerContext {
                         },
                     );
                 }
+            }
+
+            let solar_system_id = db.with_mut_snapshot(|snap| {
+                snap.module_active_states.remove(&cycle.module_id);
+                snap.module_active_charges.remove(&cycle.module_id);
+                snap.characters.get(&char_id).map(|c| c.solar_system_id)
+            });
+
+            if let Some(sys_reg) = systems_w.upgrade() {
+                let step_ctx = ServerContext::from_step_components(
+                    instance_id,
+                    sys_reg,
+                    Arc::clone(&db),
+                    Arc::clone(&sde),
+                    Arc::clone(&rng),
+                    Arc::clone(&ship_fittings),
+                    Arc::clone(&pending),
+                    notify_tx.clone(),
+                    Arc::clone(&combat_ephemeral),
+                    Arc::clone(&quasar_gateway),
+                    Arc::clone(&inv_roll),
+                    Arc::clone(&cd_map),
+                    Arc::clone(&active_fighters),
+                    Arc::clone(&projected_ewar),
+                    Arc::clone(&projected_ewar_sources),
+                    Arc::clone(&active_ewar_starts),
+                    Arc::clone(&tactical_state),
+                );
+                let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                    &step_ctx,
+                    char_id,
+                    solar_system_id,
+                    cycle.ship_id,
+                    cycle.module_id,
+                );
+                crate::services::tactical_modules::remove_projected_remote_assistance(
+                    &step_ctx,
+                    cycle.ship_id,
+                    cycle.module_id,
+                );
             }
 
             let effect_id = effect_id_for_module_sde(&sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
@@ -960,6 +1011,7 @@ impl ServerContext {
     /// Constructs a lightweight `ServerContext` handle referencing shared core components for system step execution.
     #[allow(clippy::too_many_arguments)]
     pub fn from_step_components(
+        instance_id: u64,
         systems: std::sync::Arc<crate::system_actor::SystemRegistry>,
         db: std::sync::Arc<eve_db::WorldRepository>,
         sde: std::sync::Arc<eve_sde::SdeRegistry>,
@@ -972,15 +1024,18 @@ impl ServerContext {
         invention_roll_override: std::sync::Arc<std::sync::RwLock<Option<f64>>>,
         module_reactivation_cooldowns: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(i64, i64, u32), super::context::ModuleCooldownEntry>>>,
         active_fighters: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, super::context::ActiveFighterSquadron>>>,
+        projected_ewar: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>>,
+        projected_ewar_sources: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, i64>>>,
+        active_ewar_starts: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(i64, i64), Vec<(i64, &'static str)>>>>,
+        tactical_state: std::sync::Arc<std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>>,
     ) -> Self {
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(std::sync::Arc::clone(&db));
         let clock = std::sync::RwLock::new(db.clock());
         let living_world = std::sync::Arc::new(crate::living_world::LivingWorldDirector::new());
         let esi_state = std::sync::Arc::new(crate::esi::runtime_state::EsiRuntimeState::new());
         let cluster_state = std::sync::Arc::new(std::sync::RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default()));
-        let tactical_state = std::sync::Arc::new(std::sync::RwLock::new(crate::services::tactical_modules::TacticalModulesState::default()));
         Self {
-            instance_id: super::context::next_ctx_instance_id(),
+            instance_id,
             sde,
             db,
             clock,
@@ -998,7 +1053,9 @@ impl ServerContext {
             map_landmarks: std::sync::RwLock::new(Vec::new()),
             session_closers: std::sync::RwLock::new(std::collections::HashMap::new()),
             ship_fittings,
-            projected_ewar: std::sync::RwLock::new(std::collections::HashMap::new()),
+            projected_ewar,
+            projected_ewar_sources,
+            active_ewar_starts,
             weapon_cycle_state: std::sync::RwLock::new(std::collections::HashMap::new()),
             fighter_cooldown_state: std::sync::RwLock::new(std::collections::HashMap::new()),
             fighter_charge_state: std::sync::RwLock::new(std::collections::HashMap::new()),
@@ -1032,6 +1089,75 @@ impl ServerContext {
             npc_spawns: std::sync::RwLock::new(std::collections::HashMap::new()),
             combat_rng_seq: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    pub fn upsert_projected_ewar_on_ship(
+        &self,
+        source_ship_id: i64,
+        target_ship_id: i64,
+        effect: eve_dogma::ProjectedEwarEffect,
+    ) {
+        self.projected_ewar_sources
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(effect.source_module_id, source_ship_id);
+        {
+            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
+            let list = guard.entry(target_ship_id).or_default();
+            if let Some(existing) = list
+                .iter_mut()
+                .find(|e| e.source_module_id == effect.source_module_id)
+            {
+                *existing = effect.clone();
+            } else {
+                list.push(effect.clone());
+            }
+        }
+        if let Some(fit) = self
+            .ship_fittings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&target_ship_id)
+        {
+            fit.upsert_projected_ewar(effect, &self.sde);
+        }
+    }
+
+    pub fn remove_projected_ewar_by_module(&self, source_ship_id: i64, source_module_id: i64) -> Vec<i64> {
+        {
+            let mut owners = self.projected_ewar_sources.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(&recorded_ship) = owners.get(&source_module_id) {
+                if recorded_ship != source_ship_id {
+                    return Vec::new();
+                }
+                owners.remove(&source_module_id);
+            } else if !self.db.with_snapshot(|s| s.items.get(&source_module_id).is_some_and(|i| i.location_id == source_ship_id)) {
+                return Vec::new();
+            }
+        }
+        let mut affected_ships = Vec::new();
+        {
+            let mut guard = self.projected_ewar.write().unwrap_or_else(|e| e.into_inner());
+            for (&ship_id, list) in guard.iter_mut() {
+                let before = list.len();
+                list.retain(|e| e.source_module_id != source_module_id);
+                if list.len() < before {
+                    affected_ships.push(ship_id);
+                }
+            }
+        }
+        if !affected_ships.is_empty() {
+            let mut fit_guard = self
+                .ship_fittings
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            for &ship_id in &affected_ships {
+                if let Some(fit) = fit_guard.get_mut(&ship_id) {
+                    fit.remove_projected_ewar(source_module_id, &self.sde);
+                }
+            }
+        }
+        affected_ships
     }
 
     /// Computes a target entity's effective signature radius including active Target Painters

@@ -642,7 +642,8 @@ fn execute_due_abyssal_collapse_sync(
 pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
     let now_unix = ctx.now_unix();
 
-    // 0. Sweep expired market orders across cluster ticks (`feat:market.order-expiry`).
+    // 0. Sweep expired market orders and check season transitions across cluster ticks.
+    crate::services::notify_emitters_batch8::check_and_emit_season_transitions(ctx);
     let swept = ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix));
     if !swept.is_empty() {
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);

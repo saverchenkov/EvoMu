@@ -597,6 +597,7 @@ pub(crate) async fn handle_mine(
                     },
                 );
             });
+            crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, drone_ball_id, 2, Some("mining"));
         }
         return Ok(PyRep::Dict(Vec::new()));
     }

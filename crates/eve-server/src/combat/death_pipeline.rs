@@ -81,6 +81,12 @@ pub fn execute_death_pipeline_sync_inner(
         Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
     })?;
 
+    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(
+        ctx,
+        victim_char_id,
+        Some(sys_id),
+        victim_ship_id,
+    );
     let fitted_mods: Vec<(i64, u32, u16)> = ctx
         .ship_fittings
         .write()
@@ -740,6 +746,7 @@ pub fn execute_death_pipeline_sync_inner(
         }
     });
 
+    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, None, victim_ship_id);
     sys_handle.try_remove_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {
         ctx.sde

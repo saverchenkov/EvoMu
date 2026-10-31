@@ -17,8 +17,8 @@ const OPERATIONS_STORE_KEY: i64 = -10_000_015;
 pub use super::operations_manager_helpers::*;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct OperationsStore {
-    by_character: HashMap<i64, CharacterOperationsRecord>,
+pub(crate) struct OperationsStore {
+    pub(crate) by_character: HashMap<i64, CharacterOperationsRecord>,
     #[serde(default)]
     custom_surveys: Vec<SurveyDefinition>,
 }
@@ -294,7 +294,7 @@ pub fn is_operation_site_or_system(ctx: &ServerContext, char_id: i64, target_id:
     })
 }
 
-fn load_store(snap: &eve_db::WorldStateSnapshot) -> OperationsStore {
+pub(crate) fn load_store(snap: &eve_db::WorldStateSnapshot) -> OperationsStore {
     snap.owner_notes
         .get(&OPERATIONS_STORE_KEY)
         .and_then(|n| serde_json::from_str(&n.note).ok())
@@ -312,7 +312,7 @@ pub fn completed_operations_for_character(
         .unwrap_or_default()
 }
 
-fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &OperationsStore, now_unix: u64) {
+pub(crate) fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &OperationsStore, now_unix: u64) {
     if let Ok(json) = serde_json::to_string(store) {
         snap.owner_notes.insert(
             OPERATIONS_STORE_KEY,
@@ -690,13 +690,26 @@ pub fn handle(
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
+            let sde_op_id = op_defs.task_to_op.get(&task_id).copied();
             let call_cat_id = if args.len() >= 3 {
-                args.first().and_then(|a| a.as_i64())
+                let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&c| (1..=100_000).contains(&c)) else {
+                    return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                };
+                Some(cid)
             } else {
                 None
             };
             let call_op_id = if args.len() >= 3 {
-                args.get(1).and_then(|a| a.as_i64())
+                let Some(oid) = args.get(1).and_then(|a| a.as_i64()).filter(|&oid| {
+                    sde_op_id == Some(oid)
+                        || op_defs
+                            .op_tasks
+                            .get(&oid)
+                            .is_some_and(|ts| ts.contains(&task_id))
+                }) else {
+                    return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                };
+                Some(oid)
             } else {
                 None
             };
@@ -707,14 +720,15 @@ pub fn handle(
                 if rec.skipped_tasks.len() < 512 {
                     rec.skipped_tasks.insert(task_id);
                 }
-                let cat_id = call_cat_id.or(rec.active_category_id).unwrap_or(1);
-                let op_id = call_op_id
+                let cat_id = rec.active_category_id.or(call_cat_id).unwrap_or(1);
+                let op_id = sde_op_id
+                    .or(call_op_id)
                     .or(rec.active_operation_id)
-                    .or_else(|| op_defs.task_to_op.get(&task_id).copied())
                     .unwrap_or(1);
                 save_store(snap, &store, now);
                 (cat_id, op_id)
             });
+            crate::services::notify_emitters_batch8_ops::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnOperationTaskCompleted",
@@ -867,7 +881,7 @@ pub fn handle(
                     let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
                         eve_db::NpeProgressRecord {
                             character_id: char_id,
-                            node_graph_id: 473,
+                            node_graph_id: 0,
                             current_node_id: 1,
                             completed: false,
                             career_goal_progress: Default::default(),
@@ -877,6 +891,7 @@ pub fn handle(
                     npe.completed = false;
                     npe.current_node_id = 1;
                 });
+                crate::services::notify_emitters_batch8_ops::on_tutorial_started(ctx, char_id, state_id);
                 return Some(Ok(PyRep::Bool(true)));
             }
 
@@ -891,7 +906,7 @@ pub fn handle(
                     let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
                         eve_db::NpeProgressRecord {
                             character_id: char_id,
-                            node_graph_id: 473,
+                            node_graph_id: 0,
                             current_node_id: 1,
                             completed: false,
                             career_goal_progress: Default::default(),
@@ -901,6 +916,7 @@ pub fn handle(
                     npe.completed = true;
                     npe.current_node_id = 4;
                 });
+                crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
                 return Some(Ok(PyRep::Bool(true)));
             }
 
