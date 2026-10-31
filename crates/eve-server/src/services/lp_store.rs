@@ -156,6 +156,32 @@ fn check_corp_lp_role(
     Ok(())
 }
 
+/// Returns the NPC corporations whose LP stores are hosted at `delivery_loc_id`.
+///
+/// Only NPC stations with LP store service `25` host NPC LP stores (never player-owned Upwell
+/// structures `>= 1_000_000_000_000`). A station hosts its `owner_corporation_id`, and The Fulcrum
+/// (`60_015_187`) additionally hosts the Angel Cartel (`1_000_138`, `1_000_436`) and Guristas
+/// (`1_000_127`, `1_000_437`) pirate insurgency LP stores.
+pub fn station_hosted_lp_corps(sde: &eve_sde::SdeRegistry, delivery_loc_id: i64) -> Vec<i64> {
+    if delivery_loc_id >= 1_000_000_000_000
+        || !crate::services::station_structure::npc_station_offers_service(sde, delivery_loc_id, 25)
+    {
+        return Vec::new();
+    }
+    let mut corps = Vec::new();
+    if let Some(st) = sde.stations.get(&delivery_loc_id) {
+        corps.push(st.owner_corporation_id);
+    }
+    if delivery_loc_id == 60_015_187 {
+        for cid in [1_000_138, 1_000_436, 1_000_127, 1_000_437] {
+            if !corps.contains(&cid) {
+                corps.push(cid);
+            }
+        }
+    }
+    corps
+}
+
 fn take_offer(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -167,19 +193,11 @@ fn take_offer(
         Err(e) => return Some(Err(e)),
     };
 
-    let is_known_corp = |id: i64| {
-        ctx.sde.npc_corporations.contains_key(&id)
-            || ctx.db.with_snapshot(|snap| snap.corporations.contains_key(&id))
-    };
     let (explicit_corp_id, target_offer_id, qty) = if args.len() >= 3 {
         let cid = args[0].as_i64();
         let oid = args[1].as_i64().unwrap_or(0);
         let q = args[2].as_i64().unwrap_or(1);
         (cid, oid, q)
-    } else if args.len() == 2 && args[0].as_i64().is_some_and(is_known_corp) {
-        let cid = args[0].as_i64();
-        let oid = args[1].as_i64().unwrap_or(0);
-        (cid, oid, 1)
     } else {
         let oid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
         let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
@@ -198,27 +216,40 @@ fn take_offer(
         }));
     };
 
-    let station_corp_id = session
-        .station_id
-        .and_then(|sid| ctx.sde.stations.get(&sid).map(|st| st.owner_corporation_id));
-    let target_corp_id = explicit_corp_id.or(station_corp_id);
-
-    let all_offers = ctx.db.with_snapshot(|snap| match target_corp_id {
-        Some(cid) => {
-            let corp_offers = get_corp_lp_offers_with_sde(&ctx.sde, snap, cid);
-            if explicit_corp_id.is_none()
-                && !corp_offers.iter().any(|o| o.offer_id == target_offer_id)
-            {
-                get_all_lp_offers_with_sde(&ctx.sde, snap)
-            } else {
-                corp_offers
-            }
+    let Some(delivery_loc_id) = session.station_id.or(session.structure_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "MustBeDocked".into(),
+        }));
+    };
+    let hosted_corps = station_hosted_lp_corps(&ctx.sde, delivery_loc_id);
+    if hosted_corps.is_empty() {
+        return Some(Err(BridgeRpcError {
+            code: "StationServiceUnavailable".into(),
+            message: format!("Location {delivery_loc_id} does not offer an NPC LP store"),
+        }));
+    }
+    if let Some(req_cid) = explicit_corp_id {
+        if !hosted_corps.contains(&req_cid) {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidStationCorpForLPStore".into(),
+                message: format!(
+                    "Station {delivery_loc_id} does not host LP store for corporation {req_cid}"
+                ),
+            }));
         }
-        None => get_all_lp_offers_with_sde(&ctx.sde, snap),
-    });
-    let offer = match all_offers.into_iter().find(|o| {
-        o.offer_id == target_offer_id
-            && (explicit_corp_id.is_none() || explicit_corp_id == Some(o.corp_id))
+    }
+
+    let candidate_corps: Vec<i64> = match explicit_corp_id {
+        Some(cid) => vec![cid],
+        None => hosted_corps,
+    };
+    let offer = match ctx.db.with_snapshot(|snap| {
+        candidate_corps.iter().find_map(|&cid| {
+            get_corp_lp_offers_with_sde(&ctx.sde, snap, cid)
+                .into_iter()
+                .find(|o| o.offer_id == target_offer_id && o.corp_id == cid)
+        })
     }) {
         Some(o) => o,
         None => {
@@ -261,21 +292,6 @@ fn take_offer(
             message: "LP store total AK cost overflows i64".into(),
         }));
     };
-
-    let Some(delivery_loc_id) = session.station_id.or(session.structure_id) else {
-        return Some(Err(BridgeRpcError {
-            code: "UserError".into(),
-            message: "MustBeDocked".into(),
-        }));
-    };
-    if delivery_loc_id < 1_000_000_000_000
-        && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, delivery_loc_id, 25)
-    {
-        return Some(Err(BridgeRpcError {
-            code: "StationServiceUnavailable".into(),
-            message: format!("Station {delivery_loc_id} does not offer LP store"),
-        }));
-    }
     let delivery_flag = InventoryFlag::Hangar;
 
     let now_unix = ctx.now_unix();

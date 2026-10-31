@@ -431,60 +431,74 @@ async fn test_lp_store_character_purchase_costs_standings_and_cargo_consumption(
         assert_eq!(delivered.type_id, CALDARI_TRADEIN_REWARD_TYPE_ID);
     });
 
-    // 5. Standing gate check (`min_standing = Some(2.0)`) on separate empty NPC corp (`1_000_438`)
+    // 5. Cross-station, Upwell structure, standing gate, and 2-arg offer_id collision checks
+    const FULCRUM_STATION: i64 = 60_015_187;
     ctx.db.with_mut_snapshot(|snap| {
-        register_lp_store_offer(
-            snap,
-            LPOffer {
-                offer_id: 920_002,
-                corp_id: EMPTY_CUSTODIANS_CORP,
-                type_id: CALDARI_NO_REQ_REWARD_TYPE_ID,
-                quantity: 1,
-                lp_cost: 1_000,
-                isk_cost: IskCents::from_isk(500_000),
-                req_items: vec![],
-                ak_cost: 0,
-                min_standing: Some(2.0),
-            },
-        );
+        for (oid, lp, isk, min_st) in [
+            (920_002, 1_000, 500_000, Some(2.0)),
+            (CALDARI_NAVY_CORP, 500, 100_000, None), // collides numerically with NPC corp ID
+        ] {
+            register_lp_store_offer(
+                snap,
+                LPOffer {
+                    offer_id: oid,
+                    corp_id: EMPTY_CUSTODIANS_CORP,
+                    type_id: CALDARI_NO_REQ_REWARD_TYPE_ID,
+                    quantity: 1,
+                    lp_cost: lp,
+                    isk_cost: IskCents::from_isk(isk),
+                    req_items: vec![],
+                    ak_cost: 0,
+                    min_standing: min_st,
+                },
+            );
+        }
     });
-    let err_stand = rpc(
-        &ctx,
-        &mut sess,
-        "LPStoreMgr",
-        "TakeOfferForCharacter",
-        &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)],
-    )
-    .await
-    .unwrap_err();
+
+    // Cross-station NPC LP purchase while docked at Jita 4-4 (Caldari Navy 1_000_035) must be rejected
+    let err_cross_fed = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(FEDERATION_NAVY_CORP), PyRep::Integer(FED_NAVY_EXCLUSIVE_OFFER_ID), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_cross_fed.code, "InvalidStationCorpForLPStore");
+    let err_cross_cust = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_cross_cust.code, "InvalidStationCorpForLPStore");
+    let err_two_arg_foreign = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(920_002), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_two_arg_foreign.code, "OfferNotFound");
+
+    // Player-owned Upwell structure (>= 1_000_000_000_000) must reject NPC LP store redemptions
+    sess.station_id = None;
+    sess.structure_id = Some(1_000_000_777_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&CHAR_ID).unwrap();
+        ch.station_id = None;
+        ch.structure_id = Some(1_000_000_777_001);
+    });
+    let err_upwell = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(CALDARI_NO_REQ_OFFER_ID), PyRep::Integer(1)]).await.unwrap_err();
+    assert_eq!(err_upwell.code, "StationServiceUnavailable");
+
+    // Dock at The Fulcrum (60_015_187, owned by Deathless Custodians 1_000_438 with service 25)
+    sess.structure_id = None;
+    sess.station_id = Some(FULCRUM_STATION);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&CHAR_ID).unwrap();
+        ch.station_id = Some(FULCRUM_STATION);
+        ch.structure_id = None;
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = FULCRUM_STATION; }
+    });
+
+    let err_stand = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)]).await.unwrap_err();
     assert_eq!(err_stand.code, "InsufficientStanding");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&CHAR_ID).unwrap().standings.insert(EMPTY_CUSTODIANS_CORP, 3.5);
-    });
-    let pass_stand = rpc(
-        &ctx,
-        &mut sess,
-        "LPStoreMgr",
-        "TakeOfferForCharacter",
-        &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)],
-    )
-    .await
-    .expect("standing-gated purchase should succeed once standing >= 2.0");
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&CHAR_ID).unwrap().standings.insert(EMPTY_CUSTODIANS_CORP, 3.5); });
+    let pass_stand = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(EMPTY_CUSTODIANS_CORP), PyRep::Integer(920_002), PyRep::Integer(1)]).await.expect("standing-gated purchase should succeed");
     assert_eq!(pass_stand.dict_get("offerID").and_then(|v| v.as_i64()), Some(920_002));
 
-    // Legacy 2-arg (offer_id, qty) with offer_id > 100_000 must not misclassify offer_id as corp_id
-    let pass_two_arg_high_oid = rpc(
-        &ctx,
-        &mut sess,
-        "LPStoreMgr",
-        "TakeOfferForCharacter",
-        &[PyRep::Integer(920_002), PyRep::Integer(2)],
-    )
-    .await
-    .expect("2-arg TakeOfferForCharacter with offer_id > 100_000 should succeed");
+    let pass_two_arg_high_oid = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(920_002), PyRep::Integer(2)]).await.expect("2-arg offer_id > 100_000 should succeed");
     assert_eq!(pass_two_arg_high_oid.dict_get("offerID").and_then(|v| v.as_i64()), Some(920_002));
     assert_eq!(pass_two_arg_high_oid.dict_get("quantity").and_then(|v| v.as_i64()), Some(2));
+
+    let pass_two_arg_corp_collision = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCharacter", &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(2)]).await.expect("2-arg offer_id == corp_id must parse as (offer_id, qty)");
+    assert_eq!(pass_two_arg_corp_collision.dict_get("corpID").and_then(|v| v.as_i64()), Some(EMPTY_CUSTODIANS_CORP));
+    assert_eq!(pass_two_arg_corp_collision.dict_get("offerID").and_then(|v| v.as_i64()), Some(CALDARI_NAVY_CORP));
+    assert_eq!(pass_two_arg_corp_collision.dict_get("quantity").and_then(|v| v.as_i64()), Some(2));
 }
 
 #[tokio::test]

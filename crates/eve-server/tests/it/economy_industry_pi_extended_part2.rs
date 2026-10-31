@@ -1079,7 +1079,16 @@ async fn test_wallet_evermarks_and_item_trader() {
         .expect("Tranquility Rifter emblem offer 17208 in Paragon catalog");
     assert_eq!(rifter_emblem_cost, 5_000);
     let em_for_redemption = em_earned.max(rifter_emblem_cost + 500);
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().loyalty_points.insert(paragon_corp_id, em_for_redemption); });
+    sess.station_id = Some(60_015_169);
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&char_id).unwrap();
+        ch.loyalty_points.insert(paragon_corp_id, em_for_redemption);
+        ch.station_id = Some(60_015_169);
+        let sid = ch.active_ship_id;
+        if let Some(sh) = s.items.get_mut(&sid) {
+            sh.location_id = 60_015_169;
+        }
+    });
 
     let take_emblem = ctx
         .dispatch_rpc(&mut sess, "LPStoreMgr", None, "TakeOfferForCharacter", &[PyRep::Integer(paragon_corp_id), PyRep::Integer(rifter_emblem_offer_id), PyRep::Integer(1)], &kw, None)

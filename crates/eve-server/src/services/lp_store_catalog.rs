@@ -214,27 +214,6 @@ pub fn get_corp_lp_offers_with_sde(
     esi_offers
 }
 
-/// Returns the combined LP store offer catalog across all corporations using the exact same
-/// resolution order as `get_corp_lp_offers_with_sde`.
-pub fn get_all_lp_offers_with_sde(
-    sde: &eve_sde::SdeRegistry,
-    snap: &eve_db::WorldStateSnapshot,
-) -> Vec<LPOffer> {
-    let mut corp_ids: Vec<i64> = esi_lp_catalog().keys().copied().collect();
-    corp_ids.push(PARAGON_CORP_ID);
-    for o in load_lp_store_offers(snap) {
-        corp_ids.push(o.corp_id);
-    }
-    corp_ids.extend(snap.loyalty_store_offers.keys().copied());
-    corp_ids.sort_unstable();
-    corp_ids.dedup();
-    let mut out = Vec::new();
-    for cid in corp_ids {
-        out.extend(get_corp_lp_offers_with_sde(sde, snap, cid));
-    }
-    out
-}
-
 /// Load dynamic LP store offer overrides for a corporation from `WorldStateSnapshot`.
 pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Vec<LPOffer> {
     let mut offers: Vec<_> = load_lp_store_offers(snap)

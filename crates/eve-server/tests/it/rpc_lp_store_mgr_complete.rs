@@ -628,7 +628,13 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
         ]
     );
 
-    // 6. Zero-ISK Tranquility Paragon EverMarks offer for corp (Rifter emblem offer 17208: 5,000 LP, 0 ISK)
+    // 6. Zero-ISK Tranquility Paragon EverMarks offer for corp at Jita VI - Paragon Fulfillment Center (60_015_169)
+    sess.station_id = Some(60_015_169);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(60_015_169);
+        }
+    });
     let res_paragon = rpc(
         &ctx,
         &mut sess,

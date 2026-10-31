@@ -227,7 +227,7 @@ fn handle_office_manager(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if station_id <= 0
-                    || (!ctx.sde.stations.contains_key(&station_id)
+                    || (station_id >= 1_000_000_000_000
                         && !snap.structures.contains_key(&station_id))
                 {
                     return Err(BridgeRpcError {
