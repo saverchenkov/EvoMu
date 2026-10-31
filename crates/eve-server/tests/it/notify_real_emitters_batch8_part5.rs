@@ -232,7 +232,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         "ReloadFSDPickle must scan real SDE localized entries"
     );
 
-    // UpdateLocalizationQAWrap requires GM/QA role and remains fail-closed (UnimplementedRPC)
+    // Non-GM caller rejected from UpdateLocalizationQAWrap(bool) with RoleRequired
     assert_eq!(
         rpc(
             &ctx,
@@ -246,6 +246,8 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         .code,
         "RoleRequired"
     );
+
+    // GM caller fails closed with UnimplementedRPC until QA-wrap state exists
     assert_eq!(
         rpc(
             &ctx,

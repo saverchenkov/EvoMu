@@ -493,7 +493,6 @@ async fn test_q4_achievements_sde_and_career_goals_closure() {
 
 #[tokio::test]
 async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
-    // parity: plan:Q-5, plan:Q-6
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 

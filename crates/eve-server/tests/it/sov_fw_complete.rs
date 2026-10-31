@@ -9,7 +9,7 @@ use eve_db::{CorporationRecord, IskCents, UpwellStructureRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::sov_services::{self, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
+use eve_server::services::sov_services::{self, TYPE_SOVEREIGNTY_HUB};
 use eve_server::services::station_structure::structure_lifecycle as life;
 use std::collections::{HashMap, HashSet};
 
@@ -438,10 +438,10 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
             skyhook_id,
             UpwellStructureRecord {
                 structure_id: skyhook_id,
-                type_id: TYPE_ORBITAL_SKYHOOK,
+                type_id: 81826,
                 owner_corp_id: corp_id,
                 solar_system_id: sys_id,
-                name: "Skyhook".into(),
+                name: "Sovereignty Hub".into(),
                 position: [100.0, 100.0, 100.0],
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
