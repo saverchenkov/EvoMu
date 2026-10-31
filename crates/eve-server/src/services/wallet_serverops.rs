@@ -1032,8 +1032,12 @@ pub fn handle(
         ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session, args)),
-        ("localizationServer", "UpdateLocalizationQAWrap") => Some(update_localization_qa_wrap(ctx, session, args)),
+        ("localizationServer", "GetAllTextChanges") => Some(
+            crate::services::notify_emitters_batch9_part2::handle_get_all_text_changes(ctx, session, args),
+        ),
+        ("localizationServer", "UpdateLocalizationQAWrap") => Some(
+            crate::services::notify_emitters_batch9_part2::handle_update_localization_qa_wrap(ctx, session, args),
+        ),
         ("localizationServer", "ReloadFSDPickle") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
@@ -1237,97 +1241,3 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
 }
 
 const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
-
-// GetAllTextChanges is a read-only query returning stored localization overrides.
-fn get_all_text_changes(
-    ctx: &ServerContext,
-    session: &SessionState,
-    _args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_auth(session)?;
-    ctx.db.with_snapshot(|snap| {
-        let overrides: BTreeMap<i64, String> = snap
-            .owner_notes
-            .get(&LOCALIZATION_NOTE_ID)
-            .and_then(|n| serde_json::from_str(&n.note).ok())
-            .unwrap_or_default();
-        if overrides.is_empty() {
-            Ok(PyRep::None)
-        } else {
-            Ok(PyRep::Dict(
-                overrides.into_iter().map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt))).collect(),
-            ))
-        }
-    })
-}
-
-fn update_localization_qa_wrap(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_auth(session)?;
-    let bool_arg = args.first().and_then(|a| {
-        a.as_bool().or_else(|| match a {
-            PyRep::Integer(0) => Some(false),
-            PyRep::Integer(1) => Some(true),
-            _ => None,
-        })
-    });
-    if let Some(enabled) = bool_arg {
-        let key_id = session.character_id.unwrap_or(session.session_id as i64);
-        ctx.db.with_mut_snapshot(|snap| {
-            let mut map: BTreeMap<i64, bool> = snap
-                .service_state_blobs
-                .get("localization:qa_wrap_sessions")
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            map.insert(key_id, enabled);
-            if let Ok(json) = serde_json::to_string(&map) {
-                snap.service_state_blobs
-                    .insert("localization:qa_wrap_sessions".into(), json);
-            }
-        });
-        return Ok(PyRep::Bool(enabled));
-    }
-    let qa_roles = eve_db::service_roles::ROLE_GMH
-        | eve_db::service_roles::ROLE_GML
-        | eve_machonet::service_roles::ROLE_PROGRAMMER
-        | eve_db::service_roles::ROLE_CONTENT;
-    if !session.has_gm_role() && (session.role & qa_roles) == 0 {
-        return Err(BridgeRpcError {
-            code: "RoleRequired".into(),
-            message: "localizationServer.UpdateLocalizationQAWrap requires GM or Content/Programmer role".into(),
-        });
-    }
-    let Some(PyRep::Dict(entries)) = args.first() else {
-        return Err(BridgeRpcError {
-            code: "InvalidArgument".into(),
-            message: "UpdateLocalizationQAWrap requires a boolean flag or dict of overrides".into(),
-        });
-    };
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let mut overrides: BTreeMap<i64, String> = snap
-            .owner_notes
-            .get(&LOCALIZATION_NOTE_ID)
-            .and_then(|n| serde_json::from_str(&n.note).ok())
-            .unwrap_or_default();
-        for (k, v) in entries {
-            if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
-                overrides.insert(msg_id, text.to_string());
-            }
-        }
-        snap.owner_notes.insert(
-            LOCALIZATION_NOTE_ID,
-            eve_db::OwnerNoteRecord {
-                note_id: LOCALIZATION_NOTE_ID,
-                character_id: 0,
-                item_id: 0,
-                label: "localization_overrides".into(),
-                note: serde_json::to_string(&overrides).unwrap_or_default(),
-                timestamp_unix: 0,
-            },
-        );
-        Ok(PyRep::Bool(true))
-    })
-}

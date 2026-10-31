@@ -624,34 +624,13 @@ pub fn handle_industry_facilities_bps(
                     .and_then(|a| a.as_i64())
                     .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
                     .unwrap_or(char_id);
-                let caller_corp_id = session
-                    .corporation_id
-                    .or_else(|| {
-                        ctx.db
-                            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-                    })
-                    .unwrap_or(0);
+                let caller_corp_id = session.corporation_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))).unwrap_or(0);
                 if owner_id != char_id && owner_id != caller_corp_id && !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError {
-                        code: "OwnerAccessDenied".into(),
-                        message: format!(
-                            "Character {char_id} is not authorized to query blueprints for owner {owner_id}"
-                        ),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") }));
                 }
-                let facility_filter = args
-                    .get(1)
-                    .and_then(|a| a.as_i64())
-                    .or_else(|| kwargs.get("facilityID").and_then(|v| v.as_i64()))
-                    .filter(|&id| id > 0);
+                let facility_filter = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("facilityID").and_then(|v| v.as_i64())).filter(|&id| id > 0);
                 let bps = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .filter(|it| {
-                            it.owner_id == owner_id
-                                && facility_filter.map(|fid| it.location_id == fid).unwrap_or(true)
-                                && ctx.sde.blueprints.contains_key(&it.type_id)
-                        })
+                    snap.items.values().filter(|it| it.owner_id == owner_id && facility_filter.map(|fid| it.location_id == fid).unwrap_or(true) && ctx.sde.blueprints.contains_key(&it.type_id))
                         .filter_map(|it| {
                             let bp = ctx.sde.blueprints.get(&it.type_id)?;
                             let me = it
@@ -878,7 +857,7 @@ pub fn handle_industry_facilities_bps(
             } else {
                 bp.product_type_id
             };
-            Some(Ok(PyRep::keyval([
+            let res = PyRep::keyval([
                 ("blueprintID", PyRep::Integer(bp_item_opt.as_ref().map(|i| i.item_id).unwrap_or(raw_id))),
                 ("blueprintTypeID", PyRep::Integer(bp.blueprint_type_id as i64)),
                 ("productTypeID", PyRep::Integer(prod_type_id as i64)),
@@ -893,14 +872,15 @@ pub fn handle_industry_facilities_bps(
                 ("materialEfficiency", PyRep::Integer(me_lvl)), ("timeEfficiency", PyRep::Integer(te_lvl)),
                 ("original", PyRep::Bool(!bp_item_opt.as_ref().map(|i| i.is_blueprint_copy).unwrap_or(false))),
                 ("runsRemaining", PyRep::Integer(bp_item_opt.as_ref().and_then(|i| i.blueprint_runs_remaining).unwrap_or(-1) as i64)),
-                ("materials", PyRep::List(mats_rep)),
+                ("materials", PyRep::List(mats_rep.clone())),
                 ("skills", PyRep::List(skills_rep)),
                 ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
                 ("baseJobCost", PyRep::Real(cost_meta.base_job_cost_isk)),
                 ("facilityTaxISK", PyRep::Real(cost_meta.facility_tax_isk)),
                 ("sccSurchargeISK", PyRep::Real(cost_meta.scc_surcharge_isk)),
                 ("totalJobCostISK", PyRep::Real(cost_meta.total_cost_isk)),
-            ])))
+            ]);
+            Some(Ok(res))
         }
 
         ("blueprintManager", "GetLimits") => {
@@ -1205,12 +1185,12 @@ pub fn handle_industry_facilities_bps(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if resolve_facility_modifiers_and_system(ctx, snap, facility_id).is_none() {
+                let Some((_, _, sys_id, ..)) = resolve_facility_modifiers_and_system(ctx, snap, facility_id) else {
                     return Err(BridgeRpcError {
                         code: "FacilityNotFound".into(),
                         message: format!("Industry facility {facility_id} not found"),
                     });
-                }
+                };
                 let owner_id = snap
                     .structures
                     .get(&facility_id)
@@ -1273,19 +1253,33 @@ pub fn handle_industry_facilities_bps(
                 }
                 save_facility_taxes(snap, facility_id, &taxes);
                 let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
-                Ok(PyRep::keyval([
-                    ("facilityID", PyRep::Integer(facility_id)),
-                    ("tax", PyRep::Real(mfg_tax)),
-                    ("1", PyRep::Real(taxes.get(&1).copied().unwrap_or(mfg_tax))),
-                    ("3", PyRep::Real(taxes.get(&3).copied().unwrap_or(mfg_tax))),
-                    ("4", PyRep::Real(taxes.get(&4).copied().unwrap_or(mfg_tax))),
-                    ("5", PyRep::Real(taxes.get(&5).copied().unwrap_or(mfg_tax))),
-                    ("8", PyRep::Real(taxes.get(&8).copied().unwrap_or(mfg_tax))),
-                    ("9", PyRep::Real(taxes.get(&9).copied().unwrap_or(mfg_tax))),
-                    ("manufacturing", PyRep::Real(taxes.get(&1).copied().unwrap_or(mfg_tax))),
-                ]))
+                Ok((
+                    sys_id,
+                    PyRep::keyval([
+                        ("facilityID", PyRep::Integer(facility_id)),
+                        ("tax", PyRep::Real(mfg_tax)),
+                        ("1", PyRep::Real(taxes.get(&1).copied().unwrap_or(mfg_tax))),
+                        ("3", PyRep::Real(taxes.get(&3).copied().unwrap_or(mfg_tax))),
+                        ("4", PyRep::Real(taxes.get(&4).copied().unwrap_or(mfg_tax))),
+                        ("5", PyRep::Real(taxes.get(&5).copied().unwrap_or(mfg_tax))),
+                        ("8", PyRep::Real(taxes.get(&8).copied().unwrap_or(mfg_tax))),
+                        ("9", PyRep::Real(taxes.get(&9).copied().unwrap_or(mfg_tax))),
+                        ("manufacturing", PyRep::Real(taxes.get(&1).copied().unwrap_or(mfg_tax))),
+                    ]),
+                ))
             });
-            Some(res)
+            match res {
+                Ok((sys_id, kv)) => {
+                    crate::services::notify_emitters_batch3::emit_facilities_updated(
+                        ctx,
+                        Some(sys_id),
+                        char_id,
+                        facility_id,
+                    );
+                    Some(Ok(kv))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
 
         ("facilityManager", "GetMaxActivityModifiers") => {

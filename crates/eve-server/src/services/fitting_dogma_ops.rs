@@ -213,7 +213,6 @@ pub(crate) async fn handle_dogma_ops(
                 "charid",
                 vec![PyRep::Integer(target_id), PyRep::String("locking".into())],
             );
-            let _ = ctx.notify_target_events(char_id, &[("add", target_id, "")]);
 
             if let Some(target_owner_id) = ctx
                 .db

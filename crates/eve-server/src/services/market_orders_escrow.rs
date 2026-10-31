@@ -168,6 +168,17 @@ pub fn handle_orders_escrow(
 
             let now_unix = ctx.now_unix();
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
+            let damaged_fitted_ships: std::collections::HashSet<i64> = ctx
+                .ship_fittings
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(_, fit)| {
+                    fit.rack_heat.iter().any(|&h| h > 0.0)
+                        || fit.modules.values().any(|m| m.damage_hp > 0.0)
+                })
+                .map(|(&ship_id, _)| ship_id)
+                .collect();
             // Execute the entire multi-sell batch atomically inside a single snapshot transaction
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let caller_corp_id = snap
@@ -238,6 +249,11 @@ pub fn handle_orders_escrow(
                     compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
+
+                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(snap, &damaged_fitted_ships, char_id, caller_corp_id, use_corp, &parsed_items);
+                if damaged_count > 0 {
+                    return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string() });
+                }
 
                 let mut order_ids = Vec::with_capacity(parsed_items.len());
                 let mut total_broker_fee = IskCents(0);
@@ -806,7 +822,13 @@ pub fn handle_orders_escrow(
                         ("totalSalesTaxISK", PyRep::Real(total_tax.to_wire_f64())),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "CantRepackageDamagedItem" {
+                        let count = e.message.parse::<i64>().unwrap_or(1).max(1);
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
+                    }
+                    Some(Err(e))
+                }
             }
         }
 
@@ -968,12 +990,7 @@ pub fn handle_orders_escrow(
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnOwnOrdersChanged",
-                        "charid",
-                        crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", false),
-                    );
+                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", false));
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
@@ -981,15 +998,9 @@ pub fn handle_orders_escrow(
         }
 
         "BuyMultipleItems" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(station_id) = session.station_id.or(session.structure_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDockedAtStation".into(),
-                    message: "Character must be docked at a station or structure to BuyMultipleItems".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
             };
             let raw_entries = match (args.first(), args.get(1)) {
                 (Some(PyRep::List(entries) | PyRep::Tuple(entries)), _) => entries.as_slice(),
@@ -1300,7 +1311,13 @@ pub fn handle_orders_escrow(
                         ])))
                     }
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "CantRepackageDamagedItem" {
+                        let count = e.message.parse::<i64>().unwrap_or(1).max(1);
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
+                    }
+                    Some(Err(e))
+                }
             }
         }
 

@@ -911,9 +911,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 st.unlocked_containers.retain(|&(a, b)| a != container_id && b != container_id);
                 st.container_passwords.insert(container_id, password.clone());
                 st.unlocked_containers.insert((container_id, char_id));
-                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                    timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: tid, quantity: 1,
-                });
+                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
             });
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
@@ -924,6 +922,8 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     });
                 }
             });
+            if method == "SetPassword" { crate::services::notify_emitters_batch9::emit_password_changed(ctx, char_id, container_id, tid); }
+            crate::services::notify_emitters_batch3::emit_invalidate_cache_for_locations(ctx, crate::router::NotificationTarget::Character(char_id), &[container_id]);
             Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordSet", PyRep::Bool(!password.is_empty()))])))
         }
 

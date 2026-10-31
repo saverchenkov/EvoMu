@@ -69,7 +69,10 @@ pub fn handle(
     if service != "invbroker"
         || !matches!(
             method,
-            "GetInventoryFromId" | "GetInventory" | "GetSelfInvItem" | "GetAvailableTurretSlots"
+            "GetInventoryFromId"
+                | "GetInventory"
+                | "GetSelfInvItem"
+                | "GetAvailableTurretSlots"
         )
     {
         return None;

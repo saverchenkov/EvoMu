@@ -1102,9 +1102,31 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     assert!((lock_ms - expected_sec * 1000.0).abs() < 1.0);
     let notes = sess.drain_notifications();
     assert!(notes.iter().any(|(n, _)| n == "OnTarget"));
+    assert!(
+        !notes.iter().any(|(n, _)| n == "OnMultiEvent"),
+        "OnMultiEvent OnTarget add must not be emitted before lock completes"
+    );
+
+    let locks_before = sys.get_target_locks(ship_id).await.expect("get_target_locks");
+    assert_eq!(locks_before.len(), 1);
+    assert!(!locks_before[0].locked);
+
+    // Step 4 seconds -> lock completes
+    for _ in 0..4 {
+        sys.step_manual(1.0).await.expect("sys.step_manual");
+    }
+    let locks_after = sys.get_target_locks(ship_id).await.expect("get_target_locks");
+    assert!(locks_after[0].locked);
+
     // `OnMultiEvent([(('OnTarget', 'add', targetID, reason), groupKey)])`: the V24 client's
     // `Godma.OnMultiEvent` derives `OnTargets`; the derived name is never sent by the server.
-    let multi = notes
+    let mut completed_notes: Vec<(String, Vec<PyRep>)> = ctx
+        .drain_notifications_for_char(90_000_001)
+        .into_iter()
+        .map(|n| (n.event, n.args))
+        .collect();
+    completed_notes.extend(sess.drain_notifications());
+    let multi = completed_notes
         .iter()
         .find(|(n, _)| n == "OnMultiEvent")
         .expect("OnMultiEvent carrying OnTarget");
@@ -1122,18 +1144,7 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
             PyRep::String(String::new()),
         ])
     );
-    assert!(notes.iter().all(|(n, _)| n != "OnTargets"));
-
-    let locks_before = sys.get_target_locks(ship_id).await.expect("get_target_locks");
-    assert_eq!(locks_before.len(), 1);
-    assert!(!locks_before[0].locked);
-
-    // Step 4 seconds -> lock completes
-    for _ in 0..4 {
-        sys.step_manual(1.0).await.expect("sys.step_manual");
-    }
-    let locks_after = sys.get_target_locks(ship_id).await.expect("get_target_locks");
-    assert!(locks_after[0].locked);
+    assert!(completed_notes.iter().all(|(n, _)| n != "OnTargets"));
 
     // 4. RemoveTarget & ClearTargets
     let _ = sess.drain_notifications();

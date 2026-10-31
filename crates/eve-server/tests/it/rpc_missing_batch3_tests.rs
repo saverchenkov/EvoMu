@@ -119,10 +119,10 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(proxy_traces.is_some(), "alert_proxy_traces must be persisted");
     assert!(proxy_traces.unwrap().contains("777888"));
 
-    // 3. rpc:localizationServer.UpdateLocalizationQAWrap
+    // 3. rpc:localizationServer.UpdateLocalizationQAWrap (fail-closed UnimplementedRPC)
     let mut overrides = Vec::new();
     overrides.push((PyRep::Integer(99991), PyRep::String("Overridden QA String".into())));
-    let qa_wrap_res = ctx
+    let qa_wrap_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "localizationServer",
@@ -133,12 +133,8 @@ async fn test_rpc_missing_batch3_part1() {
             None,
         )
         .await
-        .expect("localizationServer.UpdateLocalizationQAWrap");
-    assert_eq!(qa_wrap_res, PyRep::Bool(true));
-    let note_found = ctx.db.with_snapshot(|s| {
-        s.owner_notes.values().any(|n| n.note.contains("Overridden QA String"))
-    });
-    assert!(note_found, "Localization QA wrap overrides must persist in owner_notes");
+        .unwrap_err();
+    assert_eq!(qa_wrap_err.code, "UnimplementedRPC");
 
     // 4. rpc:localizationServer.ReloadFSDPickle
     let reload_res = ctx

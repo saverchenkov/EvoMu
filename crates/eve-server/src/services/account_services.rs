@@ -226,7 +226,7 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
     for cid in cids_to_catch_up {
         crate::services::character_skills::catch_up_skill_queue(ctx, cid);
     }
-    with_store(ctx, |snap, store| {
+    let (res_grade, res_exp, changed_grades, exp_changed) = with_store(ctx, |snap, store| {
         let admin_exp = store.subscription_expiry.get(&uid).copied();
         let quasar_exp = snap
             .owner_notes
@@ -244,19 +244,32 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         };
+        let exp_changed = exp.is_some() && exp != admin_exp;
+        if let Some(u) = exp {
+            store.subscription_expiry.insert(uid, u);
+        }
         let target = exp.map(|until| if until > now { 2u32 } else { 1u32 });
         let mut grade = None;
+        let mut changed = Vec::new();
         for ch in snap.characters.values_mut().filter(|c| c.user_id == uid) {
             if let Some(g) = target {
                 if ch.clone_grade != g {
                     ch.clone_grade = g;
                     ch.version += 1;
+                    changed.push((ch.character_id, g));
                 }
             }
             grade.get_or_insert(ch.clone_grade);
         }
-        (target.or(grade).unwrap_or(1), exp.unwrap_or(0))
-    })
+        (target.or(grade).unwrap_or(1), exp.unwrap_or(0), changed, exp_changed)
+    });
+    if exp_changed {
+        crate::services::notify_emitters_batch9::emit_subscription_time_update_server(ctx, uid, res_exp);
+    }
+    for (cid, g) in changed_grades {
+        crate::services::notify_emitters_batch9::emit_subscription_changed_server(ctx, cid, g);
+    }
+    (res_grade, res_exp)
 }
 
 /// GM tooling (`/setomega <userID> <unixExpiry>`): records the account's Omega expiry and applies it.
@@ -264,6 +277,7 @@ pub fn set_subscription_expiry(ctx: &ServerContext, uid: u64, until: u64) -> (u3
     with_store(ctx, |_, store| {
         store.subscription_expiry.insert(uid, until);
     });
+    crate::services::notify_emitters_batch9::emit_subscription_time_update_server(ctx, uid, until);
     sync_subscription(ctx, uid)
 }
 
@@ -614,6 +628,11 @@ fn handle_inner(
                     });
                 id
             });
+            crate::services::notify_emitters_batch9::emit_redeeming_queue_updated_for_user(
+                ctx,
+                uid,
+                session.character_id,
+            );
             Ok(Some(PyRep::keyval([
                 ("tokenID", PyRep::Integer(tok_id)),
                 ("massTokenID", PyRep::Integer(tok_id)),
@@ -708,7 +727,7 @@ fn handle_inner(
                     "ClaimRedeemTokens requires a target characterID",
                 ));
             };
-            let (claimed, created, loc) = try_with_store(ctx, |snap, store| {
+            let (claimed, created, loc, added_non_dim_qty) = try_with_store(ctx, |snap, store| {
                 let Some(ch) = snap.characters.get(&cid).cloned() else {
                     return Err(err(
                         "CharacterNotFound",
@@ -734,6 +753,7 @@ fn handle_inner(
                 let list = store.redeem_tokens.entry(uid).or_default();
                 let mut claimed_toks = Vec::new();
                 let mut created_items = Vec::new();
+                let mut added_non_dim_qty: i64 = 0;
                 let mut remaining = Vec::new();
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 for tok in list.drain(..) {
@@ -741,6 +761,9 @@ fn handle_inner(
                         if tok.expire_date_time.is_some_and(|exp| now_ft > exp) {
                             remaining.push(tok);
                             continue;
+                        }
+                        if super::implant_plugging::is_non_diminishing_injector(&ctx.sde, tok.type_id) {
+                            added_non_dim_qty += i64::from(tok.quantity.max(0));
                         }
                         snap.next_entity_id += 1;
                         let item_id = snap.next_entity_id;
@@ -780,8 +803,20 @@ fn handle_inner(
                         "No matching redeem tokens found",
                     ));
                 }
-                Ok((claimed_toks, created_items, dest_loc))
+                Ok((claimed_toks, created_items, dest_loc, added_non_dim_qty))
             })?;
+            crate::services::notify_emitters_batch9::emit_redeeming_queue_updated_for_user(
+                ctx,
+                uid,
+                Some(cid),
+            );
+            if added_non_dim_qty > 0 {
+                crate::services::notify_emitters_batch9::emit_non_diminishing_injections_added(
+                    ctx,
+                    cid,
+                    added_non_dim_qty,
+                );
+            }
             Ok(Some(PyRep::keyval([
                 ("claimedTokenIDs", PyRep::List(claimed)),
                 ("createdItemIDs", PyRep::List(created)),
@@ -811,6 +846,13 @@ fn handle_inner(
                 list.retain(|t| !token_ids.contains(&t.token_id));
                 before.saturating_sub(list.len())
             });
+            if removed > 0 {
+                crate::services::notify_emitters_batch9::emit_redeeming_queue_updated_for_user(
+                    ctx,
+                    uid,
+                    session.character_id,
+                );
+            }
             Ok(Some(PyRep::Bool(removed > 0)))
         }
         ("userSvc", "GetSessionPlaytimeMinutes") => {
@@ -942,6 +984,10 @@ fn handle_inner(
                     snap.service_state_blobs.insert(format!("mct_slots:{uid}"), json);
                 }
             });
+            crate::services::notify_emitters_batch9::emit_multiple_characters_training_updated(
+                ctx,
+                uid,
+            );
             Ok(Some(PyRep::keyval([
                 ("expiryDate", PyRep::Integer(expiry as i64)),
                 ("slotActivated", PyRep::Bool(true)),
@@ -957,6 +1003,12 @@ fn handle_inner(
                 }
                 store.mct_slots.get(&uid).cloned().unwrap_or_default()
             });
+            if method == "InvalidateMultiCharacterTrainingCache" {
+                crate::services::notify_emitters_batch9::emit_multiple_characters_training_updated(
+                    ctx,
+                    uid,
+                );
+            }
             let now_unix = ctx.now_unix();
             let list = slots.into_iter().map(|exp| PyRep::keyval([
                 ("expiryDate", PyRep::Integer(exp as i64)),

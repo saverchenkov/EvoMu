@@ -1027,18 +1027,33 @@ pub(crate) async fn handle_ships_and_services(
                             blueprint_runs_remaining: None,
                         },
                     );
-                    Ok((new_ship_id, 1_u64))
+                    Ok((new_ship_id, 1_u64, item.type_id))
                 } else {
                     let item_mut = snap.items.get_mut(&item_id).unwrap();
                     item_mut.singleton = true;
                     item_mut.version += 1;
-                    Ok((item_id, item_mut.version))
+                    Ok((item_id, item_mut.version, item_mut.type_id))
                 }
             });
             match res {
-                Ok((assembled_id, ver)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(assembled_id)), ("singleton", PyRep::Bool(true)), ("version", PyRep::Integer(ver as i64)),
-                ]))),
+                Ok((assembled_id, ver, ship_type_id)) => {
+                    if ctx
+                        .sde
+                        .types
+                        .get(&ship_type_id)
+                        .is_some_and(|t| matches!(t.group_id, 29 | 237))
+                    {
+                        crate::services::notify_emitters_batch9::emit_pod_or_corvette_assembly(
+                            ctx,
+                            char_id,
+                            assembled_id,
+                            ship_type_id,
+                        );
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("itemID", PyRep::Integer(assembled_id)), ("singleton", PyRep::Bool(true)), ("version", PyRep::Integer(ver as i64)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

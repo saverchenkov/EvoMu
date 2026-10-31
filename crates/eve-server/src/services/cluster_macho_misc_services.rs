@@ -701,7 +701,18 @@ pub async fn handle(
         // shipCasterLandingPadMgr, shipCasterLauncherMgr, starterShipcasterTravelMgr,
         // shipcasterTravelMgr: Interstellar and Starter Shipcaster Operations
         // --------------------------------------------------------------------
-        _ => crate::services::shipcaster_ops::handle(ctx, session, service, method, args, _kwargs).await,
+        _ => {
+            if let Some(res) = crate::services::notify_emitters_batch9_part2::handle_misc_batch9(
+                ctx,
+                session,
+                service,
+                method,
+                args,
+            ) {
+                return Some(res);
+            }
+            crate::services::shipcaster_ops::handle(ctx, session, service, method, args, _kwargs).await
+        }
     }
 }
 

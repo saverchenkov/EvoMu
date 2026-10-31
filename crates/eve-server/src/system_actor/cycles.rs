@@ -1246,6 +1246,18 @@ impl SystemHandle {
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
+        if let Some(lock_hook) = self.target_lock_completed_hook.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            for ev in &events {
+                if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
+                    if mode == "locked" {
+                        let char_id_opt = bp.ball_slim_meta.get(source_id).and_then(|m| m.char_id).or_else(|| {
+                            db_opt.as_ref().and_then(|db| db.with_snapshot(|s| s.characters.values().find(|c| c.active_ship_id == *source_id).map(|c| c.character_id)))
+                        });
+                        if let Some(cid) = char_id_opt.filter(|&c| c > 0) { lock_hook(cid, *target_id); }
+                    }
+                }
+            }
+        }
         let sup_dead = crate::services::pve_special_sites_abyssal::step_abyssal_hazards_and_pylons_in_ballpark(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
         );
@@ -1263,25 +1275,16 @@ impl SystemHandle {
         destroyed.extend(pg_dead.into_iter().map(|bid| (bid, None)));
         for &(target_ball_id, owner_char_id) in &destroyed {
             if let Some(db) = db_opt.as_ref() {
-                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(
-                    &mut bp,
-                    db,
-                    self.solar_system_id,
-                    target_ball_id,
-                );
+                crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
             }
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let _ = handle.spawn(fut);
-                }
+                if let Ok(handle) = tokio::runtime::Handle::try_current() { let _ = handle.spawn(fut); }
             }
         }
         let step_hook_guard = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(hook) = step_hook_guard {
             let fut = hook(self.solar_system_id, dt, destroyed);
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let _ = handle.spawn(fut);
-            }
+            if let Ok(handle) = tokio::runtime::Handle::try_current() { let _ = handle.spawn(fut); }
         }
         if let Some(db) = db_opt {
             crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(

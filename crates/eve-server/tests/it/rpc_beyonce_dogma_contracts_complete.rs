@@ -483,8 +483,9 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
     let qa_err = ctx.dispatch_rpc(&mut s1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])], &HashMap::new(), None).await.unwrap_err();
     assert_eq!(qa_err.code, "RoleRequired");
     s1.role |= service_roles::ROLE_GMH;
-    rpc(&ctx, &mut s1, "localizationServer", "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])]).await;
-    assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))]));
+    let qa_gm_err = ctx.dispatch_rpc(&mut s1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(qa_gm_err.code, "UnimplementedRPC");
+    assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);
     assert!(rpc(&ctx, &mut s1, "pingService", "Ping", &[]).await.as_i64().unwrap() > 0);
     assert_eq!(rpc(&ctx, &mut s1, "populationCap", "GetCharacterLoadSlot", &[PyRep::Integer(C1)]).await, PyRep::Dict(vec![(PyRep::Integer(JITA as i64), PyRep::None)]));
     assert!(rpc(&ctx, &mut s1, "skillMgr2", "GetMySkillHandler", &[]).await.as_i64().unwrap() > 0);
