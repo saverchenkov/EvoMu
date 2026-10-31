@@ -241,6 +241,46 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     let pocket_sys_2 = sess.solar_system_id.expect("in second abyssal pocket");
     let _ = drain_all(&ctx, &mut sess, PILOT_A);
 
+    // 2a. OnDeathzoneStateUpdate via live cluster tick in Abyssal pocket (32000001)
+    // Negative: inside ABYSSAL_ROOM_BOUNDARY_RADIUS_M (50km <= 75km from grid_offset) -> no emission
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnDeathzoneStateUpdate"));
+
+    // Positive: move outside 75km room boundary relative to grid_offset (80km) -> emits danger trackingData
+    let pocket_center = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+        reg.abyssal_pockets
+            .get(&PILOT_A)
+            .map(|p| DVec3::from_array(p.grid_offset))
+            .unwrap()
+    });
+    let abyss_sys_2 = ctx.systems.get_or_spawn(pocket_sys_2);
+    let _ = abyss_sys_2
+        .set_ball_position(700_001, pocket_center + DVec3::new(80_000.0, 0.0, 0.0))
+        .await;
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let dz_enter = drain_all(&ctx, &mut sess, PILOT_A);
+    let dz_args = find_notif(&dz_enter, "OnDeathzoneStateUpdate");
+    assert_eq!(dz_args.len(), 3);
+    assert_eq!(dz_args[0], PyRep::Integer(i64::from(pocket_sys_2)));
+    assert_eq!(dz_args[1], PyRep::Integer(700_001));
+    assert_eq!(dz_args[2].dict_get("dangerLevel").and_then(|v| v.as_f64()), Some(1.0));
+
+    // Move back inside 75km room boundary (10km from grid_offset) -> emits trackingData = None
+    let _ = abyss_sys_2
+        .set_ball_position(700_001, pocket_center + DVec3::new(10_000.0, 0.0, 0.0))
+        .await;
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let dz_exit = drain_all(&ctx, &mut sess, PILOT_A);
+    let dz_exit_args = find_notif(&dz_exit, "OnDeathzoneStateUpdate");
+    assert_eq!(
+        dz_exit_args,
+        &[
+            PyRep::Integer(i64::from(pocket_sys_2)),
+            PyRep::Integer(700_001),
+            PyRep::None,
+        ]
+    );
+
     // Negative: advancing 10s (well before 20-min expiry) does NOT emit OnSpaceWhiteOutStart
     ctx.advance_secs(10);
     assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnSpaceWhiteOutStart"));
@@ -251,63 +291,22 @@ async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     let wo_args = find_notif(&collapse_notifs, "OnSpaceWhiteOutStart");
     assert_eq!(wo_args, &[PyRep::Integer(i64::from(pocket_sys_2))]);
 
-    // Restore a clean ship for Pilot A after Abyssal collapse destruction
+    // 3. Void Space jump, relog, and end gate activation (restore clean ship in k-space 30000021)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
-            ch.solar_system_id = 30_100_000;
+            ch.solar_system_id = 30_000_021;
             ch.station_id = None;
             ch.structure_id = None;
             ch.active_ship_id = 700_002;
         }
         snap.items.insert(
             700_002,
-            make_item(700_002, 622, PILOT_A, 30_100_000, InventoryFlag::None, 1, true),
+            make_item(700_002, 622, PILOT_A, 30_000_021, InventoryFlag::None, 1, true),
         );
     });
-    sess.solar_system_id = Some(30_100_000);
+    sess.solar_system_id = Some(30_000_021);
     sess.station_id = None;
     sess.ship_id = Some(700_002);
-    let zarzakh = ctx.systems.get_or_spawn(30_100_000);
-    let _ = zarzakh
-        .spawn_ball_with_combat(make_ball(700_002, 622, DVec3::new(1_000.0, 0.0, 0.0)), Default::default())
-        .await;
-    let _ = drain_all(&ctx, &mut sess, PILOT_A);
-
-    // 3. OnDeathzoneStateUpdate via live cluster tick in Zarzakh (30100000)
-    // Negative: inside Fulcrum safe zone (1km < 50km) -> no deathzone notification
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert!(!has_notif(&drain_all(&ctx, &mut sess, PILOT_A), "OnDeathzoneStateUpdate"));
-
-    // Positive: move outside Zarzakh 50km safe zone (200km) -> emits danger trackingData
-    let _ = zarzakh.set_ball_position(700_002, DVec3::new(200_000.0, 0.0, 0.0)).await;
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let dz_enter = drain_all(&ctx, &mut sess, PILOT_A);
-    let dz_args = find_notif(&dz_enter, "OnDeathzoneStateUpdate");
-    assert_eq!(dz_args.len(), 3);
-    assert_eq!(dz_args[0], PyRep::Integer(30_100_000));
-    assert_eq!(dz_args[1], PyRep::Integer(700_002));
-    assert_eq!(dz_args[2].dict_get("dangerLevel").and_then(|v| v.as_f64()), Some(1.0));
-
-    // Move back inside safe zone -> emits trackingData = None
-    let _ = zarzakh.set_ball_position(700_002, DVec3::new(1_000.0, 0.0, 0.0)).await;
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let dz_exit = drain_all(&ctx, &mut sess, PILOT_A);
-    let dz_exit_args = find_notif(&dz_exit, "OnDeathzoneStateUpdate");
-    assert_eq!(
-        dz_exit_args,
-        &[PyRep::Integer(30_100_000), PyRep::Integer(700_002), PyRep::None]
-    );
-
-    // 4. Void Space jump, relog, and end gate activation (move pilot to k-space 30000021 first)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
-            ch.solar_system_id = 30_000_021;
-        }
-        if let Some(sh) = snap.items.get_mut(&700_002) {
-            sh.location_id = 30_000_021;
-        }
-    });
-    sess.solar_system_id = Some(30_000_021);
     let _ = ctx
         .systems
         .get_or_spawn(30_000_021)

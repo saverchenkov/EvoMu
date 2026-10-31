@@ -796,9 +796,7 @@ pub fn emit_space_white_out_start(ctx: &ServerContext, char_id: i64, solar_syste
 pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
     const BLOB_KEY: &str = "deathzone_active_ships";
     let boundary_r = crate::services::pve_abyssal_hazards::ABYSSAL_ROOM_BOUNDARY_RADIUS_M;
-    let is_abyss_or_zarzakh =
-        (32_000_000..=32_999_999).contains(&sys_id) || sys_id == 30_100_000;
-    if !is_abyss_or_zarzakh {
+    if !(32_000_000..=32_999_999).contains(&sys_id) {
         return;
     }
 
@@ -812,7 +810,7 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
         .map(|(&id, b)| (id, b.position))
         .collect();
 
-    let center_by_char: HashMap<i64, DVec3> = if (32_000_000..=32_999_999).contains(&sys_id) {
+    let center_by_char: HashMap<i64, DVec3> =
         crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             reg.abyssal_pockets
                 .values()
@@ -825,10 +823,7 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
                     )
                 })
                 .collect()
-        })
-    } else {
-        HashMap::new()
-    };
+        });
 
     let now_ft = ctx.now_blueos_filetime_ticks();
     let transitions: Vec<(i64, i64, bool)> = ctx.db.with_mut_snapshot(|snap| {

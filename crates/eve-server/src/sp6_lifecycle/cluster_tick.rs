@@ -1306,8 +1306,6 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {
             crate::services::pve_special_sites_abyssal::prune_out_of_bounds_abyssal_probes(ctx, sys_id);
-        }
-        if (32_000_000..=32_999_999).contains(&sys_id) || sys_id == 30_100_000 {
             crate::services::notify_emitters_batch10::sync_deathzone_state_notifications(ctx, sys_id);
         }
         let _ = crate::services::insurgency_services::step_system_insurgency_tick(ctx, sys_id).await;
