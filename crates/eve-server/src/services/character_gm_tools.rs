@@ -1276,15 +1276,18 @@ pub async fn handle_gm_qa_rpcs(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("slash", "SlashCmd") {
-        let (_, cid) = ServerContext::require_character(session).ok()?;
+        let (_, cid) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
         let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
         let req_role = crate::services::auth_cache::required_slash_role(cmd);
         if (session.role & req_role) == 0 {
-            return None;
-        }
-        if let Some(pve_res) = crate::services::pve_special_sites::handle_pve_slash_cmd(ctx, session, cmd).await {
-            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, pve_res.is_ok());
-            return Some(pve_res);
+            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, false);
+            return Some(Err(BridgeRpcError {
+                code: "InsufficientRole".into(),
+                message: format!("slash.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
+            }));
         }
         if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
             crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
@@ -1307,11 +1310,7 @@ pub async fn handle_gm_qa_rpcs(
                     message: format!("publicQaToolsServer.SlashCmd '{cmd}' requires role mask 0x{req_role:x}"),
                 }));
             }
-            if let Some(pve_res) = crate::services::pve_special_sites::handle_pve_slash_cmd(ctx, session, cmd).await {
-            crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, pve_res.is_ok());
-            return Some(pve_res);
-        }
-        if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
+            if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
                 crate::services::auth_cache::record_gm_audit(ctx, cid, cmd, ext_res.is_ok());
                 return Some(ext_res);
             }

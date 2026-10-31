@@ -1144,10 +1144,6 @@ pub async fn handle_pve_special_sites(
             let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
             Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
         }
-        ("slash", "SlashCmd") => {
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-            handle_pve_slash_cmd(ctx, session, cmd).await
-        }
 
         // parity: feat:pve.metaliminal-storms, rpc:map.GetAllRoamingWeatherSystems
         ("map", "GetAllRoamingWeatherSystems") => {
@@ -1157,142 +1153,91 @@ pub async fn handle_pve_special_sites(
         }
 
         // parity: feat:pve.interference
-        ("solarsystemInterferenceMgr", "GetLocalInterferenceState")
-        | ("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand")
-        | ("solarsystemInterferenceMgr", "GetAllInterferenceBands") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let now_sec = ctx.now_unix();
-            let (level, band, changed_from) = with_pve_special_reg(ctx, |reg| {
-                let entry = reg.interference_by_system.entry(sys_id).or_insert(SystemInterferenceRecord {
-                    solar_system_id: sys_id, interference_level: 0.0, band: 1, last_updated_sec: now_sec,
-                });
-                let mut changed = None;
-                if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
-                    let elapsed = now_sec - entry.last_updated_sec;
-                    let decay = (elapsed as f64) / INTERFERENCE_DECAY_WINDOW_SECS;
-                    entry.interference_level = (entry.interference_level - decay).max(0.0);
-                    let old_b = entry.band;
-                    entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
-                    entry.last_updated_sec = now_sec;
-                    if entry.band != old_b {
-                        changed = Some(old_b);
-                    }
-                }
-                (entry.interference_level, entry.band, changed)
-            });
-
-            if changed_from.is_some() {
-                session.push_notification(
-                    "OnSolarsystemInterferenceChanged",
-                    vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
-                );
-                ctx.notify(
-                    crate::router::NotificationTarget::SolarSystem(sys_id),
-                    "OnSolarsystemInterferenceChanged",
-                    "solarsystemid",
-                    vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
-                );
-            }
-
-            let band_label = match band { 1 => "Low", 2 => "Medium", _ => "High" };
-            let crab_remaining = (((1.0 + 1e-6 - level).max(0.0)) / crate::services::pve_crab_beacons::CRAB_INTERFERENCE_DELTA).floor() as i64;
-            let local_state = PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("interferenceLevel", PyRep::Real(level)),
-                ("interferencePct", PyRep::Real(level * 100.0)),
-                ("interferenceBand", PyRep::Integer(band as i64)),
-                ("bandLabel", PyRep::String(band_label.into())),
-                ("crabActivationsRemaining", PyRep::Integer(crab_remaining)),
-            ]);
-            if method == "GetAllInterferenceBands" {
-                let entries: Vec<(PyRep, PyRep)> = with_pve_special_reg(ctx, |reg| {
-                    let mut out: Vec<(SolarSystemId, u8)> = reg
-                        .interference_by_system
-                        .iter()
-                        .map(|(&sid, rec)| (sid, rec.band))
-                        .collect();
-                    if !reg.interference_by_system.contains_key(&sys_id) {
-                        out.push((sys_id, band));
-                    }
-                    out.sort_unstable_by_key(|(sid, _)| *sid);
-                    out.into_iter()
-                        .map(|(sid, b)| (PyRep::Integer(sid as i64), PyRep::Integer(b as i64)))
-                        .collect()
-                });
-                return Some(Ok(PyRep::Dict(entries)));
-            }
-            Some(Ok(local_state))
+        ("solarsystemInterferenceMgr", "GetLocalInterferenceState") => {
+            handle_solarsystem_interference_rpc(ctx, session, "GetLocalInterferenceState", args)
+        }
+        ("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand") => {
+            handle_solarsystem_interference_rpc(ctx, session, "GetSolarSystemInterferenceBand", args)
+        }
+        ("solarsystemInterferenceMgr", "GetAllInterferenceBands") => {
+            handle_solarsystem_interference_rpc(ctx, session, "GetAllInterferenceBands", args)
         }
 
         _ => None,
     }
 }
 
-pub async fn handle_pve_slash_cmd(
+fn handle_solarsystem_interference_rpc(
     ctx: &ServerContext,
     session: &mut SessionState,
-    cmd: &str,
+    method: &str,
+    args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    match parts.first().copied() {
-        Some("/iceheist") => {
-            let sub = parts.get(1).copied().unwrap_or("");
-            let sys_id: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            match sub {
-                "spawn" => Some(crate::services::ice_heist_ops::dispatch_ice_heist_rpc(ctx, session, "SpawnIceHeistInstance", &[PyRep::Integer(sys_id)]).await),
-                "escort" => {
-                    let is_pirate = parts.get(3).copied() == Some("pirate");
-                    Some(crate::services::ice_heist_ops::dispatch_ice_heist_rpc(ctx, session, "EscortIceHeistTanker", &[PyRep::Integer(sys_id), PyRep::Bool(is_pirate)]).await)
-                }
-                _ => None,
+    if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+    let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+
+    let now_sec = ctx.now_unix();
+    let (level, band, changed_from) = with_pve_special_reg(ctx, |reg| {
+        let entry = reg.interference_by_system.entry(sys_id).or_insert(SystemInterferenceRecord {
+            solar_system_id: sys_id, interference_level: 0.0, band: 1, last_updated_sec: now_sec,
+        });
+        let mut changed = None;
+        if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
+            let elapsed = now_sec - entry.last_updated_sec;
+            let decay = (elapsed as f64) / INTERFERENCE_DECAY_WINDOW_SECS;
+            entry.interference_level = (entry.interference_level - decay).max(0.0);
+            let old_b = entry.band;
+            entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
+            entry.last_updated_sec = now_sec;
+            if entry.band != old_b {
+                changed = Some(old_b);
             }
         }
-        Some("/fob") => {
-            let sub = parts.get(1).copied().unwrap_or("");
-            let id1: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let parse_csv = |s: &str| -> Vec<PyRep> {
-                s.split(',').filter_map(|x| x.parse::<i64>().ok()).map(PyRep::Integer).collect()
-            };
-            match sub {
-                "spawn" => {
-                    let fid: i64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(500_010);
-                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "SpawnPirateFob", &[PyRep::Integer(id1), PyRep::Integer(fid)]).await)
-                }
-                "defense" => {
-                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
-                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "TriggerFobDefenseResponse", &[PyRep::Integer(id1), PyRep::List(list)]).await)
-                }
-                "destroy" => {
-                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
-                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "DestroyPirateFob", &[PyRep::Integer(id1), PyRep::List(list)]).await)
-                }
-                _ => None,
-            }
-        }
-        Some("/observatory") => {
-            let sub = parts.get(1).copied().unwrap_or("");
-            let id1: i64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let parse_csv = |s: &str| -> Vec<PyRep> {
-                s.split(',').filter_map(|x| x.parse::<i64>().ok()).map(PyRep::Integer).collect()
-            };
-            match sub {
-                "spawn" => Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "SpawnObservatoryFlashpoint", &[PyRep::Integer(id1)]).await),
-                "enter" => {
-                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
-                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "EnterObservatoryFlashpoint", &[PyRep::Integer(id1), PyRep::List(list)]).await)
-                }
-                "complete" => {
-                    let list = parts.get(3).map(|s| parse_csv(s)).unwrap_or_default();
-                    Some(crate::services::pve_fob_observatory::dispatch_fob_observatory_rpc(ctx, session, "CompleteObservatoryFlashpoint", &[PyRep::Integer(id1), PyRep::List(list)]).await)
-                }
-                _ => None,
-            }
-        }
-        _ => None,
+        (entry.interference_level, entry.band, changed)
+    });
+
+    if changed_from.is_some() {
+        session.push_notification(
+            "OnSolarsystemInterferenceChanged",
+            vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::SolarSystem(sys_id),
+            "OnSolarsystemInterferenceChanged",
+            "solarsystemid",
+            vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
+        );
     }
+
+    let band_label = match band { 1 => "Low", 2 => "Medium", _ => "High" };
+    let crab_remaining = (((1.0 + 1e-6 - level).max(0.0)) / crate::services::pve_crab_beacons::CRAB_INTERFERENCE_DELTA).floor() as i64;
+    let local_state = PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(sys_id as i64)),
+        ("interferenceLevel", PyRep::Real(level)),
+        ("interferencePct", PyRep::Real(level * 100.0)),
+        ("interferenceBand", PyRep::Integer(band as i64)),
+        ("bandLabel", PyRep::String(band_label.into())),
+        ("crabActivationsRemaining", PyRep::Integer(crab_remaining)),
+    ]);
+    if method == "GetAllInterferenceBands" {
+        let entries: Vec<(PyRep, PyRep)> = with_pve_special_reg(ctx, |reg| {
+            let mut out: Vec<(SolarSystemId, u8)> = reg
+                .interference_by_system
+                .iter()
+                .map(|(&sid, rec)| (sid, rec.band))
+                .collect();
+            if !reg.interference_by_system.contains_key(&sys_id) {
+                out.push((sys_id, band));
+            }
+            out.sort_unstable_by_key(|(sid, _)| *sid);
+            out.into_iter()
+                .map(|(sid, b)| (PyRep::Integer(sid as i64), PyRep::Integer(b as i64)))
+                .collect()
+        });
+        return Some(Ok(PyRep::Dict(entries)));
+    }
+    Some(Ok(local_state))
 }

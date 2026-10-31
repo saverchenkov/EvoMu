@@ -840,45 +840,11 @@ pub async fn handle_extended(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("agentMgr", "agentID")
-        | ("agentMgr", "corporationID")
-        | ("agentMgr", "factionID")
-        | ("agentMgr", "solarsystemID")
-        | ("agentMgr", "stationID") => {
-            let agent_id = match args.first().and_then(|a| a.as_i64()).or_else(|| {
-                ctx.bound_objects.read().ok().and_then(|map| {
-                    map.values()
-                        .filter(|b| b.session_id == session.session_id && b.service == "agentMgr" && b.object_id > 0)
-                        .max_by_key(|b| b.bound_id)
-                        .map(|b| b.object_id)
-                })
-            }) {
-                Some(id) => id,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "AgentNotFound".into(),
-                        message: "agentMgr attribute lookup requires agentID or bound agent moniker".into(),
-                    }));
-                }
-            };
-            let Some(agent) = ctx.sde.agents.get(&agent_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "UnknownAgent".into(),
-                    message: format!("Agent {agent_id} does not exist in SDE"),
-                }));
-            };
-            let corp_id = agent.corporation_id;
-            let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).unwrap_or(0);
-            let val = match method {
-                "agentID" => PyRep::Integer(agent.agent_id),
-                "corporationID" => PyRep::Integer(corp_id),
-                "factionID" => PyRep::Integer(faction_id as i64),
-                "solarsystemID" => agent.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None),
-                "stationID" => agent.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                _ => PyRep::None,
-            };
-            Some(Ok(val))
-        }
+        ("agentMgr", "agentID") => handle_agent_mgr_attr(ctx, session, service, "agentID", args),
+        ("agentMgr", "corporationID") => handle_agent_mgr_attr(ctx, session, service, "corporationID", args),
+        ("agentMgr", "factionID") => handle_agent_mgr_attr(ctx, session, service, "factionID", args),
+        ("agentMgr", "solarsystemID") => handle_agent_mgr_attr(ctx, session, service, "solarsystemID", args),
+        ("agentMgr", "stationID") => handle_agent_mgr_attr(ctx, session, service, "stationID", args),
 
         ("agentMgr", "GetCompletedCareerAgentIDs") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1260,4 +1226,46 @@ pub async fn handle_extended(
 
         _ => None,
     }
+}
+
+fn handle_agent_mgr_attr(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let agent_id = match args.first().and_then(|a| a.as_i64()).or_else(|| {
+        ctx.bound_objects.read().ok().and_then(|map| {
+            map.values()
+                .filter(|b| b.session_id == session.session_id && b.service == service && b.object_id > 0)
+                .max_by_key(|b| b.bound_id)
+                .map(|b| b.object_id)
+        })
+    }) {
+        Some(id) => id,
+        None => {
+            return Some(Err(BridgeRpcError {
+                code: "AgentNotFound".into(),
+                message: "agentMgr attribute lookup requires agentID or bound agent moniker".into(),
+            }));
+        }
+    };
+    let Some(agent) = ctx.sde.agents.get(&agent_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "UnknownAgent".into(),
+            message: format!("Agent {agent_id} does not exist in SDE"),
+        }));
+    };
+    let corp_id = agent.corporation_id;
+    let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).unwrap_or(0);
+    let val = match method {
+        "agentID" => PyRep::Integer(agent.agent_id),
+        "corporationID" => PyRep::Integer(corp_id),
+        "factionID" => PyRep::Integer(faction_id as i64),
+        "solarsystemID" => agent.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None),
+        "stationID" => agent.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+        _ => PyRep::None,
+    };
+    Some(Ok(val))
 }

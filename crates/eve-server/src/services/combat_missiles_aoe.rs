@@ -95,7 +95,7 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
 
 /// Routes a ball destroyed by missile, smartbomb, or bomb to the capsuleer death pipeline,
 /// the NPC destruction & bounty pipeline, or non-ship space object cleanup.
-pub(crate) async fn handle_destroyed_ball_from_missile_or_aoe(
+pub async fn handle_destroyed_ball_from_missile_or_aoe(
     ctx: &ServerContext,
     sys_id: u32,
     attacker_char_id: i64,
@@ -127,11 +127,12 @@ pub(crate) async fn handle_destroyed_ball_from_missile_or_aoe(
             .get(&ball_type_id)
             .is_some_and(|t| t.category_id == 11)
     {
-        let _ = super::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(
+        let _ = super::combat_npc_ai::destroy_specialized_npc_with_hint(
             ctx,
             sys_id,
             ball_id,
             attacker_char_id,
+            Some((ball_type_id, ball_pos)),
         )
         .await;
     } else {

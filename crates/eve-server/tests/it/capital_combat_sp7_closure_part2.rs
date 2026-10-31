@@ -1,38 +1,26 @@
-//! Integration tests for CrimeWatch, NPC Navy/Hauler, ServerOps Downtime, and OF-19:
-//! - `feat:crimewatch.sec-status-loss`
-//! - `feat:crimewatch.sec-status-transactions`
-//! - `feat:crimewatch.kill-rights-gain`
-//! - `feat:crimewatch.kill-rights-sell`
-//! - `feat:crimewatch.sec-status-gain-caps`
-//! - `feat:crimewatch.sec-tag-tier-bands`
-//! - `feat:npc.navy-npc`
-//! - `feat:npc.npc-hauler`
-//! - `feat:serverops.downtime`
-//! - `feat:serverops.daily-jobs`
+//! Integration tests for CrimeWatch, NPC Navy/Hauler, ServerOps Downtime, and OF-19.
 
 use crate::common::*;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
-use eve_server::combat::npc_ai::compute_sec_status_gain;
 use eve_server::living_world::NpcArchetype;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{
-    dispatch_combat_rpc, evaluate_faction_police_response,
-};
+use eve_server::services::combat_crimewatch::{dispatch_combat_rpc, evaluate_faction_police_response};
 use eve_server::sp6_lifecycle::tick_background_cluster;
 use glam::DVec3;
 use std::collections::HashMap;
 
 fn make_sess(char_id: i64, ship_id: i64, sys_id: u32, station_id: Option<i64>) -> SessionState {
-    let mut sess = SessionState::default();
-    sess.user_id = Some(char_id as u64);
-    sess.character_id = Some(char_id);
-    sess.ship_id = Some(ship_id);
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = station_id;
-    sess
+    SessionState {
+        user_id: Some(char_id as u64),
+        character_id: Some(char_id),
+        ship_id: Some(ship_id),
+        solar_system_id: Some(sys_id),
+        station_id,
+        ..Default::default()
+    }
 }
 
 async fn seed_ship_in_space(
@@ -387,11 +375,58 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
         "Clone soldier tags must raise security status from -0.3 and cap at 0.0 (got {sec_post_tag})"
     );
 
-    // 3. NPC kill security status gain stops at +5.0
-    let gain_at_cap = compute_sec_status_gain(5.0, 1_000_000.0);
-    assert_eq!(gain_at_cap, 0.0, "NPC kill security status gain must stop at +5.0");
-    let gain_below_cap = compute_sec_status_gain(0.0, 1_000_000.0);
-    assert!(gain_below_cap > 0.0, "NPC kill security status gain must be positive below +5.0");
+    // 3. Real belt, mission, and incursion NPC kills through live combat/death pipeline cap at +5.0
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.security_status = 4.9999;
+        }
+    });
+    for (idx, archetype) in ["Belt", "Mission", "Incursion"].iter().enumerate() {
+        let npc_pos = DVec3::new(10_000.0 + (idx as f64) * 2_000.0, 0.0, 0.0);
+        let npc_id = eve_server::services::combat_crimewatch::spawn_specialized_npc_entity(
+            &ctx,
+            lowsec_sys,
+            16_934, // Corpus Prophet (431,250 ISK SDE bounty)
+            archetype,
+            1,
+            npc_pos,
+        )
+        .await;
+        eve_server::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+            &ctx,
+            lowsec_sys,
+            char_id,
+            npc_id,
+            16_934,
+            npc_pos,
+            ctx.now_unix(),
+        )
+        .await;
+    }
+    let sec_at_cap = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+    assert_eq!(sec_at_cap, 5.0, "Belt, mission, and incursion NPC kills must raise to +5.0 and stop at +5.0");
+
+    // 4. Verify live server CrimeWatch security status clamping at -10.0 on illegal capsule kill
+    let pod_victim_char = 90_000_002i64;
+    let pod_ship_id = 105_000_199i64;
+    seed_ship_in_space(&ctx, pod_victim_char, pod_ship_id, 670, lowsec_sys, DVec3::new(3_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) {
+            ch.security_status = -9.5;
+        }
+    });
+    eve_server::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+        &ctx,
+        lowsec_sys,
+        char_id,
+        pod_ship_id,
+        670,
+        DVec3::new(3_000.0, 0.0, 0.0),
+        ctx.now_unix(),
+    )
+    .await;
+    let sec_clamped_low = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+    assert_eq!(sec_clamped_low, -10.0, "Illegal capsule kill below -8.0 must clamp character security_status at -10.0");
 }
 
 #[tokio::test]
@@ -405,12 +440,13 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
     ]);
 
     let ctx = ServerContext::new();
-    pin_clock(&ctx);
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_700_045_970))); // 10:59:30 UTC
     let char_id = 90_000_001i64;
     let ship_id = 105_000_201i64;
     let highsec_sys = 30_000_142u32;
 
     seed_ship_in_space(&ctx, char_id, ship_id, 587, highsec_sys, DVec3::ZERO).await;
+    tick_background_cluster(&ctx).await; // Seed pre-downtime day index at 10:59:30 UTC
 
     // 1. Faction Police / Navy NPC response against outlaw (-5.5 sec status) in high-sec
     ctx.db.with_mut_snapshot(|s| {
@@ -436,29 +472,39 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
         .count();
     assert!(hauler_count >= 1, "Active HaulerConvoy must be tracked in living_world (got {hauler_count})");
 
-    // 3. ServerOps Downtime & Daily Jobs at 11:00 UTC: verify expired NPC wreck cleanup
-    let expired_wreck_id = 999_888_777i64;
+    // 3. ServerOps Downtime & Daily Jobs across 11:00 UTC: real NPC wreck cleanup & accepted mission reset
+    let npc_id = 1_880_000_099i64;
+    let npc_pos = DVec3::new(25_000.0, 0.0, 0.0);
+    let sys = ctx.systems.get_or_spawn(highsec_sys);
+    let npc_ball = eve_server::services::pve_incursion_sites::make_site_npc_ball(npc_id, 24_000, npc_pos);
+    let _ = sys.spawn_ball_with_combat(npc_ball, ctx.build_type_combat_state(24_000)).await;
+    eve_server::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+        &ctx, highsec_sys, char_id, npc_id, 24_000, npc_pos, ctx.now_unix(),
+    )
+    .await;
+    let expired_wreck_id = eve_server::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+        st.space_object_meta.iter().find(|(_, m)| m.is_npc_wreck).map(|(&id, _)| id)
+    })
+    .expect("Death pipeline must spawn an NPC wreck with is_npc_wreck = true");
     ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(
-            expired_wreck_id,
-            InventoryItemRecord {
-                item_id: expired_wreck_id,
-                type_id: 26_468, // NPC Wreck
-                owner_id: 1_000_137,
-                location_id: highsec_sys as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
+        s.active_missions.insert((char_id, 3_008_416), eve_db::ActiveMissionRecord {
+            mission_id: 1, character_id: char_id, agent_id: 3_008_416, solar_system_id: highsec_sys,
+            state: "Accepted".into(), current_room_id: 2, npcs_remaining: 1,
+            spawned_npc_ball_ids: vec![1_880_000_098], bookmark_id: None,
+        });
     });
-    ctx.advance_secs(86_400 + 60);
-    let _ = eve_server::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
+
+    ctx.advance_secs(60); // 11:00:30 UTC (only 60s elapsed, so 2h decay has not fired)
     tick_background_cluster(&ctx).await;
-    let dt_ran = ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("metenox_last_tick_unix"));
-    assert!(dt_ran, "Daily downtime and background cluster jobs must execute across 11:00 UTC window");
+    let wreck_in_meta = eve_server::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+        st.space_object_meta.contains_key(&expired_wreck_id)
+    });
+    let (wreck_in_items, mission_room, mission_npcs) = ctx.db.with_snapshot(|s| {
+        let m = s.active_missions.get(&(char_id, 3_008_416)).unwrap();
+        (s.items.contains_key(&expired_wreck_id), m.current_room_id, m.npcs_remaining)
+    });
+    assert!(!wreck_in_items && !wreck_in_meta, "11:00 UTC downtime must delete NPC wreck");
+    assert_eq!((mission_room, mission_npcs), (1, 4), "11:00 UTC downtime must reset accepted mission waves");
 }
 
 #[tokio::test]

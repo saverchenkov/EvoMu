@@ -908,9 +908,23 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     npc_ball_id: i64,
     killer_char_id: i64,
 ) -> (i64, f64, Vec<u32>) {
+    destroy_specialized_npc_with_hint(ctx, solar_system_id, npc_ball_id, killer_char_id, None).await
+}
+
+pub async fn destroy_specialized_npc_with_hint(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+    hint: Option<(u32, DVec3)>,
+) -> (i64, f64, Vec<u32>) {
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let ball_opt = sys_handle.get_ball_snapshot(npc_ball_id).await.ok().flatten().map(|(_, b)| b);
-    let pos = ball_opt.as_ref().map(|b| b.position).unwrap_or(DVec3::ZERO);
+    let pos = ball_opt
+        .as_ref()
+        .map(|b| b.position)
+        .or_else(|| hint.map(|(_, p)| p))
+        .unwrap_or(DVec3::ZERO);
     let _ = sys_handle.remove_ball(npc_ball_id).await;
 
     let npc_opt = with_mut_combat_runtime(ctx, |rt| {
@@ -929,7 +943,11 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             if let Some(ref conv) = convoy_opt {
                 ("Hauler".to_string(), sde_bounty(conv.ship_type_id), None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)))
             } else {
-                let tid = ball_opt.as_ref().map(|b| b.type_id).or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id)));
+                let tid = ball_opt
+                    .as_ref()
+                    .map(|b| b.type_id)
+                    .or_else(|| hint.map(|(t, _)| t))
+                    .or_else(|| ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id)));
                 ("BeltRat".to_string(), tid.map(sde_bounty).unwrap_or(0.0), None, tid, 0, None)
             }
         }
@@ -973,17 +991,60 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         bounty_isk * inc_mult
     };
 
+    if npc_type_id == Some(crate::services::pve_fob_observatory::WORLD_ARK_BOSS_TYPE_ID) {
+        crate::services::pve_fob_observatory::on_world_ark_boss_killed(
+            ctx,
+            solar_system_id,
+            killer_char_id,
+        )
+        .await;
+    }
+
     if effective_bounty > 0.0 && killer_char_id > 0 {
-        with_mut_combat_runtime(ctx, |rt| {
-            if rt.bounty_credited_balls.insert(npc_ball_id) {
+        let now_unix = ctx.now_unix();
+        let credited = with_mut_combat_runtime(ctx, |rt| {
+            let is_new = rt.bounty_credited_balls.insert(npc_ball_id);
+            if is_new {
                 *rt.pending_bounty_ticks
                     .entry((solar_system_id, killer_char_id))
                     .or_insert(0.0) += effective_bounty;
                 rt.bounty_tick_next_flush_unix
                     .entry((solar_system_id, killer_char_id))
-                    .or_insert_with(|| ctx.now_unix().saturating_add(1_200));
+                    .or_insert_with(|| now_unix.saturating_add(1_200));
             }
+            is_new
         });
+        if credited {
+            let old_sec = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&killer_char_id)
+                    .map(|c| c.security_status)
+                    .unwrap_or(0.0)
+            });
+            if old_sec < 5.0 {
+                let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, solar_system_id);
+                let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, effective_bounty) * supp_mult;
+                let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+                        ch.security_status = new_sec;
+                    }
+                });
+                with_mut_combat_runtime(ctx, |rt| {
+                    rt.sec_status_transactions
+                        .entry(killer_char_id)
+                        .or_default()
+                        .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                            timestamp_unix: now_unix,
+                            old_sec,
+                            new_sec,
+                            delta: new_sec - old_sec,
+                            reason: "NPC Pirate Bounty".into(),
+                            solar_system_id,
+                        });
+                });
+            }
+        }
     }
 
     let wreck_type_id = if archetype == "Sleeper" {

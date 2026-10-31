@@ -114,7 +114,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
     let dread_id = 104_000_001i64;
     let cyno_mod_id = 104_000_002i64;
     let pochven_sys = 30_000_157u32; // Otela in Pochven (region 10_000_070)
-    let lowsec_sys = 30_002_537u32;
+    let lowsec_sys = 30_000_186u32; // Oijanen low-sec (sec 0.352, 3.063 LY from Otela)
 
     seed_ship_in_space(&ctx, char_id, dread_id, 19_720, pochven_sys, DVec3::ZERO).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -240,6 +240,11 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         .await
         .expect_err("Capital manufacturing in Pochven must be refused");
     assert_eq!(ind_err.code, "CapitalConstructionForbiddenInPochven");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+        }
+    });
 
     // 4. Capitals already inside Pochven may jump out to an active low-sec cyno beacon
     let cyno_char_id = 90_000_002i64;
@@ -296,6 +301,17 @@ async fn test_pochven_capital_and_cyno_restrictions() {
             },
         );
     });
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(
+            888_001,
+            eve_db::FleetRecord {
+                fleet_id: 888_001,
+                boss_id: char_id,
+                members: vec![char_id, cyno_char_id],
+                ..Default::default()
+            },
+        );
+    });
     let mut cyno_sess = make_sess(cyno_char_id, cyno_ship_id, lowsec_sys, None);
     let _ = ctx
         .dispatch_rpc(
@@ -309,22 +325,44 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         )
         .await
         .expect("Activate low-sec cyno beacon");
-    let jump_res = ctx
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        None,
+        "CmdJumpToFleetModuleBeacon",
+        &[PyRep::Integer(cyno_char_id), PyRep::Integer(i64::from(lowsec_sys))],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("jump out of Pochven must succeed");
+    assert_eq!(sess.solar_system_id, Some(lowsec_sys), "Capital jumping out of Pochven must arrive in low-sec");
+    let fuel_after = ctx.db.with_snapshot(|s| s.items.get(&fuel_id).map(|i| i.quantity).unwrap_or(0));
+    assert!(fuel_after < 10_000, "Jumping out of Pochven must consume isotopes (remaining: {fuel_after})");
+
+    // 5. Negative: jumping INTO Pochven from low-sec must fail with CannotJumpToPochven
+    ctx.advance_secs(3_600);
+    let pochven_cyno_char = 90_000_003i64;
+    let pochven_cyno_ship = 104_000_030i64;
+    seed_ship_in_space(&ctx, pochven_cyno_char, pochven_cyno_ship, 587, pochven_sys, DVec3::new(50_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(f) = s.fleets.get_mut(&888_001) {
+            f.members.push(pochven_cyno_char);
+        }
+    });
+    let err_into_pochven = ctx
         .dispatch_rpc(
             &mut sess,
             "beyonce",
             None,
             "CmdJumpToFleetModuleBeacon",
-            &[PyRep::Integer(cyno_ship_id)],
+            &[PyRep::Integer(pochven_cyno_char), PyRep::Integer(i64::from(pochven_sys))],
             &HashMap::new(),
             None,
         )
-        .await;
-    if let Err(e) = jump_res {
-        assert!(!e.message.to_lowercase().contains("pochven"), "Capital inside Pochven must not be blocked from jumping out: {e:?}");
-    } else {
-        assert_eq!(sess.solar_system_id, Some(lowsec_sys), "Capital jumping out of Pochven must arrive in low-sec");
-    }
+        .await
+        .expect_err("Jumping into Pochven must be refused with CannotJumpToPochven");
+    assert_eq!(err_into_pochven.code, "CannotJumpToPochven");
 }
 
 #[tokio::test]

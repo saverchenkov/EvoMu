@@ -1107,21 +1107,21 @@ pub async fn on_dungeon_item_looted(
 
 #[allow(clippy::too_many_arguments, unused_variables)]
 pub fn dispatch_dungeon_notify_actions(
-    db: &eve_db::WorldRepository,
-    pending_notifications: Option<
+    _db: &eve_db::WorldRepository,
+    _pending_notifications: Option<
         &std::sync::RwLock<
             HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
         >,
     >,
-    notify_tx: Option<
+    _notify_tx: Option<
         &tokio::sync::broadcast::Sender<(
             i64,
             crate::router::cache_notifications::PendingMachoNotification,
         )>,
     >,
-    char_id: i64,
-    dungeon_id: i64,
-    obj_ball_ids: &[i64],
+    _char_id: i64,
+    _dungeon_id: i64,
+    _obj_ball_ids: &[i64],
     actions: Vec<DungeonTriggerAction>,
 ) {
     for act in actions {

@@ -19,10 +19,14 @@ pub const FACTION_BLOOD_RAIDER: i64 = 500_012;
 pub const FACTION_TRIGLAVIAN: i64 = 500_026;
 pub const CORP_DED: i64 = 1_000_137;
 pub const POCHVEN_REGION_ID: u32 = 10_000_070;
+pub const FOB_GURISTAS_TYPE_ID: u32 = 46_363; // Guristas Pirates Stronghold
+pub const FOB_BLOOD_RAIDER_TYPE_ID: u32 = 46_364; // Blood Raiders Stronghold
+pub const WORLD_ARK_BOSS_TYPE_ID: u32 = 52_361; // World Ark (Xordazh-class)
 pub const OBSERVATORY_MAX_PAYOUT_PILOTS: usize = 15;
 pub const OBSERVATORY_COLLECTIVE_ISK: f64 = 1_500_000_000.0;
 pub const OBSERVATORY_COLLECTIVE_LP: i64 = 150_000;
 pub const FOB_COLLECTIVE_BOUNTY_ISK: f64 = 300_000_000.0;
+pub const OBSERVATORY_SITE_POS: DVec3 = DVec3::new(-300_000.0, 0.0, 300_000.0);
 
 /// Spawns a Blood Raider (`500012`) or Guristas (`500010`) Forward Operating Base in a high/low-sec system
 /// and launches an initial raiding fleet.
@@ -53,9 +57,9 @@ pub async fn spawn_pirate_fob(
     let now_unix = ctx.now_unix_secs();
     let fob_id = 1_897_000_000 + i64::from(sys_id) * 100 + (pirate_faction_id % 100);
     let fob_type_id = if pirate_faction_id == FACTION_BLOOD_RAIDER {
-        47_512
+        FOB_BLOOD_RAIDER_TYPE_ID
     } else {
-        47_516
+        FOB_GURISTAS_TYPE_ID
     };
     let fob_pos = [200_000.0, 0.0, -200_000.0];
 
@@ -97,13 +101,20 @@ pub async fn spawn_pirate_fob(
     fob_ball.mass = 500_000_000.0;
     fob_ball.max_velocity = 0.0;
     fob_ball.mode = BallMode::Rigid;
-    let _ = sys.spawn_ball(fob_ball).await;
+    let mut fob_cs = CombatState::default();
+    fob_cs.shield_hp = 500_000.0;
+    fob_cs.max_shield_hp = 500_000.0;
+    fob_cs.armor_hp = 500_000.0;
+    fob_cs.max_armor_hp = 500_000.0;
+    fob_cs.structure_hp = 500_000.0;
+    fob_cs.max_structure_hp = 500_000.0;
+    let _ = sys.spawn_ball_with_combat(fob_ball, fob_cs).await;
 
-    // Launch 3 raiding fleet NPCs in the system
+    // Launch 3 raiding fleet NPCs in the system (SDE Blood Raider / Guristas cruisers)
     let raider_type_id = if pirate_faction_id == FACTION_BLOOD_RAIDER {
-        23_312 // Blood Raider Cruiser
+        24_000 // Corpatis Bishop
     } else {
-        23_340 // Guristas Cruiser
+        16_980 // Pithum Killer
     };
     let mut raiding_ids = Vec::new();
     for idx in 1..=3_i64 {
@@ -133,7 +144,7 @@ pub async fn spawn_pirate_fob(
     ]))
 }
 
-/// Launches defending response ships scaled to attacking player fleet composition.
+/// Launches defending response ships scaled to attacking on-grid player fleet composition.
 pub async fn trigger_fob_defense_response(
     ctx: &ServerContext,
     fob_id: i64,
@@ -155,7 +166,6 @@ pub async fn trigger_fob_defense_response(
             message: format!("Pirate FOB {fob_id} not found"),
         })?;
 
-    // Scale defense response by attacking fleet hull composition
     let fleet_weight: usize = ctx.db.with_snapshot(|snap| {
         attacker_ship_ids
             .iter()
@@ -167,19 +177,19 @@ pub async fn trigger_fob_defense_response(
                     .map(|t| t.group_id)
                     .unwrap_or(25);
                 match group_id {
-                    30 | 485 | 547 | 659 | 883 => 4,       // Capital / Supercapital
-                    27 | 898 | 900 => 3,                   // Battleship / Marauder / Black Ops
-                    26 | 358 | 419 | 832 | 906 => 2,       // Cruiser / BC / Logistics / HAC
-                    _ => 1,                                // Frigate / Destroyer
+                    30 | 485 | 547 | 659 | 883 => 4, // Capital / Supercapital
+                    27 | 898 | 900 => 3,             // Battleship / Marauder / Black Ops
+                    26 | 358 | 419 | 832 | 906 => 2, // Cruiser / BC / Logistics / HAC
+                    _ => 1,                          // Frigate / Destroyer
                 }
             })
             .sum()
     });
-    let defender_count = fleet_weight.max(2).min(24);
+    let defender_count = fleet_weight.clamp(2, 24);
     let defender_type_id = if pirate_faction_id == FACTION_BLOOD_RAIDER {
-        23_316 // Blood Raider Battleship
+        16_934 // Corpus Prophet
     } else {
-        23_344 // Guristas Battleship
+        16_984 // Pith Dismantler
     };
     let sys = ctx.systems.get_or_spawn(sys_id);
     let mut defender_ids = Vec::with_capacity(defender_count);
@@ -216,28 +226,32 @@ pub async fn destroy_pirate_fob_and_payout(
     fob_id: i64,
     attacker_char_ids: &[i64],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (sys_id, fob_pos, pirate_faction_id) = ctx
-        .db
-        .with_mut_snapshot(|snap| {
-            let st = snap.structures.get_mut(&fob_id).ok_or_else(|| BridgeRpcError {
+    let (sys_id, fob_pos, pirate_faction_id) = ctx.db.with_mut_snapshot(|snap| {
+        let st = snap
+            .structures
+            .get_mut(&fob_id)
+            .ok_or_else(|| BridgeRpcError {
                 code: "FobNotFound".into(),
                 message: format!("Pirate FOB {fob_id} not found"),
             })?;
-            if st.state == "Destroyed" {
-                return Err(BridgeRpcError {
-                    code: "FobAlreadyDestroyed".into(),
-                    message: format!("Pirate FOB {fob_id} is already destroyed"),
-                });
-            }
-            st.state = "Destroyed".into();
-            st.hull_hp = 0.0;
-            Ok((st.solar_system_id, DVec3::from_array(st.position), st.owner_corp_id))
-        })?;
+        if st.state == "Destroyed" {
+            return Err(BridgeRpcError {
+                code: "FobAlreadyDestroyed".into(),
+                message: format!("Pirate FOB {fob_id} is already destroyed"),
+            });
+        }
+        st.state = "Destroyed".into();
+        st.hull_hp = 0.0;
+        Ok((
+            st.solar_system_id,
+            DVec3::from_array(st.position),
+            st.owner_corp_id,
+        ))
+    })?;
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let _ = sys.remove_ball(fob_id).await;
 
-    // Spawn structure loot container in space
     let loot_container_id = fob_id + 90;
     let mut cont_ball = make_site_npc_ball(loot_container_id, 23, fob_pos);
     cont_ball.max_velocity = 0.0;
@@ -250,9 +264,9 @@ pub async fn destroy_pirate_fob_and_payout(
         (FOB_COLLECTIVE_BOUNTY_ISK as i64) / (attacker_char_ids.len() as i64)
     };
     let faction_loot_type_id = if pirate_faction_id == FACTION_BLOOD_RAIDER {
-        18_660 // Dark Blood faction module
+        13_791 // Dark Blood Dual Heavy Pulse Laser
     } else {
-        17_938 // Dread Guristas faction module
+        13_865 // Dread Guristas 125mm Railgun
     };
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -298,7 +312,7 @@ pub async fn destroy_pirate_fob_and_payout(
     ]))
 }
 
-/// Spawns a Pochven Observatory Flashpoint site with Triglavian/EDENCOM defense waves and World Ark boss.
+/// Spawns a Pochven Observatory Flashpoint site with Triglavian defense waves and Xordazh World Ark boss.
 pub async fn spawn_observatory_flashpoint(
     ctx: &ServerContext,
     sys_id: u32,
@@ -319,10 +333,16 @@ pub async fn spawn_observatory_flashpoint(
     }
 
     let site_id = 1_899_000_000 + i64::from(sys_id);
-    let site_pos = DVec3::new(-300_000.0, 0.0, 300_000.0);
+    let site_pos = OBSERVATORY_SITE_POS;
+    let gate_id = site_id + 2;
+    let gate_pos = site_pos + DVec3::new(-50_000.0, 0.0, 0.0);
     let sys = ctx.systems.get_or_spawn(sys_id);
 
-    // Spawn Dreadnought / World Ark boss + Triglavian/EDENCOM defense wave
+    let mut gate_ball = make_site_npc_ball(gate_id, 17_831, gate_pos);
+    gate_ball.max_velocity = 0.0;
+    gate_ball.mode = BallMode::Rigid;
+    let _ = sys.spawn_ball(gate_ball).await;
+
     let world_ark_id = site_id + 1;
     let mut boss_cs = CombatState::default();
     boss_cs.shield_hp = 200_000.0;
@@ -332,10 +352,13 @@ pub async fn spawn_observatory_flashpoint(
     boss_cs.structure_hp = 200_000.0;
     boss_cs.max_structure_hp = 200_000.0;
     let _ = sys
-        .spawn_ball_with_combat(make_site_npc_ball(world_ark_id, 52_907, site_pos), boss_cs)
+        .spawn_ball_with_combat(
+            make_site_npc_ball(world_ark_id, WORLD_ARK_BOSS_TYPE_ID, site_pos),
+            boss_cs,
+        )
         .await;
 
-    let wave_types = [52_908_u32, 52_909_u32, 52_910_u32];
+    let wave_types = [52_338_u32, 52_184_u32, 52_187_u32];
     let mut defense_wave_ids = Vec::with_capacity(wave_types.len());
     for (idx, &wtid) in wave_types.iter().enumerate() {
         let wid = site_id + 10 + (idx as i64);
@@ -361,6 +384,7 @@ pub async fn spawn_observatory_flashpoint(
 
     Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),
+        ("gateID", PyRep::Integer(gate_id)),
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("worldArkBossID", PyRep::Integer(world_ark_id)),
         (
@@ -397,7 +421,7 @@ pub fn validate_observatory_access(
     Ok(())
 }
 
-/// Completes an Observatory Flashpoint site and pays collective ISK and DED/Triglavian LP to up to 15 fleet members.
+/// Completes an Observatory Flashpoint site and pays collective ISK and DED LP to up to 15 on-grid fleet members.
 pub fn complete_observatory_flashpoint(
     ctx: &ServerContext,
     site_id: i64,
@@ -419,22 +443,14 @@ pub fn complete_observatory_flashpoint(
     let lp_each = OBSERVATORY_COLLECTIVE_LP / (eligible.len() as i64);
 
     ctx.db.with_mut_snapshot(|snap| {
-        if !snap
+        if snap
             .service_state_blobs
-            .contains_key(&format!("observatory_site:{site_id}"))
+            .remove(&format!("observatory_site:{site_id}"))
+            .is_none()
         {
             return Err(BridgeRpcError {
                 code: "ObservatorySiteNotFound".into(),
                 message: format!("Observatory Flashpoint site {site_id} does not exist"),
-            });
-        }
-        if snap
-            .service_state_blobs
-            .contains_key(&format!("observatory_completed:{site_id}"))
-        {
-            return Err(BridgeRpcError {
-                code: "ObservatoryAlreadyCompleted".into(),
-                message: format!("Observatory Flashpoint site {site_id} is already completed"),
             });
         }
         snap.service_state_blobs
@@ -456,7 +472,6 @@ pub fn complete_observatory_flashpoint(
                     reason: "Observatory Flashpoint Collective Payout".into(),
                 });
                 *ch.loyalty_points.entry(CORP_DED).or_insert(0) += lp_each;
-                *ch.loyalty_points.entry(1_000_298).or_insert(0) += lp_each;
             }
         }
         Ok(())
@@ -470,99 +485,142 @@ pub fn complete_observatory_flashpoint(
     ]))
 }
 
-pub async fn dispatch_fob_observatory_rpc(
+/// Validates fleet composition (>= 3) and Triglavian standing (>= 0.0) when activating an Observatory acceleration gate.
+pub async fn try_activate_observatory_gate(
     ctx: &ServerContext,
     session: &SessionState,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let parse_id_list = |idx: usize| -> Vec<i64> {
-        match args.get(idx) {
-            Some(PyRep::List(items) | PyRep::Tuple(items)) => {
-                items.iter().filter_map(|x| x.as_i64()).collect()
-            }
-            _ => Vec::new(),
-        }
+    sys_id: u32,
+    gate_id: i64,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let site_id = 1_899_000_000 + i64::from(sys_id);
+    if gate_id != site_id + 2 {
+        return None;
+    }
+    let has_site = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .contains_key(&format!("observatory_site:{site_id}"))
+    });
+    if !has_site {
+        return None;
+    }
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
     };
-    match method {
-        "SpawnPirateFob" => {
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-                .ok_or_else(|| BridgeRpcError::user_error("NoSolarSystem"))?;
-            let fac_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(FACTION_GURISTAS);
-            spawn_pirate_fob(ctx, sys_id, fac_id).await
+    let fleet_member_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        if let Some(fleet) = snap.fleets.values().find(|f| f.members.contains(&char_id)) {
+            fleet.members.clone()
+        } else {
+            vec![char_id]
         }
-        "TriggerFobDefenseResponse" => {
-            let fob_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let attackers = parse_id_list(1);
-            trigger_fob_defense_response(ctx, fob_id, &attackers).await
+    });
+    if let Err(e) = validate_observatory_access(ctx, char_id, &fleet_member_ids) {
+        return Some(Err(e));
+    }
+    if let Some(ship_id) = session.ship_id {
+        let sys = ctx.systems.get_or_spawn(sys_id);
+        let _ = sys
+            .set_ball_position(ship_id, OBSERVATORY_SITE_POS + DVec3::new(0.0, 0.0, -5_000.0))
+            .await;
+    }
+    Some(Ok(PyRep::keyval([
+        ("siteID", PyRep::Integer(site_id)),
+        ("accessGranted", PyRep::Bool(true)),
+    ])))
+}
+
+/// Completes the Observatory Flashpoint when the World Ark boss (`52361`) is killed in the NPC death pipeline.
+pub async fn on_world_ark_boss_killed(ctx: &ServerContext, sys_id: u32, killer_char_id: i64) {
+    let site_id = 1_899_000_000 + i64::from(sys_id);
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let on_grid_ship_ids: std::collections::HashSet<i64> = all_balls
+        .iter()
+        .filter(|b| b.position.distance(OBSERVATORY_SITE_POS) <= 250_000.0)
+        .map(|b| b.id)
+        .collect();
+    let fleet_member_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        let is_on_site = |cid: &i64| {
+            snap.characters.get(cid).is_some_and(|c| {
+                c.solar_system_id == sys_id
+                    && c.station_id.is_none()
+                    && c.active_ship_id > 0
+                    && on_grid_ship_ids.contains(&c.active_ship_id)
+            })
+        };
+        if let Some(fleet) = snap
+            .fleets
+            .values()
+            .find(|f| f.members.contains(&killer_char_id))
+        {
+            fleet
+                .members
+                .iter()
+                .copied()
+                .filter(is_on_site)
+                .collect()
+        } else {
+            let mut ids: Vec<i64> = snap
+                .characters
+                .keys()
+                .copied()
+                .filter(is_on_site)
+                .collect();
+            ids.sort_unstable();
+            ids
         }
-        "DestroyPirateFob" => {
-            let fob_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let attackers = parse_id_list(1);
-            destroy_pirate_fob_and_payout(ctx, fob_id, &attackers).await
-        }
-        "SpawnObservatoryFlashpoint" => {
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-                .ok_or_else(|| BridgeRpcError::user_error("NoSolarSystem"))?;
-            spawn_observatory_flashpoint(ctx, sys_id).await
-        }
-        "EnterObservatoryFlashpoint" => {
-            let site_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let fleet_ids = parse_id_list(1);
-            validate_observatory_access(ctx, char_id, &fleet_ids)?;
-            Ok(PyRep::keyval([
-                ("siteID", PyRep::Integer(site_id)),
-                ("accessGranted", PyRep::Bool(true)),
-            ]))
-        }
-        "CompleteObservatoryFlashpoint" => {
-            let site_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let fleet_ids = parse_id_list(1);
-            complete_observatory_flashpoint(ctx, site_id, &fleet_ids)
-        }
-        _ => Err(BridgeRpcError::user_error("UnknownMethod")),
+    });
+    if !fleet_member_ids.is_empty() {
+        let _ = complete_observatory_flashpoint(ctx, site_id, &fleet_member_ids);
     }
 }
 
 /// Drives Pirate FOB and Pochven Observatory Flashpoint spawns from the living-world cluster tick.
 pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
-    let has_active_fob = ctx.db.with_snapshot(|snap| {
-        snap.structures
-            .values()
-            .any(|s| matches!(s.type_id, 47_512 | 47_516) && s.state == "Online")
-    });
-    if !has_active_fob {
-        if let Some((&sys_id, _)) = ctx
-            .sde
-            .solar_systems
-            .iter()
-            .find(|(_, s)| s.security_status > 0.0 && s.security_status < 0.8)
-        {
-            let _ = spawn_pirate_fob(ctx, sys_id, FACTION_GURISTAS).await;
+    let active_handles = ctx.systems.active_system_handles();
+    for &(sys_id, _) in &active_handles {
+        let has_piloted_ship = ctx.db.with_snapshot(|s| {
+            s.characters.values().any(|c| {
+                c.solar_system_id == sys_id
+                    && c.station_id.is_none()
+                    && c.structure_id.is_none()
+                    && c.active_ship_id > 0
+            })
+        });
+        if !has_piloted_ship {
+            continue;
         }
-    }
-    let has_active_obs = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .keys()
-            .any(|k| k.starts_with("observatory_site:"))
-    });
-    if !has_active_obs {
-        if let Some((&sys_id, _)) = ctx
-            .sde
-            .solar_systems
-            .iter()
-            .find(|(_, s)| s.region_id == POCHVEN_REGION_ID)
-        {
-            let _ = spawn_observatory_flashpoint(ctx, sys_id).await;
+        let Some(sys_info) = ctx.sde.solar_systems.get(&sys_id) else {
+            continue;
+        };
+        if sys_info.security_status > 0.0 && sys_info.security_status < 0.8 {
+            let sys_has_fob = ctx.db.with_snapshot(|snap| {
+                snap.structures.values().any(|s| {
+                    s.solar_system_id == sys_id
+                        && matches!(s.type_id, FOB_GURISTAS_TYPE_ID | FOB_BLOOD_RAIDER_TYPE_ID)
+                })
+            });
+            if !sys_has_fob {
+                let faction = if sys_id % 2 == 1 {
+                    FACTION_BLOOD_RAIDER
+                } else {
+                    FACTION_GURISTAS
+                };
+                let _ = spawn_pirate_fob(ctx, sys_id, faction).await;
+            }
+        }
+        if sys_info.region_id == POCHVEN_REGION_ID {
+            let site_id = 1_899_000_000 + i64::from(sys_id);
+            let obs_exists_or_done = ctx.db.with_snapshot(|snap| {
+                snap.service_state_blobs
+                    .contains_key(&format!("observatory_site:{site_id}"))
+                    || snap
+                        .service_state_blobs
+                        .contains_key(&format!("observatory_completed:{site_id}"))
+            });
+            if !obs_exists_or_done {
+                let _ = spawn_observatory_flashpoint(ctx, sys_id).await;
+            }
         }
     }
 }

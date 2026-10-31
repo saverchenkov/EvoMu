@@ -1192,6 +1192,15 @@ pub async fn handle_pve_exploration(
         | ("keeper", "EnterNextDungeonRoom") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             if let Ok(sys) = resolve_session_system_id(ctx, session) {
+                if let Some(gate_id) = args.first().and_then(|a| a.as_i64()) {
+                    if let Some(res) = crate::services::pve_fob_observatory::try_activate_observatory_gate(
+                        ctx, session, sys, gate_id,
+                    )
+                    .await
+                    {
+                        return Some(res);
+                    }
+                }
                 if let Some(res) =
                     crate::services::pve_dungeon_runtime::try_activate_dungeon_runtime_gate(
                         ctx, session, sys, args,

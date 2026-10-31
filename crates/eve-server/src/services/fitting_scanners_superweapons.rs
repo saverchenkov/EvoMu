@@ -797,16 +797,31 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                 }));
             };
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mod_type = ctx.db.with_snapshot(|snap| snap.items.get(&module_id).map(|i| i.type_id));
-            if let Some(tid) = mod_type {
-                if (35_695..=35_698).contains(&tid) && method == "ActivateSlashModule" {
-                    return Some(crate::services::doomsday_aoe_ops::dispatch_superweapon_aoe_rpc(ctx, session, "ActivateConeModule", args).await);
-                }
-                if (35_699..=35_702).contains(&tid) && method == "ActivateSinglePointTargetedModule" {
-                    return Some(crate::services::doomsday_aoe_ops::dispatch_superweapon_aoe_rpc(ctx, session, "ActivateSpatialModule", args).await);
-                }
-                if (40_633..=40_636).contains(&tid) && method == "ActivateSlashModule" {
-                    return Some(crate::services::doomsday_aoe_ops::dispatch_superweapon_aoe_rpc(ctx, session, "ActivateMultiPointModule", args).await);
+            let mod_type_info = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&module_id).and_then(|i| ctx.sde.types.get(&i.type_id))
+            });
+            if let Some(mt) = mod_type_info {
+                if mt.group_id == 588 {
+                    let has_eff = |target: &str| {
+                        mt.effect_ids
+                            .iter()
+                            .any(|eid| ctx.sde.effects.get(eid).is_some_and(|e| e.name == target))
+                    };
+                    if has_eff("doomsdayConeDOT") && method == "ActivateSlashModule" {
+                        return Some(crate::services::doomsday_aoe_ops::dispatch_superweapon_aoe_rpc(
+                            ctx, session, crate::services::doomsday_aoe_ops::DoomsdayAoeMode::Cone, args,
+                        ).await);
+                    }
+                    if has_eff("doomsdayHOG") && method == "ActivateSinglePointTargetedModule" {
+                        return Some(crate::services::doomsday_aoe_ops::dispatch_superweapon_aoe_rpc(
+                            ctx, session, crate::services::doomsday_aoe_ops::DoomsdayAoeMode::Spatial, args,
+                        ).await);
+                    }
+                    if has_eff("doomsdaySlash") && method == "ActivateSlashModule" {
+                        return Some(crate::services::doomsday_aoe_ops::dispatch_superweapon_aoe_rpc(
+                            ctx, session, crate::services::doomsday_aoe_ops::DoomsdayAoeMode::MultiPoint, args,
+                        ).await);
+                    }
                 }
             }
             let target_id_opt = args.get(1).and_then(|a| a.as_i64());

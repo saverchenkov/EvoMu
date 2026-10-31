@@ -255,6 +255,8 @@ impl ServerContext {
                 crate::services::structure_control_ops::step_structure_auto_defense(&ctx, sys_id, dt).await;
                 crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
                 crate::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, sys_id, dt).await;
+                crate::services::ice_heist_ops::step_ice_heist_system(&ctx, sys_id).await;
+                crate::services::doomsday_aoe_ops::step_bosonic_doomsday_system(&ctx, sys_id).await;
                 crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
             })
         }));

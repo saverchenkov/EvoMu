@@ -2,9 +2,11 @@
 //!
 //! - Spawns only in systems at corruption stage `3..=4`, with a 4-hour (`14_400`s) respawn
 //!   cooldown persisted in `db` across downtime.
-//! - Spawns web-immune tanker NPCs (`is_ewar_immune = true`) at the refinery and Upwell Thunderchild guards.
-//! - Escorting tankers to each side's scoring zone increments `pirate_tankers_saved` / `empire_tankers_saved`;
-//!   the first side to `10` tankers wins `150,000` LP (persisted in `CharacterRecord::loyalty_points`).
+//! - Spawns web-immune tanker NPCs (`is_web_immune = true`, SDE `79909`) at the refinery and
+//!   Upwell Security Thunderchild guards (SDE `79986`).
+//! - Escorting tankers within `15,000` m steers them into the escorting side's scoring zone,
+//!   incrementing `pirate_tankers_saved` / `empire_tankers_saved`; the first side to `10` tankers
+//!   wins `150,000` LP for aligned militia pilots in system.
 //! - Pirates within `25,000` m of the Upwell Thunderchild guards are destroyed.
 
 #![forbid(unsafe_code)]
@@ -16,28 +18,38 @@ use crate::services::insurgency_services::{
 use crate::services::pve_incursion_sites::make_site_npc_ball;
 use eve_db::PersistedIceHeistRecord as IceHeistRecord;
 use eve_destiny::{CombatState, DVec3};
-use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
 pub const ICE_HEIST_RESPAWN_COOLDOWN_SECS: u64 = 14_400; // 4 hours
 pub const ICE_HEIST_WIN_TANKERS: u32 = 10;
 pub const ICE_HEIST_WIN_LP: i64 = 150_000;
-pub const THUNDERCHILD_GUARD_TYPE_ID: u32 = 54732;
-pub const ICE_TANKER_TYPE_ID: u32 = 32811;
+pub const THUNDERCHILD_GUARD_TYPE_ID: u32 = 79_986; // Upwell Security Thunderchild
+pub const ICE_TANKER_TYPE_ID: u32 = 79_909; // Automated HISC-99 Tanker
 const THUNDERCHILD_GUARD_RANGE_M: f64 = 25_000.0;
-const REFINERY_POS: DVec3 = DVec3::new(150_000.0, 0.0, 150_000.0);
-const EMPIRE_SCORING_ZONE: DVec3 = DVec3::new(250_000.0, 0.0, 150_000.0);
-const PIRATE_SCORING_ZONE: DVec3 = DVec3::new(50_000.0, 0.0, 150_000.0);
+pub const ICE_HEIST_REFINERY_POS: DVec3 = DVec3::new(150_000.0, 0.0, 150_000.0);
+pub const ICE_HEIST_EMPIRE_ZONE: DVec3 = DVec3::new(162_000.0, 0.0, 150_000.0);
+pub const ICE_HEIST_PIRATE_ZONE: DVec3 = DVec3::new(138_000.0, 0.0, 150_000.0);
 
-fn militia_corp_for_faction(war_faction_id: Option<i64>) -> i64 {
+fn militia_corp_for_faction(war_faction_id: Option<i64>) -> Option<i64> {
     match war_faction_id {
-        Some(500_001) => 1_000_180, // State Protectorate
-        Some(500_002) => 1_000_182, // Tribal Liberation Force
-        Some(500_003) => 1_000_179, // 24th Imperial Crusade
-        Some(500_004) => 1_000_181, // Federal Defense Union
-        Some(FACTION_ANGEL_CARTEL) => 1_000_134, // Malakim Zealots
-        Some(FACTION_GURISTAS) => 1_000_137, // Guristas Commando
-        _ => 1_000_180,
+        Some(500_001) => Some(1_000_180),              // State Protectorate
+        Some(500_002) => Some(1_000_182),              // Tribal Liberation Force
+        Some(500_003) => Some(1_000_179),              // 24th Imperial Crusade
+        Some(500_004) => Some(1_000_181),              // Federal Defense Union
+        Some(FACTION_ANGEL_CARTEL) => Some(1_000_436), // Malakim Zealots
+        Some(FACTION_GURISTAS) => Some(1_000_437),     // Commando Guri
+        _ => None,
+    }
+}
+
+fn is_winning_side_faction(war_faction_id: Option<i64>, pirate_side: bool) -> bool {
+    if pirate_side {
+        matches!(
+            war_faction_id,
+            Some(FACTION_ANGEL_CARTEL | FACTION_GURISTAS)
+        )
+    } else {
+        matches!(war_faction_id, Some(500_001..=500_004))
     }
 }
 
@@ -83,13 +95,13 @@ pub async fn spawn_ice_heist_checked(
         });
     }
 
-    let instance_id = with_insurgency_runtime(ctx, |rt| {
+    let (instance_id, newly_created) = with_insurgency_runtime(ctx, |rt| {
         if let Some(existing) = rt
             .ice_heist_instances
             .iter()
             .find(|h| h.solar_system_id == sys_id && !h.completed)
         {
-            return existing.instance_id;
+            return (existing.instance_id, false);
         }
         let id = (rt.ice_heist_instances.len() as i64) + 800_001;
         rt.ice_heist_instances.push(IceHeistRecord {
@@ -99,10 +111,13 @@ pub async fn spawn_ice_heist_checked(
             empire_tankers_saved: 0,
             completed: false,
         });
-        id
+        (id, true)
     });
 
-    // Spawn web-immune tanker NPC ball + Upwell Thunderchild guard ball in space
+    if !newly_created {
+        return Ok(instance_id);
+    }
+
     let sys = ctx.systems.get_or_spawn(sys_id);
     let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
     let guard_id = 1_896_000_000 + instance_id * 10 + 2;
@@ -116,28 +131,32 @@ pub async fn spawn_ice_heist_checked(
     tanker_cs.max_structure_hp = 30_000.0;
     tanker_cs.warp_core_strength = 100;
     tanker_cs.is_web_immune = true;
-    let mut tanker_ball = make_site_npc_ball(tanker_id, ICE_TANKER_TYPE_ID, REFINERY_POS);
-    tanker_ball.max_velocity = 150.0;
-    tanker_ball.speed_fraction = 1.0;
+    let mut tanker_ball = make_site_npc_ball(tanker_id, ICE_TANKER_TYPE_ID, ICE_HEIST_REFINERY_POS);
+    tanker_ball.max_velocity = 2_500.0;
+    tanker_ball.inertia = 0.25;
+    tanker_ball.mass = 1_000_000.0;
+    tanker_ball.speed_fraction = 0.0;
     let _ = sys.spawn_ball_with_combat(tanker_ball, tanker_cs).await;
-    let _ = sys.goto_point(tanker_id, EMPIRE_SCORING_ZONE).await;
 
     let _ = sys
-        .spawn_ball(make_site_npc_ball(
-            guard_id,
-            THUNDERCHILD_GUARD_TYPE_ID,
-            REFINERY_POS + DVec3::new(5_000.0, 0.0, 0.0),
-        ))
+        .spawn_ball_with_combat(
+            make_site_npc_ball(
+                guard_id,
+                THUNDERCHILD_GUARD_TYPE_ID,
+                ICE_HEIST_REFINERY_POS + DVec3::new(0.0, 0.0, 40_000.0),
+            ),
+            ctx.build_type_combat_state(THUNDERCHILD_GUARD_TYPE_ID),
+        )
         .await;
 
     Ok(instance_id)
 }
 
-/// Escorts a tanker to the caller's side scoring zone, enforces Upwell Thunderchild guard destruction
-/// of nearby pirates, and awards 150,000 LP + 4h respawn cooldown when a side reaches 10 tankers.
+/// Scores a tanker arrival in `pirate_side` or empire scoring zone, respawns the next refinery
+/// tanker until `10` are saved, and awards `150,000` LP + 4h respawn cooldown to aligned pilots.
 pub async fn escort_ice_heist_tanker(
     ctx: &ServerContext,
-    char_id: i64,
+    _char_id: i64,
     instance_id: i64,
     pirate_side: bool,
 ) -> Result<PyRep, BridgeRpcError> {
@@ -179,20 +198,90 @@ pub async fn escort_ice_heist_tanker(
             ))
         })?;
 
-    // Escort tanker into the target side's scoring zone
     let sys = ctx.systems.get_or_spawn(sys_id);
     let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
-    let target_zone = if pirate_side { PIRATE_SCORING_ZONE } else { EMPIRE_SCORING_ZONE };
-    let _ = sys.set_ball_position(tanker_id, target_zone).await;
-    if !completed {
-        let _ = sys.set_ball_position(tanker_id, REFINERY_POS).await;
-        let _ = sys.goto_point(tanker_id, EMPIRE_SCORING_ZONE).await;
+    let guard_id = 1_896_000_000 + instance_id * 10 + 2;
+    if completed {
+        let _ = sys.remove_ball(tanker_id).await;
+        let _ = sys.remove_ball(guard_id).await;
+    } else {
+        let _ = sys.set_ball_position(tanker_id, ICE_HEIST_REFINERY_POS).await;
+        let _ = sys.set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop).await;
     }
 
-    // Destroy any pirate ships within 25km of the Upwell Thunderchild guards via death pipeline
-    let guard_id = 1_896_000_000 + instance_id * 10 + 2;
     let all_balls = sys.list_balls().await.unwrap_or_default();
-    let mut destroyed_pirates = Vec::new();
+    let mut lp_awarded = 0_i64;
+    if just_won {
+        let on_grid_ship_ids: std::collections::HashSet<i64> = all_balls
+            .iter()
+            .filter(|b| b.position.distance(ICE_HEIST_REFINERY_POS) <= 250_000.0)
+            .map(|b| b.id)
+            .collect();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs.insert(
+                respawn_key(sys_id),
+                (now_unix + ICE_HEIST_RESPAWN_COOLDOWN_SECS).to_string(),
+            );
+            let eligible_pids: Vec<i64> = snap
+                .characters
+                .values()
+                .filter(|c| {
+                    c.solar_system_id == sys_id
+                        && c.station_id.is_none()
+                        && c.active_ship_id > 0
+                        && on_grid_ship_ids.contains(&c.active_ship_id)
+                        && is_winning_side_faction(c.war_faction_id, pirate_side)
+                })
+                .map(|c| c.character_id)
+                .collect();
+            for pid in eligible_pids {
+                if let Some(ch) = snap.characters.get_mut(&pid) {
+                    if let Some(corp_id) = militia_corp_for_faction(ch.war_faction_id) {
+                        *ch.loyalty_points.entry(corp_id).or_insert(0) += ICE_HEIST_WIN_LP;
+                        lp_awarded = ICE_HEIST_WIN_LP;
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(PyRep::keyval([
+        ("instanceID", PyRep::Integer(instance_id)),
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("pirateTankersSaved", PyRep::Integer(i64::from(pirate_saved))),
+        ("empireTankersSaved", PyRep::Integer(i64::from(empire_saved))),
+        ("completed", PyRep::Bool(completed)),
+        ("lpAwarded", PyRep::Integer(lp_awarded)),
+    ]))
+}
+
+/// Drives Pirate Insurgency Ice Refinery Heist spawns, tanker escort movement/scoring,
+/// and Upwell Thunderchild guard pirate interception on the 1 Hz system tick.
+pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
+    let has_active = read_insurgency_runtime(ctx, |rt| {
+        rt.ice_heist_instances
+            .iter()
+            .any(|h| h.solar_system_id == sys_id && !h.completed)
+    });
+    if !has_active {
+        let _ = spawn_ice_heist_checked(ctx, sys_id).await;
+    }
+
+    let Some(instance_id) = read_insurgency_runtime(ctx, |rt| {
+        rt.ice_heist_instances
+            .iter()
+            .find(|h| h.solar_system_id == sys_id && !h.completed)
+            .map(|h| h.instance_id)
+    }) else {
+        return;
+    };
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
+    let guard_id = 1_896_000_000 + instance_id * 10 + 2;
+    let now_unix = ctx.now_unix_secs();
+
     if let Some(guard_ball) = all_balls.iter().find(|b| b.id == guard_id) {
         let guard_pos = guard_ball.position;
         for b in &all_balls {
@@ -202,7 +291,7 @@ pub async fn escort_ice_heist_tanker(
             let is_pirate_ship = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .values()
-                    .find(|c| c.active_ship_id == b.id)
+                    .find(|c| c.active_ship_id == b.id && c.station_id.is_none())
                     .and_then(|c| c.war_faction_id)
                     .is_some_and(|wf| wf == FACTION_ANGEL_CARTEL || wf == FACTION_GURISTAS)
             });
@@ -217,82 +306,49 @@ pub async fn escort_ice_heist_tanker(
                     now_unix,
                 )
                 .await;
-                destroyed_pirates.push(b.id);
             }
         }
     }
 
-    let mut lp_awarded = 0_i64;
-    if just_won {
-        lp_awarded = ICE_HEIST_WIN_LP;
-        let mut participant_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .filter(|c| c.solar_system_id == sys_id && c.active_ship_id > 0)
-                .map(|c| c.character_id)
-                .collect()
-        });
-        if !participant_ids.contains(&char_id) {
-            participant_ids.push(char_id);
-        }
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.service_state_blobs.insert(
-                respawn_key(sys_id),
-                (now_unix + ICE_HEIST_RESPAWN_COOLDOWN_SECS).to_string(),
-            );
-            for pid in participant_ids {
-                if let Some(ch) = snap.characters.get_mut(&pid) {
-                    let corp_id = militia_corp_for_faction(ch.war_faction_id);
-                    *ch.loyalty_points.entry(corp_id).or_insert(0) += ICE_HEIST_WIN_LP;
+    if let Some(tanker_ball) = all_balls.iter().find(|b| b.id == tanker_id) {
+        let tpos = tanker_ball.position;
+        if tpos.distance(ICE_HEIST_EMPIRE_ZONE) <= 5_000.0 {
+            let _ = escort_ice_heist_tanker(ctx, 0, instance_id, false).await;
+        } else if tpos.distance(ICE_HEIST_PIRATE_ZONE) <= 5_000.0 {
+            let _ = escort_ice_heist_tanker(ctx, 0, instance_id, true).await;
+        } else {
+            let mut nearest_pirate = f64::INFINITY;
+            let mut nearest_empire = f64::INFINITY;
+            ctx.db.with_snapshot(|snap| {
+                for b in &all_balls {
+                    let dist = b.position.distance(tpos);
+                    if dist > 15_000.0 {
+                        continue;
+                    }
+                    if let Some(wf) = snap
+                        .characters
+                        .values()
+                        .find(|c| c.active_ship_id == b.id && c.station_id.is_none())
+                        .and_then(|c| c.war_faction_id)
+                    {
+                        if matches!(wf, FACTION_ANGEL_CARTEL | FACTION_GURISTAS) {
+                            nearest_pirate = nearest_pirate.min(dist);
+                        } else if matches!(wf, 500_001..=500_004) {
+                            nearest_empire = nearest_empire.min(dist);
+                        }
+                    }
                 }
+            });
+            if nearest_pirate.is_finite() || nearest_empire.is_finite() {
+                let dest = if nearest_pirate < nearest_empire {
+                    ICE_HEIST_PIRATE_ZONE
+                } else {
+                    ICE_HEIST_EMPIRE_ZONE
+                };
+                let _ = sys.goto_point(tanker_id, dest).await;
+            } else {
+                let _ = sys.set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop).await;
             }
-        });
-    }
-
-    Ok(PyRep::keyval([
-        ("instanceID", PyRep::Integer(instance_id)),
-        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-        ("pirateTankersSaved", PyRep::Integer(i64::from(pirate_saved))),
-        ("empireTankersSaved", PyRep::Integer(i64::from(empire_saved))),
-        ("completed", PyRep::Bool(completed)),
-        ("lpAwarded", PyRep::Integer(lp_awarded)),
-        (
-            "destroyedPiratesNearGuards",
-            PyRep::List(destroyed_pirates.into_iter().map(PyRep::Integer).collect()),
-        ),
-    ]))
-}
-
-pub async fn dispatch_ice_heist_rpc(
-    ctx: &ServerContext,
-    session: &SessionState,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    match method {
-        "SpawnIceHeistInstance" => {
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-                .ok_or_else(|| BridgeRpcError::user_error("NoSolarSystem"))?;
-            let id = spawn_ice_heist_checked(ctx, sys_id).await?;
-            Ok(PyRep::Integer(id))
         }
-        "EscortIceHeistTanker" => {
-            let instance_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let pirate_side = args
-                .get(1)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            escort_ice_heist_tanker(ctx, char_id, instance_id, pirate_side).await
-        }
-        _ => Err(BridgeRpcError::user_error("UnknownMethod")),
     }
 }

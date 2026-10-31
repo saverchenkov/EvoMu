@@ -1344,7 +1344,11 @@ pub async fn handle(
             Some(Ok(PyRep::List(instances)))
         }
 
+        // parity: feat:pve.insurgency-ice-heist
         ("dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
             let sys_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id);
             let instances = read_insurgency_runtime(ctx, |rt| {
                 rt.ice_heist_instances

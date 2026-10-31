@@ -758,6 +758,14 @@ pub async fn handle_ship_or_npc_destruction(
             target_ball.type_id,
         )
         .await;
+        if target_ball.type_id == crate::services::pve_fob_observatory::WORLD_ARK_BOSS_TYPE_ID {
+            crate::services::pve_fob_observatory::on_world_ark_boss_killed(
+                ctx,
+                sys_id,
+                attacker_char_id,
+            )
+            .await;
+        }
         ctx.db.with_mut_snapshot(|snap| {
             let is_unpiloted_hull = snap.items.get(&target_ball_id).is_some_and(|it| {
                 ctx.sde

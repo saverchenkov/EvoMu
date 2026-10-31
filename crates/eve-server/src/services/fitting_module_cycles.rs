@@ -716,7 +716,7 @@ pub(crate) async fn handle_module_cycles(
                         return Some(Err(BridgeRpcError::user_error("CannotActivateCloaked")));
                     }
                 }
-                if is_mwd {
+                if is_mwd && effect_name != "online" {
                     if let Err(e) = crate::services::pve_dungeon_runtime_rpc::check_deadspace_mwd_disallowed(ctx, &sys, sys_id, ship_id).await {
                         return Some(Err(e));
                     }
