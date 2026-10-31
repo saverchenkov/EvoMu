@@ -560,7 +560,8 @@ async fn test_so7_chat_and_mail_item_fitting_hyperlinks_roundtrip() {
 
 #[tokio::test]
 async fn test_t8_atomic_rollback_all_stores_on_rpc_and_wal_failure() {
-    // parity: plan:T-8
+    // parity: plan:T-8, feat:invariant.atomic-rollback-all-stores
+    eve_testkit::attest(&["plan:T-8", "feat:invariant.atomic-rollback-all-stores"]);
 
     let db_path = temp_sqlite_path("t8_atomic");
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
@@ -590,6 +591,23 @@ async fn test_t8_atomic_rollback_all_stores_on_rpc_and_wal_failure() {
         Err("injected multi-store failure".to_string())
     });
     assert!(fault_res.is_err());
+
+    let mut seed = 0x5EED_1234_5678_9ABCu64;
+    for step in 0..16u64 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let r: Result<(), String> = ctx.db.try_with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+                ch.balance = IskCents((seed % 1_000_000) as i64);
+            }
+            snap.items.insert(999_888_000 + step as i64, InventoryItemRecord {
+                item_id: 999_888_000 + step as i64, type_id: 34, owner_id: 90_000_001,
+                location_id: JITA_STATION_ID, flag: InventoryFlag::Hangar,
+                quantity: (seed % 500 + 1) as i32, singleton: false, version: 1, ..Default::default()
+            });
+            Err(format!("randomized fault step {step}"))
+        });
+        assert!(r.is_err());
+    }
 
     let rpc_fail = rpc(&ctx, &mut sess, "contractProxy", "CreateContract", &[
         PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440), PyRep::Integer(1),

@@ -14,8 +14,9 @@ const AU: f64 = 149_597_870_700.0;
 
 #[tokio::test]
 async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
-    // parity: feat:scanning.dscan, feat:scanning.probe-launch, feat:scanning.probe-scan-math, feat:scanning.probe-recall, feat:navigation.acceleration-gates, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:keeper.ActivateAccelerationGate, rpc:scanMgr.GetSystemScanMgr
+    // parity: plan:SO-5, feat:scanning.dscan, feat:scanning.probe-launch, feat:scanning.probe-scan-math, feat:scanning.probe-recall, feat:navigation.acceleration-gates, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.LoadAmmo, rpc:keeper.ActivateAccelerationGate, rpc:scanMgr.GetSystemScanMgr
     eve_testkit::attest(&[
+        "plan:SO-5",
         "feat:scanning.dscan",
         "feat:scanning.probe-launch",
         "feat:scanning.probe-scan-math",
