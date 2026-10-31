@@ -879,9 +879,27 @@ pub(crate) async fn handle_containers_ships_and_fitting(
 
         ("invbroker", "SetPassword") | ("invbroker", "ALSCConfigSet") | ("invbroker", "ConfigureALSC") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
-            let password = args.get(1).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str()))
-                .or_else(|| kwargs.get("password").and_then(|v| v.as_str())).or_else(|| args.first().and_then(|a| a.as_str())).unwrap_or("").to_string();
+            let (container_id, which, password, old_password) = if let Some(b) = bound_entry {
+                let first_int = args.first().and_then(|a| a.as_i64());
+                if first_int.is_some_and(|w| matches!(w, 1 | 2)) && args.get(1).and_then(|a| a.as_str()).is_some() {
+                    let w = first_int.unwrap_or(1);
+                    let new_pw = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    let old_pw = args.get(2).and_then(|a| a.as_str()).map(ToString::to_string);
+                    (b.object_id, w, new_pw, old_pw)
+                } else {
+                    let cid = first_int.unwrap_or(b.object_id);
+                    let w = kwargs.get("which").and_then(|v| v.as_i64()).unwrap_or(1);
+                    let new_pw = args.get(1).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str()))
+                        .or_else(|| kwargs.get("password").and_then(|v| v.as_str())).or_else(|| args.first().and_then(|a| a.as_str())).unwrap_or("").to_string();
+                    (cid, w, new_pw, None)
+                }
+            } else {
+                let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let w = kwargs.get("which").and_then(|v| v.as_i64()).unwrap_or(1);
+                let new_pw = args.get(1).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str()))
+                    .or_else(|| kwargs.get("password").and_then(|v| v.as_str())).or_else(|| args.first().and_then(|a| a.as_str())).unwrap_or("").to_string();
+                (cid, w, new_pw, None)
+            };
             let corp_id = session.corporation_id.unwrap_or(0);
             let cont_res = ctx.db.with_snapshot(|snap| {
                 let Some(item) = snap.items.get(&container_id) else {
@@ -907,6 +925,13 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             if matches!(grp_id, 12 | 649) {
                 return Some(Err(BridgeRpcError { code: "ContainerDoesNotSupportPassword".into(), message: format!("Container {container_id} (group {grp_id}) does not support passwords") }));
             }
+            if let Some(ref supplied_old) = old_password {
+                if let Some(existing_pw) = read_container_ship_state(ctx).container_passwords.get(&container_id) {
+                    if !existing_pw.is_empty() && existing_pw != supplied_old {
+                        return Some(Err(BridgeRpcError { code: "InvalidPassword".into(), message: "Incorrect old container password".into() }));
+                    }
+                }
+            }
             let now_unix = ctx.now_unix_secs();
             write_container_ship_state(ctx, |st| {
                 st.unlocked_containers.retain(|&(a, b)| a != container_id && b != container_id);
@@ -914,17 +939,18 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 st.unlocked_containers.insert((container_id, char_id));
                 st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
             });
+            let pw_type_str = if which == 2 { "config" } else { "general" };
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
                     snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
                         logged_at_unix: now_unix, container_id, container_type_id: tid as i32, character_id: char_id,
-                        location_id: loc_id, location_flag: loc_flag, action: "set_password".into(), password_type: Some("config".into()),
+                        location_id: loc_id, location_flag: loc_flag, action: "set_password".into(), password_type: Some(pw_type_str.into()),
                         type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
                     });
                 }
             });
-            if method == "SetPassword" { crate::services::notify_emitters_batch9::emit_password_changed(ctx, char_id, container_id, tid); }
-            crate::services::notify_emitters_batch3::emit_invalidate_cache_for_locations(ctx, crate::router::NotificationTarget::Character(char_id), &[container_id]);
+            if method == "SetPassword" { crate::services::notify_emitters_b30::emit_password_changed(ctx, char_id, which, container_id, tid); }
+            crate::services::notify_emitters_b30::emit_invalidate_cache_for_locations(ctx, crate::router::NotificationTarget::Character(char_id), &[container_id]);
             Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordSet", PyRep::Bool(!password.is_empty()))])))
         }
 

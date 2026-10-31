@@ -203,12 +203,18 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
             rt.crimewatch_timer_states.insert(char_id, (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig));
         }
     });
-    for (ev, a) in updates {
-        ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a);
+    for (ev, mut a) in updates {
+        let code_fn = |a: &mut Vec<PyRep>, def: i64| (a.pop().unwrap_or(PyRep::None), a.pop().and_then(|v| v.as_i64()).unwrap_or(def));
+        match ev {
+            "OnWeaponsTimerUpdate" => { let (exp, c) = code_fn(&mut a, 100); crate::services::notify_emitters_b30::emit_weapons_timer_update(ctx, char_id, c, exp); }
+            "OnPvpTimerUpdate" => { let (exp, c) = code_fn(&mut a, 200); crate::services::notify_emitters_b30::emit_pvp_timer_update(ctx, char_id, c, exp); }
+            "OnCriminalTimerUpdate" => { let (exp, c) = code_fn(&mut a, 300); crate::services::notify_emitters_b30::emit_criminal_timer_update(ctx, char_id, c, exp); }
+            _ => { ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a); }
+        }
     }
     if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
         if let Some((new_idles, new_suspects, new_criminals)) = crim_transition {
-            crate::services::notify_emitters_batch6::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
+            crate::services::notify_emitters_b30::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
         }
         if let Some((new_idles, new_naughty)) = dis_transition {
             crate::services::notify_emitters_batch6::emit_system_disapproval_flag_updates(ctx, sys_id, &new_idles, &new_naughty);

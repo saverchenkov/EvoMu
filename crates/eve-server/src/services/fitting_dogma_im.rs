@@ -678,6 +678,11 @@ pub(crate) async fn handle_dogma_im(
                 vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
             );
             let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
+            if let Some(target_char) = ctx.db.with_snapshot(|s| {
+                s.items.get(&target_id).map(|i| i.owner_id).filter(|oid| *oid != char_id && s.characters.contains_key(oid))
+            }) {
+                crate::services::notify_emitters_b30::emit_multi_event(ctx, target_char, &[("otherlost", ship_id, "")]);
+            }
             Some(Ok(PyRep::Integer(target_id)))
         }
 

@@ -245,17 +245,12 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         set_facwar_bunker_vulnerable(ctx, sys_id, occupier_fac, true);
     }
 
-    let vp_state = PyRep::keyval([
-        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-        ("victoryPoints", PyRep::Integer(new_vp)),
-        ("contestedPercentage", PyRep::Real(contested)),
-        ("threshold", PyRep::Integer(threshold_i)),
-    ]);
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        "OnVictoryPointStateUpdated",
-        "solarsystemid",
-        vec![PyRep::Integer(i64::from(sys_id)), vp_state],
+    crate::services::notify_emitters_b30::emit_victory_point_state_updated(
+        ctx,
+        sys_id,
+        new_vp,
+        contested,
+        threshold_i,
     );
     let front = ctx.db.with_snapshot(|snap| {
         compute_system_frontline_status(ctx, snap, sys_id)
@@ -415,11 +410,11 @@ pub fn complete_fw_dungeon_and_objective(
 
 /// Records an LP donation to a warzone solar system hub and emits `OnSolarSystemLPChange`.
 pub fn donate_solar_system_lp(ctx: &ServerContext, sys_id: u32, old_points: i64, new_points: i64) {
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        "OnSolarSystemLPChange",
-        "solarsystemid",
-        vec![PyRep::Integer(old_points), PyRep::Integer(new_points)],
+    crate::services::notify_emitters_b30::emit_solar_system_lp_change(
+        ctx,
+        sys_id,
+        old_points,
+        new_points,
     );
 }
 

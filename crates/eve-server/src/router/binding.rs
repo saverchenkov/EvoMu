@@ -1026,36 +1026,51 @@ impl ServerContext {
         let notify_tx_lock = self.notify_tx.clone();
         self.systems.set_target_lock_completed_hook(Arc::new(move |char_id, target_id| {
             let now = db_lock.clock().now_blueos_filetime_ticks();
-            let user_id = db_lock.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
-            let args = vec![PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Tuple(vec![
-                    PyRep::String("OnTarget".into()),
-                    PyRep::String("add".into()),
-                    PyRep::Integer(target_id),
-                    PyRep::String(String::new()),
-                ]),
-                PyRep::Integer(0),
-            ])])];
-            let (packet, marshaled_packet) =
-                ServerContext::build_macho_notification_packet(char_id, user_id, "OnMultiEvent", "charid", args.clone());
-            let notif = PendingMachoNotification {
-                recipient_char_id: char_id,
-                event: "OnMultiEvent".to_string(),
-                id_type: "charid".to_string(),
-                args,
-                packet,
-                marshaled_packet,
-                created_filetime: now,
-            };
-            {
-                let mut q_guard = pending_lock.write().unwrap_or_else(|e| e.into_inner());
-                let q = q_guard.entry(char_id).or_default();
-                if q.len() >= 512 {
-                    q.remove(0);
+            let enqueue_target_ev = |rcpt_char: i64, rcpt_user: Option<u64>, sub_ev: &str, item_id: i64| {
+                let args = vec![PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Tuple(vec![
+                        PyRep::String("OnTarget".into()),
+                        PyRep::String(sub_ev.into()),
+                        PyRep::Integer(item_id),
+                        PyRep::String(String::new()),
+                    ]),
+                    PyRep::Integer(0),
+                ])])];
+                let (packet, marshaled_packet) =
+                    ServerContext::build_macho_notification_packet(rcpt_char, rcpt_user, "OnMultiEvent", "charid", args.clone());
+                let notif = PendingMachoNotification {
+                    recipient_char_id: rcpt_char,
+                    event: "OnMultiEvent".to_string(),
+                    id_type: "charid".to_string(),
+                    args,
+                    packet,
+                    marshaled_packet,
+                    created_filetime: now,
+                };
+                {
+                    let mut q_guard = pending_lock.write().unwrap_or_else(|e| e.into_inner());
+                    let q = q_guard.entry(rcpt_char).or_default();
+                    if q.len() >= 512 {
+                        q.remove(0);
+                    }
+                    q.push(notif.clone());
                 }
-                q.push(notif.clone());
+                let _ = notify_tx_lock.send((rcpt_char, notif));
+            };
+            let user_id = db_lock.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
+            enqueue_target_ev(char_id, user_id, "add", target_id);
+            let target_owner_info: Option<(i64, Option<u64>, i64)> = db_lock.with_snapshot(|s| {
+                let target_char = s.items.get(&target_id).map(|i| i.owner_id).filter(|oid| s.characters.contains_key(oid))?;
+                if target_char == char_id {
+                    return None;
+                }
+                let target_user = s.characters.get(&target_char).map(|c| c.user_id);
+                let locker_ship = s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(char_id);
+                Some((target_char, target_user, locker_ship))
+            });
+            if let Some((target_char, target_user, locker_ship)) = target_owner_info {
+                enqueue_target_ev(target_char, target_user, "otheradd", locker_ship);
             }
-            let _ = notify_tx_lock.send((char_id, notif));
         }));
     }
 

@@ -522,3 +522,4 @@ mod quasar_b2_closure;
 mod notify_p7_sp1_sp2_closure;
 mod open_feats_and_rpcs_b30;
 mod open_feats_and_rpcs_b30_part2;
+mod notify_b30_closure;

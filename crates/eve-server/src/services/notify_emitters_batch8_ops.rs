@@ -415,12 +415,7 @@ fn replay_operation_for_char(
             }
         });
     });
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnOperationReplayed",
-        "charid",
-        vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)],
-    );
+    crate::services::notify_emitters_b30::emit_operation_replayed(ctx, char_id, cat_id, op_id);
     Ok(PyRep::Bool(true))
 }
 
@@ -555,12 +550,7 @@ pub fn handle_operation_slash(
         Some("reset_progress" | "reset") => Some(reset_operations_progress_for_char(ctx, caller_char_id)),
         Some("reload_fsd") => Some(reload_operations_fsd_data(ctx, session, caller_char_id)),
         Some("reveal_ui") => {
-            ctx.notify(
-                NotificationTarget::Character(caller_char_id),
-                "OnUiRevealForced",
-                "charid",
-                vec![],
-            );
+            crate::services::notify_emitters_b30::emit_ui_reveal_forced(ctx, caller_char_id);
             Some(Ok(PyRep::Bool(true)))
         }
         _ => Some(Err(rpc_err(
