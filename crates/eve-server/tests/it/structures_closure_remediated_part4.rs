@@ -395,6 +395,10 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
     let ad_entry = ad_map.iter().find(|(k, _)| k.as_i64() == Some(st_id)).map(|(_, v)| v).expect("ally sees structure");
     assert_eq!(ad_entry.dict_get("fuelBlocks"), Some(&PyRep::None), "Non-corp pilot must not see exact fuelBlocks");
     assert_eq!(ad_entry.dict_get("profileID"), Some(&PyRep::None), "External pilot must not see profileID in GetStructures");
+    let Some(PyRep::Dict(ad_services)) = ad_entry.dict_get("services") else { panic!("expected services dict") };
+    assert!(ad_services.iter().any(|(k, v)| k.as_i64() == Some(1) && v.as_i64() == Some(1)), "Ally entry must expose online market service (1)");
+    let Some(PyRep::List(ad_online_types)) = ad_entry.dict_get("onlineServiceTypeIDs") else { panic!("expected onlineServiceTypeIDs list") };
+    assert!(ad_online_types.contains(&PyRep::Integer(35892)), "Ally entry must expose Standup Market Hub I (35892) in onlineServiceTypeIDs");
 
     let ally_info = rpc(&ctx, &mut ally_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap();
     assert_eq!(ally_info.dict_get("profileID"), Some(&PyRep::None), "External pilot must not see profileID in GetStructureInfo");
@@ -408,6 +412,9 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
     };
     let PyRep::List(jb_after_ids) = &jb_after[1] else { panic!("expected list") };
     assert!(!jb_after_ids.contains(&PyRep::Integer(jb_a_id)), "Ally must lose jb_a_id access at t + 300s");
+    let ally_dir_after = rpc(&ctx, &mut ally_sess, "structureDirectory", "GetStructures", &[]).await.unwrap();
+    let PyRep::Dict(ad_map_after) = ally_dir_after else { panic!("expected dict") };
+    assert!(!ad_map_after.iter().any(|(k, _)| k.as_i64() == Some(st_id)), "Pilot without access must get nothing back from GetStructures");
     ally_sess.solar_system_id = Some(RANCER);
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&ALLY_PILOT).unwrap().solar_system_id = RANCER);
     assert_eq!(
