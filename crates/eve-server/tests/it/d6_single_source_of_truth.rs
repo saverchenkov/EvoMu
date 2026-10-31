@@ -82,9 +82,6 @@ fn esi_get(router: &EsiRouter, path: &str, token: Option<&str>) -> serde_json::V
 
 #[tokio::test]
 async fn test_d6_single_source_of_truth_client_esi_quasar_and_restart() {
-    // parity: plan:D-6, feat:invariant.single-source-of-truth
-    eve_testkit::attest(&["plan:D-6", "feat:invariant.single-source-of-truth"]);
-
     let db_path = temp_sqlite_path("d6_ssot");
     let char_id = 90_000_001i64;
     let target_char_id = 90_000_002i64;
@@ -250,7 +247,6 @@ async fn test_d6_single_source_of_truth_client_esi_quasar_and_restart() {
 
 #[tokio::test]
 async fn test_t10_client_expectation_oracle_live_rpc_shapes() {
-    // parity: plan:T-10
     let oracle_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../.agents/skills/evomu-adversarial-review/references/parity/sources/client_expectations.json");
     let raw = std::fs::read_to_string(&oracle_path)

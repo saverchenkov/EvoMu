@@ -164,7 +164,7 @@ fn raw_msg(fields: &[(u32, RawField)], num: u32) -> Option<Vec<(u32, RawField)>>
 
 #[tokio::test]
 async fn test_q3_payment_purchase_and_store_catalog_closure() {
-    // parity: plan:Q-3, quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 
@@ -430,7 +430,6 @@ async fn test_q3_payment_purchase_and_store_catalog_closure() {
 
 #[tokio::test]
 async fn test_q4_achievements_sde_and_career_goals_closure() {
-    // parity: plan:Q-4
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
     let mut unauth = SessionState::new(2);
@@ -540,7 +539,6 @@ async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
 
 #[tokio::test]
 async fn test_q7_q8_sovereignty_planet_resources_and_mercenary_den() {
-    // parity: plan:Q-7, plan:Q-8
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
     let mut unauth = SessionState::new(2);

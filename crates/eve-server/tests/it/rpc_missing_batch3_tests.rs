@@ -16,9 +16,11 @@ const PILOT2: i64 = 90_000_002;
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part1() {
-    // parity: rpc:alert.LogModeChanged, rpc:alert.SendProxyStackTraceAlert, rpc:localizationServer.UpdateLocalizationQAWrap, rpc:localizationServer.ReloadFSDPickle
-    // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent, rpc:loadService.StartLoad, rpc:loadService.StopLoad
+    // parity: rpc:alert.LogModeChanged, rpc:alert.SendProxyStackTraceAlert
+    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/internal RPCs): rpc:localizationServer.UpdateLocalizationQAWrap, rpc:localizationServer.ReloadFSDPickle
+    // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent
     // parity: rpc:machoNet.ReloadClientCodeHash, rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
+    // DATA GAP: Triaged NA in docs/parity/triage.json (cluster load test RPCs): rpc:loadService.StartLoad, rpc:loadService.StopLoad
     eve_testkit::attest(&[
         "rpc:alert.LogModeChanged",
         "rpc:alert.SendProxyStackTraceAlert",
@@ -291,8 +293,8 @@ async fn test_rpc_missing_batch3_part1() {
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part2() {
-    // parity: rpc:loadService.SetConfig, rpc:cache.Rowset, rpc:cache.Setting, rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions
-    // parity: rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
+    // parity: rpc:loadService.SetConfig, rpc:cache.Rowset, rpc:cache.Setting
+    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
     eve_testkit::attest(&[
         "rpc:loadService.SetConfig",
         "rpc:cache.Rowset",

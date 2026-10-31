@@ -73,7 +73,6 @@ fn decode_response(rsp: &eve_proto::quasar::EvePublicResponse) -> WireMessage {
 
 #[tokio::test]
 async fn test_seasons_manager_endpoints_and_selection() {
-    // parity: rpc:seasonManager.get_season_end_time, rpc:seasonManager.select_season, rpc:seasonManager.get_season_data_for_character
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = select_character(&ctx, 65_001, PILOT_1, "demo", "demo-secret").await;
