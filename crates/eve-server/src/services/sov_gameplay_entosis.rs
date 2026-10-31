@@ -921,9 +921,13 @@ pub fn require_flex_sov_upgrade_online(
         .get(&solar_system_id)
         .map(|s| s.security_status)
         .unwrap_or(1.0);
-    if sys_sec > 0.0 {
-        // Highsec and lowsec do not have Sovereignty Hubs
-        return Ok(());
+    if sys_sec >= 0.0 || solar_system_id >= 31_000_000 {
+        return Err(BridgeRpcError {
+            code: "CannotAnchorFlexOutsideSovNull".into(),
+            message: format!(
+                "FLEX structure type {structure_type_id} can only be anchored in sovereign K-space null-security space (system {solar_system_id})"
+            ),
+        });
     }
     let Some(req_upgrade) = required_upgrade_for_flex_structure(structure_type_id) else {
         return Ok(());

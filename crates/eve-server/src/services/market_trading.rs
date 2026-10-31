@@ -232,11 +232,36 @@ pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, s
     if let Some(&bps) = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
         .access_profiles
         .get(&structure_id)
-        .and_then(|p| p.service_settings.get(&1).or_else(|| p.service_settings.get(&35_892)))
+        .and_then(|p| {
+            p.service_settings
+                .get(&1)
+                .or_else(|| p.service_settings.get(&35_892))
+                .or_else(|| p.service_settings.get(&4))
+        })
     {
         return 0.005 + (bps.max(0) as f64 / 10_000.0).clamp(0.0, 1.0);
     }
     0.015
+}
+
+pub(crate) fn structure_owner_broker_share_with_pilot(
+    snap: &eve_db::WorldStateSnapshot,
+    structure_id: i64,
+    broker_fee: IskCents,
+    pilot_bps_opt: Option<i64>,
+) -> IskCents {
+    if broker_fee.0 <= 0 {
+        return IskCents(0);
+    }
+    if let Some(bps) = pilot_bps_opt {
+        if bps <= 0 {
+            return IskCents(0);
+        }
+        let owner_rate = (bps as f64 / 10_000.0).clamp(0.0, 1.0);
+        let total_rate = 0.005 + owner_rate;
+        return IskCents(((broker_fee.0 as f64) * (owner_rate / total_rate)).round() as i64);
+    }
+    structure_owner_broker_share(snap, structure_id, broker_fee)
 }
 
 pub(crate) fn structure_owner_broker_share(
@@ -495,6 +520,7 @@ pub fn handle(
                         && o.vol_remaining > 0
                         && o.region_id == region_id
                         && o.station_id == station_id
+                        && is_structure_market_online(snap, o.station_id)
                 }))
             });
             Some(Ok(DBRowDescriptor::market_summary_header()
@@ -515,7 +541,7 @@ pub fn handle(
                 best_asks_to_summary_rows(
                     snap.market_orders
                         .values()
-                        .filter(|o| !o.is_bid && o.vol_remaining > 0 && o.region_id == region_id),
+                        .filter(|o| !o.is_bid && o.vol_remaining > 0 && o.region_id == region_id && is_structure_market_online(snap, o.station_id)),
                 )
             });
             Some(Ok(DBRowDescriptor::market_summary_header()
@@ -753,44 +779,8 @@ pub fn handle(
                     None
                 }
             });
-            let (structure_info, market_hub_online, market_acl_ok) = ctx.db.with_snapshot(|snap| {
-                let info = snap
-                    .structures
-                    .get(&station_id)
-                    .filter(|st| st.state != "Destroyed")
-                    .map(|st| (st.owner_corp_id, resolve_structure_broker_rate(snap, station_id)));
-                let online = is_structure_market_online(snap, station_id)
-                    && crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(ctx, snap, station_id);
-                let acl = crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, station_id, char_id);
-                (info, online, acl)
-            });
-            if structure_info.is_some() && !market_hub_online {
-                return Some(Err(BridgeRpcError {
-                    code: "MarketHubOffline".into(),
-                    message: format!("Standup Market Hub I service module at structure {station_id} is offline"),
-                }));
-            }
-            if structure_info.is_some() && !market_acl_ok {
-                return Some(Err(BridgeRpcError {
-                    code: "StructureServiceAccessDenied".into(),
-                    message: format!("Character {char_id} is excluded by structure {station_id} access list"),
-                }));
-            }
-            let (owner_corp_id, owner_faction_id, structure_broker_opt) =
-                if let Some(station_def) = station_info {
-                    (
-                        station_def.owner_corporation_id,
-                        station_def.owner_faction_id,
-                        None,
-                    )
-                } else if let Some((st_corp_id, st_rate)) = structure_info {
-                    (st_corp_id, None, Some((st_corp_id, st_rate)))
-                } else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidMarketStation".into(),
-                        message: format!("Station {station_id} is not in region {region_id}"),
-                    }));
-                };
+            let station_owner_corp = station_info.map(|s| s.owner_corporation_id).unwrap_or(0);
+            let owner_faction_id = station_info.and_then(|s| s.owner_faction_id);
 
             let (broker_lvl, _acct_lvl, mt_lvl, vis_lvl, faction_standing, corp_standing, max_open_orders, m_tier) =
                 ctx.db.with_snapshot(|snap| {
@@ -812,7 +802,7 @@ pub fn handle(
                         .and_then(|c| owner_faction_id.and_then(|fid| c.standings.get(&fid).copied()))
                         .unwrap_or(0.0);
                     let c_st = ch
-                        .and_then(|c| c.standings.get(&owner_corp_id).copied())
+                        .and_then(|c| c.standings.get(&station_owner_corp).copied())
                         .unwrap_or(0.0);
                     let m_sys = ctx.sde.stations.get(&station_id).map(|s| s.solar_system_id).unwrap_or(0);
                     let tier = snap.fw_runtime.ihub_tiers.get(&m_sys).copied().unwrap_or(0);
@@ -830,12 +820,6 @@ pub fn handle(
                     ),
                 }));
             }
-            let broker_rate = if let Some((_, st_rate)) = structure_broker_opt {
-                st_rate
-            } else {
-                let tier_mult = 1.0 - (f64::from(m_tier) * 0.10).min(0.50);
-                compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
-            };
             let order_price = IskCents::from_f64_isk(price_isk);
             let Some(max_order_cost) = order_price.checked_mul_qty(quantity) else {
                 return Some(Err(BridgeRpcError {
@@ -843,17 +827,36 @@ pub fn handle(
                     message: "Order total cost overflows 64-bit ISK cents".into(),
                 }));
             };
-            let broker_fee = if duration_days > 0 {
-                let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
-                IskCents((((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64)
-                    .max(IskCents(10_000))
-            } else {
-                IskCents(0)
-            };
             let now_unix = ctx.now_unix();
             let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let upwell_opt = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
+                    ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
+                )?;
+                let (owner_corp_id, structure_broker_opt) = if let Some(station_def) = station_info {
+                    (station_def.owner_corporation_id, None)
+                } else if let Some((st_corp_id, st_rate, pilot_bps)) = upwell_opt {
+                    (st_corp_id, Some((st_corp_id, st_rate, pilot_bps)))
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidMarketStation".into(),
+                        message: format!("Station {station_id} is not in region {region_id}"),
+                    });
+                };
+                let broker_rate = if let Some((_, st_rate, _)) = structure_broker_opt {
+                    st_rate
+                } else {
+                    let tier_mult = 1.0 - (f64::from(m_tier) * 0.10).min(0.50);
+                    compute_broker_fee_rate(broker_lvl, faction_standing, corp_standing) * tier_mult
+                };
+                let broker_fee = if duration_days > 0 {
+                    let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
+                    IskCents((((max_order_cost.0 as i128) * broker_ppm + 500_000) / 1_000_000) as i64)
+                        .max(IskCents(10_000))
+                } else {
+                    IskCents(0)
+                };
                 let caller_corp_id = snap
                     .characters
                     .get(&char_id)
@@ -944,7 +947,13 @@ pub fn handle(
                         } else {
                             false
                         };
+                        let struct_ok = o.station_id == station_id
+                            || !snap.structures.contains_key(&o.station_id)
+                            || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                            ).is_ok();
                         o.type_id == type_id
+                            && struct_ok
                             && reach_ok
                             && o.is_bid != is_bid
                             && o.vol_remaining > 0
@@ -993,9 +1002,9 @@ pub fn handle(
                         ),
                     });
                 }
-                if let Some((st_corp_id, _)) = structure_broker_opt {
+                if let Some((st_corp_id, _, pilot_bps)) = structure_broker_opt {
                     if broker_fee.0 > 0 {
-                        let owner_share = structure_owner_broker_share(snap, station_id, broker_fee);
+                        let owner_share = structure_owner_broker_share_with_pilot(snap, station_id, broker_fee, pilot_bps);
                         if owner_share.0 > 0 {
                             if let Some(corp_mut) = snap.corporations.get_mut(&st_corp_id) {
                                 if corp_mut.wallet_divisions.is_empty() {
@@ -1203,6 +1212,7 @@ pub fn handle(
                     return Ok((
                         first_matched_oid.unwrap_or(0),
                         true,
+                        broker_fee,
                         actual_sales_tax_charged,
                         IskCents(0),
                         matched_sellers,
@@ -1303,11 +1313,11 @@ pub fn handle(
                             .with_context(eve_db::ledger::JournalContext::MarketOrder, new_oid),
                     });
                 }
-                Ok((new_oid, false, actual_sales_tax_charged, escrow, matched_sellers, delivered_items))
+                Ok((new_oid, false, broker_fee, actual_sales_tax_charged, escrow, matched_sellers, delivered_items))
             });
 
             match res {
-                Ok((order_id, filled_immediately, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items)) => {
+                Ok((order_id, filled_immediately, broker_fee, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items)) => {
                     for (matched_oid, seller_id) in matched_sellers {
                         ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false));
                     }

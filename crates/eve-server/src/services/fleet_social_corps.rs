@@ -129,8 +129,8 @@ pub(crate) fn record_corp_join_in_snap_pub(
     old_corp_id: i64,
     corp_id: i64,
     now_unix: u64,
-) {
-    record_corp_join_in_snap(snap, char_id, old_corp_id, corp_id, now_unix);
+) -> Vec<(i64, i64, u32, i64)> {
+    record_corp_join_in_snap(snap, char_id, old_corp_id, corp_id, now_unix)
 }
 
 pub(super) fn record_corp_join_in_snap(
@@ -139,7 +139,8 @@ pub(super) fn record_corp_join_in_snap(
     old_corp_id: i64,
     corp_id: i64,
     now_unix: u64,
-) {
+) -> Vec<(i64, i64, u32, i64)> {
+    let mut released = Vec::new();
     if old_corp_id > 0 && old_corp_id != corp_id {
         if let Some(g) = snap.corp_governance.get_mut(&old_corp_id) {
             g.pending_role_grants.remove(&char_id);
@@ -155,6 +156,7 @@ pub(super) fn record_corp_join_in_snap(
         snap.corp_role_assignments.remove(&(old_corp_id, char_id));
         snap.char_scoped_roles.remove(&char_id);
         snap.corp_member_titles.remove(&(old_corp_id, char_id));
+        released = crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
     }
     let list = snap.employment_history.entry(char_id).or_default();
     if list.is_empty() {
@@ -168,6 +170,7 @@ pub(super) fn record_corp_join_in_snap(
         }
     }
     list.push((corp_id, now_unix, None));
+    released
 }
 
 const MEMBER_COLS: [&str; 8] = [
@@ -904,7 +907,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Withdrawn".into();
                     }
-                    return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts, None));
+                    return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts, None, Vec::new()));
                 }
 
                 if is_invitation {
@@ -920,7 +923,7 @@ pub(super) fn handle_corps(
                     if let Some(app) = corp_mut.applications.get_mut(&app_id) {
                         app.status = "Rejected".into();
                     }
-                    return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts, None));
+                    return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts, None, Vec::new()));
                 }
                 if !action.eq_ignore_ascii_case("accepted") {
                     return Err(BridgeRpcError { code: "InvalidApplicationAction".into(), message: format!("Unknown application action '{action}'") });
@@ -997,13 +1000,14 @@ pub(super) fn handle_corps(
                 } else {
                     None
                 };
-                record_corp_join_in_snap(snap, applicant_id, old_corp_id, corp_id, now_unix);
+                let released = record_corp_join_in_snap(snap, applicant_id, old_corp_id, corp_id, now_unix);
 
-                Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts, welcome_mail_id))
+                Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts, welcome_mail_id, released))
             });
 
             match res {
-                Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts, welcome_mail_id)) => {
+                Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts, welcome_mail_id, released)) => {
+                    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
                     if status_str == "Accepted" {
                         let (old_ally, new_ally, old_role) = ctx.db.with_snapshot(|s| {
                             (
@@ -1016,6 +1020,11 @@ pub(super) fn handle_corps(
                             session.corporation_id = Some(corp_id);
                             session.alliance_id = new_ally;
                             session.corp_role = 0;
+                            if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&applicant_id).map(|c| c.active_ship_id)) {
+                                if act_ship != 0 {
+                                    session.ship_id = Some(act_ship);
+                                }
+                            }
                         }
                         super::fleet_social_persistence::with_social_state(ctx, |s| {
                             s.forced_session_corp_sync.insert(applicant_id, (corp_id, new_ally, 0));

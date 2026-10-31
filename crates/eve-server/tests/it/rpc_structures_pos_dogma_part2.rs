@@ -264,13 +264,20 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
         save_ext_state(snap, &ext);
     });
 
-    let jb_list = rpc(&ctx, &mut sess1, "structureDirectory", "GetJumpBridgesWithMyAccess", &[]).await.expect("GetJumpBridgesWithMyAccess");
-    let PyRep::List(jb_entries) = jb_list else { panic!("expected List"); };
+    let jb_res = rpc(&ctx, &mut sess1, "structureDirectory", "GetJumpBridgesWithMyAccess", &[]).await.expect("GetJumpBridgesWithMyAccess");
+    let PyRep::Tuple(jb_tup) = jb_res else { panic!("expected 3-tuple"); };
+    assert_eq!(jb_tup.len(), 3);
+    let PyRep::List(jb_entries) = &jb_tup[0] else { panic!("expected pairs List at tuple[0]"); };
+    let PyRep::List(jb_accessible) = &jb_tup[1] else { panic!("expected accessible IDs List at tuple[1]"); };
     assert!(!jb_entries.is_empty(), "Expected accessible jump bridges in list");
-    let jb1_entry = jb_entries.iter().find(|e| e.dict_get("structureID") == Some(&PyRep::Integer(jb1_id))).expect("jb1_id in jump bridges list");
-    assert_eq!(jb1_entry.dict_get("solarSystemID"), Some(&PyRep::Integer(SYS_JITA as i64)));
-    assert_eq!(jb1_entry.dict_get("linkedStructureID"), Some(&PyRep::Integer(jb2_id)));
-    assert_eq!(jb1_entry.dict_get("destinationSolarSystemID"), Some(&PyRep::Integer(SYS_DEST as i64)));
+    assert!(jb_accessible.contains(&PyRep::Integer(jb1_id)));
+    let jb1_pair = jb_entries.iter().find_map(|e| match e {
+        PyRep::Tuple(pair) if pair.len() == 2 && pair[0].dict_get("structureID") == Some(&PyRep::Integer(jb1_id)) => Some(pair),
+        _ => None,
+    }).expect("jb1_id in jump bridges pairs");
+    assert_eq!(jb1_pair[0].dict_get("solarSystemID"), Some(&PyRep::Integer(SYS_JITA as i64)));
+    assert_eq!(jb1_pair[1].dict_get("structureID"), Some(&PyRep::Integer(jb2_id)));
+    assert_eq!(jb1_pair[1].dict_get("solarSystemID"), Some(&PyRep::Integer(SYS_DEST as i64)));
 
     let nearby_jb = rpc(&ctx, &mut sess1, "structureDirectory", "GetNearbyJumpBridges", &[]).await.expect("GetNearbyJumpBridges");
     let PyRep::List(nearby_entries) = nearby_jb else { panic!("expected List"); };
@@ -339,13 +346,46 @@ async fn test_pos_mgr_parity() {
     assert_eq!(hs_gantry_err.code, "CannotAnchorOrbitalInHighSec");
 
     let gantry_ls_id = 50_000_000_005_i64;
+    let orbital_corp_id = 98_000_777_i64;
     seed_test_item(&ctx, gantry_ls_id, GANTRY_TYPE_ID, PILOT1, ship_item_id, InventoryFlag::Cargo, 1);
     sess.solar_system_id = Some(LOWSEC_SOLAR_SYSTEM_ID);
+    sess.corporation_id = Some(orbital_corp_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT1) {
             ch.solar_system_id = LOWSEC_SOLAR_SYSTEM_ID;
+            ch.corporation_id = orbital_corp_id;
         }
+        let mut corp = eve_db::CorporationRecord::default();
+        corp.corporation_id = orbital_corp_id;
+        corp.name = "Orbital Test Corp".into();
+        corp.ticker = "ORBT".into();
+        corp.ceo_id = 90_000_999;
+        corp.members.insert(PILOT1);
+        snap.corporations.insert(orbital_corp_id, corp);
     });
+    let ls_planet = ctx
+        .sde
+        .celestials_in_system(LOWSEC_SOLAR_SYSTEM_ID)
+        .into_iter()
+        .find(|c| c.celestial_id == LOWSEC_PLANET_ID)
+        .expect("lowsec planet");
+    let ls_sys = ctx.systems.get_or_spawn(LOWSEC_SOLAR_SYSTEM_ID);
+    ls_sys
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_item_id,
+            type_id: 587,
+            position: ls_planet.position + glam::DVec3::new(ls_planet.radius + 5_000.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn lowsec ship ball");
 
     let gantry_res = rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect("Anchor Customs Office Gantry at low-sec planet");
     assert_eq!(gantry_res.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_ls_id)));
@@ -363,6 +403,7 @@ async fn test_pos_mgr_parity() {
     let non_orb_err = rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(non_orbital_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("Non-orbital item for AnchorOrbital must fail");
     assert_eq!(non_orb_err.code, "StarbaseRemoved");
 
+    sess.corp_role = 0;
     let no_role_err = rpc(&ctx, &mut sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("OnlineOrbital without Director/StationManager role must fail");
     assert_eq!(no_role_err.code, "CrpAccessDenied");
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;

@@ -108,6 +108,9 @@ async fn handle_cmd_warp_to_stuff(
             return Err(bookmark_expired_err(bm_id));
         }
     }
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "warp")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
@@ -589,6 +592,9 @@ async fn handle_cmd_stargate_jump(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "jump")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
@@ -894,6 +900,9 @@ async fn handle_dock(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "dock")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "AlreadyDocked".into(),

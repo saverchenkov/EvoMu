@@ -71,6 +71,9 @@ pub fn handle_upgrade_gantry(
                 message: "Upgrading or onlining an orbital gantry requires Director or Station Manager role".into(),
             });
         }
+        crate::services::structure_anchoring_rules::validate_pochven_customs_office_standing(
+            snap, char_id, sys_id, &ctx.sde,
+        )?;
 
         let (cur_tid, planet_id) = {
             let it = snap.items.get(&orbital_id).ok_or_else(|| BridgeRpcError {
@@ -235,29 +238,6 @@ pub fn handle_anchor_orbital(
             ),
         });
     }
-    let region_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id).unwrap_or(0);
-    if region_id == structure_lifecycle::POCHVEN_REGION_ID {
-        if session.station_id.is_some() || session.structure_id.is_some() {
-            return Err(BridgeRpcError {
-                code: "NotInSpace".into(),
-                message: "Must be in space to anchor an orbital structure".into(),
-            });
-        }
-        let trig_standing = ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .get(&char_id)
-                .and_then(|c| c.standings.get(&500_026).copied())
-                .unwrap_or(0.0)
-        });
-        if trig_standing < 1.5 {
-            return Err(BridgeRpcError {
-                code: "InsufficientTriglavianStanding".into(),
-                message: format!(
-                    "Anchoring orbitals in Pochven requires at least 1.5 standing with the Triglavian Collective (500026); pilot has {trig_standing:.2}"
-                ),
-            });
-        }
-    }
     let item_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
         code: "MissingArgument".into(),
         message: "AnchorOrbital requires an orbital itemID".into(),
@@ -275,6 +255,12 @@ pub fn handle_anchor_orbital(
             message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
         });
     }
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Must be undocked in space to anchor an orbital structure".into(),
+        });
+    }
 
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
     if sys_sec >= 0.45 && sys_id < 31_000_000 {
@@ -284,28 +270,96 @@ pub fn handle_anchor_orbital(
         });
     }
 
-    let ship_pos = session.ship_id.and_then(|sid| ctx.systems.get_ball_position_sync(sys_id, sid));
-    let nearest_planet = ship_pos.and_then(|sp| {
-        ctx.sde.celestials_in_system(sys_id).into_iter().filter(|c| c.group_id == 7).min_by(|a, b| {
-            (a.position - sp).length_squared().partial_cmp(&(b.position - sp).length_squared()).unwrap_or(std::cmp::Ordering::Equal)
-        })
-    });
-    let planet_id = args.get(1).and_then(|a| a.as_i64())
-        .or_else(|| nearest_planet.as_ref().map(|p| p.celestial_id))
-        .or_else(|| ctx.sde.solar_systems.get(&sys_id).and_then(|s| s.planet_ids.first().copied()))
-        .unwrap_or(40_000_001);
-    if let (Some(sp), Some(np)) = (ship_pos, nearest_planet) {
-        if args.get(1).is_none() || args.get(1).and_then(|a| a.as_i64()) == Some(np.celestial_id) {
-            let dist = (sp - np.position).length();
-            let max_dist = np.radius + 100_000_000.0;
-            if dist > max_dist {
-                return Err(BridgeRpcError {
-                    code: "OrbitalOutOfRange".into(),
-                    message: format!("Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)", np.celestial_id),
-                });
-            }
+    ctx.db.with_snapshot(|snap| {
+        crate::services::structure_anchoring_rules::validate_pochven_customs_office_standing(
+            snap, char_id, sys_id, &ctx.sde,
+        )
+    })?;
+
+    let char_corp = ctx.db.with_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+        let corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        if corp_id < 98_000_000 || !snap.corporations.contains_key(&corp_id) {
+            return Err(BridgeRpcError {
+                code: "CrpAccessDenied".into(),
+                message: format!("Character {char_id} is in NPC corporation {corp_id}; only player corporations may anchor orbitals"),
+            });
         }
+        let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+        let has_role = session.has_gm_role()
+            || (session.corp_role & req_roles) != 0
+            || snap.corporations.get(&corp_id).is_some_and(|c| {
+                c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0)
+            })
+            || snap
+                .corp_role_assignments
+                .get(&(corp_id, char_id))
+                .is_some_and(|a| (a.roles & req_roles) != 0);
+        if !has_role {
+            return Err(BridgeRpcError {
+                code: "CrpAccessDenied".into(),
+                message: "Anchoring an orbital requires Director or Station Manager corporation role".into(),
+            });
+        }
+        Ok(corp_id)
+    })?;
+
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Anchoring an orbital requires an active ship in space".into(),
+    })?;
+    let ship_pos = ctx
+        .systems
+        .get_ball_position_sync(sys_id, ship_id)
+        .ok_or_else(|| BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship must be spawned in space to anchor an orbital".into(),
+        })?;
+
+    let planets_in_sys: Vec<_> = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .filter(|c| c.group_id == 7)
+        .collect();
+    let target_planet = if let Some(explicit_pid) = args.get(1).and_then(|a| a.as_i64()) {
+        planets_in_sys
+            .into_iter()
+            .find(|c| c.celestial_id == explicit_pid)
+            .ok_or_else(|| BridgeRpcError {
+                code: "InvalidOrbitalPlanet".into(),
+                message: format!("Celestial {explicit_pid} is not a planet in solar system {sys_id}"),
+            })?
+    } else {
+        planets_in_sys
+            .into_iter()
+            .min_by(|a, b| {
+                (a.position - ship_pos)
+                    .length_squared()
+                    .partial_cmp(&(b.position - ship_pos).length_squared())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .ok_or_else(|| BridgeRpcError {
+                code: "InvalidOrbitalPlanet".into(),
+                message: format!("Solar system {sys_id} has no anchorable planets"),
+            })?
+    };
+    let dist = (ship_pos - target_planet.position).length();
+    let max_dist = target_planet.radius + 100_000_000.0;
+    if dist > max_dist {
+        return Err(BridgeRpcError {
+            code: "OrbitalOutOfRange".into(),
+            message: format!(
+                "Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)",
+                target_planet.celestial_id
+            ),
+        });
     }
+    let planet_id = target_planet.celestial_id;
 
     let (tid, pid) = ctx.db.try_with_mut_snapshot(|snap| {
         if snap.structures.contains_key(&item_id) {
@@ -325,11 +379,6 @@ pub fn handle_anchor_orbital(
                 message: format!("Planet {planet_id} already has an anchored orbital"),
             });
         }
-        let char_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(98_000_001);
         let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
             code: "ItemNotFound".into(),
             message: format!("Gantry item {item_id} not found"),
@@ -340,13 +389,11 @@ pub fn handle_anchor_orbital(
                 message: format!("Character {char_id} does not own item {item_id}"),
             });
         }
-        if let Some(active_ship) = session.ship_id {
-            if it.location_id != active_ship || it.flag != eve_db::InventoryFlag::Cargo {
-                return Err(BridgeRpcError {
-                    code: "ItemNotInCargo".into(),
-                    message: format!("Gantry item {item_id} must be in the cargo hold of active ship {active_ship}"),
-                });
-            }
+        if it.location_id != ship_id || it.flag != eve_db::InventoryFlag::Cargo {
+            return Err(BridgeRpcError {
+                code: "ItemNotInCargo".into(),
+                message: format!("Gantry item {item_id} must be in the cargo hold of active ship {ship_id}"),
+            });
         }
         let tid = it.type_id;
         it.location_id = planet_id;
@@ -360,11 +407,7 @@ pub fn handle_anchor_orbital(
                 owner_corp_id: char_corp,
                 solar_system_id: sys_id,
                 name: tag,
-                position: ctx
-                    .systems
-                    .get_ball_position_sync(sys_id, session.ship_id.unwrap_or(0))
-                    .map(|p| p.to_array())
-                    .unwrap_or([200_000.0, 0.0, 0.0]),
+                position: ship_pos.to_array(),
                 state: "ShieldVulnerable".into(),
                 quantum_core_installed: true,
                 fuel_blocks: 1_000,
@@ -432,6 +475,7 @@ fn build_structure_dir_entry(
         ("itemName", PyRep::String(st.name.clone())),
         ("state", PyRep::String(st.state.clone())),
         ("powerState", PyRep::String(power.as_str().into())),
+        ("profileID", if is_corp_manager { ext.structure_profile_id.get(&st.structure_id).copied().map(PyRep::Integer).unwrap_or(PyRep::None) } else { PyRep::None }),
         ("fuelBlocks", if is_corp_manager { PyRep::Integer(i64::from(st.fuel_blocks)) } else { PyRep::None }),
         ("services", PyRep::Dict(services)),
         ("onlineServiceTypeIDs", PyRep::List(online_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
@@ -449,7 +493,8 @@ pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionSt
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-        let ext = load_ext_state(snap);
+        let mut ext = load_ext_state(snap);
+        structure_upwell_ops::apply_pending_profile_applications(&mut ext, now);
         let mut list: Vec<(&eve_db::UpwellStructureRecord, bool)> = snap
             .structures
             .values()
@@ -457,7 +502,7 @@ pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionSt
                 if s.state == life::STATE_DESTROYED {
                     return None;
                 }
-                let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id);
+                let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap_at(snap, s.structure_id, char_id, Some(now));
                 if s.owner_corp_id == caller_corp || (!corp_only && has_acl) {
                     Some((s, has_acl))
                 } else {
@@ -485,11 +530,12 @@ pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut Sessi
             .get(&structure_id)
             .filter(|s| s.state != life::STATE_DESTROYED)
             .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, structure_id, char_id);
+        let has_acl = structure_upwell_ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now));
         if caller_corp != st.owner_corp_id && session.solar_system_id != Some(st.solar_system_id) && !has_acl {
             return Err(err("StructureAccessDenied", format!("Character {char_id} lacks access to structure {structure_id}")));
         }
-        let ext = load_ext_state(snap);
+        let mut ext = load_ext_state(snap);
+        structure_upwell_ops::apply_pending_profile_applications(&mut ext, now);
         Ok(build_structure_dir_entry(ctx, snap, session, &ext, st, now, char_id, caller_corp, has_acl))
     })
 }
@@ -562,4 +608,82 @@ pub fn check_station_service_standing(
         });
     }
     Ok(())
+}
+
+/// Validates Upwell structure docking eligibility, state, profile/group/standing ACL, and V24 hull
+/// size matrix (`feat:structures.docking-acl`), returning the structure's position in space.
+pub(crate) fn resolve_upwell_dock_target(
+    ctx: &ServerContext,
+    dock_id: i64,
+    sys_id: u32,
+    char_id: i64,
+    ship_type_id: u32,
+    ship_group_id: u32,
+) -> Result<glam::DVec3, BridgeRpcError> {
+    structure_lifecycle::sync_all_structures(ctx);
+    let Some(st) = ctx.db.with_snapshot(|snap| snap.structures.get(&dock_id).cloned()) else {
+        return Err(err("StructureNotFound", format!("Structure {dock_id} does not exist")));
+    };
+    if st.solar_system_id != sys_id {
+        return Err(err(
+            "DockTargetWrongSystem",
+            format!("Structure {dock_id} is in system {}, but pilot is in {sys_id}", st.solar_system_id),
+        ));
+    }
+    if st.state == "Destroyed" {
+        return Err(err("StructureDestroyed", format!("Structure {dock_id} is destroyed")));
+    }
+    let st_group_id = ctx.sde.types.get(&st.type_id).map(|t| t.group_id).unwrap_or(0);
+    let is_non_dockable = matches!(st.type_id, 35_840 | 35_841 | 37_534 | 81_826 | 2_233 | 3_962)
+        || matches!(st_group_id, 1408 | 2016 | 2017 | 4744 | 4736 | 4747 | 4810);
+    if is_non_dockable {
+        return Err(err(
+            "StructureDoesNotAllowDocking",
+            format!("Structure {} (type {}) does not allow ship docking", dock_id, st.type_id),
+        ));
+    }
+    if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
+        return Err(err(
+            "StructureNotDockable",
+            format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
+        ));
+    }
+    let acl_denied = ctx.db.with_snapshot(|snap| {
+        !structure_upwell_ops::evaluate_character_structure_access(ctx, snap, dock_id, char_id)
+    });
+    if acl_denied {
+        return Err(err(
+            "StructureDockingAccessDenied",
+            format!("Character {char_id} is denied docking access by structure {dock_id} ACL"),
+        ));
+    }
+    let is_capital_ship = matches!(ship_group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
+    let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
+    let is_rorqual = ship_type_id == 28_352 || ship_group_id == 883;
+    let hull_allowed = match st.type_id {
+        // Keepstar (35834) & Upwell Palatine Keepstar (40340): all ship classes including supercapitals
+        35_834 | 40_340 => true,
+        // Fortizar (35833), Faction Fortizars (47512..=47516), & Sotiyo (35827): subcapitals + standard capitals (no supercapitals)
+        35_833 | 47_512..=47_516 | 35_827 => !is_supercapital_ship,
+        // Tatara (35836): subcapitals + Rorquals only
+        35_836 => !is_capital_ship || is_rorqual,
+        // Astrahus (35832), Raitaru (35825), Azbel (35826), Athanor (35835): subcapitals only
+        35_832 | 35_825 | 35_826 | 35_835 => !is_capital_ship,
+        _ => match structure_lifecycle::structure_profile(ctx, st.type_id).map(|p| p.hull_class) {
+            Some(structure_lifecycle::HullClass::XLarge) if st_group_id == 1657 => true,
+            Some(structure_lifecycle::HullClass::XLarge) => !is_supercapital_ship,
+            Some(structure_lifecycle::HullClass::Large) if st_group_id == 1657 => !is_supercapital_ship,
+            _ => !is_capital_ship,
+        },
+    };
+    if !hull_allowed {
+        return Err(err(
+            "ShipTooLargeForStructure",
+            format!(
+                "Ship type {} (group {}) is too large to dock at structure {} (type {})",
+                ship_type_id, ship_group_id, dock_id, st.type_id
+            ),
+        ));
+    }
+    Ok(glam::DVec3::from_array(st.position))
 }

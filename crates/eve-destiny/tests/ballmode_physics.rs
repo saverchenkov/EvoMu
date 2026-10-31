@@ -614,3 +614,62 @@ async fn test_warp_full_lifecycle_align_accelerate_cruise_decelerate_and_dropout
     assert_eq!(park.balls[&id].mode, MovementMode::Stop);
     assert!((dest - park.balls[&id].position).length() <= 2_500.0);
 }
+
+#[tokio::test]
+async fn test_upwell_structure_and_static_balls_cannot_navigate_warp_or_micro_jump() {
+    // parity: feat:structures.board-structure, destiny:GotoPoint
+    eve_testkit::attest(&["feat:structures.board-structure", "destiny:GotoPoint"]);
+    let mut park = Ballpark::new(30_000_142);
+    let struct_id: BallId = 1_040_000_000_001;
+    let static_id: BallId = 40_000_001;
+    let caster_id: BallId = 100_000_001;
+    let escort_id: BallId = 100_000_002;
+
+    let mut sm = eve_destiny::SlimItemMeta::default();
+    sm.category_id = 65; // Structure
+    sm.group_id = 1657; // Citadel
+    park.set_ball_slim_meta(struct_id, sm);
+    park.add_ball(Ball {
+        id: struct_id,
+        type_id: 35832, // Astrahus
+        position: DVec3::new(1_000.0, 2_000.0, 3_000.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000_000_000.0,
+        radius: 5_000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    });
+    park.add_ball(Ball {
+        id: static_id,
+        type_id: 16,
+        position: DVec3::new(50_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1e12,
+        radius: 10_000.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Rigid,
+    });
+    park.add_ball(ship(caster_id, DVec3::new(1_500.0, 2_000.0, 3_000.0), MovementMode::Stop));
+    park.add_ball(ship(escort_id, DVec3::new(2_500.0, 2_000.0, 3_000.0), MovementMode::Stop));
+
+    // Negative: Upwell structure and Rigid static balls reject GotoPoint, GotoDirection, Warp, speed fraction > 0, and MicroJump
+    assert!(park.goto_point(struct_id, DVec3::new(100_000.0, 0.0, 0.0)).is_err());
+    assert!(park.set_mode(struct_id, MovementMode::GotoDirection { direction: DVec3::X }).is_err());
+    assert!(park.set_mode(struct_id, MovementMode::new_warp(DVec3::ZERO, DVec3::new(1e9, 0.0, 0.0), 3.0)).is_err());
+    assert!(!park.set_speed_fraction(struct_id, 1.0));
+    assert!(park.micro_jump(struct_id, 100_000.0).is_err());
+    assert!(park.goto_point(static_id, DVec3::new(100_000.0, 0.0, 0.0)).is_err());
+    assert!(park.set_mode(static_id, MovementMode::GotoDirection { direction: DVec3::X }).is_err());
+
+    // Positive + Negative: MJFG booshes nearby escort ship but leaves Upwell structure ball anchored in place
+    let jumped = park.micro_jump_field(caster_id, 100_000.0, 6_000.0, 25).expect("mjfg");
+    assert!(jumped.contains(&escort_id));
+    assert!(!jumped.contains(&struct_id));
+    assert_eq!(park.balls[&struct_id].position, DVec3::new(1_000.0, 2_000.0, 3_000.0));
+    assert_eq!(park.balls[&escort_id].position, DVec3::new(102_500.0, 2_000.0, 3_000.0));
+}
+

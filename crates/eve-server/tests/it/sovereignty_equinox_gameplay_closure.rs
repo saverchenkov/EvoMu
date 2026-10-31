@@ -48,7 +48,8 @@ pub(crate) fn open_sqlite_ctx(path: &std::path::Path, seed_demo: bool) -> Server
         repo.provision_player_account("demo", "demo-secret");
         repo.provision_player_account("demo2", "demo2-secret");
     }
-    let ctx = ServerContext::with_repository(std::sync::Arc::new(repo));
+    let ctx = ServerContext::with_repository(std::sync::Arc::new(repo))
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
     crate::common::pin_clock(&ctx);
     ctx
 }

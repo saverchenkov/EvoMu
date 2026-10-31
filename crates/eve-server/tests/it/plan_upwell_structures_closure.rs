@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const OWNER: i64 = 90_000_001; const HACKER: i64 = 90_000_002; const BYSTANDER: i64 = 90_000_003; const RIVAL_CORP: i64 = 98_999_999;
-const JITA: u32 = 30_000_142; const RANCER: u32 = 30_002_718; const HED_GP: u32 = 30_001_161;
+const JITA: u32 = 30_000_144; const RANCER: u32 = 30_002_718; const HED_GP: u32 = 30_001_161;
 
 fn prepare_siege(ctx: &ServerContext, id: i64, charge_dmg_em: f64) -> i64 {
     ctx.db.with_mut_snapshot(|snap| {
@@ -70,12 +70,23 @@ fn new_test_ctx() -> Arc<ServerContext> {
 }
 
 async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = perim_station;
+            }
+        }
+    });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Closure Corp".into()), PyRep::String("UPWL".into())]).await.expect("AddCorporation");
-    ctx.advance_secs(12);
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     sess
 }
@@ -105,6 +116,7 @@ async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id:
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
     assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
     let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
     rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
@@ -285,7 +297,7 @@ async fn test_upwell_lifecycle_asset_safety_abandoned_and_leave_space() {
     // 6. Abandoned K-space structure destruction via live weapon combat across all 3 layers (Shield -> Armor -> Hull -> Destroyed), dropping SpecializedFuelBay fuel & reagents in space.
     ctx.advance_virtual_clock(life::ABANDON_AFTER_LOW_POWER_SECS + 60);
     let _ = observe(&ctx, &mut sess, src_id).await;
-    move_ship(&ctx, &sess, pos_jita).await;
+    move_ship(&ctx, &sess, pos_jita + DVec3::new(60_000.0, 0.0, 0.0)).await;
     let src_fb_in = grant(&ctx, OWNER, dst_ship, 4247, InventoryFlag::Cargo, 180);
     let src_gas_in = grant(&ctx, OWNER, dst_ship, 81143, InventoryFlag::Cargo, 320);
     rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(src_fb_in), PyRep::Integer(src_id), PyRep::Integer(133), PyRep::Integer(180)]).await.expect("src fuel blocks");
@@ -359,7 +371,7 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     move_ship(&ctx, &sess, pos4).await;
     let st_id = online_structure(&ctx, &mut sess, 35832, "Reinforce Test Astrahus").await;
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
-    move_ship(&ctx, &sess, pos4).await;
+    move_ship(&ctx, &sess, pos4 + DVec3::new(60_000.0, 0.0, 0.0)).await;
 
     // 1. Armor & Hull reinforcement duration tables & jitter window rules.
     use life::{armor_reinforcement_secs as a_secs, hull_reinforcement_secs as h_secs, HullClass::*, PowerState::*, SpaceClass::*};
@@ -471,7 +483,7 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     let healed_fort = observe(&ctx, &mut sess, fort_id).await.unwrap();
     assert!(healed_fort.shield_hp >= fort_prof.shield_hp && (healed_fort.armor_hp - fort_prof.armor_hp).abs() < 1.0 && (healed_fort.hull_hp - fort_prof.hull_hp).abs() < 1.0);
 
-    // 4. FLEX negative-jitter clamp: Pharolux Cyno Beacon (35840) reinforced 25m before reinforce_hour never gets reinforced_until_unix <= now.
+    // 4. FLEX negative-jitter clamp: Pharolux Cyno Beacon (35840) requires Sov Nullsec + online Sov Hub upgrade, and never gets reinforced_until_unix <= now.
     let flex_day = ((ctx.now_unix() / 86_400) + 1) * 86_400;
     let target_t = flex_day + 17 * 3_600 + 35 * 60;
     ctx.advance_virtual_clock(target_t - ctx.now_unix());
@@ -480,7 +492,40 @@ async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
     let rancer_pos = open_space(&ctx, RANCER, 1.0);
     let rancer_sys = ctx.systems.get_or_spawn(RANCER);
     let _ = rancer_sys.spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: rancer_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
-    let flex_id = kv_i64(&anchor(&ctx, &mut sess, 35840, "Rancer Flex Beacon").await.expect("anchor flex"), "structureID");
+    assert_eq!(anchor(&ctx, &mut sess, 35840, "Rancer Flex Beacon").await.expect_err("lowsec flex rejected").code, "CannotAnchorFlexOutsideSovNull");
+    ctx.db.with_mut_snapshot(|snap| snap.items.retain(|_, it| !(it.location_id == ship_id && it.type_id == 35840 && it.flag == InventoryFlag::Cargo)));
+
+    sess.solar_system_id = Some(HED_GP);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&OWNER).unwrap().solar_system_id = HED_GP;
+        let my_corp = snap.characters.get(&OWNER).unwrap().corporation_id;
+        let ally_id = 99_001_161;
+        snap.corporations.get_mut(&my_corp).unwrap().alliance_id = Some(ally_id);
+        snap.system_states.entry(HED_GP).or_insert_with(|| eve_db::SystemDynamicState { solar_system_id: HED_GP, ..Default::default() }).sov_alliance_id = Some(ally_id);
+        let hub_id = 880_001_161;
+        snap.structures.insert(hub_id, UpwellStructureRecord {
+            structure_id: hub_id, type_id: 32458, owner_corp_id: my_corp, solar_system_id: HED_GP,
+            name: "HED-GP Sov Hub".into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+            quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 100_000.0, armor_hp: 100_000.0, hull_hp: 100_000.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        let upg_id = 880_001_162;
+        snap.items.insert(upg_id, InventoryItemRecord { item_id: upg_id, type_id: 81615, owner_id: my_corp, location_id: hub_id, flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
+        snap.module_online_states.insert(upg_id, true);
+        snap.sov_runtime.sov_hubs.insert(
+            hub_id,
+            eve_db::PersistedSovHubData {
+                hub_id,
+                upgrades: vec![eve_db::PersistedHubUpgrade { type_id: 81615, online: true, low_power: false }],
+                ..Default::default()
+            },
+        );
+    });
+    let hed_pos = open_space(&ctx, HED_GP, 1.0);
+    let hed_sys = ctx.systems.get_or_spawn(HED_GP);
+    let _ = hed_sys.spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: hed_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
+    let flex_id = kv_i64(&anchor(&ctx, &mut sess, 35840, "HED-GP Flex Beacon").await.expect("anchor flex"), "structureID");
+    move_ship(&ctx, &sess, hed_pos + DVec3::new(60_000.0, 0.0, 0.0)).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structure_vulnerability_windows.insert(flex_id, (18, 3));
         let f = snap.structures.get_mut(&flex_id).unwrap();

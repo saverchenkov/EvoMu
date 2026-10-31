@@ -391,6 +391,9 @@ pub fn handle_char_unbound(
             let eff_sys = crate::services::pve_special_sites::reconcile_abyssal_login(
                 ctx, c.character_id, c.solar_system_id, c.active_ship_id,
             );
+            crate::services::structure_control_ops::release_all_structure_control_for_character(
+                ctx, None, c.character_id,
+            );
             c = ctx.db.get_character(c.character_id).unwrap_or(c);
             session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;

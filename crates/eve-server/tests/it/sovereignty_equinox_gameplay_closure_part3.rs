@@ -371,10 +371,12 @@ async fn test_sov_hub_fuel_power_workforce_upgrades_sites_hacking_flex_and_teneb
     let tenebrex_rep = rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(995_022), PyRep::String("Tenebrex Jammer".into())])
         .await.expect("anchor Tenebrex");
     let tenebrex_id = tenebrex_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    let _ = ctx.systems.get_or_spawn(null_sys).set_ball_position(PILOT_SHIP, deep_space + DVec3::new(60_000.0, 0.0, 0.0)).await;
     rpc_call(&ctx, &mut s_dir, "invbroker", "Add", &[PyRep::Integer(995_025), PyRep::Integer(tenebrex_id), PyRep::Integer(133), PyRep::Integer(500)])
         .await.expect("load Helium Fuel Blocks into Tenebrex via invbroker.Add");
-    // Advance through anchoring (15m) + anchoring timer (24h) + onlining (15m) naturally:
-    ctx.advance_secs(15 * 60 + 24 * 3_600 + 15 * 60 + 10);
+    // Advance through initial vulnerability (15m) + FLEX anchoring timer (45m * (1 + strategic_index)) + onlining (15m):
+    let strat_idx = ctx.db.with_snapshot(|s| s.system_states.get(&null_sys).map(|st| u64::from(st.strategic_index)).unwrap_or(0));
+    ctx.advance_secs(15 * 60 + 45 * 60 * (1 + strat_idx) + 15 * 60 + 10);
     eve_server::services::station_structure::structure_lifecycle::sync_all_structures(&ctx);
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&tenebrex_id].state.clone()), "ShieldVulnerable");
     assert!(ctx.db.with_snapshot(|s| s.sov_runtime.tenebrex_spool_ready_unix.contains_key(&tenebrex_id)));

@@ -565,15 +565,17 @@ pub async fn handle(
                     }
                     ch.version += 1;
                 }
-                if let Some((old_cid, new_cid)) = new_corp_opt {
+                let released = if let Some((old_cid, new_cid)) = new_corp_opt {
                     crate::services::fleet_social::fleet_social_corps::record_corp_join_in_snap_pub(
                         snap,
                         char_id,
                         old_cid,
                         new_cid,
                         now_u,
-                    );
-                }
+                    )
+                } else {
+                    Vec::new()
+                };
                 let rec = snap.fw_character_stats.entry(char_id).or_insert_with(|| {
                     eve_db::snapshot_ext::FwCharacterStatsRecord {
                         character_id: char_id,
@@ -588,12 +590,13 @@ pub async fn handle(
                 rec.faction_id = Some(faction_id);
                 rec.enlisted_on_unix = Some(now_u);
                 snap.fw_runtime.direct_enlisted_chars.insert(char_id, faction_id);
-                Ok(new_corp_opt)
+                Ok((new_corp_opt, released))
             });
-            let new_corp_opt = match res {
+            let (new_corp_opt, released) = match res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
             if let Some((_, new_cid)) = new_corp_opt {
                 session.corporation_id = Some(new_cid);
             }

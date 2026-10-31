@@ -150,6 +150,19 @@ impl Ballpark {
                 .is_some_and(|b| matches!(b.mode, MovementMode::Rigid))
     }
 
+    /// Returns `true` if `ball_id` is an immobile static celestial/station or an anchored Upwell structure (`category_id == 65` or `max_velocity <= 0.0`).
+    pub fn is_immobile_structure_or_static(&self, ball_id: BallId) -> bool {
+        self.is_static_ball(ball_id)
+            || self
+                .ball_slim_meta
+                .get(&ball_id)
+                .is_some_and(|m| m.category_id == 65)
+            || self
+                .balls
+                .get(&ball_id)
+                .is_some_and(|b| b.max_velocity <= 0.0)
+    }
+
     /// Returns `true` if any dynamic (non-static) ball is currently in the `Ballpark`.
     pub fn has_dynamic_balls(&self) -> bool {
         self.balls.keys().any(|&id| !self.is_static_ball(id))
@@ -632,6 +645,9 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
+        if self.is_immobile_structure_or_static(ball_id) {
+            return Err("StructureCannotNavigate: Static or Upwell structure balls cannot micro jump".into());
+        }
         if self.is_ball_scrambled(ball_id)
             || self
                 .combat_states
@@ -691,6 +707,9 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
+        if self.is_immobile_structure_or_static(ball_id) {
+            return Err("StructureCannotNavigate: Static or Upwell structure balls cannot activate micro jump field".into());
+        }
         if self.is_ball_scrambled(ball_id)
             || self
                 .combat_states
@@ -711,7 +730,7 @@ impl Ballpark {
             .iter()
             .filter_map(|(&other_id, b)| {
                 if other_id == ball_id
-                    || self.is_static_ball(other_id)
+                    || self.is_immobile_structure_or_static(other_id)
                     || matches!(b.mode, MovementMode::Field | MovementMode::Rigid | MovementMode::Warp { .. })
                 {
                     return None;
@@ -899,9 +918,13 @@ impl Ballpark {
         if !point.is_finite() {
             return Err("InvalidPoint: GotoPoint coordinates must be finite".to_string());
         }
-        let Some(ball) = self.balls.get_mut(&ball_id) else {
+        if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found"));
-        };
+        }
+        if self.is_immobile_structure_or_static(ball_id) {
+            return Err("StructureCannotNavigate: Static or Upwell structure balls cannot navigate or warp".to_string());
+        }
+        let ball = self.balls.get_mut(&ball_id).unwrap();
         let dir = (point - ball.position).normalize_or_zero();
         ball.mode = MovementMode::GotoDirection {
             direction: if dir.length_squared() > 1e-6 { dir } else { DVec3::X },
@@ -1054,6 +1077,9 @@ impl Ballpark {
     pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
+        }
+        if self.is_immobile_structure_or_static(ball_id) {
+            return Err("StructureCannotNavigate: Static or Upwell structure balls cannot navigate or warp".to_string());
         }
 
         match &mode {
@@ -1261,6 +1287,9 @@ impl Ballpark {
 
     pub fn set_speed_fraction(&mut self, ball_id: BallId, fraction: f64) -> bool {
         let clamped = fraction.clamp(0.0, 1.0);
+        if clamped > 0.0 && self.is_immobile_structure_or_static(ball_id) {
+            return false;
+        }
         let Some(ball) = self.balls.get_mut(&ball_id) else {
             return false;
         };

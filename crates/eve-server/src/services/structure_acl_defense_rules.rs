@@ -88,7 +88,7 @@ pub fn handle_set_member_role(
         }
     }
 
-    let notify_corp = ctx.db.try_with_mut_snapshot(|snap| {
+    let (notify_corp, released) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut classified = Vec::with_capacity(updates.len());
         for &(entity_id, role) in &updates {
             let (is_ally, is_corp, _) = ops::validate_and_classify_entity(snap, entity_id)?;
@@ -127,7 +127,7 @@ pub fn handle_set_member_role(
         let linked_pids: Vec<i64> = ext
             .profiles_by_id
             .values()
-            .filter(|p| p.access_group_ids.contains(&group_id))
+            .filter(|p| p.access_group_ids.contains(&group_id) || p.defense_group_ids.contains(&group_id))
             .map(|p| p.profile_id)
             .collect();
 
@@ -147,9 +147,11 @@ pub fn handle_set_member_role(
         }
 
         save_ext_state(snap, &ext);
-        Ok(owner_corp)
+        let released = crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
+        Ok((owner_corp, released))
     })?;
 
+    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if notify_corp > 0 {
         ctx.notify(
             crate::router::NotificationTarget::Corporation(notify_corp),
@@ -269,219 +271,11 @@ pub fn verify_structure_docking_acl(
     Ok(())
 }
 
-// ============================================================================
-// 3. Board Structure & Eject (`feat:structures.board-structure`)
-// ============================================================================
-
-pub fn handle_board_structure(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "BoardStructure requires structureID"))?;
-
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let st = ops::require_structure_corp_member(snap, char_id, structure_id)?;
-        ops::require_structure_control_role(snap, char_id, &st)?;
-        if session.structure_id != Some(structure_id)
-            && session.solar_system_id != Some(st.solar_system_id)
-        {
-            return Err(err(
-                "NotDockedInStructure",
-                format!(
-                    "Must be docked in structure {structure_id} (or in system {}) to board it",
-                    st.solar_system_id
-                ),
-            ));
-        }
-        let mut ext = load_ext_state(snap);
-        if let Some(&pilot) = ext.active_pilot_by_structure.get(&structure_id) {
-            if pilot != char_id {
-                return Err(err(
-                    "StructureAlreadyControlled",
-                    format!("Structure {structure_id} is already controlled by pilot {pilot}"),
-                ));
-            }
-        }
-        ext.active_pilot_by_structure.insert(structure_id, char_id);
-        let prev = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id)).unwrap_or(0);
-        if prev > 0 && prev != structure_id {
-            ext.previous_ship_by_structure.insert(structure_id, prev);
-        }
-        save_ext_state(snap, &ext);
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.active_ship_id = structure_id;
-        }
-        Ok(())
-    })?;
-
-    let old_ship = session.ship_id;
-    session.ship_id = Some(structure_id);
-    ops::emit_ship_session_change(ctx, session, char_id, old_ship, Some(structure_id));
-    Ok(PyRep::keyval([
-        ("structureID", PyRep::Integer(structure_id)),
-        ("pilotID", PyRep::Integer(char_id)),
-        ("boarded", PyRep::Bool(true)),
-    ]))
-}
-
-pub fn handle_eject_from_structure(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "EjectFromStructure requires structureID"))?;
-
-    let orig_ship_id = ctx.db.try_with_mut_snapshot(|snap| {
-        if snap.structures.get(&structure_id).is_some_and(|s| s.state == "Destroyed") {
-            return Err(err("StructureDestroyed", format!("Structure {structure_id} has been destroyed")));
-        }
-        let mut ext = load_ext_state(snap);
-        if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
-            return Err(err(
-                "NotControllingStructure",
-                format!("Character {char_id} is not boarding/controlling structure {structure_id}"),
-            ));
-        }
-        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())?;
-        ext.active_pilot_by_structure.remove(&structure_id);
-        let saved_prev = ext.previous_ship_by_structure.remove(&structure_id).unwrap_or(0);
-        save_ext_state(snap, &ext);
-        let fallback_ship = if saved_prev > 0 && snap.items.contains_key(&saved_prev) {
-            saved_prev
-        } else {
-            snap.items
-                .values()
-                .find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == structure_id
-                        && i.item_id != structure_id
-                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
-                })
-                .map(|i| i.item_id)
-                .unwrap_or(saved_prev)
-        };
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
-                ch.active_ship_id = fallback_ship;
-            }
-            Ok(ch.active_ship_id)
-        } else {
-            Ok(0)
-        }
-    })?;
-
-    let old_ship = session.ship_id;
-    if orig_ship_id > 0 {
-        session.ship_id = Some(orig_ship_id);
-        ops::emit_ship_session_change(ctx, session, char_id, old_ship, Some(orig_ship_id));
-    } else if session.ship_id == Some(structure_id) {
-        session.ship_id = None;
-        ops::emit_ship_session_change(ctx, session, char_id, old_ship, None);
-    }
-    Ok(PyRep::keyval([
-        ("structureID", PyRep::Integer(structure_id)),
-        ("pilotID", PyRep::None),
-        ("boarded", PyRep::Bool(false)),
-    ]))
-}
-
-pub fn handle_get_structure_pilot(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "GetStructurePilot requires structureID"))?;
-    ctx.db.with_snapshot(|snap| {
-        if snap.structures.get(&structure_id).is_some_and(|s| s.state == "Destroyed") {
-            return Err(err("StructureDestroyed", format!("Structure {structure_id} has been destroyed")));
-        }
-        Ok(load_ext_state(snap)
-            .active_pilot_by_structure
-            .get(&structure_id)
-            .copied()
-            .map(PyRep::Integer)
-            .unwrap_or(PyRep::None))
-    })
-}
-
-pub fn handle_release_control(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "ReleaseControl requires structureID"))?;
-    let target_id = arg_i64(args, 1).unwrap_or(0);
-    let orig_ship_id = ctx.db.try_with_mut_snapshot(|snap| {
-        if snap.structures.get(&structure_id).is_some_and(|s| s.state == "Destroyed") {
-            return Err(err("StructureDestroyed", format!("Structure {structure_id} has been destroyed")));
-        }
-        let mut ext = load_ext_state(snap);
-        if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
-            return Err(err(
-                "NotControllingStructure",
-                format!("Character {char_id} does not control structure {structure_id}"),
-            ));
-        }
-        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())?;
-        ext.active_pilot_by_structure.remove(&structure_id);
-        let saved_prev = ext.previous_ship_by_structure.remove(&structure_id).unwrap_or(0);
-        save_ext_state(snap, &ext);
-        let fallback_ship = if saved_prev > 0 && snap.items.contains_key(&saved_prev) {
-            saved_prev
-        } else {
-            snap.items
-                .values()
-                .find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == structure_id
-                        && i.item_id != structure_id
-                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
-                })
-                .map(|i| i.item_id)
-                .unwrap_or(saved_prev)
-        };
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
-                ch.active_ship_id = fallback_ship;
-            }
-            Ok(ch.active_ship_id)
-        } else {
-            Ok(0)
-        }
-    })?;
-    let old_ship = session.ship_id;
-    if orig_ship_id > 0 {
-        session.ship_id = Some(orig_ship_id);
-        ops::emit_ship_session_change(ctx, session, char_id, old_ship, Some(orig_ship_id));
-    } else if session.ship_id == Some(structure_id) {
-        session.ship_id = None;
-        ops::emit_ship_session_change(ctx, session, char_id, old_ship, None);
-    }
-    ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnStructureTargetRemoved",
-        "charid",
-        vec![PyRep::Integer(structure_id), PyRep::Integer(target_id)],
-    );
-    Ok(PyRep::None)
-}
-
-// ============================================================================
 // 4. Structure Auto-Defense Settings (`feat:structures.defense-settings`)
 // ============================================================================
+
+/// Active aggressor retention window (`15 minutes = 900 s`) for Upwell structure auto-defense.
+pub const STRUCTURE_ATTACKER_TTL_SECS: u64 = 900;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StructureDefenseSettings {
@@ -493,6 +287,8 @@ pub struct StructureDefenseSettings {
     pub target_blocked_acl: bool,
     #[serde(default)]
     pub known_attackers: Vec<i64>,
+    #[serde(default)]
+    pub known_attacker_timestamps: HashMap<i64, u64>,
 }
 
 impl Default for StructureDefenseSettings {
@@ -505,7 +301,39 @@ impl Default for StructureDefenseSettings {
             standing_threshold: 0.0,
             target_blocked_acl: true,
             known_attackers: Vec::new(),
+            known_attacker_timestamps: HashMap::new(),
         }
+    }
+}
+
+impl StructureDefenseSettings {
+    /// Records `attacker_char_id` as an active aggressor at `now_unix`, pruning expired entries.
+    pub fn record_attacker(&mut self, attacker_char_id: i64, now_unix: u64) {
+        self.prune_expired_attackers(now_unix);
+        if attacker_char_id > 0 {
+            if !self.known_attackers.contains(&attacker_char_id) {
+                self.known_attackers.push(attacker_char_id);
+            }
+            self.known_attacker_timestamps.insert(attacker_char_id, now_unix);
+        }
+    }
+
+    /// Removes attacker entries whose recorded timestamp has exceeded `STRUCTURE_ATTACKER_TTL_SECS`.
+    pub fn prune_expired_attackers(&mut self, now_unix: u64) {
+        let cutoff = now_unix.saturating_sub(STRUCTURE_ATTACKER_TTL_SECS);
+        self.known_attacker_timestamps.retain(|_, &mut ts| ts > cutoff);
+        let timestamps = &self.known_attacker_timestamps;
+        self.known_attackers
+            .retain(|cid| timestamps.contains_key(cid));
+    }
+
+    /// Returns `true` if `pilot_id` has an active, non-expired attacker record at `now_unix`.
+    pub fn is_active_attacker(&self, pilot_id: i64, now_unix: u64) -> bool {
+        let cutoff = now_unix.saturating_sub(STRUCTURE_ATTACKER_TTL_SECS);
+        self.known_attacker_timestamps
+            .get(&pilot_id)
+            .copied()
+            .is_some_and(|ts| ts > cutoff)
     }
 }
 
@@ -563,8 +391,8 @@ pub fn evaluate_auto_defense_target(
         }
     }
 
-    // 1. Attackers targeting: check known attackers
-    if settings.auto_target_attackers && settings.known_attackers.contains(&pilot_id) {
+    // 1. Attackers targeting: check active (non-expired) known attackers
+    if settings.auto_target_attackers && settings.is_active_attacker(pilot_id, ctx.now_unix()) {
         return true;
     }
 
@@ -575,129 +403,57 @@ pub fn evaluate_auto_defense_target(
         }
     }
 
-    // 3. Standing threshold check: standing between owner corp and pilot
+    // 3. Standing threshold check: owner corporation/alliance standing toward the pilot (or pilot's corp/alliance)
+    let lookup_contact = |list: &[eve_db::SocialContactRecord]| -> Option<f64> {
+        list.iter()
+            .find(|c| c.contact_id == pilot_id)
+            .or_else(|| (pilot_corp > 0).then(|| list.iter().find(|c| c.contact_id == pilot_corp)).flatten())
+            .or_else(|| (pilot_ally > 0).then(|| list.iter().find(|c| c.contact_id == pilot_ally)).flatten())
+            .map(|c| c.standing)
+    };
+    let owner_ally = snap
+        .corporations
+        .get(&st.owner_corp_id)
+        .and_then(|c| c.alliance_id)
+        .unwrap_or(0);
     let standing = snap
-        .characters
-        .get(&pilot_id)
-        .and_then(|c| c.standings.get(&st.owner_corp_id).copied())
+        .corp_contacts
+        .get(&st.owner_corp_id)
+        .and_then(|list| lookup_contact(list))
+        .or_else(|| {
+            (owner_ally > 0)
+                .then(|| {
+                    snap.alliance_contacts
+                        .get(&owner_ally)
+                        .and_then(|list| lookup_contact(list))
+                })
+                .flatten()
+        })
         .unwrap_or(0.0);
     if standing < settings.standing_threshold {
         return true;
     }
 
-    // 4. Blocked ACL check: pilots denied by structure access profile are targeted
-    if settings.target_blocked_acl && !ops::evaluate_character_structure_access(ctx, snap, structure_id, pilot_id) {
-        return true;
+    // 4. Blocked ACL / Defense-Blocked ACL check: pilots denied by structure docking or defense ACL are targeted
+    if settings.target_blocked_acl {
+        if !ops::evaluate_character_structure_access(ctx, snap, structure_id, pilot_id) {
+            return true;
+        }
+        let ext = ops::load_ext_state(snap);
+        if let Some(prof) = ext.access_profiles.get(&structure_id) {
+            if prof.defense_blocked_characters.contains(&pilot_id)
+                || prof.defense_group_ids.iter().any(|gid| {
+                    ext.owner_groups
+                        .get(gid)
+                        .is_some_and(|g| g.members.get(&pilot_id) == Some(&-1))
+                })
+            {
+                return true;
+            }
+        }
     }
 
     false
-}
-
-pub fn handle_get_defense_settings(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "GetDefenseSettings requires structureID"))?;
-
-    ctx.db.with_snapshot(|snap| {
-        let st = ops::require_structure_corp_member(snap, char_id, structure_id)?;
-        ops::require_structure_control_role(snap, char_id, &st)?;
-        let s = load_defense_settings(snap, structure_id);
-        let attackers: Vec<PyRep> = s.known_attackers.iter().map(|&a| PyRep::Integer(a)).collect();
-        Ok(PyRep::keyval([
-            ("structureID", PyRep::Integer(s.structure_id)),
-            ("autoDefenseEnabled", PyRep::Bool(s.auto_defense_enabled)),
-            ("autoTargetAttackers", PyRep::Bool(s.auto_target_attackers)),
-            ("autoTargetWarTargets", PyRep::Bool(s.auto_target_war_targets)),
-            ("standingThreshold", PyRep::Real(s.standing_threshold)),
-            ("targetBlockedAcl", PyRep::Bool(s.target_blocked_acl)),
-            ("knownAttackers", PyRep::List(attackers)),
-        ]))
-    })
-}
-
-pub fn handle_set_defense_settings(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "SetDefenseSettings requires structureID"))?;
-
-    let mut auto_defense_enabled = None;
-    let mut auto_target_attackers = None;
-    let mut auto_target_war_targets = None;
-    let mut standing_threshold = None;
-    let mut target_blocked_acl = None;
-    let mut add_attacker = None;
-
-    if let Some(PyRep::Dict(entries)) = args.get(1) {
-        for (k, v) in entries {
-            if let Some(key) = k.as_str() {
-                match key {
-                    "autoDefenseEnabled" => auto_defense_enabled = v.as_bool(),
-                    "autoTargetAttackers" => auto_target_attackers = v.as_bool(),
-                    "autoTargetWarTargets" => auto_target_war_targets = v.as_bool(),
-                    "standingThreshold" => standing_threshold = v.as_f64(),
-                    "targetBlockedAcl" => target_blocked_acl = v.as_bool(),
-                    "addAttacker" | "attackerID" => add_attacker = v.as_i64(),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let st = ops::require_structure_corp_member(snap, char_id, structure_id)?;
-        ops::require_structure_control_role(snap, char_id, &st)?;
-        let mut s = load_defense_settings(snap, structure_id);
-        if let Some(val) = auto_defense_enabled {
-            s.auto_defense_enabled = val;
-        }
-        if let Some(val) = auto_target_attackers {
-            s.auto_target_attackers = val;
-        }
-        if let Some(val) = auto_target_war_targets {
-            s.auto_target_war_targets = val;
-        }
-        if let Some(val) = standing_threshold {
-            s.standing_threshold = val;
-        }
-        if let Some(val) = target_blocked_acl {
-            s.target_blocked_acl = val;
-        }
-        if let Some(att) = add_attacker {
-            if !s.known_attackers.contains(&att) {
-                s.known_attackers.push(att);
-            }
-        }
-        save_defense_settings(snap, &s);
-        Ok(PyRep::Bool(true))
-    })
-}
-
-pub fn handle_evaluate_defense_target(
-    ctx: &ServerContext,
-    session: &SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "EvaluateDefenseTarget requires structureID"))?;
-    let target_pilot_id = arg_i64(args, 1)
-        .ok_or_else(|| err("MissingTargetId", "EvaluateDefenseTarget requires targetPilotID"))?;
-
-    let is_target = ctx.db.with_snapshot(|snap| {
-        evaluate_auto_defense_target(ctx, snap, structure_id, target_pilot_id)
-    });
-    Ok(PyRep::Bool(is_target))
 }
 
 // ============================================================================
@@ -750,6 +506,8 @@ pub fn is_cyno_inhibited(
     sys_id: u32,
     pos: Option<DVec3>,
 ) -> bool {
+    let now_unix = ctx.now_unix();
+    let deployables = crate::services::mobile_deployables::read_deployable_state_snap(snap);
     snap.items.values().any(|i| {
         if i.location_id != sys_id as i64 {
             return false;
@@ -764,6 +522,18 @@ pub fn is_cyno_inhibited(
                 == GROUP_MOBILE_CYNO_INHIBITOR;
         if !is_inhibitor {
             return false;
+        }
+        if let Some(rec) = deployables.deployables.get(&i.item_id) {
+            if rec.is_unanchored {
+                return false;
+            }
+            let ready_unix = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
+            if now_unix < ready_unix {
+                return false;
+            }
+            if rec.expires_at_unix > 0 && now_unix >= rec.expires_at_unix {
+                return false;
+            }
         }
         if let Some(test_pos) = pos {
             let live_or_snap_pos = ctx
@@ -1275,7 +1045,7 @@ pub fn validate_docked_ship_fitting_facility_in_snap(
 // RPC Dispatcher
 // ============================================================================
 
-pub fn handle(
+pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
@@ -1292,16 +1062,94 @@ pub fn handle(
         ("ownerGroupManager", "GetMembers") | ("ownerGroupManager", "GetGroupMembers") => {
             Some(handle_get_members(ctx, session, args))
         }
-        ("structureControl", "BoardStructure") => Some(handle_board_structure(ctx, session, args)),
-        ("structureControl", "EjectFromStructure") => Some(handle_eject_from_structure(ctx, session, args)),
-        ("structureControl", "GetStructurePilot") => Some(handle_get_structure_pilot(ctx, session, args)),
-        ("structureControl", "ReleaseControl") => Some(handle_release_control(ctx, session, args)),
-        // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-        ("structureControl", "GetDefenseSettings") => Some(handle_get_defense_settings(ctx, session, args)),
-        // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-        ("structureControl", "SetDefenseSettings") => Some(handle_set_defense_settings(ctx, session, args)),
-        // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-        ("structureControl", "EvaluateDefenseTarget") => Some(handle_evaluate_defense_target(ctx, session, args)),
         _ => None,
     }
+}
+
+const DEFAULT_STRUCTURE_SERVICE_TAX_BPS: i64 = 100;
+
+fn parse_struct_svc_args(session: &SessionState, args: &[PyRep], m: &str) -> Result<(i64, i64), BridgeRpcError> {
+    if args.len() >= 2 {
+        Ok((arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", m))?, arg_i64(args, 1).ok_or_else(|| err("MissingServiceId", m))?))
+    } else if args.len() == 1 {
+        Ok((session.structure_id.ok_or_else(|| err("MissingStructureId", m))?, arg_i64(args, 0).ok_or_else(|| err("MissingServiceId", m))?))
+    } else {
+        Err(err("MissingArguments", m))
+    }
+}
+
+pub(crate) fn handle_character_get_services(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "CharacterGetServices requires structureID"))?;
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
+        if !life::is_operational(&st.state) || !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(ctx.now_unix())) {
+            return Ok(PyRep::Dict(Vec::new()));
+        }
+        let mut entries = Vec::new();
+        for tid in life::online_service_type_ids(ctx, snap, structure_id) {
+            if let Some(svc_id) = ops::service_id_for_module_type(tid) {
+                if !entries.iter().any(|(k, _)| k == &PyRep::Integer(svc_id)) {
+                    if let Some(bps) = crate::services::structure_profile_services::evaluate_character_service_bps(
+                        ctx, snap, structure_id, char_id, svc_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
+                    ) {
+                        entries.push((PyRep::Integer(svc_id), PyRep::Real(bps as f64 / 10_000.0)));
+                    }
+                }
+            }
+        }
+        Ok(PyRep::Dict(entries))
+    })
+}
+
+pub(crate) fn handle_character_has_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterHasService")?;
+    ctx.db.with_snapshot(|snap| {
+        Ok(PyRep::Bool(
+            crate::services::structure_profile_services::evaluate_character_service_bps(
+                ctx, snap, structure_id, char_id, service_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
+            )
+            .is_some(),
+        ))
+    })
+}
+
+pub(crate) fn handle_character_check_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterCheckService")?;
+    ctx.db.with_snapshot(|snap| {
+        if !snap.structures.contains_key(&structure_id) {
+            return Err(err("StructureNotFound", format!("Structure {structure_id} not found")));
+        }
+        if crate::services::structure_profile_services::evaluate_character_service_bps(
+            ctx, snap, structure_id, char_id, service_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
+        )
+        .is_none()
+        {
+            return Err(err("StructureServiceAccessDenied", "Character is denied structure service access"));
+        }
+        Ok(PyRep::None)
+    })
+}
+
+pub(crate) fn handle_character_get_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterGetService")?;
+    ctx.db.with_snapshot(|snap| {
+        Ok(crate::services::structure_profile_services::evaluate_character_service_bps(
+            ctx, snap, structure_id, char_id, service_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
+        )
+        .map_or(PyRep::None, |bps| PyRep::Real(bps as f64 / 10_000.0)))
+    })
+}
+
+pub(crate) fn handle_character_has_setting(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, setting_id) = parse_struct_svc_args(session, args, "CharacterHasSetting")?;
+    ctx.db.with_snapshot(|snap| {
+        Ok(PyRep::Bool(crate::services::structure_profile_services::evaluate_character_setting(
+            ctx, snap, structure_id, char_id, setting_id,
+        )))
+    })
 }

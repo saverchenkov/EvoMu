@@ -467,6 +467,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     });
     ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "AddCorporation", &[PyRep::String("Bookmark Corp".into()), PyRep::String("BMCP".into()), PyRep::Real(0.05)], &kw, None).await.unwrap();
+    ctx.advance_secs(7 * 86_400);
     let corp_id = sess1.corporation_id.unwrap();
     let app = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "UpdateApplicationOffer", &[app.dict_get("applicationID").unwrap().clone(), PyRep::String("Accepted".into())], &kw, None).await.unwrap();
@@ -526,11 +527,16 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdWarpToStuff", &[PyRep::String(warp_stuff_kind.into()), PyRep::Integer(temp_bm_id), PyRep::Real(0.0)], &kw, None).await.unwrap_err().code, "BookmarkExpired");
 
     // 3. Scanning: Anomalies, Structure Signals, System Scan, Probe Formations, Scan Skills & Signature Despawn
-    let _ = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "GetSignatures", &[PyRep::Integer(30_000_142)], &kw, None).await.unwrap();
+    let scan_sys_id = 30_000_144u32;
+    let scan_sys = ctx.systems.get_or_spawn(scan_sys_id);
+    sess1.solar_system_id = Some(scan_sys_id);
+    let _ = scan_sys.spawn_ball(Ball { id: 800_000_001, type_id: 587, position: DVec3::new(0.0, 5.0e9, 0.0), velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+    let _ = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "GetSignatures", &[PyRep::Integer(i64::from(scan_sys_id))], &kw, None).await.unwrap();
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = scan_sys_id; }
         snap.structures.insert(990_000_777, eve_db::UpwellStructureRecord {
-            structure_id: 990_000_777, type_id: 35832, owner_corp_id: corp_id, solar_system_id: 30_000_142,
-            name: "Jita Trade Citadel".into(), state: "ShieldVulnerable".into(), position: [100_000.0, 0.0, 0.0],
+            structure_id: 990_000_777, type_id: 35832, owner_corp_id: corp_id, solar_system_id: scan_sys_id,
+            name: "Perimeter Trade Citadel".into(), state: "ShieldVulnerable".into(), position: [100_000.0, 0.0, 0.0],
             quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
             reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
@@ -540,32 +546,31 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         });
     });
     let _ = ctx.drain_notifications_for_char(90_000_001);
-    let tracker_rep = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "SignalTrackerRegister", &[PyRep::Integer(30_000_142)], &kw, None).await.unwrap();
+    let tracker_rep = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "SignalTrackerRegister", &[PyRep::Integer(i64::from(scan_sys_id))], &kw, None).await.unwrap();
     let PyRep::KeyVal(tr_kv) = &tracker_rep else { panic!() };
     let PyRep::Rowset { rows: struct_rows, .. } = &tr_kv["structures"] else { panic!() };
     assert!(struct_rows.iter().any(|r| r[0] == PyRep::Integer(990_000_777)), "SignalTrackerRegister must return structure signals");
     assert!(!ctx.drain_notifications_for_char(90_000_001).iter().any(|n| matches!(n.event.as_str(), "OnSignalTrackerSignatureUpdate" | "OnSignalTrackerAnomalyUpdate" | "OnSignalTrackerStructureUpdate")), "SignalTrackerRegister must not emit empty initial spam");
 
     // Trigger real anomaly, structure, and expired-signature deltas (`feat:scanning.anomalies`, `feat:scanning.structure-signals`, `feat:scanning.sig-despawn`)
-    eve_server::services::pve_exploration_seeding::ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
-    let _ = jita_sys.set_ball_position(800_000_001, DVec3::new(0.0, 5.0e9, 0.0)).await;
-    let anchor_rep = ctx.dispatch_rpc(&mut sess1, "structureDeployment", None, "Anchor", &[PyRep::Integer(35_832), PyRep::String("Jita Scanner Citadel".into())], &kw, None).await.unwrap();
+    eve_server::services::pve_exploration_seeding::ensure_system_pve_sites_seeded(&ctx, scan_sys_id).await;
+    let anchor_rep = ctx.dispatch_rpc(&mut sess1, "structureDeployment", None, "Anchor", &[PyRep::Integer(35_832), PyRep::String("Perimeter Scanner Citadel".into())], &kw, None).await.unwrap();
     let anchored_id = anchor_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
     let expired_sig_id = ctx.db.with_mut_snapshot(|snap| {
-        let relic = snap.cosmic_signatures.get_mut(&30_000_142).unwrap().iter_mut().find(|s| s.sig_group != "Wormhole").unwrap();
+        let relic = snap.cosmic_signatures.get_mut(&scan_sys_id).unwrap().iter_mut().find(|s| s.sig_group != "Wormhole").unwrap();
         relic.created_unix = 1;
         relic.lifetime_seconds = 1;
         relic.signature_id.clone()
     });
     ctx.advance_secs(10);
-    let sigs_after = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "GetSignatures", &[PyRep::Integer(30_000_142)], &kw, None).await.unwrap();
+    let sigs_after = ctx.dispatch_rpc(&mut sess1, "scanMgr", None, "GetSignatures", &[PyRep::Integer(i64::from(scan_sys_id))], &kw, None).await.unwrap();
     if let PyRep::Rowset { rows: s_rows, .. } = &sigs_after {
         assert!(!s_rows.iter().any(|r| r[0] == PyRep::String(expired_sig_id.clone())), "Expired signature must despawn from GetSignatures");
     }
     let tr_notifs = ctx.drain_notifications_for_char(90_000_001);
-    assert!(tr_notifs.iter().any(|n| n.event == "OnSignalTrackerSignatureUpdate" && n.args.len() == 3 && n.args[0] == PyRep::Integer(30_000_142) && matches!(&n.args[2], PyRep::List(rem) if rem.contains(&PyRep::String(expired_sig_id.clone())))));
-    assert!(tr_notifs.iter().any(|n| n.event == "OnSignalTrackerAnomalyUpdate" && n.args.len() == 3 && n.args[0] == PyRep::Integer(30_000_142) && matches!(&n.args[1], PyRep::Dict(d) if !d.is_empty()) && n.args[2] == PyRep::List(vec![])));
-    assert!(tr_notifs.iter().any(|n| n.event == "OnSignalTrackerStructureUpdate" && n.args.len() == 3 && n.args[0] == PyRep::Integer(30_000_142) && matches!(&n.args[1], PyRep::Dict(d) if d.iter().any(|(k, _)| k == &PyRep::Integer(anchored_id))) && n.args[2] == PyRep::List(vec![])));
+    assert!(tr_notifs.iter().any(|n| n.event == "OnSignalTrackerSignatureUpdate" && n.args.len() == 3 && n.args[0] == PyRep::Integer(i64::from(scan_sys_id)) && matches!(&n.args[2], PyRep::List(rem) if rem.contains(&PyRep::String(expired_sig_id.clone())))));
+    assert!(tr_notifs.iter().any(|n| n.event == "OnSignalTrackerAnomalyUpdate" && n.args.len() == 3 && n.args[0] == PyRep::Integer(i64::from(scan_sys_id)) && matches!(&n.args[1], PyRep::Dict(d) if !d.is_empty()) && n.args[2] == PyRep::List(vec![])));
+    assert!(tr_notifs.iter().any(|n| n.event == "OnSignalTrackerStructureUpdate" && n.args.len() == 3 && n.args[0] == PyRep::Integer(i64::from(scan_sys_id)) && matches!(&n.args[1], PyRep::Dict(d) if d.iter().any(|(k, _)| k == &PyRep::Integer(anchored_id))) && n.args[2] == PyRep::List(vec![])));
 
     // Probe Formations & Scan Skills (`feat:scanning.probe-formations`, `feat:scanning.scan-skills`)
     ctx.db.with_mut_snapshot(|snap| {

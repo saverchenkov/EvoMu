@@ -231,6 +231,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         .await
         .expect("anchor Tenebrex");
     let jammer_id = anchor_jam.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    let _ = ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, jam_pos + glam::DVec3::new(60_000.0, 0.0, 0.0)).await;
     sov_call(
         &ctx,
         &mut sess,

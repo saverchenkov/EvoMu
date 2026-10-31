@@ -269,6 +269,11 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         .await
         .expect("CreateCorporation");
         ctx.db.with_mut_snapshot(|snap| {
+            for g in snap.corp_governance.values_mut() {
+                g.created_unix = 1;
+            }
+        });
+        ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(
                 991_000_100,
                 sp6_item(991_000_100, 35_832, 90_000_001, ship_id, InventoryFlag::Cargo, HashMap::new()),
@@ -472,7 +477,7 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
     // Verify all persisted space objects were re-materialized into the fresh Ballpark at exact coordinates
     let (_, st_ball) = sys_handle2.get_ball_snapshot(structure_id).await.unwrap().expect("Upwell structure reloaded");
     assert_eq!(st_ball.type_id, 35_832);
-    assert!(st_ball.position.distance(DVec3::new(120_000.0, 0.0, -80_000.0)) < 1.0);
+    assert!(st_ball.position.distance(DVec3::new(180_000.0, 0.0, -80_000.0)) < 1.0);
 
     let (_, wr_ball) = sys_handle2.get_ball_snapshot(wreck_id).await.unwrap().expect("Unexpired wreck reloaded");
     assert!(wr_ball.position.distance(DVec3::new(15_000.0, 2_000.0, -5_000.0)) < 1.0);
@@ -522,7 +527,7 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         .expect("ScoopToDroneBay on restarted drone");
     assert_eq!(ctx2.db.with_snapshot(|s| s.items[&drone_item_id].location_id), ship_id2);
     // Target, dock, and undock at the restarted structure (`feat:lifecycle.structure-restart`)
-    let _ = sys_handle2.set_ball_position(ship_id2, DVec3::new(120_000.0, 0.0, -80_000.0)).await;
+    let _ = sys_handle2.set_ball_position(ship_id2, DVec3::new(180_000.0, 0.0, -80_000.0)).await;
     ctx2.dispatch_rpc(&mut sess_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None).await.expect("AddTarget on restarted structure");
     ctx2.advance_secs(12);
     ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Dock", &[PyRep::Integer(structure_id)], &empty, None).await.expect("Dock at restarted structure");
@@ -539,7 +544,7 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         snap.items.insert(990_007_185, ammo);
     });
     if let Ok(mut bp) = sys_handle2.ballpark.write() { let _ = bp.set_mode(ship2_id_re, MovementMode::Stop); }
-    let _ = sys_handle2.set_ball_position(ship2_id_re, DVec3::new(120_500.0, 0.0, -80_000.0)).await;
+    let _ = sys_handle2.set_ball_position(ship2_id_re, DVec3::new(180_500.0, 0.0, -80_000.0)).await;
     ctx2.dispatch_rpc(&mut sess2_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None).await.expect("AddTarget structure");
     let _ = sys_handle2.step_manual(10.0).await;
     let atk_res = ctx2.dispatch_rpc(&mut sess2_re, "dogmaIM", None, "Activate", &[PyRep::Integer(100_000_006), PyRep::String("projectileFired".into()), PyRep::Integer(structure_id)], &empty, None).await.expect("Activate weapon on restarted structure");

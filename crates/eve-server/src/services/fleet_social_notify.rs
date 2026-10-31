@@ -353,6 +353,9 @@ pub fn remove_character_from_chat_channels(
 /// Full character logout cleanup (`authentication.Logout` / `userSvc.UserLogOffCharacter`):
 /// immediately removes `char_id` from all fleets and chat channels (including Local and Fleet).
 pub fn on_character_logout(ctx: &ServerContext, char_id: i64) {
+    crate::services::structure_control_ops::release_all_structure_control_for_character(
+        ctx, None, char_id,
+    );
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         let st = snap.character_login_stats.entry(char_id).or_default();
@@ -378,6 +381,9 @@ pub fn on_character_logout(ctx: &ServerContext, char_id: i64) {
 /// Socket disconnect cleanup for a character: removes `char_id` from Local (`solarsystemid2:*`)
 /// and non-fleet chat channels immediately, and starts the 120-second fleet disconnect grace window.
 pub fn handle_character_disconnect(ctx: &ServerContext, char_id: i64) {
+    crate::services::structure_control_ops::release_all_structure_control_for_character(
+        ctx, None, char_id,
+    );
     let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         let st = snap.character_login_stats.entry(char_id).or_default();

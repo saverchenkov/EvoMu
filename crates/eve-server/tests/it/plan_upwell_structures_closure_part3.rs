@@ -14,7 +14,7 @@ use std::collections::HashMap;
 const OWNER: i64 = 90_000_001;
 const OUTSIDER: i64 = 90_000_003;
 const RIVAL_CORP: i64 = 98_999_999;
-const JITA: u32 = 30_000_142;
+const JITA: u32 = 30_000_144;
 const RANCER: u32 = 30_002_718;
 const KINO_POCHVEN: u32 = 30_000_157;
 
@@ -89,12 +89,23 @@ fn new_test_ctx() -> ServerContext {
 }
 
 async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = perim_station;
+            }
+        }
+    });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Part3 Corp".into()), PyRep::String("UPW3".into())]).await.expect("AddCorporation");
-    ctx.advance_secs(12);
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     sess
 }
@@ -124,6 +135,7 @@ async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id:
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
     assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
     let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
     rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
@@ -162,6 +174,7 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     move_ship(&ctx, &sess, pos3).await;
     let st_id = kv_i64(&anchor(&ctx, &mut sess, 35832, "Phased Astrahus").await.expect("Anchor"), "structureID");
     let st_anchored = observe(&ctx, &mut sess, st_id).await.unwrap();
+    move_ship(&ctx, &sess, DVec3::from_array(st_anchored.position)).await;
     assert_eq!((st_anchored.state.as_str(), st_anchored.shield_hp, st_anchored.armor_hp), (life::STATE_ANCHOR_VULNERABLE, 0.0, 0.0));
     let prof_hp = life::structure_profile(&ctx, 35832).unwrap();
 
@@ -182,12 +195,13 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     let pos4 = open_space(&ctx, JITA, 4.0);
     move_ship(&ctx, &sess, pos4).await;
     let doomed_id = kv_i64(&anchor(&ctx, &mut sess, 35832, "Doomed Anchor").await.expect("anchor doomed"), "structureID");
+    move_ship(&ctx, &sess, pos4 + DVec3::new(60_000.0, 0.0, 0.0)).await;
     ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&doomed_id).unwrap().hull_hp = 10.0);
     prepare_siege(&ctx, doomed_id, 20_000.0);
     fire_weapon(&ctx, &mut sess, doomed_id).await.expect("destroy in AnchorVulnerable");
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&doomed_id].state.clone()), life::STATE_DESTROYED);
 
-    move_ship(&ctx, &sess, pos3).await;
+    move_ship(&ctx, &sess, pos3 + DVec3::new(60_000.0, 0.0, 0.0)).await;
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + 30);
     assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().state, life::STATE_ANCHORING);
     assert_eq!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect_err("dock Anchoring").code, "StructureNotDockable");
@@ -277,6 +291,7 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     let pos5 = open_space(&ctx, JITA, 5.0);
     move_ship(&ctx, &sess, pos5).await;
     let doomed_on = kv_i64(&anchor(&ctx, &mut sess, 35832, "Doomed Onlining").await.expect("anchor doomed on"), "structureID");
+    move_ship(&ctx, &sess, pos5 + DVec3::new(60_000.0, 0.0, 0.0)).await;
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
     let _ = observe(&ctx, &mut sess, doomed_on).await;
     ctx.advance_virtual_clock(65);
@@ -302,7 +317,7 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     assert!(ctx.systems.get_or_spawn(JITA).get_ball_snapshot(dropped_core_id).await.unwrap().is_none(), "core inside wreck has no independent space ball");
 
     ctx.advance_virtual_clock(life::ONLINING_SECS + 65);
-    move_ship(&ctx, &sess, pos3).await;
+    move_ship(&ctx, &sess, pos3 + DVec3::new(60_000.0, 0.0, 0.0)).await;
     let st_online = observe(&ctx, &mut sess, st_id).await.unwrap();
     assert_eq!(st_online.state, life::STATE_SHIELD_VULNERABLE);
     assert!((st_online.hull_hp - prof_hp.hull_hp).abs() < 1.0 && st_online.quantum_core_installed);
@@ -314,7 +329,7 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
 
     // High-Sec alliance-level war precheck (active alliance war permitted; un-warmed non-mutual war rejected):
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock for alliance war check");
-    move_ship(&ctx, &sess, pos3).await;
+    move_ship(&ctx, &sess, pos3 + DVec3::new(60_000.0, 0.0, 0.0)).await;
     let (ally_a, ally_b) = (99_100_001i64, 99_100_002i64);
     prepare_siege(&ctx, st_id, 0.0);
     let now_war = ctx.now_unix();
@@ -375,7 +390,7 @@ async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
     move_ship(&ctx, &sess, open_space(&ctx, RANCER, 2.0)).await;
     assert_eq!(anchor(&ctx, &mut sess, 40340, "Palatine Two").await.expect_err("second Palatine").code, "PalatineKeepstarLimitReached");
 
-    move_ship(&ctx, &sess, open_space(&ctx, RANCER, 1.0)).await;
+    move_ship(&ctx, &sess, open_space(&ctx, RANCER, 1.0) + DVec3::new(60_000.0, 0.0, 0.0)).await;
     ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&pal1).unwrap().hull_hp = 10.0);
     prepare_siege(&ctx, pal1, 20_000.0);
     fire_weapon(&ctx, &mut sess, pal1).await.expect("destroy Palatine One in AnchorVulnerable");
@@ -397,6 +412,7 @@ async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
     let st_pos = open_space(&ctx, JITA, 1.0);
     move_ship(&ctx, &sess, st_pos).await;
     let astra_id = online_structure(&ctx, &mut sess, 35832, "Tether Astrahus").await;
+    let st_pos = DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&astra_id].position));
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
 
     let ship_id = sess.ship_id.unwrap();

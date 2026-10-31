@@ -63,8 +63,9 @@ pub fn has_lance_caster_lock(ctx: &ServerContext, ship_id: i64) -> bool {
     st.lance_caster_lock_until.get(&(db_key, ship_id)).or_else(|| st.lance_caster_lock_until.get(&(inst_key, ship_id))).is_some_and(|&until| now_unix < until)
 }
 
-/// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
+/// Returns `Err` if `ship_id` is an anchored Upwell structure or is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
+    crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, action)?;
     let now_unix = ctx.now_unix_secs();
     let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
     let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());

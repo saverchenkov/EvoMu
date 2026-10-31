@@ -42,11 +42,24 @@ async fn login(ctx: &ServerContext, sess_id: u64, user: &str, pass: &str, char_i
 }
 
 async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64) -> SessionState {
+    let perim_sys = 30_000_144u32;
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == perim_sys).map(|s| s.station_id).expect("Perimeter station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = perim_sys;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = perim_station;
+            }
+        }
+    });
     let mut sess = login(ctx, sess_id, "demo", "demo-secret", char_id).await;
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Sovereign Holdings".into()), PyRep::String("UPWL".into())])
         .await
         .expect("AddCorporation");
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
     sess
 }
 
@@ -91,6 +104,7 @@ async fn undock_and_anchor(ctx: &ServerContext, sess: &mut SessionState, char_id
     let id = kv_i64(&anchored, "structureID");
     assert!(id > 0);
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
+    assert!(ctx.systems.get_or_spawn(sys).set_ball_position(ship_id, station + glam::DVec3::new(60_000.0, 5.0e9, 0.0)).await);
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core = grant_item(ctx, char_id, ship_id, 56201, InventoryFlag::Cargo, 1);
     rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("insert core");
@@ -117,7 +131,7 @@ async fn test_manual_asset_safety_personal_and_corp_with_delay_and_fee() {
     let struct_id = undock_and_anchor(&ctx, &mut sess, char_id, "Safety Astrahus").await;
     let sys_id = i64::from(sess.solar_system_id.expect("system"));
     let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id).expect("corp"));
-    let station_id = 60_003_760;
+    let station_id = ctx.sde.stations.values().find(|s| s.solar_system_id == 30_000_144).map(|s| s.station_id).expect("Perimeter station");
     assert!(ctx.sde.stations.contains_key(&station_id), "destination station must exist in the SDE");
 
     // Nothing to move yet.

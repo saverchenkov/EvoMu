@@ -74,24 +74,84 @@ pub(crate) fn handle_get_jb_structure_destination(ctx: &ServerContext, session: 
 
 pub(crate) fn handle_get_jump_bridges_with_my_access(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let corp_id = session.corporation_id.unwrap_or_else(|| ctx.db.get_character(char_id).map(|c| c.corporation_id).unwrap_or(0));
+    let now = ctx.now_unix();
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        let mut pairs = Vec::new();
+        let mut accessible_ids = Vec::new();
+        let mut structs: Vec<&eve_db::UpwellStructureRecord> = snap
+            .structures
+            .values()
+            .filter(|st| {
+                st.type_id == ANSIBLEX_TYPE_ID
+                    && st.state != "Destroyed"
+                    && crate::services::structure_profile_services::can_character_use_jump_bridge(
+                        snap,
+                        st.structure_id,
+                        char_id,
+                        now,
+                    )
+            })
+            .collect();
+        structs.sort_by_key(|st| st.structure_id);
+        for st in structs {
+            accessible_ids.push(PyRep::Integer(st.structure_id));
+            if let Some(linked_id) = resolve_linked_structure_id(snap, &ext, st.structure_id) {
+                if let Some(dest_st) = snap.structures.get(&linked_id) {
+                    let from_kv = PyRep::keyval([
+                        ("structureID", PyRep::Integer(st.structure_id)),
+                        ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
+                        ("typeID", PyRep::Integer(i64::from(st.type_id))),
+                    ]);
+                    let to_kv = PyRep::keyval([
+                        ("structureID", PyRep::Integer(linked_id)),
+                        ("solarSystemID", PyRep::Integer(i64::from(dest_st.solar_system_id))),
+                        ("typeID", PyRep::Integer(i64::from(dest_st.type_id))),
+                    ]);
+                    pairs.push(PyRep::Tuple(vec![from_kv, to_kv]));
+                }
+            }
+        }
+        // V24 `MapSvc.GetJumpBridgesWithMyAccess` (`mapSvc.pyj:609`, `client_expectations.json:101570-101657`)
+        // unpacks a 3-tuple: `(jumpBridgePairs, accessibleStructureIDs, auxiliaryMap)`.
+        Ok(PyRep::Tuple(vec![
+            PyRep::List(pairs),
+            PyRep::List(accessible_ids),
+            PyRep::Dict(Vec::new()),
+        ]))
+    })
+}
+
+pub(crate) fn handle_get_nearby_jump_bridges(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let mut results = Vec::new();
-        for st in snap.structures.values() {
-            if st.type_id == ANSIBLEX_TYPE_ID
-                && st.state != "Destroyed"
-                && crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, st)
-            {
-                if let Some(linked_id) = resolve_linked_structure_id(snap, &ext, st.structure_id) {
-                    let dest_sys = snap.structures.get(&linked_id).map(|s| s.solar_system_id).unwrap_or(0);
-                    results.push(PyRep::keyval([
-                        ("structureID", PyRep::Integer(st.structure_id)),
-                        ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
-                        ("linkedStructureID", PyRep::Integer(linked_id)),
-                        ("destinationSolarSystemID", PyRep::Integer(i64::from(dest_sys))),
-                    ]));
-                }
+        let mut structs: Vec<&eve_db::UpwellStructureRecord> = snap
+            .structures
+            .values()
+            .filter(|st| {
+                st.type_id == ANSIBLEX_TYPE_ID
+                    && st.state != "Destroyed"
+                    && crate::services::structure_profile_services::can_character_use_jump_bridge(
+                        snap,
+                        st.structure_id,
+                        char_id,
+                        now,
+                    )
+            })
+            .collect();
+        structs.sort_by_key(|st| st.structure_id);
+        for st in structs {
+            if let Some(linked_id) = resolve_linked_structure_id(snap, &ext, st.structure_id) {
+                let dest_sys = snap.structures.get(&linked_id).map(|s| s.solar_system_id).unwrap_or(0);
+                results.push(PyRep::keyval([
+                    ("structureID", PyRep::Integer(st.structure_id)),
+                    ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
+                    ("linkedStructureID", PyRep::Integer(linked_id)),
+                    ("destinationSolarSystemID", PyRep::Integer(i64::from(dest_sys))),
+                ]));
             }
         }
         Ok(PyRep::List(results))
@@ -113,7 +173,6 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
     if ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(now_unix)) {
         return Err(err("WeaponsTimerActive", "Cannot jump through structure stargate while weapons timer is active"));
     }
-    let corp_id = session.corporation_id.unwrap_or_else(|| ctx.db.get_character(char_id).map(|c| c.corporation_id).unwrap_or(0));
     let (st_pos, st_radius, dest_sys_id, dest_st_pos) = ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
         if st.solar_system_id != sys_id
@@ -123,7 +182,7 @@ pub(crate) async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerConte
         {
             return Err(err("StructureNotOperational", "Ansiblex stargate is offline, unpowered, or not in this solar system"));
         }
-        if !crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, &st) {
+        if !crate::services::structure_profile_services::can_character_use_jump_bridge(snap, st.structure_id, char_id, now_unix) {
             return Err(err("AccessDenied", "Structure access list denies jump bridge usage"));
         }
         let ext = load_ext_state(snap);

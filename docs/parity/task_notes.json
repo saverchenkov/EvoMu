@@ -429,7 +429,7 @@
   },
   "Z-5": {
     "assessment": "PARTIAL",
-    "note": "Feature rows implemented and verified; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit."
+    "note": "Structure features implemented with loaded-ammo auto-defense per ledger acceptance (wiki notes manual gunner control); flagged rows await gap audit."
   },
   "Z-6": {
     "assessment": "NOT STARTED",

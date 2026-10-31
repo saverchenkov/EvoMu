@@ -1093,6 +1093,9 @@ pub async fn handle_crimewatch(
             }
             let origin_sys = session.solar_system_id.unwrap_or(30_000_142);
             let ship_id = session.ship_id.unwrap_or(100_000_002);
+            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate filament") {
+                return Some(Err(e));
+            }
             let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(47_765);
             let now_unix = ctx.now_unix();
             let resolved = ctx.db.try_with_mut_snapshot(|snap| {

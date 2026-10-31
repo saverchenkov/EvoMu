@@ -492,8 +492,8 @@ pub fn safe_logoff_blocking_space_conditions(
                 .is_some_and(|i| i.location_id == ship_id)
         })
     });
-    let has_nav_lock =
-        crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "safe logoff")
+    let has_nav_lock = !crate::services::structure_control_ops::is_structure_vessel(ctx, ship_id)
+        && crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "safe logoff")
             .is_err();
     let has_active_mods = has_persisted_active_mods
         || has_nav_lock

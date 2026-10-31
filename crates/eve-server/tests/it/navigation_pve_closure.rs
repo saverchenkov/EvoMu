@@ -169,17 +169,28 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
         )
         .await;
 
-    // 1. structureDirectory.GetJumpBridgesWithMyAccess
-    let jb_list = rpc(&ctx, &mut sess, "structureDirectory", "GetJumpBridgesWithMyAccess", &[])
+    // 1. structureDirectory.GetJumpBridgesWithMyAccess (V24 unpack:3 3-tuple)
+    let jb_res = rpc(&ctx, &mut sess, "structureDirectory", "GetJumpBridgesWithMyAccess", &[])
         .await
         .expect("GetJumpBridgesWithMyAccess");
-    let PyRep::List(entries) = jb_list else {
-        panic!("Expected list from GetJumpBridgesWithMyAccess");
+    let PyRep::Tuple(jb_tup) = jb_res else {
+        panic!("Expected 3-tuple from GetJumpBridgesWithMyAccess");
     };
+    assert_eq!(jb_tup.len(), 3);
+    let PyRep::List(entries) = &jb_tup[0] else {
+        panic!("Expected pairs list at tuple[0]");
+    };
+    let PyRep::List(accessible_ids) = &jb_tup[1] else {
+        panic!("Expected accessible IDs list at tuple[1]");
+    };
+    assert!(accessible_ids.contains(&PyRep::Integer(gate_a_id)));
     assert!(!entries.is_empty(), "Must return accessible jump bridges");
-    let found_gate_a = entries.iter().any(|e| {
-        e.dict_get("structureID").and_then(|v| v.as_i64()) == Some(gate_a_id)
-            && e.dict_get("destinationSolarSystemID").and_then(|v| v.as_i64()) == Some(sys_b as i64)
+    let found_gate_a = entries.iter().any(|e| match e {
+        PyRep::Tuple(pair) if pair.len() == 2 => {
+            pair[0].dict_get("structureID").and_then(|v| v.as_i64()) == Some(gate_a_id)
+                && pair[1].dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(sys_b as i64)
+        }
+        _ => false,
     });
     assert!(found_gate_a, "Gate A must be present with destination System B");
 

@@ -487,12 +487,29 @@ pub fn compute_industry_job_costs_for_char(
     let system_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, activity_id);
     let base_job_cost_isk =
         ((total_eiv * system_cost_index * structure_cost_modifier) * 100.0).round() / 100.0;
+    let acl_tax_override = if snap.structures.contains_key(&facility_id) {
+        if let Some(cid) = char_id {
+            crate::services::structure_profile_services::check_industry_activity_acl_and_tax(
+                snap,
+                facility_id,
+                cid,
+                activity_id,
+                ctx.now_unix(),
+            )?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let taxes = load_facility_taxes(snap, facility_id);
-    let facility_tax_rate = taxes
-        .get(&activity_id)
-        .or_else(|| taxes.get(&1))
-        .copied()
-        .unwrap_or(NPC_STATION_INDUSTRY_TAX_RATE);
+    let facility_tax_rate = acl_tax_override.unwrap_or_else(|| {
+        taxes
+            .get(&activity_id)
+            .or_else(|| taxes.get(&1))
+            .copied()
+            .unwrap_or(NPC_STATION_INDUSTRY_TAX_RATE)
+    });
     let raw_facility_tax_isk = ((total_eiv * facility_tax_rate) * 100.0).round() / 100.0;
     let is_enemy_militia = char_id
         .and_then(|cid| snap.characters.get(&cid))
@@ -1018,16 +1035,8 @@ pub fn handle_industry_facilities_bps(
         }
 
         ("facilityManager", "GetFacility") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let facility_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .or(session.structure_id)
-                .unwrap_or(60_003_760);
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let facility_id = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id).unwrap_or(60_003_760);
             let res = ctx.db.with_snapshot(|snap| {
                 build_facility_pyrep(ctx, snap, facility_id).ok_or_else(|| BridgeRpcError {
                     code: "FacilityNotFound".into(),
@@ -1038,24 +1047,21 @@ pub fn handle_industry_facilities_bps(
         }
 
         ("facilityManager", "GetFacilityTaxes") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let facility_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .or(session.structure_id)
-                .unwrap_or(60_003_760);
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let facility_id = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id).unwrap_or(60_003_760);
+            let now = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
                 if resolve_facility_modifiers_and_system(ctx, snap, facility_id).is_none() {
-                    return Err(BridgeRpcError {
-                        code: "FacilityNotFound".into(),
-                        message: format!("Industry facility {facility_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FacilityNotFound".into(), message: format!("Industry facility {facility_id} not found") });
                 }
-                let taxes = load_facility_taxes(snap, facility_id);
+                let mut taxes = load_facility_taxes(snap, facility_id);
+                if snap.structures.contains_key(&facility_id) {
+                    for act in [1_u8, 3, 4, 5, 8, 9] {
+                        if let Ok(Some(r)) = crate::services::structure_profile_services::check_industry_activity_acl_and_tax(snap, facility_id, char_id, act, now) {
+                            taxes.insert(act, r);
+                        }
+                    }
+                }
                 let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
                 Ok(PyRep::keyval([
                     ("facilityID", PyRep::Integer(facility_id)),

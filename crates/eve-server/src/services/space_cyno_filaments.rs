@@ -90,6 +90,7 @@ async fn handle_wormhole_jump(
             message: "Session has no active ship".into(),
         });
     };
+    crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "jump wormhole")?;
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
     let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {

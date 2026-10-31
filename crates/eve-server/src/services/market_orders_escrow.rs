@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    can_bid_match_seller_station, compute_sales_tax_cents, is_structure_market_online,
-    load_market_order_meta, save_market_order_meta, structure_owner_broker_share, MarketOrderMeta,
+    can_bid_match_seller_station, compute_sales_tax_cents, load_market_order_meta,
+    save_market_order_meta, MarketOrderMeta,
 };
 use crate::formulas::compute_broker_fee_rate;
 use crate::router::{NotificationTarget, ServerContext};
@@ -97,30 +97,10 @@ pub fn handle_orders_escrow(
             let station_info = ctx.sde.solar_systems.values().find_map(|sys| {
                 (sys.region_id == region_id).then(|| sys.stations.iter().find(|st| st.station_id == docked_station_id)).flatten()
             });
-            let (owner_corp_id, owner_faction_id, is_structure) = if let Some(station_def) = station_info {
+            let (station_owner_corp, owner_faction_id, is_structure) = if let Some(station_def) = station_info {
                 (station_def.owner_corporation_id, station_def.owner_faction_id, false)
-            } else if let Some((str_owner_corp, str_region, hub_online, acl_ok)) = ctx.db.with_snapshot(|snap| {
-                snap.structures.get(&docked_station_id).and_then(|st| {
-                    ctx.sde.solar_systems.get(&st.solar_system_id).map(|sys| {
-                        let online = is_structure_market_online(snap, docked_station_id)
-                            && crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(ctx, snap, docked_station_id);
-                        let acl = crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(ctx, snap, docked_station_id, char_id);
-                        (st.owner_corp_id, sys.region_id, online, acl)
-                    })
-                })
-            }) {
-                if str_region != region_id {
-                    return Some(Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Structure {docked_station_id} is not in region {region_id}") }));
-                }
-                if !hub_online {
-                    return Some(Err(BridgeRpcError { code: "MarketHubOffline".into(), message: format!("Standup Market Hub I service module at structure {docked_station_id} is offline") }));
-                }
-                if !acl_ok {
-                    return Some(Err(BridgeRpcError { code: "StructureServiceAccessDenied".into(), message: format!("Character {char_id} is excluded by structure {docked_station_id} access list") }));
-                }
-                (str_owner_corp, None, true)
             } else {
-                return Some(Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {docked_station_id} is not in region {region_id}") }));
+                (0, None, true)
             };
 
             let mut parsed_items: Vec<(i64, TypeId, i64, IskCents, i32, i64)> = Vec::with_capacity(entries.len());
@@ -181,40 +161,30 @@ pub fn handle_orders_escrow(
                 .collect();
             // Execute the entire multi-sell batch atomically inside a single snapshot transaction
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let caller_corp_id = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0);
+                let upwell_opt = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
+                    ctx, snap, docked_station_id, char_id, now_unix, "MarketHubOffline",
+                )?;
+                let (owner_corp_id, pilot_bps_opt) = if !is_structure {
+                    (station_owner_corp, None)
+                } else if let Some((st_corp_id, _, pilot_bps)) = upwell_opt {
+                    if !snap.structures.get(&docked_station_id).and_then(|st| ctx.sde.solar_systems.get(&st.solar_system_id)).is_some_and(|sys| sys.region_id == region_id) {
+                        return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Structure {docked_station_id} is not in region {region_id}") });
+                    }
+                    (st_corp_id, pilot_bps)
+                } else {
+                    return Err(BridgeRpcError { code: "InvalidMarketStation".into(), message: format!("Station {docked_station_id} is not in region {region_id}") });
+                };
+                let caller_corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let div_id = (account_key.saturating_sub(999)).clamp(1, 7) as u8;
                 if use_corp {
                     let Some(corp) = snap.corporations.get_mut(&caller_corp_id) else {
-                        return Err(BridgeRpcError {
-                            code: "CorporationNotFound".into(),
-                            message: format!(
-                                "Corporation {caller_corp_id} not found for corporate sell order"
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {caller_corp_id} not found for corporate sell order") });
                     };
                     let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0);
                     if corp.ceo_id != char_id
-                        && !eve_db::corp_roles::has_role(
-                            role_mask,
-                            eve_db::corp_roles::ROLE_ACCOUNTANT,
-                        )
-                        && !eve_db::corp_roles::has_role(
-                            role_mask,
-                            eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
-                        )
-                        && !eve_db::corp_roles::has_role(
-                            role_mask,
-                            1u64 << 20, // corpRoleTrader
-                        )
+                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | (1u64 << 20))
                     {
-                        return Err(BridgeRpcError {
-                            code: "CorpRoleRequired".into(),
-                            message: "Character lacks corporation trader/accountant role to place corporate sell order".into(),
-                        });
+                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Character lacks corporation trader/accountant role to place corporate sell order".into() });
                     }
                     corp.ensure_wallet_divisions();
                 }
@@ -240,8 +210,8 @@ pub fn handle_orders_escrow(
                 let corp_standing = ch
                     .and_then(|c| c.standings.get(&owner_corp_id).copied())
                     .unwrap_or(0.0);
-                let broker_rate = if is_structure {
-                    super::resolve_structure_broker_rate(snap, docked_station_id)
+                let broker_rate = if let Some((_, st_rate, _)) = upwell_opt {
+                    st_rate
                 } else {
                     let m_sys = ctx.sde.stations.get(&docked_station_id).map(|s| s.solar_system_id).unwrap_or(0);
                     let m_tier = snap.fw_runtime.ihub_tiers.get(&m_sys).copied().unwrap_or(0);
@@ -387,7 +357,13 @@ pub fn handle_orders_escrow(
                         .market_orders
                         .values()
                         .filter(|o| {
+                            let struct_ok = o.station_id == station_id
+                                || !snap.structures.contains_key(&o.station_id)
+                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                                ).is_ok();
                             o.type_id == type_id
+                                && struct_ok
                                 && o.region_id == region_id
                                 && o.is_bid
                                 && o.vol_remaining > 0
@@ -694,7 +670,12 @@ pub fn handle_orders_escrow(
                         }
                     }
                     if is_structure && broker_fee.0 > 0 {
-                        let owner_share = structure_owner_broker_share(snap, docked_station_id, broker_fee);
+                        let owner_share = super::structure_owner_broker_share_with_pilot(
+                            snap,
+                            docked_station_id,
+                            broker_fee,
+                            pilot_bps_opt,
+                        );
                         if owner_share.0 > 0 {
                             if let Some(str_corp) = snap.corporations.get_mut(&owner_corp_id) {
                                 str_corp.ensure_wallet_divisions();
@@ -1104,14 +1085,16 @@ pub fn handle_orders_escrow(
             let now_unix = ctx.now_unix();
             let region_id = session.region_id.unwrap_or(10_000_002);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if station_id >= 1_000_000_000_000 && !is_structure_market_online(snap, station_id) {
-                    return Err(BridgeRpcError { code: "MarketServiceOffline".into(), message: format!("Structure {station_id} does not have an online Standup Market Hub I service") });
-                }
+                let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
+                    ctx, snap, station_id, char_id, now_unix, "MarketServiceOffline",
+                )?;
                 let vis_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&3447)).map(|s| s.level).unwrap_or(0);
                 let max_vis_jumps = crate::services::market_contracts::max_remote_jumps_for_skill_level(vis_lvl);
                 for (_, _, _, ent_st, ord_rng) in &parsed_requests {
-                    if *ent_st >= 1_000_000_000_000 && !is_structure_market_online(snap, *ent_st) {
-                        return Err(BridgeRpcError { code: "MarketServiceOffline".into(), message: format!("Structure {ent_st} does not have an online Standup Market Hub I service") });
+                    if *ent_st != station_id {
+                        let _ = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
+                            ctx, snap, *ent_st, char_id, now_unix, "MarketServiceOffline",
+                        )?;
                     }
                     if *ord_rng > max_vis_jumps.max(0) {
                         return Err(BridgeRpcError { code: "InsufficientVisibilitySkill".into(), message: format!("Order range {ord_rng} exceeds Visibility skill limit {max_vis_jumps}") });
@@ -1144,7 +1127,13 @@ pub fn handle_orders_escrow(
                                     _ => false,
                                 }
                             };
+                            let struct_ok = o.station_id == *ent_st
+                                || !snap.structures.contains_key(&o.station_id)
+                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                    ctx, snap, o.station_id, char_id, now_unix, "MarketServiceOffline",
+                                ).is_ok();
                             !o.is_bid
+                                && struct_ok
                                 && in_range
                                 && o.type_id == *req_tid
                                 && virtual_rem.get(&o.order_id).copied().unwrap_or(0) > 0

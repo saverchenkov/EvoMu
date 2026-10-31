@@ -487,7 +487,7 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         .expect("SDE SKINR coating");
     let (coating_item_type_id, _) = coating_comp.associated_types[0];
     let coating_item_id = ctx.db.with_mut_snapshot(|snap| {
-        seed_item(snap, coating_item_type_id, char_id, 60_015_169, InventoryFlag::Hangar, 2)
+        seed_item(snap, coating_item_type_id, char_id, 60_015_169, InventoryFlag::Hangar, 11)
     });
 
     let mut seq_item = Vec::new();
@@ -496,7 +496,7 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
     encode_bytes_field(1, &seq_item, &mut item_outer);
     let mut consume_req = Vec::new();
     encode_bytes_field(1, &item_outer, &mut consume_req);
-    encode_varint_field(2, 2, &mut consume_req);
+    encode_varint_field(2, 11, &mut consume_req);
     assert_eq!(
         ctx.quasar_gateway
             .handle_public_request(
@@ -514,7 +514,7 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         200
     );
 
-    for (idx, name) in [(1, "Rifter Gold"), (2, "Rifter Crimson")] {
+    let seq_job = |idx: u32, name: &str, qty: u64| {
         let mut seq_comp = Vec::new();
         encode_varint_field(1, coating_comp.component_id as u64, &mut seq_comp);
         let mut coat_cfg = Vec::new();
@@ -536,9 +536,8 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         encode_string_field(1, name, &mut init_req);
         encode_string_field(2, "Paragon Custom", &mut init_req);
         encode_bytes_field(3, &layout, &mut init_req);
-        encode_varint_field(5, 1, &mut init_req);
-
-        let rsp = ctx.quasar_gateway.handle_public_request(
+        encode_varint_field(5, qty, &mut init_req);
+        ctx.quasar_gateway.handle_public_request(
             &sess,
             &mk_req(
                 format!("corr-em-seq-{idx}").as_bytes(),
@@ -548,8 +547,11 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
             None,
             false,
             ctx.now_unix(),
-        );
-        assert_eq!(rsp.status_code, 200);
+        )
+    };
+
+    for (idx, name) in [(1, "Rifter Gold"), (2, "Rifter Crimson")] {
+        assert_eq!(seq_job(idx, name, 1).status_code, 200);
     }
 
     assert_eq!(
@@ -557,10 +559,12 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         1_000
     );
 
-    // 4. Redeem Rifter Corporation Emblem (72964, offer 17208, 5,000 LP) from Tranquility Paragon catalog
-    ctx.db.with_mut_snapshot(|s| {
-        *s.characters.get_mut(&char_id).unwrap().loyalty_points.entry(PARAGON_CORP_ID).or_insert(0) += 4_500;
-    });
+    // 4. Sequence a 9-license batch (+4,500 EverMarks) and redeem Rifter Corporation Emblem (72964, offer 17208, 5,000 LP)
+    assert_eq!(seq_job(3, "Rifter Fleet Batch", 9).status_code, 200);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points[&PARAGON_CORP_ID]),
+        5_500
+    );
     let take_res = ctx
         .dispatch_rpc(
             &mut sess,

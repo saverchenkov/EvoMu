@@ -480,15 +480,15 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
     eve_testkit::attest(&["feat:corporation.corp-structure-ownership"]);
 
     let ctx = new_ctx();
-    let sys_id = 30_000_142u32;
+    let sys_id = 30_000_144u32;
     let corp_id = 98_500_001i64;
     let other_corp = 98_500_002i64;
     let (ceo_id, mgr_id, outsider_id) = (98_000_001i64, 98_000_002i64, 98_000_003i64);
     let (ceo_ship, mgr_ship, out_ship) = (88_000_001i64, 88_000_002i64, 88_000_003i64);
 
-    let mut ceo_sess = spawn_pilot(&ctx, 1201, ceo_id, corp_id, ceo_ship, 648, sys_id, DVec3::ZERO).await;
-    let mut mgr_sess = spawn_pilot(&ctx, 1202, mgr_id, corp_id, mgr_ship, 648, sys_id, DVec3::new(500.0, 0.0, 0.0)).await;
-    let mut out_sess = spawn_pilot(&ctx, 1203, outsider_id, other_corp, out_ship, 648, sys_id, DVec3::new(800.0, 0.0, 0.0)).await;
+    let mut ceo_sess = spawn_pilot(&ctx, 1201, ceo_id, corp_id, ceo_ship, 648, sys_id, DVec3::new(0.0, 5.0e9, 0.0)).await;
+    let mut mgr_sess = spawn_pilot(&ctx, 1202, mgr_id, corp_id, mgr_ship, 648, sys_id, DVec3::new(500.0, 5.0e9, 0.0)).await;
+    let mut out_sess = spawn_pilot(&ctx, 1203, outsider_id, other_corp, out_ship, 648, sys_id, DVec3::new(800.0, 5.0e9, 0.0)).await;
 
     ctx.db.with_mut_snapshot(|snap| {
         let mut ceo_roles = HashMap::new();
@@ -519,6 +519,8 @@ async fn test_corporation_structure_ownership_and_station_manager_roles() {
     use eve_server::services::station_structure::structure_lifecycle as life;
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
     rpc(&ctx, &mut ceo_sess, "structureGuests", None, "GetGuests", &[PyRep::Integer(struct_id)]).await.unwrap();
+    let st_pos = DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&struct_id].position));
+    for sh in [ceo_ship, mgr_ship, out_ship] { assert!(ctx.systems.get_or_spawn(sys_id).set_ball_position(sh, st_pos).await); }
     rpc(&ctx, &mut ceo_sess, "structureDocking", None, "Dock", &[PyRep::Integer(struct_id)]).await.unwrap();
     let core_tid = ctx.sde.types[&35832].default_attributes[&life::ATTR_REQUIRES_DEED_TYPE] as u32;
     seed_item(&ctx, 88_000_103, core_tid, ceo_id, ceo_ship, InventoryFlag::Cargo, 1, true);

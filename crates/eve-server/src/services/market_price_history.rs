@@ -49,6 +49,11 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
                 && o.vol_remaining > 0
                 && o.price.0 <= new_price.0
                 && o.owner_id != order.owner_id
+                && (o.station_id == order.station_id
+                    || !snap.structures.contains_key(&o.station_id)
+                    || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                        ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                    ).is_ok())
                 && (order.type_id == PLEX_TYPE_ID
                     || (o.region_id == order.region_id
                         && super::market_trading::can_bid_match_seller_station(
@@ -216,6 +221,11 @@ pub(crate) fn execute_crossed_order_fills_on_modify(
         let mut bid_ids: Vec<(i64, IskCents)> = snap.market_orders.values().filter(|o| {
             o.is_bid && o.region_id == order.region_id && o.type_id == order.type_id
                 && o.vol_remaining > 0 && o.price.0 >= new_price.0 && o.owner_id != order.owner_id
+                && (o.station_id == order.station_id
+                    || !snap.structures.contains_key(&o.station_id)
+                    || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                        ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                    ).is_ok())
                 && super::market_trading::can_bid_match_seller_station(ctx, snap, o, order.station_id, now_unix)
         }).map(|o| (o.order_id, o.price)).collect();
         bid_ids.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(&b.0)));

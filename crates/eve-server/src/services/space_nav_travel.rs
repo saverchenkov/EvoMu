@@ -298,6 +298,7 @@ pub(crate) async fn handle_cmd_goto_point(
     let ship_id = session
         .ship_id
         .ok_or_else(|| err("NoActiveShip", "Session has no active ship".into()))?;
+    crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "steer structure")?;
     let coord = |i: usize| args.get(i).and_then(|a| a.as_f64()).filter(|v| v.is_finite());
     let (Some(x), Some(y), Some(z)) = (coord(0), coord(1), coord(2)) else {
         return Err(err("InvalidArguments", "CmdGotoPoint expects finite (x, y, z)".into()));
@@ -627,6 +628,9 @@ pub(crate) async fn handle_cmd_goto_direction(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "steer structure")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
@@ -680,6 +684,9 @@ pub(crate) async fn handle_cmd_stop(
     bound_entry: Option<&BoundObjectEntry>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "stop structure")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
@@ -737,6 +744,9 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "change structure speed")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
@@ -792,6 +802,9 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "orbit or follow")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),
@@ -881,6 +894,9 @@ pub(crate) async fn handle_cmd_align_to(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(ship_id) = session.ship_id {
+        crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "align structure")?;
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "NotInSpace".into(),

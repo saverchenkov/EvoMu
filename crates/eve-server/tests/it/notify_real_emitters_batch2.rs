@@ -385,6 +385,7 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess_a, "corpRegistry", "AddCorporation", &[PyRep::String("Mutual Corp A".into()), PyRep::String("MWCA".into()), PyRep::Real(0.05)]).await.expect("AddCorporation A");
     rpc(&ctx, &mut sess_b, "corpRegistry", "AddCorporation", &[PyRep::String("Mutual Corp B".into()), PyRep::String("MWCB".into()), PyRep::Real(0.05)]).await.expect("AddCorporation B");
+    ctx.advance_secs(7 * 86_400);
     let (corp_a, corp_b) = (sess_a.corporation_id.expect("corp_a"), sess_b.corporation_id.expect("corp_b"));
 
     // Return PILOT_A to space in sys_lowsec far from celestials to anchor, core, & unanchor an Astrahus
@@ -411,6 +412,7 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     assert!(matches!(&st_add[1], PyRep::Dict(d) if d.len() == 1 && d[0].0 == PyRep::Integer(structure_id) && d[0].1.dict_get("categoryID") == Some(&PyRep::Integer(65))));
 
     ctx.advance_secs(25 * 3_600);
+    let _ = sys_handle.set_ball_position(carrier_id, open_pos + DVec3::new(60_000.0, 0.0, 0.0)).await;
     rpc(&ctx, &mut sess_a, "structureDocking", "Dock", &[PyRep::Integer(structure_id)]).await.expect("Dock Citadel");
     rpc(&ctx, &mut sess_a, "invbroker", "Add", &[PyRep::Integer(core_item_id), PyRep::Integer(structure_id), PyRep::Integer(172)]).await.expect("Insert Core");
     ctx.advance_secs(12);

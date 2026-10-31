@@ -206,6 +206,7 @@ pub(super) fn handle_add_corporation(
         state.accept_structures = true;
         state.accept_structures_set = true;
         state.reinforce_hour = 18;
+        state.created_unix = now_unix;
         snap.corp_shareholders.insert(
             cid,
             vec![eve_db::snapshot_ext::CorpShareholderEntry {
@@ -214,15 +215,21 @@ pub(super) fn handle_add_corporation(
                 share_count: 1_000,
             }],
         );
-        super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
-        Ok(cid)
+        let released = super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
+        Ok((cid, released))
     });
 
     match res {
-        Ok(corp_id) => {
+        Ok((corp_id, released)) => {
+            crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
             session.corporation_id = Some(corp_id);
             session.alliance_id = None;
             session.corp_role = u64::MAX;
+            if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)) {
+                if act_ship != 0 {
+                    session.ship_id = Some(act_ship);
+                }
+            }
             let change = PyRep::Dict(vec![
                 (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
                 (PyRep::String(("corporationName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(name.to_string())])),

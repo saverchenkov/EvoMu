@@ -769,6 +769,7 @@ pub async fn handle_use_warp_vector(
         code: "NoActiveShip".into(),
         message: "Session has no active ship in space".into(),
     })?;
+    crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate warp vector")?;
     let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
         code: "NoSolarSystem".into(),
         message: "Session has no active solar system".into(),

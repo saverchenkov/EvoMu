@@ -53,8 +53,6 @@ pub const ASSET_SAFETY_AUTO_DELIVERY_SECS: u64 = 20 * 86_400;
 pub const MIN_ANCHOR_DISTANCE_M: f64 = 1_000_000.0;
 /// Fuel is burned per hour (`serviceModuleFuelAmount` is an hourly amount).
 const SECS_PER_HOUR: u64 = 3_600;
-/// Celestial groups used for the anchoring distance rule (SDE `sde_groups`: 9 Asteroid Belt, 10 Stargate).
-const ANCHOR_BLOCKING_CELESTIAL_GROUPS: [u32; 2] = [9, 10];
 
 pub const STATE_ANCHOR_VULNERABLE: &str = "AnchorVulnerable";
 pub const STATE_ANCHORING: &str = "Anchoring";
@@ -148,7 +146,7 @@ pub fn structure_profile(ctx: &ServerContext, type_id: u32) -> Option<StructureP
         Some(2) => HullClass::Medium,
         Some(3) => HullClass::Large,
         Some(4) => HullClass::XLarge,
-        _ if matches!(type_id, 2233 | 3962) => HullClass::Medium,
+        _ if matches!(type_id, 2233 | 3962 | 81826) || t.group_id == 4744 => HullClass::Medium,
         _ => HullClass::Flex,
     };
     Some(StructureProfile {
@@ -898,6 +896,18 @@ fn burn_fuel(ctx: &ServerContext, snap: &mut WorldStateSnapshot, life: &mut Stru
 /// Advances every elapsed lifecycle timer of one structure. Returns the disposal outcome when
 /// the structure left space (unanchor completed).
 pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now: u64) -> Option<DisposalOutcome> {
+    let mut released = Vec::new();
+    sync_structure_with_released(ctx, snap, ext, structure_id, now, &mut released)
+}
+
+pub(crate) fn sync_structure_with_released(
+    ctx: &ServerContext,
+    snap: &mut WorldStateSnapshot,
+    ext: &mut StructureExtendedState,
+    structure_id: i64,
+    now: u64,
+    released_out: &mut Vec<(i64, i64, u32, i64)>,
+) -> Option<DisposalOutcome> {
     let st = snap.structures.get(&structure_id).cloned()?;
     if st.state == STATE_DESTROYED {
         return None;
@@ -916,12 +926,17 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
     }
     let profile = structure_profile(ctx, st.type_id)?;
     super::structure_upwell_ops::apply_pending_reinforce_schedule(ctx, snap, ext, structure_id, now);
-    super::structure_upwell_ops::apply_pending_profile_applications(ext, now);
+    released_out.extend(super::structure_upwell_ops::apply_pending_profile_applications_with_snap(snap, ext, now));
+    let anchoring_secs = ext
+        .lifecycle
+        .get(&structure_id)
+        .and_then(|l| l.anchoring_duration_secs)
+        .unwrap_or(ANCHORING_SECS);
     for _ in 0..16 {
         let st = snap.structures.get(&structure_id).cloned()?;
         let timer = st.reinforced_until_unix;
         let next = match st.state.as_str() {
-            STATE_ANCHOR_VULNERABLE if now >= timer => Some((STATE_ANCHORING, timer + ANCHORING_SECS)),
+            STATE_ANCHOR_VULNERABLE if now >= timer => Some((STATE_ANCHORING, timer + anchoring_secs)),
             STATE_ANCHORING if now >= timer => Some(if profile.core_type_id.is_some() { (STATE_NO_CORE, 0) } else { (STATE_ONLINING, timer + ONLINING_SECS) }),
             STATE_NO_CORE => {
                 if ctx.sde.solar_systems.get(&st.solar_system_id).map(|s| s.region_id) == Some(POCHVEN_REGION_ID) {
@@ -1031,11 +1046,12 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
     super::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
     let now = ctx.now_unix();
     let mut sov_claims: Vec<(u32, i64, i64, i64)> = Vec::new();
-    let gone = ctx.db.with_mut_snapshot(|snap| {
+    let (gone, released) = ctx.db.with_mut_snapshot(|snap| {
         let mut ids: Vec<i64> = snap.structures.keys().copied().collect();
         ids.sort_unstable();
         let mut ext = load_ext_state(snap);
         let mut gone = Vec::new();
+        let mut released = Vec::new();
         for id in ids {
             if let Some(st) = snap.structures.get(&id).cloned() {
                 if crate::services::fw_gameplay::is_fw_or_insurgency_structure_in_snap(snap, &ctx.sde, id, st.type_id)
@@ -1057,13 +1073,14 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
                     continue;
                 }
             }
-            if let Some(out) = sync_structure(ctx, snap, &mut ext, id, now) {
+            if let Some(out) = sync_structure_with_released(ctx, snap, &mut ext, id, now, &mut released) {
                 gone.push((id, out));
             }
         }
         save_ext_state(snap, &ext);
-        gone
+        (gone, released)
     });
+    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     for (_, out) in &gone {
         crate::services::fleet_social::fleet_social_scanning::dispatch_signal_tracker_notifications(ctx, out.pending_signal_tracker_notifs.clone());
     }
@@ -1263,44 +1280,9 @@ pub fn record_structure_hack_reveal(ctx: &ServerContext, char_id: i64, structure
     Some((info.1, info.2, info.3))
 }
 
-/// Anchoring position rules: Pochven restriction, Palatine Keepstar cluster limit,
-/// Keepstar/FLEX per-system limits, SDE `disallowInHighSec`, and the DERIVED 1,000 km minimum
-/// distance from NPC stations, stargates, asteroid belts and other live structures.
+/// Anchoring position rules delegated to [`crate::services::structure_anchoring_rules::check_anchor_position`].
 pub fn check_anchor_position(ctx: &ServerContext, snap: &WorldStateSnapshot, profile: &StructureProfile, sys_id: u32, pos: glam::DVec3) -> Result<(), BridgeRpcError> {
-    if !pos.is_finite() || pos.abs().max_element() > 1.0e14 {
-        return Err(BridgeRpcError { code: "InvalidAnchorCoordinates".into(), message: "Anchoring position coordinates must be finite and within solar system bounds".into() });
-    }
-    let region_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id).unwrap_or(0);
-    if region_id == POCHVEN_REGION_ID {
-        return Err(BridgeRpcError { code: "CannotAnchorInPochven".into(), message: format!("Upwell structures cannot be anchored in Pochven solar system {sys_id}") });
-    }
-    if profile.type_id == PALATINE_KEEPSTAR_TYPE_ID
-        && snap.structures.values().any(|s| s.type_id == PALATINE_KEEPSTAR_TYPE_ID && s.state != STATE_DESTROYED)
-    {
-        return Err(BridgeRpcError { code: "PalatineKeepstarLimitReached".into(), message: "Only one Upwell Palatine Keepstar (40340) may be active in the cluster at any time".into() });
-    }
-    if profile.hull_class == HullClass::XLarge
-        && profile.group_id == 1657
-        && snap.structures.values().any(|s| s.solar_system_id == sys_id && s.state != STATE_DESTROYED && structure_profile(ctx, s.type_id).is_some_and(|p| p.hull_class == HullClass::XLarge && p.group_id == 1657))
-    {
-        return Err(BridgeRpcError { code: "KeepstarPerSystemLimit".into(), message: format!("Only one Keepstar-sized Citadel may be anchored in solar system {sys_id}") });
-    }
-    if profile.hull_class == HullClass::Flex
-        && snap.structures.values().any(|s| s.solar_system_id == sys_id && s.state != STATE_DESTROYED && s.type_id == profile.type_id)
-    {
-        return Err(BridgeRpcError { code: "FlexStructurePerSystemLimit".into(), message: format!("Only one FLEX structure of type {} may be anchored in solar system {sys_id}", profile.type_id) });
-    }
-    if profile.disallow_in_highsec && space_class(ctx, sys_id) == SpaceClass::HighSec {
-        return Err(BridgeRpcError { code: "CannotAnchorInHighSec".into(), message: format!("Structure type {} cannot be anchored in high-security system {sys_id}", profile.type_id) });
-    }
-    let too_close = |p: glam::DVec3| p.distance(pos) < MIN_ANCHOR_DISTANCE_M;
-    let station_hit = ctx.sde.stations.values().any(|s| s.solar_system_id == sys_id && too_close(s.position));
-    let celestial_hit = ctx.sde.celestials_in_system(sys_id).iter().any(|c| ANCHOR_BLOCKING_CELESTIAL_GROUPS.contains(&c.group_id) && too_close(c.position));
-    let structure_hit = snap.structures.values().any(|s| s.solar_system_id == sys_id && s.state != STATE_DESTROYED && too_close(glam::DVec3::from_array(s.position)));
-    if station_hit || celestial_hit || structure_hit {
-        return Err(BridgeRpcError { code: "TooCloseToStructureOrStation".into(), message: format!("Anchoring position must be at least {} km from stations, stargates, asteroid belts and other structures", MIN_ANCHOR_DISTANCE_M / 1_000.0) });
-    }
-    Ok(())
+    crate::services::structure_anchoring_rules::check_anchor_position(ctx, snap, profile, sys_id, pos)
 }
 
 /// Online service module type IDs fitted to `structure_id`.

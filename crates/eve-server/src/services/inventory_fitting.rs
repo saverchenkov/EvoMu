@@ -884,6 +884,12 @@ pub async fn handle(
                         if st.state == "Destroyed" {
                             return Err(BridgeRpcError { code: "StructureDestroyed".into(), message: format!("Structure {new_loc} is destroyed") });
                         }
+                        if ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.region_id == crate::services::station_structure::structure_lifecycle::POCHVEN_REGION_ID) {
+                            return Err(BridgeRpcError {
+                                code: "QuantumCoreDisallowedInPochven".into(),
+                                message: format!("Quantum Cores cannot be installed into Upwell structure {new_loc} in Pochven"),
+                            });
+                        }
                         if ch_dock != new_loc {
                             return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Installing a quantum core requires docking in structure {new_loc}") });
                         }

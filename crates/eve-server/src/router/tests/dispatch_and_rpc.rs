@@ -149,17 +149,29 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         panic!("Expected corp1 KeyVal");
     };
     let apex_corp_id = corp1_kv.get("corporationID").unwrap().as_i64().unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(gov) = snap.corp_governance.get_mut(&apex_corp_id) {
+            gov.created_unix = gov.created_unix.saturating_sub(700_000);
+        }
+    });
 
     // E2E-14: Upwell Structure Anchoring (consuming Astrahus 35832 + Quantum Core 56201), Fueling, & Damage-Capped Reinforcement
-    // Anchoring needs 1,000 km clearance from Jita 4-4: fly both ships 5,000,000 km off the station.
-    let at_station = {
-        let ship1 = session.ship_id.unwrap();
-        let at_station = jita_handle.get_ball_snapshot(ship1).await.unwrap().unwrap().1.position;
-        let spot = at_station + glam::DVec3::new(0.0, 5.0e9, 0.0);
-        assert!(jita_handle.set_ball_position(ship1, spot).await);
-        assert!(jita_handle.set_ball_position(sess2.ship_id.unwrap(), spot + glam::DVec3::new(1_000.0, 0.0, 0.0)).await);
-        at_station
-    };
+    // Jita (30000142) is a trade hub (`AnchoringDisallowedInTradeHub`); jump to high-sec Perimeter (30000144) 5,000,000 km off the gate.
+    let at_station = jita_handle.get_ball_snapshot(session.ship_id.unwrap()).await.unwrap().unwrap().1.position;
+    let gate_jita_perim = 50_001_249_i64;
+    let gate_jita_pos = ctx.sde.jumps[&gate_jita_perim].position;
+    assert!(jita_handle.set_ball_position(session.ship_id.unwrap(), gate_jita_pos).await);
+    assert!(jita_handle.set_ball_position(sess2.ship_id.unwrap(), gate_jita_pos).await);
+    let (b1, b2) = (ctx.bind_object(&session, "beyonce", 30_000_142).unwrap(), ctx.bind_object(&sess2, "beyonce", 30_000_142).unwrap());
+    ctx.advance_secs(12);
+    ctx.dispatch_rpc(&mut session, "beyonce", Some(b1), "CmdStargateJump", &[PyRep::Integer(gate_jita_perim)], &empty, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess2, "beyonce", Some(b2), "CmdStargateJump", &[PyRep::Integer(gate_jita_perim)], &empty, None).await.unwrap();
+    ctx.advance_secs(12);
+    let perim_handle = ctx.systems.get_or_spawn(30_000_144);
+    let ship1 = session.ship_id.unwrap();
+    let spot = perim_handle.get_ball_snapshot(ship1).await.unwrap().unwrap().1.position + glam::DVec3::new(0.0, 5.0e9, 0.0);
+    assert!(perim_handle.set_ball_position(ship1, spot).await);
+    assert!(perim_handle.set_ball_position(sess2.ship_id.unwrap(), spot + glam::DVec3::new(1_000.0, 0.0, 0.0)).await);
     let st_res = ctx
         .dispatch_rpc(
             &mut session,
@@ -179,6 +191,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         panic!("Expected structure KeyVal");
     };
     let st_id = st_kv.get("structureID").unwrap().as_i64().unwrap();
+    assert!(perim_handle.set_ball_position(ship1, spot + glam::DVec3::new(60_000.0, 0.0, 0.0)).await && perim_handle.set_ball_position(sess2.ship_id.unwrap(), spot + glam::DVec3::new(61_000.0, 0.0, 0.0)).await);
     ctx.dispatch_rpc(
         &mut session,
         "invbroker",
@@ -247,7 +260,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     )
     .await
     .unwrap();
-    let _ = jita_handle.step_manual(10.0).await.unwrap();
+    let _ = perim_handle.step_manual(10.0).await.unwrap();
     let no_war_atk = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -294,7 +307,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     .await
     .unwrap();
     ctx.advance_virtual_clock(86_401);
-    let _ = jita_handle.step_manual(1.0).await.unwrap();
+    let _ = perim_handle.step_manual(1.0).await.unwrap();
     ctx.dispatch_rpc(
         &mut sess2,
         "dogmaIM",
@@ -318,8 +331,8 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     )
     .unwrap();
     let st_dvec = ctx.db.with_snapshot(|snap| glam::DVec3::from_array(snap.structures[&st_id].position));
-    assert!(jita_handle.set_ball_position(sess2.ship_id.unwrap(), st_dvec + glam::DVec3::new(100.0, 0.0, 0.0)).await);
-    assert!(jita_handle.set_ball_position(session.ship_id.unwrap(), st_dvec).await);
+    assert!(perim_handle.set_ball_position(sess2.ship_id.unwrap(), st_dvec + glam::DVec3::new(100.0, 0.0, 0.0)).await);
+    assert!(perim_handle.set_ball_position(session.ship_id.unwrap(), st_dvec).await);
     ctx.dispatch_rpc(
         &mut sess2,
         "structureDocking",
@@ -450,23 +463,19 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
         "CourierNotAtDestinationStation"
     );
 
-    // Undock from structure `st_id` via RPC and dock at destination station `60_003_760` via RPC
-    let st_undock = ctx
-        .dispatch_rpc(
-            &mut session,
-            "structureDocking",
-            None,
-            "Undock",
-            &[],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
-    let PyRep::KeyVal(stu_kv) = st_undock else {
+    // Undock from structure `st_id` via RPC, jump Perimeter -> Jita, and dock at destination station `60_003_760` via RPC
+    let PyRep::KeyVal(stu_kv) = ctx.dispatch_rpc(&mut session, "structureDocking", None, "Undock", &[], &empty, None).await.unwrap() else {
         panic!("Expected structure undock KeyVal");
     };
-    let stu_b_id = stu_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let perim_b_id = stu_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let gate_perim_jita = ctx.sde.jumps.iter().find_map(|(&gid, j)| (j.from_solar_system_id == 30_000_144 && j.to_solar_system_id == 30_000_142).then_some(gid)).unwrap();
+    assert!(perim_handle.set_ball_position(session.ship_id.unwrap(), ctx.sde.jumps[&gate_perim_jita].position).await);
+    ctx.advance_secs(12);
+    let PyRep::KeyVal(jb_kv) = ctx.dispatch_rpc(&mut session, "beyonce", Some(perim_b_id), "CmdStargateJump", &[PyRep::Integer(gate_perim_jita)], &empty, None).await.unwrap() else {
+        panic!("Expected jump back KeyVal");
+    };
+    let stu_b_id = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    ctx.advance_secs(12);
     assert!(jita_handle.set_ball_position(session.ship_id.unwrap(), at_station).await);
     let short_warp = ctx
         .dispatch_rpc(

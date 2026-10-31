@@ -5,15 +5,14 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::compute_reprocessing_yield_rate;
 use crate::router::{BoundObjectEntry, ServerContext};
 pub use crate::services::mining_advanced::mining_compression::{
     caller_can_take_corp_hangar_item, compute_structure_reprocessing_base_yield,
     compute_structure_rigged_base_yield, resolve_reprocessable_materials,
     resolve_reprocessable_materials_for_portions, structure_has_online_reprocessing_service,
 };
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
-use eve_sde::{InvType, SdeRegistry, TypeId};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_sde::TypeId;
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -818,138 +817,9 @@ pub(crate) async fn handle_mine(
     ]))
 }
 
-pub fn compute_reprocessing_rates_for_item(
-    sde: &SdeRegistry,
-    snap: &WorldStateSnapshot,
-    char_id: i64,
-    station_id: i64,
-    inv_type: &InvType,
-) -> (f64, f64, f64) {
-    let char_skills = snap.skills.get(&char_id);
-    let reproc_lvl = char_skills.and_then(|m| m.get(&3385)).map(|s| s.level).unwrap_or(0);
-    let reproc_eff_lvl = char_skills.and_then(|m| m.get(&3389)).map(|s| s.level).unwrap_or(0);
-    let raw_reproc_skill = inv_type
-        .default_attributes
-        .get(&eve_sde::attr_ids::REPROCESSING_SKILL_TYPE)
-        .map(|&skill_id_f| skill_id_f as TypeId);
-    let ore_proc_lvl = raw_reproc_skill
-        .filter(|&sid| sid > 0 && sid != 12196)
-        .and_then(|sid| char_skills.and_then(|m| m.get(&sid)).map(|s| s.level))
-        .unwrap_or(0);
-    let scrap_lvl = char_skills.and_then(|m| m.get(&12196)).map(|s| s.level).unwrap_or(0);
-    let is_ore_or_ice = raw_reproc_skill != Some(12196)
-        && (inv_type.category_id == 25
-            || inv_type.group_id == 465
-            || inv_type.group_id == 4932
-            || raw_reproc_skill.is_some_and(|sid| sid > 0));
-    let station_base_yield = if station_id >= 1_000_000_000_000 {
-        if is_ore_or_ice {
-            compute_structure_rigged_base_yield(sde, snap, station_id, Some(inv_type))
-        } else {
-            0.50
-        }
-    } else {
-        sde.solar_systems
-            .values()
-            .flat_map(|s| s.stations.iter())
-            .find(|st| st.station_id == station_id)
-            .map(|st| st.reprocessing_efficiency.clamp(0.30, 0.50))
-            .unwrap_or(0.50)
-    };
-    let implant_bonus = snap
-        .active_implants
-        .get(&char_id)
-        .map(|implants| {
-            implants
-                .iter()
-                .filter_map(|&imp_id| sde.types.get(&imp_id)?.default_attributes.get(&379))
-                .map(|&bonus| bonus / 100.0)
-                .sum::<f64>()
-        })
-        .unwrap_or(0.0);
-    let yield_rate = if is_ore_or_ice {
-        compute_reprocessing_yield_rate(
-            station_base_yield,
-            reproc_lvl,
-            reproc_eff_lvl,
-            ore_proc_lvl,
-            implant_bonus,
-        )
-    } else {
-        (station_base_yield * (1.0 + 0.02 * (scrap_lvl.min(5) as f64))).clamp(0.0, 0.55)
-    };
-    let station_tax_rate = if station_id >= 1_000_000_000_000 {
-        crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
-            .access_profiles
-            .get(&station_id)
-            .and_then(|p| {
-                p.service_settings
-                    .get(&3)
-                    .or_else(|| p.service_settings.get(&35899))
-                    .copied()
-            })
-            .map(|bps| (bps as f64 / 10_000.0).clamp(0.0, 1.0))
-            .unwrap_or(0.0)
-    } else {
-        let owner_corp_id = sde
-            .solar_systems
-            .values()
-            .flat_map(|s| s.stations.iter())
-            .find(|st| st.station_id == station_id)
-            .map(|st| st.owner_corporation_id as i64);
-        let effective_standing: f64 = owner_corp_id
-            .map(|cid| {
-                let ch_opt = snap.characters.get(&char_id);
-                let personal_raw = ch_opt
-                    .and_then(|ch| ch.standings.get(&cid).copied())
-                    .unwrap_or(0.0);
-                let conn_lvl = char_skills
-                    .and_then(|m| m.get(&3359))
-                    .map(|s| s.level.min(5))
-                    .unwrap_or(0);
-                let has_completed_mission_for_corp = snap.active_missions.values().any(|m| {
-                    m.character_id == char_id
-                        && m.state == "Completed"
-                        && sde.agents.get(&m.agent_id).is_some_and(|a| a.corporation_id == cid)
-                }) || snap
-                    .standing_transactions
-                    .get(&char_id)
-                    .is_some_and(|txs| {
-                        txs.iter()
-                            .any(|tx| tx.from_id == cid && tx.event_type_id == 85 && tx.modification > 0.0)
-                    });
-                let personal_eff = if has_completed_mission_for_corp && personal_raw >= 0.0 && conn_lvl > 0 {
-                    (personal_raw + (10.0 - personal_raw) * 0.04 * (conn_lvl as f64)).clamp(-10.0, 10.0)
-                } else {
-                    personal_raw
-                };
-                let player_corp_id = ch_opt.map(|ch| ch.corporation_id).unwrap_or(0);
-                let corp_standing = if player_corp_id > 0 {
-                    let direct_corp_st = snap
-                        .characters
-                        .get(&player_corp_id)
-                        .and_then(|c| c.standings.get(&cid).copied());
-                    direct_corp_st.unwrap_or_else(|| {
-                        let mut sum = 0.0;
-                        let mut cnt = 0usize;
-                        for member in snap.characters.values().filter(|m| m.corporation_id == player_corp_id) {
-                            if let Some(&st) = member.standings.get(&cid) {
-                                sum += st;
-                                cnt += 1;
-                            }
-                        }
-                        if cnt > 0 { sum / (cnt as f64) } else { 0.0 }
-                    })
-                } else {
-                    0.0
-                };
-                personal_eff.max(corp_standing).max(0.0)
-            })
-            .unwrap_or(0.0);
-        (0.05_f64 - 0.0075_f64 * effective_standing).clamp(0.0, 0.05)
-    };
-    (station_base_yield, yield_rate, station_tax_rate)
-}
+pub use crate::services::mining_cycle::{
+    compute_reprocessing_rates_for_item, compute_reprocessing_rates_for_item_at,
+};
 
 
 
@@ -1002,6 +872,7 @@ pub async fn handle(
                 }));
             }
 
+            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if station_id >= 1_000_000_000_000 {
                     let Some(st) = snap.structures.get(&station_id) else {
@@ -1025,8 +896,8 @@ pub async fn handle(
                             ),
                         });
                     }
-                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                        snap, station_id, char_id,
+                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
+                        snap, station_id, char_id, Some(now_unix),
                     ) {
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
@@ -1035,6 +906,16 @@ pub async fn handle(
                             ),
                         });
                     }
+                    let _ = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+                        snap,
+                        station_id,
+                        char_id,
+                        &[3, 35_899],
+                        false,
+                        Some(now_unix),
+                        "AccessDenied",
+                        "reprocessing",
+                    )?;
                 } else if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 5) {
                     return Err(BridgeRpcError {
                         code: "StationServiceUnavailable".into(),
@@ -1093,7 +974,7 @@ pub async fn handle(
                         return Err(BridgeRpcError { code: "InsufficientBatchPortion".into(), message: format!("Need at least {portion_size} units to reprocess type {} (have {})", item.type_id, item.quantity) });
                     }
                     let (station_base_yield, yield_rate, station_tax_rate) =
-                        compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
+                        compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
                     let mut gross_value_cents = 0_i64;
                     for mat in &materials {
                         let unit_val = ctx.sde.types.get(&mat.material_type_id).map(|t| t.base_price.max(4.0)).unwrap_or(4.0);
@@ -1153,9 +1034,10 @@ pub async fn handle(
                         };
                         if station_id >= 1_000_000_000_000 {
                             if let Some(owner_corp_id) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
-                                if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
-                                    corp.master_wallet.0 = corp.master_wallet.0.saturating_add(tax_cents.0);
-                                }
+                                crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                                    snap, owner_corp_id, tax_cents, eve_db::ledger::ref_types::TRANSACTION_TAX, "ReprocessingTax", char_id,
+                                    format!("Structure reprocessing tax ({:.2}%) at structure {station_id}", station_tax_rate * 100.0), now_unix,
+                                );
                             }
                         }
                         snap.append_journal(
@@ -1247,6 +1129,26 @@ pub async fn handle(
                     message: format!("Station {station_id} does not offer reprocessing facilities"),
                 }));
             }
+            let now_unix = ctx.now_unix();
+            if station_id >= 1_000_000_000_000 {
+                let acl_err = ctx.db.with_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
+                        snap, station_id, char_id, Some(now_unix),
+                    ) {
+                        return Err(BridgeRpcError {
+                            code: "AccessDenied".into(),
+                            message: format!("Character {char_id} is denied access to structure {station_id}"),
+                        });
+                    }
+                    let _ = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+                        snap, station_id, char_id, &[3, 35_899], false, Some(now_unix), "AccessDenied", "reprocessing",
+                    )?;
+                    Ok(())
+                });
+                if let Err(e) = acl_err {
+                    return Some(Err(e));
+                }
+            }
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
                 Some(first) => first.as_i64().into_iter().collect(),
@@ -1256,7 +1158,7 @@ pub async fn handle(
                 ctx.db.with_snapshot(|snap| {
                     let dummy_type = ctx.sde.types.get(&1230);
                     let (mut base, _, tax) = dummy_type
-                        .map(|t| compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, t))
+                        .map(|t| compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, t, Some(now_unix)))
                         .unwrap_or((0.50, 0.50, 0.0));
                     if station_id >= 1_000_000_000_000 {
                         base = compute_structure_rigged_base_yield(&ctx.sde, snap, station_id, None);
@@ -1301,7 +1203,7 @@ pub async fn handle(
                         continue;
                     };
                     let (item_base_yield, yield_rate, item_tax_rate) =
-                        compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
+                        compute_reprocessing_rates_for_item_at(&ctx.sde, snap, char_id, station_id, inv_type, Some(now_unix));
                     let net_yield_rate = yield_rate;
                     let mut est_outputs = Vec::new();
                     for mat in &materials {

@@ -42,16 +42,19 @@ pub fn check_alpha_clone_install_capacity(
     Ok(())
 }
 
-/// Evaluates structure clone bay access against Upwell structure access lists.
-pub fn check_structure_clone_bay_access(
+/// Evaluates structure clone bay access against Upwell structure access lists and per-service ACLs,
+/// returning `Ok(Some(fee_cents))` when a per-ACL-group Clone Bay fee is configured for `char_id`.
+pub fn check_structure_clone_bay_access_at(
     snap: &WorldStateSnapshot,
     structure_id: i64,
     char_id: i64,
-) -> Result<(), BridgeRpcError> {
-    if !structure_upwell_ops::evaluate_character_structure_access_in_snap(
+    now_unix_opt: Option<u64>,
+) -> Result<Option<IskCents>, BridgeRpcError> {
+    if !structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
         snap,
         structure_id,
         char_id,
+        now_unix_opt,
     ) {
         return Err(BridgeRpcError {
             code: "StructureAccessDenied".into(),
@@ -59,7 +62,11 @@ pub fn check_structure_clone_bay_access(
         });
     }
     let ext = structure_upwell_ops::load_ext_state(snap);
-    if let Some(prof) = ext.access_profiles.get(&structure_id) {
+    if let Some(prof) = crate::services::structure_profile_services::effective_profile_for_structure(
+        &ext,
+        structure_id,
+        now_unix_opt,
+    ) {
         if prof.general_settings.get(&2) == Some(&false)
             || prof.general_settings.get(&35894) == Some(&false)
         {
@@ -69,7 +76,26 @@ pub fn check_structure_clone_bay_access(
             });
         }
     }
-    Ok(())
+    let bps_opt = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+        snap,
+        structure_id,
+        char_id,
+        &[crate::services::structure_profile_services::SETTING_CLONINGBAY_TAX, 35_894, 2, 10, 6],
+        false,
+        now_unix_opt,
+        "StructureAccessDenied",
+        "clone bay",
+    )?;
+    Ok(bps_opt.map(|bps| IskCents((bps / 100).max(0))))
+}
+
+/// Evaluates structure clone bay access against Upwell structure access lists.
+pub fn check_structure_clone_bay_access(
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+) -> Result<(), BridgeRpcError> {
+    check_structure_clone_bay_access_at(snap, structure_id, char_id, None).map(|_| ())
 }
 
 /// Computes clone jump fee at an Upwell structure, owner-set per standing (minimum 1 ISK).
@@ -270,12 +296,14 @@ pub fn handle_clone_jump(
         }
 
         // Resolve departure solar_system_id and region_id
+        let mut dep_custom_acl_fee: Option<IskCents> = None;
         let (dep_sys_id, dep_reg_id) = if departure_loc_id >= 1_000_000_000_000 {
             let st = snap.structures.get(&departure_loc_id).ok_or_else(|| BridgeRpcError {
                 code: "DepartureStructureNotFound".into(),
                 message: format!("Departure structure {departure_loc_id} not found"),
             })?;
-            check_structure_clone_bay_access(snap, departure_loc_id, char_id)?;
+            dep_custom_acl_fee =
+                check_structure_clone_bay_access_at(snap, departure_loc_id, char_id, Some(now_unix))?;
             let sys = ctx.sde.solar_systems.get(&st.solar_system_id).ok_or_else(|| BridgeRpcError {
                 code: "DepartureSystemNotFound".into(),
                 message: format!("Departure system {} not found in SDE", st.solar_system_id),
@@ -327,7 +355,7 @@ pub fn handle_clone_jump(
                 });
             }
             // feat:clones.jump-clone-structure-dock: clone bay on Upwell structures is access-list gated
-            check_structure_clone_bay_access(snap, dest_loc_id, char_id)?;
+            let _ = check_structure_clone_bay_access_at(snap, dest_loc_id, char_id, Some(now_unix))?;
 
             let sys_id = st.solar_system_id;
             let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
@@ -518,13 +546,17 @@ pub fn handle_clone_jump(
         // At an Upwell structure the owner sets the fee per standing, minimum 1 ISK (in-structure swap is free).
         if !same_structure_swap {
             let leave_behind_fee = if departure_loc_id >= 1_000_000_000_000 {
-                let owner_corp = snap.structures.get(&departure_loc_id).map(|s| s.owner_corp_id).unwrap_or(0);
-                let standing = snap
-                    .characters
-                    .get(&char_id)
-                    .and_then(|c| c.standings.get(&owner_corp).copied())
-                    .unwrap_or(0.0);
-                compute_structure_clone_fee(snap, departure_loc_id, standing)
+                if let Some(acl_fee) = dep_custom_acl_fee {
+                    acl_fee
+                } else {
+                    let owner_corp = snap.structures.get(&departure_loc_id).map(|s| s.owner_corp_id).unwrap_or(0);
+                    let standing = snap
+                        .characters
+                        .get(&char_id)
+                        .and_then(|c| c.standings.get(&owner_corp).copied())
+                        .unwrap_or(0.0);
+                    compute_structure_clone_fee(snap, departure_loc_id, standing)
+                }
             } else {
                 IskCents(NPC_LEAVE_BEHIND_FEE_CENTS)
             };
@@ -553,16 +585,11 @@ pub fn handle_clone_jump(
                 },
             );
             if departure_loc_id >= 1_000_000_000_000 {
-                let owner_corp_opt = snap.structures.get(&departure_loc_id).map(|st| st.owner_corp_id);
-                if let Some(owner_corp_id) = owner_corp_opt {
-                    if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
-                        let new_corp_bal = corp
-                            .master_wallet
-                            .checked_add(leave_behind_fee)
-                            .unwrap_or(corp.master_wallet);
-                        corp.master_wallet = new_corp_bal;
-                        corp.set_division_balance(1, new_corp_bal);
-                    }
+                if let Some(owner_corp_id) = snap.structures.get(&departure_loc_id).map(|st| st.owner_corp_id) {
+                    crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                        snap, owner_corp_id, leave_behind_fee, 10, "CloneJumpFee", char_id,
+                        format!("Clone jump leave-behind fee from {char_id} at structure {departure_loc_id}"), now_unix,
+                    );
                 }
             }
         }

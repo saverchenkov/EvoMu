@@ -179,14 +179,26 @@ async fn test_structure_dock_undock_and_lifecycle_notifications() {
     s1.alliance_id = Some(alliance_id);
     s1.corp_role = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STATION_MANAGER;
 
-    // 1. Undock from station so P1 is in space in Jita, move far from stations, and anchor an Astrahus (35832).
+    // 1. Undock from station so P1 is in space in Perimeter, move far from stations, and anchor an Astrahus (35832).
+    let perim_sys = 30_000_144u32;
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == perim_sys).map(|s| s.station_id).expect("Perimeter station");
+    s1.solar_system_id = Some(perim_sys);
+    s1.station_id = Some(perim_station);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            let sid = ch.active_ship_id;
+            ch.solar_system_id = perim_sys;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&sid) { sh.location_id = perim_station; }
+        }
+    });
     call(&ctx, &mut s1, "structureDocking", "Undock", &[]).await;
     assert_eq!(events(&ctx, P1, "OnInvulunOnUndockingUpdated").len(), 1);
     assert!(events(&ctx, p3, "OnInvulunOnUndockingUpdated").is_empty());
 
     let ship_id = s1.ship_id.expect("ship");
-    let open_pos = ctx.sde.stations[&JITA_44].position + DVec3::new(0.0, 5.0e9, 0.0);
-    assert!(ctx.systems.get_or_spawn(JITA).set_ball_position(ship_id, open_pos).await);
+    let open_pos = ctx.sde.stations[&perim_station].position + DVec3::new(0.0, 5.0e9, 0.0);
+    assert!(ctx.systems.get_or_spawn(perim_sys).set_ball_position(ship_id, open_pos).await);
     seed_item(&ctx, 770_000, 35832, P1, ship_id, InventoryFlag::Cargo, 1);
 
     let anchor_res = call(
@@ -194,15 +206,15 @@ async fn test_structure_dock_undock_and_lifecycle_notifications() {
         &mut s1,
         "structureDeployment",
         "Anchor",
-        &[PyRep::Integer(35832), PyRep::String("Jita Test Citadel".into())],
+        &[PyRep::Integer(35832), PyRep::String("Perimeter Test Citadel".into())],
     )
     .await;
     let structure_id = anchor_res.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID");
 
-    assert_eq!(events(&ctx, P1, "OnStructureAdded"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(structure_id)]]);
+    assert_eq!(events(&ctx, P1, "OnStructureAdded"), vec![vec![PyRep::Integer(i64::from(perim_sys)), PyRep::Integer(structure_id)]]);
     assert_eq!(events(&ctx, P1, "OnCorporationStructuresUpdated"), vec![vec![]]);
-    assert_eq!(events(&ctx, P1, "OnStructureStateChanged"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(structure_id), PyRep::String("AnchorVulnerable".into())]]);
-    assert_eq!(events(&ctx, P1, "OnCurrentStructureStateChanged"), vec![vec![PyRep::Integer(i64::from(JITA)), PyRep::Integer(structure_id), PyRep::String("AnchorVulnerable".into())]]);
+    assert_eq!(events(&ctx, P1, "OnStructureStateChanged"), vec![vec![PyRep::Integer(i64::from(perim_sys)), PyRep::Integer(structure_id), PyRep::String("AnchorVulnerable".into())]]);
+    assert_eq!(events(&ctx, P1, "OnCurrentStructureStateChanged"), vec![vec![PyRep::Integer(i64::from(perim_sys)), PyRep::Integer(structure_id), PyRep::String("AnchorVulnerable".into())]]);
     assert!(events(&ctx, p3, "OnStructureAdded").is_empty());
 
     // Mark structure ShieldVulnerable with Quantum Core and fuel blocks so P1 can dock and fit a service module.

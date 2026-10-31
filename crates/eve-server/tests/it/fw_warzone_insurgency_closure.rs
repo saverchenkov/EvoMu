@@ -309,10 +309,40 @@ async fn test_fw_frontlines_hull_gating_supply_advantage_plexes_battlefields_and
 
     // Taking non-lethal damage on a friendly supply site and holding defense for 30s resolves defense:
     if let Some(&(def_sid, def_pos)) = supply_sites.iter().skip(2).next() {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                997_010,
+                InventoryItemRecord {
+                    item_id: 997_010,
+                    type_id: 484, // 125mm Gatling AutoCannon I (non-lethal subcap hit on 4,500 HP outpost)
+                    owner_id: gal_cid,
+                    location_id: gal_ship,
+                    flag: InventoryFlag::HiSlot3,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+            snap.items.insert(
+                997_011,
+                InventoryItemRecord {
+                    item_id: 997_011,
+                    type_id: 185, // EMP S
+                    owner_id: gal_cid,
+                    location_id: gal_ship,
+                    flag: InventoryFlag::HiSlot3,
+                    quantity: 100,
+                    ..Default::default()
+                },
+            );
+            snap.module_online_states.insert(997_010, true);
+            snap.module_active_charges.insert(997_010, 185);
+        });
+        ctx.invalidate_ship_fitting(gal_ship);
         set_hull(&ctx, gal_ship, 19_722, def_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
         lock_target_via_rpc(&ctx, &mut s_gal, front_sys, gal_ship, def_sid).await;
         let _ = rpc_call(&ctx, &mut s_gal, "dogmaIM", "Activate", &[
-            PyRep::Integer(997_000),
+            PyRep::Integer(997_010),
             PyRep::String("targetAttack".into()),
             PyRep::Integer(def_sid),
         ]).await;

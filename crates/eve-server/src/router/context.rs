@@ -252,6 +252,7 @@ impl ServerContext {
                 }
                 crate::services::combat_weapons_spool::step_system_entropic_spools(&ctx, sys_id, dt).await;
                 crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
+                crate::services::structure_control_ops::step_structure_auto_defense(&ctx, sys_id, dt).await;
                 crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
                 crate::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, sys_id, dt).await;
                 crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
@@ -677,25 +678,7 @@ impl ServerContext {
 
     /// Synchronizes a live `SessionState` with current DB character spatial and vessel state.
     pub fn sync_session(&self, session: &mut eve_machonet::SessionState) {
-        if let Some(cid) = session.character_id {
-            if let Some((new_corp, new_ally, new_role)) = crate::services::fleet_social::fleet_social_persistence::with_social_state(self, |s| {
-                s.forced_session_corp_sync.remove(&cid)
-            }) {
-                session.corporation_id = Some(new_corp);
-                session.alliance_id = new_ally;
-                session.corp_role = new_role;
-            }
-            if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id)) = self.db.with_snapshot(|snap| {
-                snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id, c.constellation_id, c.region_id))
-            }) {
-                session.solar_system_id = Some(sys_id);
-                if const_id != 0 { session.constellation_id = Some(const_id); }
-                if reg_id != 0 { session.region_id = Some(reg_id); }
-                session.station_id = st_id;
-                session.structure_id = str_id;
-                if act_ship != 0 { session.ship_id = Some(act_ship); }
-            }
-        }
+        crate::services::structure_control_ops::sync_character_session(self, session);
     }
 
     /// Advances virtual server time by `secs` seconds and runs time-driven skill queue,

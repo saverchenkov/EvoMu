@@ -17,6 +17,7 @@ use std::collections::HashMap;
 // parity: feat:structures.mobile-cyno-beacon, feat:structures.mobile-micro-jump-unit, feat:structures.mobile-observatory-decloak-ping
 // Well-known Mobile Deployable Groups
 pub const GROUP_MOBILE_DEPOT: u32 = 1246;
+pub const GROUP_MOBILE_CYNO_INHIBITOR: u32 = 1249;
 pub const GROUP_MOBILE_TRACTOR: u32 = 1250;
 pub const GROUP_MOBILE_MICRO_JUMP_UNIT: u32 = 1276;
 pub const GROUP_MOBILE_CYNO_BEACON: u32 = 4093;
@@ -28,6 +29,7 @@ pub const SKILL_ANCHORING: u32 = 11584;
 
 // Well-known Type IDs
 pub const TYPE_MOBILE_DEPOT: u32 = 33474;
+pub const TYPE_MOBILE_CYNO_INHIBITOR: u32 = 33476;
 pub const TYPE_WETU_DEPOT: u32 = 33520;
 pub const TYPE_YURT_DEPOT: u32 = 33522;
 pub const TYPE_MTU_STANDARD: u32 = 33475;
@@ -45,6 +47,8 @@ pub const MIN_STATION_DISTANCE_M: f64 = 50_000.0;
 pub const MIN_STRUCTURE_DISTANCE_M: f64 = 50_000.0;
 pub const MIN_MTU_TO_MTU_DISTANCE_M: f64 = 5_000.0;
 pub const MIN_DEPOT_TO_DEPOT_DISTANCE_M: f64 = 5_000.0;
+pub const CYNO_INHIBITOR_RANGE_M: f64 = 100_000.0;
+pub const MIN_CYNO_INHIBITOR_TO_INHIBITOR_DISTANCE_M: f64 = 200_000.0;
 
 // Lifetimes & Timers (seconds)
 pub const DEPOT_ANCHOR_TIME_SECS: u64 = 60;
@@ -64,6 +68,8 @@ pub const OBSERVATORY_DEPLOY_SECS: u64 = 600; // 10 minutes
 pub const OBSERVATORY_PING_INTERVAL_SECS: u64 = 600; // 10 minutes
 pub const OBSERVATORY_LIFETIME_SECS: u64 = 600 + 2 * 3_600; // 10m deploy + 2h active
 pub const OBSERVATORY_DECLOAK_CHANCE: f64 = 0.40; // 40% per ping
+pub const CYNO_INHIBITOR_ACTIVATION_DELAY_SECS: u64 = 120; // 2 minutes (120 s)
+pub const CYNO_INHIBITOR_LIFETIME_SECS: u64 = 3_600; // 1 hour (3,600 s)
 
 pub const MOBILE_DEPLOYABLE_NOTE_ID: i64 = -8_650_000_000_000;
 pub const MOBILE_DEPLOYABLE_NOTE_OWNER: i64 = 1;
@@ -194,7 +200,7 @@ pub fn is_mobile_structure(sde: &SdeRegistry, type_id: u32) -> bool {
 }
 
 /// Checks if a mobile structure can be scooped back into cargo.
-/// Mobile Micro Jump Units (group 1276), Cyno Beacons (group 4093), Mobile Observatories (group 4107), and CRAB Beacons (group 4137) cannot be scooped.
+/// Mobile Micro Jump Units (group 1276), Cyno Beacons (group 4093), Mobile Observatories (group 4107), CRAB Beacons (group 4137), and Cyno Inhibitors (group 1249) cannot be scooped.
 pub fn can_deployable_be_scooped(group_id: u32) -> bool {
     !matches!(
         group_id,
@@ -202,6 +208,7 @@ pub fn can_deployable_be_scooped(group_id: u32) -> bool {
             | GROUP_MOBILE_CYNO_BEACON
             | GROUP_MOBILE_OBSERVATORY
             | GROUP_CRAB_BEACON
+            | GROUP_MOBILE_CYNO_INHIBITOR
     )
 }
 
@@ -254,6 +261,7 @@ pub fn check_mobile_deployment_restrictions(
             });
         }
     }
+    // 3. Mobile Cyno Beacon fleet requirement, CRAB Beacon low/null security requirement, & Mobile Cyno Inhibitor high-sec / wormhole / Abyssal / Zarzakh ban
     if group_id == GROUP_MOBILE_CYNO_BEACON && session.fleet_id.is_none() {
         return Err(BridgeRpcError {
             code: "MustBeInFleet".into(),
@@ -309,6 +317,17 @@ pub fn check_mobile_deployment_restrictions(
     if group_id == GROUP_CRAB_BEACON {
         crate::services::pve_crab_beacons::validate_crab_deployment_system(&ctx.sde, sys_id)?;
     }
+    if group_id == GROUP_MOBILE_CYNO_INHIBITOR {
+        let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
+        if sys_sec >= 0.45 || sys_id >= 31_000_000 || sys_id == 30_100_000 {
+            return Err(BridgeRpcError {
+                code: "CantAnchorInHighSecOrWormhole".into(),
+                message: format!(
+                    "Mobile Cynosural Inhibitor cannot be anchored in high-sec, wormhole, Abyssal, or Zarzakh space (system {sys_id})"
+                ),
+            });
+        }
+    }
 
     // 3. Stargate distance check (>= 50 km)
     for gate in ctx.sde.stargates().values() {
@@ -340,18 +359,16 @@ pub fn check_mobile_deployment_restrictions(
     ctx.db.with_snapshot(|snap| {
         // Distance from Upwell structures (>= 50 km)
         for st in snap.structures.values() {
-            if st.solar_system_id == sys_id {
-                if let Some(pos_arr) = snap.item_positions.get(&st.structure_id) {
-                    let spos = DVec3::from_array(*pos_arr);
-                    if (anchor_pos - spos).length() < MIN_STRUCTURE_DISTANCE_M {
-                        return Err(BridgeRpcError {
-                            code: "DeploymentTooCloseToStructure".into(),
-                            message: format!(
-                                "Cannot anchor within 50km of an Upwell structure (distance: {:.1} km)",
-                                (anchor_pos - spos).length() / 1_000.0
-                            ),
-                        });
-                    }
+            if st.solar_system_id == sys_id && st.state != "Destroyed" {
+                let spos = DVec3::from_array(st.position);
+                if (anchor_pos - spos).length() < MIN_STRUCTURE_DISTANCE_M {
+                    return Err(BridgeRpcError {
+                        code: "DeploymentTooCloseToStructure".into(),
+                        message: format!(
+                            "Cannot anchor within 50km of an Upwell structure (distance: {:.1} km)",
+                            (anchor_pos - spos).length() / 1_000.0
+                        ),
+                    });
                 }
             }
         }
@@ -430,6 +447,29 @@ pub fn check_mobile_deployment_restrictions(
             }
         }
 
+        // Distance from another Mobile Cynosural Inhibitor (>= 200 km so 100 km inhibition spheres do not overlap)
+        if group_id == GROUP_MOBILE_CYNO_INHIBITOR {
+            for it in snap.items.values() {
+                if it.item_id != item_id && it.location_id == sys_id as i64 {
+                    let it_grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    if it_grp == GROUP_MOBILE_CYNO_INHIBITOR {
+                        if let Some(pos_arr) = snap.item_positions.get(&it.item_id) {
+                            let opos = DVec3::from_array(*pos_arr);
+                            if (anchor_pos - opos).length() < MIN_CYNO_INHIBITOR_TO_INHIBITOR_DISTANCE_M {
+                                return Err(BridgeRpcError {
+                                    code: "MobileCynoInhibitorOverlap".into(),
+                                    message: format!(
+                                        "Cannot anchor within 200km of another Mobile Cynosural Inhibitor (distance: {:.1} km)",
+                                        (anchor_pos - opos).length() / 1_000.0
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     })
 }
@@ -449,7 +489,8 @@ pub fn register_mobile_deployable(
     let lifetime_secs = match group_id {
         GROUP_MOBILE_DEPOT => DEPOT_LIFETIME_SECS,
         GROUP_MOBILE_TRACTOR => MTU_LIFETIME_SECS,
-        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_ACTIVATION_DELAY_SECS.saturating_add(MMJU_LIFETIME_SECS),
+        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_LIFETIME_SECS,
+        GROUP_MOBILE_CYNO_INHIBITOR => CYNO_INHIBITOR_LIFETIME_SECS,
         GROUP_MOBILE_CYNO_BEACON => {
             let active_dur = if type_id == TYPE_COVERT_MOBILE_CYNO_BEACON {
                 COVERT_CYNO_BEACON_DURATION_SECS

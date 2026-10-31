@@ -984,13 +984,14 @@ fn handle_job_initiate(
             if let Some(rem) = ch.balance.checked_sub(fee) {
                 ch.balance = rem;
                 if award_evermarks {
+                    let em_reward = 500_i64.saturating_mul(i64::from(licenses_qty));
                     let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
-                    *cur = cur.saturating_add(500);
+                    *cur = cur.saturating_add(em_reward);
                     crate::services::lp_store::record_lp_reward_log(
                         s,
                         cid as i64,
                         EVERMARK_CORP_ID,
-                        500,
+                        em_reward,
                         "SKINR sequencing EverMarks reward".into(),
                         0,
                     );

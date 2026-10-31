@@ -32,8 +32,8 @@ pub const SLEEPER_BLUE_LOOT_ORDERS: &[(TypeId, i64)] = &[
 ];
 
 use super::market_trading::{
-    load_market_order_meta, resolve_station_solar_system, resolve_structure_broker_rate,
-    save_market_order_meta, unix_to_filetime, MarketOrderMeta,
+    load_market_order_meta, resolve_station_solar_system, save_market_order_meta,
+    unix_to_filetime, MarketOrderMeta,
 };
 
 fn market_order_descriptor() -> DBRowDescriptor {
@@ -564,12 +564,13 @@ pub fn handle(
                         }
                     }
 
-                    // Resolve station vs Upwell structure broker rate & 0.5% SCC surcharge
-                    let structure_info = snap.structures.get(&order.station_id).filter(|st| st.state != "Destroyed")
-                        .map(|st| (st.owner_corp_id, resolve_structure_broker_rate(snap, order.station_id)));
+                    // Resolve station vs Upwell structure broker rate & per-ACL-group market access
+                    let structure_info = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
+                        ctx, snap, order.station_id, char_id, now_unix, "MarketHubOffline",
+                    )?;
                     let (broker_rate, structure_owner_opt) =
-                        if let Some((st_corp_id, st_rate)) = structure_info {
-                            (st_rate, Some(st_corp_id))
+                        if let Some((st_corp_id, st_rate, pilot_bps)) = structure_info {
+                            (st_rate, Some((st_corp_id, pilot_bps)))
                         } else { let st_def = ctx.sde.stations.get(&order.station_id);
                             let owner_corp = st_def.map(|s| s.owner_corporation_id).unwrap_or(0);
                             let owner_fac = st_def.and_then(|s| s.owner_faction_id);
@@ -589,9 +590,16 @@ pub fn handle(
                         broker_rate,
                         adv_broker_lvl,
                     );
-                    let scc_surcharge = if structure_owner_opt.is_some() {
-                        IskCents(relist_fee.0 / 2)
-                    } else { IskCents(0)
+                    let (owner_share, scc_surcharge) = if let Some((_, pilot_bps)) = structure_owner_opt {
+                        let share = super::market_trading::structure_owner_broker_share_with_pilot(
+                            snap,
+                            order.station_id,
+                            relist_fee,
+                            pilot_bps,
+                        );
+                        (share, relist_fee.checked_sub(share).unwrap_or(IskCents(0)))
+                    } else {
+                        (IskCents(0), IskCents(0))
                     };
 
                     // Calculate buy order escrow delta, preserving any existing Margin Trading escrow ratio
@@ -669,7 +677,7 @@ pub fn handle(
                                 meta: eve_db::ledger::JournalMeta::new(
                                     eve_db::ledger::ref_types::BROKER_FEE,
                                     char_id,
-                                    structure_owner_opt.unwrap_or_else(|| {
+                                    structure_owner_opt.map(|(cid, _)| cid).unwrap_or_else(|| {
                                         ctx.sde.stations.get(&order.station_id).map(|s| s.owner_corporation_id).unwrap_or(0)
                                     }),
                                     now_unix,
@@ -679,17 +687,18 @@ pub fn handle(
                         }
                     }
 
-                    if let Some(st_corp_id) = structure_owner_opt {
-                        let owner_share = relist_fee.checked_sub(scc_surcharge).unwrap_or(IskCents(0));
+                    if let Some((st_corp_id, _)) = structure_owner_opt {
                         if owner_share.0 > 0 {
-                            if let Some(st_corp) = snap.corporations.get_mut(&st_corp_id) {
-                                st_corp.ensure_wallet_divisions();
-                                st_corp.master_wallet = st_corp.master_wallet.checked_add(owner_share)
-                                    .unwrap_or(st_corp.master_wallet);
-                                if let Some(d1) = st_corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
-                                    d1.balance = d1.balance.checked_add(owner_share).unwrap_or(d1.balance);
-                                }
-                            }
+                            crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                                snap,
+                                st_corp_id,
+                                owner_share,
+                                eve_db::ledger::ref_types::BROKER_FEE,
+                                "MarketBrokerFee",
+                                order.owner_id,
+                                format!("Structure market relist broker fee for order {order_id}"),
+                                now_unix,
+                            );
                         }
                     }
 
@@ -856,10 +865,15 @@ pub fn handle(
                 let tax_collector = super::wallet_serverops::tax_collector_id(ctx);
 
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let upwell_opt = crate::services::structure_profile_services::apply_due_profiles_and_check_upwell_market(
+                        ctx, snap, station_id, char_id, now_unix, "MarketHubOffline",
+                    )?;
                     let sk = snap.skills.get(&char_id);
                     let broker_lvl = sk.and_then(|m| m.get(&3446)).map(|s| s.level).unwrap_or(0);
                     let acct_lvl = sk.and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
-                    let broker_rate = compute_broker_fee_rate(broker_lvl, 0.0, 0.0);
+                    let broker_rate = upwell_opt
+                        .map(|(_, rate, _)| rate)
+                        .unwrap_or_else(|| compute_broker_fee_rate(broker_lvl, 0.0, 0.0));
                     let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 
                     // Consume PLEX from character's PLEX Vault (`plex_balance`) or station hangar item (`44992`)
@@ -900,7 +914,13 @@ pub fn handle(
 
                     // Match globally against any resting PLEX buy orders across all regions
                     let mut candidate_bids: Vec<(i64, i64)> = snap.market_orders.values().filter(|o| {
+                            let struct_ok = o.station_id == station_id
+                                || !snap.structures.contains_key(&o.station_id)
+                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
+                                ).is_ok();
                             o.type_id == PLEX_TYPE_ID
+                                && struct_ok
                                 && o.is_bid
                                 && o.vol_remaining > 0
                                 && o.price.0 >= order_price.0
@@ -1082,8 +1102,30 @@ pub fn handle(
                         let bal = ch_mut.balance;
                         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
                             owner_id: char_id, entry_type: "MarketBrokerFee", amount: IskCents(-broker_fee.0), balance_after: bal,
-                            reason: "Broker fee for PLEX sell order".into(), meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, 0, now_unix),
+                            reason: "Broker fee for PLEX sell order".into(), meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, upwell_opt.map(|(c, _, _)| c).unwrap_or(0), now_unix),
                         });
+                    }
+                    if let Some((st_corp_id, _, pilot_bps)) = upwell_opt {
+                        if broker_fee.0 > 0 {
+                            let owner_share = super::market_trading::structure_owner_broker_share_with_pilot(
+                                snap, station_id, broker_fee, pilot_bps,
+                            );
+                            if owner_share.0 > 0 {
+                                if let Some(st_corp) = snap.corporations.get_mut(&st_corp_id) {
+                                    st_corp.ensure_wallet_divisions();
+                                    st_corp.master_wallet = st_corp.master_wallet.checked_add(owner_share).unwrap_or(st_corp.master_wallet);
+                                    if let Some(d1) = st_corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
+                                        d1.balance = d1.balance.checked_add(owner_share).unwrap_or(d1.balance);
+                                    }
+                                    let c_bal = st_corp.master_wallet;
+                                    snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                                        owner_id: st_corp_id, entry_type: "MarketBrokerFee", amount: owner_share, balance_after: c_bal,
+                                        reason: "Structure market broker fee for PLEX sell order".into(),
+                                        meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, st_corp_id, now_unix),
+                                    });
+                                }
+                            }
+                        }
                     }
                     snap.next_entity_id += 1;
                     let new_oid = snap.next_entity_id;

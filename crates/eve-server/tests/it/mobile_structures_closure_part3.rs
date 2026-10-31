@@ -215,8 +215,21 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
     let starter_res = ctx.dispatch_rpc(&mut starter_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mci_starter_id)], &kw, None).await;
     assert_eq!(starter_res.unwrap_err().code, "RestrictionsInEffect", "Mobile Cyno Inhibitor must be blocked in starter systems");
 
-    // 2. Proximity to Stargate (>= 50km)
-    let gate_pos = ctx.sde.stargates().values().find(|g| g.from_solar_system_id == TEST_SYSTEM).map(|g| g.position).unwrap_or(DVec3::ZERO);
+    // 2. High-sec deployment ban (CantAnchorInHighSecOrWormhole)
+    let mci_hs_id = 700_064i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mci_hs_id, InventoryItemRecord {
+            item_id: mci_hs_id, type_id: mci_type_id, owner_id: PILOT_1,
+            location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+        });
+    });
+    let mut hs_sess = setup_pilot(&ctx, 608, PILOT_1, SHIP_1, TEST_SYSTEM, ship_pos).await;
+    let hs_res = ctx.dispatch_rpc(&mut hs_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mci_hs_id)], &kw, None).await;
+    assert_eq!(hs_res.unwrap_err().code, "CantAnchorInHighSecOrWormhole", "Mobile Cyno Inhibitor must be blocked in high-sec");
+
+    // 3. Proximity to Stargate (>= 50km) in low-sec Rancer (30002718)
+    const LOWSEC_SYS: u32 = 30_002_718;
+    let gate_pos = ctx.sde.stargates().values().find(|g| g.from_solar_system_id == LOWSEC_SYS).map(|g| g.position).unwrap_or(DVec3::ZERO);
     let mci_gate_id = 700_061i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(mci_gate_id, InventoryItemRecord {
@@ -224,12 +237,12 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
             location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
     });
-    let mut gate_sess = setup_pilot(&ctx, 604, PILOT_1, SHIP_1, TEST_SYSTEM, gate_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let mut gate_sess = setup_pilot(&ctx, 604, PILOT_1, SHIP_1, LOWSEC_SYS, gate_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
     let gate_res = ctx.dispatch_rpc(&mut gate_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mci_gate_id)], &kw, None).await;
     assert_eq!(gate_res.unwrap_err().code, "DeploymentTooCloseToGate", "Mobile Cyno Inhibitor must be blocked within 50km of stargates");
 
-    // 3. Proximity to Station (>= 50km)
-    let st_pos = ctx.sde.stations.values().find(|s| s.solar_system_id == TEST_SYSTEM).map(|s| s.position).unwrap_or(DVec3::new(100_000.0, 0.0, 0.0));
+    // 4. Proximity to Station (>= 50km) in low-sec Rancer
+    let st_pos = ctx.sde.stations.values().find(|s| s.solar_system_id == LOWSEC_SYS).map(|s| s.position).unwrap_or(DVec3::new(100_000.0, 0.0, 0.0));
     let mci_station_id = 700_062i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(mci_station_id, InventoryItemRecord {
@@ -237,11 +250,11 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
             location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
     });
-    let mut station_sess = setup_pilot(&ctx, 605, PILOT_1, SHIP_1, TEST_SYSTEM, st_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let mut station_sess = setup_pilot(&ctx, 605, PILOT_1, SHIP_1, LOWSEC_SYS, st_pos + DVec3::new(10_000.0, 0.0, 0.0)).await;
     let station_res = ctx.dispatch_rpc(&mut station_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mci_station_id)], &kw, None).await;
     assert_eq!(station_res.unwrap_err().code, "DeploymentTooCloseToStation", "Mobile Cyno Inhibitor must be blocked within 50km of stations");
 
-    // 4. Valid deployment & Crimewatch suspect flag upon attack in highsec
+    // 5. Valid deployment in low-sec & Crimewatch suspect flag upon attack
     let valid_pos = DVec3::new(80_000_000.0, 80_000_000.0, 80_000_000.0);
     let mci_valid_id = 700_063i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -250,12 +263,12 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
             location_id: SHIP_1, flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
         });
     });
-    let mut valid_sess = setup_pilot(&ctx, 606, PILOT_1, SHIP_1, TEST_SYSTEM, valid_pos).await;
+    let mut valid_sess = setup_pilot(&ctx, 606, PILOT_1, SHIP_1, LOWSEC_SYS, valid_pos).await;
     let anchor_res = ctx.dispatch_rpc(&mut valid_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mci_valid_id)], &kw, None).await;
-    assert!(anchor_res.is_ok(), "Mobile Cyno Inhibitor anchoring in valid space must succeed: {anchor_res:?}");
+    assert!(anchor_res.is_ok(), "Mobile Cyno Inhibitor anchoring in valid low-sec space must succeed: {anchor_res:?}");
 
     // Pilot 2 attacks Pilot 1's Mobile Cyno Inhibitor
-    let mut sess_p2 = setup_pilot(&ctx, 607, PILOT_2, SHIP_2, TEST_SYSTEM, valid_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+    let mut sess_p2 = setup_pilot(&ctx, 607, PILOT_2, SHIP_2, LOWSEC_SYS, valid_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
     let turret_id = 800_200i64;
     let ammo_id = 800_201i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -269,7 +282,7 @@ async fn test_mobile_cyno_inhibitor_deploy_restrictions_and_suspect_flag() {
         });
     });
 
-    let sys_handle = ctx.systems.get_or_spawn(TEST_SYSTEM);
+    let sys_handle = ctx.systems.get_or_spawn(LOWSEC_SYS);
     sys_handle.add_target_lock(SHIP_2, eve_destiny::TargetLock { target_id: mci_valid_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await.unwrap();
     let now_attack = ctx.now_unix();
     let fire_res = ctx.dispatch_rpc(

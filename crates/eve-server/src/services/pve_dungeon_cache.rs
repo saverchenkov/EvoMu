@@ -816,6 +816,9 @@ pub async fn handle(
                 message: "Session has no active ship".into(),
             }));
         };
+        if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "warp to content") {
+            return Some(Err(e));
+        }
 
         // Extract content identifier from argument (no client raw coordinates accepted)
         let (target_iid, target_did) = match args.first() {

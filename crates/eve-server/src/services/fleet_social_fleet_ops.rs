@@ -421,6 +421,13 @@ pub(super) async fn handle_fleet_ops(
                         message: "Only Fleet, Wing, or Squad Commanders can initiate Fleet Warp".into(),
                     });
                 }
+                if let Some(caller_ship_id) = session.ship_id {
+                    crate::services::structure_control_ops::reject_if_controlling_structure(
+                        ctx,
+                        caller_ship_id,
+                        "initiate fleet warp",
+                    )?;
+                }
                 let mut ships = Vec::new();
                 let mut skipped = Vec::new();
                 for m in fleet.member_details.values() {
@@ -441,6 +448,7 @@ pub(super) async fn handle_fleet_ops(
                         if ch.solar_system_id == sys_id
                             && ch.station_id.is_none()
                             && ch.structure_id.is_none()
+                            && !snap.structures.contains_key(&ch.active_ship_id)
                         {
                             ships.push((m.character_id, ch.active_ship_id));
                         }
@@ -1050,6 +1058,7 @@ pub(super) async fn handle_fleet_ops(
                 if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 3 {
                     return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Commanders can issue Regroup".into() });
                 }
+                crate::services::structure_control_ops::reject_if_controlling_structure(ctx, caller_ship_id, "issue fleet regroup")?;
                 let mut candidates = Vec::new();
                 let mut skipped = Vec::new();
                 for m in fleet.member_details.values() {
@@ -1063,7 +1072,11 @@ pub(super) async fn handle_fleet_ops(
                     if !in_scope { continue; }
                     if !m.accepts_regroup { skipped.push(m.character_id); continue; }
                     if let Some(ch) = snap.characters.get(&m.character_id) {
-                        if ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none() {
+                        if ch.solar_system_id == sys_id
+                            && ch.station_id.is_none()
+                            && ch.structure_id.is_none()
+                            && !snap.structures.contains_key(&ch.active_ship_id)
+                        {
                             candidates.push((m.character_id, ch.active_ship_id));
                         }
                     }

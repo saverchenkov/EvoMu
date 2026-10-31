@@ -134,6 +134,8 @@ pub struct CorpGovState {
     pub next_bulletin_id: i64,
     #[serde(default)]
     pub role_drop_timestamps: HashMap<i64, u64>,
+    #[serde(default)]
+    pub created_unix: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -181,6 +181,9 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
+            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "issue fleet regroup") {
+                return Some(Err(e));
+            }
             let fleet_res = ctx.db.with_snapshot(|snap| {
                 let fid = fleet_of(snap, char_id)?;
                 let fleet = snap.fleets.get(&fid)?;
@@ -208,7 +211,7 @@ pub async fn handle(
                         return None;
                     }
                     let ch = snap.characters.get(&mid)?;
-                    if ch.solar_system_id != sys_id || ch.active_ship_id == 0 {
+                    if ch.solar_system_id != sys_id || ch.active_ship_id == 0 || snap.structures.contains_key(&ch.active_ship_id) {
                         return None;
                     }
                     Some((mid, ch.active_ship_id))

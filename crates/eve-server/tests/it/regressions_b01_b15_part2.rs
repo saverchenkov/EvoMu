@@ -229,6 +229,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
     )
     .await
     .expect("AddCorporation TVC");
+    ctx.advance_secs(7 * 86_400);
 
     // Anchoring needs 1,000 km clearance from gates/stations/structures: fly 5,000,000 km off the gate.
     let tama = ctx.systems.get_or_spawn(30002813);
@@ -255,6 +256,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
     };
     assert_eq!(anchor_kv.get("fuelBlocks").and_then(|v| v.as_i64()), Some(0));
     let tama_struct_id = anchor_kv.get("structureID").unwrap().as_i64().unwrap() as u64;
+    assert!(tama.set_ball_position(tama_ship, citadel_spot + glam::DVec3::new(60_000.0, 0.0, 0.0)).await);
     ctx.dispatch_rpc(
         &mut sess,
         "invbroker",
@@ -272,9 +274,9 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
     .await
     .expect("Fuel Tama Cyno Citadel via invbroker.Add");
 
-    // R-P1-07 & AP-06: Anchor and fuel a dedicated Pharolux Cyno Beacon (35840) in low-sec Tama (30002813), 2,000 km from the citadel.
+    // R-P1-07 & AP-06: Pharolux Cyno Beacon (35840) is rejected in low-sec Tama (CannotAnchorFlexOutsideSovNull); anchor a secondary Astrahus (35832) 2,000 km from the citadel.
     assert!(tama.set_ball_position(tama_ship, citadel_spot + glam::DVec3::new(2.0e6, 0.0, 0.0)).await);
-    let anchor_beacon_res = ctx
+    let flex_lowsec_err = ctx
         .dispatch_rpc(
             &mut sess,
             "structureDeployment",
@@ -285,11 +287,25 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
             None,
         )
         .await
-        .expect("Anchor Tama Cyno Beacon");
+        .expect_err("Pharolux Cyno Beacon must be rejected in low-sec Tama");
+    assert_eq!(flex_lowsec_err.code, "CannotAnchorFlexOutsideSovNull");
+    let anchor_beacon_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureDeployment",
+            None,
+            "Anchor",
+            &[PyRep::Integer(35832), PyRep::String("Tama Secondary Citadel".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Anchor Tama Secondary Citadel");
     let PyRep::KeyVal(beacon_kv) = anchor_beacon_res else {
-        panic!("Expected beacon KeyVal");
+        panic!("Expected secondary citadel KeyVal");
     };
     let tama_beacon_id = beacon_kv.get("structureID").unwrap().as_i64().unwrap() as u64;
+    assert!(tama.set_ball_position(tama_ship, citadel_spot + glam::DVec3::new(2.0e6 + 60_000.0, 0.0, 0.0)).await);
     ctx.dispatch_rpc(
         &mut sess,
         "invbroker",
@@ -305,7 +321,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
         None,
     )
     .await
-    .expect("Fuel Tama Cyno Beacon via invbroker.Add");
+    .expect("Fuel Tama Secondary Citadel via invbroker.Add");
 
     // Fast-forward citadel to operational state so jump-clone checks below run against an online structure.
     ctx.db.with_mut_snapshot(|snap| {
@@ -314,7 +330,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
         st.quantum_core_installed = true;
         st.reinforced_until_unix = 0;
     });
-    assert!(tama.set_ball_position(tama_ship, citadel_spot).await);
+    assert!(tama.set_ball_position(tama_ship, citadel_spot + glam::DVec3::new(60_000.0, 0.0, 0.0)).await);
     ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,

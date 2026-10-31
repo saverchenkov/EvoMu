@@ -16,7 +16,7 @@ use crate::formulas::{
 use crate::router::ServerContext;
 use crate::services::industry_pi::{
     ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, compute_industry_job_costs_for_char,
-    emit_industry_job, handle_industry_job_queries,
+    emit_industry_job, finalize_completed_industry_job_response, handle_industry_job_queries,
     is_fulcrum_pirate_ship_bonus_applicable, is_structure_industry_service_online,
     load_job_cost_meta, resolve_decryptor_modifiers, resolve_facility_modifiers_and_system,
     resolve_structure_rig_bonus, restore_blueprint_flag, save_job_cost_meta,
@@ -246,6 +246,15 @@ pub fn handle_industry_jobs(
                             "Facility {station_id} industry/reaction service is offline or out of fuel"
                         ),
                     });
+                }
+                if snap.structures.contains_key(&station_id) {
+                    let _ = crate::services::structure_profile_services::check_industry_activity_acl_and_tax(
+                        snap,
+                        station_id,
+                        char_id,
+                        activity_id,
+                        now_unix,
+                    )?;
                 }
                 let char_corp_id = snap
                     .characters
@@ -1309,26 +1318,18 @@ pub fn handle_industry_jobs(
                 });
                 match res {
                     Ok(Ok((prod_item_id, prod_type, job))) => {
-                        emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
-                        if job.activity_id == 1 {
-                            ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
-                            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
-                            ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(char_id as u32, crate::services::quasar_campaign_state::CampaignEvent { method: "ManufactureItem", type_id: Some(job.product_type_id), solar_system_id: None, faction_id: None }, 1, ctx.now_unix(), &ctx.quasar_gateway);
-                            ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["industryManufacturingJobDeliveredCount", "typeManufacturedCount"], 1, ctx.now_unix(), &ctx.quasar_gateway);
+                        match finalize_completed_industry_job_response(
+                            ctx,
+                            char_id,
+                            method,
+                            job_id,
+                            prod_item_id,
+                            prod_type,
+                            &job,
+                        ) {
+                            Ok(kv) => completed_kvs.push(kv),
+                            Err(e) => return Some(Err(e)),
                         }
-                        if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
-                            return Some(Err(BridgeRpcError {
-                                code: "InventionAttemptFailed".into(),
-                                message: "Invention roll failed to produce a tech II blueprint".into(),
-                            }));
-                        }
-                        completed_kvs.push(PyRep::keyval([
-                            ("jobID", PyRep::Integer(job_id)),
-                            ("deliveredItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
-                            ("createdBpcItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
-                            ("productTypeID", PyRep::Integer(prod_type as i64)),
-                            ("inventionSucceeded", PyRep::Bool(job.activity_id == 8 && prod_item_id > 0)),
-                        ]));
                     }
                     Ok(Err(inv_err)) => return Some(Err(inv_err)),
                     Err(e) => return Some(Err(e)),

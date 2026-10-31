@@ -13,7 +13,7 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 const OWNER: i64 = 90_000_001;
-const JITA: u32 = 30_000_142;
+const JITA: u32 = 30_000_144;
 const RIVAL_CORP: i64 = 98_999_999;
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -37,14 +37,25 @@ fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
     ctx.sde.types.get(&type_id).and_then(|t| t.default_attributes.get(&attr_id).copied()).unwrap_or_else(|| panic!("SDE type {type_id} lacks attribute {attr_id}"))
 }
 
-/// Logged-in pilot with a player corp, undocked in Jita and moved far from stations/gates.
+/// Logged-in pilot with a player corp, undocked in Perimeter and moved far from stations/gates.
 async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = perim_station;
+            }
+        }
+    });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Lifecycle Holdings".into()), PyRep::String("LIFE".into())]).await.expect("AddCorporation");
-    ctx.advance_secs(12);
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     sess
 }
@@ -86,6 +97,7 @@ async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id:
     assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
     let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
     // The pilot drags the core into the structure (core room) while docked.
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
     rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core into structure");
@@ -222,6 +234,7 @@ async fn test_deploy_anchor_timers_restrictions_and_quantum_core() {
     assert_eq!((st.shield_hp, st.armor_hp), (0.0, 0.0));
 
     // A core of the wrong type does nothing; the SDE deed type starts the 15-minute onlining.
+    move_ship(&ctx, &sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
     rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let wrong_core = attr(&ctx, 35834, life::ATTR_REQUIRES_DEED_TYPE) as u32;
     let wrong = grant(&ctx, OWNER, ship, wrong_core, InventoryFlag::Cargo, 1);

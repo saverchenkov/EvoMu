@@ -316,9 +316,16 @@ pub fn handle_clones_and_sheet(
                 }
                 // Enforce NPC station owner standing check (`feat:clones.jump-clone-install`)
                 crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
-                if is_structure {
-                    crate::services::character_clone_jump_rules::check_structure_clone_bay_access(snap, station_id, char_id)?;
-                }
+                let custom_acl_fee = if is_structure {
+                    crate::services::character_clone_jump_rules::check_structure_clone_bay_access_at(
+                        snap,
+                        station_id,
+                        char_id,
+                        Some(ctx.now_unix()),
+                    )?
+                } else {
+                    None
+                };
                 if let Some(owner_corp_id) = station_owner_corp_id {
                     let corp_standing = snap
                         .characters
@@ -390,8 +397,8 @@ pub fn handle_clones_and_sheet(
                     });
                 }
 
-                // Deduct canonical 900,000 ISK clone installation fee (`Jump_clones.md:20, 54`)
-                let install_fee = jump_clone_install_fee_cents();
+                // Deduct canonical 900,000 ISK clone installation fee (`Jump_clones.md:20, 54`), or per-ACL-group fee on structures
+                let install_fee = custom_acl_fee.unwrap_or_else(jump_clone_install_fee_cents);
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -401,17 +408,27 @@ pub fn handle_clones_and_sheet(
                 let Some(new_bal) = ch.balance.checked_sub(install_fee) else {
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
-                        message: "Installing a jump clone requires 900,000 ISK".into(),
+                        message: format!("Installing a jump clone requires {} ISK", install_fee.to_wire_f64()),
                     });
                 };
                 ch.balance = new_bal;
-                snap.append_journal(
-                    char_id,
-                    "JumpCloneInstallationFee",
-                    IskCents(-install_fee.0),
-                    new_bal,
-                    format!("Installed jump clone at station {station_id}"),
-                );
+                if install_fee.0 > 0 {
+                    snap.append_journal(
+                        char_id,
+                        "JumpCloneInstallationFee",
+                        IskCents(-install_fee.0),
+                        new_bal,
+                        format!("Installed jump clone at station {station_id}"),
+                    );
+                    if is_structure {
+                        if let Some(owner_corp_id) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
+                            crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                                snap, owner_corp_id, install_fee, 10, "JumpCloneInstallationFee", char_id,
+                                format!("Jump clone installation fee from {char_id} at structure {station_id}"), ctx.now_unix(),
+                            );
+                        }
+                    }
+                }
 
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
@@ -484,7 +501,13 @@ pub fn handle_clones_and_sheet(
                         ),
                     });
                 }
-                crate::services::character_clone_jump_rules::check_structure_clone_bay_access(snap, structure_id, char_id)?;
+                let custom_acl_fee =
+                    crate::services::character_clone_jump_rules::check_structure_clone_bay_access_at(
+                        snap,
+                        structure_id,
+                        char_id,
+                        Some(ctx.now_unix()),
+                    )?;
 
                 let skill_map = snap.skills.get(&char_id);
                 let psych_level = skill_map
@@ -531,7 +554,7 @@ pub fn handle_clones_and_sheet(
                     });
                 }
 
-                let install_fee = jump_clone_install_fee_cents();
+                let install_fee = custom_acl_fee.unwrap_or_else(jump_clone_install_fee_cents);
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -541,17 +564,25 @@ pub fn handle_clones_and_sheet(
                 let Some(new_bal) = ch.balance.checked_sub(install_fee) else {
                     return Err(BridgeRpcError {
                         code: "InsufficientFunds".into(),
-                        message: "Installing a jump clone requires 900,000 ISK".into(),
+                        message: format!("Installing a jump clone requires {} ISK", install_fee.to_wire_f64()),
                     });
                 };
                 ch.balance = new_bal;
-                snap.append_journal(
-                    char_id,
-                    "JumpCloneInstallationFee",
-                    IskCents(-install_fee.0),
-                    new_bal,
-                    format!("Installed jump clone at structure {structure_id}"),
-                );
+                if install_fee.0 > 0 {
+                    snap.append_journal(
+                        char_id,
+                        "JumpCloneInstallationFee",
+                        IskCents(-install_fee.0),
+                        new_bal,
+                        format!("Installed jump clone at structure {structure_id}"),
+                    );
+                    if let Some(owner_corp_id) = snap.structures.get(&structure_id).map(|s| s.owner_corp_id) {
+                        crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                            snap, owner_corp_id, install_fee, 10, "JumpCloneInstallationFee", char_id,
+                            format!("Jump clone installation fee from {char_id} at structure {structure_id}"), ctx.now_unix(),
+                        );
+                    }
+                }
 
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;

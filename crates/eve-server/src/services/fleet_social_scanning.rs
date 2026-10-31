@@ -701,6 +701,9 @@ pub(super) async fn handle_scanning_and_wormholes(
                     message: "Session has no active ship".into(),
                 }));
             };
+            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate acceleration gate") {
+                return Some(Err(e));
+            }
             let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if ctx.db.with_snapshot(|snap| snap.fw_runtime.fw_complexes.contains_key(&gate_id)) {
                 return Some(

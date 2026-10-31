@@ -551,14 +551,25 @@ pub(crate) fn handle_update_members(
                 || new_roles > old_roles;
             results.push((target_char_id, old_roles, new_roles, effective_roles, delayed));
         }
-        Ok(results)
+        let released_controllers =
+            crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
+        Ok((results, released_controllers))
     });
 
     match res {
-        Ok(results) => {
+        Ok((results, released_controllers)) => {
+            crate::services::structure_control_ops::notify_released_structure_controllers(
+                ctx,
+                &released_controllers,
+            );
             for &(tid, old_roles, new_roles, effective_roles, _) in &results {
                 if session.character_id == Some(tid) {
                     session.corp_role = effective_roles;
+                    if let Some((_, _, _, restored_ship)) = released_controllers.iter().find(|r| r.1 == tid) {
+                        if *restored_ship > 0 {
+                            session.ship_id = Some(*restored_ship);
+                        }
+                    }
                 }
                 let change = PyRep::Dict(vec![(
                     PyRep::String(("roles").into()),
@@ -592,7 +603,7 @@ fn remove_member_to_bloodline_npc_in_snap(
     corp_id: i64,
     tid: i64,
     now_unix: u64,
-) -> (i64, u64, Option<i64>, bool) {
+) -> (i64, u64, Option<i64>, bool, Vec<(i64, i64, u32, i64)>) {
     let npc_corp = bloodline_default_npc_corp(ctx, snap, tid);
     let old_role = snap
         .corporations
@@ -660,8 +671,8 @@ fn remove_member_to_bloodline_npc_in_snap(
         ch.corporation_id = npc_corp;
         ch.alliance_id = None;
     }
-    record_corp_join_in_snap(snap, tid, old_corp_id, npc_corp, now_unix);
-    (npc_corp, old_role, old_alliance, closed)
+    let released = record_corp_join_in_snap(snap, tid, old_corp_id, npc_corp, now_unix);
+    (npc_corp, old_role, old_alliance, closed, released)
 }
 
 fn emit_member_removed_notifications(
@@ -842,6 +853,7 @@ pub(crate) fn handle_kick_out_members(
 
         let mut removed_members: Vec<(i64, i64, u64, Option<i64>)> = Vec::new();
         let mut queued_members: Vec<i64> = Vec::new();
+        let mut released_controllers = Vec::new();
         let mut closed = false;
         for &tid in &target_ids {
             let in_space = snap
@@ -857,23 +869,33 @@ pub(crate) fn handle_kick_out_members(
                 queued_members.push(tid);
                 continue;
             }
-            let (npc_corp, old_role, old_alliance, corp_closed) =
+            let (npc_corp, old_role, old_alliance, corp_closed, released) =
                 remove_member_to_bloodline_npc_in_snap(ctx, snap, corp_id, tid, now_unix);
             if corp_closed {
                 closed = true;
             }
+            released_controllers.extend(released);
             removed_members.push((tid, npc_corp, old_role, old_alliance));
         }
-        Ok((removed_members, queued_members, closed))
+        Ok((removed_members, queued_members, closed, released_controllers))
     });
 
     match res {
-        Ok((removed_members, queued_members, closed)) => {
+        Ok((removed_members, queued_members, closed, released_controllers)) => {
+            crate::services::structure_control_ops::notify_released_structure_controllers(
+                ctx,
+                &released_controllers,
+            );
             for &(tid, npc_corp, old_role, old_alliance) in &removed_members {
                 if tid == char_id {
                     session.corporation_id = Some(npc_corp);
                     session.alliance_id = None;
                     session.corp_role = 0;
+                    if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)) {
+                        if act_ship != 0 {
+                            session.ship_id = Some(act_ship);
+                        }
+                    }
                 }
                 emit_member_removed_notifications(
                     ctx,
@@ -921,15 +943,24 @@ pub fn execute_pending_auto_kicks_for_docked_char(
         if !is_queued {
             return None;
         }
-        let (npc_corp, old_role, old_alliance, _) =
+        let (npc_corp, old_role, old_alliance, _, released) =
             remove_member_to_bloodline_npc_in_snap(ctx, snap, corp_id, char_id, now_unix);
-        Some((corp_id, npc_corp, old_role, old_alliance))
+        Some((corp_id, npc_corp, old_role, old_alliance, released))
     });
-    if let Some((corp_id, npc_corp, old_role, old_alliance)) = executed {
+    if let Some((corp_id, npc_corp, old_role, old_alliance, released)) = executed {
+        crate::services::structure_control_ops::notify_released_structure_controllers(
+            ctx,
+            &released,
+        );
         if session.character_id == Some(char_id) {
             session.corporation_id = Some(npc_corp);
             session.alliance_id = None;
             session.corp_role = 0;
+            if let Some(act_ship) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)) {
+                if act_ship != 0 {
+                    session.ship_id = Some(act_ship);
+                }
+            }
         }
         emit_member_removed_notifications(
             ctx,
@@ -946,7 +977,7 @@ pub fn execute_pending_auto_kicks_for_docked_char(
 /// Executes all queued corporation `pending_auto_kicks` at daily downtime (`feat:lifecycle.corp-autokick-queue`).
 pub fn execute_pending_auto_kicks_on_downtime(ctx: &ServerContext) -> usize {
     let now_unix = ctx.now_unix();
-    let removed = ctx.db.with_mut_snapshot(|snap| {
+    let (removed, released_controllers) = ctx.db.with_mut_snapshot(|snap| {
         let mut due: Vec<(i64, i64)> = Vec::new();
         for (&corp_id, g) in &snap.corp_governance {
             for &tid in g.pending_auto_kicks.keys() {
@@ -954,17 +985,23 @@ pub fn execute_pending_auto_kicks_on_downtime(ctx: &ServerContext) -> usize {
             }
         }
         let mut out = Vec::new();
+        let mut released_controllers = Vec::new();
         for (corp_id, tid) in due {
             if snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&tid)) {
-                let (npc_corp, old_role, old_alliance, _) =
+                let (npc_corp, old_role, old_alliance, _, released) =
                     remove_member_to_bloodline_npc_in_snap(ctx, snap, corp_id, tid, now_unix);
+                released_controllers.extend(released);
                 out.push((corp_id, tid, npc_corp, old_role, old_alliance));
             } else if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
                 g.pending_auto_kicks.remove(&tid);
             }
         }
-        out
+        (out, released_controllers)
     });
+    crate::services::structure_control_ops::notify_released_structure_controllers(
+        ctx,
+        &released_controllers,
+    );
     let count = removed.len();
     for (corp_id, tid, npc_corp, old_role, old_alliance) in removed {
         emit_member_removed_notifications(

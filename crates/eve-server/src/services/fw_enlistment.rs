@@ -219,15 +219,17 @@ fn create_direct(
             }
         }
         ch.version += 1;
-        if let Some((old_cid, new_cid)) = new_corp_opt {
+        let released = if let Some((old_cid, new_cid)) = new_corp_opt {
             crate::services::fleet_social::fleet_social_corps::record_corp_join_in_snap_pub(
                 snap,
                 char_id,
                 old_cid,
                 new_cid,
                 now,
-            );
-        }
+            )
+        } else {
+            Vec::new()
+        };
         let rec = snap.fw_character_stats.entry(char_id).or_insert_with(|| {
             eve_db::snapshot_ext::FwCharacterStatsRecord {
                 character_id: char_id,
@@ -242,8 +244,10 @@ fn create_direct(
         rec.faction_id = Some(faction_id);
         rec.enlisted_on_unix = Some(now);
         snap.fw_runtime.direct_enlisted_chars.insert(char_id, faction_id);
-        Ok(new_corp_opt)
+        Ok((new_corp_opt, released))
     })?;
+    let (moved_corp_opt, released) = (moved_corp_opt.0, moved_corp_opt.1);
+    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if let Some((_, new_cid)) = moved_corp_opt {
         session.corporation_id = Some(new_cid);
     }
@@ -261,7 +265,7 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
     let until = now + DIRECT_ENLISTMENT_COOLDOWN_SECS;
-    let (moved_corp_opt, inherited_corp_fac) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (moved_corp_opt, inherited_corp_fac, released) = ctx.db.try_with_mut_snapshot(|snap| {
         let old_corp_id = snap
             .characters
             .get(&char_id)
@@ -290,20 +294,23 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
         }
         ch.version += 1;
         snap.fw_runtime.direct_enlisted_chars.remove(&char_id);
-        if let Some((old_cid, new_cid)) = new_corp_opt {
+        let released = if let Some((old_cid, new_cid)) = new_corp_opt {
             crate::services::fleet_social::fleet_social_corps::record_corp_join_in_snap_pub(
                 snap,
                 char_id,
                 old_cid,
                 new_cid,
                 now,
-            );
-        }
+            )
+        } else {
+            Vec::new()
+        };
         let mut store = load_store(snap);
         store.cooldown_until.insert(char_id, until);
         save_store(snap, &store);
-        Ok((new_corp_opt, corp_fac))
+        Ok((new_corp_opt, corp_fac, released))
     })?;
+    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if let Some((_, new_cid)) = moved_corp_opt {
         session.corporation_id = Some(new_cid);
     }

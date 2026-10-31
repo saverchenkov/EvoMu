@@ -218,6 +218,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
                     };
                     if should_drain {
+                        ctx.sync_session(&mut session);
                         let mut write_failed = false;
                         for notif in ctx.drain_notifications_for_char(cid) {
                             let notif_pkt = MachoPacket::new_broadcast_notification(
@@ -789,6 +790,13 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     if let Some(uid) = session.user_id {
         // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
         if ctx.db.release_online_lock(uid, session_id) {
+            if let Some(cid) = session.character_id {
+                crate::services::structure_control_ops::release_all_structure_control_for_character(
+                    &ctx,
+                    Some(&mut session),
+                    cid,
+                );
+            }
             if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
                 if session.station_id.is_none() && session.structure_id.is_none() {
                     let handle = ctx.systems.get_or_spawn(sys_id);

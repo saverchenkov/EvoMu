@@ -337,6 +337,13 @@ pub async fn handle(
     args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("authentication", "Logout") {
+        if let Some(cid) = session.character_id {
+            crate::services::structure_control_ops::release_all_structure_control_for_character(
+                ctx,
+                Some(session),
+                cid,
+            );
+        }
         let (removed_from_space, saved_sys) = save_location_and_leave_space(ctx, session).await;
         if let Some(cid) = session.character_id {
             // Watchers of this character get OnClientContactChange(charID, False).
@@ -371,6 +378,11 @@ pub async fn handle(
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
+        crate::services::structure_control_ops::release_all_structure_control_for_character(
+            ctx,
+            Some(session),
+            cid,
+        );
         let _ = save_location_and_leave_space(ctx, session).await;
         crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
         crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);

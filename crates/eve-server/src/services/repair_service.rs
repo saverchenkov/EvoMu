@@ -6,7 +6,7 @@
 use crate::router::ServerContext;
 use crate::services::station_structure::structure_lifecycle as life;
 use crate::services::station_structure::structure_upwell_ops::{
-    evaluate_character_structure_access_in_snap, load_ext_state, StructureExtendedState,
+    load_ext_state, StructureExtendedState,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -41,8 +41,15 @@ fn item_repair_metrics(
             (hp + armor).max(40.0)
         })
         .unwrap_or(100.0);
-    let base_price = t_opt.map(|t| t.base_price).unwrap_or(10_000.0).max(1_000.0);
-    let cost_per_unit = ((base_price * 0.0125) / max_hp).max(1.0);
+    // DERIVED: linear basePrice repair scaling factors (7.5e-6 per HP for ships, 1.25e-3 per HP
+    // for modules/drones); live EVE Online computes repair quotes from material/market valuation.
+    let is_ship = t_opt.is_some_and(|t| t.category_id == 6);
+    let base_price = t_opt
+        .map(|t| t.base_price)
+        .filter(|p| *p > 0.0)
+        .unwrap_or(10_000.0);
+    let repair_modifier = if is_ship { 7.5e-6 } else { 1.25e-3 };
+    let cost_per_unit = (base_price * repair_modifier).max(0.01);
     (dmg, max_hp, cost_per_unit)
 }
 
@@ -74,31 +81,48 @@ fn validate_structure_repair_access(
         });
     }
     match life::power_state(ctx, snap, ext, st, now) {
-        life::PowerState::FullPower => {}
+        life::PowerState::FullPower | life::PowerState::LowPower => {}
+        // Forsaken Fortress (`Abandoned` state after 7 days without fuel): all Upwell service
+        // modules and structure services (including repair facilities) are offline until refueled.
         life::PowerState::Abandoned => {
             return Err(BridgeRpcError {
                 code: "StructureAbandoned".into(),
                 message: format!("Abandoned structure {sid} does not offer repair services"),
             });
         }
-        life::PowerState::LowPower | life::PowerState::NotOperational => {
+        life::PowerState::NotOperational => {
             return Err(BridgeRpcError {
-                code: "StructureServiceOffline".into(),
+                code: "StructureNotOperational".into(),
                 message: format!(
-                    "Low-power structure {sid} has no online service modules and cannot offer repair services"
+                    "Structure {sid} is not operational and cannot offer repair services"
                 ),
             });
         }
     }
     let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
     if caller_corp != st.owner_corp_id
-        && !evaluate_character_structure_access_in_snap(snap, sid, char_id)
+        && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap_at(
+            snap,
+            sid,
+            char_id,
+            Some(now),
+        )
     {
         return Err(BridgeRpcError {
             code: "StructureRepairAccessDenied".into(),
             message: format!("Character {char_id} lacks ACL access to repair at structure {sid}"),
         });
     }
+    let _ = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+        snap,
+        sid,
+        char_id,
+        &[13, 8],
+        false,
+        Some(now),
+        "StructureRepairAccessDenied",
+        "repair",
+    )?;
     Ok(())
 }
 
@@ -226,9 +250,19 @@ fn resolve_structure_repair_tax_bps(
     }
     let ext = load_ext_state(snap);
     validate_structure_repair_access(ctx, snap, &ext, sid, char_id, now)?;
-    Ok(ext
-        .access_profiles
-        .get(&sid)
+    if let Some(bps) = crate::services::structure_profile_services::check_service_domain_acl_and_tax(
+        snap,
+        sid,
+        char_id,
+        &[13, 8],
+        false,
+        Some(now),
+        "StructureRepairAccessDenied",
+        "repair",
+    )? {
+        return Ok(bps.max(0));
+    }
+    Ok(crate::services::structure_profile_services::effective_profile_for_structure(&ext, sid, Some(now))
         .and_then(|p| p.service_settings.get(&13).or_else(|| p.service_settings.get(&0)).copied())
         .unwrap_or(0)
         .max(0))
@@ -246,6 +280,7 @@ pub fn handle_repair_get_quotes(
     life::sync_all_structures(ctx);
     if let Some(station_id) = session.station_id.or(session.structure_id) {
         if station_id < 1_000_000_000_000
+            && !ctx.db.with_snapshot(|s| s.structures.contains_key(&station_id))
             && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 13)
         {
             return Err(BridgeRpcError {
@@ -404,6 +439,7 @@ pub fn handle_repair_items_in_location(
             message: "RepairItemsInStation requires being docked in a station or structure".into(),
         })?;
         if sid < 1_000_000_000_000
+            && !ctx.db.with_snapshot(|s| s.structures.contains_key(&sid))
             && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, sid, 13)
         {
             return Err(BridgeRpcError {

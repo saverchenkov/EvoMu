@@ -583,8 +583,10 @@ pub async fn apply_fw_or_insurgency_structure_damage(
                     rem -= take;
                 }
             }
-            if st.hull_hp > 0.0 {
+            if damage > 0.0 {
                 st.last_damage_unix = now;
+            }
+            if st.hull_hp > 0.0 {
                 return Ok((false, st.shield_hp, st.armor_hp, st.hull_hp, pos, att_fac, 0, Vec::new()));
             }
             st.state = "Destroyed".into();

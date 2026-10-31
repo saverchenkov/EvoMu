@@ -13,6 +13,8 @@ use std::collections::HashMap;
 
 #[path = "structure_upwell_ops.rs"]
 pub mod structure_upwell_ops;
+#[path = "structure_profiles_rpc.rs"]
+pub mod structure_profiles_rpc;
 #[path = "structure_lifecycle.rs"]
 pub mod structure_lifecycle;
 #[path = "structure_ansiblex_navigation.rs"]
@@ -363,13 +365,24 @@ pub async fn handle(
             }) {
                 return Some(Err(e));
             }
+            let controlled_sid = session.structure_id.and_then(|sid| {
+                crate::services::structure_control_ops::prepare_ship_for_undock_while_controlling(
+                    ctx, sid, char_id,
+                )
+                .map(|_| sid)
+            });
             let (station_id, ch, ship) = match ctx.db.undock_character(user_id, char_id) {
                 Ok(t) => t,
                 Err(e) => {
+                    if let Some(sid) = controlled_sid {
+                        crate::services::structure_control_ops::rollback_ship_after_failed_undock(
+                            ctx, sid, char_id,
+                        );
+                    }
                     return Some(Err(BridgeRpcError {
                         code: "UndockFailed".into(),
                         message: e.to_string(),
-                    }))
+                    }));
                 }
             };
             crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
@@ -377,6 +390,11 @@ pub async fn handle(
                 char_id,
                 ship.item_id,
             );
+            if let Some(sid) = controlled_sid {
+                crate::services::structure_control_ops::release_structure_control_on_undock(
+                    ctx, session, sid, char_id,
+                );
+            }
 
             if kwargs
                 .get("onlineModules")
@@ -608,6 +626,11 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(ship_id) = session.ship_id {
+                if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "dock") {
+                    return Some(Err(e));
+                }
+            }
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "AlreadyDocked".into(),
@@ -713,66 +736,17 @@ pub async fn handle(
             }
 
             let target_pos = if is_structure {
-                let st_opt = ctx
-                    .db
-                    .with_snapshot(|snap| snap.structures.get(&dock_id).cloned());
-                let Some(st) = st_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "StructureNotFound".into(),
-                        message: format!("Structure {dock_id} does not exist"),
-                    }));
-                };
-                if st.solar_system_id != sys_id {
-                    return Some(Err(BridgeRpcError {
-                        code: "DockTargetWrongSystem".into(),
-                        message: format!(
-                            "Structure {dock_id} is in system {}, but pilot is in {sys_id}",
-                            st.solar_system_id
-                        ),
-                    }));
+                match crate::services::station_structure_handlers::resolve_upwell_dock_target(
+                    ctx,
+                    dock_id,
+                    sys_id,
+                    char_id,
+                    ball.type_id,
+                    ship_group_id,
+                ) {
+                    Ok(pos) => pos,
+                    Err(e) => return Some(Err(e)),
                 }
-                if st.state == "Destroyed" {
-                    return Some(Err(BridgeRpcError {
-                        code: "StructureDestroyed".into(),
-                        message: format!("Structure {dock_id} is destroyed"),
-                    }));
-                }
-                if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
-                    return Some(Err(BridgeRpcError {
-                        code: "StructureNotDockable".into(),
-                        message: format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
-                    }));
-                }
-                let acl_denied = ctx.db.with_snapshot(|snap| {
-                    !structure_upwell_ops::evaluate_character_structure_access(
-                        ctx, snap, dock_id, char_id,
-                    )
-                });
-                if acl_denied {
-                    return Some(Err(BridgeRpcError {
-                        code: "StructureDockingAccessDenied".into(),
-                        message: format!(
-                            "Character {char_id} is denied docking access by structure {dock_id} ACL"
-                        ),
-                    }));
-                }
-                let is_medium_structure = matches!(st.type_id, 35832 | 35825 | 35835);
-                let is_large_structure = matches!(st.type_id, 35833 | 35826 | 35836);
-                let is_capital_ship =
-                    matches!(ship_group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
-                let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
-                if (is_medium_structure && is_capital_ship)
-                    || (is_large_structure && is_supercapital_ship)
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "ShipTooLargeForStructure".into(),
-                        message: format!(
-                            "Ship type {} (group {}) is too large to dock at structure {} (type {})",
-                            ball.type_id, ship_group_id, dock_id, st.type_id
-                        ),
-                    }));
-                }
-                DVec3::from_array(st.position)
             } else {
                 let st_opt = ctx
                     .sde
@@ -1094,6 +1068,17 @@ pub async fn handle(
                     ),
                 }));
             }
+            if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_INHIBITOR
+                && !crate::services::mobile_deployables::is_starter_or_career_system(&ctx.sde, sys_id)
+                && (sys_sec >= 0.45 || sys_id >= 31_000_000 || sys_id == 30_100_000)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CantAnchorInHighSecOrWormhole".into(),
+                    message: format!(
+                        "Mobile Cynosural Inhibitor cannot be anchored in high-sec, wormhole, Abyssal, or Zarzakh space (system {sys_id})"
+                    ),
+                }));
+            }
             if matches!(item_type.group_id, 12 | 340 | 448 | 649) && item_type.type_id != 23 && sys_sec >= 0.75 {
                 return Some(Err(BridgeRpcError {
                     code: "CantAnchorInHighSec08".into(),
@@ -1179,6 +1164,8 @@ pub async fn handle(
                         1_000.0
                     } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_OBSERVATORY {
                         600_000.0
+                    } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_INHIBITOR {
+                        (crate::services::mobile_deployables::CYNO_INHIBITOR_ACTIVATION_DELAY_SECS * 1_000) as f64
                     } else {
                         60_000.0
                     }
@@ -1297,6 +1284,20 @@ pub async fn handle(
                     &ctx.sde,
                     item.type_id,
                 ))
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
+                now_unix.saturating_add(crate::services::mobile_deployables::DEPOT_LIFETIME_SECS)
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_TRACTOR {
+                now_unix.saturating_add(crate::services::mobile_deployables::MTU_LIFETIME_SECS)
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_MICRO_JUMP_UNIT {
+                now_unix.saturating_add(crate::services::mobile_deployables::MMJU_LIFETIME_SECS)
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_INHIBITOR {
+                now_unix.saturating_add(crate::services::mobile_deployables::CYNO_INHIBITOR_LIFETIME_SECS)
+            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
+                if item.type_id == crate::services::mobile_deployables::TYPE_COVERT_MOBILE_CYNO_BEACON {
+                    now_unix.saturating_add(crate::services::mobile_deployables::COVERT_CYNO_BEACON_DURATION_SECS)
+                } else {
+                    now_unix.saturating_add(crate::services::mobile_deployables::CYNO_BEACON_DURATION_SECS)
+                }
             } else {
                 0
             };
@@ -1328,7 +1329,7 @@ pub async fn handle(
             if service == "structure" && method == "JettisonStructureFuel" {
                 return Some(structure_lifecycle_rpc::handle_jettison_structure_fuel(ctx, session, args).await);
             }
-            if let Some(res) = super::structure_acl_defense_rules::handle(ctx, session, service, method, args, kwargs) {
+            if let Some(res) = super::structure_acl_defense_rules::handle(ctx, session, service, method, args, kwargs).await {
                 return Some(res);
             }
             structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await

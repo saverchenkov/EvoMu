@@ -91,6 +91,25 @@ pub async fn handle(
     {
         return Some(restricted);
     }
+    if matches!(
+        (service, method),
+        ("abyssalMgr", "AbyssalEntranceDeployment")
+            | ("abyssalMgr", "AbyssalEntranceGateActivation")
+            | ("abyssalMgr", "AbyssalGateActivation")
+            | ("abyssalMgr", "AbyssalEndGateActivation")
+            | ("voidSpaceMgr", "VoidSpacePlayerJump")
+            | ("voidSpaceMgr", "VoidSpaceEndGateActivation")
+    ) {
+        if let Some(ship_id) = session.ship_id {
+            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(
+                ctx,
+                ship_id,
+                "activate abyssal or void gate",
+            ) {
+                return Some(Err(e));
+            }
+        }
+    }
     match (service, method) {
         ("abyssalMgr", "AbyssalEntranceDeployment") => {
             if args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0).is_none() {

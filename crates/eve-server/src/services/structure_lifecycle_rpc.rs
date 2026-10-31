@@ -83,11 +83,8 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         return Err(err("AnchoringDisallowedInPochven", "Upwell structures cannot be anchored in Pochven"));
     }
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
-    if type_id == 35840 && sys_sec >= 0.45 {
-        return Err(err("CannotAnchorCynoBeaconInHighSec", format!("Pharolux Cyno Beacon (35840) cannot be anchored in high-security solar system {sys_id} (security {sys_sec:.2} >= 0.45)")));
-    }
-    if type_id == ANSIBLEX_TYPE_ID && !is_sovereign_nullsec_for_ansiblex(&ctx.sde, sys_id) {
-        return Err(err("CannotAnchorAnsiblexOutsideSovNull", format!("Ansiblex Jump Gate ({ANSIBLEX_TYPE_ID}) can only be anchored in sovereign null-security space (system {sys_id})")));
+    if profile.hull_class == life::HullClass::Flex && (sys_sec >= 0.0 || sys_id >= 31_000_000) {
+        return Err(err("CannotAnchorFlexOutsideSovNull", format!("FLEX structure type {type_id} can only be anchored in sovereign K-space null-security space (system {sys_id})")));
     }
     if matches!(type_id, 35840 | 35841 | crate::services::sov_gameplay::TYPE_TENEBREX_CYNO_JAMMER) {
         crate::services::sov_gameplay::require_flex_sov_upgrade_online(ctx, sys_id, type_id)?;
@@ -99,33 +96,51 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         .await
         .map_err(|e| err("DestinyQueryFailed", e))?
         .ok_or_else(|| err("ShipNotInSpace", format!("Active ship {ship_id} is not spawned in space in system {sys_id}")))?;
-    let explicit_pos = match args.get(1) {
+    // Parse both V24 `StructureDeployment.ConfirmDeployment` 10-positional-arg calls
+    // `(itemID, x, z, yaw, profileID, reinforceWeekday, reinforceHour, name, description, extraVars)`
+    // (`client_expectations.json:101420-101446`) and `(itemID_or_typeID, [x, y, z], ...)` / `(itemID_or_typeID, name)` forms.
+    let (explicit_pos, profile_id_arg, reinforce_window, name, description_opt) = match args.get(1) {
         Some(PyRep::List(coords)) | Some(PyRep::Tuple(coords)) if coords.len() >= 3 => {
             let (Some(x), Some(y), Some(z)) = (coords[0].as_f64(), coords[1].as_f64(), coords[2].as_f64()) else {
                 return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers"));
             };
-            let pos = DVec3::new(x, y, z);
-            if !pos.is_finite() || pos.abs().max_element() > 1.0e14 {
-                return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be finite numbers within solar system bounds"));
-            }
-            if pos.distance(ship_ball.position) > 100_000.0 {
-                return Err(err("AnchorPositionTooFarFromShip", "Anchoring position must be within 100 km of the deploying ship"));
-            }
-            Some(pos)
+            let prof_arg = args.get(2).and_then(|a| a.as_i64()).filter(|&p| p > 0);
+            let rw = match args.get(3) {
+                Some(PyRep::Tuple(seq)) | Some(PyRep::List(seq)) if seq.len() >= 2 => {
+                    let a = seq[0].as_i64().unwrap_or(0) as u64;
+                    let b = seq[1].as_i64().unwrap_or(0) as u64;
+                    if a < 24 && b < 7 { Some((a, b)) } else { Some((b, a)) }
+                }
+                _ => None,
+            };
+            let nm = args.iter().skip(1).filter_map(|a| a.as_str()).map(str::trim).find(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
+            (Some(DVec3::new(x, y, z)), prof_arg, rw, nm, None)
         }
-        _ => None,
-    };
-    let anchor_pos: DVec3 = explicit_pos.unwrap_or(ship_ball.position);
-    let profile_id_arg = args.get(2).and_then(|a| a.as_i64());
-    let reinforce_window = match args.get(3) {
-        Some(PyRep::Tuple(seq)) | Some(PyRep::List(seq)) if seq.len() >= 2 => {
-            let a = seq[0].as_i64().unwrap_or(0) as u64;
-            let b = seq[1].as_i64().unwrap_or(0) as u64;
-            if a < 24 && b < 7 { Some((a, b)) } else { Some((b, a)) }
+        _ if args.len() >= 8 && !matches!(args.get(1), Some(PyRep::String(_))) => {
+            let pos_opt = match (args.get(1), args.get(2)) {
+                (Some(PyRep::None), Some(PyRep::None)) | (None, None) => None,
+                (Some(ax), Some(az)) => {
+                    let (Some(x), Some(z)) = (ax.as_f64(), az.as_f64()) else {
+                        return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers"));
+                    };
+                    Some(DVec3::new(x, ship_ball.position.y, z))
+                }
+                _ => return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers")),
+            };
+            let prof_arg = args.get(4).and_then(|a| a.as_i64()).filter(|&p| p > 0);
+            let rw = match (args.get(6).and_then(|a| a.as_i64()), args.get(5).and_then(|a| a.as_i64())) {
+                (Some(h), Some(d)) if (0..24).contains(&h) && (0..7).contains(&d) => Some((h as u64, d as u64)),
+                _ => None,
+            };
+            let nm = args.get(7).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
+            let desc = args.get(8).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            (pos_opt, prof_arg, rw, nm, desc)
         }
-        _ => None,
+        _ => {
+            let nm = args.iter().skip(1).filter_map(|a| a.as_str()).map(str::trim).find(|s| !s.is_empty()).unwrap_or("Upwell Structure").to_string();
+            (None, None, None, nm, None)
+        }
     };
-    let name = args.iter().filter_map(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).last().unwrap_or("Upwell Structure").to_string();
     let now = ctx.now_unix();
     let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
@@ -135,7 +150,40 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         if !has_structure_manager_role(snap, session, char_id, corp_id) {
             return Err(err("InsufficientCorpRoles", "Anchoring an Upwell structure requires Director or Station Manager role"));
         }
-        life::check_anchor_position(ctx, snap, &profile, sys_id, anchor_pos)?;
+        let (anchor_pos, anchoring_duration_secs) = crate::services::structure_anchoring_rules::validate_and_resolve_anchor(
+            ctx,
+            snap,
+            &profile,
+            sys_id,
+            corp_id,
+            ship_ball.position,
+            explicit_pos,
+            now,
+        )?;
+        let ext_pre = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        let explicit_pid = profile_id_arg.filter(|&pid| !(pid == 1 && !ext_pre.profiles_by_id.contains_key(&1)));
+        let resolved_profile = if let Some(pid) = explicit_pid {
+            let p = ext_pre.profiles_by_id.get(&pid).cloned().ok_or_else(|| {
+                err("StructureOwnershipViolation", format!("Structure profile {pid} does not exist or is not owned by corporation {corp_id}"))
+            })?;
+            if p.owner_corp_id != corp_id {
+                return Err(err(
+                    "StructureOwnershipViolation",
+                    format!(
+                        "Cannot attach profile {pid} owned by corporation {} to structure anchored by corporation {corp_id}",
+                        p.owner_corp_id
+                    ),
+                ));
+            }
+            Some((pid, p))
+        } else {
+            ext_pre
+                .profiles_by_id
+                .iter()
+                .filter(|(_, p)| p.owner_corp_id == corp_id && p.is_default)
+                .min_by_key(|(&pid, _)| pid)
+                .map(|(&pid, p)| (pid, p.clone()))
+        };
         let item_id = if let Some(cid) = cargo_item_id_opt {
             let item = snap.items.get(&cid).ok_or_else(|| err("MissingStructureItem", format!("Cargo item {cid} not found")))?;
             if (item.owner_id != char_id && item.owner_id != corp_id) || item.location_id != ship_id || item.quantity < 1 || item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(cid) {
@@ -188,13 +236,21 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             .unwrap_or((now / 3_600) % 24);
         let vuln = reinforce_window.unwrap_or((default_hour, ((now / 86_400) + 4) % 7));
         snap.structure_vulnerability_windows.insert(id, vuln);
-        if let Some(pid) = profile_id_arg {
-            let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-            if let Some(p) = ext.profiles_by_id.get(&pid).cloned() {
-                ext.access_profiles.insert(id, p);
-                ext.structure_profile_id.insert(id, pid);
-                crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
-            }
+        let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.lifecycle.entry(id).or_default().anchoring_duration_secs = Some(anchoring_duration_secs);
+        if let Some(desc) = description_opt {
+            ext.descriptions.insert(id, desc);
+        }
+        let mut applied_defense = None;
+        if let Some((pid, p)) = resolved_profile {
+            applied_defense = p.defense_settings.clone();
+            ext.access_profiles.insert(id, p);
+            ext.structure_profile_id.insert(id, pid);
+        }
+        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        if let Some(mut ds) = applied_defense {
+            ds.structure_id = id;
+            crate::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
         }
         Ok((id, corp_id))
     })?;
@@ -487,6 +543,11 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
             (1.0, 1.0, 1.0)
         };
         save_ext_state(snap, &ext);
+        if attacker_char_id > 0 && dmg.total() > 0.0 {
+            let mut ds = crate::services::structure_acl_defense_rules::load_defense_settings(snap, target_ball_id);
+            ds.record_attacker(attacker_char_id, now_unix);
+            crate::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
+        }
         Ok((
             out.clone(),
             (out.shield_hp / max_s).clamp(0.0, 1.0),
@@ -705,6 +766,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             return Err(err("NotAtStructure", format!("Character {char_id} must be at structure {structure_id} to modify its fitting")));
         }
         let mut ext = load_ext_state(snap);
+        let mut released = Vec::new();
         let (st, profile) = life::validate_structure_refit(ctx, snap, &ext, structure_id, now)?;
         if !is_target_fit_slot {
             // Unfitting from structure
@@ -714,7 +776,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             if matches!(src.flag as u16, 92..=94) {
                 snap.items.remove(&item_id);
                 snap.module_online_states.remove(&item_id);
-                return Ok((structure_id, item_id, src.type_id, src.flag as i64, true, false, false));
+                return Ok((structure_id, item_id, src.type_id, src.flag as i64, true, false, false, released));
             }
             let was_service = (164..=171).contains(&(src.flag as u16));
             if let Some(it) = snap.items.get_mut(&item_id) {
@@ -727,7 +789,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 if let Some(lf) = ext.lifecycle.get_mut(&structure_id) {
                     lf.online_modules.retain(|&id| id != item_id);
                 }
-                life::sync_structure(ctx, snap, &mut ext, structure_id, now);
+                life::sync_structure_with_released(ctx, snap, &mut ext, structure_id, now, &mut released);
                 if let Some(st_after) = snap.structures.get(&structure_id).cloned() {
                     let power_after = life::power_state(ctx, snap, &ext, &st_after, now);
                     let max_after = life::effective_max_shield(ctx, snap, &profile, structure_id, power_after);
@@ -737,7 +799,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 }
                 save_ext_state(snap, &ext);
             }
-            return Ok((structure_id, item_id, src.type_id, src.flag as i64, false, false, was_service));
+            return Ok((structure_id, item_id, src.type_id, src.flag as i64, false, false, was_service, released));
         }
         if matches!(src.flag as u16, 92..=94) && src.location_id == structure_id && flag != src.flag {
             return Err(err("CannotMoveFittedRig", "Fitted structure rigs cannot be moved between slots without being destroyed"));
@@ -830,7 +892,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 }
             }
             let max_before = life::effective_max_shield(ctx, snap, &profile, structure_id, life::PowerState::LowPower);
-            life::sync_structure(ctx, snap, &mut ext, structure_id, now);
+            life::sync_structure_with_released(ctx, snap, &mut ext, structure_id, now, &mut released);
             let st_after = snap.structures.get(&structure_id).cloned().unwrap_or(st.clone());
             let power_now = life::power_state(ctx, snap, &ext, &st_after, now);
             let max_after = life::effective_max_shield(ctx, snap, &profile, structure_id, power_now);
@@ -843,9 +905,10 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             }
             save_ext_state(snap, &ext);
         }
-        Ok((structure_id, fitted_id, src.type_id, src.flag as i64, false, will_online, is_service))
+        Ok((structure_id, fitted_id, src.type_id, src.flag as i64, false, will_online, is_service, released))
     })?;
-    let (structure_id, fitted_id, type_id, old_flag, destroyed, is_online, service_changed) = res;
+    let (structure_id, fitted_id, type_id, old_flag, destroyed, is_online, service_changed, released) = res;
+    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if service_changed {
         ctx.notify(
             crate::router::NotificationTarget::Station(structure_id),
@@ -872,7 +935,7 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
     let (_, char_id) = ServerContext::require_character(session)?;
     life::sync_all_structures(ctx);
     let now = ctx.now_unix();
-    let (_type_id, is_service) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (_type_id, is_service, released) = ctx.db.try_with_mut_snapshot(|snap| {
         if set_online {
             if let Some(st0) = snap.structures.get(&structure_id) {
                 let is_svc0 = snap.items.get(&module_id).is_some_and(|i| i.location_id == structure_id && (164..=171).contains(&(i.flag as u16)));
@@ -882,6 +945,7 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
             }
         }
         let mut ext = load_ext_state(snap);
+        let mut released = Vec::new();
         let (st, profile) = life::validate_structure_refit(ctx, snap, &ext, structure_id, now)?;
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if st.owner_corp_id != caller_corp {
@@ -923,7 +987,7 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
         }
         let max_before = life::effective_max_shield(ctx, snap, &profile, structure_id, life::power_state(ctx, snap, &ext, &st, now));
         snap.module_online_states.insert(module_id, set_online);
-        life::sync_structure(ctx, snap, &mut ext, structure_id, now);
+        life::sync_structure_with_released(ctx, snap, &mut ext, structure_id, now, &mut released);
         let st_after = snap.structures.get(&structure_id).cloned().unwrap_or(st.clone());
         let power_after = life::power_state(ctx, snap, &ext, &st_after, now);
         let max_after = life::effective_max_shield(ctx, snap, &profile, structure_id, power_after);
@@ -935,8 +999,9 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
             }
         }
         save_ext_state(snap, &ext);
-        Ok((item.type_id, is_service))
+        Ok((item.type_id, is_service, released))
     })?;
+    crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
     if is_service {
         ctx.notify(
             crate::router::NotificationTarget::Station(structure_id),

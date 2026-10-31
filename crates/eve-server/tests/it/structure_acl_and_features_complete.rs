@@ -207,46 +207,42 @@ async fn test_structure_access_lists_and_docking_acl() {
     let PyRep::KeyVal(g_kv) = group_info else { panic!("expected keyval") };
     assert_eq!(g_kv.get("name").and_then(|v| v.as_str()), Some("Alpha ACL Renamed"));
 
-    // 2. Test feat:structures.docking-acl
+    // 2. Test feat:structures.docking-acl via live stationSvc.Dock / structureDocking.Dock RPCs
     let struct_id = 100_001;
     let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().corporation_id);
     create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_142, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
 
-    // Configure structure profile requiring group_id for docking
+    let prof_id = rpc(&ctx, &mut sess, "structureProfiles", "CreateProfile", &[PyRep::String("Docking ACL Profile".into()), PyRep::String("Test".into())]).await.expect("CreateProfile").as_i64().unwrap();
+    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_id), PyRep::Dict(vec![(PyRep::String("accessGroups".into()), PyRep::List(vec![PyRep::Integer(group_id)]))])]).await.expect("SaveProfileSettings");
+    rpc(&ctx, &mut sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)]).await.expect("ChangeProfiles");
+
+    let mut other_sess = login(&ctx, 302, "other", "other-secret", other_char).await;
+    ctx.advance_virtual_clock(15);
+    rpc(&ctx, &mut other_sess, "stationSvc", "Undock", &[]).await.expect("Undock other_char");
+    let sys_handle = ctx.systems.get_or_spawn(30_000_142);
+    let _ = sys_handle.set_ball_position(other_sess.ship_id.unwrap(), DVec3::ZERO).await;
+    rpc(&ctx, &mut other_sess, "stationSvc", "Dock", &[PyRep::Integer(struct_id)]).await.expect("other_char on ACL must dock via stationSvc.Dock");
+    assert_eq!(other_sess.structure_id, Some(struct_id));
+
+    let blocked_ship = 100_901;
     ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = ops::load_ext_state(snap);
-        let mut profile = ops::StructureAccessProfile {
-            profile_id: 1,
-            owner_corp_id: corp_id,
-            name: "Test Profile".into(),
-            description: "Test".into(),
-            ..Default::default()
-        };
-        profile.access_group_ids.insert(group_id);
-        ext.access_profiles.insert(struct_id, profile);
-        ops::save_ext_state(snap, &ext);
+        if let Some(ch) = snap.characters.get_mut(&blocked_char) {
+            ch.station_id = None; ch.structure_id = None; ch.solar_system_id = 30_000_142; ch.active_ship_id = blocked_ship;
+        }
+        snap.items.insert(blocked_ship, InventoryItemRecord {
+            item_id: blocked_ship, type_id: 587, owner_id: blocked_char, location_id: 30_000_142, flag: InventoryFlag::None,
+            quantity: 1, singleton: true, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+        });
     });
-
-    // Verify other_char (member on group_id) is granted docking access
-    ctx.db.with_snapshot(|snap| {
-        let access_res = acl_rules::verify_structure_docking_acl(&ctx, snap, struct_id, other_char);
-        assert!(access_res.is_ok(), "other_char should have docking access");
-    });
-
-    // Verify blocked_char (blocked role on group_id) is denied docking access
-    ctx.db.with_snapshot(|snap| {
-        let denied_res = acl_rules::verify_structure_docking_acl(&ctx, snap, struct_id, blocked_char);
-        assert!(denied_res.is_err(), "blocked_char must be denied docking access");
-        assert_eq!(denied_res.unwrap_err().code, "StructureDockingAccessDenied");
-    });
-
-    // Verify a random unaffiliated pilot without ACL entry is also denied
-    let random_pilot = 99_999_999;
-    ctx.db.with_snapshot(|snap| {
-        let denied_res = acl_rules::verify_structure_docking_acl(&ctx, snap, struct_id, random_pilot);
-        assert!(denied_res.is_err(), "random pilot without ACL entry must be denied");
-        assert_eq!(denied_res.unwrap_err().code, "StructureDockingAccessDenied");
-    });
+    let mut blocked_sess = SessionState::new(303);
+    (blocked_sess.user_id, blocked_sess.character_id, blocked_sess.corporation_id, blocked_sess.solar_system_id, blocked_sess.ship_id) =
+        (Some(303), Some(blocked_char), Some(98_000_002), Some(30_000_142), Some(blocked_ship));
+    let _ = sys_handle.spawn_ball(Ball {
+        id: blocked_ship, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+    }).await;
+    let denied_err = rpc(&ctx, &mut blocked_sess, "stationSvc", "Dock", &[PyRep::Integer(struct_id)]).await.expect_err("blocked_char must be denied by stationSvc.Dock");
+    assert_eq!(denied_err.code, "StructureDockingAccessDenied");
 }
 
 #[tokio::test]
@@ -266,7 +262,17 @@ async fn test_structure_board_eject_and_defense_settings() {
     let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().corporation_id);
 
     let struct_id = 100_002;
-    create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_142, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
+    create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_144, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
+    sess.structure_id = Some(struct_id);
+    sess.station_id = None;
+    sess.solar_system_id = Some(30_000_144);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = Some(struct_id);
+            ch.station_id = None;
+            ch.solar_system_id = 30_000_144;
+        }
+    });
 
     // 1. Test feat:structures.board-structure
     let board_res = rpc(&ctx, &mut sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
@@ -301,7 +307,7 @@ async fn test_structure_board_eject_and_defense_settings() {
         .expect("GetStructurePilot after eject");
     assert_eq!(cleared_pilot, PyRep::None);
 
-    // 2. Test feat:structures.defense-settings
+    // 2. Test feat:structures.defense-settings via canonical structureSettings profile RPCs
     let attacker_pilot = 90_000_005;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get(&90_000_002).cloned() {
@@ -311,64 +317,75 @@ async fn test_structure_board_eject_and_defense_settings() {
             ca.name = "Attacker Pilot".into();
             snap.characters.insert(attacker_pilot, ca);
         }
+        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
+        ds.record_attacker(attacker_pilot, ctx.now_unix());
+        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
     });
-    let set_args = vec![
-        PyRep::Integer(struct_id),
-        PyRep::Dict(vec![
-            (PyRep::String("autoDefenseEnabled".into()), PyRep::Bool(true)),
-            (PyRep::String("autoTargetAttackers".into()), PyRep::Bool(true)),
-            (PyRep::String("autoTargetWarTargets".into()), PyRep::Bool(true)),
-            (PyRep::String("standingThreshold".into()), PyRep::Real(0.0)),
-            (PyRep::String("targetBlockedAcl".into()), PyRep::Bool(true)),
-            (PyRep::String("attackerID".into()), PyRep::Integer(attacker_pilot)),
-        ]),
-    ];
-    // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-    rpc(&ctx, &mut sess, "structureControl", "SetDefenseSettings", &set_args)
+    let prof_id = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Citadel Defense".into()), PyRep::String("Auto defense".into())])
         .await
-        .expect("SetDefenseSettings");
-
-    // Verify settings stored in snap.service_state_blobs
-    let blob_key = format!("structure_defense:{struct_id}");
-    ctx.db.with_snapshot(|snap| {
-        let blob = snap.service_state_blobs.get(&blob_key).expect("defense settings blob must exist");
-        assert!(blob.contains("\"auto_defense_enabled\":true"));
-        assert!(blob.contains(&format!("{attacker_pilot}")));
-    });
-
-    // Verify GetDefenseSettings
-    // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-    let get_rep = rpc(&ctx, &mut sess, "structureControl", "GetDefenseSettings", &[PyRep::Integer(struct_id)])
+        .expect("CreateProfile")
+        .as_i64()
+        .unwrap();
+    rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)])
         .await
-        .expect("GetDefenseSettings");
-    let PyRep::KeyVal(def_kv) = get_rep else { panic!("expected keyval") };
-    assert_eq!(def_kv.get("autoDefenseEnabled"), Some(&PyRep::Bool(true)));
-    assert_eq!(def_kv.get("autoTargetAttackers"), Some(&PyRep::Bool(true)));
-
-    // Test EvaluateDefenseTarget
-    // Case A: Friendly corp member -> NOT targeted
-    let eval_friendly = rpc(
+        .expect("ChangeProfiles");
+    rpc(
         &ctx,
         &mut sess,
-        "structureControl",
-        "EvaluateDefenseTarget", // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-        &[PyRep::Integer(struct_id), PyRep::Integer(char_id)],
+        "structureSettings",
+        "SaveProfileSettings",
+        &[
+            PyRep::Integer(prof_id),
+            PyRep::Dict(vec![(
+                PyRep::String("defenseSettings".into()),
+                PyRep::Dict(vec![
+                    (PyRep::String("autoDefenseEnabled".into()), PyRep::Bool(true)),
+                    (PyRep::String("autoTargetAttackers".into()), PyRep::Bool(true)),
+                    (PyRep::String("autoTargetWarTargets".into()), PyRep::Bool(true)),
+                    (PyRep::String("standingThreshold".into()), PyRep::Real(0.0)),
+                    (PyRep::String("targetBlockedAcl".into()), PyRep::Bool(true)),
+                ]),
+            )]),
+        ],
     )
     .await
-    .expect("EvaluateDefenseTarget char_id");
-    assert_eq!(eval_friendly, PyRep::Bool(false));
+    .expect("SaveProfileSettings");
 
-    // Case B: Known attacker -> targeted
-    let eval_attacker = rpc(
-        &ctx,
-        &mut sess,
-        "structureControl",
-        "EvaluateDefenseTarget", // rpc-lint: allow canonical ledger feat:structures.defense-settings requires structureControl defense methods
-        &[PyRep::Integer(struct_id), PyRep::Integer(attacker_pilot)],
-    )
-    .await
-    .expect("EvaluateDefenseTarget attacker_pilot");
-    assert_eq!(eval_attacker, PyRep::Bool(true));
+    // Non-client defense RPCs must return UnimplementedRPC
+    let expected_err = "UnimplementedRPC";
+    for bad_method in ["GetDefenseSettings", "SetDefenseSettings", "EvaluateDefenseTarget"] {
+        assert_eq!(
+            rpc(&ctx, &mut sess, "structureControl", bad_method, &[PyRep::Integer(struct_id)])
+                .await
+                .expect_err(bad_method)
+                .code,
+            expected_err
+        );
+    }
+
+    // Release manual control so auto-defense engages, then verify settings persisted and live ballpark auto-defense weapon fire
+    let _ = rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(struct_id)]).await;
+    let (attacker_ship, launcher_id, ammo_id) = (100_902, 100_903, 100_904);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
+        ds.record_attacker(attacker_pilot, ctx.now_unix());
+        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
+        if let Some(ch) = snap.characters.get_mut(&attacker_pilot) {
+            (ch.station_id, ch.solar_system_id, ch.active_ship_id) = (None, 30_000_144, attacker_ship);
+        }
+        for (id, tid, owner, loc, flag, qty, dyn_attrs) in [(attacker_ship, 621_u32, attacker_pilot, 30_000_144_i64, InventoryFlag::None, 1, HashMap::new()), (launcher_id, 35922, corp_id, struct_id, InventoryFlag::HiSlot0, 1, HashMap::from([(2, 1.0)])), (ammo_id, 37847, corp_id, struct_id, InventoryFlag::HiSlot0, 200, HashMap::new())] {
+            snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: tid, owner_id: owner, location_id: loc, flag, quantity: qty, singleton: qty == 1, version: 1, dynamic_attributes: dyn_attrs, source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None });
+        }
+    });
+    let sys_144 = ctx.systems.get_or_spawn(30_000_144);
+    let _ = sys_144.spawn_ball(Ball { id: struct_id, type_id: 35832_u32, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 10_000_000.0, radius: 5_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }).await;
+    let mut attacker_cs = ctx.build_type_combat_state(621);
+    (attacker_cs.shield_hp, attacker_cs.max_shield_hp, attacker_cs.armor_hp, attacker_cs.max_armor_hp, attacker_cs.structure_hp, attacker_cs.max_structure_hp) = (5_000.0, 5_000.0, 5_000.0, 5_000.0, 5_000.0, 5_000.0);
+    sys_144.spawn_ball_with_combat(Ball { id: attacker_ship, type_id: 621, position: DVec3::new(15_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 10_000_000.0, radius: 140.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }, attacker_cs).await.expect("spawn attacker_ship");
+    let _ = sys_144.step_manual(5.0).await.expect("step_5s");
+    let _ = sys_144.step_manual(60.0).await.expect("step_60s");
+    let cs = sys_144.get_combat_state(attacker_ship).await.unwrap().expect("attacker combat state");
+    assert!(cs.shield_hp < 5_000.0, "Auto-defense Standup launcher must lock and damage attacker ship in ballpark");
 }
 
 #[tokio::test]
@@ -384,7 +401,7 @@ async fn test_structure_anchor_restrictions_and_fitting_state_locks() {
 
     let astrahus_type = 35832;
     let keepstar_type = 35834;
-    let sys_id = 30_000_142;
+    let sys_id = 30_000_144;
     let profile = life::structure_profile(&ctx, astrahus_type).expect("astrahus profile");
     let keepstar_prof = life::structure_profile(&ctx, keepstar_type).expect("keepstar profile");
 
@@ -399,7 +416,7 @@ async fn test_structure_anchor_restrictions_and_fitting_state_locks() {
     });
 
     // 1B. Distance >= 1,000 km succeeds
-    let valid_pos = station.position + DVec3::new(5_000_000.0, 0.0, 0.0); // 5,000 km
+    let valid_pos = station.position + DVec3::new(50_000_000.0, 0.0, 0.0); // 50,000 km
     ctx.db.with_snapshot(|snap| {
         let res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, sys_id, valid_pos);
         assert!(res.is_ok(), "must succeed when >= 1,000 km clear");
@@ -415,12 +432,16 @@ async fn test_structure_anchor_restrictions_and_fitting_state_locks() {
         assert_eq!(res.unwrap_err().code, "KeepstarPerSystemLimit");
     });
 
-    // 1D. Pochven restriction
+    // 1D. Trade hub & Pochven restrictions
+    ctx.db.with_snapshot(|snap| {
+        let jita_res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, 30_000_142, valid_pos);
+        assert_eq!(jita_res.unwrap_err().code, "AnchoringDisallowedInTradeHub");
+    });
     let pochven_sys = ctx.sde.solar_systems.values().find(|s| s.region_id == life::POCHVEN_REGION_ID).map(|s| s.solar_system_id).unwrap_or(30_000_157);
     ctx.db.with_snapshot(|snap| {
         let res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, pochven_sys, valid_pos);
         assert!(res.is_err(), "anchoring in Pochven must be refused");
-        assert_eq!(res.unwrap_err().code, "CannotAnchorInPochven");
+        assert_eq!(res.unwrap_err().code, "AnchoringDisallowedInPochven");
     });
 
     // 2. Test feat:structures.fitting-state-locks

@@ -346,7 +346,7 @@ async fn test_structure_ops_and_asset_safety_audit() {
         .expect("create_character")
         .character_id;
 
-    let sys_id = 30_000_142u32;
+    let sys_id = 30_000_144u32;
     let ship_id = 910_000_106i64;
     let astrahus_item_id = 920_000_106i64;
 
@@ -424,7 +424,7 @@ async fn test_structure_ops_and_asset_safety_audit() {
     sess.corporation_id = Some(corp_id);
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let ship_ball = make_ball(ship_id, 587, DVec3::ZERO);
+    let ship_ball = make_ball(ship_id, 587, DVec3::new(0.0, 5.0e9, 0.0));
     sys_handle.spawn_ball(ship_ball).await.expect("spawn ship ball");
 
     // 1. structureDeployment.Anchor with V24 client tuple
@@ -432,9 +432,9 @@ async fn test_structure_ops_and_asset_safety_audit() {
     let anchor_args = vec![
         PyRep::Integer(astrahus_item_id),
         PyRep::List(vec![
-            PyRep::Real(1000.0),
-            PyRep::Real(2000.0),
-            PyRep::Real(3000.0),
+            PyRep::Real(60_000.0),
+            PyRep::Real(5.0e9),
+            PyRep::Real(0.0),
         ]),
         PyRep::Integer(1),
         PyRep::Tuple(vec![PyRep::Integer(2), PyRep::Integer(18)]),

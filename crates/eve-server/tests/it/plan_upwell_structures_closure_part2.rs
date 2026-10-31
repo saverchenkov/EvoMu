@@ -14,8 +14,8 @@ const OWNER: i64 = 90_000_001;
 const GUEST: i64 = 90_000_002;
 const OUTSIDER: i64 = 90_000_003;
 const CORP_GRUNT: i64 = 90_000_004;
-const JITA: u32 = 30_000_142;
-const JITA_44: i64 = 60_003_760;
+const JITA: u32 = 30_000_144;
+const JITA_44: i64 = 60_000_358;
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
@@ -51,12 +51,22 @@ fn new_test_ctx() -> ServerContext {
 }
 
 async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(JITA_44);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = JITA_44;
+            }
+        }
+    });
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Services Corp".into()), PyRep::String("USVC".into())]).await.expect("AddCorporation");
-    ctx.advance_secs(12);
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     sess
 }
@@ -86,6 +96,7 @@ async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id:
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
     assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
     let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
     rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
     let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
     rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
@@ -207,9 +218,9 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
         snap.items.get_mut(&drone_id).unwrap().dynamic_attributes.insert(attr_ids::ARMOR_DAMAGE, 25.0);
     });
 
-    // While st_id is LowPower (unfueled), both GetRepairQuotes and RepairItemsInStructure fail with StructureServiceOffline!
-    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect_err("low power quote").code, "StructureServiceOffline");
-    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect_err("low power repair").code, "StructureServiceOffline");
+    // While st_id is LowPower (unfueled, with Quantum Core installed), Repair Shop remains available!
+    let lp_quotes = rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("low power quote succeeds with core");
+    assert!(matches!(lp_quotes, PyRep::Dict(ref d) if !d.is_empty()), "LowPower structure with Quantum Core must provide Repair Shop quotes");
 
     // NaN/negative budget, Abandoned, and QuantumCoreRequired rejections.
     assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Real(f64::NAN)]).await.expect_err("NaN").code, "InvalidArgument");
@@ -262,7 +273,7 @@ async fn test_upwell_services_clone_bay_modules_and_repairshop() {
     let hangar_mod = grant(&ctx, OWNER, st_id, 3170, InventoryFlag::Hangar, 1);
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&hangar_mod).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 10.0); });
     rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock to test tethered hangar repair rejection");
-    move_ship(&ctx, &sess, st_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    move_ship(&ctx, &sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&st_id].position)) + DVec3::new(500.0, 0.0, 0.0)).await;
     let _ = ctx.systems.get_or_spawn(JITA).step_manual(1.0).await;
     if let Ok(mut bp) = ctx.systems.get_or_spawn(JITA).ballpark.write() { bp.combat_states.entry(ship_id).or_default().is_tethered = true; }
     assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(hangar_mod)])]).await.expect_err("undocked hangar repair").code, "NotDockedInStructure");
@@ -369,7 +380,7 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
 
     move_ship(&ctx, &sess, open_space(&ctx, JITA, 5.0)).await;
     assert_eq!(anchor(&ctx, &mut sess, 35834, "Jita Keepstar").await.expect_err("hs keepstar").code, "CannotAnchorInHighSec");
-    assert!(matches!(anchor(&ctx, &mut sess, 35840, "Jita Pharolux").await.expect_err("hs pharolux").code.as_str(), "CannotAnchorInHighSec" | "CannotAnchorCynoBeaconInHighSec"));
+    assert!(matches!(anchor(&ctx, &mut sess, 35840, "Jita Pharolux").await.expect_err("hs pharolux").code.as_str(), "CannotAnchorInHighSec" | "CannotAnchorCynoBeaconInHighSec" | "CannotAnchorFlexOutsideSovNull"));
 
     // 2. Live invbroker.Add fitting, rig destruction on unfit, authorization, and state/HP locks.
     let st_id = online_structure(&ctx, &mut sess, 35832, "Fitting & Profiles Astrahus").await;

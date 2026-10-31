@@ -820,13 +820,24 @@ pub fn handle(
                         state.role_audit_log.push((char_id, tid, old_role, new_role, now_unix));
                         changed_members.push((tid, old_role, new_role, effective_role));
                     }
-                    Ok(changed_members)
+                    let released_controllers =
+                        crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
+                    Ok((changed_members, released_controllers))
                 });
                 return match res {
-                    Ok(changed_members) => {
+                    Ok((changed_members, released_controllers)) => {
+                        crate::services::structure_control_ops::notify_released_structure_controllers(
+                            ctx,
+                            &released_controllers,
+                        );
                         for (tid, old_role, new_role, effective_role) in changed_members {
                             if session.character_id == Some(tid) {
                                 session.corp_role = effective_role;
+                                if let Some((_, _, _, restored_ship)) = released_controllers.iter().find(|r| r.1 == tid) {
+                                    if *restored_ship > 0 {
+                                        session.ship_id = Some(*restored_ship);
+                                    }
+                                }
                             }
                             let change = PyRep::Dict(vec![(
                                 PyRep::String("roles".into()),
