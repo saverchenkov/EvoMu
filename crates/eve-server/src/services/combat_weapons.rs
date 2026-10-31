@@ -24,7 +24,8 @@ pub async fn handle_weapons(
                 "SAFE_LOGOFF_ABORT_MODULE",
             );
             crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
-            if session.station_id.is_some() || session.structure_id.is_some() {
+            let controlling_structure = session.structure_id.is_some() && session.structure_id == session.ship_id;
+            if session.station_id.is_some() || (session.structure_id.is_some() && !controlling_structure) {
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
                     message: "Cannot activate combat modules while docked".into(),
@@ -66,6 +67,14 @@ pub async fn handle_weapons(
                     message: format!("Active ship {ship_id} is not spawned in space"),
                 }));
             };
+
+            if controlling_structure {
+                if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
+                    ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
+                ).await {
+                    return Some(res);
+                }
+            }
 
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
@@ -132,6 +141,11 @@ pub async fn handle_weapons(
                     message: format!("Module type {} not found in SDE", m.type_id),
                 }));
             };
+            if let Some(res) = crate::services::structure_standup_weapons::try_activate_standup_weapon(
+                ctx, &sys_handle, char_id, ship_id, sys_id, module_id, target_id_opt, &attacker_ball,
+            ).await {
+                return Some(res);
+            }
 
             let is_overloaded = method == "Overload";
             if matches!(

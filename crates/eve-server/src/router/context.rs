@@ -58,7 +58,7 @@ pub struct ServerContext {
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
     pub fighter_charge_state: RwLock<HashMap<(i64, u32), u32>>,
-    pub active_fighters: RwLock<HashMap<i64, ActiveFighterSquadron>>,
+    pub active_fighters: Arc<RwLock<HashMap<i64, ActiveFighterSquadron>>>,
     pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
     pub active_scanner_probes: RwLock<HashMap<i64, ActiveScannerProbe>>,
     pub active_moon_probes: RwLock<Vec<ActiveMoonSurveyProbe>>,
@@ -214,17 +214,18 @@ impl ServerContext {
             Arc::downgrade(&combat_ephemeral), Arc::downgrade(&quasar_gateway), Arc::downgrade(&invention_roll_override),
         );
         let module_reactivation_cooldowns = Arc::new(RwLock::new(HashMap::new()));
-        let step_cd_w = Arc::downgrade(&module_reactivation_cooldowns);
+        let active_fighters = Arc::new(RwLock::new(HashMap::new()));
+        let (step_cd_w, step_af_w) = (Arc::downgrade(&module_reactivation_cooldowns), Arc::downgrade(&active_fighters));
         systems.set_system_step_hook(Arc::new(move |sys_id, dt, destroyed_balls| {
-            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw, cdw) = (
+            let (sw, dw, sdw, rw, fit_w, pend_w, ntx, cew, gww, inw, cdw, afw) = (
                 step_sys_w.clone(), step_db_w.clone(), step_sde_w.clone(), step_rng_w.clone(),
-                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(), step_cd_w.clone(),
+                step_fit_w.clone(), step_pend_w.clone(), step_ntx.clone(), step_ce_w.clone(), step_gw_w.clone(), step_inv_w.clone(), step_cd_w.clone(), step_af_w.clone(),
             );
             Box::pin(async move {
-                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map)) = (
-                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(),
+                let (Some(sys), Some(db), Some(sde), Some(rng), Some(fit), Some(pend), Some(ce), Some(gw), Some(inv_roll), Some(cd_map), Some(af_map)) = (
+                    sw.upgrade(), dw.upgrade(), sdw.upgrade(), rw.upgrade(), fit_w.upgrade(), pend_w.upgrade(), cew.upgrade(), gww.upgrade(), inw.upgrade(), cdw.upgrade(), afw.upgrade(),
                 ) else { return; };
-                let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map);
+                let ctx = ServerContext::from_step_components(sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map);
                 for (tid, killer_opt) in destroyed_balls {
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
                     if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
@@ -241,6 +242,7 @@ impl ServerContext {
                 crate::services::inventory_fitting::execute_pending_cycle_actions(&ctx, sys_id).await;
                 crate::services::pve_crab_beacons::tick_crab_beacons_in_system(&ctx, sys_id).await;
                 crate::services::wormhole_pve_escalations::step_wormhole_pve_system(&ctx, sys_id, dt).await;
+                crate::services::structure_standup_weapons::step_guided_bombs_in_system(&ctx, sys_id, dt).await;
             })
         }));
         let persisted_notifications = db.with_snapshot(|snap| {
@@ -286,7 +288,7 @@ impl ServerContext {
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
             fighter_charge_state: RwLock::new(HashMap::new()),
-            active_fighters: RwLock::new(HashMap::new()),
+            active_fighters,
             fighter_tube_loads: RwLock::new(HashMap::new()),
             active_scanner_probes: RwLock::new(HashMap::new()),
             active_moon_probes: RwLock::new(Vec::new()),
@@ -1148,7 +1150,7 @@ impl ServerContext {
             .get(&ship_id)
             .cloned()
             .unwrap_or_default();
-        if let Some(mut existing) = self
+        let cached = self
             .ship_fittings
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -1157,8 +1159,8 @@ impl ServerContext {
             .filter(|e| {
                 e.boosters == active_boosters
                     && e.booster_side_effects == active_booster_side_effects
-            })
-        {
+            });
+        if let Some(mut existing) = cached {
             let needs_recalc = existing.character_skills != skill_levels
                 || existing.implants != active_implants
                 || existing.projected_ewar != active_projected;
@@ -1184,11 +1186,11 @@ impl ServerContext {
         }
 
         let items = self.db.get_items_for_character(char_id);
-        let Some(ship_item) = items.iter().find(|i| i.item_id == ship_id) else {
-            return Err(BridgeRpcError {
-                code: "ShipNotFound".into(),
-                message: format!("Ship item {ship_id} not found for character {char_id}"),
-            });
+        let ship_item = items.iter().find(|i| i.item_id == ship_id).cloned().or_else(|| {
+            self.db.with_snapshot(|s| s.structures.contains_key(&ship_id).then(|| s.items.get(&ship_id).cloned()).flatten())
+        });
+        let Some(ship_item) = ship_item else {
+            return Err(BridgeRpcError { code: "ShipNotFound".into(), message: format!("Ship item {ship_id} not found for character {char_id}") });
         };
 
         let mut fit = ShipFittingEngine::from_sde(ship_id, ship_item.type_id, &self.sde)
@@ -1200,13 +1202,8 @@ impl ServerContext {
         for (&attr_id, &val) in &ship_item.dynamic_attributes {
             fit.ship.base_attributes.insert(attr_id, val);
         }
-
         let (online_states, active_states, active_charges) = self.db.with_snapshot(|s| {
-            (
-                s.module_online_states.clone(),
-                s.module_active_states.clone(),
-                s.module_active_charges.clone(),
-            )
+            (s.module_online_states.clone(), s.module_active_states.clone(), s.module_active_charges.clone())
         });
 
         let mut fittable_items: Vec<_> = items

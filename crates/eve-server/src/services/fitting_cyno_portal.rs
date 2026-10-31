@@ -95,14 +95,27 @@ fn ctx_key(ctx: &ServerContext) -> usize {
     ctx.instance_id as usize
 }
 
-/// Active cynosural field beacon counts per solar system for `map.GetBeaconCount`.
+pub fn is_covert_beacon_type(beacon_type_id: TypeId) -> bool {
+    matches!(beacon_type_id, 28646 | 28650 | 59630 | 59631)
+}
+
+fn effective_beacon_field_type(beacon_type_id: TypeId) -> TypeId {
+    match beacon_type_id {
+        59630 => 59631,
+        57319 => 57425,
+        56099 | 56488 | 58906 => 21094,
+        other => other,
+    }
+}
+
+/// Active cynosural field beacon counts per solar system for `map.GetBeaconCount` (excludes covert cynos).
 pub(crate) fn active_cyno_beacon_counts(ctx: &ServerContext) -> HashMap<i64, i64> {
     let key = ctx_key(ctx);
     let now_unix = ctx.now_unix();
     let mut counts = HashMap::new();
     if let Ok(state) = cyno_state().read() {
         for (&(k, _), b) in &state.beacons {
-            if k == key && b.expires_at_unix > now_unix {
+            if k == key && b.expires_at_unix > now_unix && !is_covert_beacon_type(b.beacon_type_id) {
                 *counts.entry(i64::from(b.solar_system_id)).or_insert(0) += 1;
             }
         }
@@ -266,23 +279,31 @@ fn evaluated_attrs(
     (ship_vals, mod_vals)
 }
 
-/// Consumes `qty` units of `type_id` from items stored inside `ship_id` (cargo / fuel bays).
+/// Consumes `qty` units of `type_id` from items stored inside `ship_id`, prioritizing `SpecializedFuelBay` before `Cargo`.
 fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_id: TypeId, qty: i64) -> Result<(), i64> {
     if qty <= 0 {
         return Ok(());
     }
-    let stacks: Vec<i64> = snap
+    let mut stacks: Vec<(i64, eve_db::InventoryFlag)> = snap
         .items
         .values()
-        .filter(|i| i.location_id == ship_id && i.type_id == type_id && !matches!(i.flag as u16, 11..=34 | 92..=99))
-        .map(|i| i.item_id)
+        .filter(|i| i.location_id == ship_id && i.type_id == type_id && !matches!(i.flag as u16, 11..=34 | 92..=99 | 125..=132))
+        .map(|i| (i.item_id, i.flag))
         .collect();
-    let available: i64 = stacks.iter().filter_map(|id| snap.items.get(id)).map(|i| i.quantity as i64).sum();
+    stacks.sort_by_key(|&(id, flg)| {
+        let prio = match flg {
+            eve_db::InventoryFlag::SpecializedFuelBay => 0,
+            eve_db::InventoryFlag::Cargo => 1,
+            _ => 2,
+        };
+        (prio, id)
+    });
+    let available: i64 = stacks.iter().filter_map(|(id, _)| snap.items.get(id)).map(|i| i.quantity as i64).sum();
     if available < qty {
         return Err(available);
     }
     let mut remaining = qty;
-    for id in stacks {
+    for (id, _) in stacks {
         if remaining == 0 {
             break;
         }
@@ -352,7 +373,7 @@ pub(crate) async fn handle_cyno_generator_activation(
 }
 
 #[allow(clippy::too_many_arguments)]
-// parity: feat:ships.cynosural-beacon-spawning
+// parity: feat:ships.cynosural-beacon-spawning, feat:modules.covert-cyno-rules
 async fn light_cyno(
     ctx: &ServerContext,
     sys: &crate::system_actor::SystemHandle,
@@ -399,23 +420,41 @@ async fn light_cyno(
     }
     let beacon_type_id = beacon_type_for_module(ctx, mod_type)
         .ok_or_else(|| err("NoActiveBeacon", "No SDE beacon type matches this cynosural generator"))?;
-    let (_, mod_vals) = evaluated_attrs(
+    let (ship_vals, mod_vals) = evaluated_attrs(
         ctx,
         char_id,
         ship_id,
-        &[],
+        &[3320],
         Some((module_id, &[attr_ids::DURATION, ATTR_CONSUMPTION_QUANTITY])),
     );
+    if is_covert && ship_type.group_id == 963 && ship_vals[0] <= 0.0 {
+        return Err(err("CannotLightCynoInSystem", format!("{} requires a Covert Reconfiguration subsystem to light {}", ship_type.name, mod_type.name)));
+    }
     let duration_ms = if mod_vals[0] > 0.0 { mod_vals[0] } else { type_attr(ctx, mod_type, attr_ids::DURATION) };
     let fuel_type = type_attr(ctx, mod_type, ATTR_CONSUMPTION_TYPE) as TypeId;
     let cft_lvl = ctx.db.with_snapshot(|s| {
-        s.skills.get(&char_id).and_then(|sk| sk.get(&21611)).map(|r| r.level).unwrap_or(0)
+        s.skills.get(&char_id).and_then(|sk| sk.get(&21603)).map(|r| r.level).unwrap_or(0)
     });
-    let base_fuel = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
-    let fuel_qty = if cft_lvl > 0 && (mod_vals[1] <= 0.0 || mod_vals[1] >= type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY)) {
-        ((base_fuel * (1.0 - 0.10 * (cft_lvl as f64))).max(1.0)).ceil() as i64
+    let req_skill = type_attr(ctx, mod_type, 182) as u32;
+    let req_skill_lvl = type_attr(ctx, mod_type, 277) as i32;
+    if req_skill != 0 && req_skill_lvl > 0 {
+        let char_sk = ctx.db.with_snapshot(|s| {
+            s.skills.get(&char_id).and_then(|sk| sk.get(&req_skill)).map(|r| r.level).unwrap_or(0)
+        });
+        if (char_sk as i32) < req_skill_lvl {
+            return Err(err("SkillMissing", format!("{} requires Cynosural Field Theory level {req_skill_lvl}", mod_type.name)));
+        }
+    }
+    let fuel_qty = if mod_vals[1] > 0.0 && mod_vals[1] < type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) {
+        mod_vals[1].max(1.0).ceil() as i64
     } else {
-        base_fuel.ceil() as i64
+        let base_fuel = if mod_vals[1] > 0.0 { mod_vals[1] } else { type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY) };
+        let after_cft = if cft_lvl > 0 {
+            base_fuel * (1.0 - 0.10 * (cft_lvl as f64))
+        } else {
+            base_fuel
+        };
+        after_cft.max(1.0).ceil() as i64
     };
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}"))?;
 
@@ -474,6 +513,8 @@ async fn light_cyno(
         ("beaconID", PyRep::Integer(beacon_id)),
         ("beaconTypeID", PyRep::Integer(beacon_type_id as i64)),
         ("solarSystemID", PyRep::Integer(sys_id as i64)),
+        ("isCovert", PyRep::Bool(is_covert)),
+        ("onGridOnly", PyRep::Bool(is_covert)),
         ("consumptionTypeID", PyRep::Integer(fuel_type as i64)),
         ("consumptionQuantity", PyRep::Integer(fuel_qty)),
         ("durationSeconds", PyRep::Real(duration_s)),
@@ -612,7 +653,7 @@ async fn relocate_caller(
 }
 
 /// Common caller validation for jump/bridge commands: in space, not in warp, not on cooldown.
-async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<(i64, i64, u32, Ball), BridgeRpcError> {
+async fn caller_in_space(ctx: &ServerContext, session: &SessionState, allow_bubble_host: bool) -> Result<(i64, i64, u32, Ball), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
@@ -623,36 +664,28 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<
         return Err(err("ShipDocked", "Cannot jump while docked"));
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let ball = handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| err("DestinyCommandFailed", e))?
-        .map(|(_, b)| b)
-        .ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
+    let ball = handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyCommandFailed", e))?
+        .map(|(_, b)| b).ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
     if matches!(ball.mode, MovementMode::Warp { .. }) {
         return Err(err("ShipInWarp", "Cannot jump while in warp"));
     }
     let now = ctx.now_unix();
-    let release_portal_mod = cyno_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .bridges
-        .get(&(ctx_key(ctx), char_id))
-        .and_then(|b| (b.bridger_ship_id == ship_id).then_some(b.portal_module_id));
+    let release_portal_mod = cyno_state().read().unwrap_or_else(|e| e.into_inner())
+        .bridges.get(&(ctx_key(ctx), char_id)).and_then(|b| (b.bridger_ship_id == ship_id).then_some(b.portal_module_id));
     if let Some(pmod_id) = release_portal_mod {
         let _ = handle.remove_module_cycle(ship_id, pmod_id).await;
     }
-    if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(err(
-            "WarpScrambled",
-            "Cannot jump or bridge while warp scrambled or inside a warp disruption bubble",
-        ));
+    let scrambled = if allow_bubble_host {
+        handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_warp_scrambled() || cs.warp_core_strength < 0)
+    } else {
+        handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+    };
+    if scrambled {
+        return Err(err("WarpScrambled", "Cannot jump or bridge while warp scrambled"));
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
-    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
-        ctx, char_id, ship_id, sys_id, "jump_drive", now,
-    )?;
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(ctx, char_id, ship_id, sys_id, "jump_drive", now)?;
     let cd = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.jump_cooldown_until_unix).unwrap_or(0));
     if cd > now {
         return Err(err("JumpReactivationCooldown", format!("Jump activation cooldown active for {} s", cd - now)));
@@ -708,13 +741,30 @@ async fn resolve_fleet_beacon(
                 .or_else(|| s.corporations.get(&owner_id).and_then(|c| c.alliance_id));
             caller_alliance.is_some() && caller_alliance == owner_alliance
         };
+        let now_unix = ctx.now_unix();
+        let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(s);
         let is_deployable_beacon = |it: &eve_db::InventoryItemRecord| {
-            let is_cyno_type = matches!(it.type_id, 56099 | 56488);
+            let is_cyno_type = matches!(it.type_id, 56099 | 56488 | 57319 | 59630);
             if !is_cyno_type {
                 return false;
             }
-            if it.flag != eve_db::InventoryFlag::None || !(30_000_000..=33_000_000).contains(&it.location_id) {
+            if !matches!(it.flag, eve_db::InventoryFlag::None | eve_db::InventoryFlag::Hangar)
+                || !(30_000_000..=33_000_000).contains(&it.location_id)
+            {
                 return false;
+            }
+            if matches!(it.type_id, 57319 | 59630) {
+                let Some(rec) = dep_state.deployables.get(&it.item_id) else {
+                    return false;
+                };
+                if rec.is_unanchored
+                    || now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                    || now_unix >= rec.expires_at_unix
+                {
+                    return false;
+                }
+                let owner_fleet = fleet_of(s, it.owner_id);
+                return it.owner_id == char_id || (caller_fleet.is_some() && caller_fleet == owner_fleet);
             }
             if let Some(meta) = s.sp6_lifecycle.space_object_meta.get(&it.item_id) {
                 if !meta.anchor_completed && meta.anchor_start_unix.is_some() {
@@ -740,6 +790,13 @@ async fn resolve_fleet_beacon(
     if let Some((b_id, b_type_id, b_owner, b_sys)) = item_info {
         let handle = ctx.systems.get_or_spawn(b_sys);
         let pos = handle.get_ball_snapshot(b_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
+        let expires_at_unix = ctx.db.with_snapshot(|s| {
+            crate::services::mobile_deployables::read_deployable_state_snap(s)
+                .deployables
+                .get(&b_id)
+                .map(|r| r.expires_at_unix)
+                .unwrap_or(u64::MAX)
+        });
         Ok(FleetModuleBeacon {
             beacon_id: b_id,
             char_id: b_owner,
@@ -747,7 +804,7 @@ async fn resolve_fleet_beacon(
             beacon_type_id: b_type_id,
             solar_system_id: b_sys,
             position: pos,
-            expires_at_unix: u64::MAX,
+            expires_at_unix,
         })
     } else {
         Err(err("NoActiveBeacon", format!("Deployable beacon {beacon_id} in system {target_sys} is not active")))
@@ -767,7 +824,7 @@ async fn jump_to_fleet_beacon(
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
     }
-    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, false).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Jump drives cannot operate in or into Zarzakh"));
     }
@@ -799,11 +856,7 @@ async fn jump_to_fleet_beacon(
     }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
-    let accepts_beacon = if is_deployable {
-        type_attr(ctx, ship_type, ATTR_CAN_JUMP) > 0.0
-    } else {
-        ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id)
-    };
+    let accepts_beacon = ship_accepts_beacon(ctx, ship_type, effective_beacon_field_type(beacon.beacon_type_id));
     if type_attr(ctx, ship_type, ATTR_CAN_JUMP) <= 0.0 || !accepts_beacon {
         return Err(err(
             "ShipCannotJumpToBeacon",
@@ -823,7 +876,7 @@ async fn jump_to_fleet_beacon(
     }
     let fuel_type = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
     let jfc_lvl = ctx.db.with_snapshot(|s| {
-        s.skills.get(&char_id).and_then(|sk| sk.get(&3456)).map(|r| r.level).unwrap_or(0)
+        s.skills.get(&char_id).and_then(|sk| sk.get(&21610)).map(|r| r.level).unwrap_or(0)
     });
     let base_consumption = if vals[1] > 0.0 { vals[1] } else { type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_AMOUNT) };
     let effective_consumption = if jfc_lvl > 0 && (vals[1] <= 0.0 || vals[1] >= type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_AMOUNT)) {
@@ -853,7 +906,7 @@ async fn bridge_to_fleet_beacon(
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
     }
-    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, true).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot operate in or into Zarzakh"));
     }
@@ -900,11 +953,11 @@ async fn bridge_to_fleet_beacon(
     if !hull_allowed(ctx, portal_type, ship_type) {
         return Err(err("ShipCannotBridgeToBeacon", format!("{} cannot operate {}", ship_type.name, portal_type.name)));
     }
-    let accepts_beacon = if is_deployable {
-        true
-    } else {
-        ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id)
-    };
+    let is_covert_portal = portal_tid == 28652
+        || type_attr(ctx, portal_type, ATTR_IS_COVERT) > 0.0
+        || type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_PASSENGER_REQUIRED_ATTR) as AttributeId == 3320;
+    let accepts_beacon = ship_accepts_beacon(ctx, ship_type, effective_beacon_field_type(beacon.beacon_type_id))
+        && (is_covert_beacon_type(beacon.beacon_type_id) == is_covert_portal);
     if !accepts_beacon {
         return Err(err(
             "ShipCannotBridgeToBeacon",
@@ -989,7 +1042,7 @@ async fn group_jump_to_fleet_beacon(
     if target_sys != 0 && (!ctx.sde.solar_systems.contains_key(&target_sys) || Some(target_sys) == session.solar_system_id) {
         return Err(err("InvalidJumpDestination", format!("Invalid jump destination solar system {target_sys}")));
     }
-    let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session, false).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot operate in or into Zarzakh"));
     }
@@ -1024,11 +1077,7 @@ async fn group_jump_to_fleet_beacon(
     if ship_type.group_id == 30 {
         return Err(err("TitanCannotConduitJump", "Titans cannot perform conduit jumps"));
     }
-    let accepts_beacon = if is_deployable {
-        type_attr(ctx, ship_type, ATTR_CAN_JUMP) > 0.0
-    } else {
-        ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id)
-    };
+    let accepts_beacon = ship_accepts_beacon(ctx, ship_type, effective_beacon_field_type(beacon.beacon_type_id));
     if type_attr(ctx, ship_type, ATTR_CAN_JUMP) <= 0.0 || !accepts_beacon {
         return Err(err(
             "ShipCannotJumpToBeacon",
@@ -1048,7 +1097,7 @@ async fn group_jump_to_fleet_beacon(
     }
     let fuel_type = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
     let jfc_lvl = ctx.db.with_snapshot(|s| {
-        s.skills.get(&char_id).and_then(|sk| sk.get(&3456)).map(|r| r.level).unwrap_or(0)
+        s.skills.get(&char_id).and_then(|sk| sk.get(&21610)).map(|r| r.level).unwrap_or(0)
     });
     let base_consumption = if vals[1] > 0.0 { vals[1] } else { type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_AMOUNT) };
     let effective_consumption = if jfc_lvl > 0 && (vals[1] <= 0.0 || vals[1] >= type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_CONSUMPTION_AMOUNT)) {
@@ -1127,6 +1176,7 @@ async fn group_jump_to_fleet_beacon(
     Ok(JumpOutcome { dist_ly: dist, fuel_type, fuel_qty, cooldown_min, fatigue_min, beyonce_bound_id: bound })
 }
 
+// parity: feat:modules.covert-jump-portal-generator
 /// `beyonce.CmdJumpThroughFleet(otherCharID, otherShipID)`: passenger jumps through an open portal.
 async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<JumpOutcome, BridgeRpcError> {
     let other_char = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -1144,7 +1194,7 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
     let bridge = bridge
         .filter(|b| b.bridger_ship_id == other_ship && b.expires_at_unix > now)
         .ok_or_else(|| err("NoActiveBridge", format!("Ship {other_ship} has no open jump portal")))?;
-    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session, false).await?;
     if bridge.origin_system_id != sys_id {
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
     }
@@ -1157,6 +1207,12 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
                 format!("Ship is {dist_m:.1} m from bridging ship (must be <= 2,500 m)"),
             ));
         }
+    }
+    if origin_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(err(
+            "WarpScrambled",
+            "Cannot jump through portal while warp scrambled or inside a warp disruption bubble",
+        ));
     }
     let beacon = live_beacon(ctx, bridge.beacon.char_id, bridge.beacon.beacon_id, bridge.beacon.solar_system_id)
         .unwrap_or_else(|_| bridge.beacon.clone());
@@ -1171,7 +1227,15 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
         .get(&bridge.portal_module_type_id)
         .ok_or_else(|| err("ModuleNotFound", "Portal type unknown"))?;
     let required_attr = type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_PASSENGER_REQUIRED_ATTR) as AttributeId;
-    if required_attr == 0 || type_attr(ctx, ship_type, required_attr) <= 0.0 {
+    let (pvals, _) = evaluated_attrs(
+        ctx,
+        char_id,
+        ship_id,
+        &[required_attr, ATTR_JUMP_THROUGH_FATIGUE_MULTIPLIER, attr_ids::MASS],
+        None,
+    );
+    let passenger_eligible = required_attr != 0 && (pvals[0] > 0.0 || type_attr(ctx, ship_type, required_attr) > 0.0);
+    if !passenger_eligible {
         return Err(err(
             "JumpBridgeRestrictedShip",
             format!("{} may not use this jump portal (requires attribute {required_attr})", ship_type.name),
@@ -1183,16 +1247,25 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
         .and_then(|t| ctx.sde.types.get(&t))
         .ok_or_else(|| err("ShipNotFound", "Bridging ship unknown"))?;
     let (bvals, _) = evaluated_attrs(ctx, bridge.bridger_char_id, bridge.bridger_ship_id, &[ATTR_JUMP_DRIVE_CONSUMPTION_AMOUNT], None);
-    let (pvals, _) = evaluated_attrs(ctx, char_id, ship_id, &[ATTR_JUMP_THROUGH_FATIGUE_MULTIPLIER], None);
-    let mass = if ball.mass > 0.0 { ball.mass } else { ship_type.mass };
+    let jfc_lvl = ctx.db.with_snapshot(|s| {
+        s.skills.get(&bridge.bridger_char_id).and_then(|sk| sk.get(&21610)).map(|r| r.level).unwrap_or(0)
+    });
+    let default_b_cons = type_attr(ctx, bridger_type, ATTR_JUMP_DRIVE_CONSUMPTION_AMOUNT);
+    let base_b_cons = if bvals[0] > 0.0 { bvals[0] } else { default_b_cons };
+    let eff_b_cons = if jfc_lvl > 0 && (bvals[0] <= 0.0 || (bvals[0] - default_b_cons).abs() < 1e-6) {
+        base_b_cons * (1.0 - 0.10 * f64::from(jfc_lvl))
+    } else {
+        base_b_cons
+    };
+    let mass = pvals[2].max(if ball.mass > 0.0 { ball.mass } else { ship_type.mass });
     let fuel_type = type_attr(ctx, bridger_type, ATTR_JUMP_DRIVE_CONSUMPTION_TYPE) as TypeId;
     // DERIVED: portal fuel = bridger jumpDriveConsumptionAmount × jumpPortalConsumptionMassFactor × passenger mass × LY.
     let factor = type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_MASS_FACTOR);
-    let fuel_qty = (bvals[0] * factor * mass * bridge.distance_ly).ceil() as i64;
+    let fuel_qty = (eff_b_cons * factor * mass * bridge.distance_ly).ceil() as i64;
     consume_or_err(ctx, bridge.bridger_ship_id, fuel_type, fuel_qty, |have| format!("Bridge requires {fuel_qty} x type {fuel_type}, bridging ship holds {have}"))?;
     let pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let (cooldown_min, fatigue_min, bound) =
-        relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, bridge.distance_ly, pvals[0]).await?;
+        relocate_caller(ctx, session, char_id, ship_id, sys_id, beacon.solar_system_id, pos, bridge.distance_ly, pvals[1]).await?;
     Ok(JumpOutcome { dist_ly: bridge.distance_ly, fuel_type, fuel_qty, cooldown_min, fatigue_min, beyonce_bound_id: bound })
 }
 

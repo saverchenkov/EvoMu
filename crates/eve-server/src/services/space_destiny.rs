@@ -985,6 +985,14 @@ async fn handle_call_component_from_client(
     })?;
     let comp_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
     let comp_method = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
+    if comp_name == "microJumpDriver"
+        && matches!(comp_method, "ActivateMicroJumpDrive" | "StartMicroJumpDriveForShip" | "")
+    {
+        return crate::services::mobile_deployables::handle_activate_micro_jump_unit(
+            ctx, session, trader_id,
+        )
+        .await;
+    }
     if comp_name == "crabBeacon"
         || (comp_name == "linkWithShip"
             && crate::services::pve_crab_beacons::is_crab_beacon_item(ctx, trader_id))

@@ -1083,6 +1083,17 @@ async fn handle_cone_scan(
         if group_id == 906 {
             continue;
         }
+        if crate::services::inventory_fitting::fitting_cyno_portal::is_covert_beacon_type(ball.type_id) {
+            let caller_bub = if let Some(sid) = session.ship_id {
+                sys_handle.get_bubble_id_for_ball(sid).await.ok().flatten()
+            } else {
+                None
+            };
+            let b_bub = sys_handle.get_bubble_id_for_ball(ball.id).await.ok().flatten();
+            if caller_bub.is_none() || b_bub != caller_bub {
+                continue;
+            }
+        }
         if let Ok(Some(cs)) = sys_handle.get_combat_state(ball.id).await {
             if cs.is_cloaked {
                 continue;

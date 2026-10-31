@@ -169,6 +169,36 @@ pub fn handle_clone_jump(
             .unwrap_or(false)
     };
     let now_unix = ctx.now_unix();
+    let pre_ship_host: Option<(i64, u32)> = ctx.db.with_snapshot(|snap| {
+        let loc_id = snap
+            .jump_clones
+            .get(&char_id)?
+            .iter()
+            .find(|c| c.jump_clone_id == target_jc_id)?
+            .location_id;
+        let ship_it = snap.items.get(&loc_id)?;
+        if !ctx.sde.types.get(&ship_it.type_id).is_some_and(|t| matches!(t.group_id, 30 | 883)) {
+            return None;
+        }
+        let host_sys = snap
+            .characters
+            .get(&ship_it.owner_id)
+            .map(|c| c.solar_system_id)
+            .unwrap_or(0);
+        Some((loc_id, host_sys))
+    });
+    let live_host_ball_state: Option<(u32, [f64; 3], bool)> = pre_ship_host.and_then(|(ship_id, sys_id)| {
+        if sys_id == 0 {
+            return None;
+        }
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let b = bp.balls.get(&ship_id)?;
+        let cloaked = bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_cloaked)
+            || bp.ball_slim_meta.get(&ship_id).is_some_and(|m| m.is_cloaked);
+        let adj_x = b.position.x + b.radius.max(250.0) + 150.0;
+        Some((sys_id, [adj_x, b.position.y, b.position.z], cloaked))
+    });
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let sync_level = snap
@@ -270,6 +300,7 @@ pub fn handle_clone_jump(
         };
 
         // Resolve destination solar_system_id, constellation_id, and region_id
+        let mut ship_clone_spawn_pos: Option<[f64; 3]> = None;
         let (dest_sys_id, dest_const_id, dest_reg_id) = if dest_loc_id >= 1_000_000_000_000 {
             let Some(st) = snap.structures.get(&dest_loc_id) else {
                 return Err(BridgeRpcError {
@@ -305,6 +336,64 @@ pub fn handle_clone_jump(
                     message: format!("Destination solar system {sys_id} not found in SDE"),
                 });
             };
+            (sys_id, sys.constellation_id, sys.region_id)
+        } else if let Some(host_ship) = snap.items.get(&dest_loc_id).filter(|it| {
+            ctx.sde.types.get(&it.type_id).is_some_and(|t| matches!(t.group_id, 30 | 883))
+        }) {
+            // feat:modules.clone-vat-bay-fuel: jumping to a clone installed in a Titan or Rorqual Clone Vat Bay
+            let host_owner = host_ship.owner_id;
+            let Some(host_ch) = snap.characters.get(&host_owner) else {
+                return Err(BridgeRpcError {
+                    code: "NoActiveCloneVatBay".into(),
+                    message: "Host ship pilot not found".into(),
+                });
+            };
+            if host_ch.active_ship_id != dest_loc_id || host_ch.station_id.is_some() || host_ch.structure_id.is_some() {
+                return Err(BridgeRpcError {
+                    code: "NoActiveCloneVatBay".into(),
+                    message: "Host Titan or Rorqual must be piloted in space".into(),
+                });
+            }
+            let in_fleet = char_id == host_owner
+                || snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&host_owner));
+            if !in_fleet {
+                return Err(BridgeRpcError {
+                    code: "NotInHostShipFleet".into(),
+                    message: "Clone jump to a ship Clone Vat Bay requires being in the host pilot's fleet".into(),
+                });
+            }
+            if !is_ship_clone_vat_bay_active(ctx, snap, dest_loc_id, now_unix) {
+                return Err(BridgeRpcError {
+                    code: "NoActiveCloneVatBay".into(),
+                    message: "Host ship Clone Vat Bay is not currently active".into(),
+                });
+            }
+            let sys_id = host_ch.solar_system_id;
+            let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
+                return Err(BridgeRpcError {
+                    code: "CloneDestinationNotFound".into(),
+                    message: format!("Host ship solar system {sys_id} not found in SDE"),
+                });
+            };
+            let has_active_cloak = snap.items.values().any(|i| {
+                i.location_id == dest_loc_id
+                    && matches!(i.flag as u16, 11..=34)
+                    && snap.module_active_states.contains(&i.item_id)
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
+            });
+            let Some((_, live_spawn_pos, live_cloaked)) = live_host_ball_state.filter(|(ls, _, _)| *ls == sys_id) else {
+                return Err(BridgeRpcError {
+                    code: "NoActiveCloneVatBay".into(),
+                    message: "Host Titan or Rorqual is not present in live space".into(),
+                });
+            };
+            if live_cloaked || has_active_cloak {
+                return Err(BridgeRpcError {
+                    code: "ShipCloaked".into(),
+                    message: "Cannot clone jump to a cloaked Titan or Rorqual".into(),
+                });
+            }
+            ship_clone_spawn_pos = Some(live_spawn_pos);
             (sys_id, sys.constellation_id, sys.region_id)
         } else {
             let Some((sys, dest_station)) = ctx.sde.solar_systems.values().find_map(|sys| {
@@ -489,11 +578,13 @@ pub fn handle_clone_jump(
             idx
         };
 
-        // Ensure character is placed in a Capsule (type_id 670) at dest_loc_id
+        // Ensure character is placed in a Capsule (type_id 670) at dest_loc_id (or in space near host ship)
+        let cap_loc = if ship_clone_spawn_pos.is_some() { dest_sys_id as i64 } else { dest_loc_id };
+        let cap_flag = if ship_clone_spawn_pos.is_some() { InventoryFlag::None } else { InventoryFlag::Hangar };
         let existing_capsule_id = snap
             .items
             .values()
-            .find(|i| i.owner_id == char_id && i.type_id == 670 && i.location_id == dest_loc_id)
+            .find(|i| i.owner_id == char_id && i.type_id == 670 && i.location_id == cap_loc)
             .map(|i| i.item_id);
         let capsule_id = if let Some(cid) = existing_capsule_id {
             cid
@@ -506,8 +597,8 @@ pub fn handle_clone_jump(
                     item_id: cid,
                     type_id: 670, // Capsule
                     owner_id: char_id,
-                    location_id: dest_loc_id,
-                    flag: InventoryFlag::Hangar,
+                    location_id: cap_loc,
+                    flag: cap_flag,
                     quantity: 1,
                     singleton: true,
                     version: 1,
@@ -516,6 +607,9 @@ pub fn handle_clone_jump(
             );
             cid
         };
+        if let Some(pos) = ship_clone_spawn_pos {
+            snap.item_positions.insert(capsule_id, pos);
+        }
 
         // feat:clones.clone-jump-booster-and-implant-handling:
         // Skills, standings, corporation membership and active cerebral accelerators transfer.
@@ -530,7 +624,10 @@ pub fn handle_clone_jump(
         crate::services::implant_plugging::sync_clone_jump_implants_and_boosters(&ctx.sde, snap, char_id);
 
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            if dest_loc_id >= 1_000_000_000_000 {
+            if ship_clone_spawn_pos.is_some() {
+                ch.station_id = None;
+                ch.structure_id = None;
+            } else if dest_loc_id >= 1_000_000_000_000 {
                 ch.structure_id = Some(dest_loc_id);
                 ch.station_id = None;
             } else {
@@ -562,6 +659,7 @@ pub fn handle_clone_jump(
             effective_cooldown,
             active_implants,
             cleared_zarzakh_gate,
+            ship_clone_spawn_pos,
         ))
     });
 
@@ -576,6 +674,7 @@ pub fn handle_clone_jump(
             cooldown_sec,
             active_implants,
             cleared_zarzakh_gate,
+            ship_clone_spawn_pos,
         )) => {
             if let Some(locked_gate_id) = cleared_zarzakh_gate {
                 crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
@@ -586,7 +685,48 @@ pub fn handle_clone_jump(
                     now_unix,
                 );
             }
-            if dest_loc_id >= 1_000_000_000_000 {
+            if let Some(spawn_pos) = ship_clone_spawn_pos {
+                session.station_id = None;
+                session.structure_id = None;
+                let (ch_corp_id, ch_alliance_id, ch_sec_status) = ctx.db.with_snapshot(|s| {
+                    if let Some(ch) = s.characters.get(&char_id) {
+                        let all_id = ch
+                            .alliance_id
+                            .or_else(|| s.corporations.get(&ch.corporation_id).and_then(|co| co.alliance_id))
+                            .unwrap_or(-1);
+                        (ch.corporation_id, all_id, ch.security_status)
+                    } else {
+                        (-1, -1, 0.0)
+                    }
+                });
+                let sys_handle = ctx.systems.get_or_spawn(dest_sys_id);
+                let cap_sde = ctx.sde.types.get(&670);
+                sys_handle.try_spawn_ball_with_meta(
+                    eve_destiny::Ball {
+                        id: capsule_id,
+                        type_id: 670,
+                        position: glam::DVec3::from_array(spawn_pos),
+                        velocity: glam::DVec3::ZERO,
+                        max_velocity: cap_sde.and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(335.0),
+                        inertia: cap_sde.and_then(|t| t.default_attributes.get(&70).copied()).unwrap_or(0.25),
+                        mass: cap_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
+                        radius: cap_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    ctx.build_ship_combat_state(char_id, capsule_id, 670),
+                    eve_destiny::SlimItemMeta {
+                        group_id: cap_sde.map(|t| t.group_id).unwrap_or(29),
+                        category_id: 6,
+                        owner_id: char_id,
+                        char_id: Some(char_id),
+                        corp_id: ch_corp_id,
+                        alliance_id: ch_alliance_id,
+                        security_status: ch_sec_status,
+                        is_cloaked: false,
+                    },
+                );
+            } else if dest_loc_id >= 1_000_000_000_000 {
                 session.structure_id = Some(dest_loc_id);
                 session.station_id = None;
             } else {
@@ -640,4 +780,183 @@ pub fn handle_clone_jump(
         }
         Err(e) => Some(Err(e)),
     }
+}
+
+const CLONE_VAT_BAY_STATE_KEY: &str = "clone_vat_bay_state";
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CloneVatBayState {
+    pub active_by_ship: std::collections::HashMap<i64, (i64, u64)>,
+}
+
+pub fn load_clone_vat_bay_state(snap: &eve_db::WorldStateSnapshot) -> CloneVatBayState {
+    snap.service_state_blobs
+        .get(CLONE_VAT_BAY_STATE_KEY)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_clone_vat_bay_state(snap: &mut eve_db::WorldStateSnapshot, st: &CloneVatBayState) {
+    if let Ok(raw) = serde_json::to_string(st) {
+        snap.service_state_blobs.insert(CLONE_VAT_BAY_STATE_KEY.to_string(), raw);
+    }
+}
+
+/// Returns `true` iff `host_ship_id` is a Titan (`30`) or Rorqual (`883`) with a currently active Clone Vat Bay cycle.
+pub fn is_ship_clone_vat_bay_active(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    host_ship_id: i64,
+    now_unix: u64,
+) -> bool {
+    let valid_hull = snap
+        .items
+        .get(&host_ship_id)
+        .and_then(|s| ctx.sde.types.get(&s.type_id))
+        .is_some_and(|t| matches!(t.group_id, 30 | 883));
+    if !valid_hull {
+        return false;
+    }
+    let st = load_clone_vat_bay_state(snap);
+    if let Some(&(mod_id, until_unix)) = st.active_by_ship.get(&host_ship_id) {
+        return now_unix < until_unix
+            && snap.module_online_states.get(&mod_id).copied().unwrap_or(true)
+            && snap.module_active_states.contains(&mod_id);
+    }
+    false
+}
+
+// parity: feat:modules.clone-vat-bay-fuel
+/// Activates a Clone Vat Bay (`group_id == 815`) on a Titan (`30`) or Rorqual (`883`),
+/// consuming Liquid Ozone once from fuel bay/cargo and immobilizing the ship (`feat:modules.clone-vat-bay-fuel`).
+pub async fn activate_clone_vat_bay(
+    ctx: &ServerContext,
+    sys: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    module_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    let (ship_type_id, mod_type_id) = ctx.db.with_snapshot(|s| {
+        (
+            s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0),
+            s.items.get(&module_id).map(|i| i.type_id).unwrap_or(0),
+        )
+    });
+    let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| BridgeRpcError {
+        code: "ShipNotFound".into(),
+        message: "Ship type unknown".into(),
+    })?;
+    if !matches!(ship_type.group_id, 30 | 883) {
+        return Err(BridgeRpcError {
+            code: "ShipCannotFitModule".into(),
+            message: "Clone Vat Bay requires a Titan or Rorqual".into(),
+        });
+    }
+    if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+        return Err(BridgeRpcError {
+            code: "ShipCloaked".into(),
+            message: "Cannot activate Clone Vat Bay while cloaked".into(),
+        });
+    }
+    let mod_type = ctx.sde.types.get(&mod_type_id).ok_or_else(|| BridgeRpcError {
+        code: "ModuleNotFound".into(),
+        message: "Module type unknown".into(),
+    })?;
+    let (duration_ms, fuel_qty) = if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
+        let ev = fit.evaluated_context(&ctx.sde);
+        let m = ev.ship_located_items.iter().find(|m| m.item_id == module_id);
+        let d = m.map(|m| m.get_attribute(eve_dogma::attr_ids::DURATION, &ctx.sde)).unwrap_or(0.0);
+        let q = m.map(|m| m.get_attribute(714, &ctx.sde)).unwrap_or(0.0);
+        (
+            if d > 0.0 { d } else { mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0) },
+            if q > 0.0 { q } else { mod_type.default_attributes.get(&714).copied().unwrap_or(200.0) },
+        )
+    } else {
+        (
+            mod_type.default_attributes.get(&73).copied().unwrap_or(300_000.0),
+            mod_type.default_attributes.get(&714).copied().unwrap_or(200.0),
+        )
+    };
+    let fuel_type = mod_type
+        .default_attributes
+        .get(&713)
+        .copied()
+        .map(|v| v as u32)
+        .filter(|&v| v > 0)
+        .unwrap_or(16_273);
+    let needed = fuel_qty.max(1.0).ceil() as i32;
+
+    let consumed = ctx.db.try_with_mut_snapshot(|s| -> Result<(), BridgeRpcError> {
+        let mut stacks: Vec<(i64, InventoryFlag, i32)> = s
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == ship_id
+                    && i.type_id == fuel_type
+                    && i.quantity > 0
+                    && matches!(i.flag, InventoryFlag::SpecializedFuelBay | InventoryFlag::Cargo)
+            })
+            .map(|i| (i.item_id, i.flag, i.quantity))
+            .collect();
+        stacks.sort_by_key(|&(id, flg, _)| (if flg == InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, id));
+        let have: i32 = stacks.iter().map(|x| x.2).sum();
+        if have < needed {
+            return Err(BridgeRpcError {
+                code: "NotEnoughFuel".into(),
+                message: format!("Clone Vat Bay requires {needed} x type {fuel_type}, ship holds {have}"),
+            });
+        }
+        let mut rem = needed;
+        for (iid, _, qty) in stacks {
+            if rem <= 0 {
+                break;
+            }
+            let take = rem.min(qty);
+            rem -= take;
+            if take >= qty {
+                s.items.remove(&iid);
+            } else if let Some(it) = s.items.get_mut(&iid) {
+                it.quantity -= take;
+            }
+        }
+        Ok(())
+    });
+    consumed?;
+
+    let duration_s = (duration_ms / 1000.0).max(1.0);
+    let now_unix = ctx.now_unix();
+    let until_unix = now_unix.saturating_add(duration_s.ceil() as u64);
+    sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
+        ship_id,
+        module_id,
+        module_type_id: mod_type.type_id,
+        owner_char_id: Some(char_id),
+        effect_name: "effects.CloneVatBay".to_string(),
+        repeat: 1,
+        duration_s,
+        immobilize_self: true,
+        ..Default::default()
+    })
+    .await
+    .map_err(|e| BridgeRpcError { code: "ModuleActivationFailed".into(), message: e })?;
+
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(module_id, true);
+        s.module_active_states.insert(module_id);
+        let mut st = load_clone_vat_bay_state(s);
+        st.active_by_ship.insert(ship_id, (module_id, until_unix));
+        save_clone_vat_bay_state(s, &st);
+    });
+
+    Ok(PyRep::keyval([
+        ("moduleID", PyRep::Integer(module_id)),
+        ("shipID", PyRep::Integer(ship_id)),
+        ("active", PyRep::Bool(true)),
+        ("cloneVatBayActive", PyRep::Bool(true)),
+        ("fuelTypeID", PyRep::Integer(fuel_type as i64)),
+        ("fuelConsumed", PyRep::Integer(needed as i64)),
+        ("durationSeconds", PyRep::Real(duration_s)),
+        ("activeUntilUnix", PyRep::Integer(until_unix as i64)),
+    ]))
 }

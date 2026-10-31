@@ -485,6 +485,10 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
     s1.user_id = Some(1);
     s1.character_id = Some(p1);
     s1.ship_id = Some(rorq_id);
+    s1.solar_system_id = Some(30_000_142);
+    ctx.dispatch_rpc(&mut s1, "dogmaIM", None, "Activate", &[PyRep::Integer(cvb_id)], &kw, None)
+        .await
+        .unwrap();
 
     ctx.dispatch_rpc(&mut s1, "jumpCloneSvc", None, "OfferShipCloneInstallation", &[PyRep::Integer(p2)], &kw, None)
         .await.unwrap();

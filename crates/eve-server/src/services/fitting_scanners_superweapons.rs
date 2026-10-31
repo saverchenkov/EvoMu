@@ -757,12 +757,12 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
         }
 
         // Clone Vat Bay I (`type_id == 23735`, `group_id == 815`)
-        815 => Some(Ok(PyRep::keyval([
-            ("moduleID", PyRep::Integer(module_id)),
-            ("shipID", PyRep::Integer(ship_id)),
-            ("active", PyRep::Bool(true)),
-            ("cloneVatBayActive", PyRep::Bool(true)),
-        ]))),
+        815 => Some(
+            crate::services::character_clone_jump_rules::activate_clone_vat_bay(
+                ctx, sys, char_id, ship_id, module_id,
+            )
+            .await,
+        ),
 
         _ => None,
     }
@@ -1143,17 +1143,9 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     let controls = host_ship_id > 0
                         && host_ship_id == active_ship
                         && snap.items.get(&host_ship_id).is_some_and(|it| it.owner_id == char_id);
-                    let valid_hull = snap
-                        .items
-                        .get(&host_ship_id)
-                        .and_then(|s| ctx.sde.types.get(&s.type_id))
-                        .is_some_and(|t| matches!(t.group_id, 30 | 883));
-                    let has_mod = snap.items.values().any(|i| {
-                        i.location_id == host_ship_id
-                            && (matches!(i.type_id, 23735 | 24258)
-                                || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 815))
-                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
-                    });
+                    let has_vat_bay = crate::services::character_clone_jump_rules::is_ship_clone_vat_bay_active(
+                        ctx, snap, host_ship_id, ctx.now_unix(),
+                    );
                     let sys_and_fleet = if target_char_id == char_id {
                         true
                     } else {
@@ -1172,7 +1164,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                             .any(|f| f.members.contains(&char_id) && f.members.contains(&target_char_id));
                         caller_sys > 0 && caller_sys == target_sys && same_fleet
                     };
-                    (valid_hull && has_mod, controls, sys_and_fleet)
+                    (has_vat_bay, controls, sys_and_fleet)
                 });
                 if !caller_controls_ship {
                     return Some(Err(BridgeRpcError {
@@ -1283,16 +1275,23 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                             message: "Accepting character is no longer in the same solar system as the host ship".into(),
                         });
                     }
-                    let valid_hull = snap.items.get(&host_ship_id).and_then(|s| ctx.sde.types.get(&s.type_id)).is_some_and(|t| matches!(t.group_id, 30 | 883));
-                    let has_mod = snap.items.values().any(|i| {
-                        i.location_id == host_ship_id
-                            && (matches!(i.type_id, 23735 | 24258) || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 815))
-                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
-                    });
-                    if !valid_hull || !has_mod {
+                    if !crate::services::character_clone_jump_rules::is_ship_clone_vat_bay_active(
+                        ctx, snap, host_ship_id, ctx.now_unix(),
+                    ) {
                         return Err(BridgeRpcError {
                             code: "NoActiveCloneVatBay".into(),
-                            message: "Host ship does not have an online Clone Vat Bay".into(),
+                            message: "Host ship does not have an active Clone Vat Bay".into(),
+                        });
+                    }
+                    let same_fleet = char_id == offerer_id
+                        || snap
+                            .fleets
+                            .values()
+                            .any(|f| f.members.contains(&char_id) && f.members.contains(&offerer_id));
+                    if !same_fleet {
+                        return Err(BridgeRpcError {
+                            code: "TargetNotInSameFleetOrSystem".into(),
+                            message: "Accepting character must be in the host pilot's fleet".into(),
                         });
                     }
                     let existing_count = snap.jump_clones.get(&char_id).map_or(0, |v| v.len());
@@ -1301,18 +1300,6 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                             code: "JumpCloneLimitReached".into(),
                             message: format!("Character {char_id} has {existing_count} jump clones (max {max_clones})"),
                         });
-                    }
-                    let oz_item = snap.items.values().find(|i| i.location_id == host_ship_id && i.type_id == 16273 && i.quantity > 0).map(|i| (i.item_id, i.quantity));
-                    let Some((oz_id, oz_qty)) = oz_item else {
-                        return Err(BridgeRpcError {
-                            code: "InsufficientLiquidOzone".into(),
-                            message: "Host ship lacks required Liquid Ozone fuel in cargo".into(),
-                        });
-                    };
-                    if oz_qty <= 1 {
-                        snap.items.remove(&oz_id);
-                    } else if let Some(it) = snap.items.get_mut(&oz_id) {
-                        it.quantity -= 1;
                     }
                     snap.next_entity_id += 1;
                     let cid = snap.next_entity_id;

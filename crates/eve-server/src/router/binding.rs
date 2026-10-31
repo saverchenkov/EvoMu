@@ -797,12 +797,39 @@ impl ServerContext {
         let pending = Arc::clone(&self.pending_notifications);
         let notify_tx = self.notify_tx.clone();
         let ship_fittings = Arc::clone(&self.ship_fittings);
+        let cd_map = Arc::clone(&self.module_reactivation_cooldowns);
 
         self.systems.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
             ship_fittings
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&cycle.ship_id);
+
+            let is_cloak = sde.types.get(&cycle.module_type_id).is_some_and(|t| t.group_id == 330)
+                || cycle.effect_name.to_ascii_lowercase().contains("cloak");
+            if is_cloak {
+                let reactiv_delay_s = if cycle.reactivation_delay_s > 0.0 {
+                    cycle.reactivation_delay_s
+                } else {
+                    sde.types
+                        .get(&cycle.module_type_id)
+                        .and_then(|t| t.default_attributes.get(&669).copied())
+                        .map(|ms| ms / 1000.0)
+                        .unwrap_or(0.0)
+                };
+                if reactiv_delay_s > 0.0 {
+                    let now_s = db.clock().now_unix_secs() as f64;
+                    cd_map.write().unwrap_or_else(|e| e.into_inner()).insert(
+                        (cycle.ship_id, cycle.module_id, cycle.module_type_id),
+                        super::context::ModuleCooldownEntry {
+                            recorded_unix_f64: now_s,
+                            delay_s: reactiv_delay_s,
+                            solar_system_id: None,
+                            recorded_sys_sim_s: 0.0,
+                        },
+                    );
+                }
+            }
 
             let effect_id = effect_id_for_module_sde(&sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
             let now = db.clock().now_blueos_filetime_ticks();
@@ -848,6 +875,47 @@ impl ServerContext {
                 q.push(notif.clone());
             }
             let _ = notify_tx.send((char_id, notif));
+
+            if sde.types.get(&cycle.module_type_id).is_some_and(|t| t.group_id == 330)
+                || cycle.effect_name.to_ascii_lowercase().contains("cloak")
+            {
+                let sfx_args = vec![
+                    PyRep::Integer(cycle.ship_id),
+                    PyRep::Integer(cycle.module_id),
+                    PyRep::Integer(cycle.module_type_id as i64),
+                    PyRep::None,
+                    PyRep::None,
+                    PyRep::String("effects.Cloak".to_string()),
+                    PyRep::Bool(false),
+                    PyRep::Integer(0),
+                    PyRep::Integer(0),
+                    PyRep::Real(cycle.duration_s * 1000.0),
+                    PyRep::Integer(0),
+                    PyRep::Integer(now),
+                    PyRep::Real(0.0),
+                    PyRep::None,
+                ];
+                let (sfx_pkt, sfx_bytes) =
+                    ServerContext::build_macho_notification_packet(char_id, user_id, "OnSpecialFX", "charid", sfx_args.clone());
+                let sfx_notif = PendingMachoNotification {
+                    recipient_char_id: char_id,
+                    event: "OnSpecialFX".to_string(),
+                    id_type: "charid".to_string(),
+                    args: sfx_args,
+                    packet: sfx_pkt,
+                    marshaled_packet: sfx_bytes,
+                    created_filetime: now,
+                };
+                {
+                    let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
+                    let q = q_guard.entry(char_id).or_default();
+                    if q.len() >= 512 {
+                        q.remove(0);
+                    }
+                    q.push(sfx_notif.clone());
+                }
+                let _ = notify_tx.send((char_id, sfx_notif));
+            }
 
             let auto_reload_ev: Option<(Vec<i64>, u32, f64)> = db.with_mut_snapshot(|snap| {
                 snap.service_state_blobs
@@ -903,6 +971,7 @@ impl ServerContext {
         quasar_gateway: std::sync::Arc<crate::quasar_gateway::PublicGatewayRouter>,
         invention_roll_override: std::sync::Arc<std::sync::RwLock<Option<f64>>>,
         module_reactivation_cooldowns: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<(i64, i64, u32), super::context::ModuleCooldownEntry>>>,
+        active_fighters: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<i64, super::context::ActiveFighterSquadron>>>,
     ) -> Self {
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(std::sync::Arc::clone(&db));
         let clock = std::sync::RwLock::new(db.clock());
@@ -933,7 +1002,7 @@ impl ServerContext {
             weapon_cycle_state: std::sync::RwLock::new(std::collections::HashMap::new()),
             fighter_cooldown_state: std::sync::RwLock::new(std::collections::HashMap::new()),
             fighter_charge_state: std::sync::RwLock::new(std::collections::HashMap::new()),
-            active_fighters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            active_fighters,
             fighter_tube_loads: std::sync::RwLock::new(std::collections::HashMap::new()),
             active_scanner_probes: std::sync::RwLock::new(std::collections::HashMap::new()),
             active_moon_probes: std::sync::RwLock::new(Vec::new()),

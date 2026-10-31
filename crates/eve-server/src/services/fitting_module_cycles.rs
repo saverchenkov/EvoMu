@@ -188,7 +188,7 @@ pub(crate) async fn handle_module_cycles(
                     }));
             let is_arena_pvp = is_weapon && (32_000_000..33_000_000).contains(&sys_id)
                 && ctx.db.with_snapshot(|s| crate::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.arena_solar_system_id == sys_id));
-            if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target {
+            if is_fw_pvp || is_arena_pvp || is_upwell_weapon_or_aoe || is_special_target || matches!(mod_type.group_id, 1328 | 1330 | 1333) {
                 return crate::services::combat_crimewatch::combat_weapons::handle_weapons(ctx, session, service, method, args, kwargs).await;
             }
 
@@ -1286,6 +1286,9 @@ pub(crate) async fn handle_module_cycles(
                 }
             });
             let _ = fit.activate_module(module_id, is_overloaded, &ctx.sde);
+            if mod_type.group_id == 330 || m.type_id == 83485 {
+                crate::services::space_destiny::space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
             let is_cycle_gated = matches!(
                 mod_type.group_id,
                 72 | 40 | 1156 | 41 | 1697 | 67 | 71 | 76 | 1122 | 650 | 80 | 353
@@ -1335,18 +1338,11 @@ pub(crate) async fn handle_module_cycles(
             ) {
                 Some(Ok(res))
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
-                let rep = handle_survey_scanner_activation(
-                    ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state,
-                )
-                .await;
+                let rep = handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await;
                 Some(Ok(rep))
             } else {
                 let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
-                    ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-                    ("duration", PyRep::Real(duration_s)),
-                ])))
+                Some(Ok(PyRep::keyval([("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)), ("duration", PyRep::Real(duration_s))])))
             }
             }
         }

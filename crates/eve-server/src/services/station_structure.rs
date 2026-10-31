@@ -358,6 +358,11 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())
+            }) {
+                return Some(Err(e));
+            }
             let (station_id, ch, ship) = match ctx.db.undock_character(user_id, char_id) {
                 Ok(t) => t,
                 Err(e) => {
@@ -1160,6 +1165,8 @@ pub async fn handle(
                         10_000.0
                     } else if item_type.group_id == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
                         1_000.0
+                    } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_OBSERVATORY {
+                        600_000.0
                     } else {
                         60_000.0
                     }
@@ -1259,23 +1266,20 @@ pub async fn handle(
                 }
             }
 
-            let despawn_unix = if is_secure_container {
+            let despawn_unix = if let Some(exp) = crate::services::mobile_deployables::read_deployable_state(ctx)
+                .deployables
+                .get(&item_id)
+                .map(|r| r.expires_at_unix)
+                .filter(|&t| t > 0)
+            {
+                exp
+            } else if is_secure_container {
                 now_unix.saturating_add(crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS)
             } else if is_warp_disruptor {
                 now_unix.saturating_add(crate::sp6_lifecycle::sde_mobile_warp_disruptor_decay_secs(
                     &ctx.sde,
                     item.type_id,
                 ))
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
-                now_unix.saturating_add(crate::services::mobile_deployables::DEPOT_LIFETIME_SECS)
-            } else if matches!(item_type.group_id, crate::services::mobile_deployables::GROUP_MOBILE_TRACTOR | crate::services::mobile_deployables::GROUP_MOBILE_MICRO_JUMP_UNIT) {
-                now_unix.saturating_add(crate::services::mobile_deployables::MTU_LIFETIME_SECS)
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
-                if item.type_id == crate::services::mobile_deployables::TYPE_COVERT_MOBILE_CYNO_BEACON {
-                    now_unix.saturating_add(crate::services::mobile_deployables::COVERT_CYNO_BEACON_DURATION_SECS)
-                } else {
-                    now_unix.saturating_add(crate::services::mobile_deployables::CYNO_BEACON_DURATION_SECS)
-                }
             } else {
                 0
             };
