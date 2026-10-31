@@ -46,7 +46,7 @@ pub fn count_damaged_sell_items(
     char_id: i64,
     caller_corp_id: i64,
     use_corp: bool,
-    parsed_items: &[(u32, u32, i64, eve_db::IskCents, i32, i32)],
+    parsed_items: &[(i64, u32, i64, eve_db::IskCents, i32, i64)],
 ) -> i64 {
     let mut damaged_count: i64 = 0;
     for (station_id, type_id, raw_item_id, _, _, _) in parsed_items {

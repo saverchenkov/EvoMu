@@ -285,19 +285,8 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
     ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnCorporationStructuresUpdated", "corpid", vec![]);
     let slim_kv = PyRep::keyval([("itemID", PyRep::Integer(structure_id)), ("typeID", PyRep::Integer(i64::from(st.type_id))), ("ownerID", PyRep::Integer(st.owner_corp_id)), ("name", PyRep::String(new_name.clone()))]);
     ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnSlimItemChange", "solarsystemid", vec![PyRep::Integer(structure_id), slim_kv]);
-    crate::services::notify_emitters_batch9_part2::emit_structure_cfg_data_changed(
-        ctx,
-        st.solar_system_id,
-        structure_id,
-        &new_name,
-        st.position,
-    );
-    crate::services::notify_emitters_batch3::emit_facilities_updated(
-        ctx,
-        Some(st.solar_system_id),
-        char_id,
-        structure_id,
-    );
+    crate::services::notify_emitters_batch9_part2::emit_structure_cfg_data_changed(ctx, st.solar_system_id, structure_id, &new_name, st.position);
+    crate::services::notify_emitters_batch3::emit_facilities_updated(ctx, Some(st.solar_system_id), char_id, structure_id);
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("name", PyRep::String(new_name))]))
 }
 

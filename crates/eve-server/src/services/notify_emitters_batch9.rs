@@ -16,6 +16,22 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+const BLOB_ALPHA_AVAIL_NOTIFIED: &str = "alpha_avail_notified";
+
+fn load_alpha_avail_notified(snap: &WorldStateSnapshot) -> HashMap<i64, bool> {
+    snap.service_state_blobs
+        .get(BLOB_ALPHA_AVAIL_NOTIFIED)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+fn save_alpha_avail_notified(snap: &mut WorldStateSnapshot, map: &HashMap<i64, bool>) {
+    if let Ok(s) = serde_json::to_string(map) {
+        snap.service_state_blobs
+            .insert(BLOB_ALPHA_AVAIL_NOTIFIED.to_string(), s);
+    }
+}
+
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
         code: code.into(),
@@ -25,16 +41,9 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
 
 /// Clears the Alpha injector ready notification latch when an Alpha injector is consumed.
 pub fn clear_alpha_avail_notified(snap: &mut WorldStateSnapshot, char_id: i64) {
-    let mut map: HashMap<i64, bool> = snap
-        .service_state_blobs
-        .get("alpha_avail_notified")
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    let mut map = load_alpha_avail_notified(snap);
     if map.remove(&char_id).is_some() {
-        if let Ok(json) = serde_json::to_string(&map) {
-            snap.service_state_blobs
-                .insert("alpha_avail_notified".into(), json);
-        }
+        save_alpha_avail_notified(snap, &map);
     }
 }
 
@@ -49,21 +58,24 @@ pub fn maybe_emit_alpha_injection_available(
     if !is_alpha || next_available != 0 {
         return;
     }
+    let already_notified = ctx.db.with_snapshot(|snap| {
+        load_alpha_avail_notified(snap)
+            .get(&char_id)
+            .copied()
+            .unwrap_or(false)
+    });
+    if already_notified {
+        return;
+    }
     let should_emit = ctx.db.with_mut_snapshot(|snap| {
-        let mut map: HashMap<i64, bool> = snap
-            .service_state_blobs
-            .get("alpha_avail_notified")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        let mut map = load_alpha_avail_notified(snap);
         if map.get(&char_id).copied().unwrap_or(false) {
-            return false;
+            false
+        } else {
+            map.insert(char_id, true);
+            save_alpha_avail_notified(snap, &map);
+            true
         }
-        map.insert(char_id, true);
-        if let Ok(json) = serde_json::to_string(&map) {
-            snap.service_state_blobs
-                .insert("alpha_avail_notified".into(), json);
-        }
-        true
     });
     if should_emit {
         emit_alpha_injection_available(ctx, char_id);
@@ -150,13 +162,12 @@ pub fn emit_login_milestone_timer_started(ctx: &ServerContext, char_id: i64, tim
 pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, _now_unix: u64) {
     let now_ft = ctx.now_blueos_filetime_ticks();
 
-    let ready_alpha_chars = ctx.db.with_mut_snapshot(|snap| {
+    let candidates = ctx.db.with_snapshot(|snap| {
         let cooldowns = super::implant_plugging::load_alpha_injector_cooldowns(snap);
-        let mut notified_map: HashMap<i64, bool> = snap
-            .service_state_blobs
-            .get("alpha_avail_notified")
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        if cooldowns.is_empty() {
+            return Vec::new();
+        }
+        let notified_map = load_alpha_avail_notified(snap);
         let mut alpha_ready = Vec::new();
         let mut cd_cids: Vec<i64> = cooldowns.keys().copied().collect();
         cd_cids.sort_unstable();
@@ -175,16 +186,28 @@ pub fn sweep_due_login_milestones_and_alpha_injectors(ctx: &ServerContext, _now_
             {
                 continue;
             }
-            notified_map.insert(cid, true);
             alpha_ready.push(cid);
         }
-        if !alpha_ready.is_empty() {
-            if let Ok(json) = serde_json::to_string(&notified_map) {
-                snap.service_state_blobs
-                    .insert("alpha_avail_notified".into(), json);
+        alpha_ready
+    });
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let ready_alpha_chars = ctx.db.with_mut_snapshot(|snap| {
+        let mut notified_map = load_alpha_avail_notified(snap);
+        let mut to_emit = Vec::new();
+        for cid in candidates {
+            if !notified_map.get(&cid).copied().unwrap_or(false) {
+                notified_map.insert(cid, true);
+                to_emit.push(cid);
             }
         }
-        alpha_ready
+        if !to_emit.is_empty() {
+            save_alpha_avail_notified(snap, &notified_map);
+        }
+        to_emit
     });
 
     for cid in ready_alpha_chars {
@@ -359,26 +382,24 @@ pub fn handle_rnd_buy_datacores(
             "Datacore quantity must be between 1 and 100,000",
         ));
     };
-    if let Some(agent_info) = ctx.sde.agents.get(&agent_id) {
-        if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
-            || (session.station_id.is_some()
-                && agent_info.station_id.is_some()
-                && agent_info.station_id != session.station_id)
-        {
-            return Err(err(
-                "AgentNotCoLocated",
-                format!("Must be co-located with R&D agent {agent_id} to redeem datacores"),
-            ));
-        }
+    let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
+        return Err(err(
+            "UnknownAgent",
+            format!("R&D agent {agent_id} does not exist in SDE"),
+        ));
+    };
+    if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
+        || (session.station_id.is_some()
+            && agent_info.station_id.is_some()
+            && agent_info.station_id != session.station_id)
+    {
+        return Err(err(
+            "AgentNotCoLocated",
+            format!("Must be co-located with R&D agent {agent_id} to redeem datacores"),
+        ));
     }
     let now_unix = ctx.now_unix();
-    let Some(station_id) = ctx
-        .sde
-        .agents
-        .get(&agent_id)
-        .and_then(|a| a.station_id)
-        .or(session.station_id)
-    else {
+    let Some(station_id) = agent_info.station_id.or(session.station_id) else {
         return Err(err(
             "AgentLocationUnknown",
             format!("Cannot resolve station location for R&D agent {agent_id}"),
@@ -404,27 +425,25 @@ pub fn handle_rnd_buy_datacores(
         }
         // DERIVED: 10,000 ISK per datacore redemption fee
         let isk_cost = IskCents::from_isk(10_000 * i64::from(qty));
-        let mut bal_after_opt = None;
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            if ch.balance < isk_cost {
-                return Err(err(
-                    "InsufficientFunds",
-                    "Insufficient ISK to redeem R&D datacores",
-                ));
-            }
-            ch.balance = ch.balance.checked_sub(isk_cost).unwrap_or(IskCents(0));
-            bal_after_opt = Some(ch.balance);
+        let Some(ch) = snap.characters.get_mut(&char_id) else {
+            return Err(err("CharacterNotFound", format!("Character {char_id} not found")));
+        };
+        if ch.balance < isk_cost {
+            return Err(err(
+                "InsufficientFunds",
+                "Insufficient ISK to redeem R&D datacores",
+            ));
         }
-        let bal_wire = bal_after_opt.map(|b| b.to_wire_f64()).unwrap_or(0.0);
-        if let Some(bal_after) = bal_after_opt {
-            snap.append_journal(
-                char_id,
-                "DatacoreFee",
-                IskCents(-isk_cost.0),
-                bal_after,
-                format!("Redeemed {qty} datacore(s) from R&D agent {agent_id}"),
-            );
-        }
+        ch.balance = ch.balance.checked_sub(isk_cost).unwrap_or(IskCents(0));
+        let bal_after = ch.balance;
+        let bal_wire = bal_after.to_wire_f64();
+        snap.append_journal(
+            char_id,
+            "DatacoreFee",
+            IskCents(-isk_cost.0),
+            bal_after,
+            format!("Redeemed {qty} datacore(s) from R&D agent {agent_id}"),
+        );
         let rem_rp = (total_rp - rp_cost).max(0.0);
         entry.initial_points = rem_rp;
         entry.started_unix = now_unix;
@@ -445,6 +464,14 @@ pub fn handle_rnd_buy_datacores(
             .types
             .values()
             .find(|t| t.name == expected_dc_name)
+            .or_else(|| {
+                ctx.sde.types.values().find(|t| {
+                    t.group_id == 333
+                        && t.default_attributes
+                            .get(&182)
+                            .is_some_and(|&req_sk| (req_sk.round() as u32) == entry.research_type_id)
+                })
+            })
             .map(|t| t.type_id)
             .ok_or_else(|| {
                 err(

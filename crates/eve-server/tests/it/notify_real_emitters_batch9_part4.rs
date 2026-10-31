@@ -86,7 +86,10 @@ async fn notify_batch9_facilities_industry_trade_and_repackage_errors() {
     .await
     .expect("SetFacilityTaxes");
     let fac_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(fac_notifs.iter().any(|(e, _)| e == "OnFacilitiesUpdated"));
+    assert_eq!(
+        find_notif(&fac_notifs, "OnFacilitiesUpdated"),
+        &[PyRep::List(vec![PyRep::Integer(struct_id)])]
+    );
 
     // 2. OnIndustryMaterials: blueprintManager.GetBlueprintData
     let bp_item_id = 940_000_050_i64;
@@ -350,8 +353,15 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     .await
     .expect("SetModuleOnline");
     let online_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(online_notifs.iter().any(|(e, _)| e == "OnGodmaPrimeItem"));
-    assert!(online_notifs.iter().any(|(e, _)| e == "OnGodmaEffectInfo"));
+    let prime_args = find_notif(&online_notifs, "OnGodmaPrimeItem");
+    assert_eq!(prime_args.len(), 2);
+    assert_eq!(prime_args[0], PyRep::Integer(ship_a));
+    assert_eq!(prime_args[1].dict_get("itemID"), Some(&PyRep::Integer(mod_id)));
+    assert!(matches!(prime_args[1].dict_get("attributes"), Some(PyRep::Dict(d)) if d.len() > 2));
+    let eff_args = find_notif(&online_notifs, "OnGodmaEffectInfo");
+    assert_eq!(eff_args.len(), 4);
+    assert_eq!(eff_args[0], PyRep::Integer(mod_id));
+    assert_eq!(eff_args[1], PyRep::Integer(2873));
 
     // Negative 7a: TakeModuleOffline on unowned ship fails
     assert!(rpc(
@@ -422,12 +432,23 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .await
         .is_err());
 
-    // Positive: AddTarget(ship_b) does not emit OnMultiEvent until lock timer finishes, then emits [("OnTarget", "add", ship_b, ""), 0]
+    // Positive: AddTarget(ship_b) emits OnMultiEvent([("OnTarget", "add", ship_b, ""), 0]) on lock start and lock completion
     let _ = rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_b)])
         .await
         .expect("AddTarget");
     let pre_lock_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(!pre_lock_notifs.iter().any(|(e, _)| e == "OnMultiEvent"));
+    assert_eq!(
+        find_notif(&pre_lock_notifs, "OnMultiEvent"),
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnTarget".into()),
+                PyRep::String("add".into()),
+                PyRep::Integer(ship_b),
+                PyRep::String(String::new()),
+            ]),
+            PyRep::Integer(0),
+        ])])]
+    );
     ctx.systems
         .get_or_spawn(SYS_JITA)
         .step_manual(10.0)

@@ -305,12 +305,9 @@ pub(super) fn handle_corps(
             };
             let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let corp_info = ctx.db.with_snapshot(|snap| {
-                let allow_war = snap
-                    .service_state_blobs
-                    .get("corp_allow_war")
+                let allow_war = snap.service_state_blobs.get("corp_allow_war")
                     .and_then(|s| serde_json::from_str::<HashMap<i64, bool>>(s).ok())
-                    .and_then(|m| m.get(&corp_id).copied())
-                    .unwrap_or(true);
+                    .and_then(|m| m.get(&corp_id).copied()).unwrap_or(true);
                 snap.corporations.get(&corp_id).map(|c| {
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
                     let w_divs: Vec<(u8, String)> = c.wallet_divisions.iter().map(|d| (d.division_id, d.name.clone())).collect();
@@ -319,20 +316,12 @@ pub(super) fn handle_corps(
             }).or_else(|| {
                 // DERIVED: SDE NPC corporations fallback for starter/NPC corps
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
-                    (
-                        c.corporation_id, c.name.clone(), c.ticker_name.clone(), 0i64,
-                        10_000i64, c.tax_rate, None, c.station_id.unwrap_or(0),
-                        format!("NPC Corporation {}", c.name), String::new(),
-                        HashMap::new(), Vec::new(), false,
-                    )
+                    (c.corporation_id, c.name.clone(), c.ticker_name.clone(), 0i64, 10_000i64, c.tax_rate, None, c.station_id.unwrap_or(0), format!("NPC Corporation {}", c.name), String::new(), HashMap::new(), Vec::new(), false)
                 })
             });
 
             let Some((cid, name, ticker, ceo_id, m_count, tax, alliance_id, hq_station, desc, url, h_divs, w_divs, allow_war)) = corp_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "CorporationNotFound".into(),
-                    message: format!("Corporation {corp_id} not found"),
-                }));
+                return Some(Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") }));
             };
             let ((s1, s2, s3, c1), (c2, c3), apps_enabled) = read_corp_gov(ctx, |g| {
                 g.get(&cid)
@@ -424,47 +413,28 @@ pub(super) fn handle_corps(
             };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut allow_war_map: HashMap<i64, bool> = snap
-                    .service_state_blobs
-                    .get("corp_allow_war")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
+                let mut allow_war_map: HashMap<i64, bool> = snap.service_state_blobs.get("corp_allow_war")
+                    .and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
                 let old_allow_war = allow_war_map.get(&corp_id).copied().unwrap_or(true);
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
                 if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
-                    return Err(BridgeRpcError {
-                        code: "CorpRoleDenied".into(),
-                        message: "Only CEO or Director can update corporation details".into(),
-                    });
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update corporation details".into() });
                 }
                 let (old_desc, old_url, old_tax) = (corp.description.clone(), corp.url.clone(), corp.tax_rate);
                 corp.description = desc.to_string();
                 corp.url = url.to_string();
-                if let Some(t) = tax_rate_opt {
-                    corp.tax_rate = t.clamp(0.0, 1.0);
-                }
-                let updated_desc = corp.description.clone();
-                let updated_url = corp.url.clone();
-                let updated_tax = corp.tax_rate;
-                let allow_war_changed = if let Some(new_aw) = allow_war_opt {
+                if let Some(t) = tax_rate_opt { corp.tax_rate = t.clamp(0.0, 1.0); }
+                let (updated_desc, updated_url, updated_tax) = (corp.description.clone(), corp.url.clone(), corp.tax_rate);
+                let allow_war_changed = allow_war_opt.and_then(|new_aw| {
                     allow_war_map.insert(corp_id, new_aw);
                     if let Ok(json) = serde_json::to_string(&allow_war_map) {
                         snap.service_state_blobs.insert("corp_allow_war".into(), json);
                     }
-                    if new_aw != old_allow_war {
-                        Some((old_allow_war, new_aw))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                    (new_aw != old_allow_war).then_some((old_allow_war, new_aw))
+                });
                 Ok((old_desc, old_url, old_tax, updated_desc, updated_url, updated_tax, allow_war_changed))
             });
 
@@ -476,10 +446,7 @@ pub(super) fn handle_corps(
                         (PyRep::String(("taxRate").into()), PyRep::Tuple(vec![PyRep::Real(old_tax), PyRep::Real(tax)])),
                     ];
                     if let Some((old_aw, new_aw)) = allow_war_changed {
-                        change_entries.push((
-                            PyRep::String("allowWar".into()),
-                            PyRep::Tuple(vec![PyRep::Bool(old_aw), PyRep::Bool(new_aw)]),
-                        ));
+                        change_entries.push((PyRep::String("allowWar".into()), PyRep::Tuple(vec![PyRep::Bool(old_aw), PyRep::Bool(new_aw)])));
                     }
                     let change = PyRep::Dict(change_entries);
                     ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);

@@ -393,5 +393,5 @@ async fn notify_batch9_skill_bundles_refresh_logon_and_mct() {
         .await
         .expect("ActivateMultiTraining");
     let mct_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(mct_notifs.iter().any(|(e, _)| e == "OnMultipleCharactersTrainingUpdated"));
+    assert_eq!(find_notif(&mct_notifs, "OnMultipleCharactersTrainingUpdated"), &[]);
 }

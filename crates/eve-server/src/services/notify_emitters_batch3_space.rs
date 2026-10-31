@@ -94,7 +94,6 @@ pub fn emit_structure_cfg_and_jammer_notifications(
             PyRep::List(vec![
                 PyRep::Integer(structure_id),
                 PyRep::String(name.to_string()),
-                PyRep::Integer(i64::from(sys_id)),
                 PyRep::Real(pos[0]),
                 PyRep::Real(pos[1]),
                 PyRep::Real(pos[2]),
@@ -566,16 +565,23 @@ pub fn emit_module_activation_godma_notifications(
         inv_item.singleton = true;
         let inv_row = DBRowDescriptor::inv_item_header()
             .build_dbrow(crate::services::inventory_fitting::item_to_packed_cells(ctx, &inv_item));
-        let cap_need = ctx
+        let mut merged_attrs: std::collections::BTreeMap<u16, f64> = ctx
             .sde
             .types
             .get(&module_type_id)
-            .and_then(|t| t.default_attributes.get(&6).copied())
-            .unwrap_or(10.0);
-        let attrs_dict = PyRep::Dict(vec![
-            (PyRep::Integer(73), PyRep::Real(dur_ms)),
-            (PyRep::Integer(6), PyRep::Real(cap_need)),
-        ]);
+            .map(|t| t.default_attributes.iter().map(|(&k, &v)| (k, v)).collect())
+            .unwrap_or_default();
+        for (&k, &v) in &inv_item.dynamic_attributes {
+            merged_attrs.insert(k, v);
+        }
+        merged_attrs.entry(73).or_insert(dur_ms);
+        merged_attrs.insert(2, 1.0);
+        let attrs_dict = PyRep::Dict(
+            merged_attrs
+                .into_iter()
+                .map(|(k, v)| (PyRep::Integer(i64::from(k)), PyRep::Real(v)))
+                .collect(),
+        );
         let prime_row = PyRep::keyval([
             ("itemID", PyRep::Integer(module_id)),
             ("invItem", inv_row),

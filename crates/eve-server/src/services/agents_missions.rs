@@ -591,28 +591,16 @@ pub async fn handle(
                             char_id,
                             &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, origin_station_id: origin_sid, },
                         );
-                        let target_sys = if is_fw_agent(agent_info) {
-                            resolve_fw_warzone_system(agent_info.corporation_id)
-                        } else {
-                            sys_id
-                        };
-                        snap.active_missions.insert(
-                            (char_id, mission_id),
-                            ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new(), bookmark_id: None },
-                        );
+                        let target_sys = if is_fw_agent(agent_info) { resolve_fw_warzone_system(agent_info.corporation_id) } else { sys_id };
+                        snap.active_missions.insert((char_id, mission_id), ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
                         Ok((mission_id, title, briefing, objectives, dest_sid))
                     });
 
                     match res {
                         Ok((mission_id, title, briefing, objectives, dest_sid)) => {
                             let expiry_unix = now + offer_dur;
-                            let dialogue = PyRep::List(vec![
-                                PyRep::Tuple(vec![PyRep::Integer(3), PyRep::String("Accept".into())]),
-                                PyRep::Tuple(vec![PyRep::Integer(9), PyRep::String("Decline".into())]),
-                            ]);
-                            let (isk_reward, lp_reward, bonus_reward) =
-                                compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
-
+                            let dialogue = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3), PyRep::String("Accept".into())]), PyRep::Tuple(vec![PyRep::Integer(9), PyRep::String("Decline".into())])]);
+                            let (isk_reward, lp_reward, bonus_reward) = compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id)]);
                             let clean_header = title.trim_start_matches("[d]").trim();
                             let header_str = if clean_header.is_empty() { "Agent Transmission" } else { clean_header };

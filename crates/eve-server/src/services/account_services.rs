@@ -226,7 +226,7 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
     for cid in cids_to_catch_up {
         crate::services::character_skills::catch_up_skill_queue(ctx, cid);
     }
-    let (res_grade, res_exp, changed_grades) = with_store(ctx, |snap, store| {
+    let (res_grade, res_exp, changed_grades, exp_changed) = with_store(ctx, |snap, store| {
         let admin_exp = store.subscription_expiry.get(&uid).copied();
         let quasar_exp = snap
             .owner_notes
@@ -244,6 +244,10 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         };
+        let exp_changed = exp.is_some() && exp != admin_exp;
+        if let Some(u) = exp {
+            store.subscription_expiry.insert(uid, u);
+        }
         let target = exp.map(|until| if until > now { 2u32 } else { 1u32 });
         let mut grade = None;
         let mut changed = Vec::new();
@@ -257,8 +261,11 @@ pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
             }
             grade.get_or_insert(ch.clone_grade);
         }
-        (target.or(grade).unwrap_or(1), exp.unwrap_or(0), changed)
+        (target.or(grade).unwrap_or(1), exp.unwrap_or(0), changed, exp_changed)
     });
+    if exp_changed {
+        crate::services::notify_emitters_batch9::emit_subscription_time_update_server(ctx, uid, res_exp);
+    }
     for (cid, g) in changed_grades {
         crate::services::notify_emitters_batch9::emit_subscription_changed_server(ctx, cid, g);
     }

@@ -407,7 +407,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
         redeem_rd
             .dict_get("datacoreTypeID")
             .and_then(|v| v.as_i64()),
-        Some(20_424)
+        Some(20_417)
     );
 
     // 6. Locator Agents (`DoAction` action 15 = LocateCharacter)

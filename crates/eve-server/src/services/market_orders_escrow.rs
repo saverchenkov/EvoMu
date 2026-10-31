@@ -239,14 +239,9 @@ pub fn handle_orders_escrow(
                 };
                 let broker_ppm = (broker_rate * 1_000_000.0).round() as i128;
 
-                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(
-                    ctx, snap, char_id, caller_corp_id, use_corp, &parsed_items,
-                );
+                let damaged_count = crate::services::notify_emitters_batch9_part2::count_damaged_sell_items(ctx, snap, char_id, caller_corp_id, use_corp, &parsed_items);
                 if damaged_count > 0 {
-                    return Err(BridgeRpcError {
-                        code: "CantRepackageDamagedItem".into(),
-                        message: damaged_count.to_string(),
-                    });
+                    return Err(BridgeRpcError { code: "CantRepackageDamagedItem".into(), message: damaged_count.to_string() });
                 }
 
                 let mut order_ids = Vec::with_capacity(parsed_items.len());
@@ -819,12 +814,7 @@ pub fn handle_orders_escrow(
                 Err(e) => {
                     if e.code == "CantRepackageDamagedItem" {
                         let count = e.message.parse::<i64>().unwrap_or(1).max(1);
-                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
-                            ctx,
-                            char_id,
-                            "CantRepackageDamagedItem",
-                            count,
-                        );
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
                     }
                     Some(Err(e))
                 }
@@ -989,39 +979,17 @@ pub fn handle_orders_escrow(
             });
             match res {
                 Ok(()) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnOwnOrdersChanged",
-                        "charid",
-                        crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", false),
-                    );
+                    ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, "Expiry", false));
                     Some(Ok(PyRep::Bool(true)))
                 }
-                Err(e) => {
-                    if e.code == "CantRepackageDamagedItem" {
-                        let count = e.message.parse::<i64>().unwrap_or(1).max(1);
-                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
-                            ctx,
-                            char_id,
-                            "CantRepackageDamagedItem",
-                            count,
-                        );
-                    }
-                    Some(Err(e))
-                }
+                Err(e) => Some(Err(e)),
             }
         }
 
         "BuyMultipleItems" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(station_id) = session.station_id.or(session.structure_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotDockedAtStation".into(),
-                    message: "Character must be docked at a station or structure to BuyMultipleItems".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NotDockedAtStation".into(), message: "Character must be docked at a station or structure to BuyMultipleItems".into() }));
             };
             let raw_entries = match (args.first(), args.get(1)) {
                 (Some(PyRep::List(entries) | PyRep::Tuple(entries)), _) => entries.as_slice(),
@@ -1335,12 +1303,7 @@ pub fn handle_orders_escrow(
                 Err(e) => {
                     if e.code == "CantRepackageDamagedItem" {
                         let count = e.message.parse::<i64>().unwrap_or(1).max(1);
-                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(
-                            ctx,
-                            char_id,
-                            "CantRepackageDamagedItem",
-                            count,
-                        );
+                        crate::services::notify_emitters_batch9_part2::emit_sell_repackage_errors(ctx, char_id, "CantRepackageDamagedItem", count);
                     }
                     Some(Err(e))
                 }

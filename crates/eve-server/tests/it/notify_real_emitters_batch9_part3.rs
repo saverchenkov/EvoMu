@@ -311,8 +311,11 @@ async fn notify_batch9_agents_epic_journal_and_datacores() {
     .await
     .expect("Agent Accept");
     let accept_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(accept_notifs.iter().any(|(e, a)| e == "OnIncomingAgentMessage" && a.len() == 2));
-    assert!(accept_notifs.iter().any(|(e, _)| e == "OnEpicJournalChange"));
+    let msg_args = find_notif(&accept_notifs, "OnIncomingAgentMessage");
+    assert_eq!(msg_args.len(), 2);
+    assert_eq!(msg_args[0], PyRep::Integer(epic_agent_id));
+    assert!(matches!(&msg_args[1], PyRep::Tuple(t) if t.len() == 2));
+    assert_eq!(find_notif(&accept_notifs, "OnEpicJournalChange"), &[]);
 
     // TrackOfferDelivered (contextualOfferMgr) -> records telemetry without echoing OnOfferReceived
     let _ = rpc(

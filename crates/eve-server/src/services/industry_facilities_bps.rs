@@ -624,34 +624,13 @@ pub fn handle_industry_facilities_bps(
                     .and_then(|a| a.as_i64())
                     .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
                     .unwrap_or(char_id);
-                let caller_corp_id = session
-                    .corporation_id
-                    .or_else(|| {
-                        ctx.db
-                            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))
-                    })
-                    .unwrap_or(0);
+                let caller_corp_id = session.corporation_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))).unwrap_or(0);
                 if owner_id != char_id && owner_id != caller_corp_id && !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError {
-                        code: "OwnerAccessDenied".into(),
-                        message: format!(
-                            "Character {char_id} is not authorized to query blueprints for owner {owner_id}"
-                        ),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") }));
                 }
-                let facility_filter = args
-                    .get(1)
-                    .and_then(|a| a.as_i64())
-                    .or_else(|| kwargs.get("facilityID").and_then(|v| v.as_i64()))
-                    .filter(|&id| id > 0);
+                let facility_filter = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("facilityID").and_then(|v| v.as_i64())).filter(|&id| id > 0);
                 let bps = ctx.db.with_snapshot(|snap| {
-                    snap.items
-                        .values()
-                        .filter(|it| {
-                            it.owner_id == owner_id
-                                && facility_filter.map(|fid| it.location_id == fid).unwrap_or(true)
-                                && ctx.sde.blueprints.contains_key(&it.type_id)
-                        })
+                    snap.items.values().filter(|it| it.owner_id == owner_id && facility_filter.map(|fid| it.location_id == fid).unwrap_or(true) && ctx.sde.blueprints.contains_key(&it.type_id))
                         .filter_map(|it| {
                             let bp = ctx.sde.blueprints.get(&it.type_id)?;
                             let me = it
