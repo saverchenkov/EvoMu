@@ -577,11 +577,11 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
         "Second Mobile Depot within 5km of existing Mobile Depot must be rejected"
     );
 
-    // During 60s anchoring timer: takes direct damage without reinforcing AND cannot refit before anchoring finishes
+    // During 60s anchoring timer: invulnerable (0 damage applied) AND cannot refit before anchoring finishes
     let (applied_anchor, _) = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
         &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(100.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix_secs(),
     ).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-    assert!(applied_anchor > 0.0, "Mobile Depot takes direct damage without reinforcing during 60s anchoring countdown");
+    assert_eq!(applied_anchor, 0.0, "Mobile Depot must be invulnerable during its 60s anchoring countdown");
 
     let mod_item = 971_210;
     give_item(&ctx, mod_item, 3041, char_id, ship_id, InventoryFlag::Cargo, 1);
@@ -590,11 +590,15 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
         "Cannot refit in space while Mobile Depot is still anchoring"
     );
 
-    // Advance 61s -> step -> anchor_completed == true
+    // Advance 61s -> step -> anchor_completed == true, and depot now takes damage once anchored
     ctx.advance_time_seconds(61);
     let _ = sys.step_manual(1.0).await;
     let st_anchored = ctx.db.with_snapshot(|snap| eve_server::services::mobile_deployables::read_deployable_state_snap(snap).deployables.get(&depot_item).cloned()).unwrap();
     assert!(st_anchored.anchor_completed, "Mobile Depot must complete anchoring after 60s");
+    let (applied_anchored, _) = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+        &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(50.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix_secs(),
+    ).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+    assert!(applied_anchored > 0.0, "Mobile Depot must take damage once 60s anchoring completes");
 
     // Dedicated storage bay deposit & retrieval via invbroker.Add
     let bay_item = 971_215;

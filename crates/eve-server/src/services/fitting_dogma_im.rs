@@ -381,6 +381,18 @@ pub(crate) async fn handle_dogma_im(
                     return Some(Err(BridgeRpcError { code: "CannotUnfitInSpace".into(), message: "Destroying fittings in space requires being within range of an anchored, non-reinforced Mobile Depot or capital SMA".into() }));
                 }
             }
+            if let Some(sys_id) = session.solar_system_id {
+                let loc_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).map(|i| i.location_id));
+                if let Some(loc) = loc_opt {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    if sys.has_active_module_cycle_sync(loc, item_id) {
+                        return Some(Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") }));
+                    }
+                    if sys.has_active_nanite_repair_sync(loc, item_id) {
+                        return Some(Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be destroyed while undergoing nanite repair") }));
+                    }
+                }
+            }
             let destroy_res = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(item) = snap.items.get(&item_id) {
                     let loc = item.location_id;
@@ -402,15 +414,6 @@ pub(crate) async fn handle_dogma_im(
                     }
                     if snap.module_active_states.contains(&item_id) {
                         return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
-                    }
-                    if let Some(sys_id) = session.solar_system_id {
-                        let sys = ctx.systems.get_or_spawn(sys_id);
-                        if sys.has_active_module_cycle_sync(loc, item_id) {
-                            return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
-                        }
-                        if sys.has_active_nanite_repair_sync(loc, item_id) {
-                            return Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be destroyed while undergoing nanite repair") });
-                        }
                     }
                     if (125..=129).contains(&flag_u16) {
                         let has_fitted_modules = snap.items.values().any(|other| {

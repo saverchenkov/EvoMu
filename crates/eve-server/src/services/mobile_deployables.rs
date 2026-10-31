@@ -1018,11 +1018,14 @@ pub fn handle_ball_damage_in_actor(
                 }
             }
 
-            // Anchoring phase or unanchored: takes direct damage, never reinforces!
-            let is_anchored = !rec.is_unanchored
-                && (rec.anchor_completed
-                    || (rec.anchor_start_unix > 0 && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)));
-            if !is_anchored {
+            // Invulnerable during 60-second anchoring countdown
+            let anchoring_until_unix = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
+            if !rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0 && anchoring_until_unix > now_unix {
+                return Some((0.0, false, ball_snap));
+            }
+
+            // Unanchored: takes direct damage, never reinforces
+            if rec.is_unanchored {
                 let (applied, destroyed) = cs.apply_damage(damage);
                 if destroyed {
                     ballpark.balls.remove(&ball_id);
