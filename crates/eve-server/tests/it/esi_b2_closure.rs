@@ -5,7 +5,7 @@
 use crate::common;
 use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, make_structure};
 use eve_db::{
-    corp_roles::{ROLE_DIRECTOR, ROLE_JUNIOR_ACCOUNTANT, ROLE_STATION_MANAGER, ROLE_TRADER},
+    corp_roles::{ROLE_DIRECTOR, ROLE_STATION_MANAGER, ROLE_TRADER},
     CorporationRecord, InventoryFlag, IskCents, TrainedSkillRecord,
 };
 use eve_machonet::SessionState;
@@ -251,12 +251,13 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     http_expect_status(addr, &obs_path, Some(&tok_station_mgr), 403).await;
     http_expect_status(addr, "/v1/corporation/999999999/mining/extractions/", Some(&tok_director), 403).await;
 
-    // Station Manager succeeds on extractions & customs_offices; Director succeeds on observers
+    // Station Manager succeeds on extractions; Director succeeds on customs_offices & observers
     let exts = http_get_json(addr, &spec, &ext_path, Some(&tok_station_mgr)).await;
     assert_eq!(exts.as_array().unwrap().len(), 1);
     assert_eq!(exts[0]["structure_id"], athanor_id);
 
-    let pocos = http_get_json(addr, &spec, &poco_path, Some(&tok_station_mgr)).await;
+    http_expect_status(addr, &poco_path, Some(&tok_station_mgr), 403).await;
+    let pocos = http_get_json(addr, &spec, &poco_path, Some(&tok_director)).await;
     assert_eq!(pocos.as_array().unwrap().len(), 1);
     assert_eq!(pocos[0]["office_id"], JITA_PLANET_ID);
 
@@ -488,7 +489,7 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
             ..Default::default()
         };
         corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
-        corp.member_roles.insert(trader_id, ROLE_JUNIOR_ACCOUNTANT | ROLE_TRADER);
+        corp.member_roles.insert(trader_id, ROLE_TRADER);
         snap.corporations.insert(corp_id, corp);
         for cid in [ceo_id, trader_id] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
