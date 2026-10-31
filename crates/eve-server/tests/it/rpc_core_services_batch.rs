@@ -298,6 +298,72 @@ async fn test_rpc_lookup_svc_batch() {
     assert!(oid >= 90_000_000);
 
     // 10. LookupWarableCorporationsOrAlliances (Player corps group 2, Alliances group 32)
+    sess.corporation_id = Some(98_000_001);
+    sess.alliance_id = Some(99_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            98_000_050,
+            eve_db::CorporationRecord {
+                corporation_id: 98_000_050,
+                name: "Target Federation Corp".into(),
+                ticker: "TFC".into(),
+                ceo_id: 90_000_050,
+                ..Default::default()
+            },
+        );
+        snap.corporations.insert(
+            98_000_051,
+            eve_db::CorporationRecord {
+                corporation_id: 98_000_051,
+                name: "Peaceful Federation Corp".into(),
+                ticker: "PFC".into(),
+                ceo_id: 90_000_051,
+                alliance_id: Some(99_000_051),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_000_000_050_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_050_001,
+                type_id: 35832,
+                owner_corp_id: 98_000_050,
+                solar_system_id: 30_000_142,
+                name: "TFC Astrahus".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.alliances.insert(
+            99_000_050,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_050,
+                name: "Target Federation Alliance".into(),
+                short_name: "TFA".into(),
+                executor_corp_id: 98_000_050,
+                member_corp_ids: [98_000_050].into_iter().collect(),
+            },
+        );
+        snap.alliances.insert(
+            99_000_051,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_051,
+                name: "Peaceful Federation Alliance".into(),
+                short_name: "PFA".into(),
+                executor_corp_id: 98_000_051,
+                member_corp_ids: [98_000_051].into_iter().collect(),
+            },
+        );
+    });
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -311,11 +377,17 @@ async fn test_rpc_lookup_svc_batch() {
         .await
         .expect("LookupWarableCorporationsOrAlliances");
     let warable = as_list(&res);
-    assert!(warable.len() >= 2, "Must return both player corp and alliance matching 'Federation'");
-    let has_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_001)) && w.dict_get("groupID") == Some(&PyRep::Integer(2)));
-    let has_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_001)) && w.dict_get("groupID") == Some(&PyRep::Integer(32)));
-    assert!(has_corp, "Must find warable corp");
-    assert!(has_alliance, "Must find warable alliance");
+    let own_corp_id = sess.corporation_id.unwrap_or(98_000_001);
+    let has_own_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(own_corp_id)));
+    let has_peaceful_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_051)));
+    let has_peaceful_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_051)));
+    let has_target_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_050)) && w.dict_get("groupID") == Some(&PyRep::Integer(2)));
+    let has_target_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_050)) && w.dict_get("groupID") == Some(&PyRep::Integer(32)));
+    assert!(!has_own_corp, "Caller's own corp must be excluded");
+    assert!(!has_peaceful_corp, "Corp without Upwell structures must be excluded even if in an alliance");
+    assert!(!has_peaceful_alliance, "Alliance with no structure-owning member corps must be excluded");
+    assert!(has_target_corp, "Must find warable corp with Upwell structure");
+    assert!(has_target_alliance, "Must find warable alliance");
 }
 
 #[tokio::test]

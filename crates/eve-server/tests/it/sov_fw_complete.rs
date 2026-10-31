@@ -505,15 +505,15 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
     let structs_info = sov_call(&ctx, &mut sess, "sovMgr", "GetSovStructuresInfoForSolarSystem", &[PyRep::Integer(sys_id as i64)])
         .await
         .expect("GetSovStructuresInfoForSolarSystem");
-    assert_eq!(structs_info.dict_get("allianceID").and_then(|v| v.as_i64()), Some(alliance_id));
-    if let Some(PyRep::List(list)) = structs_info.dict_get("structures") {
+    if let PyRep::List(list) = structs_info {
         assert_eq!(list.len(), 2);
         let hub_rep = list.iter().find(|s| s.dict_get("structureID").and_then(|v| v.as_i64()) == Some(hub_id)).unwrap();
         assert_eq!(hub_rep.dict_get("corporationID").and_then(|v| v.as_i64()), Some(corp_id));
+        assert_eq!(hub_rep.dict_get("allianceID").and_then(|v| v.as_i64()), Some(alliance_id));
         assert_eq!(hub_rep.dict_get("vulnerableStartTime").and_then(|v| v.as_i64()), Some(1000));
         assert_eq!(hub_rep.dict_get("vulnerableEndTime").and_then(|v| v.as_i64()), Some(5000));
     } else {
-        panic!("expected structures list");
+        panic!("expected top-level structures list");
     }
 
     let map_data = sov_call(&ctx, &mut sess, "map", "GetCurrentSovData", &[])

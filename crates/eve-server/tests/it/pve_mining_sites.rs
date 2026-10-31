@@ -196,7 +196,7 @@ async fn bind_service_oid(
 // ============================================================================
 #[tokio::test]
 async fn test_mn18_mining_missions_market_and_goals() {
-    // parity: feat:pve.mission-mining, feat:mining.mining-missions, feat:mining.mining-market, feat:mining.mining-goals, rpc:agentMgr.GetAgents, rpc:marketProxy.GetOrders, rpc:seasonManager.claim_goal_reward, rpc:seasonManager.get_character_progress_by_character_id
+    // parity: plan:MN-18, feat:pve.mission-mining, feat:mining.mining-missions, feat:mining.mining-market, feat:mining.mining-goals, rpc:agentMgr.GetAgents, rpc:marketProxy.GetOrders, rpc:seasonManager.claim_goal_reward, rpc:seasonManager.get_character_progress_by_character_id
     eve_testkit::attest(&["feat:pve.mission-mining", "feat:mining.mining-missions", "feat:mining.mining-market", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

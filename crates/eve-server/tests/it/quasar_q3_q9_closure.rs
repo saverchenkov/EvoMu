@@ -528,7 +528,12 @@ async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
     )
     .await;
     assert_eq!(cdn_ok.status_code, STATUS_OK);
-    assert!(!cdn_ok.payload.as_ref().unwrap().value.is_empty());
+    let cdn_payload = cdn_ok.payload.as_ref().unwrap();
+    assert_eq!(
+        cdn_payload.normalized_type_name(),
+        "eve_public.space.api.cdn.GetUpdateResponse"
+    );
+    assert!(!cdn_payload.value.is_empty());
 }
 
 #[tokio::test]

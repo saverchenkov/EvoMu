@@ -944,21 +944,23 @@ pub async fn handle(
                     message: "GetSovStructuresInfoForSolarSystem requires a valid solarSystemID argument or active session solar system".into(),
                 }));
             };
-            let (alliance_id, structs_list) = ctx.db.with_snapshot(|snap| {
-                let aid = snap
-                    .system_states
-                    .get(&sys_id)
-                    .and_then(|s| s.sov_alliance_id);
-                let list: Vec<PyRep> = snap
-                    .structures
+            let structs_list = ctx.db.with_snapshot(|snap| {
+                snap.structures
                     .values()
-                    .filter(|s| s.solar_system_id == sys_id)
+                    .filter(|s| {
+                        s.solar_system_id == sys_id
+                            && matches!(s.type_id, 32226 | 32458 | 81080)
+                    })
                     .map(|s| {
                         let vuln = snap
                             .structure_vulnerability_windows
                             .get(&s.structure_id)
                             .copied()
                             .unwrap_or((0, 0));
+                        let owner_alliance_id = snap
+                            .corporations
+                            .get(&s.owner_corp_id)
+                            .and_then(|c| c.alliance_id);
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),
@@ -966,24 +968,16 @@ pub async fn handle(
                             ("corporationID", PyRep::Integer(s.owner_corp_id)),
                             (
                                 "allianceID",
-                                aid.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                owner_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                             ),
                             ("solarSystemID", PyRep::Integer(sys_id as i64)),
                             ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),
                             ("vulnerableEndTime", PyRep::Integer(vuln.1 as i64)),
                         ])
                     })
-                    .collect();
-                (aid, list)
+                    .collect::<Vec<PyRep>>()
             });
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                (
-                    "allianceID",
-                    alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                ("structures", PyRep::List(structs_list)),
-            ])))
+            Some(Ok(PyRep::List(structs_list)))
         }
 
         ("sovMgr", "GetSovStructuresInfoForLocalSolarSystem") => {
