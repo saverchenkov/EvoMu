@@ -586,6 +586,7 @@ async fn test_fleet_boss_handover_closure() {
         .expect("LeaveFleet");
     assert_eq!(field(&left, "disbanded"), PyRep::Bool(false));
     assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), boss_id);
+    assert!(ctx.drain_notifications_for_char(boss_id).iter().any(|n| n.event == "OnFleetMemberChanged"));
 
     // Re-invite fc_id, then disconnect boss_id -> boss passes automatically to fc_id
     let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "Invite", &[PyRep::Integer(fc_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)])
@@ -595,6 +596,8 @@ async fn test_fleet_boss_handover_closure() {
     let _ = rpc(&ctx, &mut sess2, "fleetObjectHandler", "AcceptInvite", &[PyRep::Integer(fid)])
         .await
         .expect("AcceptInvite 2");
+    let _ = ctx.drain_notifications_for_char(fc_id);
     let _ = eve_server::services::fleet_social::fleet_social_notify::remove_character_from_all_fleets(&ctx, boss_id);
     assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), fc_id);
+    assert!(ctx.drain_notifications_for_char(fc_id).iter().any(|n| n.event == "OnFleetMemberChanged"));
 }

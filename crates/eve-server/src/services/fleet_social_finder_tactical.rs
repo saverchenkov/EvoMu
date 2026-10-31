@@ -1057,21 +1057,6 @@ pub(super) async fn handle_finder_and_tactical(
             };
             let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), char_id, 1.0, 1.0, 1.0);
             ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetStateChange", "fleetid", vec![fleet_state]);
-            let sys_id = session.solar_system_id.unwrap_or(0) as i64;
-            let target_type_id = ctx.db.with_snapshot(|s| s.items.get(&target_id).map(|i| i.type_id as i64)).unwrap_or(0);
-            ctx.notify(
-                NotificationTarget::Fleet(fleet_id),
-                "OnFleetBroadcast",
-                "fleetid",
-                vec![
-                    PyRep::String("Target".into()),
-                    PyRep::Integer(1),
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(sys_id),
-                    PyRep::Integer(target_id),
-                    PyRep::Integer(target_type_id),
-                ],
-            );
             let tag_rep = if tag_str.is_empty() { PyRep::None } else { PyRep::String(tag_str) };
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fleet_id)),

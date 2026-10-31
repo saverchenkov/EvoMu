@@ -7,21 +7,13 @@ use super::*;
 /// Evaluates Faction Police security status threshold for a given high-security system (`feat:crimewatch.faction-police-thresholds`).
 pub fn faction_police_sec_threshold(system_security: f64) -> Option<f64> {
     let rounded = (system_security * 10.0).round() / 10.0;
-    if rounded >= 1.0 {
-        Some(-2.0)
-    } else if rounded >= 0.9 {
-        Some(-2.5)
-    } else if rounded >= 0.8 {
-        Some(-3.0)
-    } else if rounded >= 0.7 {
-        Some(-3.5)
-    } else if rounded >= 0.6 {
-        Some(-4.0)
-    } else if rounded >= 0.5 {
-        Some(-4.5)
-    } else {
-        None
-    }
+    if rounded >= 1.0 { Some(-2.0) }
+    else if rounded >= 0.9 { Some(-2.5) }
+    else if rounded >= 0.8 { Some(-3.0) }
+    else if rounded >= 0.7 { Some(-3.5) }
+    else if rounded >= 0.6 { Some(-4.0) }
+    else if rounded >= 0.5 { Some(-4.5) }
+    else { None }
 }
 
 /// Evaluates whether Faction Police engage a pilot in `solar_system_id` (`feat:crimewatch.faction-police`, `feat:crimewatch.faction-police-thresholds`).
@@ -35,26 +27,13 @@ pub async fn evaluate_faction_police_response(
     if crate::services::combat_npc_police::is_faction_police_suppressed(ctx, solar_system_id) {
         return (false, true, false);
     }
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
+    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     let Some(threshold) = faction_police_sec_threshold(sys_sec) else {
         return (false, true, false);
     };
     let (char_sec, is_capsule) = ctx.db.with_snapshot(|snap| {
-        let sec = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.security_status)
-            .unwrap_or(0.0);
-        let is_pod = snap
-            .items
-            .get(&ship_id)
-            .map(|i| i.type_id == 670)
-            .unwrap_or(false);
+        let sec = snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0);
+        let is_pod = snap.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false);
         (sec, is_pod)
     });
     if char_sec <= threshold {
@@ -80,20 +59,8 @@ pub fn evaluate_remote_assistance_legality(
     solar_system_id: u32,
     now_unix: u64,
 ) -> (&'static str, bool, bool) {
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
-    let recipient_sec = ctx
-        .db
-        .with_snapshot(|snap| {
-            snap.characters
-                .get(&recipient_char_id)
-                .map(|c| c.security_status)
-                .unwrap_or(0.0)
-        });
+    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
+    let recipient_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&recipient_char_id).map(|c| c.security_status).unwrap_or(0.0));
     let is_outlaw = recipient_sec <= -4.95;
 
     let rec_in_le = with_combat_runtime(ctx, |rt| {

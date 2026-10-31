@@ -128,11 +128,12 @@ pub async fn precheck_entosis_activation(
     char_id: i64,
 ) -> Result<bool, BridgeRpcError> {
     let now = ctx.now_unix();
+    let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
     let info = ctx.db.with_snapshot(|snap| {
         let is_hub = snap
             .structures
             .get(&target_id)
-            .is_some_and(|st| matches!(st.type_id, TYPE_SOVEREIGNTY_HUB | 32_226) && st.state != "Destroyed");
+            .is_some_and(|st| (st.type_id == TYPE_SOVEREIGNTY_HUB || sov_types.contains(&st.type_id)) && st.state != "Destroyed");
         let node = snap.sov_runtime.command_nodes.get(&target_id).copied();
         if !is_hub && node.is_none() {
             return Ok(None);
@@ -345,11 +346,12 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
         return;
     }
     let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+    let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
 
     for (target_id, (char_id, alliance_id, ship_id, mut accrued_secs, last_ts)) in entries {
         let meta = ctx.db.with_snapshot(|snap| {
             if let Some(st) = snap.structures.get(&target_id) {
-                if matches!(st.type_id, TYPE_SOVEREIGNTY_HUB | 32_226) && st.state != "Destroyed" {
+                if (st.type_id == TYPE_SOVEREIGNTY_HUB || sov_types.contains(&st.type_id)) && st.state != "Destroyed" {
                     let sys = st.solar_system_id;
                     let adm = adm_for_system(snap, sys);
                     return Some((true, sys, DVec3::from_array(st.position), ENTOSIS_HUB_BASE_CAPTURE_SECS * adm));

@@ -642,6 +642,7 @@ impl CrimeWatchDirector {
                 crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
                     ctx,
                     criminal_char_id,
+                    victim_char_id,
                     sys_id,
                     sys_sec,
                     false,
