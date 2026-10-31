@@ -20,7 +20,7 @@
 
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
-    STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -997,16 +997,101 @@ pub fn register_handlers(
         );
     }
 
-    // 14. AI assistant (external LLM service DATA GAP — fail closed) & Space CDN map-tag checkpoint
-    router.register_handler(
-        "eve_public.ai.assistant.chat.api.QueryRequest",
-        Arc::new(|_ctx, _any, _dyn_msg| {
-            Err((
-                STATUS_NOT_IMPLEMENTED,
-                "DATA GAP: Aura Guidance AI assistant requires external LLM service".to_string(),
-            ))
-        }),
-    );
+    // 14. AI assistant (SDE-backed Aura Guidance query) & Space CDN map-tag checkpoint
+    {
+        let sde_ai = Arc::clone(&sde);
+        router.register_handler(
+            "eve_public.ai.assistant.chat.api.QueryRequest",
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let _cid = require_character(ctx)?;
+                let raw_msg = match dyn_msg.get(1) {
+                    Some(DynamicValue::String(s)) => s.trim().to_string(),
+                    _ => String::new(),
+                };
+                if raw_msg.is_empty() {
+                    return Err((STATUS_BAD_REQUEST, "Query message must not be empty".to_string()));
+                }
+                let q = raw_msg.to_ascii_lowercase();
+                let (response, fallback) = if let Some(sys) = sde_ai
+                    .solar_systems
+                    .values()
+                    .find(|s| s.name.to_ascii_lowercase() == q)
+                {
+                    (
+                        format!(
+                            "Solar system {} (ID {}): security {:.2}, region ID {}, constellation ID {}.",
+                            sys.name, sys.solar_system_id, sys.security_status, sys.region_id, sys.constellation_id
+                        ),
+                        false,
+                    )
+                } else if let Some(t) = sde_ai
+                    .types
+                    .values()
+                    .find(|t| t.name.to_ascii_lowercase() == q)
+                {
+                    (
+                        format!(
+                            "{} (Type ID {}): group ID {}, category ID {}, volume {:.2} m3.",
+                            t.name, t.type_id, t.group_id, t.category_id, t.volume
+                        ),
+                        false,
+                    )
+                } else if q.len() >= 3 {
+                    if let Some(sys) = sde_ai
+                        .solar_systems
+                        .values()
+                        .filter(|s| s.name.to_ascii_lowercase().contains(&q))
+                        .min_by_key(|s| s.solar_system_id)
+                    {
+                        (
+                            format!(
+                                "Solar system {} (ID {}): security {:.2}, region ID {}, constellation ID {}.",
+                                sys.name, sys.solar_system_id, sys.security_status, sys.region_id, sys.constellation_id
+                            ),
+                            false,
+                        )
+                    } else if let Some(t) = sde_ai
+                        .types
+                        .values()
+                        .filter(|t| t.name.to_ascii_lowercase().contains(&q))
+                        .min_by_key(|t| t.type_id)
+                    {
+                        (
+                            format!(
+                                "{} (Type ID {}): group ID {}, category ID {}, volume {:.2} m3.",
+                                t.name, t.type_id, t.group_id, t.category_id, t.volume
+                            ),
+                            false,
+                        )
+                    } else {
+                        (
+                            format!(
+                                "Aura: No New Eden SDE record matched \"{}\". Try querying a solar system or item type name.",
+                                raw_msg
+                            ),
+                            true,
+                        )
+                    }
+                } else {
+                    (
+                        format!(
+                            "Aura: No New Eden SDE record matched \"{}\". Try querying a solar system or item type name.",
+                            raw_msg
+                        ),
+                        true,
+                    )
+                };
+
+                let mut out = Vec::new();
+                encode_string_field(1, &response, &mut out);
+                encode_varint_field(2, u64::from(fallback), &mut out);
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.ai.assistant.chat.api.QueryResponse"),
+                    value: out,
+                })
+            }),
+        );
+    }
     {
         let sde_cdn = Arc::clone(&sde);
         router.register_handler(

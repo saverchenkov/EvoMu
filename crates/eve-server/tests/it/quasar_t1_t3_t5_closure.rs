@@ -5,7 +5,7 @@ use crate::quasar_sov_equinox_hub::{drain, field, id_req, idm, rpc, sess, struct
 use eve_db::corp_roles;
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
-use eve_server::quasar_gateway::{STATUS_FORBIDDEN, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB;
 
@@ -347,3 +347,53 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
         .unwrap_or(0);
     assert!(vp >= 250, "FW system victory points must reflect admin increment, got {vp}");
 }
+
+#[tokio::test]
+async fn test_ai_assistant_chat_sde_query() {
+    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj",
+    ]);
+
+    let ctx = ServerContext::new();
+    let mut s = sess(92_007, PILOT, CORP, JITA, 0);
+
+    // Empty query rejected with STATUS_BAD_REQUEST
+    let mut empty_req = Vec::new();
+    encode_string_field(1, "   ", &mut empty_req);
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", empty_req)
+            .await
+            .status_code,
+        STATUS_BAD_REQUEST
+    );
+
+    // SDE solar system query ("Jita") -> fallback = false, contains Jita system ID
+    let mut jita_req = Vec::new();
+    encode_string_field(1, "Jita", &mut jita_req);
+    let jita_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", jita_req).await;
+    assert_eq!(jita_res.status_code, STATUS_OK);
+    let jita_val = jita_res.payload.expect("QueryResponse payload").value;
+    let jita_text = String::from_utf8(field(&jita_val, 1).expect("response text")).expect("utf8");
+    assert!(jita_text.contains("30000142"), "Expected Jita ID in response: {jita_text}");
+    assert_eq!(varint(&jita_val, 2), Some(0), "SDE match must have fallback = false");
+
+    // SDE item type query ("Rifter") -> fallback = false, contains Rifter type ID 587
+    let mut rifter_req = Vec::new();
+    encode_string_field(1, "Rifter", &mut rifter_req);
+    let rifter_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", rifter_req).await;
+    assert_eq!(rifter_res.status_code, STATUS_OK);
+    let rifter_val = rifter_res.payload.expect("QueryResponse payload").value;
+    let rifter_text = String::from_utf8(field(&rifter_val, 1).expect("response text")).expect("utf8");
+    assert!(rifter_text.contains("587"), "Expected Rifter type ID 587 in response: {rifter_text}");
+    assert_eq!(varint(&rifter_val, 2), Some(0), "SDE match must have fallback = false");
+
+    // Unmatched query -> fallback = true
+    let mut unknown_req = Vec::new();
+    encode_string_field(1, "ZzzNonexistentEntity999", &mut unknown_req);
+    let unknown_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", unknown_req).await;
+    assert_eq!(unknown_res.status_code, STATUS_OK);
+    let unknown_val = unknown_res.payload.expect("QueryResponse payload").value;
+    assert_eq!(varint(&unknown_val, 2), Some(1), "Unmatched query must have fallback = true");
+}
+
