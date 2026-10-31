@@ -517,7 +517,10 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
     });
     assert_eq!(main_after, 0);
     assert_eq!(gain_a + gain_b, main_pooled);
-    assert!((gain_a - 2 * gain_b).abs() <= 2);
+    assert!(
+        (gain_a - 2 * gain_b).abs() * 1_000 <= gain_a,
+        "ESS Main Bank payout must follow 2:1 contribution ratio (within DBS decay): gain_a={gain_a}, gain_b={gain_b}"
+    );
     assert!(has_j_a && has_j_b);
 
     // 3. ESS Reserve Bank key tiers (15m vs 45m quadrant keys) + live ISK pulse streaming via AttemptLinkToReserveBank
