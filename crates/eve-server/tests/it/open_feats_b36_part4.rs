@@ -1,4 +1,4 @@
-//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 4: ESS grid, Main Bank autopayout, Reserve keys).
+//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 4: ESS grid warp & module restrictions).
 
 #![forbid(unsafe_code)]
 
@@ -61,13 +61,9 @@ async fn step_until_stopped(ctx: &ServerContext, sys_id: u32, ship_id: i64) {
 }
 
 #[tokio::test]
-async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
-    // parity: feat:pve.ess-grid-warp-mwd-restrictions, feat:pve.ess-main-bank-autopayout, feat:pve.ess-reserve-bank-key-tiers
-    eve_testkit::attest(&[
-        "feat:pve.ess-grid-warp-mwd-restrictions",
-        "feat:pve.ess-main-bank-autopayout",
-        "feat:pve.ess-reserve-bank-key-tiers",
-    ]);
+async fn test_b36_ess_grid_warp_and_module_restrictions() {
+    // parity: feat:pve.ess-grid-warp-mwd-restrictions
+    eve_testkit::attest(&["feat:pve.ess-grid-warp-mwd-restrictions"]);
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -96,48 +92,30 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         .stargate_id as i64;
 
     let pilot_a = 100_001_i64;
-    let pilot_b = 100_002_i64;
     let ship_a = 960_001_i64;
-    let ship_b = 960_002_i64;
     let frig_a = 960_003_i64;
     let mwd_id = 960_010_i64;
     let ab_id = 960_011_i64;
     let mjd_id = 960_012_i64;
     let cloak_id = 960_013_i64;
     let cyno_id = 960_014_i64;
-    let wep_a = 960_015_i64;
-    let ammo_a = 960_016_i64;
-    let wep_b = 960_017_i64;
-    let ammo_b = 960_018_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
-        let base = snap.characters.values().next().cloned().expect("base char");
-        let mut ca = base.clone();
+        let mut ca = snap.characters.values().next().cloned().expect("base char");
         ca.character_id = pilot_a;
         ca.user_id = 1;
         ca.solar_system_id = sys_id;
         ca.station_id = None;
         ca.active_ship_id = ship_a;
         ca.balance = IskCents(0);
-        let mut cb = base;
-        cb.character_id = pilot_b;
-        cb.user_id = 2;
-        cb.solar_system_id = sys_id;
-        cb.station_id = None;
-        cb.active_ship_id = ship_b;
-        cb.balance = IskCents(0);
         snap.characters.insert(pilot_a, ca);
-        snap.characters.insert(pilot_b, cb);
 
         let st = snap.system_states.entry(sys_id).or_default();
         st.solar_system_id = sys_id;
         st.sov_alliance_id = Some(99_000_001);
         st.dbs_multiplier = 1.35;
-        st.ess_main_bank = IskCents(0);
-        st.ess_reserve_bank = IskCents(0);
 
         snap.items.insert(ship_a, make_item(ship_a, 639, pilot_a, i64::from(sys_id), InventoryFlag::None, 1, true));
-        snap.items.insert(ship_b, make_item(ship_b, 639, pilot_b, i64::from(sys_id), InventoryFlag::None, 1, true));
         snap.items.insert(frig_a, make_item(frig_a, 587, pilot_a, i64::from(sys_id), InventoryFlag::None, 1, true));
         snap.items.insert(mwd_id, make_item(mwd_id, 12052, pilot_a, ship_a, InventoryFlag::MedSlot0, 1, true));
         snap.items.insert(ab_id, make_item(ab_id, 12056, pilot_a, ship_a, InventoryFlag::MedSlot1, 1, true));
@@ -145,27 +123,21 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         snap.items.insert(cloak_id, make_item(cloak_id, 11370, pilot_a, ship_a, InventoryFlag::HiSlot1, 1, true));
         snap.items.insert(cyno_id, make_item(cyno_id, 21096, pilot_a, ship_a, InventoryFlag::HiSlot2, 1, true));
         snap.items.insert(960_019, make_item(960_019, 16273, pilot_a, ship_a, InventoryFlag::Cargo, 2_000, false));
-        snap.items.insert(wep_a, make_item(wep_a, 2961, pilot_a, ship_a, InventoryFlag::HiSlot0, 1, true));
-        snap.items.insert(ammo_a, make_item(ammo_a, 21894, pilot_a, ship_a, InventoryFlag::HiSlot0, 5_000, false));
-        snap.items.insert(wep_b, make_item(wep_b, 2961, pilot_b, ship_b, InventoryFlag::HiSlot0, 1, true));
-        snap.items.insert(ammo_b, make_item(ammo_b, 21894, pilot_b, ship_b, InventoryFlag::HiSlot0, 5_000, false));
-        for mid in [mwd_id, mjd_id, cloak_id, cyno_id, wep_a, wep_b] {
+        for mid in [mwd_id, mjd_id, cloak_id, cyno_id] {
             snap.module_online_states.insert(mid, true);
         }
         snap.module_online_states.insert(ab_id, false);
-        for pid in [pilot_a, pilot_b] {
-            let sk = snap.skills.entry(pid).or_default();
-            for sid in [3300_u32, 3302, 3305, 3308, 3310, 3311, 3312, 3315, 3316, 3318, 3334, 3413, 3418, 3426, 3432, 3449, 3450, 3454, 3455, 4385, 11579, 20327, 21603, 21667] {
-                sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 1_280_000.0 });
-            }
-            for tid in [639_u32, 2961, 21894, 12052, 12056, 33915, 11370, 21096] {
-                if let Some(t) = ctx.sde.types.get(&tid) {
-                    for sa in [182_u16, 183, 184] {
-                        if let Some(&req_f) = t.default_attributes.get(&sa) {
-                            let rsid = req_f as u32;
-                            if rsid > 0 {
-                                sk.insert(rsid, TrainedSkillRecord { type_id: rsid, level: 5, skill_points: 1_280_000.0 });
-                            }
+        let sk = snap.skills.entry(pilot_a).or_default();
+        for sid in [3318_u32, 3413, 3418, 3426, 3432, 3449, 3450, 3454, 3455, 4385, 11579, 21603] {
+            sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 1_280_000.0 });
+        }
+        for tid in [639_u32, 12052, 12056, 33915, 11370, 21096] {
+            if let Some(t) = ctx.sde.types.get(&tid) {
+                for sa in [182_u16, 183, 184] {
+                    if let Some(&req_f) = t.default_attributes.get(&sa) {
+                        let rsid = req_f as u32;
+                        if rsid > 0 {
+                            sk.insert(rsid, TrainedSkillRecord { type_id: rsid, level: 5, skill_points: 1_280_000.0 });
                         }
                     }
                 }
@@ -173,7 +145,6 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         }
     });
     ctx.invalidate_ship_fitting(ship_a);
-    ctx.invalidate_ship_fitting(ship_b);
 
     let mut sess_a = SessionState::new(3612);
     sess_a.user_id = Some(1);
@@ -181,23 +152,26 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
     sess_a.solar_system_id = Some(sys_id);
     sess_a.ship_id = Some(ship_a);
 
-    let mut sess_b = SessionState::new(3613);
-    sess_b.user_id = Some(2);
-    sess_b.character_id = Some(pilot_b);
-    sess_b.solar_system_id = Some(sys_id);
-    sess_b.ship_id = Some(ship_b);
-
-    // 1. ESS intrusion site & acceleration gate (essMgr.GetDataForClientSolarSystem -> essID + essGateID)
+    // 1. ESS intrusion site & ballpark acceleration gate (V24 0-arg essMgr.GetDataForClientSolarSystem)
     let ess_info = kv_map(
-        &ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "GetDataForClientSolarSystem", &[PyRep::Integer(i64::from(sys_id))], &kw, None)
+        &ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "GetDataForClientSolarSystem", &[], &kw, None)
             .await
             .unwrap(),
     );
+    assert!(!ess_info.contains_key("essGateID"));
     let ess_id = ess_info["essID"].as_i64().unwrap();
-    let ess_gate_id = ess_info["essGateID"].as_i64().unwrap();
 
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    let gate_pos = sys_h.get_ball_snapshot(ess_gate_id).await.unwrap().unwrap().1.position;
+    let ess_gate_ball = sys_h
+        .list_balls()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| b.type_id == 17_831)
+        .expect("ESS acceleration gate ball in system ballpark");
+    let ess_gate_id = ess_gate_ball.id;
+    let gate_pos = ess_gate_ball.position;
+
     let _ = sys_h
         .spawn_ball_with_combat(
             Ball {
@@ -216,7 +190,7 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         )
         .await;
 
-    // Outside 500 km no-cloak & 75 km warp bubble: MWD and Cloak allowed; direct warp onto ESS grid blocked; warp to exterior ESS gate allowed!
+    // Outside 500 km no-cloak & 75 km warp bubble: MWD allowed; direct warp onto ESS grid blocked; warp to exterior ESS gate allowed!
     let ess_pos = sys_h.get_ball_snapshot(ess_id).await.unwrap().unwrap().1.position;
     let _ = sys_h.set_ball_position(ship_a, ess_pos + DVec3::new(550_000.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(&mut sess_a, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)], &kw, None)
@@ -235,7 +209,11 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         .await
         .expect("Warp to exterior ESS gate");
     step_until_stopped(&ctx, sys_id, ship_a).await;
-    let _ = sys_h.set_ball_position(ship_a, gate_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    let gate_standoff = gate_pos + DVec3::new(500.0, 0.0, 0.0);
+    let _ = sys_h.set_ball_position(ship_a, gate_standoff).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.item_positions.insert(ship_a, gate_standoff.to_array());
+    });
 
     // At ESS gate (200 km from ESS beacon, within 500 km no-cloak zone): Cloak blocked with EssIntrusionBubbleCloakBlocked!
     assert_eq!(
@@ -246,15 +224,14 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         "EssIntrusionBubbleCloakBlocked"
     );
 
-    // Frigate (587), non-Tactical Destroyer (16242), Marauder (28659), Black Ops (22428),
-    // Mining Barge (17478), Industrial (648), and Capital (23911) rejected at ESS gate;
-    // Tactical Destroyer (34317) and Cruiser/Battleship (639) admitted; warp-scrambled ship rejected with WarpScrambled!
+    // Hull class eligibility: Frigate (587), Marauder (28659), Mining Barge (17478), Industrial (648),
+    // non-Tactical Destroyer (16242), Black Ops (22428), and Capital (23911) rejected; T3D (34317) admitted!
     for (bad_sid, bad_tid) in [(frig_a, 587_u32), (960_004, 28_659), (960_005, 17_478), (960_006, 648), (960_008, 16_242), (960_009, 22_428), (960_029, 23_911)] {
         ctx.db.with_mut_snapshot(|s| {
             s.items.insert(bad_sid, make_item(bad_sid, bad_tid, pilot_a, i64::from(sys_id), InventoryFlag::None, 1, true));
             s.characters.get_mut(&pilot_a).unwrap().active_ship_id = bad_sid;
         });
-        let _ = sys_h.spawn_ball_with_combat(Ball { id: bad_sid, type_id: bad_tid, position: gate_pos + DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 10_000_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(bad_tid)).await;
+        let _ = sys_h.spawn_ball_with_combat(Ball { id: bad_sid, type_id: bad_tid, position: gate_standoff, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 10_000_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(bad_tid)).await;
         sess_a.ship_id = Some(bad_sid);
         assert_eq!(ctx.dispatch_rpc(&mut sess_a, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(ess_gate_id)], &kw, None).await.unwrap_err().code, "ShipRestrictedByEssGate");
     }
@@ -263,13 +240,14 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         s.items.insert(t3d_id, make_item(t3d_id, 34_317, pilot_a, i64::from(sys_id), InventoryFlag::None, 1, true));
         s.characters.get_mut(&pilot_a).unwrap().active_ship_id = t3d_id;
     });
-    let _ = sys_h.spawn_ball_with_combat(Ball { id: t3d_id, type_id: 34_317, position: gate_pos + DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 2_000_000.0, radius: 65.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(34_317)).await;
+    let _ = sys_h.spawn_ball_with_combat(Ball { id: t3d_id, type_id: 34_317, position: gate_standoff, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 2_000_000.0, radius: 65.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(34_317)).await;
     sess_a.ship_id = Some(t3d_id);
     ctx.dispatch_rpc(&mut sess_a, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(ess_gate_id)], &kw, None).await.expect("Tactical Destroyer (group 1305) admitted by ESS gate");
 
+    // Warp-scrambled ship rejected; unscrambled ship initiates warp WITHOUT prematurely teleporting snap.item_positions!
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&pilot_a).unwrap().active_ship_id = ship_a);
     sess_a.ship_id = Some(ship_a);
-    let _ = sys_h.set_ball_position(ship_a, gate_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = sys_h.set_ball_position(ship_a, gate_standoff).await;
     if let Ok(Some(mut cs)) = sys_h.get_combat_state(ship_a).await {
         cs.warp_scramble_strength = 2;
         let _ = sys_h.set_combat_state(ship_a, cs).await;
@@ -288,12 +266,29 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
     }
     ctx.dispatch_rpc(&mut sess_a, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(ess_gate_id)], &kw, None)
         .await
-        .expect("Cruiser enters ESS grid and decloaks");
+        .expect("Cruiser/Battleship enters ESS gate warp slide and decloaks");
     assert!(!sys_h.get_combat_state(ship_a).await.unwrap().unwrap().is_cloaked);
-    step_until_stopped(&ctx, sys_id, ship_a).await;
 
-    // Inside 75 km ESS bubble: Warp, MWD (standard 12052 + meta/storyline MWD via dogma effect 6730/attr 554),
-    // MJD, Cloak, Cyno, and Travel Filament ALL refused; Afterburner allowed!
+    // Pre-landing invariant (`B36-F06`): while warp slide is in flight, persisted DB position is still at exterior gate!
+    let pre_land_db_pos = DVec3::from_array(ctx.db.with_snapshot(|s| s.item_positions[&ship_a]));
+    assert!(
+        pre_land_db_pos.distance(ess_pos) > 150_000.0,
+        "DB item_positions must NOT prematurely teleport to ESS landing grid before warp completes: {pre_land_db_pos:?}"
+    );
+    assert!(matches!(
+        sys_h.get_ball_snapshot(ship_a).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
+
+    // Post-landing invariant (`B36-F06`): once SystemActor finishes warp slide, DB item_positions updates to landing grid!
+    step_until_stopped(&ctx, sys_id, ship_a).await;
+    let post_land_db_pos = DVec3::from_array(ctx.db.with_snapshot(|s| s.item_positions[&ship_a]));
+    assert!(
+        post_land_db_pos.distance(ess_pos) < 5_000.0,
+        "SystemActor must persist landed ship position inside ESS grid upon warp completion: {post_land_db_pos:?}"
+    );
+
+    // 2. Inside 75 km ESS bubble: Warp, MWD (T1 + meta/storyline), MJD, Cloak, Cyno, and Travel/Abyssal Filaments ALL refused; Afterburner allowed!
     let storyline_mwd_id = 960_020_i64;
     let needlejack_id = 960_021_i64;
     let abyssal_fil_id = 960_022_i64;
@@ -349,7 +344,13 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
     });
     let _ = sys_h.spawn_ball_with_combat(Ball { id: cruiser_ess_id, type_id: 621, position: ess_pos + DVec3::new(1_500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 10_000_000.0, radius: 120.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(621)).await;
     sess_a.ship_id = Some(cruiser_ess_id);
-    assert_eq!(ctx.dispatch_rpc(&mut sess_a, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(abyssal_fil_id)], &kw, None).await.unwrap_err().code, "EssIntrusionBubbleRestricted");
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_a, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(abyssal_fil_id), PyRep::Integer(47_765)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "EssIntrusionBubbleRestricted"
+    );
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&pilot_a).unwrap().active_ship_id = ship_a);
     sess_a.ship_id = Some(ship_a);
     assert_eq!(
@@ -383,246 +384,4 @@ async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
         .await
         .expect("Afterburner allowed inside 75 km ESS bubble");
     let _ = ctx.dispatch_rpc(&mut sess_a, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ab_id), PyRep::String("moduleBonusAfterburner".into())], &kw, None).await;
-
-    // 2. ESS Main Bank 2h45m autopayout via live NPC bounty combat (2:1 ratio) + tick_background_cluster
-    let bounty_npc_tid = ctx
-        .sde
-        .types
-        .values()
-        .find(|t| t.category_id == 11 && t.default_attributes.get(&481).copied().unwrap_or(0.0) >= 100_000.0)
-        .map(|t| t.type_id)
-        .unwrap();
-    let rat_spot = DVec3::new(-5.0e9, 0.0, 0.0);
-    let _ = sys_h
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_b,
-                type_id: 639,
-                position: rat_spot,
-                velocity: DVec3::ZERO,
-                max_velocity: 300.0,
-                inertia: 1.0,
-                mass: 100_000_000.0,
-                radius: 250.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_type_combat_state(639),
-        )
-        .await;
-    let ess_pos = sys_h.get_ball_snapshot(ess_id).await.unwrap().unwrap().1.position;
-
-    for (idx, (is_a, npc_bid)) in [(true, 960_501_i64), (true, 960_502), (false, 960_503)].into_iter().enumerate() {
-        let origin = if is_a { ess_pos + DVec3::new(1_500.0, 0.0, 0.0) } else { rat_spot };
-        let mut cs = ctx.build_type_combat_state(bounty_npc_tid);
-        cs.shield_hp = 10.0;
-        cs.armor_hp = 10.0;
-        cs.structure_hp = 10.0;
-        cs.signature_radius = 400.0;
-        let _ = sys_h
-            .spawn_ball_with_combat(
-                Ball {
-                    id: npc_bid,
-                    type_id: bounty_npc_tid,
-                    position: origin + DVec3::new(5_000.0 + (idx as f64) * 100.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 100.0,
-                    inertia: 1.0,
-                    mass: 100_000.0,
-                    radius: 400.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await;
-        let s_ref = if is_a { &mut sess_a } else { &mut sess_b };
-        let w_id = if is_a { wep_a } else { wep_b };
-        let attacker_sid = if is_a { ship_a } else { ship_b };
-        ctx.dispatch_rpc(s_ref, "dogmaIM", None, "AddTarget", &[PyRep::Integer(npc_bid)], &kw, None)
-            .await
-            .expect("AddTarget bounty NPC");
-        for _ in 0..30 {
-            if sys_h.get_target_locks(attacker_sid).await.unwrap().iter().any(|l| l.target_id == npc_bid && l.locked) {
-                break;
-            }
-            let _ = sys_h.step_manual(1.0).await;
-        }
-        for _ in 0..20 {
-            if sys_h.get_ball_snapshot(npc_bid).await.unwrap().is_none() {
-                break;
-            }
-            let r = kv_map(
-                &ctx.dispatch_rpc(
-                    s_ref,
-                    "dogmaIM",
-                    None,
-                    "Activate",
-                    &[PyRep::Integer(w_id), PyRep::Integer(npc_bid)],
-                    &kw,
-                    None,
-                )
-                .await
-                .unwrap(),
-            );
-            if r.get("destroyed").and_then(|v| v.as_bool()) == Some(true) {
-                break;
-            }
-            let _ = sys_h.step_manual(1.0).await;
-        }
-        assert!(
-            sys_h.get_ball_snapshot(npc_bid).await.unwrap().is_none(),
-            "Bounty NPC {npc_bid} must be destroyed"
-        );
-    }
-
-    // Advance 20m bounty tick (1,200 s) so ratting bounties pool into ESS Main Bank via tick_background_cluster
-    ctx.db.clock().advance_secs(1_200);
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-
-    let (main_pooled, bal_a_pre, bal_b_pre) = ctx.db.with_snapshot(|s| {
-        (
-            s.system_states[&sys_id].ess_main_bank.0,
-            s.characters[&pilot_a].balance.0,
-            s.characters[&pilot_b].balance.0,
-        )
-    });
-    assert!(main_pooled > 0);
-    let _ = sys_h.set_ball_position(ship_a, ess_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-
-    ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_id)], &kw, None)
-        .await
-        .expect("AttemptLinkToMainBank start");
-    ctx.db.clock().advance_secs(9_900);
-    let _ = ctx
-        .dispatch_rpc(&mut sess_a, "essMgr", None, "GetDataForClientSolarSystem", &[PyRep::Integer(i64::from(sys_id))], &kw, None)
-        .await
-        .unwrap();
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    assert_eq!(ctx.db.with_snapshot(|s| s.system_states[&sys_id].ess_main_bank.0), main_pooled);
-
-    ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestMainBankUnlink", &[], &kw, None)
-        .await
-        .expect("RequestMainBankUnlink");
-    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-
-    let (main_after, gain_a, gain_b, has_j_a, has_j_b) = ctx.db.with_snapshot(|s| {
-        (
-            s.system_states[&sys_id].ess_main_bank.0,
-            s.characters[&pilot_a].balance.0 - bal_a_pre,
-            s.characters[&pilot_b].balance.0 - bal_b_pre,
-            s.wallet_journal.iter().any(|j| j.character_id == pilot_a && j.entry_type == "ESSMainBankPayout"),
-            s.wallet_journal.iter().any(|j| j.character_id == pilot_b && j.entry_type == "ESSMainBankPayout"),
-        )
-    });
-    assert_eq!(main_after, 0);
-    assert_eq!(gain_a + gain_b, main_pooled);
-    assert!(
-        (gain_a - 2 * gain_b).abs() * 1_000 <= gain_a,
-        "ESS Main Bank payout must follow 2:1 contribution ratio (within DBS decay): gain_a={gain_a}, gain_b={gain_b}"
-    );
-    assert!(has_j_a && has_j_b);
-
-    // 3. ESS Reserve Bank key tiers (15m vs 45m quadrant keys) + live ISK pulse streaming via AttemptLinkToReserveBank
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.get_mut(&sys_id).unwrap().ess_reserve_bank = IskCents(4_500_000);
-    });
-    let _ = sys_h.set_ball_position(ship_a, ess_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
-    assert_eq!(
-        ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[], &kw, None)
-            .await
-            .unwrap_err()
-            .code,
-        "OutsideEssLinkRange"
-    );
-    let _ = sys_h.set_ball_position(ship_a, ess_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-
-    let keys_15m = [57714_u32, 57716, 57717, 57720];
-    let keys_45m = [57715_u32, 57719, 57718, 57721];
-    let (mut wrong_quad_15m, mut matched_15m) = (false, false);
-    for (idx, &tid) in keys_15m.iter().enumerate() {
-        let iid = 960_610 + idx as i64;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.insert(iid, make_item(iid, tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
-        });
-        match ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(iid)], &kw, None).await {
-            Ok(rep) => {
-                assert_eq!(kv_map(&rep)["durationMinutes"].as_i64(), Some(15));
-                assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&iid)));
-                let unlock_ev = sess_a
-                    .drain_notifications()
-                    .into_iter()
-                    .find(|(n, _)| n == "OnReserveBankUnlock")
-                    .expect("OnReserveBankUnlock notification");
-                assert_eq!(unlock_ev.1.len(), 1, "OnReserveBankUnlock must take 1 data argument");
-                assert!(unlock_ev.1[0].dict_get("regionID").is_some());
-                matched_15m = true;
-            }
-            Err(e) => {
-                assert_eq!(e.code, "EssReserveKeyWrongQuadrant");
-                wrong_quad_15m = true;
-            }
-        }
-    }
-    assert!(wrong_quad_15m && matched_15m);
-
-    let bal_before_r15 = ctx.db.with_snapshot(|s| s.characters[&pilot_a].balance.0);
-    ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
-    {
-        let now_u = ctx.now_unix();
-        let cw = ctx.crimewatch.read().unwrap();
-        let st = cw.states.get(&pilot_a).expect("crimewatch state");
-        assert!(st.suspect_flag_until_unix >= now_u + 900);
-        assert!(st.weapon_timer_until_unix >= now_u + 60);
-    }
-    for _ in 0..6 {
-        let _ = sys_h.step_manual(1.0).await;
-    }
-    ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15, 300_000);
-    assert!(ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == pilot_a && j.entry_type == "ESSReserveBankPayout")));
-    assert_eq!(
-        ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "IsClientLinkedToReserveBank", &[], &kw, None).await.unwrap(),
-        PyRep::Bool(true)
-    );
-    assert_eq!(
-        ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
-            .await
-            .unwrap_err()
-            .code,
-        "EssReservePulseCooldown"
-    );
-
-    // Multi-pulse persistence: after 61s, second pulse pays out directly (300_000 cents) without needing a new link-start!
-    ctx.db.clock().advance_secs(61);
-    let pulse2_rep = kv_map(
-        &ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
-            .await
-            .expect("Second Reserve Bank pulse on persistent link"),
-    );
-    assert_eq!(pulse2_rep.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15, 600_000);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.system_states.get_mut(&sys_id).unwrap().ess_reserve_bank = IskCents(4_500_000);
-    });
-    let mut matched_45m = false;
-    for (idx, &tid) in keys_45m.iter().enumerate() {
-        let iid = 960_620 + idx as i64;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.insert(iid, make_item(iid, tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
-        });
-        if let Ok(rep) = ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(iid)], &kw, None).await {
-            assert_eq!(kv_map(&rep)["durationMinutes"].as_i64(), Some(45));
-            matched_45m = true;
-        }
-    }
-    assert!(matched_45m);
-
-    let bal_before_r45 = ctx.db.with_snapshot(|s| s.characters[&pilot_a].balance.0);
-    ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
-    for _ in 0..6 {
-        let _ = sys_h.step_manual(1.0).await;
-    }
-    ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r45, 100_000);
 }

@@ -922,11 +922,8 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let notif_id = args.first().and_then(|a| a.as_i64());
-            let is_undelete = args.get(1).and_then(|a| a.as_str()) == Some("undelete")
-                || kwargs.get("action").and_then(|v| v.as_str()) == Some("undelete");
             if let Some(nid) = notif_id {
                 let mut changed = false;
-                let mut undeleted = false;
                 {
                     let mut recs = ctx
                         .notification_records
@@ -935,17 +932,10 @@ pub fn handle(
                     if let Some(r) = recs.iter_mut().find(|r| r.notification_id == nid && r.receiver_id == char_id) {
                         r.interacted = true;
                         changed = true;
-                        if is_undelete && r.deleted {
-                            r.deleted = false;
-                            undeleted = true;
-                        }
                     }
                 }
                 if changed {
                     ctx.sync_character_notifications_to_db(char_id);
-                }
-                if undeleted {
-                    super::notify_emitters_b36::emit_notification_undeleted(ctx, char_id, &[nid]);
                 }
             }
             Some(Ok(PyRep::Bool(true)))

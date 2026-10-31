@@ -997,6 +997,7 @@ impl SystemRegistry {
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.step(dt);
+                                persist_landed_warps_in_db(&ballpark, &events, &db_opt);
                                 if let Some(lock_hook) = target_lock_completed_hook_actor.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
                                     for ev in &events {
                                         if let DestinyEvent::OnTarget { mode, source_id, target_id } = ev {

@@ -687,59 +687,6 @@ fn handle_macho_net(
             Some(Ok(PyRep::String(name)))
         }
 
-        "SetGlobalConfigValue" => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "UserError: GM_InsufficientRole".into(),
-                }));
-            }
-            let Some(key) = args.first().and_then(|a| a.as_str()).filter(|s| !s.is_empty()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "SetGlobalConfigValue requires key".into(),
-                }));
-            };
-            let Some(val) = args.get(1) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "SetGlobalConfigValue requires value".into(),
-                }));
-            };
-            if let Some(svc) = key.strip_prefix("serviceMapping:") {
-                let Some(node_id) = val.as_i64() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "serviceMapping value must be integer nodeID".into(),
-                    }));
-                };
-                ctx.db.with_mut_snapshot(|snap| {
-                    let mut mappings: std::collections::BTreeMap<String, i64> = snap
-                        .service_state_blobs
-                        .get("service_mappings")
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-                    mappings.insert(svc.to_string(), node_id);
-                    if let Ok(json) = serde_json::to_string(&mappings) {
-                        snap.service_state_blobs
-                            .insert("service_mappings".into(), json);
-                    }
-                });
-                super::notify_emitters_b36::emit_update_service_mapping(
-                    ctx,
-                    NotificationTarget::All,
-                    svc,
-                    node_id,
-                );
-            } else if let Ok(mut state) = ctx.cluster_state.write() {
-                state.connection_properties.insert(key.to_string(), val.clone());
-            }
-            Some(Ok(PyRep::Bool(true)))
-        }
-
         "GetConnectionProperties" => {
             let props = ctx
                 .cluster_state

@@ -58,11 +58,11 @@ pub fn is_ess_gate_eligible_hull(sde: &SdeRegistry, ship_type_id: TypeId) -> boo
         .is_some_and(|t| ESS_ALLOWED_SHIP_GROUP_IDS.contains(&t.group_id))
 }
 
-/// Returns `true` only for regular Security/Distribution/Mining (`2`), Tutorial (`3`), and R&D (`4`)
+/// Returns `true` only for regular Security/Distribution/Mining (`2`), R&D (`4`), and Epic Arc (`10`, `11`)
 /// agents that increment the 16-mission Storyline counter (`feat:pve.storyline-offer-counter`),
-/// excluding Career (`12`), COSMOS (`8`), Data Center (`5`, `9`), Storyline (`6`, `7`), and Epic Arc (`10`, `11`).
+/// excluding Tutorial (`3`), Data Center (`5`), Storyline (`6`, `7`), CONCORD/COSMOS (`8`), FW (`9`), and Career (`12`).
 pub fn is_storyline_qualifying_agent_type(agent_type_id: u32) -> bool {
-    matches!(agent_type_id, 2..=4)
+    matches!(agent_type_id, 2 | 4 | 10 | 11)
 }
 
 fn skill_level(snap: &WorldStateSnapshot, char_id: CharacterId, type_id: TypeId) -> u8 {
@@ -396,7 +396,10 @@ fn stargate_jump_distances(sde: &SdeRegistry, origin: SolarSystemId) -> HashMap<
     let mut q = VecDeque::new();
     dist.insert(origin, 0);
     q.push_back(origin);
-    while let Some(cur) = q.pop_front() {
+    for _ in 0..sde.solar_systems.len().max(1) {
+        let Some(cur) = q.pop_front() else {
+            break;
+        };
         let next_d = dist[&cur] + 1;
         if let Some(neighbors) = adj.get(&cur) {
             for &nb in neighbors {
@@ -734,9 +737,6 @@ pub async fn try_activate_ess_acceleration_gate(
         *phase = eve_destiny::WarpPhase::Accelerating;
     }
     let _ = sys_handle.set_movement_mode(ship_id, warp_mode).await;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.item_positions.insert(ship_id, landing_pos.to_array());
-    });
     Some(Ok(PyRep::keyval([
         ("success", PyRep::Bool(true)),
         ("gateID", PyRep::Integer(gate_id)),

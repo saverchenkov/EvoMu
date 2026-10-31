@@ -568,11 +568,16 @@ impl SystemHandle {
     }
 
     pub fn try_step_manual(&self, dt: f64) {
-        if dt > 0.0 && dt.is_finite() {
-            self.actor_state.write().unwrap_or_else(|e| e.into_inner()).sim_elapsed_secs += dt;
-        }
+        let db_opt = {
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            if dt > 0.0 && dt.is_finite() {
+                st.sim_elapsed_secs += dt;
+            }
+            st.db_opt.clone()
+        };
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         let events = bp.step(dt);
+        persist_landed_warps_in_db(&bp, &events, &db_opt);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
         let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
         let _ = self.event_tx.send(broadcast);
@@ -1271,5 +1276,33 @@ pub fn try_remove_ball_for_db(
             super::sync_ball_positions(&bp, &pos_arc, &scram_arc);
         }
     }
+}
+
+/// Persists dynamic ship/item landing coordinates into `snap.item_positions` when a warp slide exits warp.
+pub(crate) fn persist_landed_warps_in_db(
+    ballpark: &Ballpark,
+    events: &[eve_destiny::DestinyEvent],
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+) {
+    let Some(db) = db_opt.as_ref() else {
+        return;
+    };
+    if !events
+        .iter()
+        .any(|e| matches!(e, eve_destiny::DestinyEvent::OnDeactivatingWarp { .. }))
+    {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        for ev in events {
+            if let eve_destiny::DestinyEvent::OnDeactivatingWarp { ball_id } = ev {
+                if !ballpark.is_static_ball(*ball_id) && snap.items.contains_key(ball_id) {
+                    if let Some(b) = ballpark.balls.get(ball_id) {
+                        snap.item_positions.insert(*ball_id, b.position.to_array());
+                    }
+                }
+            }
+        }
+    });
 }
 

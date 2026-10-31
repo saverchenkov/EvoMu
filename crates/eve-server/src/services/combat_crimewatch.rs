@@ -728,6 +728,15 @@ pub(crate) fn emit_combat_log_and_damage_state(
         armor_ratio,
         hull_ratio,
     );
+    super::notify_emitters_b36::emit_combat_message(
+        ctx,
+        attacker_char_id,
+        if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
+        target_ball_id,
+        applied_dmg,
+        weapon_type_id,
+        is_wrecking,
+    );
 
 
     let resolved_victim = victim_char_opt.or_else(|| {
@@ -764,6 +773,15 @@ pub(crate) fn emit_combat_log_and_damage_state(
         );
     }
     if let Some(vic_id) = victim_char_opt.filter(|&v| v != attacker_char_id) {
+        super::notify_emitters_b36::emit_combat_message(
+            ctx,
+            vic_id,
+            if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
+            attacker_ship_id,
+            applied_dmg,
+            weapon_type_id,
+            is_wrecking,
+        );
         ctx.notify(
             NotificationTarget::Character(vic_id),
             "OnDamageMessage",

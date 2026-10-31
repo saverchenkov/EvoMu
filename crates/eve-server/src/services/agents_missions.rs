@@ -1195,9 +1195,10 @@ pub async fn handle(
                             save_epic_arc_states(snap, char_id, &arcs);
                         }
 
+                        let is_epic_arc = ctx.sde.agents.get(&m_agent_id).is_some_and(|a| matches!(a.agent_type_id, 10 | 11));
                         let mut resolved_storyline_agent_id = storyline_agent_id;
                         let mut resolved_storyline_level = ctx.sde.agents.get(&m_agent_id).map_or(1, |a| a.level.clamp(1, 5));
-                        let (t, storyline) = if (!is_storyline && tmpl.has_standing_rewards) || is_rnd {
+                        let (t, storyline) = if (!is_storyline && tmpl.has_standing_rewards) || is_rnd || is_epic_arc {
                             let sl_opt = ctx.sde.agents.get(&m_agent_id).and_then(|ca| crate::services::pve_open_feats_b36::record_mission_completion_and_resolve_storyline(ctx, snap, char_id, ca));
                             let qualifies = ctx.sde.agents.get(&m_agent_id).is_some_and(|ca| crate::services::pve_open_feats_b36::is_storyline_qualifying_agent_type(ca.agent_type_id)) && !crate::services::pve_open_feats_b36::is_interbus_or_militia_corp(&ctx.sde, corp_id);
                             let t = if !qualifies {

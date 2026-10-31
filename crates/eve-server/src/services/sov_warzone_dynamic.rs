@@ -153,7 +153,10 @@ pub async fn handle(
                         .map(|s| s.security_status)
                         .unwrap_or(1.0);
                     if sec <= 0.0 && sys_id < 31_000_000 {
-                        let unlocked_until = unlocked_map.get(&sys_id).copied().unwrap_or(0);
+                        let pulse_st = crate::services::space_destiny::get_ess_reserve_pulses(snap, sys_id);
+                        let unlocked_until = pulse_st.unlocked_until_unix.max(
+                            unlocked_map.get(&sys_id).copied().unwrap_or(0),
+                        );
                         let is_unlocked = unlocked_until > now_u;
                         let main_val = st.ess_main_bank.to_wire_f64();
                         let res_val = st.ess_reserve_bank.to_wire_f64();
@@ -225,7 +228,7 @@ pub async fn handle(
                 }));
             };
             let now_u = ctx.now_unix();
-            let unlocked_until = with_combat_runtime(ctx, |rt| {
+            let rt_unlocked_until = with_combat_runtime(ctx, |rt| {
                 rt.ess_reserve_unlocked_until
                     .get(&sys_id)
                     .copied()
@@ -233,6 +236,8 @@ pub async fn handle(
             });
             let rep = ctx.db.with_snapshot(|snap| {
                 let st = snap.system_states.get(&sys_id);
+                let pulse_st = crate::services::space_destiny::get_ess_reserve_pulses(snap, sys_id);
+                let unlocked_until = pulse_st.unlocked_until_unix.max(rt_unlocked_until);
                 let is_unlocked = unlocked_until > now_u;
                 let rem_secs = if is_unlocked { (unlocked_until - now_u) as i64 } else { 0 };
                 let total_pulses = if is_unlocked { (unlocked_until - now_u).div_ceil(60) as i64 } else { 0 };

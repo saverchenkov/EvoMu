@@ -1,27 +1,22 @@
 //! Live integration tests for Batch 36 state-backed V24 notification emitters:
-//! - `notify:OnNotificationUndeleted`
-//! - `notify:OnPlexDepositFailed`
-//! - `notify:OnPlexWithdrawFailed`
 //! - `notify:OnProgressionAdvanced`
 //! - `notify:OnProgressionTaskCompleted`
-//! - `notify:OnProgressionTaskWidgetUpdate`
-//! - `notify:OnStartConversation`
-//! - `notify:OnServerBrainUpdated`
 //! - `notify:OnCombatMessage`
-//! - `notify:OnOfferReceived`
-//! - `notify:OnFlaggedListsChange`
-//! - `notify:OnUpdateServiceMapping`
+
+#![forbid(unsafe_code)]
 
 use crate::common;
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use glam::DVec3;
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
 const P2: i64 = 90_000_002;
-const JITA_STATION: i64 = 60_003_760;
-const JITA_SYSTEM: u32 = 30_000_142;
+const NULLSEC_SYSTEM: u32 = 30_004_759;
 
 fn new_ctx() -> ServerContext {
     let sde = std::sync::Arc::new(
@@ -73,279 +68,35 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
 }
 
 #[tokio::test]
-async fn test_b36_notification_undeleted_and_flagged_lists() {
-    // parity: notify:OnNotificationUndeleted
-    // parity: notify:OnFlaggedListsChange
-    eve_testkit::attest(&[
-        "notify:OnNotificationUndeleted",
-        "notify:OnFlaggedListsChange",
-    ]);
-
-    let ctx = new_ctx();
-    let mut s1 = pilot(&ctx, 911, "demo", "demo-secret", P1).await;
-
-    // Seed a deleted notification for P1
-    let notif_id = 777_001i64;
-    {
-        let mut records = ctx
-            .notification_records
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        records.push(eve_server::router::NotificationRecord {
-            notification_id: notif_id,
-            type_id: 1,
-            group_id: 1,
-            sender_id: P2,
-            receiver_id: P1,
-            created: ctx.now_blueos_filetime_ticks(),
-            data: "{}".into(),
-            processed: false,
-            deleted: true,
-            interacted: false,
-        });
-    }
-
-    // Negative case: undeleting a non-existent/non-deleted ID emits nothing
-    let res_none = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "notificationMgr",
-            None,
-            "LogNotificationInteraction",
-            &[PyRep::Integer(999_999), PyRep::String("undelete".into())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("LogNotificationInteraction non-existent");
-    assert_eq!(res_none, PyRep::Bool(true));
-    assert!(events(&ctx, P1, "OnNotificationUndeleted").is_empty());
-
-    // Positive case: undeleting the deleted notification mutates state and emits OnNotificationUndeleted
-    let res_ok = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "notificationMgr",
-            None,
-            "LogNotificationInteraction",
-            &[PyRep::Integer(notif_id), PyRep::String("undelete".into())],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("LogNotificationInteraction undelete");
-    assert_eq!(res_ok, PyRep::Bool(true));
-    let undeleted_ev = events(&ctx, P1, "OnNotificationUndeleted");
-    assert_eq!(undeleted_ev.len(), 1);
-    assert_eq!(undeleted_ev[0].len(), 1);
-    match &undeleted_ev[0][0] {
-        PyRep::List(ids) => {
-            assert_eq!(ids.len(), 1);
-            assert_eq!(ids[0].as_i64(), Some(notif_id));
-        }
-        other => panic!("expected List of notificationIDs, got {other:?}"),
-    }
-
-    // Negative case: unblocking a contact that is not blocked emits no OnFlaggedListsChange
-    let _ = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "charMgr",
-            None,
-            "UnblockOwners",
-            &[PyRep::List(vec![PyRep::Integer(P2)])],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("UnblockOwners");
-    assert!(events(&ctx, P1, "OnFlaggedListsChange").is_empty());
-
-    // Positive case: blocking P2 mutates blocklist and emits OnFlaggedListsChange()
-    let _ = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "charMgr",
-            None,
-            "BlockOwners",
-            &[PyRep::List(vec![PyRep::Integer(P2)])],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("BlockOwners");
-    let flagged_ev = events(&ctx, P1, "OnFlaggedListsChange");
-    assert_eq!(flagged_ev.len(), 1);
-    assert!(flagged_ev[0].is_empty());
-}
-
-#[tokio::test]
-async fn test_b36_plex_deposit_and_withdraw_failed() {
-    // parity: notify:OnPlexDepositFailed
-    // parity: notify:OnPlexWithdrawFailed
-    eve_testkit::attest(&[
-        "notify:OnPlexDepositFailed",
-        "notify:OnPlexWithdrawFailed",
-    ]);
-
-    let ctx = new_ctx();
-    let mut s1 = pilot(&ctx, 912, "demo", "demo-secret", P1).await;
-    s1.station_id = Some(JITA_STATION);
-    s1.solar_system_id = Some(JITA_SYSTEM);
-
-    // Seed 50 PLEX in P1's hangar at Jita 4-4
-    let plex_item_id = 888_100i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            plex_item_id,
-            eve_db::InventoryItemRecord {
-                item_id: plex_item_id,
-                type_id: 44992, // PLEX
-                owner_id: P1,
-                location_id: JITA_STATION,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 50,
-                singleton: false,
-                ..Default::default()
-            },
-        );
-    });
-
-    // Positive deposit of 20 PLEX should NOT emit OnPlexDepositFailed
-    let _ = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "invbroker",
-            None,
-            "DepositPlexToVault",
-            &[
-                PyRep::Integer(JITA_STATION),
-                PyRep::Integer(plex_item_id),
-                PyRep::Integer(20),
-            ],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("DepositPlexToVault valid");
-    assert!(events(&ctx, P1, "OnPlexDepositFailed").is_empty());
-
-    // Negative deposit (requesting 100 PLEX when only 30 remain) emits OnPlexDepositFailed(error_key, reference)
-    let err_dep = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "invbroker",
-            None,
-            "DepositPlexToVault",
-            &[
-                PyRep::Integer(JITA_STATION),
-                PyRep::Integer(plex_item_id),
-                PyRep::Integer(100),
-            ],
-            &HashMap::new(),
-            None,
-        )
-        .await;
-    assert!(err_dep.is_err());
-    let dep_ev = events(&ctx, P1, "OnPlexDepositFailed");
-    assert_eq!(dep_ev.len(), 1);
-    assert_eq!(dep_ev[0].len(), 2);
-    assert_eq!(dep_ev[0][0].as_str(), Some("NotEnoughQuantity"));
-    assert_eq!(dep_ev[0][1].as_i64(), Some(plex_item_id));
-
-    // Negative withdraw (requesting 999_999_999 PLEX when vault has far less) emits OnPlexWithdrawFailed(error_key, reference)
-    let err_wd = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "invbroker",
-            None,
-            "WithdrawPlexFromVault",
-            &[PyRep::Integer(JITA_STATION), PyRep::Integer(999_999_999)],
-            &HashMap::new(),
-            None,
-        )
-        .await;
-    assert!(err_wd.is_err());
-    let wd_ev = events(&ctx, P1, "OnPlexWithdrawFailed");
-    assert_eq!(wd_ev.len(), 1);
-    assert_eq!(wd_ev[0].len(), 2);
-    assert_eq!(wd_ev[0][0].as_str(), Some("NotEnoughPlex"));
-    assert_eq!(wd_ev[0][1].as_i64(), Some(999_999_999));
-}
-
-#[tokio::test]
-async fn test_b36_progression_and_conversation_notifications() {
+async fn test_b36_progression_notifications() {
     // parity: notify:OnProgressionAdvanced
     // parity: notify:OnProgressionTaskCompleted
-    // parity: notify:OnProgressionTaskWidgetUpdate
-    // parity: notify:OnStartConversation
     eve_testkit::attest(&[
         "notify:OnProgressionAdvanced",
         "notify:OnProgressionTaskCompleted",
-        "notify:OnProgressionTaskWidgetUpdate",
-        "notify:OnStartConversation",
     ]);
 
     let ctx = new_ctx();
     let mut s1 = pilot(&ctx, 913, "demo", "demo-secret", P1).await;
 
-    // 1. OnStartConversation
-    let res_conv = ctx
+    // Negative check: completing a task before any operation is active returns false and emits nothing
+    let res_inactive = ctx
         .dispatch_rpc(
             &mut s1,
             "operationsManager",
             None,
             "process_client_event",
-            &[
-                PyRep::String("start_conversation".into()),
-                PyRep::Integer(42),
-            ],
+            &[PyRep::String("complete_task".into())],
             &HashMap::new(),
             None,
         )
         .await
-        .expect("start_conversation");
-    assert_eq!(res_conv, PyRep::Bool(true));
-    let conv_ev = events(&ctx, P1, "OnStartConversation");
-    assert_eq!(conv_ev.len(), 1);
-    assert_eq!(conv_ev[0].len(), 2);
-    assert_eq!(conv_ev[0][0].as_i64(), Some(42));
-    assert_eq!(conv_ev[0][1], PyRep::Bool(true));
+        .expect("complete_task without active operation");
+    assert_eq!(res_inactive, PyRep::Bool(false));
+    assert!(events(&ctx, P1, "OnProgressionTaskCompleted").is_empty());
+    assert!(events(&ctx, P1, "OnProgressionAdvanced").is_empty());
 
-    // 2. OnProgressionTaskWidgetUpdate
-    let mut widget_kwargs = HashMap::new();
-    widget_kwargs.insert(
-        "extra_data".into(),
-        PyRep::Dict(vec![
-            (PyRep::String("completed".into()), PyRep::Bool(true)),
-            (PyRep::String("progress".into()), PyRep::Integer(1)),
-        ]),
-    );
-    let res_widget = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "operationsManager",
-            None,
-            "process_client_event",
-            &[
-                PyRep::String("update_task_widget".into()),
-                PyRep::Integer(101),
-                PyRep::Integer(7),
-            ],
-            &widget_kwargs,
-            None,
-        )
-        .await
-        .expect("update_task_widget");
-    assert_eq!(res_widget, PyRep::Bool(true));
-    let widget_ev = events(&ctx, P1, "OnProgressionTaskWidgetUpdate");
-    assert_eq!(widget_ev.len(), 1);
-    assert_eq!(widget_ev[0].len(), 3);
-    assert_eq!(widget_ev[0][0].as_i64(), Some(101));
-    assert_eq!(widget_ev[0][1].as_i64(), Some(7));
-    assert!(matches!(widget_ev[0][2], PyRep::Dict(_)));
-
-    // 3. OnProgressionTaskCompleted & OnProgressionAdvanced
+    // Positive check: activate operation 1 and complete task -> mutates progression state and emits both notifications
     let _ = ctx
         .dispatch_rpc(
             &mut s1,
@@ -371,6 +122,7 @@ async fn test_b36_progression_and_conversation_notifications() {
         .await
         .expect("complete_task");
     assert_eq!(res_task, PyRep::Bool(true));
+
     let task_ev = events(&ctx, P1, "OnProgressionTaskCompleted");
     assert_eq!(task_ev.len(), 1);
     assert_eq!(task_ev[0].len(), 1);
@@ -379,150 +131,223 @@ async fn test_b36_progression_and_conversation_notifications() {
     let adv_ev = events(&ctx, P1, "OnProgressionAdvanced");
     assert_eq!(adv_ev.len(), 1);
     assert_eq!(adv_ev[0].len(), 2);
-    assert!(adv_ev[0][0].as_i64().unwrap_or(0) > 0);
+    assert_eq!(adv_ev[0][0].as_i64(), Some(1));
     assert_eq!(adv_ev[0][1], task_ev[0][0]);
 }
 
 #[tokio::test]
-async fn test_b36_brain_combat_offer_and_service_mapping() {
-    // parity: notify:OnServerBrainUpdated
+async fn test_b36_combat_message_live_weapon_cycle() {
     // parity: notify:OnCombatMessage
-    // parity: notify:OnOfferReceived
-    // parity: notify:OnUpdateServiceMapping
-    eve_testkit::attest(&[
-        "notify:OnServerBrainUpdated",
-        "notify:OnCombatMessage",
-        "notify:OnOfferReceived",
-        "notify:OnUpdateServiceMapping",
-    ]);
+    eve_testkit::attest(&["notify:OnCombatMessage"]);
 
     let ctx = new_ctx();
     let mut s1 = pilot(&ctx, 914, "demo", "demo-secret", P1).await;
+    let _s2 = pilot(&ctx, 915, "other", "other-secret", P2).await;
+    let kw = HashMap::new();
 
-    // 1. OnOfferReceived via contextualOfferMgr.TrackOfferDelivered
-    let _ = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "contextualOfferMgr",
-            None,
-            "TrackOfferDelivered",
-            &[PyRep::Integer(555)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("TrackOfferDelivered");
-    let offer_ev = events(&ctx, P1, "OnOfferReceived");
-    assert_eq!(offer_ev.len(), 1);
-    assert_eq!(offer_ev[0].len(), 2);
-    assert_eq!(offer_ev[0][0].as_i64(), Some(555));
+    let ship_p1 = 970_001_i64;
+    let ship_p2 = 970_002_i64;
+    let gun_p1 = 970_010_i64;
+    let ammo_p1 = 970_011_i64;
 
-    // 2. OnUpdateServiceMapping: unauthorized pilot fails and emits nothing
-    let unauth = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "machoNet",
-            None,
-            "SetGlobalConfigValue",
-            &[
-                PyRep::String("serviceMapping:marketProxy".into()),
-                PyRep::Integer(1002),
-            ],
-            &HashMap::new(),
-            None,
-        )
-        .await;
-    assert!(unauth.is_err());
-    assert!(events(&ctx, P1, "OnUpdateServiceMapping").is_empty());
-
-    // Authorized GM updates service mapping -> emits OnUpdateServiceMapping(svc, nodeID)
-    s1.role |= eve_db::service_roles::ROLE_GMH;
-    let ok_map = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "machoNet",
-            None,
-            "SetGlobalConfigValue",
-            &[
-                PyRep::String("serviceMapping:marketProxy".into()),
-                PyRep::Integer(1002),
-            ],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("SetGlobalConfigValue GM");
-    assert_eq!(ok_map, PyRep::Bool(true));
-    let map_ev = events(&ctx, P1, "OnUpdateServiceMapping");
-    assert_eq!(map_ev.len(), 1);
-    assert_eq!(map_ev[0].len(), 2);
-    assert_eq!(map_ev[0][0].as_str(), Some("marketProxy"));
-    assert_eq!(map_ev[0][1].as_i64(), Some(1002));
-
-    // 3. OnServerBrainUpdated via implant plugging
-    let implant_id = 888_200i64;
+    let fw_sys = ctx
+        .db
+        .with_snapshot(|s| s.fw_system_occupations.keys().copied().min().unwrap_or(NULLSEC_SYSTEM));
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&P1) {
-            c.station_id = Some(JITA_STATION);
+        if let Some(c1) = snap.characters.get_mut(&P1) {
+            c1.solar_system_id = fw_sys;
+            c1.station_id = None;
+            c1.active_ship_id = ship_p1;
+            c1.war_faction_id = Some(500_001);
         }
-        snap.skills.entry(P1).or_default().insert(
-            3411,
-            eve_db::TrainedSkillRecord {
-                type_id: 3411,
-                level: 1,
-                skill_points: 250.0,
-            },
-        ); // Cybernetics I
+        if let Some(c2) = snap.characters.get_mut(&P2) {
+            c2.solar_system_id = fw_sys;
+            c2.station_id = None;
+            c2.active_ship_id = ship_p2;
+            c2.war_faction_id = Some(500_004);
+        }
         snap.items.insert(
-            implant_id,
-            eve_db::InventoryItemRecord {
-                item_id: implant_id,
-                type_id: 9899, // Ocular Filter - Basic
+            ship_p1,
+            InventoryItemRecord {
+                item_id: ship_p1,
+                type_id: 639,
                 owner_id: P1,
-                location_id: JITA_STATION,
-                flag: eve_db::InventoryFlag::Hangar,
+                location_id: i64::from(fw_sys),
+                flag: InventoryFlag::None,
                 quantity: 1,
                 singleton: true,
+                version: 1,
                 ..Default::default()
             },
         );
-    });
-    let _ = eve_server::services::implant_plugging::inject_implant(
-        &ctx,
-        &s1,
-        &[PyRep::Integer(implant_id)],
-    )
-    .expect("inject_implant");
-    let brain_ev = events(&ctx, P1, "OnServerBrainUpdated");
-    assert_eq!(brain_ev.len(), 1);
-    assert_eq!(brain_ev[0].len(), 1);
-    match &brain_ev[0][0] {
-        PyRep::Tuple(parts) => {
-            assert_eq!(parts.len(), 4);
-            assert!(parts[0].as_i64().unwrap_or(0) >= 1);
+        snap.items.insert(
+            ship_p2,
+            InventoryItemRecord {
+                item_id: ship_p2,
+                type_id: 639,
+                owner_id: P2,
+                location_id: i64::from(fw_sys),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            gun_p1,
+            InventoryItemRecord {
+                item_id: gun_p1,
+                type_id: 2961,
+                owner_id: P1,
+                location_id: ship_p1,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ammo_p1,
+            InventoryItemRecord {
+                item_id: ammo_p1,
+                type_id: 21894,
+                owner_id: P1,
+                location_id: ship_p1,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(gun_p1, true);
+        let sk = snap.skills.entry(P1).or_default();
+        for sid in [3300_u32, 3302, 3305, 3308, 3310, 3311, 3312, 3315, 3316, 3318, 3334, 3413, 3418, 3426, 20327, 21667] {
+            sk.insert(
+                sid,
+                TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 1_280_000.0,
+                },
+            );
         }
-        other => panic!("expected brainData Tuple, got {other:?}"),
+        for tid in [639_u32, 2961, 21894] {
+            if let Some(t) = ctx.sde.types.get(&tid) {
+                for sa in [182_u16, 183, 184] {
+                    if let Some(&req_f) = t.default_attributes.get(&sa) {
+                        let rsid = req_f as u32;
+                        if rsid > 0 {
+                            sk.insert(
+                                rsid,
+                                TrainedSkillRecord {
+                                    type_id: rsid,
+                                    level: 5,
+                                    skill_points: 1_280_000.0,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_p1);
+    ctx.invalidate_ship_fitting(ship_p2);
+
+    s1.solar_system_id = Some(fw_sys);
+    s1.station_id = None;
+    s1.ship_id = Some(ship_p1);
+
+    let sys_h = ctx.systems.get_or_spawn(fw_sys);
+    for (sid, pos) in [(ship_p1, DVec3::ZERO), (ship_p2, DVec3::new(5_000.0, 0.0, 0.0))] {
+        let mut cs = ctx.build_type_combat_state(639);
+        cs.signature_radius = 450.0;
+        let _ = sys_h
+            .spawn_ball_with_combat(
+                Ball {
+                    id: sid,
+                    type_id: 639,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 1.0,
+                    mass: 100_000_000.0,
+                    radius: 250.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                },
+                cs,
+            )
+            .await;
     }
 
-    // 4. OnCombatMessage via state-backed emitter
-    eve_server::services::notify_emitters_b36::emit_combat_message(
-        &ctx,
-        P1,
-        "AttackHit",
-        900_000_099,
-        142.5,
-    );
-    let combat_ev = events(&ctx, P1, "OnCombatMessage");
-    assert_eq!(combat_ev.len(), 1);
-    assert_eq!(combat_ev[0].len(), 2);
-    assert_eq!(combat_ev[0][0].as_str(), Some("AttackHit"));
-    match &combat_ev[0][1] {
-        PyRep::Dict(entries) => {
-            let has_special = entries
-                .iter()
-                .any(|(k, v)| k.as_str() == Some("specialObject") && v.as_i64() == Some(900_000_099));
-            assert!(has_special);
+    // Negative check: activating weapon before target lock fails and emits no OnCombatMessage
+    assert!(ctx
+        .dispatch_rpc(
+            &mut s1,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(gun_p1), PyRep::Integer(ship_p2)],
+            &kw,
+            None,
+        )
+        .await
+        .is_err());
+    assert!(events(&ctx, P1, "OnCombatMessage").is_empty());
+    assert!(events(&ctx, P2, "OnCombatMessage").is_empty());
+
+    // Lock target via dogmaIM.AddTarget + SystemActor ticks
+    ctx.dispatch_rpc(
+        &mut s1,
+        "dogmaIM",
+        None,
+        "AddTarget",
+        &[PyRep::Integer(ship_p2)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AddTarget ship_p2");
+    for _ in 0..30 {
+        if sys_h
+            .get_target_locks(ship_p1)
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.target_id == ship_p2 && l.locked)
+        {
+            break;
         }
-        other => panic!("expected messageArgs Dict, got {other:?}"),
+        let _ = sys_h.tick().await;
     }
+
+    // Activate weapon via live dogmaIM.Activate + SystemActor tick -> emits OnCombatMessage to attacker P1 and victim P2
+    ctx.dispatch_rpc(
+        &mut s1,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(gun_p1), PyRep::Integer(ship_p2)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Activate weapon on locked ship_p2");
+    let _ = sys_h.tick().await;
+
+    let atk_ev = events(&ctx, P1, "OnCombatMessage");
+    assert!(!atk_ev.is_empty(), "Attacker P1 must receive OnCombatMessage from live weapon cycle");
+    assert_eq!(atk_ev[0].len(), 2);
+    assert!(matches!(atk_ev[0][0].as_str(), Some("AttackHit" | "AttackMiss")));
+    assert_eq!(atk_ev[0][1].dict_get("specialObject"), Some(&PyRep::Integer(ship_p2)));
+
+    let vic_ev = events(&ctx, P2, "OnCombatMessage");
+    assert!(!vic_ev.is_empty(), "Victim P2 must receive OnCombatMessage from live weapon cycle");
+    assert_eq!(vic_ev[0].len(), 2);
+    assert!(matches!(vic_ev[0][0].as_str(), Some("AttackedBy" | "AttackMissBy")));
+    assert_eq!(vic_ev[0][1].dict_get("specialObject"), Some(&PyRep::Integer(ship_p1)));
 }

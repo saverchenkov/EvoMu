@@ -1102,6 +1102,15 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         "charid",
                         vec![dmg_dict.clone()],
                     );
+                    crate::services::notify_emitters_b36::emit_combat_message(
+                        ctx,
+                        attacker_char_id,
+                        if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
+                        victim_id,
+                        applied_dmg,
+                        module_type_id,
+                        false,
+                    );
                     msg_tuples.push(PyRep::Tuple(vec![dmg_dict]));
                     let victim_char_opt = ctx.db.with_snapshot(|snap| {
                         snap.characters
@@ -1116,6 +1125,15 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             })
                     });
                     if let Some(victim_char_id) = victim_char_opt {
+                        crate::services::notify_emitters_b36::emit_combat_message(
+                            ctx,
+                            victim_char_id,
+                            if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
+                            attacker_ship_id,
+                            applied_dmg,
+                            module_type_id,
+                            false,
+                        );
                         let vic_dict = PyRep::Dict(vec![
                             (PyRep::String("damage".into()), PyRep::Real(applied_dmg)),
                             (PyRep::String("source".into()), PyRep::Integer(attacker_ship_id)),

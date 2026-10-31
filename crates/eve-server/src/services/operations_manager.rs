@@ -929,17 +929,6 @@ pub fn handle(
                 return Some(Ok(PyRep::Bool(true)));
             }
 
-            if super::notify_emitters_b36::handle_conversation_and_widget_events(
-                ctx,
-                char_id,
-                &event_name,
-                args,
-                amount,
-                extra_data,
-            ) {
-                return Some(Ok(PyRep::Bool(true)));
-            }
-
             if event_name == "set_active_category_id" || event_name == "activate_category" {
                 let cat_id = extra_data
                     .and_then(|ed| match ed {

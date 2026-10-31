@@ -437,20 +437,6 @@ pub fn inject_implant(
         "charid",
         vec![],
     );
-    let brain_version = ctx.db.with_snapshot(|snap| {
-        snap.active_implants
-            .get(&char_id)
-            .map(|v| v.len() as i64)
-            .unwrap_or(0)
-    }) + 1;
-    super::notify_emitters_b36::emit_server_brain_updated(
-        ctx,
-        char_id,
-        brain_version,
-        vec![],
-        vec![],
-        vec![],
-    );
     Ok(PyRep::None)
 }
 
@@ -523,20 +509,6 @@ pub fn destroy_implant(
         NotificationTarget::Character(char_id),
         "OnServerImplantsChanged",
         "charid",
-        vec![],
-    );
-    let brain_version = ctx.db.with_snapshot(|snap| {
-        snap.active_implants
-            .get(&char_id)
-            .map(|v| v.len() as i64)
-            .unwrap_or(0)
-    }) + 1;
-    super::notify_emitters_b36::emit_server_brain_updated(
-        ctx,
-        char_id,
-        brain_version,
-        vec![],
-        vec![],
         vec![],
     );
     Ok(PyRep::None)

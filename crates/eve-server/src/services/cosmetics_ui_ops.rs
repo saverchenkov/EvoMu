@@ -793,14 +793,6 @@ fn handle_track_offer(ctx: &ServerContext, session: &mut SessionState, method: &
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::None)
     })?;
-    if method == "TrackOfferDelivered" {
-        let offer = PyRep::keyval([
-            ("offerID", PyRep::Integer(offer_id)),
-            ("deliveredAt", PyRep::Integer(now_unix as i64)),
-            ("status", PyRep::String("delivered".into())),
-        ]);
-        super::notify_emitters_b36::emit_offer_received(ctx, char_id, offer_id, offer);
-    }
     Ok(PyRep::None)
 }
 

@@ -145,7 +145,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
 
     // 1. Within 1,000 km of NPC station and stargate -> ProximityRestriction
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -153,7 +153,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     );
     let _ = sys_h.set_ball_position(ship_id, gate_pos + DVec3::new(400_000.0, 0.0, 0.0)).await;
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -194,7 +194,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     .expect("Warp to deep safe");
     step_until_stopped(&ctx, low_sys, ship_id).await;
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -223,7 +223,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         )
         .await;
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -256,7 +256,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         );
     });
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -272,7 +272,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
         .await
         .expect("SafeLogoff");
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -326,7 +326,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(gun_caracal)], &kw, None).await;
     sys_h.try_remove_ball(enemy_ship);
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -337,14 +337,14 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
     // 5. Deploy 1st Abyssal Trace in open space (succeeds), then < 1,000 km from trace -> ProximityRestriction,
     // and activate trace gate via AbyssalEntranceGateActivation to enter Abyssal Deadspace (32_000_000..=32_999_999)
     let dep = kv_map(
-        &ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        &ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .expect("Open space AbyssalEntranceDeployment"),
     );
     let trace_ball_id = dep["traceBallID"].as_i64().expect("traceBallID");
     let _ = sys_h.set_ball_position(ship_id, open_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(filament_id), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,
@@ -520,7 +520,7 @@ async fn test_b36_abyssal_activation_and_deadspace_pocket_rules() {
 
     // Inside deadspace pocket Room 1 -> both Abyssal and random jump filaments refused with ShipInDungeon!
     assert_eq!(
-        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_rifter)], &kw, None)
+        ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_rifter), PyRep::Integer(i64::from(FIL_T1_ELEC))], &kw, None)
             .await
             .unwrap_err()
             .code,

@@ -147,11 +147,21 @@ pub fn prime_cache_result(
         return Ok(PyRep::None);
     }
 
+    let now_u = ctx.now_unix();
+    let rt_until = with_combat_runtime(ctx, |rt| {
+        rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
+    });
     let rep = ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.system_states.get(&sys_id) else {
             return PyRep::None;
         };
         let pulse_st = get_ess_reserve_pulses(snap, sys_id);
+        let eff_until = pulse_st.unlocked_until_unix.max(rt_until);
+        let rem_pulses = if pulse_st.unlocked_until_unix > 0 && eff_until <= now_u {
+            0
+        } else {
+            pulse_st.pulses_remaining
+        };
         let ess_id = 820_000_000 + sys_id as i64;
 
         let main_bank_link = if let Some(linked_char_id) = st.ess_linked_character_id {
@@ -193,7 +203,7 @@ pub fn prime_cache_result(
             ),
             (
                 PyRep::String("reserveBankPulsesRemaining".into()),
-                PyRep::Integer(pulse_st.pulses_remaining as i64),
+                PyRep::Integer(rem_pulses as i64),
             ),
             (
                 PyRep::String("reserveBankPulsesTotal".into()),
@@ -322,7 +332,9 @@ pub async fn handle_ess_link(
             &snap.service_state_blobs,
             sys_id,
         );
-        let is_unlocked = unlocked_until > now_unix || pulse_st.pulses_remaining > 0;
+        let eff_unlocked_until = pulse_st.unlocked_until_unix.max(unlocked_until);
+        let is_unlocked = eff_unlocked_until > now_unix
+            || (pulse_st.unlocked_until_unix == 0 && pulse_st.pulses_remaining > 0);
         if is_reserve {
             if let Some(other) = pulse_st.reserve_linked_character_id {
                 if other != char_id {
@@ -356,9 +368,12 @@ pub async fn handle_ess_link(
         if is_reserve && !already_linked {
             if is_unlocked {
                 if pulse_st.pulses_total == 0 && pulse_st.last_pulse_sec.is_none() {
-                    let mins = ((unlocked_until.saturating_sub(now_unix) + 59) / 60).max(1) as u32;
+                    let mins = ((eff_unlocked_until.saturating_sub(now_unix) + 59) / 60).max(1) as u32;
                     pulse_st.pulses_total = mins;
                     pulse_st.pulses_remaining = mins;
+                }
+                if pulse_st.unlocked_until_unix == 0 && eff_unlocked_until > now_unix {
+                    pulse_st.unlocked_until_unix = eff_unlocked_until;
                 }
                 if pulse_st.pulses_remaining == 0 {
                     return Err(BridgeRpcError {
@@ -389,7 +404,9 @@ pub async fn handle_ess_link(
                         snap.items.remove(&key_id);
                     }
                 }
-                unlocked_until_new = Some(now_unix + dur_mins * 60);
+                let new_until = now_unix + dur_mins * 60;
+                unlocked_until_new = Some(new_until);
+                pulse_st.unlocked_until_unix = new_until;
                 pulse_st.pulses_total = dur_mins as u32;
                 pulse_st.pulses_remaining = dur_mins as u32;
                 pulse_st.last_pulse_sec = None;
@@ -481,6 +498,7 @@ pub async fn handle_ess_link(
                     st.ess_link_started_tick = None;
                 }
                 if pulse_st.pulses_remaining == 0 {
+                    pulse_st.unlocked_until_unix = 0;
                     clear_unlock = true;
                 }
             }

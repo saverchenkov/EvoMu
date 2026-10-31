@@ -1247,6 +1247,7 @@ impl SystemHandle {
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
+        super::persist_landed_warps_in_db(&bp, &events, db_opt);
         if let Some(lock_hook) = self.target_lock_completed_hook.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
             for ev in &events {
                 if let eve_destiny::DestinyEvent::OnTarget { mode, source_id, target_id } = ev {
