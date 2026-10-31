@@ -1,34 +1,12 @@
 #![forbid(unsafe_code)]
 
-use crate::quasar_sov_equinox_hub::{id_req, rpc, sess};
+use crate::quasar_sov_equinox_hub::sess;
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_sde_localization_fsd_pickle_resources_and_server_rpcs() {
-    // parity: sde:res:/localizationfsd/localization_fsd_de.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_en-us.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_es.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_fr.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_ja.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_ko.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_main.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_ru.pickle
-    // parity: sde:res:/localizationfsd/localization_fsd_zh.pickle
-    eve_testkit::attest(&[
-        "sde:res:/localizationfsd/localization_fsd_de.pickle",
-        "sde:res:/localizationfsd/localization_fsd_en-us.pickle",
-        "sde:res:/localizationfsd/localization_fsd_es.pickle",
-        "sde:res:/localizationfsd/localization_fsd_fr.pickle",
-        "sde:res:/localizationfsd/localization_fsd_ja.pickle",
-        "sde:res:/localizationfsd/localization_fsd_ko.pickle",
-        "sde:res:/localizationfsd/localization_fsd_main.pickle",
-        "sde:res:/localizationfsd/localization_fsd_ru.pickle",
-        "sde:res:/localizationfsd/localization_fsd_zh.pickle",
-    ]);
-
     let ctx = ServerContext::new();
 
     let expected: &[(&str, &str, usize, &str)] = &[
@@ -106,7 +84,7 @@ async fn test_sde_localization_fsd_pickle_resources_and_server_rpcs() {
         );
     }
 
-    // Exercise localizationServer RPCs and Quasar GetLocalizedTextRequest
+    // Exercise localizationServer RPCs
     let mut gm = sess(91_001, 91_001, 1000002, 30000142, 0);
     gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let changes = ctx
@@ -128,14 +106,4 @@ async fn test_sde_localization_fsd_pickle_resources_and_server_rpcs() {
         .await
         .expect("ReloadFSDPickle");
     assert!(!matches!(reload, PyRep::None));
-
-    let mut authed = sess(91_002, 91_002, 1000002, 30000142, 0);
-    let resp = rpc(
-        &ctx,
-        &mut authed,
-        "eve.localization.message.api.GetLocalizedTextRequest",
-        id_req(1, 93841), // Rifter descriptionID
-    )
-    .await;
-    assert_eq!(resp.status_code, STATUS_OK);
 }

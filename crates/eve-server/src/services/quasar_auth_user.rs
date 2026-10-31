@@ -459,21 +459,6 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         }),
     );
 
-    // 7. eve.localization.message.api.GetLocalizedTextRequest -> GetLocalizedTextResponse
-    router.register_handler(
-        "eve.localization.message.api.GetLocalizedTextRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_string_field(1, "Welcome to EVE Online Tranquility", &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.localization.message.api.GetLocalizedTextResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
-
     register_federated_and_transfer_handlers(router, db);
 }
 
