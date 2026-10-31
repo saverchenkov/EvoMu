@@ -606,13 +606,60 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
     let ctx2 = Arc::new(ServerContext::with_repository(repo2));
     let router2 = EsiRouter::new(ctx2);
     let tok_char2 = issue_token_with_scopes(&router2.ctx, char1, vec!["esi-industry.read_character_jobs.v1"]);
-    let persisted = get_json(
-        &router2,
-        &spec,
-        format!("/v1/characters/{char1}/industry/jobs/?include_completed=true"),
-        Some(&tok_char2),
-    );
+    let persisted = get_json(&router2, &spec, format!("/v1/characters/{char1}/industry/jobs/?include_completed=true"), Some(&tok_char2));
     assert!(persisted.as_array().unwrap().iter().any(|j| j["job_id"] == job_id));
     assert!(!persisted.as_array().unwrap().iter().any(|j| j["job_id"] == corp_job_id));
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_esi_corp_roles_personnel_manager_and_grantable_role_gate() {
+    let (db_path, ctx) = open_seeded_sqlite_ctx("corp_roles_gate");
+    let router = EsiRouter::new(ctx.clone());
+    let spec = OpenApiSpec::pinned();
+    let (corp1, ceo_id, plain_id, trader_id, pm_id, grantable_id) =
+        (98_000_077_i64, 90_000_001_i64, 90_000_801_i64, 90_000_802_i64, 90_000_803_i64, 90_000_804_i64);
+
+    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        let base = snap.characters[&ceo_id].clone();
+        let mut corp = CorporationRecord {
+            corporation_id: corp1, name: "Roles Gate Corp".into(), ticker: "RGC".into(), ceo_id, ..Default::default()
+        };
+        for (cid, roles) in [
+            (ceo_id, ROLE_DIRECTOR),
+            (plain_id, 0),
+            (trader_id, eve_db::corp_roles::ROLE_TRADER),
+            (pm_id, eve_db::corp_roles::ROLE_PERSONNEL_MANAGER),
+            (grantable_id, 0),
+        ] {
+            let mut ch = base.clone();
+            ch.character_id = cid;
+            ch.corporation_id = corp1;
+            snap.characters.insert(cid, ch);
+            corp.members.insert(cid);
+            corp.member_roles.insert(cid, roles);
+        }
+        snap.corporations.insert(corp1, corp);
+        snap.corp_role_assignments.insert(
+            (corp1, grantable_id),
+            eve_db::CorpMemberRoleAssignment { character_id: grantable_id, grantable_roles: ROLE_FACTORY_MANAGER, ..Default::default() },
+        );
+        Ok(())
+    });
+
+    let tok_for = |cid: i64| issue_token_with_scopes(&ctx, cid, vec!["esi-corporations.read_corporation_membership.v1"]);
+    let (tok_plain, tok_trader, tok_pm, tok_grantable, tok_ceo) =
+        (tok_for(plain_id), tok_for(trader_id), tok_for(pm_id), tok_for(grantable_id), tok_for(ceo_id));
+
+    assert_status(&router, format!("/v1/corporations/{corp1}/roles/"), Some(&tok_plain), 403);
+    assert_status(&router, format!("/v1/corporations/{corp1}/roles/"), Some(&tok_trader), 403);
+    assert_status(&router, format!("/v1/corporations/{corp1}/roles/history/"), Some(&tok_plain), 403);
+    assert_status(&router, format!("/v1/corporations/{corp1}/roles/history/"), Some(&tok_pm), 403);
+
+    for tok in [&tok_pm, &tok_grantable, &tok_ceo] {
+        let arr = get_json(&router, &spec, format!("/v1/corporations/{corp1}/roles/"), Some(tok));
+        assert!(arr.as_array().unwrap().iter().any(|r| r["character_id"] == grantable_id));
+    }
+    let _ = get_json(&router, &spec, format!("/v1/corporations/{corp1}/roles/history/"), Some(&tok_ceo));
     let _ = std::fs::remove_file(&db_path);
 }

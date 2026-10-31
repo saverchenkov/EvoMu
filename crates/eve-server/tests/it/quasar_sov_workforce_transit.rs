@@ -40,7 +40,7 @@ fn find_transit_chain(ctx: &ServerContext) -> (u32, u32, u32) {
     let mut sys_ids: Vec<u32> = ctx.sde.solar_systems.keys().copied().collect();
     sys_ids.sort_unstable();
     for &a in &sys_ids {
-        if eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, a).planet_workforce < 200 {
+        if eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, a).planet_workforce < 2_000 {
             continue;
         }
         let reach_a = systems_within_jumps(&ctx.sde, a, WORKFORCE_TRANSFER_MAX_JUMPS);
@@ -224,4 +224,109 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
     assert_eq!(cap.status_code, STATUS_OK);
     let cap_bytes = cap.payload.unwrap().value;
     assert!(varint(&cap_bytes, 1).unwrap_or(0) >= 1, "Must return positive activity capacity");
+}
+
+#[tokio::test]
+async fn test_sov_workforce_transit_disconnect_drops_starved_upgrades_to_low_power() {
+    // Regression test for B-03: severing a Transit relay must immediately drop starved zero-fuel
+    // downstream upgrades into POWER_STATE_LOW (3) and emit HubUpgradesSimulatedNotice.
+    const MINOR_THREAT_1: u32 = 82_499; // 200 power, 1_800 workforce, 0 fuel/hr
+    const UPGRADE_ITEM_ID: i64 = 995_001;
+
+    let ctx = ServerContext::new();
+    let (sys_a, sys_b, sys_c) = find_transit_chain(&ctx);
+    seed_hub(&ctx, HUB_A, sys_a);
+    seed_hub(&ctx, HUB_B, sys_b);
+    // Seed HUB_C WITHOUT Orbital Skyhooks so HUB_C has 0 local workforce and depends entirely on imported workforce.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(HUB_C, structure(HUB_C, CORP, sys_c, TYPE_SOVEREIGNTY_HUB));
+        snap.items.insert(
+            UPGRADE_ITEM_ID,
+            eve_db::InventoryItemRecord {
+                item_id: UPGRADE_ITEM_ID,
+                type_id: MINOR_THREAT_1,
+                owner_id: CORP,
+                location_id: HUB_C,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.solar_system_id = sys_c;
+        }
+    });
+
+    let mut sc = sess(9103, PILOT, CORP, sys_c, corp_roles::ROLE_DIRECTOR);
+    let mut rx_c = subscribe(&ctx, &mut sc).await;
+
+    // 1. Enable Transit on HUB_B, export 2_000 workforce from HUB_A -> sys_c, and import from sys_a on HUB_C.
+    let mut transit_cfg = Vec::new();
+    encode_varint_field(4, 1, &mut transit_cfg);
+    assert_eq!(
+        rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", encode_configure_req(HUB_B, &transit_cfg)).await.status_code,
+        STATUS_OK
+    );
+
+    let mut exp_inner = id_req(3, u64::from(sys_c));
+    encode_varint_field(2, 2_000, &mut exp_inner);
+    let mut exp_cfg = Vec::new();
+    encode_bytes_field(3, &exp_inner, &mut exp_cfg);
+    assert_eq!(
+        rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", encode_configure_req(HUB_A, &exp_cfg)).await.status_code,
+        STATUS_OK
+    );
+
+    let mut src = Vec::new();
+    encode_bytes_field(1, &idm(u64::from(sys_a)), &mut src);
+    let mut imp_inner = Vec::new();
+    encode_bytes_field(1, &src, &mut imp_inner);
+    let mut imp_cfg = Vec::new();
+    encode_bytes_field(2, &imp_inner, &mut imp_cfg);
+    assert_eq!(
+        rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", encode_configure_req(HUB_C, &imp_cfg)).await.status_code,
+        STATUS_OK
+    );
+
+    // 2. Install & online zero-fuel Minor Threat Detection Array 1 (82499) on HUB_C; verify POWER_STATE_ONLINE (2).
+    let mut install_req = Vec::new();
+    encode_bytes_field(1, &idm(UPGRADE_ITEM_ID as u64), &mut install_req);
+    let mut cfg_entry = Vec::new();
+    encode_bytes_field(1, &idm(u64::from(MINOR_THREAT_1)), &mut cfg_entry);
+    encode_varint_field(2, 1, &mut cfg_entry);
+    encode_bytes_field(2, &cfg_entry, &mut install_req);
+    encode_bytes_field(3, &idm(HUB_C as u64), &mut install_req);
+    let install_rsp = rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", install_req).await;
+    assert_eq!(install_rsp.status_code, STATUS_OK);
+    let up_before = field(&field(&install_rsp.payload.unwrap().value, 1).unwrap(), 2).unwrap();
+    assert_eq!(field(&up_before, 2).and_then(|a| varint(&a, 2)), Some(2), "POWER_STATE_ONLINE while Transit supplies workforce");
+
+    // 3. Disable Transit on HUB_B (Transit -> Inactive) and verify HUB_C upgrade immediately drops to POWER_STATE_LOW (3) with HubUpgradesSimulatedNotice.
+    let _ = drain(&mut rx_c);
+    let mut inactive_cfg = Vec::new();
+    encode_varint_field(1, 1, &mut inactive_cfg);
+    let off_rsp = rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", encode_configure_req(HUB_B, &inactive_cfg)).await;
+    assert_eq!(off_rsp.status_code, STATUS_OK);
+
+    let notices = drain(&mut rx_c);
+    let sim_notice = notices
+        .iter()
+        .find(|(t, _)| t == "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice")
+        .expect("Disabling Transit relay must emit HubUpgradesSimulatedNotice on starved HUB_C");
+    let sim_up = field(&field(&sim_notice.1, 1).unwrap(), 2).unwrap();
+    assert_eq!(field(&sim_up, 2).and_then(|a| varint(&a, 2)), Some(3), "Notice must report POWER_STATE_LOW (3)");
+
+    let res_notice = notices
+        .iter()
+        .find(|(t, _)| t == "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice")
+        .expect("Disabling Transit relay must emit post-overload ResourcesSimulatedNotice on HUB_C");
+    assert_eq!(field(&res_notice.1, 4).and_then(|w| varint(&w, 1)), Some(0), "HUB_C available workforce must drop to 0");
+    assert_eq!(field(&res_notice.1, 4).and_then(|w| varint(&w, 2)), Some(0), "Low-power upgrade must release workforce allocation");
+
+    let get_hu = rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.upgrade.api.GetHubUpgradesRequest", id_req(1, HUB_C as u64)).await;
+    assert_eq!(get_hu.status_code, STATUS_OK);
+    let up_after = field(&field(&get_hu.payload.unwrap().value, 1).unwrap(), 2).unwrap();
+    assert_eq!(field(&up_after, 2).and_then(|a| varint(&a, 2)), Some(3), "GetHubUpgradesRequest must persist POWER_STATE_LOW (3)");
 }

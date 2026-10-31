@@ -9,9 +9,9 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_sov_hub::{
-    any, caller, compute_hub_resources, emit_hub_diffs, hub_views, id_field, owned_structure,
-    push_notice, required_id, require_roles, run_simulation, same_owner, transact, Caller, RpcError,
-    HUB_MANAGER_ROLES,
+    any, caller, compute_hub_resources, emit_hub_diffs, encode_hub_upgrades,
+    enforce_hub_power_overload, hub_views, id_field, owned_structure, push_notice, required_id,
+    require_roles, run_simulation, same_owner, transact, Caller, RpcError, HUB_MANAGER_ROLES,
 };
 use super::quasar_space_services::{get_identifier_or_int, get_int_field};
 use super::sov_services::TYPE_SOVEREIGNTY_HUB;
@@ -238,7 +238,11 @@ pub fn networkable_hubs(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i6
     let mut visited = std::collections::HashSet::from([hub_id]);
     let mut queue = VecDeque::from([(hub_id, my_sys)]);
     let mut hubs = Vec::new();
-    while let Some((_cur_id, cur_sys)) = queue.pop_front() {
+    let max_steps = snap.structures.len().saturating_add(1);
+    for _ in 0..max_steps {
+        let Some((_cur_id, cur_sys)) = queue.pop_front() else {
+            break;
+        };
         let reach = systems_within_jumps(sde, cur_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
         for s in snap.structures.values() {
             if s.type_id != TYPE_SOVEREIGNTY_HUB
@@ -364,12 +368,95 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>,
                             extra.push(other_id);
                         }
                     }
+                    // Enforce upgrade power/workforce overload to a network-wide fixed point across
+                    // `hub_id` and all linked hubs so severing `Transit` / `Export` / `Import` links
+                    // immediately drops starved upgrades into `POWER_STATE_LOW` (`Sovereignty.md:38,147`).
+                    let all_hub_ids: std::collections::BTreeSet<i64> = snap
+                        .sov_runtime
+                        .sov_hubs
+                        .keys()
+                        .copied()
+                        .chain(extra.iter().copied())
+                        .collect();
+                    let prev_upgrades: std::collections::BTreeMap<i64, _> = all_hub_ids
+                        .iter()
+                        .filter_map(|&id| {
+                            snap.sov_runtime
+                                .sov_hubs
+                                .get(&id)
+                                .map(|h| (id, h.upgrades.clone()))
+                        })
+                        .collect();
+                    for _ in 0..all_hub_ids.len().saturating_add(1) {
+                        let mut changed_in_pass = false;
+                        for &id in &all_hub_ids {
+                            if enforce_hub_power_overload(snap, &sde, id) {
+                                changed_in_pass = true;
+                            }
+                            if let Some(exported) = snap.sov_runtime.sov_hubs.get(&id).and_then(|h| {
+                                match h.workforce {
+                                    PersistedWorkforceMode::Export { amount, .. } if amount > 0 => {
+                                        Some(amount)
+                                    }
+                                    _ => None,
+                                }
+                            }) {
+                                if let Some(r) = compute_hub_resources(snap, &sde, id) {
+                                    let imported_sum: u64 =
+                                        imports(snap, &sde, id).iter().map(|s| s.1).sum();
+                                    let base_w =
+                                        (r.workforce_local + imported_sum).saturating_sub(exported);
+                                    let produced_w = r.workforce_available.saturating_sub(base_w);
+                                    let max_exportable = (r.workforce_local
+                                        + imported_sum
+                                        + produced_w)
+                                        .saturating_sub(r.workforce_allocated);
+                                    if exported > max_exportable {
+                                        if let Some(h) = snap.sov_runtime.sov_hubs.get_mut(&id) {
+                                            if let PersistedWorkforceMode::Export { amount, .. } =
+                                                &mut h.workforce
+                                            {
+                                                *amount = max_exportable;
+                                                changed_in_pass = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !changed_in_pass {
+                            break;
+                        }
+                    }
                     let mut n = Vec::new();
                     id_field(1, u64::from(sys), &mut n);
                     encode_bytes_field(2, &encode_configuration(&old), &mut n);
                     encode_bytes_field(3, &encode_configuration(&new_mode), &mut n);
                     id_field(4, hub_id as u64, &mut n);
                     push_notice(&pending, sys, CONFIGURED_NOTICE, n);
+                    for &id in &all_hub_ids {
+                        let changed = snap
+                            .sov_runtime
+                            .sov_hubs
+                            .get(&id)
+                            .is_some_and(|h| prev_upgrades.get(&id) != Some(&h.upgrades));
+                        if changed {
+                            if let Some(h_sys) = hub_sys(snap, id) {
+                                let mut sim_n = Vec::new();
+                                encode_bytes_field(
+                                    1,
+                                    &encode_hub_upgrades(&sde, id, snap.sov_runtime.sov_hubs.get(&id)),
+                                    &mut sim_n,
+                                );
+                                push_notice(
+                                    &pending,
+                                    h_sys,
+                                    "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice",
+                                    sim_n,
+                                );
+                            }
+                        }
+                    }
                     emit_hub_diffs(&pending, &before, &hub_views(snap, &sde, &extra));
                     Ok(())
                 })?;

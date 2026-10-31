@@ -628,10 +628,11 @@ impl EsiRouter {
                         true,
                     );
                 };
-                // Enforce corporation role checks only when the OpenAPI operation (`op.required_roles`)
-                // or `required_corp_roles_for_route` specifies required roles; routes with empty
-                // `required_roles` (such as `/corporations/{corporation_id}/contracts*`) require
-                // only corporation membership plus the OAuth scope.
+                // Default authenticated `/corporations/{corporation_id}/...` routes to `ROLE_DIRECTOR`
+                // via `required_corp_roles_for_route` unless the OpenAPI specification explicitly allows
+                // any corporation member (`required_role_mask == 0`) or specifies a narrower role mask.
+                // Specifically, `GET /corporations/{corporation_id}/roles` requires `ROLE_DIRECTOR`,
+                // `ROLE_PERSONNEL_MANAGER`, CEO, or any grantable corporation role.
                 let mut required_role_mask = required_corp_roles_for_route(
                     matched.operation.method.as_str(),
                     matched.operation.path_pattern.as_str(),
@@ -644,11 +645,15 @@ impl EsiRouter {
                         "Trader" => eve_db::corp_roles::ROLE_TRADER,
                         "Factory_Manager" => eve_db::corp_roles::ROLE_FACTORY_MANAGER,
                         "Station_Manager" => eve_db::corp_roles::ROLE_STATION_MANAGER,
+                        "Personnel_Manager" => eve_db::corp_roles::ROLE_PERSONNEL_MANAGER,
                         _ => 0,
                     };
                 }
-                let allow_any_grantable =
-                    matched.operation.path_pattern == "/corporations/{corporation_id}/roles";
+                let is_corp_roles_route = matched.operation.method == "GET"
+                    && matched.operation.path_pattern == "/corporations/{corporation_id}/roles";
+                if is_corp_roles_route {
+                    required_role_mask |= eve_db::corp_roles::ROLE_PERSONNEL_MANAGER;
+                }
                 let (char_corp, has_corp_role) = self.ctx.db.with_snapshot(|snap| {
                     let c_corp = snap
                         .characters
@@ -658,6 +663,19 @@ impl EsiRouter {
                         return (c_corp, true);
                     }
                     let allowed_mask = required_role_mask | eve_db::corp_roles::ROLE_DIRECTOR;
+                    let has_title_grantable = is_corp_roles_route
+                        && snap
+                            .corp_member_titles
+                            .get(&(path_corp_id, claims.character_id))
+                            .zip(snap.corp_titles.get(&path_corp_id))
+                            .is_some_and(|(tids, titles)| {
+                                titles.iter().filter(|t| tids.contains(&t.title_id)).any(|t| {
+                                    !t.grantable_roles.is_empty()
+                                        || !t.grantable_roles_at_hq.is_empty()
+                                        || !t.grantable_roles_at_base.is_empty()
+                                        || !t.grantable_roles_at_other.is_empty()
+                                })
+                            });
                     let has_role = snap
                         .corporations
                         .get(&path_corp_id)
@@ -679,14 +697,15 @@ impl EsiRouter {
                                 (((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
                                     & allowed_mask)
                                     != 0)
-                                    || (allow_any_grantable
+                                    || (is_corp_roles_route
                                         && (r.grantable_roles
                                             | r.grantable_roles_at_hq
                                             | r.grantable_roles_at_base
                                             | r.grantable_roles_at_other)
                                             != 0)
                             })
-                            .unwrap_or(false);
+                            .unwrap_or(false)
+                        || has_title_grantable;
                     (c_corp, has_role)
                 });
                 if char_corp != Some(path_corp_id) || !has_corp_role {
@@ -1026,7 +1045,19 @@ fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
             ROLE_ACCOUNTANT | ROLE_JUNIOR_ACCOUNTANT
         }
         ("GET", "/corporations/{corporation_id}/roles") => ROLE_PERSONNEL_MANAGER,
-        ("GET", "/corporations/{corporation_id}/members") => ROLE_DIRECTOR,
-        _ => 0,
+        ("GET", "/corporations/{corporation_id}/roles/history") => ROLE_DIRECTOR,
+        // OpenAPI routes with empty `x-required-roles` and no prose role requirement (corp membership + OAuth scope only):
+        ("GET", "/corporations/{corporation_id}/contracts")
+        | ("GET", "/corporations/{corporation_id}/contracts/{contract_id}/items")
+        | ("GET", "/corporations/{corporation_id}/contracts/{contract_id}/bids")
+        | ("GET", "/corporations/{corporation_id}/contacts")
+        | ("GET", "/corporations/{corporation_id}/contacts/labels")
+        | ("GET", "/corporations/{corporation_id}/fw/stats")
+        | ("GET", "/corporations/{corporation_id}/medals")
+        | ("GET", "/corporations/{corporation_id}/standings")
+        | ("GET", "/corporations/{corporation_id}/bookmarks")
+        | ("GET", "/corporations/{corporation_id}/bookmarks/folders")
+        | ("GET", "/corporations/{corporation_id}/projects") => 0,
+        _ => ROLE_DIRECTOR,
     }
 }
