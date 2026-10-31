@@ -312,9 +312,10 @@ async fn test_fulcrum_docking_and_alignment_services() {
         .expect_err("Non-pirate corp office rental refused at Fulcrum");
     assert_eq!(office_denied.code, "FulcrumOfficeRequiresPirateEnlistment");
 
-    // Enlist corp CEO in Angel Cartel -> office rental allowed
+    // Enlist corporation itself in Guristas (500010) -> office rental allowed
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500010);
+        s.fw_runtime.corp_war_factions.insert(corp_id, 500010);
     });
     let office_rep = ctx
         .dispatch_rpc(&mut sess, "officeManager", None, "RentOffice", &[PyRep::Integer(fulcrum_station_id)], &kw, None)
@@ -322,43 +323,18 @@ async fn test_fulcrum_docking_and_alignment_services() {
         .expect("Office manager rents office at Fulcrum for pirate corp");
     assert!(matches!(office_rep, PyRep::KeyVal(_) | PyRep::Dict(_)));
 
-    // 5. Angel Cartel and Guristas LP store available
-    ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
-            offer_id: 8001,
-            corp_id: 1000135, // Angel Cartel
-            type_id: 78260, // Angel Cartel FOB
-            quantity: 1,
-            lp_cost: 50_000,
-            isk_cost: eve_db::IskCents::from_isk(50_000_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: None,
-        });
-        eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
-            offer_id: 8002,
-            corp_id: 1000127, // Guristas
-            type_id: 79172, // Guristas FOB
-            quantity: 1,
-            lp_cost: 50_000,
-            isk_cost: eve_db::IskCents::from_isk(50_000_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: None,
-        });
-    });
-
+    // 5. Authoritative unseeded Angel Cartel (1000138) and Guristas (1000127) LP stores available
     let angel_rep = ctx.dispatch_rpc(
         &mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp",
-        &[PyRep::Integer(1000135)],
+        &[PyRep::Integer(1000138)],
         &kw, None,
     ).await.expect("Angel Cartel LP store query");
     let PyRep::List(ref a_offers) = angel_rep else { panic!("expected list of offers"); };
     assert!(!a_offers.is_empty(), "Angel Cartel LP store has available offers");
-    let a_off = a_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8001)).expect("Offer 8001");
-    assert_eq!(a_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1000135));
-    assert_eq!(a_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(50_000));
-    assert_eq!(a_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(78260));
+    let a_off = a_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(3838)).expect("Offer 3838");
+    assert_eq!(a_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1000138));
+    assert_eq!(a_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(23_625));
+    assert_eq!(a_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(20_498));
 
     let guristas_rep = ctx.dispatch_rpc(
         &mut sess, "LPStoreMgr", None, "GetAvailableOffersFromCorp",
@@ -367,10 +343,10 @@ async fn test_fulcrum_docking_and_alignment_services() {
     ).await.expect("Guristas LP store query");
     let PyRep::List(ref g_offers) = guristas_rep else { panic!("expected list of offers"); };
     assert!(!g_offers.is_empty(), "Guristas LP store has available offers");
-    let g_off = g_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8002)).expect("Offer 8002");
+    let g_off = g_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(3938)).expect("Offer 3938");
     assert_eq!(g_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1000127));
-    assert_eq!(g_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(50_000));
-    assert_eq!(g_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(79172));
+    assert_eq!(g_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(23_625));
+    assert_eq!(g_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(20_121));
 }
 
 #[tokio::test]

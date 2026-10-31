@@ -271,10 +271,20 @@ pub fn check_docking_allowed(
     _is_structure: bool,
 ) -> Result<(), BridgeRpcError> {
     // The Fulcrum Alignment Services (`feat:structures.fulcrum-alignment-services`):
-    // Refuses docking to characters enlisted in an Empire militia (500001..=500004) or with active weapons/retribution timer.
+    // Refuses docking to characters enlisted in an Empire militia (`500_001..=500_004`, whether via
+    // direct enlistment, character war faction, or corporation enlistment) or carrying an active
+    // 60s weapons timer (`is_weapon_timer_active`) or Zarzakh retribution timer (NOT the 15m PvP logoff timer).
     if dock_id == 60_015_187 {
-        let char_war_fac = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
-        if matches!(char_war_fac, Some(500_001..=500_004)) {
+        let eff_war_fac = ctx.db.with_snapshot(|s| {
+            let ch = s.characters.get(&char_id);
+            s.fw_runtime
+                .direct_enlisted_chars
+                .get(&char_id)
+                .copied()
+                .or_else(|| ch.and_then(|c| c.war_faction_id))
+                .or_else(|| ch.and_then(|c| s.fw_runtime.corp_war_factions.get(&c.corporation_id).copied()))
+        });
+        if matches!(eff_war_fac, Some(500_001..=500_004)) {
             return Err(BridgeRpcError::user_error("FulcrumRefusesEmpireMilitia"));
         }
         let now_unix = ctx.now_unix();
@@ -282,7 +292,7 @@ pub fn check_docking_allowed(
         let weapons_active = cw
             .states
             .get(&char_id)
-            .is_some_and(|s| s.is_weapon_timer_active(now_unix) || s.is_pvp_active(now_unix));
+            .is_some_and(|s| s.is_weapon_timer_active(now_unix));
         let retribution_active = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
             rt.disapproval_flags
                 .get(&char_id)
@@ -1241,46 +1251,26 @@ async fn sync_insurgency_system_npcs(
 
     if let Some(tid) = desired_pirate {
         if !has_pirate {
-            let spawn_pos = waypoints[0] + pirate_offset;
-            let next_pos = waypoints[1 % waypoints.len()] + pirate_offset;
-            let bid = spawn_specialized_npc_entity(
-                ctx,
-                sys_id,
-                tid,
-                "InsurgencyPirateRoamer",
-                pirate_fac as u32,
-                spawn_pos,
-            )
-            .await;
+            let (spawn_pos, next_pos) = (waypoints[0] + pirate_offset, waypoints[1 % waypoints.len()] + pirate_offset);
+            let bid = spawn_specialized_npc_entity(ctx, sys_id, tid, "InsurgencyPirateRoamer", pirate_fac as u32, spawn_pos).await;
             with_mut_combat_runtime(ctx, |rt| {
                 if let Some(npc) = rt.npc_entities.get_mut(&bid) {
                     npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
                 }
             });
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let _ = bp.goto_point(bid, next_pos);
+            let _ = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner()).goto_point(bid, next_pos);
         }
     }
     if let Some(tid) = desired_enforcer {
         if !has_enforcer {
-            let spawn_pos = waypoints[0] + enforcer_offset;
-            let next_pos = waypoints[1 % waypoints.len()] + enforcer_offset;
-            let bid = spawn_specialized_npc_entity(
-                ctx,
-                sys_id,
-                tid,
-                "InsurgencyEnforcer",
-                empire_fac as u32,
-                spawn_pos,
-            )
-            .await;
+            let (spawn_pos, next_pos) = (waypoints[0] + enforcer_offset, waypoints[1 % waypoints.len()] + enforcer_offset);
+            let bid = spawn_specialized_npc_entity(ctx, sys_id, tid, "InsurgencyEnforcer", empire_fac as u32, spawn_pos).await;
             with_mut_combat_runtime(ctx, |rt| {
                 if let Some(npc) = rt.npc_entities.get_mut(&bid) {
                     npc.custom_cargo_loot = crate::services::insurgency_complex_ops::named_insurgency_roamer_loot_drop(tid);
                 }
             });
-            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
-            let _ = bp.goto_point(bid, next_pos);
+            let _ = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner()).goto_point(bid, next_pos);
         }
     }
     let should_deploy_ci = with_mut_combat_runtime(ctx, |rt| {
@@ -1296,54 +1286,21 @@ async fn sync_insurgency_system_npcs(
     });
     if should_deploy_ci {
         // DERIVED (synthetic): Counter-Insurgency Sentry Gun deployment offset near grid anchor.
-        let _ = spawn_specialized_npc_entity(
-            ctx,
-            sys_id,
-            79_507,
-            "CounterInsurgencySentry",
-            empire_fac as u32,
-            DVec3::new(0.0, 0.0, 5_000.0),
-        )
-        .await;
+        let _ = spawn_specialized_npc_entity(ctx, sys_id, 79_507, "CounterInsurgencySentry", empire_fac as u32, DVec3::new(0.0, 0.0, 5_000.0)).await;
     }
 }
 
-async fn cleanup_ended_campaign_sites_and_roamers(
-    ctx: &ServerContext,
-    pirate_fac: i64,
-    ended_systems: &[u32],
-) {
+async fn cleanup_ended_campaign_sites_and_roamers(ctx: &ServerContext, pirate_fac: i64, ended_systems: &[u32]) {
     use crate::services::combat_crimewatch::with_mut_combat_runtime;
 
     let orphan_systems: Vec<u32> = ctx.db.with_mut_snapshot(|snap| {
-        let still_covered: std::collections::HashSet<u32> = snap
-            .insurgency_runtime
-            .campaigns
-            .values()
-            .flat_map(|c| c.systems.iter().copied())
-            .collect();
-        let same_fac_active = snap
-            .insurgency_runtime
-            .campaigns
-            .values()
-            .any(|c| c.pirate_faction_id == pirate_fac);
-        let war_hqs: &[u32] = if pirate_fac == FACTION_ANGEL_CARTEL {
-            &[30_002_974, 30_002_055]
-        } else {
-            &[30_045_324, 30_003_788]
-        };
-        let orphans: Vec<u32> = ended_systems
-            .iter()
-            .copied()
-            .filter(|s| !still_covered.contains(s))
-            .collect();
+        let still_covered: std::collections::HashSet<u32> = snap.insurgency_runtime.campaigns.values().flat_map(|c| c.systems.iter().copied()).collect();
+        let same_fac_active = snap.insurgency_runtime.campaigns.values().any(|c| c.pirate_faction_id == pirate_fac);
+        let war_hqs: &[u32] = if pirate_fac == FACTION_ANGEL_CARTEL { &[30_002_974, 30_002_055] } else { &[30_045_324, 30_003_788] };
+        let orphans: Vec<u32> = ended_systems.iter().copied().filter(|s| !still_covered.contains(s)).collect();
         snap.insurgency_runtime.insurgency_instances.retain(|site| {
-            if site.site_type == "PirateStronghold" {
-                return true;
-            }
-            if site.site_type == "CounterInsurgencyOutpost" && war_hqs.contains(&site.solar_system_id) {
-                return same_fac_active;
-            }
+            if site.site_type == "PirateStronghold" { return true; }
+            if site.site_type == "CounterInsurgencyOutpost" && war_hqs.contains(&site.solar_system_id) { return same_fac_active; }
             !orphans.contains(&site.solar_system_id)
         });
         orphans

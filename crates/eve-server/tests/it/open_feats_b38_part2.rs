@@ -437,9 +437,18 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     let empire_dock_station = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
     assert_eq!(empire_dock_station.expect_err("Fulcrum must refuse Empire militia via stationSvc").code, "FulcrumRefusesEmpireMilitia");
 
-    // Clear militia -> neutral character with weapons timer refuses docking on both entrypoints
+    // Clear personal militia, enlist corporation in Gallente militia (500_004) -> still refused on both entrypoints
+    let owner_corp_id = ctx.db.get_character(OWNER).unwrap().corporation_id;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) { ch.war_faction_id = None; }
+        snap.fw_runtime.corp_war_factions.insert(owner_corp_id, 500_004);
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await.expect_err("corp Empire militia beyonce").code, "FulcrumRefusesEmpireMilitia");
+    assert_eq!(rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await.expect_err("corp Empire militia stationSvc").code, "FulcrumRefusesEmpireMilitia");
+
+    // Clear corp militia -> neutral character with 60s weapons timer refuses docking on both entrypoints
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_runtime.corp_war_factions.remove(&owner_corp_id);
     });
     let t_now = ctx.now_unix();
     ctx.crimewatch.write().unwrap().states.entry(OWNER).or_default().weapon_timer_until_unix = t_now + 60;
@@ -461,9 +470,16 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
         rt.disapproval_flags.remove(&OWNER);
     });
 
-    // Neutral character without timers docks successfully at Fulcrum
+    // Active 15-minute capsuleer PvP logoff timer (`pvp_timer_until_unix`) with expired weapons timer MUST allow docking
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.states.entry(OWNER).or_default();
+        st.weapon_timer_until_unix = 0;
+        st.pvp_timer_until_unix = t_now + 900;
+        assert!(st.is_pvp_active(t_now) && !st.is_weapon_timer_active(t_now));
+    }
     let ok_dock = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
-    assert!(ok_dock.is_ok(), "neutral character must dock at Fulcrum via stationSvc.Dock: {ok_dock:?}");
+    assert!(ok_dock.is_ok(), "pilot with only 15m pvp_timer_until_unix must dock at Fulcrum: {ok_dock:?}");
     sess.station_id = Some(FULCRUM_STATION_ID);
 
     // Neutral character gets all 5 standard services: repair, fitting, market, insurance, industry
@@ -495,87 +511,114 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     let ind_jobs = rpc(&ctx, &mut sess, "industryManager", "GetJobCounts", &[]).await;
     assert!(ind_jobs.is_ok(), "neutral industry job counts at Fulcrum: {ind_jobs:?}");
 
-    // Jump clone & corp office require pirate enlistment
+    // Jump clone needs pirate-enlisted character; corp office needs pirate-enlisted corporation
     let clone_neutral = rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStation", &[]).await;
     assert_eq!(clone_neutral.expect_err("Fulcrum clone requires pirate enlistment").code, "FulcrumCloneRequiresPirateEnlistment");
     let office_neutral = rpc(&ctx, &mut sess, "officeManager", "RentOffice", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
     assert_eq!(office_neutral.expect_err("Fulcrum office requires pirate enlistment").code, "FulcrumOfficeRequiresPirateEnlistment");
 
-    // Pirate-enlisted character (500_010 Guristas) can install clone & rent office
+    // Direct-enlisted character in Angels (500_011) inside an UN-ENLISTED corporation:
+    // - jumpCloneSvc.InstallCloneInStation succeeds (character is pirate-enlisted)
+    // - officeManager.RentOffice STILL fails with FulcrumOfficeRequiresPirateEnlistment!
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
-            ch.war_faction_id = Some(500_010);
-            if let Some(corp) = snap.corporations.get_mut(&ch.corporation_id) {
-                corp.set_division_balance(1, eve_db::IskCents::from_f64_isk(100_000_000.0));
-            }
+            ch.war_faction_id = Some(500_011);
+        }
+        snap.fw_runtime.direct_enlisted_chars.insert(OWNER, 500_011);
+        if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
+            corp.set_division_balance(1, eve_db::IskCents::from_f64_isk(100_000_000.0));
         }
         snap.skills.entry(OWNER).or_default().insert(24242, eve_db::TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 });
     });
     assert!(rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStation", &[]).await.is_ok(), "pirate-enlisted clone install should succeed");
-    assert!(rpc(&ctx, &mut sess, "officeManager", "RentOffice", &[PyRep::Integer(FULCRUM_STATION_ID)]).await.is_ok(), "pirate-enlisted office rent should succeed");
+    let office_char_only = rpc(&ctx, &mut sess, "officeManager", "RentOffice", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(office_char_only.expect_err("un-enlisted corp must fail RentOffice even if caller is direct-enlisted").code, "FulcrumOfficeRequiresPirateEnlistment");
 
-    // Non-empty Angel Cartel (1_000_138) and Guristas (1_000_127) LP store offers with value assertions
+    // Enlist the corporation itself in Angel Cartel (500_011) -> officeManager.RentOffice succeeds, deducts fee, creates office item
     ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
-            offer_id: 8001,
-            corp_id: 1_000_138,
-            type_id: 78260,
-            quantity: 1,
-            lp_cost: 50_000,
-            isk_cost: eve_db::IskCents::from_isk(50_000_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: None,
-        });
-        eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
-            offer_id: 8002,
-            corp_id: 1_000_127,
-            type_id: 79172,
-            quantity: 1,
-            lp_cost: 45_000,
-            isk_cost: eve_db::IskCents::from_isk(45_000_000),
-            req_items: vec![],
-            ak_cost: 0,
-            min_standing: None,
-        });
+        snap.fw_runtime.corp_war_factions.insert(owner_corp_id, 500_011);
+    });
+    let corp_bal_before = ctx.db.with_snapshot(|s| s.corporations[&owner_corp_id].division_balance(1));
+    assert!(rpc(&ctx, &mut sess, "officeManager", "RentOffice", &[PyRep::Integer(FULCRUM_STATION_ID)]).await.is_ok(), "pirate-enlisted corp office rent should succeed");
+    ctx.db.with_snapshot(|s| {
+        assert!(s.corporations[&owner_corp_id].division_balance(1) < corp_bal_before, "office rental fee deducted");
+        assert!(s.items.values().any(|i| i.owner_id == owner_corp_id && i.location_id == FULCRUM_STATION_ID && i.type_id == 27), "office folder created");
     });
 
+    // Authoritative unseeded Tranquility Angel Cartel (1_000_138 / 1_000_436) and Guristas (1_000_127 / 1_000_437) LP store offers
     let angel_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_138)]).await.expect("Angel LP store");
-    let PyRep::List(ref a_offers) = angel_rep else { panic!("expected list of offers"); };
-    assert!(!a_offers.is_empty(), "Angel Cartel LP store has available offers");
-    let a_off = a_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8001)).expect("Offer 8001");
+    let PyRep::List(ref a_offers) = angel_rep else { panic!("expected list of Angel offers"); };
+    assert!(a_offers.len() >= 250, "Angel Cartel LP store must return real Tranquility catalog");
+    let a_off = a_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(3838)).expect("Angel offer 3838");
     assert_eq!(a_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1_000_138));
-    assert_eq!(a_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(78260));
-    assert_eq!(a_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(50_000));
-    assert_eq!(a_off.dict_get("iskCost").and_then(|v| v.as_f64()), Some(50_000_000.0));
+    assert_eq!(a_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(20_498));
+    assert_eq!(a_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(23_625));
+    assert_eq!(a_off.dict_get("iskCost").and_then(|v| v.as_f64()), Some(23_625_000.0));
+    let PyRep::List(ref angel_militia) = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_436)]).await.expect("Malakim Zealots LP store") else { panic!("list"); };
+    assert!(angel_militia.len() >= 300 && angel_militia.iter().any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(3838)));
 
     let guristas_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_127)]).await.expect("Guristas LP store");
-    let PyRep::List(ref g_offers) = guristas_rep else { panic!("expected list of offers"); };
-    assert!(!g_offers.is_empty(), "Guristas LP store has available offers");
-    let g_off = g_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8002)).expect("Offer 8002");
+    let PyRep::List(ref g_offers) = guristas_rep else { panic!("expected list of Guristas offers"); };
+    assert!(g_offers.len() >= 300, "Guristas LP store must return real Tranquility catalog");
+    let g_off = g_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(3938)).expect("Guristas offer 3938");
     assert_eq!(g_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1_000_127));
-    assert_eq!(g_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(79172));
-    assert_eq!(g_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(45_000));
-    assert_eq!(g_off.dict_get("iskCost").and_then(|v| v.as_f64()), Some(45_000_000.0));
+    assert_eq!(g_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(20_121));
+    assert_eq!(g_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(23_625));
+    assert_eq!(g_off.dict_get("iskCost").and_then(|v| v.as_f64()), Some(23_625_000.0));
+    let PyRep::List(ref guri_militia) = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_437)]).await.expect("Commando Guri LP store") else { panic!("list"); };
+    assert!(guri_militia.len() >= 350 && guri_militia.iter().any(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(3938)));
 
-    // 3. Reprocessing rig live RPC verification via reprocessingSvc.GetQuotes
-    let refinery_id = 889_001i64;
-    ctx.db.with_mut_snapshot(|snap| {
+    // 3. Genuine rigged Upwell Athanor refinery (`35835`, `>= 1_000_000_000_000`) via `reprocessingSvc.GetQuotes`
+    // In null-sec (`null_sys`), Athanor (`hull_mult = 1.02`) + T2 M-Set Asteroid Ore Grading Processor II (`46634`,
+    // `attr 717 = 0.53`, `attr 2357 = 1.12`) yields `0.53 * 1.12 * 1.02 = 0.605472` (`24_218` Tritanium from `10_000` Veldspar).
+    let refinery_id = 1_000_000_889_001i64;
+    let ore_id = ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(refinery_id, UpwellStructureRecord {
-            structure_id: refinery_id, type_id: 35835, owner_corp_id: 98_000_001,
-            solar_system_id: JITA, name: "Rigged Refinery".into(), position: [0.0, 0.0, 0.0],
-            state: life::STATE_SHIELD_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 100,
+            structure_id: refinery_id, type_id: 35835, owner_corp_id: owner_corp_id,
+            solar_system_id: null_sys, name: "Rigged Null Athanor".into(), position: [0.0, 0.0, 0.0],
+            state: life::STATE_SHIELD_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 200,
             shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0,
             reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
         snap.items.insert(refinery_id + 1, InventoryItemRecord {
-            item_id: refinery_id + 1, type_id: 35892, owner_id: 98_000_001, location_id: refinery_id,
+            item_id: refinery_id + 1, type_id: 35899, owner_id: owner_corp_id, location_id: refinery_id,
             flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, ..Default::default()
         });
+        snap.items.insert(refinery_id + 2, InventoryItemRecord {
+            item_id: refinery_id + 2, type_id: 46634, owner_id: owner_corp_id, location_id: refinery_id,
+            flag: InventoryFlag::RigSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
         snap.module_online_states.insert(refinery_id + 1, true);
+        snap.module_online_states.insert(refinery_id + 2, true);
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            ch.solar_system_id = null_sys;
+            ch.station_id = None;
+            ch.structure_id = Some(refinery_id);
+        }
+        if let Some(skills) = snap.skills.get_mut(&OWNER) {
+            skills.remove(&3385);
+            skills.remove(&3389);
+            skills.remove(&12195);
+        }
+        snap.next_entity_id += 1;
+        let oid = snap.next_entity_id;
+        snap.items.insert(oid, InventoryItemRecord {
+            item_id: oid, type_id: 1230, owner_id: OWNER, location_id: refinery_id,
+            flag: InventoryFlag::Hangar, quantity: 10_000, singleton: false, ..Default::default()
+        });
+        oid
     });
+    sess.solar_system_id = Some(null_sys);
     sess.station_id = None;
     sess.structure_id = Some(refinery_id);
-    let quotes_rep = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[]).await;
-    assert!(quotes_rep.is_ok(), "reprocessingSvc.GetQuotes must succeed: {quotes_rep:?}");
+    let PyRep::List(quotes) = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[PyRep::List(vec![PyRep::Integer(ore_id)])]).await.expect("rigged GetQuotes") else {
+        panic!("expected List of quotes from reprocessingSvc.GetQuotes");
+    };
+    assert_eq!(quotes.len(), 1);
+    let rigged_base = quotes[0].dict_get("stationBaseYield").and_then(|v| v.as_f64()).expect("stationBaseYield");
+    let expected_rigged = 0.53 * 1.12 * 1.02;
+    assert!((rigged_base - expected_rigged).abs() < 1e-6 && rigged_base > 0.51, "rigged base yield {rigged_base} must match {expected_rigged}");
+    let PyRep::List(ref outputs) = quotes[0].dict_get("outputs").expect("outputs") else { panic!("outputs list"); };
+    let trit_out = outputs.iter().find(|o| o.dict_get("typeID").and_then(|v| v.as_i64()) == Some(34)).expect("Tritanium output");
+    assert_eq!(trit_out.dict_get("quantity").and_then(|v| v.as_i64()), Some(24_218));
 }

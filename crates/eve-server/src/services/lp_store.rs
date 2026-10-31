@@ -9,193 +9,20 @@
 //! - Querying character LP reward logs (`GetRewardLPLogs`)
 
 // parity: plan:E-5, plan:E-6
-// parity: feat:lp.lp-balance
+// parity: feat:lp.lp-store-offers, feat:lp.lp-store-buy, feat:lp.lp-balance
 // parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs, feat:wallet.evermarks
 // parity: feat:lifecycle.lp-durable
 
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+pub use crate::services::lp_store_catalog::*;
 pub use eve_db::LpRewardLogEntry;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-const CONCORD_CORP_ID: i64 = 1_000_125;
-pub const PARAGON_CORP_ID: i64 = 1_000_419;
-const LP_STORE_OFFERS_KEY: &str = "lp_store_offers";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LPOffer {
-    pub offer_id: i64,
-    pub corp_id: i64,
-    pub type_id: TypeId,
-    pub quantity: i32,
-    pub lp_cost: i64,
-    pub isk_cost: IskCents,
-    pub req_items: Vec<(TypeId, i32)>,
-    #[serde(default)]
-    pub ak_cost: i64,
-    #[serde(default)]
-    pub min_standing: Option<f64>,
-}
-
-/// Load persisted LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
-///
-/// DATA GAP: General NPC corporation LP store offer catalogs are server-only in modern EVE and absent
-/// from V24 client FSD (`feat:lp.lp-store-offers`), whereas Paragon (`1_000_419`) EverMarks Ship Cosmetic
-/// Emblem offers are loaded directly from V24 `res:/staticdata/shipcosmeticlicenses.fsdbinary` (`feat:wallet.evermarks`).
-pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
-    snap.service_state_blobs
-        .get(LP_STORE_OFFERS_KEY)
-        .and_then(|json| serde_json::from_str::<Vec<LPOffer>>(json).ok())
-        .unwrap_or_default()
-}
-
-/// DERIVED: Synthesized EverMark price tiers by hull group and cosmetic type (`1` = corp, `2` = alliance).
-/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` defines the published emblem offer list, while
-/// EverMark prices are server-authored (`DERIVED`).
-fn paragon_emblem_evermark_cost(ship_group_id: u32, cosmetic_type: u8) -> i64 {
-    let base = match ship_group_id {
-        25 | 31 | 237 => 750,
-        324 | 420 | 541 | 830 | 831 | 834 | 893 | 1305 | 1527 | 1534 => 1_500,
-        26 | 28 | 463 => 2_500,
-        358 | 380 | 419 | 540 | 543 | 832 | 833 | 894 | 906 | 963 | 1201 | 1202 | 1972 => 4_000,
-        27 | 513 | 941 => 7_500,
-        485 | 547 | 659 | 883 | 898 | 900 | 902 | 1538 | 4594 | 30 => 15_000,
-        _ => 2_500,
-    };
-    if cosmetic_type == 2 { (base * 5) / 3 } else { base }
-}
-
-/// Loads Paragon (`1_000_419`) Ship Cosmetic Emblem offers from
-/// `res:/staticdata/shipcosmeticlicenses.fsdbinary` (offer list from V24 SDE; EverMark prices `DERIVED`).
-pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOffer] {
-    static PARAGON_OFFERS: std::sync::OnceLock<Vec<LPOffer>> = std::sync::OnceLock::new();
-    PARAGON_OFFERS.get_or_init(|| {
-        let mut offers = Vec::new();
-        let Ok(rows) = sde.load_cfsd_table("res:/staticdata/shipcosmeticlicenses.fsdbinary") else {
-            return offers;
-        };
-        let get_u32 = |rec: &eve_sde::CfsdRecord, k: &str| match rec.fields.get(k) {
-            Some(eve_sde::CfsdValue::Int(i)) => u32::try_from(*i).ok(),
-            _ => None,
-        };
-        for rec in rows.values() {
-            let (Some(license_type_id), Some(ship_type_id), Some(ctype)) = (
-                get_u32(rec, "shipCosmeticLicenseTypeID"),
-                get_u32(rec, "shipTypeID"),
-                get_u32(rec, "cosmeticType"),
-            ) else {
-                continue;
-            };
-            if !sde.types.get(&license_type_id).is_some_and(|t| t.published) {
-                continue;
-            }
-            let ship_group_id = sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
-            offers.push(LPOffer {
-                offer_id: 600_000 + i64::from(license_type_id),
-                corp_id: PARAGON_CORP_ID,
-                type_id: license_type_id,
-                quantity: 1,
-                lp_cost: paragon_emblem_evermark_cost(ship_group_id, ctype as u8),
-                isk_cost: IskCents::ZERO,
-                req_items: Vec::new(),
-                ak_cost: 0,
-                min_standing: None,
-            });
-        }
-        offers.sort_by_key(|o| o.offer_id);
-        offers
-    })
-}
-
-/// Load all available LP store offers for a corporation, including V24 SDE Paragon EverMarks offers.
-pub fn get_corp_lp_offers_with_sde(
-    sde: &eve_sde::SdeRegistry,
-    snap: &eve_db::WorldStateSnapshot,
-    corp_id: i64,
-) -> Vec<LPOffer> {
-    let mut offers = get_corp_lp_offers(snap, corp_id);
-    if offers.is_empty() && corp_id == PARAGON_CORP_ID {
-        offers.extend_from_slice(paragon_sde_evermark_offers(sde));
-    }
-    offers
-}
-
-/// Load all available LP store offers for a corporation.
-///
-/// Reads dynamic offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`
-/// and falls back to legacy `snap.loyalty_store_offers` if present.
-pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Vec<LPOffer> {
-    let mut offers: Vec<_> = load_lp_store_offers(snap)
-        .into_iter()
-        .filter(|o| o.corp_id == corp_id)
-        .collect();
-    if offers.is_empty() {
-        if let Some(legacy) = snap.loyalty_store_offers.get(&corp_id) {
-            for o in legacy {
-                offers.push(LPOffer {
-                    offer_id: o.offer_id,
-                    corp_id,
-                    type_id: o.type_id as eve_sde::TypeId,
-                    quantity: o.quantity as i32,
-                    lp_cost: o.lp_cost,
-                    isk_cost: eve_db::IskCents(o.isk_cost * 100),
-                    ak_cost: o.ak_cost.unwrap_or(0),
-                    req_items: o
-                        .required_items
-                        .iter()
-                        .map(|ri| (ri.type_id as eve_sde::TypeId, ri.quantity as i32))
-                        .collect(),
-                    min_standing: None,
-                });
-            }
-        }
-    }
-    offers
-}
-
-pub fn save_lp_store_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &[LPOffer]) {
-    if let Ok(json) = serde_json::to_string(offers) {
-        snap.service_state_blobs
-            .insert(LP_STORE_OFFERS_KEY.to_string(), json);
-    }
-}
-
-pub fn register_lp_store_offer(snap: &mut eve_db::WorldStateSnapshot, offer: LPOffer) {
-    let mut offers = load_lp_store_offers(snap);
-    if let Some(existing) = offers
-        .iter_mut()
-        .find(|o| o.corp_id == offer.corp_id && o.offer_id == offer.offer_id)
-    {
-        *existing = offer;
-    } else {
-        offers.push(offer);
-    }
-    save_lp_store_offers(snap, &offers);
-}
-
-pub fn load_corp_lp_balances(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> HashMap<i64, i64> {
-    snap.corp_lp_balances
-        .iter()
-        .filter_map(|(&(cid, issuer_id), &lp)| (cid == corp_id).then_some((issuer_id, lp)))
-        .collect()
-}
-
-pub fn save_corp_lp_balances(
-    snap: &mut eve_db::WorldStateSnapshot,
-    corp_id: i64,
-    balances: &HashMap<i64, i64>,
-) {
-    snap.corp_lp_balances.retain(|&(cid, _), _| cid != corp_id);
-    for (&issuer_id, &lp) in balances {
-        snap.corp_lp_balances.insert((corp_id, issuer_id), lp);
-    }
-}
 
 pub fn record_lp_reward_log(
     snap: &mut eve_db::WorldStateSnapshot,
@@ -295,33 +122,6 @@ pub fn record_lp_reward_log(
     }
 }
 
-fn offer_to_pyrep(o: &LPOffer) -> PyRep {
-    let req_items_rep: Vec<PyRep> = o
-        .req_items
-        .iter()
-        .map(|&(tid, qty)| {
-            PyRep::keyval([
-                ("typeID", PyRep::Integer(tid as i64)),
-                ("quantity", PyRep::Integer(qty as i64)),
-            ])
-        })
-        .collect();
-    let mut fields = vec![
-        ("offerID", PyRep::Integer(o.offer_id)),
-        ("corpID", PyRep::Integer(o.corp_id)),
-        ("typeID", PyRep::Integer(o.type_id as i64)),
-        ("quantity", PyRep::Integer(o.quantity as i64)),
-        ("lpCost", PyRep::Integer(o.lp_cost)),
-        ("iskCost", PyRep::Real(o.isk_cost.to_wire_f64())),
-        ("akCost", PyRep::Integer(o.ak_cost.max(0))),
-        ("reqItems", PyRep::List(req_items_rep)),
-    ];
-    if let Some(min_st) = o.min_standing {
-        fields.push(("minStanding", PyRep::Real(min_st)));
-    }
-    PyRep::keyval(fields)
-}
-
 fn check_corp_lp_role(
     snap: &eve_db::WorldStateSnapshot,
     session: &SessionState,
@@ -407,6 +207,7 @@ fn take_offer(
                 let mut fallback = load_lp_store_offers(snap);
                 if fallback.is_empty() {
                     fallback.extend_from_slice(paragon_sde_evermark_offers(&ctx.sde));
+                    fallback.extend(esi_all_lp_offers(&ctx.sde));
                 }
                 fallback
             } else {
@@ -417,6 +218,7 @@ fn take_offer(
             let mut all = load_lp_store_offers(snap);
             if all.is_empty() {
                 all.extend_from_slice(paragon_sde_evermark_offers(&ctx.sde));
+                all.extend(esi_all_lp_offers(&ctx.sde));
             }
             all
         }
@@ -434,9 +236,12 @@ fn take_offer(
         }
     };
 
-    // Check Triglavian, EDENCOM, or FW militia standing/enlistment gates if applicable
+    // Check Triglavian, EDENCOM, or FW/pirate militia standing/enlistment gates if applicable
     let is_trig_or_edencom = matches!(offer.corp_id, 500_026 | 500_027 | 1_000_298 | 1_000_299);
-    let is_fw_militia_corp = matches!(offer.corp_id, 1_000_179 | 1_000_180 | 1_000_181 | 1_000_182 | 1_000_127 | 1_000_135);
+    let is_fw_militia_corp = matches!(
+        offer.corp_id,
+        1_000_179 | 1_000_180 | 1_000_181 | 1_000_182 | 1_000_127 | 1_000_437 | 1_000_138 | 1_000_436
+    );
 
     let Some(total_lp_cost) = offer.lp_cost.checked_mul(qty) else {
         return Some(Err(BridgeRpcError {
@@ -455,6 +260,12 @@ fn take_offer(
         return Some(Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
             message: "LP store delivered item quantity overflows i32".into(),
+        }));
+    };
+    let Some(total_ak_cost) = offer.ak_cost.checked_mul(qty) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: "LP store total AK cost overflows i64".into(),
         }));
     };
 
@@ -509,14 +320,21 @@ fn take_offer(
         }
 
         if is_fw_militia_corp {
-            let char_fac = ch.war_faction_id.unwrap_or(0);
+            let char_fac = snap
+                .fw_runtime
+                .direct_enlisted_chars
+                .get(&char_id)
+                .copied()
+                .or(ch.war_faction_id)
+                .or_else(|| snap.fw_runtime.corp_war_factions.get(&ch.corporation_id).copied())
+                .unwrap_or(0);
             let expected_fac = match offer.corp_id {
                 1_000_179 => 500_003, // Amarr
                 1_000_180 => 500_001, // Caldari
                 1_000_181 => 500_004, // Gallente
                 1_000_182 => 500_002, // Minmatar
-                1_000_127 => 500_010,
-                1_000_135 => 500_011,
+                1_000_127 | 1_000_437 => 500_010, // Guristas / Commando Guri
+                1_000_138 | 1_000_436 => 500_011, // Angel Cartel / Malakim Zealots
                 _ => 0,
             };
             let standing = ch.standings.get(&offer.corp_id).copied().unwrap_or(0.0);
@@ -659,9 +477,8 @@ fn take_offer(
                     message: "Not enough ISK for corporation LP store purchase".into(),
                 });
             }
-            if offer.ak_cost > 0 {
-                let ak_cost = offer.ak_cost.saturating_mul(qty);
-                crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, ak_cost)?;
+            if total_ak_cost > 0 {
+                crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, total_ak_cost)?;
             }
             let rem = current_lp - total_lp_cost;
             corp_balances.insert(offer.corp_id, rem);
@@ -677,7 +494,7 @@ fn take_offer(
                     1_000_181 => 500_004, // Gallente
                     1_000_182 => 500_002, // Minmatar
                     1_000_127 | 1_000_437 => 500_010, // Guristas / Commando Guri
-                    1_000_135 | 1_000_138 | 1_000_436 => 500_011, // Angel Cartel / Gistii Domination
+                    1_000_138 | 1_000_436 => 500_011, // Angel Cartel / Malakim Zealots
                     _ => 0,
                 };
                 (fac_id, ch.loyalty_points.get(&fac_id).copied().unwrap_or(0))
@@ -701,9 +518,8 @@ fn take_offer(
                     ),
                 });
             }
-            if offer.ak_cost > 0 {
-                let ak_cost = offer.ak_cost.saturating_mul(qty);
-                crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, ak_cost)?;
+            if total_ak_cost > 0 {
+                crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, total_ak_cost)?;
             }
             let rem = current_lp - total_lp_cost;
             if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
@@ -1057,6 +873,7 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
         ("LPStoreMgr", "GetAvailableOffersFromCorp") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1086,7 +903,9 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
+        // parity: rpc:LPStoreMgr.TakeOfferForCharacter
         ("LPStoreMgr", "TakeOfferForCharacter") => take_offer(ctx, session, args, false),
+        // parity: rpc:LPStoreMgr.TakeOfferForCorporation
         ("LPStoreMgr", "TakeOfferForCorporation") => take_offer(ctx, session, args, true),
 
         ("LPSvc", "GetAllMyCharacterWalletLPBalances") => get_character_lp_balances(ctx, session),

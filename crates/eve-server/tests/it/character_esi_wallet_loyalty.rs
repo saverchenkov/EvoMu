@@ -37,11 +37,10 @@ fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<S
             now,
         )
         .expect("authorize_pkce");
-    let bundle = ctx
-        .db
+    ctx.db
         .exchange_pkce_code(&code, "evomu-esi-wallet-loyalty-test", PKCE_VERIFIER, now)
-        .expect("exchange_pkce_code");
-    bundle.access_token
+        .expect("exchange_pkce_code")
+        .access_token
 }
 
 fn validate_and_json(
@@ -51,11 +50,7 @@ fn validate_and_json(
     expected_status: u16,
 ) -> Value {
     let resp = router.handle_request(req);
-    let raw_path = req
-        .raw_target
-        .split('?')
-        .next()
-        .unwrap_or(&req.raw_target);
+    let raw_path = req.raw_target.split('?').next().unwrap_or(&req.raw_target);
     assert_eq!(
         resp.status_code,
         expected_status,
@@ -65,19 +60,10 @@ fn validate_and_json(
         resp.status_code,
         String::from_utf8_lossy(&resp.body)
     );
-    spec.validate_response(
-        &req.method,
-        raw_path,
-        resp.status_code,
-        &resp.headers,
-        &resp.body,
-    )
-    .unwrap_or_else(|e| {
-        panic!(
-            "OpenAPI schema validation failed for {} {}: {e}",
-            req.method, req.raw_target
-        )
-    });
+    spec.validate_response(&req.method, raw_path, resp.status_code, &resp.headers, &resp.body)
+        .unwrap_or_else(|e| {
+            panic!("OpenAPI schema validation failed for {} {}: {e}", req.method, req.raw_target)
+        });
     if expected_status == 204 || expected_status == 304 {
         Value::Null
     } else {
@@ -88,14 +74,8 @@ fn validate_and_json(
 fn assert_etag_and_304(router: &EsiRouter, spec: &OpenApiSpec, req: &EsiHttpRequest) {
     let resp = router.handle_request(req);
     assert_eq!(resp.status_code, 200);
-    let etag = resp
-        .header("etag")
-        .expect("ETag header must be present on 200 GET response")
-        .to_string();
-    assert!(
-        resp.header("cache-control").is_some(),
-        "Cache-Control header must be present"
-    );
+    let etag = resp.header("etag").expect("ETag header must be present on 200 GET").to_string();
+    assert!(resp.header("cache-control").is_some(), "Cache-Control header must be present");
     let mut cond_req = req.clone();
     cond_req.headers.insert("if-none-match".to_string(), etag);
     validate_and_json(router, spec, &cond_req, 304);
@@ -106,7 +86,7 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     // parity: esi:GET /characters/{character_id}/agents_research, feat:esi.character.agents-research
     // parity: esi:GET /characters/{character_id}/medals, feat:esi.character.medals
     // parity: esi:GET /characters/{character_id}/roles, feat:esi.character.roles
-    // DATA GAP: requires SDE/live store catalog import (esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers)
+    // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/agents_research",
         "feat:esi.character.agents-research",
@@ -114,6 +94,8 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
         "feat:esi.character.medals",
         "esi:GET /characters/{character_id}/roles",
         "feat:esi.character.roles",
+        "esi:GET /loyalty/stores/{corporation_id}/offers",
+        "feat:esi.loyalty.offers",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
@@ -125,6 +107,7 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     let other_char_id = 90_000_002;
     let corp_id = 98_000_401;
     let npc_corp_id = 1_000_035; // Caldari Navy
+    let empty_npc_corp_id = 1_000_438; // Deathless Custodians
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
@@ -156,22 +139,15 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     let wrong_token = issue_token_with_scopes(&ctx, other_char_id, vec![]);
 
     // 1. GET /v2/characters/{character_id}/agents_research/
+    let research_path = format!("/v2/characters/{char_id}/agents_research/");
+    validate_and_json(&router, &spec, &EsiHttpRequest::new("GET", &research_path), 401);
     validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/agents_research/")),
-        401,
-    );
-    validate_and_json(
-        &router,
-        &spec,
-        &EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/agents_research/"))
-            .with_bearer_token(&wrong_token),
+        &EsiHttpRequest::new("GET", &research_path).with_bearer_token(&wrong_token),
         403,
     );
-    let research_req =
-        EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/agents_research/"))
-            .with_bearer_token(&token);
+    let research_req = EsiHttpRequest::new("GET", &research_path).with_bearer_token(&token);
     assert_eq!(validate_and_json(&router, &spec, &research_req, 200), json!([]));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -180,14 +156,14 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
             vec![
                 CharacterResearchAgentRecord {
                     agent_id: 3_019_002,
-                    skill_type_id: 11_446, // Graviton Physics
+                    skill_type_id: 11_446,
                     started_at_unix: 1_700_100_000,
                     points_per_day: 84.25,
                     remainder_points: 1_240.5,
                 },
                 CharacterResearchAgentRecord {
                     agent_id: 3_019_001,
-                    skill_type_id: 11_442, // Aerospace Engineering
+                    skill_type_id: 11_442,
                     started_at_unix: 1_700_000_000,
                     points_per_day: 62.5,
                     remainder_points: 450.0,
@@ -218,21 +194,15 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     );
 
     // 2. GET /v2/characters/{character_id}/medals/
+    let medals_path = format!("/v2/characters/{char_id}/medals/");
+    validate_and_json(&router, &spec, &EsiHttpRequest::new("GET", &medals_path), 401);
     validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/medals/")),
-        401,
-    );
-    validate_and_json(
-        &router,
-        &spec,
-        &EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/medals/"))
-            .with_bearer_token(&wrong_token),
+        &EsiHttpRequest::new("GET", &medals_path).with_bearer_token(&wrong_token),
         403,
     );
-    let medals_req = EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/medals/"))
-        .with_bearer_token(&token);
+    let medals_req = EsiHttpRequest::new("GET", &medals_path).with_bearer_token(&token);
     assert_eq!(validate_and_json(&router, &spec, &medals_req, 200), json!([]));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -269,27 +239,16 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
             "date": "2023-11-14T22:13:20Z",
             "reason": "Defended staging citadel",
             "status": "public",
-            "graphics": [{
-                "part": 1,
-                "layer": 0,
-                "graphic": "caldari.1_1",
-                "color": 16_777_215
-            }]
+            "graphics": [{ "part": 1, "layer": 0, "graphic": "caldari.1_1", "color": 16_777_215 }]
         }])
     );
 
     // 3. GET /v2/characters/{character_id}/roles/
-    validate_and_json(
-        &router,
-        &spec,
-        &EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/roles/")),
-        401,
-    );
-    let roles_req = EsiHttpRequest::new("GET", format!("/v2/characters/{char_id}/roles/"))
-        .with_bearer_token(&token);
-    let initial_roles = validate_and_json(&router, &spec, &roles_req, 200);
+    let roles_path = format!("/v2/characters/{char_id}/roles/");
+    validate_and_json(&router, &spec, &EsiHttpRequest::new("GET", &roles_path), 401);
+    let roles_req = EsiHttpRequest::new("GET", &roles_path).with_bearer_token(&token);
     assert_eq!(
-        initial_roles,
+        validate_and_json(&router, &spec, &roles_req, 200),
         json!({
             "roles": ["Director"],
             "roles_at_hq": [],
@@ -310,9 +269,8 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
         );
     });
     assert_etag_and_304(&router, &spec, &roles_req);
-    let scoped_roles = validate_and_json(&router, &spec, &roles_req, 200);
     assert_eq!(
-        scoped_roles,
+        validate_and_json(&router, &spec, &roles_req, 200),
         json!({
             "roles": ["Director", "Personnel_Manager"],
             "roles_at_hq": ["Hangar_Take_1", "Config_Equipment"],
@@ -325,36 +283,57 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     validate_and_json(
         &router,
         &spec,
+        &EsiHttpRequest::new("GET", "/v1/loyalty/stores/not_a_corp/offers/"),
+        400,
+    );
+    validate_and_json(
+        &router,
+        &spec,
         &EsiHttpRequest::new("GET", "/v1/loyalty/stores/999999999/offers/"),
         404,
     );
-    let offers_req = EsiHttpRequest::new(
+    let empty_offers_req = EsiHttpRequest::new(
         "GET",
-        format!("/v1/loyalty/stores/{npc_corp_id}/offers/"),
+        format!("/v1/loyalty/stores/{empty_npc_corp_id}/offers/"),
     );
-    assert_eq!(validate_and_json(&router, &spec, &offers_req, 200), json!([]));
+    assert_eq!(validate_and_json(&router, &spec, &empty_offers_req, 200), json!([]));
+
+    let caldari_req =
+        EsiHttpRequest::new("GET", format!("/v1/loyalty/stores/{npc_corp_id}/offers/"));
+    assert_etag_and_304(&router, &spec, &caldari_req);
+    let caldari_offers = validate_and_json(&router, &spec, &caldari_req, 200);
+    let caldari_arr = caldari_offers.as_array().expect("Caldari Navy offers array");
+    assert_eq!(caldari_arr.len(), 310);
+    let o3565 = caldari_arr.iter().find(|o| o["offer_id"] == 3565).expect("offer 3565");
+    assert_eq!(
+        *o3565,
+        json!({
+            "offer_id": 3565,
+            "type_id": 27361,
+            "quantity": 5000,
+            "lp_cost": 2400,
+            "isk_cost": 2400000,
+            "required_items": [{ "type_id": 210, "quantity": 5000 }]
+        })
+    );
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.loyalty_store_offers.insert(
-            npc_corp_id,
+            empty_npc_corp_id,
             vec![LoyaltyStoreOfferRecord {
                 offer_id: 4001,
-                type_id: 17_634, // Caracal Navy Issue
+                type_id: 17_634,
                 quantity: 1,
                 lp_cost: 50_000,
                 isk_cost: 20_000_000,
                 ak_cost: Some(100),
-                required_items: vec![LoyaltyStoreOfferItemRecord {
-                    type_id: 621, // Caracal
-                    quantity: 1,
-                }],
+                required_items: vec![LoyaltyStoreOfferItemRecord { type_id: 621, quantity: 1 }],
             }],
         );
     });
-    assert_etag_and_304(&router, &spec, &offers_req);
-    let offers = validate_and_json(&router, &spec, &offers_req, 200);
+    assert_etag_and_304(&router, &spec, &empty_offers_req);
     assert_eq!(
-        offers,
+        validate_and_json(&router, &spec, &empty_offers_req, 200),
         json!([{
             "offer_id": 4001,
             "type_id": 17_634,
@@ -362,10 +341,7 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
             "lp_cost": 50_000,
             "isk_cost": 20_000_000,
             "ak_cost": 100,
-            "required_items": [{
-                "type_id": 621,
-                "quantity": 1
-            }]
+            "required_items": [{ "type_id": 621, "quantity": 1 }]
         }])
     );
 }
@@ -432,44 +408,24 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
         }
     });
 
-    let token = issue_token_with_scopes(
-        &ctx,
-        char_id,
-        vec![
-            "esi-wallet.read_character_wallet.v1".to_string(),
-            "esi-wallet.read_corporation_wallets.v1".to_string(),
-        ],
-    );
-    let outsider_token = issue_token_with_scopes(
-        &ctx,
-        outsider_id,
-        vec![
-            "esi-wallet.read_character_wallet.v1".to_string(),
-            "esi-wallet.read_corporation_wallets.v1".to_string(),
-        ],
-    );
+    let scopes = vec![
+        "esi-wallet.read_character_wallet.v1".to_string(),
+        "esi-wallet.read_corporation_wallets.v1".to_string(),
+    ];
+    let token = issue_token_with_scopes(&ctx, char_id, scopes.clone());
+    let outsider_token = issue_token_with_scopes(&ctx, outsider_id, scopes);
 
     // 1. Character Wallet Journal (`GET /v6/characters/{character_id}/wallet/journal/`)
+    let cj_path = format!("/v6/characters/{char_id}/wallet/journal/");
+    validate_and_json(&router, &spec, &EsiHttpRequest::new("GET", &cj_path), 401);
     validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new("GET", format!("/v6/characters/{char_id}/wallet/journal/")),
-        401,
-    );
-    validate_and_json(
-        &router,
-        &spec,
-        &EsiHttpRequest::new("GET", format!("/v6/characters/{char_id}/wallet/journal/"))
-            .with_bearer_token(&outsider_token),
+        &EsiHttpRequest::new("GET", &cj_path).with_bearer_token(&outsider_token),
         403,
     );
-    let char_journal_req =
-        EsiHttpRequest::new("GET", format!("/v6/characters/{char_id}/wallet/journal/"))
-            .with_bearer_token(&token);
-    assert_eq!(
-        validate_and_json(&router, &spec, &char_journal_req, 200),
-        json!([])
-    );
+    let char_journal_req = EsiHttpRequest::new("GET", &cj_path).with_bearer_token(&token);
+    assert_eq!(validate_and_json(&router, &spec, &char_journal_req, 200), json!([]));
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.wallet_journal.push(WalletJournalEntry {
@@ -495,9 +451,8 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
     assert_eq!(cj_resp.status_code, 200);
     assert_eq!(cj_resp.header("x-pages"), Some("1"));
     assert_etag_and_304(&router, &spec, &char_journal_req);
-    let cj = validate_and_json(&router, &spec, &char_journal_req, 200);
     assert_eq!(
-        cj,
+        validate_and_json(&router, &spec, &char_journal_req, 200),
         json!([
             {
                 "id": 9102,
@@ -521,25 +476,15 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
     );
 
     // 2. Character Wallet Transactions (`GET /v1/characters/{character_id}/wallet/transactions/`)
+    let ctx_path = format!("/v1/characters/{char_id}/wallet/transactions/");
+    validate_and_json(&router, &spec, &EsiHttpRequest::new("GET", &ctx_path), 401);
     validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new("GET", format!("/v1/characters/{char_id}/wallet/transactions/")),
-        401,
-    );
-    validate_and_json(
-        &router,
-        &spec,
-        &EsiHttpRequest::new(
-            "GET",
-            format!("/v1/characters/{char_id}/wallet/transactions/?from_id=0"),
-        )
-        .with_bearer_token(&token),
+        &EsiHttpRequest::new("GET", format!("{ctx_path}?from_id=0")).with_bearer_token(&token),
         400,
     );
-    let char_tx_req =
-        EsiHttpRequest::new("GET", format!("/v1/characters/{char_id}/wallet/transactions/"))
-            .with_bearer_token(&token);
+    let char_tx_req = EsiHttpRequest::new("GET", &ctx_path).with_bearer_token(&token);
     assert_eq!(validate_and_json(&router, &spec, &char_tx_req, 200), json!([]));
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -584,11 +529,7 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
     let char_tx_filtered = validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new(
-            "GET",
-            format!("/v1/characters/{char_id}/wallet/transactions/?from_id=9502"),
-        )
-        .with_bearer_token(&token),
+        &EsiHttpRequest::new("GET", format!("{ctx_path}?from_id=9502")).with_bearer_token(&token),
         200,
     );
     assert_eq!(char_tx_filtered.as_array().unwrap().len(), 1);
@@ -603,16 +544,9 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
         200,
     );
     assert_eq!(corp_wallets.as_array().unwrap().len(), 7);
-    assert_eq!(
-        corp_wallets[0],
-        json!({ "division": 1, "balance": 500_000_000.0 })
-    );
-    assert_eq!(
-        corp_wallets[1],
-        json!({ "division": 2, "balance": 125_000_000.0 })
-    );
+    assert_eq!(corp_wallets[0], json!({ "division": 1, "balance": 500_000_000.0 }));
+    assert_eq!(corp_wallets[1], json!({ "division": 2, "balance": 125_000_000.0 }));
 
-    // Auth & division range validation
     validate_and_json(
         &router,
         &spec,
@@ -630,11 +564,8 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
     validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new(
-            "GET",
-            format!("/v1/corporations/{corp_id}/wallets/8/transactions/"),
-        )
-        .with_bearer_token(&token),
+        &EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/wallets/8/transactions/"))
+            .with_bearer_token(&token),
         400,
     );
 
@@ -684,18 +615,15 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
         );
     });
 
-    let corp_j_req = EsiHttpRequest::new(
-        "GET",
-        format!("/v4/corporations/{corp_id}/wallets/1/journal/"),
-    )
-    .with_bearer_token(&token);
+    let corp_j_req =
+        EsiHttpRequest::new("GET", format!("/v4/corporations/{corp_id}/wallets/1/journal/"))
+            .with_bearer_token(&token);
     let corp_j_resp = router.handle_request(&corp_j_req);
     assert_eq!(corp_j_resp.status_code, 200);
     assert_eq!(corp_j_resp.header("x-pages"), Some("1"));
     assert_etag_and_304(&router, &spec, &corp_j_req);
-    let corp_j = validate_and_json(&router, &spec, &corp_j_req, 200);
     assert_eq!(
-        corp_j,
+        validate_and_json(&router, &spec, &corp_j_req, 200),
         json!([{
             "id": 9801,
             "date": "2023-11-14T22:13:20Z",
@@ -709,11 +637,8 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
         }])
     );
 
-    let corp_tx_req = EsiHttpRequest::new(
-        "GET",
-        format!("/v1/corporations/{corp_id}/wallets/1/transactions/"),
-    )
-    .with_bearer_token(&token);
+    let corp_tx_path = format!("/v1/corporations/{corp_id}/wallets/1/transactions/");
+    let corp_tx_req = EsiHttpRequest::new("GET", &corp_tx_path).with_bearer_token(&token);
     assert_etag_and_304(&router, &spec, &corp_tx_req);
     let corp_txs = validate_and_json(&router, &spec, &corp_tx_req, 200);
     assert_eq!(corp_txs.as_array().unwrap().len(), 2);
@@ -723,11 +648,7 @@ async fn test_esi4_wallet_char_and_corp_journal_and_transactions() {
     let corp_tx_filtered = validate_and_json(
         &router,
         &spec,
-        &EsiHttpRequest::new(
-            "GET",
-            format!("/v1/corporations/{corp_id}/wallets/1/transactions/?from_id=9902"),
-        )
-        .with_bearer_token(&token),
+        &EsiHttpRequest::new("GET", format!("{corp_tx_path}?from_id=9902")).with_bearer_token(&token),
         200,
     );
     assert_eq!(corp_tx_filtered.as_array().unwrap().len(), 1);
