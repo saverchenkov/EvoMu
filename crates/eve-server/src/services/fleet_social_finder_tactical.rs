@@ -1057,9 +1057,22 @@ pub(super) async fn handle_finder_and_tactical(
             };
             let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), char_id, 1.0, 1.0, 1.0);
             ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetStateChange", "fleetid", vec![fleet_state]);
+            let sys_id = session.solar_system_id.unwrap_or(0) as i64;
+            let target_type_id = ctx.db.with_snapshot(|s| s.items.get(&target_id).map(|i| i.type_id as i64)).unwrap_or(0);
+            ctx.notify(
+                NotificationTarget::Fleet(fleet_id),
+                "OnFleetBroadcast",
+                "fleetid",
+                vec![
+                    PyRep::String("Target".into()),
+                    PyRep::Integer(1),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(sys_id),
+                    PyRep::Integer(target_id),
+                    PyRep::Integer(target_type_id),
+                ],
+            );
             let tag_rep = if tag_str.is_empty() { PyRep::None } else { PyRep::String(tag_str) };
-            // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetTargetTagChanged", "fleetid", vec![PyRep::Integer(fleet_id), PyRep::Integer(target_id), tag_rep.clone()]);
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fleet_id)),
                 ("targetID", PyRep::Integer(target_id)),
@@ -1095,6 +1108,7 @@ pub(super) async fn handle_finder_and_tactical(
             let size = args.get(2).and_then(|a| a.as_f64()).or_else(|| kwargs.get("formationSize").and_then(|a| a.as_f64())).unwrap_or(spacing.max(10_000.0)).clamp(0.0, 100_000.0);
             ctx.fleet_extras.lock().unwrap().stored_formations.insert(char_id, (formation_id, spacing, size));
             sync_fleet_formations_to_db(ctx);
+            ctx.notify(NotificationTarget::Character(char_id), "OnFleetFormationWndChanged", "charid", vec![]);
             Some(Ok(PyRep::keyval([
                 ("formationID", PyRep::Integer(formation_id)),
                 ("formationName", PyRep::String(formation_name(formation_id).into())),

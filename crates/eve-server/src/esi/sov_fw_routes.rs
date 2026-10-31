@@ -203,11 +203,24 @@ pub fn dispatch_sov_route(
                     let Some(sys) = ctx.sde.solar_systems.get(&st.solar_system_id) else {
                         continue;
                     };
-                    let (attackers_score, defender_score) = snap
-                        .sov_campaign_scores
+                    let Some((attackers_score, defender_score)) = snap
+                        .sov_runtime
+                        .command_node_scores
                         .get(&st.structure_id)
-                        .map(|s| (s.attackers_score, s.defender_score))
-                        .unwrap_or((0.4, 0.6));
+                        .and_then(|v| v.first())
+                        .map(|&(_, def_prog)| {
+                            let def = (def_prog.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                            let att = ((1.0 - def).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                            (att, def)
+                        })
+                        .or_else(|| {
+                            snap.sov_campaign_scores
+                                .get(&st.structure_id)
+                                .map(|s| (s.attackers_score, s.defender_score))
+                        })
+                    else {
+                        continue;
+                    };
                     campaigns.push(json!({
                         "campaign_id": st.structure_id,
                         "constellation_id": sys.constellation_id as i64,

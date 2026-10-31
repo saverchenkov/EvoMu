@@ -3,13 +3,10 @@
 //! Parity rows:
 //! - `feat:fleet.member-movement-optins`
 //! - `feat:fleet.fleet-setups`
-//! - `feat:fleet.boss-handover`
 //! - `feat:fleet.join-requests`
 //! - `feat:fleet.watchlist-broadcast-tracking`
 //! - `feat:fleet.broadcast-scope-and-filter`
-//! - `feat:fleet.stored-formations-and-warp-shapes`
 //! - `feat:fleet.takes-fleet-warp-toggle`
-//! - `feat:fleet.target-tagging`
 
 #![forbid(unsafe_code)]
 
@@ -73,15 +70,11 @@ fn field(rep: &PyRep, key: &str) -> PyRep {
 async fn test_fleet_movement_optins_formations_and_setups() {
     // parity: feat:fleet.member-movement-optins
     // parity: feat:fleet.takes-fleet-warp-toggle
-    // parity: feat:fleet.stored-formations-and-warp-shapes
     // parity: feat:fleet.fleet-setups
-    // parity: feat:fleet.boss-handover
     eve_testkit::attest(&[
         "feat:fleet.member-movement-optins",
         "feat:fleet.takes-fleet-warp-toggle",
-        "feat:fleet.stored-formations-and-warp-shapes",
         "feat:fleet.fleet-setups",
-        "feat:fleet.boss-handover",
     ]);
 
     let ctx = ServerContext::new();
@@ -273,12 +266,10 @@ async fn test_fleet_tactical_broadcasts_watchlist_and_tagging() {
     // parity: feat:fleet.join-requests
     // parity: feat:fleet.watchlist-broadcast-tracking
     // parity: feat:fleet.broadcast-scope-and-filter
-    // parity: feat:fleet.target-tagging
     eve_testkit::attest(&[
         "feat:fleet.join-requests",
         "feat:fleet.watchlist-broadcast-tracking",
         "feat:fleet.broadcast-scope-and-filter",
-        "feat:fleet.target-tagging",
     ]);
 
     let ctx = ServerContext::new();

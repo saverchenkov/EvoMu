@@ -141,22 +141,12 @@ pub(crate) fn fit_module_and_charge(
 #[tokio::test]
 async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
     // parity: feat:crimewatch.sec-status-tags
-    // parity: feat:crimewatch.sec-status-transactions
     // parity: feat:crimewatch.faction-police
-    // parity: feat:crimewatch.kill-rights-gain
-    // parity: feat:crimewatch.kill-rights-sell
     // parity: feat:crimewatch.faction-police-thresholds
-    // parity: feat:crimewatch.sec-status-gain-caps
-    // parity: feat:crimewatch.sec-tag-tier-bands
     eve_testkit::attest(&[
         "feat:crimewatch.sec-status-tags",
-        "feat:crimewatch.sec-status-transactions",
         "feat:crimewatch.faction-police",
-        "feat:crimewatch.kill-rights-gain",
-        "feat:crimewatch.kill-rights-sell",
         "feat:crimewatch.faction-police-thresholds",
-        "feat:crimewatch.sec-status-gain-caps",
-        "feat:crimewatch.sec-tag-tier-bands",
     ]);
 
     let ctx = ServerContext::new();
@@ -202,21 +192,45 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
     let (attacked_pod, can_dock_pod, _) = evaluate_faction_police_response(&ctx, highsec_id, char_b, pod_target_id).await;
     assert!(!attacked_pod && can_dock_pod, "Capsules must not be attacked by Faction Police and may dock");
 
-    // 9. Kill Rights (`feat:crimewatch.kill-rights`)
-    let kr_id = ctx.db.with_mut_snapshot(|s| {
-        s.next_entity_id += 1;
-        let id = s.next_entity_id;
-        s.kill_rights.insert(
-            id,
-            eve_db::KillRightRecord {
-                kill_right_id: id,
-                owner_id: char_b,
-                target_id: char_a,
-                activation_fee: IskCents::from_isk(5_000_000),
-                is_active_suspect: false,
+    // 9. Kill Rights (`feat:crimewatch.kill-rights`) via live illegal aggression + CONCORD step
+    let _ = ctx
+        .systems
+        .get_or_spawn(highsec_id)
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_a,
+                type_id: 587,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 3.0,
+                mass: 1_200_000.0,
+                radius: 35.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
             },
-        );
-        id
+            ctx.build_type_combat_state(587),
+        )
+        .await;
+    let now_kr = ctx.now_unix();
+    let mut cw = eve_server::combat::crimewatch::CrimeWatchDirector::new();
+    let _ = cw.handle_combat_aggression_with_pod(
+        char_a,
+        char_b,
+        ship_a,
+        highsec_id,
+        1.0,
+        false,
+        false,
+        now_kr,
+    );
+    let _ = cw.step_concord(&ctx, now_kr + 10, 42).await;
+    let kr_id = ctx.db.with_snapshot(|s| {
+        s.kill_rights
+            .values()
+            .find(|kr| kr.owner_id == char_b && kr.target_id == char_a)
+            .expect("live kill right created on illegal aggression")
+            .kill_right_id
     });
     let _ = dispatch_combat_rpc(&ctx, &mut sess_b, "bountyProxy", "SellKillRight", &[PyRep::Integer(kr_id), PyRep::Real(10_000_000.0)], &HashMap::new())
         .await
@@ -230,9 +244,25 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
     assert_eq!(dict_get(&act_kr, "suspectFlagged").and_then(|v| v.as_bool()), Some(true));
 
     // 10. Clone Soldier Security Tags (`feat:crimewatch.security-tags`)
+    let lowsec_station_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|st| {
+            ctx.sde
+                .solar_systems
+                .get(&st.solar_system_id)
+                .is_some_and(|sys| {
+                    let r = (sys.security_status * 10.0).round() / 10.0;
+                    (0.1..0.5).contains(&r)
+                })
+        })
+        .expect("lowsec station in SDE")
+        .station_id;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.characters.get_mut(&char_b) {
             c.security_status = -6.5;
+            c.station_id = Some(lowsec_station_id);
         }
         s.items.insert(
             750_001,
@@ -253,7 +283,7 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
             },
         );
     });
-    sess_b.station_id = Some(60_003_760);
+    sess_b.station_id = Some(lowsec_station_id);
     let tag_res = dispatch_combat_rpc(&ctx, &mut sess_b, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35662), PyRep::Integer(2)], &HashMap::new())
         .await
         .expect("ApplyTagsForSecStatus");

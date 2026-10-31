@@ -305,7 +305,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         }
     });
 
-    // 1. Verify EVE security status loss formula (ship & pod, accounting for target_sec and aggressor_sec)
+    // 1. Verify EVE security status loss formula and live character security_status update on illegal high-sec aggression
     let loss_ship = compute_sec_status_loss(0.0, 5.0, false, 0.95);
     let expected_ship = (10.0 - 0.0) * 0.025 * 0.95 * (1.0 + (5.0 - 0.0) / 100.0);
     assert!((loss_ship - expected_ship).abs() < 1e-6);
@@ -313,6 +313,15 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     let loss_pod = compute_sec_status_loss(-2.0, 5.0, true, 0.95);
     let expected_pod = (10.0 - (-2.0)) * 0.25 * 0.95 * (1.0 + (5.0 - (-2.0)) / 100.0);
     assert!((loss_pod - expected_pod).abs() < 1e-6);
+
+    let jita_sec = ctx.sde.solar_systems[&30_000_142].security_status;
+    let expected_jita_loss = compute_sec_status_loss(0.0, 5.0, false, jita_sec);
+    eve_server::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+        &ctx, char_id, 1, 30_000_142, victim_id, false,
+    )
+    .expect("evaluate_and_record_pvp_aggression");
+    let sec_after_aggr = ctx.db.with_snapshot(|s| s.characters[&char_id].security_status);
+    assert!((sec_after_aggr - (-expected_jita_loss)).abs() < 1e-6, "live character security_status must drop by exact ship loss formula");
 
     // 2. Verify NPC kill security status gain caps at +5.0 (`feat:crimewatch.sec-status-gain-caps`)
     ctx.db.with_mut_snapshot(|snap| {
@@ -576,55 +585,36 @@ async fn test_fleet_boss_handover_formations_and_target_tagging_closure() {
     .await;
     assert!(bad_tag.unwrap_err().contains("InvalidTargetTag"));
 
-    let tagged = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        "SetTargetTag",
-        &[PyRep::Integer(target_ship), PyRep::String("A".into())],
-    )
-    .await
-    .expect("SetTargetTag A");
+    let _ = ctx.drain_notifications_for_char(boss_id);
+    // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
+    let tagged = rpc(&ctx, &mut sess1, "fleetObjectHandler", "SetTargetTag", &[PyRep::Integer(target_ship), PyRep::String("A".into())])
+        .await
+        .expect("SetTargetTag A");
     assert_eq!(field(&tagged, "tag"), PyRep::String("A".into()));
+    let tag_notifs = ctx.drain_notifications_for_char(boss_id);
+    assert!(tag_notifs.iter().any(|n| n.event == "OnFleetBroadcast" && n.args.first().and_then(|a| a.as_str()) == Some("Target")));
+    assert!(tag_notifs.iter().any(|n| n.event == "OnFleetStateChange"));
 
     // Destroy target_ship -> target tag must be cleared automatically
     let _ = execute_death_pipeline(&ctx, sys_id, fc_id, target_ship, boss_id, DVec3::ZERO, 99)
         .await
         .expect("destroy tagged ship");
-    let tags_after = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        "GetTargetTags",
-        &[],
-    )
-    .await
-    .expect("GetTargetTags");
+    // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
+    let tags_after = rpc(&ctx, &mut sess1, "fleetObjectHandler", "GetTargetTags", &[])
+        .await
+        .expect("GetTargetTags");
     assert_eq!(tags_after, PyRep::Dict(Vec::new()));
 
     // 3. Stored formations & FleetWarp deterministic landing offsets (`feat:fleet.stored-formations-and-warp-shapes`)
-    let _ = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        "SetFleetFormation",
-        &[PyRep::Integer(3), PyRep::Real(5_000.0), PyRep::Real(10_000.0)], // Arrow
-    )
-    .await
-    .expect("SetFleetFormation");
+    // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
+    let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "SetFleetFormation", &[PyRep::Integer(3), PyRep::Real(5_000.0), PyRep::Real(10_000.0)])
+        .await
+        .expect("SetFleetFormation");
+    assert!(ctx.drain_notifications_for_char(boss_id).iter().any(|n| n.event == "OnFleetFormationWndChanged"));
 
-    let warp_res = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        "FleetWarp",
-        &[PyRep::Integer(40_000_001), PyRep::Real(0.0)],
-    )
-    .await
-    .expect("FleetWarp");
+    let warp_res = rpc(&ctx, &mut sess1, "fleetObjectHandler", "FleetWarp", &[PyRep::Integer(40_000_001), PyRep::Real(0.0)])
+        .await
+        .expect("FleetWarp");
     assert_eq!(field(&warp_res, "formationID"), PyRep::Integer(3));
     if let PyRep::List(positions) = field(&warp_res, "landingPositions") {
         assert_eq!(positions.len(), 2);
@@ -634,16 +624,11 @@ async fn test_fleet_boss_handover_formations_and_target_tagging_closure() {
     }
 
     // 4. Boss handover (`feat:fleet.boss-handover`): MakeLeader, LeaveFleet, and disconnect handover
-    let _ = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        "MakeLeader",
-        &[PyRep::Integer(fc_id)],
-    )
-    .await
-    .expect("MakeLeader");
+    let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "MakeLeader", &[PyRep::Integer(fc_id)])
+        .await
+        .expect("MakeLeader");
     assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), fc_id);
+    assert!(ctx.drain_notifications_for_char(boss_id).iter().any(|n| n.event == "OnFleetMemberChanged"));
 
     // Boss (fc_id) leaves -> boss passes automatically to boss_id
     let left = rpc(&ctx, &mut sess2, "fleetObjectHandler", "LeaveFleet", &[])
@@ -653,15 +638,9 @@ async fn test_fleet_boss_handover_formations_and_target_tagging_closure() {
     assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), boss_id);
 
     // Re-invite fc_id, then disconnect boss_id -> boss passes automatically to fc_id
-    let _ = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        "Invite",
-        &[PyRep::Integer(fc_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)],
-    )
-    .await
-    .expect("Re-invite fc_id");
+    let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "Invite", &[PyRep::Integer(fc_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)])
+        .await
+        .expect("Re-invite fc_id");
     ctx.advance_secs(15);
     let _ = rpc(&ctx, &mut sess2, "fleetObjectHandler", "AcceptInvite", &[PyRep::Integer(fid)])
         .await

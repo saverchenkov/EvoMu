@@ -237,11 +237,10 @@ async fn test_npc_mining_ops_and_hauler_convoy_lifecycle() {
 
 #[tokio::test]
 async fn test_concord_response_and_faction_police_enforcement() {
-    // parity: feat:npc.concord-npc, feat:npc.navy-npc, feat:crimewatch.sec-status-loss
+    // parity: feat:npc.concord-npc, feat:npc.navy-npc
     eve_testkit::attest(&[
         "feat:npc.concord-npc",
         "feat:npc.navy-npc",
-        "feat:crimewatch.sec-status-loss",
     ]);
 
     let ctx = ServerContext::new();

@@ -6,10 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use eve_db::{
-    CorporationRecord, InventoryItemRecord, KillmailDetailRecord, KillmailRecord, SystemJumpEvent,
-    SystemKillEvent, UpwellStructureRecord, WarRecord,
-};
+use eve_db::{CorporationRecord, InventoryItemRecord, WarRecord};
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
 use serde_json::{json, Value};
@@ -19,7 +16,7 @@ use std::sync::Arc;
 const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
-fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<String>) -> String {
+pub(crate) fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<String>) -> String {
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&character_id) {
             ch.user_id = 1;
@@ -29,17 +26,7 @@ fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<S
     let now = ctx.now_unix();
     let code = ctx
         .db
-        .authorize_pkce(
-            "demo",
-            "demo-secret",
-            character_id,
-            "evomu-esi-fw-complete-test",
-            "https://localhost/callback",
-            scopes,
-            PKCE_CHALLENGE,
-            "S256",
-            now,
-        )
+        .authorize_pkce("demo", "demo-secret", character_id, "evomu-esi-fw-complete-test", "https://localhost/callback", scopes, PKCE_CHALLENGE, "S256", now)
         .expect("authorize_pkce");
     ctx.db
         .exchange_pkce_code(&code, "evomu-esi-fw-complete-test", PKCE_VERIFIER, now)
@@ -47,10 +34,7 @@ fn issue_token_with_scopes(ctx: &ServerContext, character_id: i64, scopes: Vec<S
         .access_token
 }
 
-/// Issues the request, asserts the status, validates status/headers/body against the pinned
-/// OpenAPI operation, checks the caching contract (ETag, Cache-Control, Expires, Last-Modified) and
-/// that a conditional re-request with the ETag yields `304 Not Modified` with an empty body.
-fn call(router: &EsiRouter, req: EsiHttpRequest, expected: u16) -> Value {
+pub(crate) fn call(router: &EsiRouter, req: EsiHttpRequest, expected: u16) -> Value {
     let spec = OpenApiSpec::pinned();
     let resp = router.handle_request(&req);
     let raw_path = req.raw_target.split('?').next().unwrap().to_string();
@@ -477,60 +461,21 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     );
 
     // Scope & identity enforcement (401 without token, 403 without scope, 403 for other character)
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{char_id}/fw/stats/")),
-        401,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{char_id}/fw/stats/"))
-            .with_bearer_token(&no_scope_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{other_char_id}/fw/stats/"))
-            .with_bearer_token(&char_token),
-        403,
-    );
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{char_id}/fw/stats/")), 401);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{char_id}/fw/stats/")).with_bearer_token(&no_scope_token), 403);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{other_char_id}/fw/stats/")).with_bearer_token(&char_token), 403);
 
     // 2. Corporation FW Stats (`GET /corporations/{corporation_id}/fw/stats`)
-    let corp_fw = call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/fw/stats/"))
-            .with_bearer_token(&char_token),
-        200,
-    );
+    let corp_fw = call(&router, EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/fw/stats/")).with_bearer_token(&char_token), 200);
     assert_eq!(corp_fw["faction_id"], json!(500_001));
     assert_eq!(corp_fw["pilots"], json!(1));
     assert_eq!(corp_fw["enlisted_on"], json!(fmt(now)));
-    assert_eq!(
-        corp_fw["kills"],
-        json!({ "yesterday": 1, "last_week": 1, "total": 1 })
-    );
-    assert_eq!(
-        corp_fw["victory_points"],
-        json!({ "yesterday": expected_vp, "last_week": expected_vp, "total": expected_vp })
-    );
+    assert_eq!(corp_fw["kills"], json!({ "yesterday": 1, "last_week": 1, "total": 1 }));
+    assert_eq!(corp_fw["victory_points"], json!({ "yesterday": expected_vp, "last_week": expected_vp, "total": expected_vp }));
 
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/fw/stats/")),
-        401,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/fw/stats/"))
-            .with_bearer_token(&no_scope_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/corporations/99999999/fw/stats/")
-            .with_bearer_token(&char_token),
-        403,
-    );
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/fw/stats/")), 401);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/corporations/{corp_id}/fw/stats/")).with_bearer_token(&no_scope_token), 403);
+    call(&router, EsiHttpRequest::new("GET", "/v1/corporations/99999999/fw/stats/").with_bearer_token(&char_token), 403);
 
     // 3. FW Leaderboards (`GET /fw/leaderboards`, `/characters`, `/corporations`)
     let lb = call(&router, EsiHttpRequest::new("GET", "/v1/fw/leaderboards/"), 200);
@@ -713,430 +658,3 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     assert!(fw_wars_upd_arr.contains(&json!({ "faction_id": 500_002, "against_id": 500_001 })));
 }
 
-#[tokio::test]
-async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
-    // parity: esi:GET /universe/stars/{star_id}, esi:GET /universe/stations/{station_id}
-    // parity: esi:GET /universe/system_jumps, esi:GET /universe/system_kills
-    // parity: feat:esi.universe.celestials, feat:esi.universe.stations-structures
-    // parity: feat:esi.universe.system-jumps-kills
-    eve_testkit::attest(&[
-        "esi:GET /universe/stars/{star_id}",
-        "esi:GET /universe/stations/{station_id}",
-        "esi:GET /universe/system_jumps",
-        "esi:GET /universe/system_kills",
-        "feat:esi.universe.celestials",
-        "feat:esi.universe.stations-structures",
-        "feat:esi.universe.system-jumps-kills",
-    ]);
-
-    let ctx = Arc::new(ServerContext::new());
-    crate::common::pin_clock(&ctx);
-    let router = EsiRouter::new(Arc::clone(&ctx));
-    let now = ctx.now_unix();
-
-    let char_id = 90_000_001_i64;
-    let outsider_id = 90_000_002_i64;
-    let corp_id = 98_500_001_i64;
-    let outsider_corp_id = 98_500_002_i64;
-    let sys_id = 30_000_001_u32;
-    let structure_id = 1_099_000_001_i64;
-    let capsule_type_id = ctx
-        .sde
-        .groups
-        .values()
-        .find(|g| g.name == "Capsule")
-        .and_then(|g| {
-            ctx.sde
-                .types
-                .values()
-                .find(|t| t.group_id == g.group_id && t.published)
-        })
-        .map(|t| t.type_id)
-        .unwrap_or(670);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.fw_system_occupations.clear();
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.user_id = 1;
-            ch.corporation_id = corp_id;
-            ch.solar_system_id = sys_id;
-        }
-        if let Some(ch) = snap.characters.get_mut(&outsider_id) {
-            ch.user_id = 1;
-            ch.corporation_id = outsider_corp_id;
-            ch.solar_system_id = sys_id;
-            ch.standings.insert(corp_id, -5.0);
-        }
-        snap.corporations.insert(
-            corp_id,
-            CorporationRecord {
-                corporation_id: corp_id,
-                name: "Structure Owner Corp".to_string(),
-                ticker: "STOWN".to_string(),
-                ceo_id: char_id,
-                members: HashSet::from([char_id]),
-                ..Default::default()
-            },
-        );
-        snap.corporations.insert(
-            outsider_corp_id,
-            CorporationRecord {
-                corporation_id: outsider_corp_id,
-                name: "Outsider Corp".to_string(),
-                ticker: "OUTS".to_string(),
-                ceo_id: outsider_id,
-                members: HashSet::from([outsider_id]),
-                ..Default::default()
-            },
-        );
-        snap.structures.insert(
-            structure_id,
-            UpwellStructureRecord {
-                structure_id,
-                type_id: 35832, // Astrahus
-                owner_corp_id: corp_id,
-                solar_system_id: sys_id,
-                name: "Frontline Citadel".to_string(),
-                position: [1000.0, 2000.0, 3000.0],
-                state: "ShieldVulnerable".to_string(),
-                quantum_core_installed: true,
-                fuel_blocks: 500,
-                shield_hp: 5000.0,
-                armor_hp: 5000.0,
-                hull_hp: 5000.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0, self_destruct_at_unix: None,
-            },
-        );
-        snap.station_office_rental_costs
-            .insert(60_003_760, 750_000.0);
-
-        // 1-hour windowed jump events (2 inside [now - 3600, now], 1 expired at now - 7200)
-        snap.system_jump_events.push(SystemJumpEvent {
-            solar_system_id: sys_id,
-            character_id: char_id,
-            timestamp_unix: now - 600,
-        });
-        snap.system_jump_events.push(SystemJumpEvent {
-            solar_system_id: sys_id,
-            character_id: outsider_id,
-            timestamp_unix: now - 1_800,
-        });
-        snap.system_jump_events.push(SystemJumpEvent {
-            solar_system_id: sys_id,
-            character_id: char_id,
-            timestamp_unix: now - 7_200,
-        });
-
-        // 1-hour windowed kill events (1 ship kill + 1 pod kill + 3 NPC kills inside window; 1 expired ship kill + 5 expired NPC kills outside window)
-        snap.killmails.insert(
-            89_001,
-            KillmailRecord {
-                kill_id: 89_001,
-                victim_character_id: outsider_id,
-                attacker_character_id: char_id,
-                solar_system_id: sys_id,
-                ship_type_id: 587, // Rifter (ship kill inside 1h window)
-                total_value_isk: 1_500_000.0,
-                ..Default::default()
-            },
-        );
-        snap.killmail_details.insert(
-            89_001,
-            KillmailDetailRecord {
-                kill_id: 89_001,
-                killmail_time_unix: now - 300,
-                damage_taken: 1_200,
-                victim_position: Some([0.0, 0.0, 0.0]),
-                attackers: Vec::new(),
-            },
-        );
-        snap.killmails.insert(
-            89_002,
-            KillmailRecord {
-                kill_id: 89_002,
-                victim_character_id: outsider_id,
-                attacker_character_id: char_id,
-                solar_system_id: sys_id,
-                ship_type_id: capsule_type_id, // Capsule (pod kill inside 1h window)
-                total_value_isk: 10_000.0,
-                ..Default::default()
-            },
-        );
-        snap.killmail_details.insert(
-            89_002,
-            KillmailDetailRecord {
-                kill_id: 89_002,
-                killmail_time_unix: now - 900,
-                damage_taken: 400,
-                victim_position: Some([0.0, 0.0, 0.0]),
-                attackers: Vec::new(),
-            },
-        );
-        snap.killmails.insert(
-            89_003,
-            KillmailRecord {
-                kill_id: 89_003,
-                victim_character_id: outsider_id,
-                attacker_character_id: char_id,
-                solar_system_id: sys_id,
-                ship_type_id: 587, // Expired ship kill outside 1h window
-                total_value_isk: 1_500_000.0,
-                ..Default::default()
-            },
-        );
-        snap.killmail_details.insert(
-            89_003,
-            KillmailDetailRecord {
-                kill_id: 89_003,
-                killmail_time_unix: now - 5_400,
-                damage_taken: 1_200,
-                victim_position: Some([0.0, 0.0, 0.0]),
-                attackers: Vec::new(),
-            },
-        );
-        snap.system_kill_events.push(SystemKillEvent {
-            solar_system_id: sys_id,
-            ship_kills: 0,
-            pod_kills: 0,
-            npc_kills: 3,
-            timestamp_unix: now - 1_200,
-        });
-        snap.system_kill_events.push(SystemKillEvent {
-            solar_system_id: sys_id,
-            ship_kills: 0,
-            pod_kills: 0,
-            npc_kills: 5,
-            timestamp_unix: now - 7_200,
-        });
-    });
-
-    let owner_token = issue_token_with_scopes(
-        &ctx,
-        char_id,
-        vec!["esi-universe.read_structures.v1".to_string()],
-    );
-    let outsider_token = issue_token_with_scopes(
-        &ctx,
-        outsider_id,
-        vec!["esi-universe.read_structures.v1".to_string()],
-    );
-
-    // 1. Universe Stars & Celestials (`/stars/{id}`, `/planets/{id}`, `/moons/{id}`, `/asteroid_belts/{id}`, `/stargates/{id}`)
-    let tanoo_star = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stars/40000001/"),
-        200,
-    );
-    assert_eq!(tanoo_star["name"], json!("Tanoo - Star"));
-    assert_eq!(tanoo_star["solar_system_id"], json!(30_000_001));
-    assert_eq!(tanoo_star["type_id"], json!(45_041));
-    assert_eq!(tanoo_star["radius"], json!(63_350_000));
-    assert_eq!(tanoo_star["temperature"], json!(4_567));
-    assert_eq!(tanoo_star["spectral_class"], json!("K2 V"));
-    assert!(tanoo_star["age"].as_i64().unwrap() > 0);
-    assert!(tanoo_star["luminosity"].as_f64().unwrap() > 0.0);
-
-    let jita_star = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stars/40009076/"),
-        200,
-    );
-    assert_eq!(jita_star["name"], json!("Jita - Star"));
-    assert_eq!(jita_star["solar_system_id"], json!(30_000_142));
-    assert_eq!(jita_star["type_id"], json!(3_796));
-    assert_eq!(jita_star["radius"], json!(513_100_000));
-    assert_eq!(jita_star["temperature"], json!(7_305));
-    assert_eq!(jita_star["spectral_class"], json!("F1 V"));
-    assert_ne!(jita_star["age"], tanoo_star["age"]);
-    assert_ne!(jita_star["luminosity"], tanoo_star["luminosity"]);
-
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stars/99999999/"),
-        404,
-    );
-
-    let planet = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/planets/40000002/"),
-        200,
-    );
-    assert_eq!(planet["planet_id"], json!(40_000_002));
-    assert_eq!(planet["name"], json!("Tanoo I"));
-    assert_eq!(planet["system_id"], json!(30_000_001));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/planets/99999999/"),
-        404,
-    );
-
-    let moon = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/moons/40000004/"),
-        200,
-    );
-    assert_eq!(moon["moon_id"], json!(40_000_004));
-    assert_eq!(moon["name"], json!("Tanoo I - Moon 1"));
-    assert_eq!(moon["system_id"], json!(30_000_001));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/moons/99999999/"),
-        404,
-    );
-
-    let belt = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/asteroid_belts/40000003/"),
-        200,
-    );
-    assert_eq!(belt["name"], json!("Tanoo I - Asteroid Belt 1"));
-    assert_eq!(belt["system_id"], json!(30_000_001));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/asteroid_belts/99999999/"),
-        404,
-    );
-
-    let gate = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stargates/50000001/"),
-        200,
-    );
-    assert_eq!(gate["stargate_id"], json!(50_000_001));
-    assert!(gate["name"].as_str().unwrap().contains("Stargate"));
-    assert_eq!(gate["system_id"], json!(30_000_777));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/stargates/99999999/"),
-        404,
-    );
-
-    // 2. Universe Stations & Structures (`GET /universe/stations/{id}`, `/universe/structures`, `/universe/structures/{id}`)
-    let station = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v2/universe/stations/60003760/"),
-        200,
-    );
-    let sde_jita_station = ctx.sde.solar_systems[&30_000_142]
-        .stations
-        .iter()
-        .find(|s| s.station_id == 60_003_760)
-        .expect("Jita 4-4 in SDE");
-    assert_eq!(station["station_id"], json!(60_003_760));
-    assert_eq!(station["system_id"], json!(30_000_142));
-    assert_eq!(station["name"], json!(sde_jita_station.name));
-    assert_eq!(
-        station["owner"],
-        json!(sde_jita_station.owner_corporation_id)
-    );
-    assert_eq!(station["office_rental_cost"], json!(750_000.0));
-    let station_other_op = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v2/universe/stations/60000004/"),
-        200,
-    );
-    assert_ne!(
-        station["services"], station_other_op["services"],
-        "stations with different SDE operation_id values must expose distinct service lists"
-    );
-    assert!(station_other_op["services"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("storage")));
-    assert!(!station["services"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("storage")));
-    assert!(station["services"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("factory")));
-    assert!(!station_other_op["services"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("factory")));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v2/universe/stations/99999999/"),
-        404,
-    );
-
-    let structs_list = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/structures/"),
-        200,
-    );
-    assert!(structs_list.as_array().unwrap().contains(&json!(structure_id)));
-    let filtered = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/structures/?filter=market"),
-        200,
-    );
-    assert!(filtered.as_array().unwrap().contains(&json!(structure_id)));
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/structures/?filter=bad_filter"),
-        400,
-    );
-
-    let s_detail = call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v2/universe/structures/{structure_id}/"))
-            .with_bearer_token(&owner_token),
-        200,
-    );
-    assert_eq!(s_detail["name"], json!("Frontline Citadel"));
-    assert_eq!(s_detail["owner_id"], json!(corp_id));
-    assert_eq!(s_detail["solar_system_id"], json!(sys_id));
-    assert_eq!(s_detail["type_id"], json!(35832));
-
-    // Structure ACL & auth checks (401 without token, 403 for non-ACL outsider, 404 for unknown structure)
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v2/universe/structures/{structure_id}/")),
-        401,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v2/universe/structures/{structure_id}/"))
-            .with_bearer_token(&outsider_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v2/universe/structures/99999999/")
-            .with_bearer_token(&owner_token),
-        404,
-    );
-
-    // 3. Universe System Jumps and Kills (`GET /universe/system_jumps`, `GET /universe/system_kills`)
-    let jumps = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/universe/system_jumps/"),
-        200,
-    );
-    let sys_jump = jumps
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|j| j["system_id"] == json!(sys_id))
-        .expect("system jump entry");
-    assert_eq!(sys_jump["ship_jumps"], json!(2));
-
-    let kills = call(
-        &router,
-        EsiHttpRequest::new("GET", "/v2/universe/system_kills/"),
-        200,
-    );
-    let sys_kill = kills
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|k| k["system_id"] == json!(sys_id))
-        .expect("system kill entry");
-    assert_eq!(sys_kill["ship_kills"], json!(1));
-    assert_eq!(sys_kill["pod_kills"], json!(1));
-    assert_eq!(sys_kill["npc_kills"], json!(3));
-}

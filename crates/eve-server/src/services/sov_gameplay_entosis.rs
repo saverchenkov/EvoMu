@@ -132,7 +132,7 @@ pub async fn precheck_entosis_activation(
         let is_hub = snap
             .structures
             .get(&target_id)
-            .is_some_and(|st| st.type_id == TYPE_SOVEREIGNTY_HUB && st.state != "Destroyed");
+            .is_some_and(|st| matches!(st.type_id, TYPE_SOVEREIGNTY_HUB | 32_226) && st.state != "Destroyed");
         let node = snap.sov_runtime.command_nodes.get(&target_id).copied();
         if !is_hub && node.is_none() {
             return Ok(None);
@@ -309,6 +309,14 @@ async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_i
         snap.sov_runtime
             .command_node_scores
             .insert(hub_id, vec![(def_key, SOV_COMMAND_NODE_INITIAL_PROGRESS)]);
+        snap.sov_campaign_scores.insert(
+            hub_id,
+            eve_db::SovCampaignScoreRecord {
+                structure_id: hub_id,
+                attackers_score: 1.0 - SOV_COMMAND_NODE_INITIAL_PROGRESS,
+                defender_score: SOV_COMMAND_NODE_INITIAL_PROGRESS,
+            },
+        );
         out
     });
     spawn_command_node_balls(ctx, spawned).await;
@@ -341,7 +349,7 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
     for (target_id, (char_id, alliance_id, ship_id, mut accrued_secs, last_ts)) in entries {
         let meta = ctx.db.with_snapshot(|snap| {
             if let Some(st) = snap.structures.get(&target_id) {
-                if st.type_id == TYPE_SOVEREIGNTY_HUB && st.state != "Destroyed" {
+                if matches!(st.type_id, TYPE_SOVEREIGNTY_HUB | 32_226) && st.state != "Destroyed" {
                     let sys = st.solar_system_id;
                     let adm = adm_for_system(snap, sys);
                     return Some((true, sys, DVec3::from_array(st.position), ENTOSIS_HUB_BASE_CAPTURE_SECS * adm));
@@ -537,6 +545,16 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                 }
                 scores[0].0 = def_key;
                 scores[0].1 = progress;
+                let def_rounded = (progress.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                let att_rounded = ((1.0 - def_rounded).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                snap.sov_campaign_scores.insert(
+                    hub_id,
+                    eve_db::SovCampaignScoreRecord {
+                        structure_id: hub_id,
+                        attackers_score: att_rounded,
+                        defender_score: def_rounded,
+                    },
+                );
 
                 if progress > 1e-6 && progress + 1e-6 < 1.0 {
                     let const_systems = constellation_systems_for_hub(ctx, hub_sys);
@@ -593,6 +611,7 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
                     snap.item_positions.remove(nid);
                 }
                 snap.sov_runtime.command_node_scores.remove(&hub_id);
+                snap.sov_campaign_scores.remove(&hub_id);
                 if let Some(st) = snap.structures.get_mut(&hub_id) {
                     if defender_won {
                         st.state = "Online".into();
