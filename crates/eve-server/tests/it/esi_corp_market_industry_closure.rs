@@ -3,55 +3,21 @@
 
 #![forbid(unsafe_code)]
 
+use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, make_structure, rpc_call};
 use eve_db::corp_roles::{
     ROLE_ACCOUNTANT, ROLE_DIRECTOR, ROLE_FACTORY_MANAGER, ROLE_STATION_MANAGER, ROLE_TRADER,
 };
-use eve_db::{
-    CorporationRecord, CustomsOfficeRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    MarketOrderMeta, MarketOrderRecord, MoonExtractionRecord, ObserverMiningRecord,
-    UpwellStructureRecord,
-};
+use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::sample_routes::is_operation_implemented;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
 use eve_server::router::ServerContext;
+use glam::DVec3;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-
-fn issue_token(ctx: &ServerContext, character_id: i64, scopes: Vec<&str>) -> String {
-    let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&character_id) {
-            ch.user_id = 1;
-        }
-        Ok(())
-    });
-    let now = ctx.now_unix();
-    let scope_vec: Vec<String> = scopes.into_iter().map(str::to_string).collect();
-    let code = ctx
-        .db
-        .authorize_pkce(
-            "demo",
-            "demo-secret",
-            character_id,
-            "evomu-esi-closure",
-            "https://localhost/callback",
-            scope_vec,
-            PKCE_CHALLENGE,
-            "S256",
-            now,
-        )
-        .expect("authorize_pkce");
-    let bundle = ctx
-        .db
-        .exchange_pkce_code(&code, "evomu-esi-closure", PKCE_VERIFIER, now)
-        .expect("exchange_pkce_code");
-    bundle.access_token
-}
 
 fn call_esi(router: &EsiRouter, path: &str, token: Option<&str>) -> (u16, Value) {
     let mut req = EsiHttpRequest::new("GET", path);
@@ -63,21 +29,17 @@ fn call_esi(router: &EsiRouter, path: &str, token: Option<&str>) -> (u16, Value)
     (resp.status_code, body)
 }
 
-async fn rpc_call(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-) -> PyRep {
-    ctx.dispatch_rpc(session, service, None, method, args, &HashMap::new(), None)
-        .await
-        .unwrap_or_else(|e| panic!("RPC {service}.{method} failed: {e:?}"))
-}
-
-// parity: esi:GET /corporation/{corporation_id}/mining/extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, esi:GET /corporations/{corporation_id}/customs_offices, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
 #[tokio::test]
 async fn test_esi_corp_role_gated_mining_customs_and_orders() {
+    // parity: esi:GET /corporation/{corporation_id}/mining/extractions, esi:GET /corporation/{corporation_id}/mining/observers, esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}, esi:GET /corporations/{corporation_id}/customs_offices, esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
+    eve_testkit::attest(&[
+        "esi:GET /corporation/{corporation_id}/mining/extractions",
+        "esi:GET /corporation/{corporation_id}/mining/observers",
+        "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}",
+        "esi:GET /corporations/{corporation_id}/customs_offices",
+        "esi:GET /corporations/{corporation_id}/orders",
+        "esi:GET /corporations/{corporation_id}/orders/history",
+    ]);
     assert!(is_operation_implemented("GET", "/corporation/{corporation_id}/mining/extractions"));
     assert!(is_operation_implemented("GET", "/corporation/{corporation_id}/mining/observers"));
     assert!(is_operation_implemented(
@@ -89,7 +51,6 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
-    let now = ctx.now_unix();
 
     let corp_id = 98_500_001_i64;
     let ceo_id = 90_000_001_i64;
@@ -98,15 +59,34 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
     let trader_id = 90_000_004_i64;
     let plain_member_id = 90_000_005_i64;
     let observer_id = 1_030_000_000_001_i64;
+    let ship_id = 100_000_001_i64;
+    let jita_station = 60_003_760_i64;
+    let lowsec_sys = 30_000_192_u32;
+    let lowsec_planet_id = ctx.sde.solar_systems[&lowsec_sys].planet_ids[0];
+    let perim_moon = ctx
+        .sde
+        .celestials_in_system(30_000_144)
+        .into_iter()
+        .find(|c| c.group_id == 8)
+        .expect("SDE moon in Perimeter");
+    let perim_pos = [
+        perim_moon.position.x + 2_000.0,
+        perim_moon.position.y,
+        perim_moon.position.z,
+    ];
 
     ctx.db
         .try_with_mut_snapshot(|snap| {
-            let mut member_roles = HashMap::new();
-            member_roles.insert(ceo_id, ROLE_DIRECTOR);
-            member_roles.insert(station_mgr_id, ROLE_STATION_MANAGER);
-            member_roles.insert(accountant_id, ROLE_ACCOUNTANT);
-            member_roles.insert(trader_id, ROLE_TRADER);
-            member_roles.insert(plain_member_id, 0);
+            let member_roles = HashMap::from([
+                (
+                    ceo_id,
+                    ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_ACCOUNTANT | ROLE_TRADER,
+                ),
+                (station_mgr_id, ROLE_STATION_MANAGER),
+                (accountant_id, ROLE_ACCOUNTANT),
+                (trader_id, ROLE_TRADER),
+                (plain_member_id, 0),
+            ]);
 
             let template_char = snap.characters[&ceo_id].clone();
             for cid in [ceo_id, station_mgr_id, accountant_id, trader_id, plain_member_id] {
@@ -117,140 +97,180 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
                     c
                 });
                 ch.corporation_id = corp_id;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.solar_system_id = 30_000_144;
+                ch.active_ship_id = ship_id;
+                ch.balance = IskCents::from_isk(250_000_000);
                 snap.characters.insert(cid, ch);
             }
 
-            snap.corporations.insert(
-                corp_id,
-                CorporationRecord {
-                    corporation_id: corp_id,
-                    name: "Role Gate Test Corp".into(),
-                    ticker: "RGTC".into(),
+            let mut corp = CorporationRecord {
+                corporation_id: corp_id,
+                name: "Role Gate Test Corp".into(),
+                ticker: "RGTC".into(),
+                ceo_id,
+                tax_rate: 0.05,
+                members: HashSet::from([
                     ceo_id,
-                    tax_rate: 0.05,
-                    members: HashSet::from([
-                        ceo_id,
-                        station_mgr_id,
-                        accountant_id,
-                        trader_id,
-                        plain_member_id,
-                    ]),
-                    member_roles,
-                    hq_station_id: Some(60_003_760),
-                    ..Default::default()
-                },
-            );
+                    station_mgr_id,
+                    accountant_id,
+                    trader_id,
+                    plain_member_id,
+                ]),
+                member_roles,
+                hq_station_id: Some(jita_station),
+                master_wallet: IskCents::from_isk(250_000_000),
+                ..Default::default()
+            };
+            corp.ensure_wallet_divisions();
+            for d in &mut corp.wallet_divisions {
+                d.balance = IskCents::from_isk(250_000_000);
+            }
+            snap.corporations.insert(corp_id, corp);
 
-            snap.structures.insert(
-                observer_id,
-                UpwellStructureRecord {
-                    structure_id: observer_id,
-                    type_id: 35835,
-                    owner_corp_id: corp_id,
-                    solar_system_id: 30_000_142,
-                    name: "Corp Moon Refinery".into(),
-                    position: [1000.0, 2000.0, 3000.0],
-                    state: "ShieldVulnerable".into(),
-                    quantum_core_installed: true,
-                    fuel_blocks: 500,
-                    shield_hp: 10000.0,
-                    armor_hp: 10000.0,
-                    hull_hp: 10000.0,
-                    reinforced_until_unix: 0,
-                    last_damage_tick: 0,
-                    last_damage_unix: 0,
-                    self_destruct_at_unix: None,
-                },
-            );
-            snap.moon_extractions.insert(
-                observer_id,
-                MoonExtractionRecord {
-                    structure_id: observer_id,
-                    moon_id: 40_009_081,
-                    extraction_start_unix: now.saturating_sub(3600),
-                    chunk_arrival_unix: now + 3600,
-                    natural_decay_unix: now + 7200,
-                    status: "Started".to_string(),
-                    auto_fracture: false,
-                    event_id: 1,
-                    moon_ores: vec![(45490, 12_000.0)],
-                    spawned_asteroid_ids: vec![],
-                },
-            );
-            snap.observer_mining_ledger.insert(
-                observer_id,
-                vec![ObserverMiningRecord {
-                    observer_id,
-                    character_id: plain_member_id,
-                    recorded_corporation_id: corp_id,
-                    type_id: 45490,
-                    quantity: 1200,
-                    last_updated_date: "2025-12-16".to_string(),
-                    timestamp_unix: now.saturating_sub(300),
-                }],
-            );
-            snap.corp_customs_offices.insert(
-                corp_id,
-                vec![CustomsOfficeRecord {
-                    office_id: 1_040_000_000_001,
-                    system_id: 30_000_142,
-                    reinforce_exit_start: 18,
-                    reinforce_exit_end: 20,
-                    allow_alliance_access: true,
-                    allow_access_with_standings: false,
-                    standing_level: None,
-                    corporation_tax_rate: Some(0.01),
-                    alliance_tax_rate: Some(0.02),
-                    excellent_standing_tax_rate: None,
-                    good_standing_tax_rate: None,
-                    neutral_standing_tax_rate: Some(0.10),
-                    bad_standing_tax_rate: None,
-                    terrible_standing_tax_rate: None,
-                }],
-            );
-            snap.market_orders.insert(
-                8801,
-                MarketOrderRecord {
-                    order_id: 8801,
-                    type_id: 34,
-                    owner_id: corp_id,
-                    station_id: 60_003_760,
-                    region_id: 10_000_002,
-                    price: IskCents::from_isk(5),
-                    vol_entered: 1000,
-                    vol_remaining: 1000,
-                    min_volume: 1,
-                    is_bid: false,
-                    escrow: IskCents::ZERO,
-                    is_npc: false,
-                },
-            );
-            snap.market_order_meta.insert(
-                8801,
-                MarketOrderMeta {
-                    issued_unix: now.saturating_sub(600),
-                    duration_days: 90,
-                    range: "station".to_string(),
-                    issued_by: Some(ceo_id),
-                    is_corporation: true,
-                    wallet_division: Some(1000),
-                    state: Some("active".into()),
-                },
+            let mut ref_st = make_structure(observer_id, 35835, corp_id, 30_000_144, "Corp Moon Refinery");
+            ref_st.position = perim_pos;
+            ref_st.fuel_blocks = 1_000;
+            snap.structures.insert(observer_id, ref_st);
+            snap.items.insert(
+                960_001,
+                make_item(960_001, 35_894, corp_id, observer_id, InventoryFlag::ServiceSlot0, 1, true),
             );
             Ok::<(), ()>(())
         })
         .unwrap();
+
+    // Populate moon extraction & observer mining ledger via live RPCs
+    let mut ceo_sess = SessionState::new(9861);
+    ceo_sess.user_id = Some(1);
+    ceo_sess.character_id = Some(ceo_id);
+    ceo_sess.corporation_id = Some(corp_id);
+    ceo_sess.corp_role = ROLE_DIRECTOR | ROLE_STATION_MANAGER | ROLE_ACCOUNTANT | ROLE_TRADER;
+    ceo_sess.solar_system_id = Some(30_000_144);
+    ceo_sess.ship_id = Some(ship_id);
+
+    let ext_args = [PyRep::Integer(observer_id), PyRep::Integer(518_400)];
+    rpc_call(&ctx, &mut ceo_sess, "moonExtractions", "StartNewExtraction", &ext_args).await;
+    ctx.db.clock().advance_secs(520_000);
+    let frac = rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "moonExtractions",
+        "FractureChunkWithStructure",
+        &[PyRep::Integer(observer_id)],
+    )
+    .await;
+    let ast_id = match frac.dict_get("asteroidIDs") {
+        Some(PyRep::List(v)) => v[0].as_i64().expect("fractured asteroid ID"),
+        other => panic!("unexpected asteroidIDs: {other:?}"),
+    };
+    let _ = ctx
+        .systems
+        .get_or_spawn(30_000_144)
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 606,
+            position: DVec3::from_array(perim_pos),
+            velocity: DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    rpc_call(&ctx, &mut ceo_sess, "dogmaIM", "Mine", &[PyRep::Integer(ast_id)]).await;
+    rpc_call(&ctx, &mut ceo_sess, "moonExtractions", "StartNewExtraction", &ext_args).await;
+
+    // Populate active & historical corporate orders via marketProxy.PlaceBuyOrder + CancelCharOrder
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.station_id = Some(jita_station);
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    ceo_sess.station_id = Some(jita_station);
+    ceo_sess.solar_system_id = Some(30_000_142);
+    ceo_sess.region_id = Some(10_000_002);
+    let corp_buy_args = [
+        PyRep::Integer(jita_station),
+        PyRep::Integer(36),
+        PyRep::Real(25.0),
+        PyRep::Integer(1_000),
+        PyRep::Integer(-1),
+        PyRep::Integer(1),
+        PyRep::Integer(90),
+        PyRep::Bool(true),
+        PyRep::Integer(1000),
+    ];
+    let active_rep = rpc_call(&ctx, &mut ceo_sess, "marketProxy", "PlaceBuyOrder", &corp_buy_args).await;
+    let active_oid = active_rep.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    let hist_rep = rpc_call(&ctx, &mut ceo_sess, "marketProxy", "PlaceBuyOrder", &corp_buy_args).await;
+    let hist_oid = hist_rep.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    rpc_call(&ctx, &mut ceo_sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(hist_oid)])
+        .await;
+
+    // Populate customs office via posMgr.AnchorOrbital + OnlineOrbital + planetOrbitalRegistryBroker.UpdateSettings
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.station_id = None;
+            ch.solar_system_id = lowsec_sys;
+            ch.standings.insert(500_026, 2.0);
+        }
+        snap.items
+            .insert(960_002, make_item(960_002, 3962, corp_id, ship_id, InventoryFlag::Cargo, 1, false));
+        snap.items
+            .insert(960_003, make_item(960_003, 2233, corp_id, ship_id, InventoryFlag::Cargo, 1, false));
+    });
+    ceo_sess.station_id = None;
+    ceo_sess.solar_system_id = Some(lowsec_sys);
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "posMgr",
+        "AnchorOrbital",
+        &[PyRep::Integer(960_002), PyRep::Integer(lowsec_planet_id)],
+    )
+    .await;
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "posMgr",
+        "OnlineOrbital",
+        &[PyRep::Integer(960_002), PyRep::Integer(960_003)],
+    )
+    .await;
+    let poco_args = [
+        PyRep::Integer(lowsec_planet_id),
+        PyRep::Integer(18),
+        PyRep::keyval([
+            ("corporation", PyRep::Real(0.01)),
+            ("alliance", PyRep::Real(0.02)),
+            ("standingHigh", PyRep::Real(0.05)),
+            ("standingGood", PyRep::Real(0.08)),
+            ("standingNeutral", PyRep::Real(0.10)),
+            ("standingBad", PyRep::Real(0.15)),
+            ("standingHorrible", PyRep::Real(0.20)),
+        ]),
+        PyRep::Real(0.0),
+        PyRep::Bool(true),
+        PyRep::Bool(false),
+    ];
+    rpc_call(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "UpdateSettings", &poco_args)
+        .await;
 
     let all_scopes = vec![
         "esi-industry.read_corporation_mining.v1",
         "esi-planets.read_customs_offices.v1",
         "esi-markets.read_corporation_orders.v1",
     ];
-    let sm_tok = issue_token(&ctx, station_mgr_id, all_scopes.clone());
-    let acc_tok = issue_token(&ctx, accountant_id, all_scopes.clone());
-    let trd_tok = issue_token(&ctx, trader_id, all_scopes.clone());
-    let dir_tok = issue_token(&ctx, ceo_id, all_scopes.clone());
-    let mem_tok = issue_token(&ctx, plain_member_id, all_scopes);
+    let sm_tok = issue_token_with_scopes(&ctx, station_mgr_id, all_scopes.clone());
+    let acc_tok = issue_token_with_scopes(&ctx, accountant_id, all_scopes.clone());
+    let trd_tok = issue_token_with_scopes(&ctx, trader_id, all_scopes.clone());
+    let dir_tok = issue_token_with_scopes(&ctx, ceo_id, all_scopes.clone());
+    let mem_tok = issue_token_with_scopes(&ctx, plain_member_id, all_scopes);
 
     // 1. Station_Manager allowed on mining/extractions; Accountant & plain member rejected with 403
     let (st, body) = call_esi(
@@ -284,7 +304,7 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
         Some(&acc_tok),
     );
     assert_eq!(st, 200);
-    assert_eq!(obs_detail[0]["quantity"], json!(1200));
+    assert!(obs_detail[0]["quantity"].as_i64().unwrap() > 0);
     assert_eq!(
         call_esi(
             &router,
@@ -303,21 +323,17 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
             Some(tok),
         );
         assert_eq!(st, 200);
-        assert_eq!(orders[0]["order_id"], json!(8801));
-        let (st_h, _) = call_esi(
+        assert_eq!(orders[0]["order_id"], json!(active_oid));
+        let (st_h, hist) = call_esi(
             &router,
             &format!("/v1/corporations/{corp_id}/orders/history/"),
             Some(tok),
         );
         assert_eq!(st_h, 200);
+        assert_eq!(hist[0]["order_id"], json!(hist_oid));
     }
     assert_eq!(
-        call_esi(
-            &router,
-            &format!("/v1/corporations/{corp_id}/orders/"),
-            Some(&sm_tok),
-        )
-        .0,
+        call_esi(&router, &format!("/v1/corporations/{corp_id}/orders/"), Some(&sm_tok)).0,
         403
     );
 
@@ -328,7 +344,7 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
         Some(&dir_tok),
     );
     assert_eq!(st, 200);
-    assert_eq!(pocos[0]["system_id"], json!(30_000_142));
+    assert_eq!(pocos[0]["system_id"], json!(lowsec_sys));
     assert_eq!(
         call_esi(
             &router,
@@ -340,13 +356,27 @@ async fn test_esi_corp_role_gated_mining_customs_and_orders() {
     );
 }
 
-// parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
 #[tokio::test]
 async fn test_esi_market_history_prices_structures_and_industry_jobs() {
+    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs, esi:GET /industry/facilities, esi:GET /markets/prices, esi:GET /markets/structures/{structure_id}, esi:GET /markets/{region_id}/history
+    // parity: feat:esi.industry.facilities, feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs, feat:esi.market.history, feat:esi.market.prices
+    eve_testkit::attest(&[
+        "esi:GET /characters/{character_id}/industry/jobs",
+        "esi:GET /corporations/{corporation_id}/industry/jobs",
+        "esi:GET /industry/facilities",
+        "esi:GET /markets/prices",
+        "esi:GET /markets/structures/{structure_id}",
+        "esi:GET /markets/{region_id}/history",
+        "feat:esi.industry.facilities",
+        "feat:esi.industry.char-jobs",
+        "feat:esi.industry.corp-jobs",
+        "feat:esi.market.history",
+        "feat:esi.market.prices",
+    ]);
+
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
-    let now = ctx.now_unix();
 
     let seller_id = 90_000_001_i64;
     let buyer_id = 90_000_002_i64;
@@ -355,6 +385,8 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
     let jita_system = 30_000_142_u32;
     let forge_region = 10_000_002_u32;
     let structure_id = 1_050_000_000_001_i64;
+    let trit_item_id = 99_910_001_i64;
+    let bpc_item_id = 99_910_002_i64;
 
     // 1. GET /industry/facilities includes SDE NPC industry stations with 0.0025 tax even with 0 active jobs
     let (st, facs) = call_esi(&router, "/v1/industry/facilities/", None);
@@ -368,12 +400,9 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
     assert_eq!(jita_fac["tax"], json!(0.0025));
 
     // 2. Setup corp, structure without Market Hub, items, and wallets
-    let mut trit_item_id = 0_i64;
-    let mut bpc_item_id = 0_i64;
     ctx.db
         .try_with_mut_snapshot(|snap| {
-            let mut member_roles = HashMap::new();
-            member_roles.insert(seller_id, ROLE_DIRECTOR | ROLE_FACTORY_MANAGER);
+            let member_roles = HashMap::from([(seller_id, ROLE_DIRECTOR | ROLE_FACTORY_MANAGER)]);
             if let Some(ch) = snap.characters.get_mut(&seller_id) {
                 ch.corporation_id = corp_id;
                 ch.station_id = Some(jita_station);
@@ -402,45 +431,12 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
             );
             snap.structures.insert(
                 structure_id,
-                UpwellStructureRecord {
-                    structure_id,
-                    type_id: 35833,
-                    owner_corp_id: corp_id,
-                    solar_system_id: jita_system,
-                    name: "Jita Fortizar".into(),
-                    position: [1000.0, 2000.0, 3000.0],
-                    state: "ShieldVulnerable".into(),
-                    quantum_core_installed: true,
-                    fuel_blocks: 500,
-                    shield_hp: 10000.0,
-                    armor_hp: 10000.0,
-                    hull_hp: 10000.0,
-                    reinforced_until_unix: 0,
-                    last_damage_tick: 0,
-                    last_damage_unix: 0,
-                    self_destruct_at_unix: None,
-                },
+                make_structure(structure_id, 35833, corp_id, jita_system, "Jita Fortizar"),
             );
-            trit_item_id = 99_910_001;
             snap.items.insert(
                 trit_item_id,
-                InventoryItemRecord {
-                    item_id: trit_item_id,
-                    type_id: 39,
-                    owner_id: seller_id,
-                    location_id: jita_station,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 50_000,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
+                make_item(trit_item_id, 39, seller_id, jita_station, InventoryFlag::Hangar, 50_000, false),
             );
-            bpc_item_id = 99_910_002;
             snap.items.insert(
                 bpc_item_id,
                 InventoryItemRecord {
@@ -452,43 +448,38 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
                     quantity: 1,
                     singleton: true,
                     version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
                     is_blueprint_copy: true,
                     blueprint_runs_remaining: Some(5),
+                    ..Default::default()
                 },
             );
-            for (idx, (tid, qty)) in [(34_u32, 30_000_i32), (35, 10_000), (36, 3_000), (37, 1_000), (38, 5_000), (39, 5_000), (40, 5_000), (57_478, 200), (57_479, 10), (57_486, 100)]
-                .into_iter()
-                .enumerate()
+            for (idx, (tid, qty)) in [
+                (34_u32, 30_000_i32),
+                (35, 10_000),
+                (36, 3_000),
+                (37, 1_000),
+                (38, 5_000),
+                (39, 5_000),
+                (40, 5_000),
+                (57_478, 200),
+                (57_479, 10),
+                (57_486, 100),
+            ]
+            .into_iter()
+            .enumerate()
             {
                 let iid = 99_910_010 + idx as i64;
                 snap.items.insert(
                     iid,
-                    InventoryItemRecord {
-                        item_id: iid,
-                        type_id: tid,
-                        owner_id: seller_id,
-                        location_id: jita_station,
-                        flag: InventoryFlag::Hangar,
-                        quantity: qty,
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
+                    make_item(iid, tid, seller_id, jita_station, InventoryFlag::Hangar, qty, false),
                 );
             }
             Ok::<(), ()>(())
         })
         .unwrap();
 
-    // 3. Bare Astrahus without Standup Market Hub I must return 403 on GET /markets/structures/{id}
-    let mkt_tok = issue_token(&ctx, seller_id, vec!["esi-markets.structure_markets.v1"]);
+    // 3. Bare structure without Standup Market Hub I must return 403 on GET /markets/structures/{id}
+    let mkt_tok = issue_token_with_scopes(&ctx, seller_id, vec!["esi-markets.structure_markets.v1"]);
     assert_eq!(
         call_esi(
             &router,
@@ -503,21 +494,7 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
         .try_with_mut_snapshot(|snap| {
             snap.items.insert(
                 99_910_099,
-                InventoryItemRecord {
-                    item_id: 99_910_099,
-                    type_id: 35892,
-                    owner_id: corp_id,
-                    location_id: structure_id,
-                    flag: InventoryFlag::ServiceSlot0,
-                    quantity: 1,
-                    singleton: true,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
+                make_item(99_910_099, 35892, corp_id, structure_id, InventoryFlag::ServiceSlot0, 1, true),
             );
             Ok::<(), ()>(())
         })
@@ -533,12 +510,6 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
     );
 
     // 4. Execute real market orders via marketProxy and verify GET /markets/{region_id}/history & /markets/prices
-    ctx.db
-        .try_with_mut_snapshot(|snap| {
-            snap.market_history.remove(&(forge_region, 35));
-            Ok::<(), ()>(())
-        })
-        .unwrap();
     let mut seller_sess = SessionState::default();
     seller_sess.user_id = Some(1);
     seller_sess.role = eve_db::accounts::service_roles::ROLE_PLAYER_DEFAULT;
@@ -562,26 +533,31 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
         (PyRep::String("stationID".into()), PyRep::Integer(jita_station)),
         (PyRep::String("duration".into()), PyRep::Integer(90)),
     ])]);
-    rpc_call(&ctx, &mut seller_sess, "marketProxy", "PlaceMultiSellOrder", &[sell_order_arg, PyRep::Bool(false)]).await;
     rpc_call(
         &ctx,
-        &mut buyer_sess,
+        &mut seller_sess,
         "marketProxy",
-        "PlaceBuyOrder",
-        &[
-            PyRep::Integer(jita_station),
-            PyRep::Integer(39),
-            PyRep::Real(7.5),
-            PyRep::Integer(4_000),
-            PyRep::Integer(-1),
-            PyRep::Integer(1),
-            PyRep::Integer(90),
-            PyRep::Bool(false),
-        ],
+        "PlaceMultiSellOrder",
+        &[sell_order_arg, PyRep::Bool(false)],
     )
     .await;
+    let buy_args = [
+        PyRep::Integer(jita_station),
+        PyRep::Integer(39),
+        PyRep::Real(7.5),
+        PyRep::Integer(4_000),
+        PyRep::Integer(-1),
+        PyRep::Integer(1),
+        PyRep::Integer(90),
+        PyRep::Bool(false),
+    ];
+    rpc_call(&ctx, &mut buyer_sess, "marketProxy", "PlaceBuyOrder", &buy_args).await;
 
-    let (st, hist) = call_esi(&router, &format!("/v1/markets/{forge_region}/history/?type_id=39"), None);
+    let (st, hist) = call_esi(
+        &router,
+        &format!("/v1/markets/{forge_region}/history/?type_id=39"),
+        None,
+    );
     assert_eq!(st, 200);
     let hist_arr = hist.as_array().unwrap();
     assert!(!hist_arr.is_empty());
@@ -591,55 +567,32 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
 
     let (st, prices) = call_esi(&router, "/v1/markets/prices/", None);
     assert_eq!(st, 200);
-    let trit_p = prices.as_array().unwrap().iter().find(|p| p["type_id"] == json!(39)).expect("Zydrine in /markets/prices");
+    let trit_p = prices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["type_id"] == json!(39))
+        .expect("Zydrine in /markets/prices");
     assert_eq!(trit_p["average_price"], json!(hist_avg));
     assert_eq!(trit_p["adjusted_price"], json!(hist_avg));
 
-    // 5. Install and deliver an industry job via industryJobMgr and verify character & corp ESI job fields
-    let install_rep = rpc_call(
-        &ctx,
-        &mut seller_sess,
-        "industryManager",
-        "InstallJob",
-        &[PyRep::Dict(vec![
-            (PyRep::String("blueprintID".into()), PyRep::Integer(bpc_item_id)),
-            (PyRep::String("activityID".into()), PyRep::Integer(1)),
-            (PyRep::String("runs".into()), PyRep::Integer(1)),
-            (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
-            (PyRep::String("useCorp".into()), PyRep::Bool(true)),
-        ])],
-    )
-    .await;
-    let job_id = match &install_rep {
-        PyRep::KeyVal(kv) => kv
-            .get("jobID")
-            .and_then(|v| match v {
-                PyRep::Integer(id) => Some(*id),
-                _ => None,
-            })
-            .expect("jobID in InstallJob response"),
-        _ => panic!("unexpected InstallJob response: {install_rep:?}"),
-    };
+    // 5. Install and deliver an industry job via industryManager and verify character & corp ESI job fields
+    let install_dict = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(bpc_item_id)),
+        (PyRep::String("activityID".into()), PyRep::Integer(1)),
+        (PyRep::String("runs".into()), PyRep::Integer(1)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(true)),
+    ]);
+    let install_rep =
+        rpc_call(&ctx, &mut seller_sess, "industryManager", "InstallJob", &[install_dict]).await;
+    let job_id = install_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("jobID");
 
-    ctx.db
-        .try_with_mut_snapshot(|snap| {
-            if let Some(j) = snap.industry_jobs.get_mut(&job_id) {
-                j.start_unix = now.saturating_sub(j.duration_seconds + 60);
-            }
-            Ok::<(), ()>(())
-        })
-        .unwrap();
+    ctx.db.clock().advance_secs(10_000);
+    rpc_call(&ctx, &mut seller_sess, "industryManager", "CompleteJob", &[PyRep::Integer(job_id)])
+        .await;
 
-    rpc_call(
-        &ctx,
-        &mut seller_sess,
-        "industryManager",
-        "CompleteJob",
-        &[PyRep::Integer(job_id)],
-    )
-    .await;
-
-    let ind_tok = issue_token(
+    let ind_tok = issue_token_with_scopes(
         &ctx,
         seller_id,
         vec![

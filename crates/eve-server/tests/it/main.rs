@@ -409,6 +409,8 @@ mod rpc_lp_store_and_travel_closure;
 mod client_bug_reporting_suite;
 mod pi_and_evermarks_remediation;
 mod esi_market_industry_pi_part2;
+mod esi_market_industry_pi_part3;
+mod esi_market_industry_pi_part4;
 mod quasar_daily_goals_remediation;
 mod quasar_q3_q9_closure;
 mod wormhole_statics_lifecycle_closure;
