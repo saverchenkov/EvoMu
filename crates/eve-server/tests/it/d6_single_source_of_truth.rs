@@ -247,3 +247,43 @@ async fn test_d6_single_source_of_truth_client_esi_quasar_and_restart() {
 
     cleanup_sqlite_path(&db_path);
 }
+
+#[tokio::test]
+async fn test_t10_client_expectation_oracle_live_rpc_shapes() {
+    // parity: plan:T-10
+    let oracle_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.agents/skills/evomu-adversarial-review/references/parity/sources/client_expectations.json");
+    let raw = std::fs::read_to_string(&oracle_path)
+        .expect("read client_expectations.json oracle");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).expect("parse client_expectations.json");
+    let methods = parsed["rpc"]
+        .as_object()
+        .expect("client_expectations.json must contain rpc object");
+    assert!(
+        methods.len() >= 1000,
+        "expected >= 1000 V24 client RPC expectations, got {}",
+        methods.len()
+    );
+    assert!(methods.contains_key("machoNet.GetTime"));
+    assert!(methods.contains_key("charUnboundMgr.GetCharacterInfo"));
+    assert!(methods.contains_key("marketProxy.GetCharOrders"));
+
+    let ctx = ServerContext::with_repository(Arc::new(WorldRepository::with_demo_seed()));
+    let mut sess = SessionState::new(8201);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let time_rep = rpc(&ctx, &mut sess, "machoNet", "GetTime", &[])
+        .await
+        .expect("machoNet.GetTime");
+    assert!(matches!(time_rep, PyRep::Integer(t) if t > 0));
+    let info_rep = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterInfo", &[PyRep::Integer(90_000_001)])
+        .await
+        .expect("charUnboundMgr.GetCharacterInfo");
+    assert!(!matches!(info_rep, PyRep::None));
+    sess.character_id = Some(90_000_001);
+    let mkt_rep = rpc(&ctx, &mut sess, "marketProxy", "GetCharOrders", &[])
+        .await
+        .expect("marketProxy.GetCharOrders");
+    assert!(!matches!(mkt_rep, PyRep::None));
+}
+
