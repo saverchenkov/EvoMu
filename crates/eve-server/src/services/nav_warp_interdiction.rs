@@ -315,7 +315,7 @@ pub async fn handle_use_warp_vector(
 
     // Atomically validate the cargo item, cooldown, star proximity, and >= 150 km vector distance,
     // and reserve 1 unit + 300s per-character cooldown before awaiting `set_movement_mode`.
-    let (dest_pos, dist_m, remaining_qty, prev_item, prev_cd_until) = ctx.db.with_mut_snapshot(|snap| {
+    let (dest_pos, dist_m, remaining_qty, prev_item, prev_cd_until) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(vec_item) = snap.items.get(&target_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "InvalidVectorItem".into(),

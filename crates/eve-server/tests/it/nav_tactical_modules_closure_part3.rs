@@ -159,7 +159,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     ]);
 
     let ctx = build_ctx();
-    let kw: HashMap<String, PyRep> = HashMap::new();
+    let _kw: HashMap<String, PyRep> = HashMap::new();
     let jita_sys: u32 = 30_000_142;
     let char_a: i64 = 94_045;
     let ship_a: i64 = 84_045;

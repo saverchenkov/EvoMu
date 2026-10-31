@@ -831,7 +831,7 @@ impl SystemRegistry {
                                 let _ = reply.send(updated);
                             }
                             SystemCommand::EmitDestinyEvent { ball_id, event, reply } => {
-                                let known = celestials::apply_destiny_event_in_actor(
+                                let known = cycles_tackle::apply_destiny_event_in_actor(
                                     &mut ballpark,
                                     ball_id,
                                     event,
