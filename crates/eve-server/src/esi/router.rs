@@ -1028,6 +1028,7 @@ fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
     use eve_db::corp_roles::*;
     match (method, path_pattern) {
         ("GET", "/corporation/{corporation_id}/mining/extractions")
+        | ("GET", "/corporations/{corporation_id}/customs_offices")
         | ("GET", "/corporations/{corporation_id}/structures") => ROLE_STATION_MANAGER,
         ("GET", "/corporation/{corporation_id}/mining/observers")
         | ("GET", "/corporation/{corporation_id}/mining/observers/{observer_id}") => {
@@ -1035,7 +1036,7 @@ fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
         }
         ("GET", "/corporations/{corporation_id}/orders")
         | ("GET", "/corporations/{corporation_id}/orders/history") => {
-            ROLE_ACCOUNTANT | ROLE_TRADER
+            ROLE_ACCOUNTANT | ROLE_JUNIOR_ACCOUNTANT | ROLE_TRADER
         }
         ("GET", "/corporations/{corporation_id}/industry/jobs")
         | ("GET", "/corporations/{corporation_id}/facilities") => ROLE_FACTORY_MANAGER,
