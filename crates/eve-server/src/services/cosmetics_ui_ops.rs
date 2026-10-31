@@ -65,6 +65,12 @@ pub struct CosmeticsUiExtendedState {
     pub community_track_qa_mode: bool,
     #[serde(default)]
     pub client_telemetry_events: Vec<String>,
+    #[serde(default)]
+    pub browser_lockdown: bool,
+    #[serde(default)]
+    pub browser_default_home_page: Option<String>,
+    #[serde(default)]
+    pub browser_flagged_sites: Vec<String>,
 }
 
 pub fn load_cosmetics_ui_state(snap: &WorldStateSnapshot) -> CosmeticsUiExtendedState {

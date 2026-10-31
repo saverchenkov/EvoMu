@@ -61,6 +61,32 @@ pub(crate) async fn handle(
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
         }
+        ("beyonce", "Bind") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let object_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| session.solar_system_id.map(i64::from))
+                .unwrap_or(0);
+            match ctx.bind_object(session, BEYONCE_SVC, object_id) {
+                Ok(bound_id) => Some(Ok(PyRep::Integer(bound_id as i64))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+        ("beyonce", "UnBind") | ("beyonce", "Unbind") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let bound_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+            if bound_id > 0 {
+                if let Err(e) = ctx.release_bound_object(session, bound_id) {
+                    return Some(Err(e));
+                }
+            }
+            Some(Ok(PyRep::None))
+        }
         _ => None,
     }
 }

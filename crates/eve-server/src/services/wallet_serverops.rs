@@ -777,8 +777,27 @@ pub fn handle(
 
         // --- Corporation & Personal Bills (`billMgr`, `feat:wallet.bills`) ---
         ("billMgr", "get") => {
-            // const-ok: empty bill list fallback when no active bills pending
-            Some(Ok(PyRep::List(Vec::new())))
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let filter_bill_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+            let rows = ctx.db.with_snapshot(|snap| {
+                let mut bills: Vec<CorpBillRecord> = snap
+                    .owner_notes
+                    .values()
+                    .filter(|n| n.character_id == -71)
+                    .filter_map(|n| serde_json::from_str::<CorpBillRecord>(&n.note).ok())
+                    .filter(|b| {
+                        !b.paid
+                            && b.debtor_id == char_id
+                            && filter_bill_id.map_or(true, |id| b.bill_id == id)
+                    })
+                    .collect();
+                bills.sort_by_key(|b| b.bill_id);
+                bills.iter().map(|b| PyRep::List(bill_to_row(b))).collect()
+            });
+            Some(Ok(PyRep::List(rows)))
         }
         ("billMgr", "GetCorporationBills") | ("billMgr", "GetCorporationBillsReceivable") => {
             let (_, char_id) = match ServerContext::require_character(session) {

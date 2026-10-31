@@ -336,3 +336,168 @@ async fn test_admin_gm_tournament_lifecycle() {
     .await
     .expect("CleanupGrid");
 }
+
+#[tokio::test]
+async fn test_ui_browser_lockdown_policy_and_persistence() {
+    // parity: feat:ui.browser-lockdown, rpc:browserLockdownSvc.IsBrowserInLockdown, rpc:browserLockdownSvc.GetDefaultHomePage, rpc:browserLockdownSvc.GetFlaggedSitesList, rpc:browserLockdownSvc.GetFlaggedSitesHash
+    eve_testkit::attest(&[
+        "feat:ui.browser-lockdown",
+        "rpc:browserLockdownSvc.IsBrowserInLockdown",
+        "rpc:browserLockdownSvc.GetDefaultHomePage",
+        "rpc:browserLockdownSvc.GetFlaggedSitesList",
+        "rpc:browserLockdownSvc.GetFlaggedSitesHash",
+    ]);
+
+    let ctx = ServerContext::new();
+    let mut unauth = SessionState::new(9200);
+    assert!(rpc(&ctx, &mut unauth, "browserLockdownSvc", "IsBrowserInLockdown", &[]).await.is_err());
+
+    let mut pilot = select_pilot(&ctx, 9201, "demo", "demo-secret", P1).await;
+    assert_eq!(
+        rpc(&ctx, &mut pilot, "browserLockdownSvc", "IsBrowserInLockdown", &[]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetDefaultHomePage", &[]).await.unwrap(),
+        PyRep::String("https://community.eveonline.com".to_string())
+    );
+    assert_eq!(
+        rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesList", &[]).await.unwrap(),
+        PyRep::List(vec![])
+    );
+    let h0 = rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesHash", &[]).await.unwrap();
+
+    // Persist updated policy in CosmeticsUiExtendedState and verify RPCs reflect it
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        st.browser_lockdown = true;
+        st.browser_default_home_page = Some("https://forums.eveonline.com".to_string());
+        st.browser_flagged_sites = vec!["https://phishing.example.test".to_string()];
+        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &st);
+    });
+
+    assert_eq!(
+        rpc(&ctx, &mut pilot, "browserLockdownSvc", "IsBrowserInLockdown", &[]).await.unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetDefaultHomePage", &[]).await.unwrap(),
+        PyRep::String("https://forums.eveonline.com".to_string())
+    );
+    assert_eq!(
+        rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesList", &[]).await.unwrap(),
+        PyRep::List(vec![PyRep::String("https://phishing.example.test".to_string())])
+    );
+    let h1 = rpc(&ctx, &mut pilot, "browserLockdownSvc", "GetFlaggedSitesHash", &[]).await.unwrap();
+    assert_ne!(h0, h1);
+}
+
+#[tokio::test]
+async fn test_ui_search_and_agency_content_warp() {
+    // parity: feat:ui.search, feat:ui.agency, rpc:custom_agency_provider.warp_to_content
+    eve_testkit::attest(&[
+        "feat:ui.search",
+        "feat:ui.agency",
+        "rpc:custom_agency_provider.warp_to_content",
+    ]);
+
+    let ctx = ServerContext::new();
+    let mut s = select_pilot(&ctx, 9210, "demo", "demo-secret", P1).await;
+
+    // 1. search.Query & search.QuickQuery
+    let q_res = rpc(&ctx, &mut s, "search", "Query", &[PyRep::String("Jita".to_string())])
+        .await
+        .expect("search.Query");
+    assert!(format!("{q_res:?}").contains("30000142"), "search.Query('Jita') must include Jita (30000142)");
+    let qq_res = rpc(&ctx, &mut s, "search", "QuickQuery", &[PyRep::String("Jita".to_string())])
+        .await
+        .expect("search.QuickQuery");
+    assert!(format!("{qq_res:?}").contains("30000142"), "search.QuickQuery('Jita') must include Jita (30000142)");
+
+    // 2. Agency content data & warp_to_content
+    let mut unauth = SessionState::new(9211);
+    let unauth_err = rpc(&ctx, &mut unauth, "custom_agency_provider", "get_content_data", &[])
+        .await
+        .unwrap_err();
+    assert!(!unauth_err.code.is_empty());
+
+    let content = rpc(&ctx, &mut s, "custom_agency_provider", "get_content_data", &[])
+        .await
+        .expect("get_content_data");
+    let content_dbg = format!("{content:?}");
+    assert!(
+        content_dbg.contains("contentID") || content_dbg.contains("solarSystemID"),
+        "get_content_data must return structured agency content"
+    );
+
+    // Negative: warp_to_content without contentID fails
+    let warp_err = rpc(&ctx, &mut s, "custom_agency_provider", "warp_to_content", &[])
+        .await
+        .unwrap_err();
+    assert!(!warp_err.code.is_empty());
+}
+
+#[tokio::test]
+async fn test_beyonce_bind_unbind_and_bill_get() {
+    // parity: rpc:beyonce.Bind, rpc:beyonce.Unbind, rpc:billMgr.get
+    eve_testkit::attest(&[
+        "rpc:beyonce.Bind",
+        "rpc:beyonce.Unbind",
+        "rpc:billMgr.get",
+    ]);
+
+    let ctx = ServerContext::new();
+    let mut unauth = SessionState::new(9220);
+    assert!(rpc(&ctx, &mut unauth, "beyonce", "Bind", &[PyRep::Integer(30000142)]).await.is_err());
+    assert!(rpc(&ctx, &mut unauth, "billMgr", "get", &[]).await.is_err());
+
+    let mut s = select_pilot(&ctx, 9221, "demo", "demo-secret", P1).await;
+
+    // 1. beyonce.Bind & beyonce.Unbind
+    let bound = rpc(&ctx, &mut s, "beyonce", "Bind", &[PyRep::Integer(30000142)])
+        .await
+        .expect("beyonce.Bind");
+    let bound_id = bound.as_i64().expect("bound_id int");
+    assert!(bound_id > 0);
+    let unbind_res = rpc(&ctx, &mut s, "beyonce", "Unbind", &[PyRep::Integer(bound_id)])
+        .await
+        .expect("beyonce.Unbind");
+    assert_eq!(unbind_res, PyRep::None);
+
+    // 2. billMgr.get state-backed personal bills
+    let empty_bills = rpc(&ctx, &mut s, "billMgr", "get", &[]).await.expect("billMgr.get empty");
+    assert_eq!(empty_bills, PyRep::List(vec![]));
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.owner_notes.insert(
+            990_001,
+            eve_db::OwnerNoteRecord {
+                note_id: 990_001,
+                character_id: -71,
+                item_id: 0,
+                label: "bill:990001".to_string(),
+                note: serde_json::json!({
+                    "bill_id": 990001,
+                    "bill_type_id": 1,
+                    "debtor_id": P1,
+                    "creditor_id": 1000002,
+                    "amount_cents": 25000000,
+                    "due_unix": 1700086400,
+                    "interest": 0.0,
+                    "external_id": 0,
+                    "external_id2": 0,
+                    "paid": false,
+                    "paid_by_division": null
+                })
+                .to_string(),
+                timestamp_unix: 1_700_000_000,
+            },
+        );
+    });
+    let one_bill = rpc(&ctx, &mut s, "billMgr", "get", &[]).await.expect("billMgr.get 1");
+    if let PyRep::List(rows) = one_bill {
+        assert_eq!(rows.len(), 1);
+    } else {
+        panic!("expected PyRep::List from billMgr.get");
+    }
+}
