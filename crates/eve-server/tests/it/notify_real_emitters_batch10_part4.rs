@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{InventoryFlag, InventoryItemRecord};
-use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
@@ -155,17 +155,15 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     // 1. OnSystemDynamicBountyStateChanged in Null-Sec
     let mut sess_a = setup_pilot_in_space(&ctx, PILOT_A, 700_501, 587, null_sys, false).await;
     let null_handle = ctx.systems.get_or_spawn(null_sys);
-    let pirate_npc_tid = *ctx
-        .sde
-        .types
-        .iter()
-        .find(|(_, t)| t.category_id == 11 && t.default_attributes.get(&481).copied().unwrap_or(0.0) >= 100_000.0)
-        .map(|(id, _)| id)
-        .expect("pirate NPC with bounty");
+    let pirate_npc_tid = 33_132_u32;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             700_530,
-            make_item(700_530, 2262, PILOT_A, 700_501, InventoryFlag::HiSlot0, 1, true),
+            make_item(700_530, 10_678, PILOT_A, 700_501, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.items.insert(
+            700_531,
+            make_item(700_531, 222, PILOT_A, 700_501, InventoryFlag::HiSlot0, 200, false),
         );
         for &sk in &[3300_u32, 3303, 3426] {
             snap.skills.entry(PILOT_A).or_default().insert(
@@ -176,45 +174,60 @@ async fn batch10_ess_fw_hacking_security_dbs_and_mining() {
     });
     ctx.invalidate_ship_fitting(700_501);
     let _ = rpc(&ctx, &mut sess_a, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(700_501), PyRep::Integer(700_530)]).await;
-    let _ = null_handle
-        .spawn_ball_with_combat(
-            make_ball(900_550, pirate_npc_tid, DVec3::new(1_200.0, 0.0, 0.0)),
-            CombatState {
-                shield_hp: 500_000.0,
-                max_shield_hp: 500_000.0,
-                armor_hp: 500_000.0,
-                max_armor_hp: 500_000.0,
-                structure_hp: 500_000.0,
-                max_structure_hp: 500_000.0,
-                ..Default::default()
-            },
-        )
-        .await;
-    let _ = null_handle
-        .spawn_ball_with_combat(
-            make_ball(900_551, pirate_npc_tid, DVec3::new(1_250.0, 0.0, 0.0)),
-            CombatState {
-                shield_hp: 0.0,
-                max_shield_hp: 100.0,
-                armor_hp: 0.0,
-                max_armor_hp: 100.0,
-                structure_hp: 1.0,
-                max_structure_hp: 100.0,
-                ..Default::default()
-            },
-        )
-        .await;
+    let npc_ball_id = eve_server::services::combat_crimewatch::spawn_specialized_npc_entity(
+        &ctx,
+        null_sys,
+        pirate_npc_tid,
+        "CloneSoldier",
+        500_010,
+        DVec3::new(1_250.0, 0.0, 0.0),
+    )
+    .await;
+    if let Ok(Some(mut cs)) = null_handle.get_combat_state(npc_ball_id).await {
+        cs.shield_hp = 0.0;
+        cs.armor_hp = 0.0;
+        cs.structure_hp = 1.0;
+        cs.shield_recharge_time_ms = 1.0e15;
+        let _ = null_handle.set_combat_state(npc_ball_id, cs).await;
+    }
+    rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(npc_ball_id)])
+        .await
+        .expect("AddTarget pirate NPC");
+    for _ in 0..25 {
+        null_handle.step_manual(1.0).await.unwrap();
+    }
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(700_530), PyRep::String("targetAttack".into()), PyRep::Integer(npc_ball_id)],
+    )
+    .await
+    .expect("Activate weapon on pirate NPC");
+    for _ in 0..8 {
+        null_handle.step_manual(1.0).await.unwrap();
+        if null_handle.get_ball_snapshot(npc_ball_id).await.unwrap().is_none() {
+            break;
+        }
+    }
+    assert!(null_handle.get_ball_snapshot(npc_ball_id).await.unwrap().is_none(), "pirate NPC must be destroyed by weapon");
+    assert!(
+        eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.pending_bounty_ticks.get(&(null_sys, PILOT_A)).copied().unwrap_or(0.0)
+        }) > 0.0,
+        "pending bounty must be queued after NPC kill (tid={pirate_npc_tid}, sys={null_sys})"
+    );
     let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
 
-    // Negative: flushing 0 pending NPC bounty in Null-Sec does NOT change DBS rate or emit OnSystemDynamicBountyStateChanged
-    eve_server::services::combat_crimewatch::flush_npc_bounty_tick(&ctx, null_sys, PILOT_A, 0.0);
+    // Negative: before the 20-minute (1,200s) bounty tick elapses, tick_background_cluster does NOT flush or emit OnSystemDynamicBountyStateChanged
+    ctx.advance_secs(60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(!has_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnSystemDynamicBountyStateChanged"));
 
-    // Positive: flushing accrued pirate NPC bounty via flush_npc_bounty_tick adjusts DBS rate and emits OnSystemDynamicBountyStateChanged
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.pending_bounty_ticks.insert((null_sys, PILOT_A), 500_000.0);
-    });
-    eve_server::services::combat_crimewatch::flush_npc_bounty_tick(&ctx, null_sys, PILOT_A, 0.0);
+    // Positive: advancing past the 20-minute (1,200s) bounty tick flushes the queued NPC bounty and emits OnSystemDynamicBountyStateChanged
+    ctx.advance_secs(1_200);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let dbs_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let dbs_args = find_notif(&dbs_notifs, "OnSystemDynamicBountyStateChanged");
     assert_eq!(dbs_args.len(), 2);

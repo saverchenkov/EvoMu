@@ -792,6 +792,9 @@ pub async fn handle_ship_or_npc_destruction(
                     *rt.pending_bounty_ticks
                         .entry((sys_id, attacker_char_id))
                         .or_insert(0.0) += eff_bounty;
+                    rt.bounty_tick_next_flush_unix
+                        .entry((sys_id, attacker_char_id))
+                        .or_insert_with(|| now_unix.saturating_add(1_200));
                 }
             });
             let old_sec = ctx.db.with_snapshot(|snap| {

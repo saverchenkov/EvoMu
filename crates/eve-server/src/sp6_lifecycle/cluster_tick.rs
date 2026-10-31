@@ -1219,6 +1219,34 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     crate::services::sov_gameplay::tick_sov_gameplay(ctx, now_unix).await;
     crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
 
+    let due_bounty_ticks: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
+        let mut due = Vec::new();
+        for (&(sys_id, char_id), &pending) in &rt.pending_bounty_ticks {
+            if pending <= 0.0 {
+                continue;
+            }
+            let next_flush = *rt
+                .bounty_tick_next_flush_unix
+                .entry((sys_id, char_id))
+                .or_insert_with(|| now_unix.saturating_add(1_200));
+            if now_unix >= next_flush {
+                due.push((sys_id, char_id));
+            }
+        }
+        for key in &due {
+            rt.bounty_tick_next_flush_unix.remove(key);
+        }
+        due
+    });
+    for (sys_id, char_id) in due_bounty_ticks {
+        let _ = crate::services::combat_npc_encounters::flush_npc_bounty_tick(
+            ctx,
+            sys_id,
+            char_id,
+            0.0,
+        );
+    }
+
     let mut temp_cw = crate::combat::crimewatch::CrimeWatchDirector::new();
     if let Ok(mut cw) = ctx.crimewatch.write() {
         for (&cid, st) in cw.states.iter_mut() {
