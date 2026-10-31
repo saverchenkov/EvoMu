@@ -657,6 +657,7 @@ pub(crate) fn resolve_upwell_dock_target(
         !structure_upwell_ops::evaluate_character_structure_access(ctx, snap, dock_id, char_id)
     });
     if acl_denied {
+        crate::services::notify_emitters_b5::emit_docking_request_was_denied(ctx, char_id, dock_id);
         return Err(err(
             "StructureDockingAccessDenied",
             format!("Character {char_id} is denied docking access by structure {dock_id} ACL"),

@@ -262,6 +262,13 @@ pub(super) async fn handle_bookmarks(
 
             match res {
                 Ok((bm_id, is_shared_folder, corp_id)) => {
+                    crate::services::notify_emitters_b5::emit_bookmark_created(
+                        ctx,
+                        char_id,
+                        bm_id,
+                        label,
+                        derived_type_id,
+                    );
                     if is_shared_folder {
                         if let Some(cid) = corp_id {
                             ctx.notify(
@@ -499,6 +506,7 @@ pub(super) async fn handle_bookmarks(
             });
             match res {
                 Ok((any_shared_folder, corp_id)) => {
+                    crate::services::notify_emitters_b5::emit_refresh_bookmarks(ctx, char_id);
                     if let (Some(fid_opt), Some(cid)) = (any_shared_folder, corp_id) {
                         ctx.notify(
                             NotificationTarget::Corporation(cid),

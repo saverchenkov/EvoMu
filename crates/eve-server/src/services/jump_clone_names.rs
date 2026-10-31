@@ -223,6 +223,7 @@ pub(crate) fn emit_server_skills_changed(
         return;
     }
     let now_ft = ctx.now_blueos_filetime_ticks();
+    crate::services::notify_emitters_b5::emit_skills_changed(ctx, char_id, entries.clone());
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnServerSkillsChanged",

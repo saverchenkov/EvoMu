@@ -562,8 +562,8 @@ async fn test_rnd_research_agents_datacore_purchase_and_storyline_counter() {
         Some(&PyRep::Bool(true))
     );
 
-    // Advance clock by 5 days to accumulate RP via the real RP formula, then redeem 1 datacore (action 14)
-    ctx.advance_secs(86_400 * 5);
+    // Advance clock by 6 days to accumulate RP via the real RP formula, then redeem 1 datacore (action 14)
+    ctx.advance_secs(86_400 * 6);
     let buy_res = rpc(
         &ctx,
         &mut sess,
