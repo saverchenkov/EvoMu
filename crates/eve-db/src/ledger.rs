@@ -133,37 +133,6 @@ impl WorldStateSnapshot {
         let tx_id = self.record_market_transaction(
             f.date_unix, f.type_id, f.quantity, f.price, f.location_id, f.buyer_id, f.seller_id, 0,
         );
-        if let Some(reg_id) = f.region_id {
-            if f.quantity > 0 {
-                let date = unix_secs_to_date_str(f.date_unix);
-                let unit_price = f.price.to_wire_f64();
-                let entries = self.market_history.entry((reg_id, f.type_id)).or_default();
-                if let Some(day) = entries.iter_mut().find(|d| d.date == date) {
-                    let prev_total = day.average * (day.volume as f64);
-                    day.volume += f.quantity;
-                    day.order_count += 1;
-                    day.lowest = day.lowest.min(unit_price);
-                    day.highest = day.highest.max(unit_price);
-                    day.close_price = Some(unit_price);
-                    day.average = if day.volume > 0 {
-                        (prev_total + unit_price * (f.quantity as f64)) / (day.volume as f64)
-                    } else {
-                        unit_price
-                    };
-                } else {
-                    entries.push(crate::types::MarketHistoryDayRecord {
-                        date,
-                        average: unit_price,
-                        highest: unit_price,
-                        lowest: unit_price,
-                        order_count: 1,
-                        volume: f.quantity,
-                        open_price: Some(unit_price),
-                        close_price: Some(unit_price),
-                    });
-                }
-            }
-        }
         let base = JournalMeta::new(ref_types::MARKET_TRANSACTION, f.buyer_id, f.seller_id, f.date_unix)
             .with_context(JournalContext::MarketTransaction, tx_id);
         let mut journal_ref = 0;

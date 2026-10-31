@@ -58,16 +58,18 @@ fn get_json(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: Option<&s
         raw_target: path.to_string(),
         headers,
         body: Vec::new(),
+        peer_ip: "127.0.0.1".to_string(),
     };
     let resp = router.handle_request(&req);
     let raw_path = req.raw_target.split('?').next().unwrap_or(&req.raw_target);
     assert_eq!(
-        resp.status, 200,
+        resp.status_code, 200,
         "GET {path} failed with {}: {}",
-        resp.status, resp.body
+        resp.status_code,
+        String::from_utf8_lossy(&resp.body)
     );
-    let val: Value = serde_json::from_str(&resp.body).expect("valid JSON");
-    spec.validate_response(&req.method, raw_path, resp.status, &val)
+    let val: Value = serde_json::from_slice(&resp.body).expect("valid JSON");
+    spec.validate_response(&req.method, raw_path, resp.status_code, &resp.headers, &resp.body)
         .unwrap_or_else(|e| panic!("OpenAPI validation failed for {path}: {e}"));
     val
 }
@@ -78,6 +80,7 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
             PyRep::String(s) if s == key => Some(v),
             _ => None,
         }),
+        PyRep::KeyVal(entries) => entries.iter().find_map(|(k, v)| (k == key).then_some(v)),
         PyRep::Object { args, .. } => dict_get(args, key),
         _ => None,
     }
@@ -278,6 +281,8 @@ async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
     let trit_type = 34u32;
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.clear();
+        snap.market_history.clear();
         if let Some(ch) = snap.characters.get_mut(&buyer_id) {
             ch.balance = IskCents(50_000_000);
         }
@@ -303,6 +308,7 @@ async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
     seller_sess.corporation_id = Some(98_000_001);
     seller_sess.station_id = Some(jita_station);
     seller_sess.solar_system_id = Some(jita_sys);
+    seller_sess.region_id = Some(10_000_002);
 
     let mut buyer_sess = SessionState::new(3104);
     buyer_sess.user_id = Some(1);
@@ -310,22 +316,45 @@ async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
     buyer_sess.corporation_id = Some(98_000_001);
     buyer_sess.station_id = Some(jita_station);
     buyer_sess.solar_system_id = Some(jita_sys);
+    buyer_sess.region_id = Some(10_000_002);
 
     let kw = HashMap::new();
-    // Place two sell orders at 10.0 ISK and 20.0 ISK, then buy 100 units at each price via PlaceCharOrder
+    // Place two sell orders at 10.0 ISK and 20.0 ISK, then buy 100 units at each price via PlaceMultiSellOrder + PlaceBuyOrder
     for price in [10.0_f64, 20.0_f64] {
         ctx.dispatch_rpc(
             &mut seller_sess,
             "marketProxy",
             None,
-            "PlaceCharOrder",
+            "PlaceMultiSellOrder",
+            &[
+                PyRep::List(vec![PyRep::keyval([
+                    ("stationID", PyRep::Integer(jita_station)),
+                    ("typeID", PyRep::Integer(i64::from(trit_type))),
+                    ("itemID", PyRep::Integer(7_700_000_001)),
+                    ("price", PyRep::Real(price)),
+                    ("quantity", PyRep::Integer(100)),
+                ])]),
+                PyRep::Bool(false),
+                PyRep::Integer(90),
+                PyRep::Real(0.0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("sell PlaceMultiSellOrder");
+
+        ctx.dispatch_rpc(
+            &mut buyer_sess,
+            "marketProxy",
+            None,
+            "PlaceBuyOrder",
             &[
                 PyRep::Integer(jita_station),
                 PyRep::Integer(i64::from(trit_type)),
                 PyRep::Real(price),
                 PyRep::Integer(100),
-                PyRep::Integer(0), // sell
-                PyRep::Integer(0), // range station
+                PyRep::Integer(-1), // range station
                 PyRep::Integer(1), // minVolume
                 PyRep::Integer(90),
             ],
@@ -333,28 +362,7 @@ async fn test_esi_market_history_and_prices_driven_by_real_market_orders() {
             None,
         )
         .await
-        .expect("sell PlaceCharOrder");
-
-        ctx.dispatch_rpc(
-            &mut buyer_sess,
-            "marketProxy",
-            None,
-            "PlaceCharOrder",
-            &[
-                PyRep::Integer(jita_station),
-                PyRep::Integer(i64::from(trit_type)),
-                PyRep::Real(price),
-                PyRep::Integer(100),
-                PyRep::Integer(1), // buy
-                PyRep::Integer(0),
-                PyRep::Integer(1),
-                PyRep::Integer(90),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("buy PlaceCharOrder");
+        .expect("buy PlaceBuyOrder");
     }
 
     let hist = get_json(
@@ -406,6 +414,12 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
     let bp_type_id = 681u32; // Bantam Blueprint
 
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.corporation_id = corp_id;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(char_id, u64::MAX);
+        }
         snap.items.insert(
             bp_item_id,
             InventoryItemRecord {
@@ -421,9 +435,15 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
             },
         );
         // Seed ample minerals for manufacturing
-        for (idx, (mat_tid, qty)) in [(34u32, 50_000i32), (35, 20_000), (36, 10_000), (37, 5_000)]
-            .into_iter()
-            .enumerate()
+        for (idx, (mat_tid, qty)) in [
+            (34u32, 50_000i32),
+            (35, 20_000),
+            (36, 10_000),
+            (37, 5_000),
+            (38, 5_000),
+        ]
+        .into_iter()
+        .enumerate()
         {
             snap.items.insert(
                 7_700_000_020 + idx as i64,
@@ -449,7 +469,9 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
     sess.station_id = Some(station_id);
     sess.solar_system_id = Some(30_000_142);
 
-    let kw = HashMap::new();
+    let mut kw = HashMap::new();
+    kw.insert("blueprintItemID".to_string(), PyRep::Integer(bp_item_id));
+    kw.insert("useCorp".to_string(), PyRep::Bool(true));
     let install_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -457,8 +479,7 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
             None,
             "InstallJob",
             &[
-                PyRep::Integer(station_id),
-                PyRep::Integer(bp_item_id),
+                PyRep::Integer(i64::from(bp_type_id)),
                 PyRep::Integer(1), // Manufacturing
                 PyRep::Integer(1), // 1 run
             ],

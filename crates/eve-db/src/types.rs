@@ -1177,7 +1177,7 @@ pub struct CosmicAnomalyRecord {
     pub cleared: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AllianceRecord {
     pub alliance_id: i64,
     pub name: String,
@@ -1243,7 +1243,7 @@ fn default_structure_hp() -> f64 {
     5_000.0
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct UpwellStructureRecord {
     pub structure_id: i64,
     pub type_id: TypeId,
