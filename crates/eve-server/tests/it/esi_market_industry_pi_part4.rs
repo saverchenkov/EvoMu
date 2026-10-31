@@ -139,6 +139,11 @@ async fn test_esi6_industry_and_mining_routes() {
             snap.items
                 .insert(iid, make_item(iid, tid, corp_id, struct_id, flag, 1, true));
         }
+        eve_server::services::industry_pi::industry_facilities_bps::save_facility_taxes(
+            snap,
+            struct_id,
+            &std::collections::HashMap::from([(1_u8, 0.08)]),
+        );
         let mut next_iid = 941_000_i64;
         for (owner, loc) in [
             (other_char_id, jita_stn),
@@ -271,7 +276,7 @@ async fn test_esi6_industry_and_mining_routes() {
         (PyRep::String("activityID".into()), PyRep::Integer(1)),
         (PyRep::String("runs".into()), PyRep::Integer(1)),
         (PyRep::String("facilityID".into()), PyRep::Integer(jita_stn)),
-        (PyRep::String("useCorp".into()), PyRep::Bool(true)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(false)),
     ]);
     let jita_job_rep =
         rpc_call(&ctx, &mut char_sess, "industryManager", "InstallJob", &[jita_dict]).await;
@@ -382,7 +387,9 @@ async fn test_esi6_industry_and_mining_routes() {
         format!("/v1/corporations/{corp_id}/industry/jobs/?include_completed=true"),
         Some(&token),
     );
-    assert_eq!(corp_jobs.as_array().unwrap().len(), 2);
+    let corp_jobs_arr = corp_jobs.as_array().unwrap();
+    assert_eq!(corp_jobs_arr.len(), 1);
+    assert_eq!(corp_jobs_arr[0]["job_id"], json!(perim_job_id));
 
     let extractions = get_json(
         &router,

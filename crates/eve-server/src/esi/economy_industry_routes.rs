@@ -93,22 +93,45 @@ pub fn dispatch_economy_industry_route(
     let now = ctx.now_unix();
     match (method, path) {
         ("GET", "/industry/facilities") => Some(ctx.db.with_snapshot(|snap| {
+            const INDUSTRY_ACTIVITIES: [u8; 6] = [1, 3, 4, 5, 8, 9];
             let mut by_id: BTreeMap<i64, Value> = BTreeMap::new();
             for s in snap.structures.values().filter(|s| s.state != "Destroyed") {
+                // Only emit Upwell structures that have an online, fueled industry or reaction service module.
+                let online_act = INDUSTRY_ACTIVITIES.into_iter().find(|&act| {
+                    crate::services::industry_pi::industry_facilities_bps::is_structure_industry_service_online(
+                        snap,
+                        s.structure_id,
+                        act,
+                    )
+                });
+                let Some(primary_act) = online_act else {
+                    continue;
+                };
                 let Some(sys) = ctx.sde.solar_systems.get(&s.solar_system_id) else {
                     continue;
                 };
-                let mut obj = json!({
-                    "facility_id": s.structure_id,
-                    "owner_id": s.owner_corp_id,
-                    "region_id": sys.region_id as i64,
-                    "solar_system_id": s.solar_system_id as i64,
-                    "type_id": s.type_id as i64,
-                });
-                if let Some(corp) = snap.corporations.get(&s.owner_corp_id) {
-                    obj["tax"] = json!(corp.tax_rate);
-                }
-                by_id.insert(s.structure_id, obj);
+                // Read the structure's configured industry facility tax rather than corporation PvE bounty tax.
+                let taxes =
+                    crate::services::industry_pi::industry_facilities_bps::load_facility_taxes(
+                        snap,
+                        s.structure_id,
+                    );
+                let tax = taxes
+                    .get(&primary_act)
+                    .or_else(|| taxes.get(&1))
+                    .copied()
+                    .unwrap_or(0.05);
+                by_id.insert(
+                    s.structure_id,
+                    json!({
+                        "facility_id": s.structure_id,
+                        "owner_id": s.owner_corp_id,
+                        "region_id": sys.region_id as i64,
+                        "solar_system_id": s.solar_system_id as i64,
+                        "type_id": s.type_id as i64,
+                        "tax": tax,
+                    }),
+                );
             }
             for st in ctx.sde.stations.values() {
                 if by_id.contains_key(&st.station_id) {
@@ -264,7 +287,12 @@ pub fn dispatch_economy_industry_route(
                     .industry_jobs
                     .values()
                     .filter(|j| {
+                        // Exclude jobs installed on behalf of a corporation (`use_corp == true`) from personal character jobs.
+                        let is_corp_job =
+                            crate::services::industry_pi::load_job_cost_meta(snap, j.job_id)
+                                .is_some_and(|m| m.use_corp);
                         j.installer_id == char_id
+                            && !is_corp_job
                             && (include_completed || j.status.eq_ignore_ascii_case("active"))
                     })
                     .collect();
@@ -335,23 +363,20 @@ pub fn dispatch_economy_industry_route(
                 .map(String::as_str)
                 != Some("false");
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
                         404,
                         format!("Corporation {corp_id} not found"),
                     );
-                };
+                }
                 let mut jobs: Vec<_> = snap
                     .industry_jobs
                     .values()
                     .filter(|j| {
-                        let is_corp_job = if j.installer_id == corp_id {
-                            true
-                        } else if let Some(m) = crate::services::industry_pi::load_job_cost_meta(snap, j.job_id) {
-                            m.use_corp && m.owner_id == corp_id
-                        } else {
-                            corp.members.contains(&j.installer_id) || j.installer_id == corp.ceo_id
-                        };
+                        // Only include jobs installed for the corporation (`use_corp == true` for `corp_id`), never personal member jobs.
+                        let is_corp_job = j.installer_id == corp_id
+                            || crate::services::industry_pi::load_job_cost_meta(snap, j.job_id)
+                                .is_some_and(|m| m.use_corp && m.owner_id == corp_id);
                         is_corp_job && (include_completed || j.status.eq_ignore_ascii_case("active"))
                     })
                     .collect();

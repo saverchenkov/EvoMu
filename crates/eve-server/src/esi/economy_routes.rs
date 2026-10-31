@@ -95,7 +95,7 @@ fn is_character_party_to_contract(
     char_id: i64,
     c: &eve_db::ContractRecord,
 ) -> bool {
-    if c.issuer_id == char_id
+    if (c.issuer_id == char_id && !c.for_corp)
         || c.acceptor_id == Some(char_id)
         || c.assignee_id == char_id
         || c.current_bidder_id == Some(char_id)
@@ -859,7 +859,9 @@ pub fn dispatch_economy_route(
                     .contracts
                     .values()
                     .filter(|c| {
-                        c.issuer_id == char_id
+                        // Corporation-issued contracts (`c.for_corp == true`) belong on `/corporations/{id}/contracts`,
+                        // not on the issuing character's personal contract list unless personally accepted/assigned.
+                        (c.issuer_id == char_id && !c.for_corp)
                             || c.acceptor_id == Some(char_id)
                             || c.assignee_id == char_id
                     })

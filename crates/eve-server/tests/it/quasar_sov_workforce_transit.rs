@@ -157,7 +157,7 @@ async fn test_sov_workforce_transit_relay_traversal_and_notices() {
 
 #[tokio::test]
 async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
+    // DATA GAP: sovereignty/hub/api and sovereignty/resource/star/api remain untagged (`OPEN`) per docs/BLOCKERS.md §9.
     let ctx = ServerContext::new();
     let sys_a = 30_000_142u32;
     seed_hub(&ctx, HUB_A, sys_a);
@@ -174,10 +174,20 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
     assert!(varint(&power_pair, 1).unwrap_or(0) > 0, "Jita hub must have positive available power");
 
     // 2. sovereignty.resource.star.api.GetAllConfigurationsRequest
+    let expected_star_id = ctx
+        .sde
+        .celestials_in_system(sys_a)
+        .into_iter()
+        .find(|c| c.group_id == 6)
+        .expect("SDE star in system")
+        .celestial_id as u64;
     let stars = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(stars.status_code, STATUS_OK);
     let star_cfgs = fields(&stars.payload.unwrap().value, 1);
-    assert!(!star_cfgs.is_empty(), "Must return SDE star configurations");
+    assert_eq!(star_cfgs.len(), 1, "Jita must return 1 SDE star configuration");
+    let decoded_star_id = field(&star_cfgs[0], 1).and_then(|id| varint(&id, 1));
+    assert_eq!(decoded_star_id, Some(expected_star_id));
+    assert!(varint(&star_cfgs[0], 2).unwrap_or(0) > 0);
 
     // 3. Seed Mercenary Den and verify EvolutionStateChangedNotice + Activity requests/notices.
     let planet_id = 40_009_048i64;

@@ -126,7 +126,6 @@ async fn test_quasar_accounting_loyalty_contracts() {
 
 #[tokio::test]
 async fn test_quasar_industry_planetary_moon_asteroidbelt() {
-    // parity: plan:Q-6
     let ctx = ServerContext::new();
     let empty_kw = HashMap::new();
     let mut sess = SessionState::new(1001);

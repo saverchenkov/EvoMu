@@ -576,21 +576,32 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
     assert_eq!(trit_p["average_price"], json!(hist_avg));
     assert_eq!(trit_p["adjusted_price"], json!(hist_avg));
 
-    // 5. Install and deliver an industry job via industryManager and verify character & corp ESI job fields
-    let install_dict = PyRep::Dict(vec![
+    // 5. Install and deliver personal & corporation industry jobs via industryManager and verify isolation
+    let personal_dict = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(bpc_item_id)),
+        (PyRep::String("activityID".into()), PyRep::Integer(1)),
+        (PyRep::String("runs".into()), PyRep::Integer(1)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(false)),
+    ]);
+    let personal_rep =
+        rpc_call(&ctx, &mut seller_sess, "industryManager", "InstallJob", &[personal_dict]).await;
+    let job_id = personal_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("jobID");
+    ctx.db.clock().advance_secs(10_000);
+    rpc_call(&ctx, &mut seller_sess, "industryManager", "CompleteJob", &[PyRep::Integer(job_id)]).await;
+
+    let corp_dict = PyRep::Dict(vec![
         (PyRep::String("blueprintID".into()), PyRep::Integer(bpc_item_id)),
         (PyRep::String("activityID".into()), PyRep::Integer(1)),
         (PyRep::String("runs".into()), PyRep::Integer(1)),
         (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
         (PyRep::String("useCorp".into()), PyRep::Bool(true)),
     ]);
-    let install_rep =
-        rpc_call(&ctx, &mut seller_sess, "industryManager", "InstallJob", &[install_dict]).await;
-    let job_id = install_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("jobID");
-
+    let corp_rep =
+        rpc_call(&ctx, &mut seller_sess, "industryManager", "InstallJob", &[corp_dict]).await;
+    let corp_job_id = corp_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("corp jobID");
     ctx.db.clock().advance_secs(10_000);
-    rpc_call(&ctx, &mut seller_sess, "industryManager", "CompleteJob", &[PyRep::Integer(job_id)])
-        .await;
+    rpc_call(&ctx, &mut seller_sess, "industryManager", "CompleteJob", &[PyRep::Integer(corp_job_id)]).await;
 
     let ind_tok = issue_token_with_scopes(
         &ctx,
@@ -606,12 +617,12 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
         Some(&ind_tok),
     );
     assert_eq!(st, 200);
-    let cj = char_jobs
-        .as_array()
-        .unwrap()
+    let char_arr = char_jobs.as_array().unwrap();
+    let cj = char_arr
         .iter()
         .find(|j| j["job_id"] == json!(job_id))
-        .expect("delivered job in character industry/jobs");
+        .expect("delivered personal job in character industry/jobs");
+    assert!(!char_arr.iter().any(|j| j["job_id"] == json!(corp_job_id)));
     assert_eq!(cj["status"], json!("delivered"));
     assert_eq!(cj["blueprint_location_id"], json!(jita_station));
     assert_eq!(cj["output_location_id"], json!(jita_station));
@@ -625,12 +636,12 @@ async fn test_esi_market_history_prices_structures_and_industry_jobs() {
         Some(&ind_tok),
     );
     assert_eq!(st, 200);
-    let crj = corp_jobs
-        .as_array()
-        .unwrap()
+    let corp_arr = corp_jobs.as_array().unwrap();
+    let crj = corp_arr
         .iter()
-        .find(|j| j["job_id"] == json!(job_id))
-        .expect("delivered job in corp industry/jobs");
+        .find(|j| j["job_id"] == json!(corp_job_id))
+        .expect("delivered corp job in corp industry/jobs");
+    assert!(!corp_arr.iter().any(|j| j["job_id"] == json!(job_id)));
     assert_eq!(crj["location_id"], json!(jita_station));
     assert_eq!(crj["completed_character_id"], json!(seller_id));
 }

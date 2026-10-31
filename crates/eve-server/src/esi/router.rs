@@ -628,11 +628,14 @@ impl EsiRouter {
                         true,
                     );
                 };
-                let mut required_role_mask = eve_db::corp_roles::ROLE_DIRECTOR
-                    | required_corp_roles_for_route(
-                        matched.operation.method.as_str(),
-                        matched.operation.path_pattern.as_str(),
-                    );
+                // Enforce corporation role checks only when the OpenAPI operation (`op.required_roles`)
+                // or `required_corp_roles_for_route` specifies required roles; routes with empty
+                // `required_roles` (such as `/corporations/{corporation_id}/contracts*`) require
+                // only corporation membership plus the OAuth scope.
+                let mut required_role_mask = required_corp_roles_for_route(
+                    matched.operation.method.as_str(),
+                    matched.operation.path_pattern.as_str(),
+                );
                 for role_name in &op.required_roles {
                     required_role_mask |= match role_name.as_str() {
                         "Director" => eve_db::corp_roles::ROLE_DIRECTOR,
@@ -644,12 +647,17 @@ impl EsiRouter {
                         _ => 0,
                     };
                 }
+                let allow_any_grantable =
+                    matched.operation.path_pattern == "/corporations/{corporation_id}/roles";
                 let (char_corp, has_corp_role) = self.ctx.db.with_snapshot(|snap| {
                     let c_corp = snap
                         .characters
                         .get(&claims.character_id)
                         .map(|c| c.corporation_id);
-                    let allowed_mask = required_role_mask;
+                    if required_role_mask == 0 {
+                        return (c_corp, true);
+                    }
+                    let allowed_mask = required_role_mask | eve_db::corp_roles::ROLE_DIRECTOR;
                     let has_role = snap
                         .corporations
                         .get(&path_corp_id)
@@ -668,9 +676,15 @@ impl EsiRouter {
                             .corp_role_assignments
                             .get(&(path_corp_id, claims.character_id))
                             .map(|r| {
-                                ((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
+                                (((r.roles | r.roles_at_hq | r.roles_at_base | r.roles_at_other)
                                     & allowed_mask)
-                                    != 0
+                                    != 0)
+                                    || (allow_any_grantable
+                                        && (r.grantable_roles
+                                            | r.grantable_roles_at_hq
+                                            | r.grantable_roles_at_base
+                                            | r.grantable_roles_at_other)
+                                            != 0)
                             })
                             .unwrap_or(false);
                     (c_corp, has_role)
@@ -1011,6 +1025,8 @@ fn required_corp_roles_for_route(method: &str, path_pattern: &str) -> u64 {
         | ("GET", "/corporations/{corporation_id}/wallets/{division}/transactions") => {
             ROLE_ACCOUNTANT | ROLE_JUNIOR_ACCOUNTANT
         }
-        _ => ROLE_DIRECTOR,
+        ("GET", "/corporations/{corporation_id}/roles") => ROLE_PERSONNEL_MANAGER,
+        ("GET", "/corporations/{corporation_id}/members") => ROLE_DIRECTOR,
+        _ => 0,
     }
 }

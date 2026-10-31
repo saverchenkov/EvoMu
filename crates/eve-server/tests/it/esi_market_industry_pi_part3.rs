@@ -53,6 +53,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     let jita_station = 60_003_760_i64;
     let escrow_item_id = 880_621_i64;
     let private_item_id = 880_622_i64;
+    let personal_item_id = 880_623_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -83,9 +84,13 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
             private_item_id,
             make_item(private_item_id, 587, rival_char_id, jita_station, InventoryFlag::Hangar, 1, true),
         );
+        snap.items.insert(
+            personal_item_id,
+            make_item(personal_item_id, 587, char_id, jita_station, InventoryFlag::Hangar, 1, true),
+        );
     });
 
-    // 1. Create public corporation Auction contract via contractProxy.CreateContract
+    // 1. Create public corporation Auction contract + personal character Auction contract via contractProxy.CreateContract
     let mut issuer_sess = SessionState::new(9821);
     issuer_sess.user_id = Some(1);
     issuer_sess.character_id = Some(char_id);
@@ -114,6 +119,27 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     ];
     let pub_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &pub_args).await;
     let public_contract_id = pub_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
+
+    let personal_args = [
+        PyRep::Integer(2), // Auction
+        PyRep::Integer(0), // Public
+        PyRep::Integer(0),
+        PyRep::Integer(1440),
+        PyRep::Integer(7),
+        PyRep::Integer(jita_station),
+        PyRep::Integer(jita_station),
+        PyRep::Real(1_500_000.0),
+        PyRep::Real(0.0),
+        PyRep::Real(5_000_000.0),
+        PyRep::String("Personal Rifter Auction".into()),
+        PyRep::String(String::new()),
+        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(personal_item_id), PyRep::Integer(1)])]),
+        PyRep::Integer(4),
+        PyRep::List(vec![]),
+        PyRep::Bool(false), // personal
+    ];
+    let personal_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &personal_args).await;
+    let personal_contract_id = personal_rep.dict_get("contractID").and_then(|v| v.as_i64()).unwrap();
 
     // 2. Place two bids from rival_char_id via contractProxy.PlaceBid and create a private personal contract
     let mut rival_sess = SessionState::new(9822);
@@ -163,7 +189,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         get_json(&router, &spec, format!("/v1/characters/{char_id}/contracts/"), Some(&token));
     let char_contracts_arr = char_contracts.as_array().unwrap();
     assert_eq!(char_contracts_arr.len(), 1);
-    assert_eq!(char_contracts_arr[0]["contract_id"], json!(public_contract_id));
+    assert_eq!(char_contracts_arr[0]["contract_id"], json!(personal_contract_id));
     assert_eq!(char_contracts_arr[0]["type"], json!("auction"));
     assert_eq!(char_contracts_arr[0]["buyout"], json!(5_000_000.0));
 

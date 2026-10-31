@@ -5,12 +5,14 @@
 use crate::esi_market_industry_pi::{assert_status, get_json, issue_token_with_scopes, validate_and_json};
 use eve_db::{
     corp_roles::{ROLE_CONTRACT_MANAGER, ROLE_DIRECTOR, ROLE_FACTORY_MANAGER},
-    CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, WorldRepository,
+    CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
+    UpwellStructureRecord, WorldRepository,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
+use eve_server::services::industry_pi::industry_facilities_bps::save_facility_taxes;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -229,6 +231,7 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
 
     let station_id = 60_003_760_i64;
     let corp1 = 98_000_001_i64;
+    let member_char = 90_000_777_i64;
     let (char1, char2, corp2) = ctx.db.with_snapshot(|snap| {
         let mut chars: Vec<_> = snap.characters.values().collect();
         chars.sort_by_key(|c| c.character_id);
@@ -239,6 +242,12 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
         )
     });
     let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut plain_member = snap.characters[&char1].clone();
+        plain_member.character_id = member_char;
+        plain_member.name = "P6 Ordinary Member".to_string();
+        plain_member.corporation_id = corp1;
+        snap.characters.insert(member_char, plain_member);
+
         let mut corp = CorporationRecord {
             corporation_id: corp1,
             name: "P6 Corp".to_string(),
@@ -248,6 +257,8 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
             ..Default::default()
         };
         corp.ensure_wallet_divisions();
+        corp.members.insert(member_char);
+        corp.member_roles.insert(member_char, 0);
         snap.corporations.insert(corp1, corp);
         Ok(())
     });
@@ -259,8 +270,10 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
         station_id,
         ROLE_CONTRACT_MANAGER | ROLE_DIRECTOR,
     );
-    let mut sess2 = setup_session(&ctx, char2, corp2, station_id, 0);
+    let _sess_member = setup_session(&ctx, member_char, corp1, station_id, 0);
+    let mut sess2 = setup_session(&ctx, char2, corp2, station_id, ROLE_DIRECTOR);
     let item_id = seed_hangar_item(&ctx, char1, station_id, 35, 250);
+    let personal_item_id = seed_hangar_item(&ctx, char1, station_id, 34, 100);
 
     let mut kwargs = HashMap::new();
     kwargs.insert("forCorp".to_string(), PyRep::Bool(true));
@@ -298,6 +311,41 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
     };
     let cid = kv.get("contractID").unwrap().as_i64().unwrap();
 
+    // Also create a personal contract (`forCorp` omitted/false) by `char1` to verify character vs corp isolation.
+    let p_res = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "contractProxy",
+            None,
+            "CreateContract",
+            &[
+                PyRep::Integer(1), // ItemExchange
+                PyRep::Integer(0), // Public
+                PyRep::Integer(0),
+                PyRep::Integer(1440),
+                PyRep::Integer(1),
+                PyRep::Integer(station_id),
+                PyRep::Integer(station_id),
+                PyRep::Real(50_000.0),
+                PyRep::Real(0.0),
+                PyRep::Real(0.0),
+                PyRep::String("P6 Personal Tritanium".into()),
+                PyRep::String("Personal exchange".into()),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::Integer(personal_item_id),
+                    PyRep::Integer(100),
+                ])]),
+            ],
+            &empty,
+            None,
+        )
+        .await
+        .expect("CreateContract personal");
+    let PyRep::KeyVal(p_kv) = p_res else {
+        panic!("expected KeyVal");
+    };
+    let personal_cid = p_kv.get("contractID").unwrap().as_i64().unwrap();
+
     ctx.dispatch_rpc(
         &mut sess2,
         "contractProxy",
@@ -310,29 +358,46 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
     .await
     .expect("PlaceBid on corp auction");
 
-    let tok_corp = issue_token_with_scopes(&ctx, char1, vec!["esi-contracts.read_corporation_contracts.v1"]);
+    let tok_member = issue_token_with_scopes(&ctx, member_char, vec!["esi-contracts.read_corporation_contracts.v1"]);
+    let tok_char1 = issue_token_with_scopes(&ctx, char1, vec!["esi-contracts.read_character_contracts.v1"]);
     let tok_other = issue_token_with_scopes(&ctx, char2, vec!["esi-contracts.read_corporation_contracts.v1"]);
 
+    // Cross-corp and unauthenticated negative tests on all 3 corporation contract endpoints
     assert_status(&router, format!("/v1/corporations/{corp1}/contracts/"), None, 401);
     assert_status(&router, format!("/v1/corporations/{corp1}/contracts/"), Some(&tok_other), 403);
-    assert_status(&router, format!("/v1/corporations/{corp1}/contracts/999999999/items/"), Some(&tok_corp), 404);
-    assert_status(&router, format!("/v1/corporations/{corp1}/contracts/999999999/bids/"), Some(&tok_corp), 404);
+    assert_status(&router, format!("/v1/corporations/{corp1}/contracts/{cid}/items/"), Some(&tok_other), 403);
+    assert_status(&router, format!("/v1/corporations/{corp1}/contracts/{cid}/bids/"), Some(&tok_other), 403);
+    assert_status(&router, format!("/v1/corporations/{corp1}/contracts/999999999/items/"), Some(&tok_member), 404);
+    assert_status(&router, format!("/v1/corporations/{corp1}/contracts/999999999/bids/"), Some(&tok_member), 404);
 
-    let corp_contracts = get_json(&router, &spec, format!("/v1/corporations/{corp1}/contracts/"), Some(&tok_corp));
-    let found = corp_contracts
-        .as_array()
-        .unwrap()
+    // Non-Director ordinary corporation member (`roles == 0`) gets 200 OK on all 3 corp contract routes
+    let corp_contracts = get_json(&router, &spec, format!("/v1/corporations/{corp1}/contracts/"), Some(&tok_member));
+    let corp_arr = corp_contracts.as_array().unwrap();
+    let found = corp_arr
         .iter()
         .find(|c| c["contract_id"] == cid)
-        .expect("corp contract in list");
+        .expect("corp contract in list for ordinary member");
     assert_eq!(found["for_corporation"], true);
     assert_eq!(found["issuer_corporation_id"], corp1);
+    assert!(
+        !corp_arr.iter().any(|c| c["contract_id"] == personal_cid),
+        "personal character contract must not leak into corporation contracts"
+    );
+
+    // Character contracts for `char1` must include `personal_cid` and exclude `for_corp == true` `cid`
+    let char1_contracts = get_json(&router, &spec, format!("/v1/characters/{char1}/contracts/"), Some(&tok_char1));
+    let char1_arr = char1_contracts.as_array().unwrap();
+    assert!(char1_arr.iter().any(|c| c["contract_id"] == personal_cid));
+    assert!(
+        !char1_arr.iter().any(|c| c["contract_id"] == cid),
+        "for_corp contract must not appear in issuer character contracts"
+    );
 
     let corp_items = get_json(
         &router,
         &spec,
         format!("/v1/corporations/{corp1}/contracts/{cid}/items/"),
-        Some(&tok_corp),
+        Some(&tok_member),
     );
     assert_eq!(corp_items.as_array().unwrap().len(), 1);
     assert_eq!(corp_items[0]["type_id"], 35);
@@ -342,7 +407,7 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
         &router,
         &spec,
         format!("/v1/corporations/{corp1}/contracts/{cid}/bids/"),
-        Some(&tok_corp),
+        Some(&tok_member),
     );
     assert_eq!(corp_bids.as_array().unwrap().len(), 1);
     assert_eq!(corp_bids[0]["amount"], 250_000.0);
@@ -353,12 +418,12 @@ async fn test_esi_p6_corp_contracts_live_rpc_auth_and_sqlite_persistence() {
     let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
     let ctx2 = Arc::new(ServerContext::with_repository(repo2));
     let router2 = EsiRouter::new(ctx2);
-    let tok_corp2 = issue_token_with_scopes(&router2.ctx, char1, vec!["esi-contracts.read_corporation_contracts.v1"]);
+    let tok_member2 = issue_token_with_scopes(&router2.ctx, member_char, vec!["esi-contracts.read_corporation_contracts.v1"]);
     let corp_bids2 = get_json(
         &router2,
         &spec,
         format!("/v1/corporations/{corp1}/contracts/{cid}/bids/"),
-        Some(&tok_corp2),
+        Some(&tok_member2),
     );
     assert_eq!(corp_bids2.as_array().unwrap().len(), 1);
     let _ = std::fs::remove_file(&db_path);
@@ -374,6 +439,8 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
 
     let station_id = 60_003_760_i64;
     let corp1 = 98_000_001_i64;
+    let raitaru_id = 1_030_000_991_001_i64;
+    let bare_astrahus_id = 1_030_000_991_002_i64;
     let (char1, char2, corp2) = ctx.db.with_snapshot(|snap| {
         let mut chars: Vec<_> = snap.characters.values().collect();
         chars.sort_by_key(|c| c.character_id);
@@ -389,50 +456,106 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
             name: "P6 Corp".to_string(),
             ticker: "P6C".to_string(),
             ceo_id: char1,
+            tax_rate: 0.11, // PvE bounty tax rate — must NOT be reported as facility industry tax
             master_wallet: IskCents::from_isk(500_000_000),
             ..Default::default()
         };
         corp.ensure_wallet_divisions();
         snap.corporations.insert(corp1, corp);
+        snap.skills.entry(char1).or_default().insert(
+            3387,
+            TrainedSkillRecord { type_id: 3387, level: 5, skill_points: 256_000.0 },
+        );
+
+        for (sid, tid, name) in [
+            (raitaru_id, 35_825, "P6 Perimeter Raitaru"),
+            (bare_astrahus_id, 35_832, "P6 Bare Astrahus"),
+        ] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: tid,
+                    owner_corp_id: corp1,
+                    solar_system_id: 30_000_144,
+                    name: name.to_string(),
+                    position: [1_000.0, 2_000.0, 3_000.0],
+                    state: "ShieldVulnerable".to_string(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 500,
+                    shield_hp: 10_000.0,
+                    armor_hp: 10_000.0,
+                    hull_hp: 10_000.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        }
+        for (iid, tid, owner, loc, flag) in [
+            (990_001, 35_878, corp1, raitaru_id, InventoryFlag::ServiceSlot0),
+            (990_002, 691, char1, station_id, InventoryFlag::Hangar),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: owner,
+                    location_id: loc,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        save_facility_taxes(snap, raitaru_id, &HashMap::from([(1_u8, 0.035)]));
         Ok(())
     });
 
-    let mut sess1 = setup_session(
-        &ctx,
-        char1,
-        corp1,
-        station_id,
-        ROLE_FACTORY_MANAGER | ROLE_DIRECTOR,
-    );
+    let mut sess1 = setup_session(&ctx, char1, corp1, station_id, ROLE_FACTORY_MANAGER | ROLE_DIRECTOR);
     let _sess2 = setup_session(&ctx, char2, corp2, station_id, 0);
 
-    // Install character manufacturing job via industryManager.InstallJob
-    let job_res = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "industryManager",
-            None,
-            "InstallJob",
-            &[PyRep::Integer(691), PyRep::Integer(1), PyRep::Integer(1)],
-            &empty,
-            None,
-        )
-        .await
-        .expect("InstallJob");
-    let PyRep::KeyVal(job_kv) = job_res else {
-        panic!("expected KeyVal from InstallJob");
-    };
-    let job_id = job_kv.get("jobID").unwrap().as_i64().unwrap();
-
-    // Public /industry/facilities endpoint
-    let facilities = get_json(&router, &spec, "/v1/industry/facilities/", None);
-    let fac_arr = facilities.as_array().unwrap();
-    assert!(!fac_arr.is_empty(), "SDE NPC industry facilities must be listed");
-    if let Some(jita_fac) = fac_arr.iter().find(|f| f["facility_id"] == station_id) {
-        assert_eq!(jita_fac["tax"], 0.0025);
+    // Seed sufficient materials for 2 Rifter (691) manufacturing runs in Jita hangar
+    let rifter_mats: Vec<(u32, i32)> = ctx.sde.blueprints[&691]
+        .materials
+        .iter()
+        .map(|m| (m.type_id, (m.quantity as i32) * 10))
+        .collect();
+    for (tid, qty) in rifter_mats {
+        seed_hangar_item(&ctx, char1, station_id, tid, qty);
     }
 
+    let job_args = [PyRep::Integer(691), PyRep::Integer(1), PyRep::Integer(1)];
+    let job_res = ctx
+        .dispatch_rpc(&mut sess1, "industryManager", None, "InstallJob", &job_args, &empty, None)
+        .await
+        .expect("InstallJob");
+    let PyRep::KeyVal(job_kv) = job_res else { panic!("expected KeyVal") };
+    let job_id = job_kv.get("jobID").unwrap().as_i64().unwrap();
+
+    let corp_kwargs = HashMap::from([("useCorp".to_string(), PyRep::Bool(true))]);
+    let corp_job_res = ctx
+        .dispatch_rpc(&mut sess1, "industryManager", None, "InstallJob", &job_args, &corp_kwargs, None)
+        .await
+        .expect("InstallJob useCorp");
+    let PyRep::KeyVal(corp_job_kv) = corp_job_res else { panic!("expected KeyVal") };
+    let corp_job_id = corp_job_kv.get("jobID").unwrap().as_i64().unwrap();
+
+    // Public /industry/facilities endpoint: exact tax assertions + non-industry structure exclusion
+    let facilities = get_json(&router, &spec, "/v1/industry/facilities/", None);
+    let fac_arr = facilities.as_array().unwrap();
+    let jita_fac = fac_arr.iter().find(|f| f["facility_id"] == station_id).expect("Jita facility");
+    assert_eq!(jita_fac["tax"], 0.0025);
+    let raitaru_fac = fac_arr.iter().find(|f| f["facility_id"] == raitaru_id).expect("Raitaru facility");
+    assert_eq!(raitaru_fac["tax"], 0.035);
+    assert!(!fac_arr.iter().any(|f| f["facility_id"] == bare_astrahus_id));
+
     let tok_char = issue_token_with_scopes(&ctx, char1, vec!["esi-industry.read_character_jobs.v1"]);
+    let tok_corp = issue_token_with_scopes(&ctx, char1, vec!["esi-industry.read_corporation_jobs.v1"]);
     let tok_other = issue_token_with_scopes(&ctx, char2, vec!["esi-industry.read_character_jobs.v1"]);
 
     assert_status(&router, format!("/v1/characters/{char1}/industry/jobs/"), None, 401);
@@ -440,77 +563,41 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
     assert_status(&router, format!("/v1/corporations/{corp1}/industry/jobs/"), None, 401);
     assert_status(&router, format!("/v1/corporations/{corp1}/industry/jobs/"), Some(&tok_other), 403);
 
+    // Personal vs corporation job isolation while both jobs are active
     let char_jobs = get_json(&router, &spec, format!("/v1/characters/{char1}/industry/jobs/"), Some(&tok_char));
-    let j = char_jobs
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|j| j["job_id"] == job_id)
-        .expect("installed job in char jobs");
+    let char_jobs_arr = char_jobs.as_array().unwrap();
+    let j = char_jobs_arr.iter().find(|j| j["job_id"] == job_id).expect("personal job in character jobs");
     assert_eq!(j["status"], "active");
     assert_eq!(j["facility_id"], station_id);
+    assert!(!char_jobs_arr.iter().any(|j| j["job_id"] == corp_job_id));
 
-    // Complete job and verify include_completed=false vs true
+    let corp_jobs = get_json(&router, &spec, format!("/v1/corporations/{corp1}/industry/jobs/"), Some(&tok_corp));
+    let corp_jobs_arr = corp_jobs.as_array().unwrap();
+    assert!(corp_jobs_arr.iter().any(|j| j["job_id"] == corp_job_id));
+    assert!(!corp_jobs_arr.iter().any(|j| j["job_id"] == job_id));
+
+    // Complete personal job and verify include_completed=false vs true + continued corp isolation
     ctx.advance_virtual_clock(6_000);
     let tok_char = issue_token_with_scopes(&ctx, char1, vec!["esi-industry.read_character_jobs.v1"]);
     let tok_corp = issue_token_with_scopes(&ctx, char1, vec!["esi-industry.read_corporation_jobs.v1"]);
-    ctx.dispatch_rpc(
-        &mut sess1,
-        "industryManager",
-        None,
-        "CompleteJob",
-        &[PyRep::Integer(job_id)],
-        &empty,
-        None,
-    )
-    .await
-    .expect("CompleteJob");
+    ctx.dispatch_rpc(&mut sess1, "industryManager", None, "CompleteJob", &[PyRep::Integer(job_id)], &empty, None)
+        .await
+        .expect("CompleteJob");
 
-    let active_only = get_json(
-        &router,
-        &spec,
-        format!("/v1/characters/{char1}/industry/jobs/?include_completed=false"),
-        Some(&tok_char),
-    );
+    let active_only = get_json(&router, &spec, format!("/v1/characters/{char1}/industry/jobs/?include_completed=false"), Some(&tok_char));
     assert!(!active_only.as_array().unwrap().iter().any(|j| j["job_id"] == job_id));
 
-    let all_jobs = get_json(
-        &router,
-        &spec,
-        format!("/v1/characters/{char1}/industry/jobs/?include_completed=true"),
-        Some(&tok_char),
-    );
-    let completed = all_jobs
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|j| j["job_id"] == job_id)
-        .expect("completed job");
+    let all_jobs = get_json(&router, &spec, format!("/v1/characters/{char1}/industry/jobs/?include_completed=true"), Some(&tok_char));
+    let all_char_arr = all_jobs.as_array().unwrap();
+    let completed = all_char_arr.iter().find(|j| j["job_id"] == job_id).expect("completed job");
     assert_eq!(completed["status"], "delivered");
     assert_eq!(completed["completed_character_id"], char1);
+    assert!(!all_char_arr.iter().any(|j| j["job_id"] == corp_job_id));
 
-    // Install corporation manufacturing job via industryManager.InstallJob (useCorp = true)
-    let mut corp_kwargs = HashMap::new();
-    corp_kwargs.insert("useCorp".to_string(), PyRep::Bool(true));
-    let corp_job_res = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "industryManager",
-            None,
-            "InstallJob",
-            &[PyRep::Integer(691), PyRep::Integer(1), PyRep::Integer(1)],
-            &corp_kwargs,
-            None,
-        )
-        .await
-        .expect("InstallJob useCorp");
-    let PyRep::KeyVal(corp_job_kv) = corp_job_res else {
-        panic!("expected KeyVal from corp InstallJob");
-    };
-    let corp_job_id = corp_job_kv.get("jobID").unwrap().as_i64().unwrap();
-
-    let corp_jobs = get_json(&router, &spec, format!("/v1/corporations/{corp1}/industry/jobs/"), Some(&tok_corp));
-    assert!(corp_jobs.as_array().unwrap().iter().any(|j| j["job_id"] == corp_job_id));
+    let corp_all = get_json(&router, &spec, format!("/v1/corporations/{corp1}/industry/jobs/?include_completed=true"), Some(&tok_corp));
+    let corp_all_arr = corp_all.as_array().unwrap();
+    assert!(corp_all_arr.iter().any(|j| j["job_id"] == corp_job_id));
+    assert!(!corp_all_arr.iter().any(|j| j["job_id"] == job_id));
 
     // SQLite persistence check
     drop(router);
@@ -526,5 +613,6 @@ async fn test_esi_p6_industry_jobs_and_facilities_live_rpc_and_sqlite_persistenc
         Some(&tok_char2),
     );
     assert!(persisted.as_array().unwrap().iter().any(|j| j["job_id"] == job_id));
+    assert!(!persisted.as_array().unwrap().iter().any(|j| j["job_id"] == corp_job_id));
     let _ = std::fs::remove_file(&db_path);
 }

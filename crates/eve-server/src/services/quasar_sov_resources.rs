@@ -210,6 +210,8 @@ pub fn register_handlers(
 
     // 4. eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest
     //    Star celestials (`group_id == 6`) of the caller's current system from SDE `mapDenormalize`.
+    //    DATA GAP: `quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj`
+    //    remains untagged (`OPEN`) per `docs/BLOCKERS.md` §9 until authoritative V24.01 star tables are imported.
     {
         let db_star = Arc::clone(&db);
         let sde_star = Arc::clone(&sde);
