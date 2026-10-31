@@ -33,11 +33,11 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
     let db_path = temp_sqlite_path("sov_power_wf_sites");
     let ctx = open_sqlite_ctx(&db_path, true);
     let (null_sys, _, lava_planet, ice_planet, _) = find_nullsec_planets(&ctx);
-    let neighbor_sys = ctx
+    let mut adj_null: Vec<u32> = ctx
         .sde
         .jumps
         .values()
-        .find(|j| {
+        .filter(|j| {
             j.from_solar_system_id == null_sys
                 && ctx.sde.solar_systems.get(&j.to_solar_system_id).is_some_and(|s| {
                     s.security_status <= 0.0
@@ -46,7 +46,18 @@ async fn test_sov_power_workforce_fuel_upgrades_reagents_and_sites_parity() {
                 })
         })
         .map(|j| j.to_solar_system_id)
-        .expect("adjacent null-sec system");
+        .filter(|&sys| {
+            ctx.sde
+                .celestials_in_system(sys)
+                .into_iter()
+                .filter(|c| c.group_id == 7)
+                .map(|c| eve_server::services::quasar_sov_hub::planet_yield(c.type_id).1)
+                .sum::<u64>()
+                >= 5_000
+        })
+        .collect();
+    adj_null.sort_unstable();
+    let neighbor_sys = adj_null.into_iter().next().expect("adjacent null-sec system with >= 5000 workforce");
     let cels = ctx.sde.celestials_in_system(null_sys);
     let lava_pos = cels.iter().find(|c| c.celestial_id == lava_planet).unwrap().position;
     let ice_pos = cels.iter().find(|c| c.celestial_id == ice_planet).unwrap().position;
