@@ -253,6 +253,50 @@ async fn test_sov_mgr_structures_and_fuel_access() {
     );
 
     // 3. GetSovStructuresInfoForSolarSystem & GetSovStructuresInfoForLocalSolarSystem
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            1_000_000_090_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_090_001,
+                type_id: 35832, // Astrahus (non-sov Upwell structure)
+                owner_corp_id: 98_000_001,
+                solar_system_id: NULLSEC_SYS_ID,
+                name: "Non-Sov Astrahus".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            1_000_000_090_002,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_090_002,
+                type_id: 81826, // Sovereignty Hub
+                owner_corp_id: 98_000_001,
+                solar_system_id: NULLSEC_SYS_ID,
+                name: "Sov Hub".into(),
+                position: [1000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
     let structures_sys = ctx
         .dispatch_rpc(
             &mut sess,
@@ -265,7 +309,17 @@ async fn test_sov_mgr_structures_and_fuel_access() {
         )
         .await
         .expect("GetSovStructuresInfoForSolarSystem");
-    assert!(get_kv(&structures_sys, "structures").is_some());
+    let PyRep::List(sov_structs) = get_kv(&structures_sys, "structures").expect("structures") else {
+        panic!("expected structures list");
+    };
+    assert!(
+        sov_structs.iter().all(|s| get_kv(s, "typeID") != Some(&PyRep::Integer(35832))),
+        "Non-sov Upwell structures must be excluded from GetSovStructuresInfoForSolarSystem"
+    );
+    assert!(
+        sov_structs.iter().any(|s| get_kv(s, "typeID") == Some(&PyRep::Integer(81826))),
+        "Sovereignty Hub must be returned by GetSovStructuresInfoForSolarSystem"
+    );
 
     let local_structures = ctx
         .dispatch_rpc(

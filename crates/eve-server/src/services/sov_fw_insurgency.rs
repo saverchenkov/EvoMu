@@ -952,13 +952,20 @@ pub async fn handle(
                 let list: Vec<PyRep> = snap
                     .structures
                     .values()
-                    .filter(|s| s.solar_system_id == sys_id)
+                    .filter(|s| {
+                        s.solar_system_id == sys_id
+                            && matches!(s.type_id, 32226 | 32458 | 81826)
+                    })
                     .map(|s| {
                         let vuln = snap
                             .structure_vulnerability_windows
                             .get(&s.structure_id)
                             .copied()
                             .unwrap_or((0, 0));
+                        let owner_alliance_id = snap
+                            .corporations
+                            .get(&s.owner_corp_id)
+                            .and_then(|c| c.alliance_id);
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),
@@ -966,7 +973,7 @@ pub async fn handle(
                             ("corporationID", PyRep::Integer(s.owner_corp_id)),
                             (
                                 "allianceID",
-                                aid.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                owner_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                             ),
                             ("solarSystemID", PyRep::Integer(sys_id as i64)),
                             ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),

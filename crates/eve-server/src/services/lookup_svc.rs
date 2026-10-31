@@ -419,36 +419,51 @@ pub fn handle(
         ("lookupSvc", "LookupWarableCorporationsOrAlliances") => {
             let (query, exact) = parse_search_args(args);
             let mut results = Vec::new();
+            let caller_corp_id = session.corporation_id;
+            let caller_alliance_id = session.alliance_id;
 
             ctx.db.with_snapshot(|snap| {
-                // Player corporations (group 2)
+                // Player corporations (group 2): must be war-eligible (own an Upwell structure or belong to an alliance)
+                // and must not be the caller's own corporation or in the caller's own alliance.
                 for corp in snap.corporations.values() {
                     if corp.corporation_id >= 98_000_000
+                        && Some(corp.corporation_id) != caller_corp_id
+                        && (caller_alliance_id.is_none() || corp.alliance_id != caller_alliance_id)
+                        && (corp.alliance_id.is_some()
+                            || snap.structures.values().any(|s| s.owner_corp_id == corp.corporation_id))
                         && (matches_query(&corp.name, &query, exact)
                             || matches_query(&corp.ticker, &query, exact))
                     {
-                        results.push(PyRep::keyval([
-                            ("ownerID", PyRep::Integer(corp.corporation_id)),
-                            ("ownerName", PyRep::String(corp.name.clone())),
-                            ("groupID", PyRep::Integer(2)),
-                        ]));
+                        results.push((
+                            corp.corporation_id,
+                            PyRep::keyval([
+                                ("ownerID", PyRep::Integer(corp.corporation_id)),
+                                ("ownerName", PyRep::String(corp.name.clone())),
+                                ("groupID", PyRep::Integer(2)),
+                            ]),
+                        ));
                     }
                 }
-                // Alliances (group 32)
+                // Alliances (group 32): war-eligible, excluding caller's own alliance
                 for al in snap.alliances.values() {
-                    if matches_query(&al.name, &query, exact)
-                        || matches_query(&al.short_name, &query, exact)
+                    if Some(al.alliance_id) != caller_alliance_id
+                        && (matches_query(&al.name, &query, exact)
+                            || matches_query(&al.short_name, &query, exact))
                     {
-                        results.push(PyRep::keyval([
-                            ("ownerID", PyRep::Integer(al.alliance_id)),
-                            ("ownerName", PyRep::String(al.name.clone())),
-                            ("groupID", PyRep::Integer(32)),
-                        ]));
+                        results.push((
+                            al.alliance_id,
+                            PyRep::keyval([
+                                ("ownerID", PyRep::Integer(al.alliance_id)),
+                                ("ownerName", PyRep::String(al.name.clone())),
+                                ("groupID", PyRep::Integer(32)),
+                            ]),
+                        ));
                     }
                 }
             });
 
-            Some(Ok(PyRep::List(results)))
+            results.sort_by_key(|(id, _)| *id);
+            Some(Ok(PyRep::List(results.into_iter().map(|(_, rep)| rep).collect())))
         }
 
         ("bannedwords", "fetch_regexes") => {

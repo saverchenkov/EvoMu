@@ -19,6 +19,7 @@ use crate::common::login_pilot;
 // ============================================================================
 #[tokio::test]
 async fn test_mn01_sde_mining_static_data_and_distributions() {
+    // parity: plan:MN-01
     let ctx = ServerContext::new();
     let sde = &ctx.sde;
 
@@ -71,6 +72,7 @@ async fn test_mn01_sde_mining_static_data_and_distributions() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn02_asteroid_belts_as_balls_highsec_and_nullsec() {
+    // parity: plan:MN-02, plan:C-5
     // parity: feat:mining.belts-as-balls
     eve_testkit::attest(&["feat:mining.belts-as-balls"]);
     let ctx = ServerContext::new();
@@ -477,6 +479,7 @@ async fn test_mn09_mining_drones_ore_hold_delivery_and_range_check() {
 // ============================================================================
 #[tokio::test]
 async fn test_npc_mining_op_derived_hauler_replenishment() {
+    // parity: plan:MN-17
     let ctx = ServerContext::new();
     let director = LivingWorldDirector::new();
 

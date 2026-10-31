@@ -560,6 +560,7 @@ async fn test_so7_chat_and_mail_item_fitting_hyperlinks_roundtrip() {
 
 #[tokio::test]
 async fn test_t8_atomic_rollback_all_stores_on_rpc_and_wal_failure() {
+    // parity: plan:T-8
 
     let db_path = temp_sqlite_path("t8_atomic");
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
@@ -609,6 +610,7 @@ async fn test_t8_atomic_rollback_all_stores_on_rpc_and_wal_failure() {
 
 #[tokio::test]
 async fn test_t9_no_transient_active_cycle_attrs_persisted_on_restart() {
+    // parity: plan:T-9
 
     let db_path = temp_sqlite_path("t9_transient");
     let (ship_id, active_mod_id, mutated_mod_id) = (100_000_001_i64, 880_004_001_i64, 880_004_002_i64);
