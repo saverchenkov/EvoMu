@@ -328,6 +328,7 @@ async fn test_ships_cyno_beacon_jump_fatigue_and_titan_portal_bridge() {
         snap.module_online_states.insert(cloak_mod, true);
         snap.module_online_states.insert(portal_mod, true);
         snap.skills.entry(cyno_char).or_default().insert(21611, TrainedSkillRecord { type_id: 21611, level: 5, skill_points: 256_000.0 });
+        snap.skills.entry(cyno_char).or_default().insert(21603, TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
         snap.skills.entry(titan_char).or_default().insert(3456, TrainedSkillRecord { type_id: 3456, level: 5, skill_points: 256_000.0 });
         let fleet_id = 77_001;
         snap.fleets.insert(

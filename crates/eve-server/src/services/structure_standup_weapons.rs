@@ -613,7 +613,7 @@ pub async fn try_activate_standup_weapon(
         return Some(Err(err("ModuleNotFitted", "Standup weapon must be fitted to a structure high slot")));
     }
     if !is_online {
-        return Some(Err(err("ModuleNotOnline", format!("Module {module_id} is offline"))));
+        return Some(Err(err("ModuleOffline", format!("Module {module_id} is offline"))));
     }
 
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
@@ -730,6 +730,14 @@ pub async fn try_activate_standup_weapon(
         }
 
         GROUP_STANDUP_GUIDED_BOMB_LAUNCHER => {
+            if !structure_profile(ctx, st_type_id)
+                .is_some_and(|p| matches!(p.hull_class, HullClass::Large | HullClass::XLarge))
+            {
+                return Some(Err(err(
+                    "RequiresLOrXLStructure",
+                    "Standup Guided Bomb Launcher can only be activated on a Large or XL Upwell structure",
+                )));
+            }
             let Some(tid) = target_id_opt else {
                 return Some(Err(err("TargetRequired", "Standup Guided Bomb Launcher requires a locked target")));
             };

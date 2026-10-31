@@ -486,6 +486,7 @@ async fn test_pochven_wormholes_filaments_gates_and_capital_restrictions() {
         snap.items.insert(cyno_mod_id, make_item(cyno_mod_id, 21_096, cyno_char_id, cyno_ship_id, InventoryFlag::HiSlot0, 1, true));
         snap.items.insert(ozone_id, make_item(ozone_id, 16_273, cyno_char_id, cyno_ship_id, InventoryFlag::Cargo, 5_000, false));
         snap.module_online_states.insert(cyno_mod_id, true);
+        snap.skills.entry(cyno_char_id).or_default().insert(21_603, eve_db::TrainedSkillRecord { type_id: 21_603, level: 5, skill_points: 256_000.0 });
     });
     sess.fleet_id = Some(88_701);
     cyno_sess.fleet_id = Some(88_701);

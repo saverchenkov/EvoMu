@@ -1150,7 +1150,7 @@ impl ServerContext {
             .get(&ship_id)
             .cloned()
             .unwrap_or_default();
-        if let Some(mut existing) = self
+        let cached = self
             .ship_fittings
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -1159,8 +1159,8 @@ impl ServerContext {
             .filter(|e| {
                 e.boosters == active_boosters
                     && e.booster_side_effects == active_booster_side_effects
-            })
-        {
+            });
+        if let Some(mut existing) = cached {
             let needs_recalc = existing.character_skills != skill_levels
                 || existing.implants != active_implants
                 || existing.projected_ewar != active_projected;
