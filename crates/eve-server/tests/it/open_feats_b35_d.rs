@@ -199,6 +199,13 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     });
     assert!(dmg_after_tether <= 1e-6, "In-space Upwell structure tethering must clear burned-out module heat damage");
     assert!(!is_online_after_tether, "Tether-repaired burned-out module must remain offline until manually onlined by pilot");
+    // BF-B35-03: InitiateModuleRepairMany must also reject docked sessions
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = Some(60_003_760));
+    sess.station_id = Some(60_003_760);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepairMany", &[PyRep::List(vec![PyRep::Integer(mod_5m3)])], &kw, None).await.unwrap_err().code,
+        "CannotRepairNaniteWhileDocked"
+    );
 }
 
 #[tokio::test]

@@ -409,6 +409,15 @@ impl SystemHandle {
             .any(|r| r.ship_id == ship_id && r.module_id == module_id)
     }
 
+    pub fn has_active_module_cycle_sync(&self, ship_id: BallId, module_id: i64) -> bool {
+        self.actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.module_id == module_id)
+    }
+
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
         let mut cancelled = Vec::new();

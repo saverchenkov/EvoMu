@@ -234,26 +234,26 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&cap_battery_id); });
     ctx.invalidate_ship_fitting(victim_id);
     // Small Energy Nosferatu I (530):
-    // 1) Target cap higher in GJ (1200) but lower in % (40% < 80%): proves absolute GJ rule runs end-to-end:
+    // 1) Target cap higher in % (80% > 25%) even when lower in GJ (400 < 500): proves relative % rule runs end-to-end:
     let mut ship_cs_nos = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     ship_cs_nos.capacitor_recharge_time_ms = 0.0;
-    ship_cs_nos.max_capacitor = 1_000.0;
-    ship_cs_nos.capacitor = 800.0; // 80%
+    ship_cs_nos.max_capacitor = 2_000.0;
+    ship_cs_nos.capacitor = 500.0; // 25%
     sys.set_combat_state(ship_id, ship_cs_nos).await.unwrap();
     let mut v_cs_nos = sys.get_combat_state(victim_id).await.unwrap().unwrap();
     v_cs_nos.capacitor_recharge_time_ms = 0.0;
-    v_cs_nos.max_capacitor = 3_000.0;
-    v_cs_nos.capacitor = 1_200.0; // 40%
+    v_cs_nos.max_capacitor = 500.0;
+    v_cs_nos.capacitor = 400.0; // 80%
     sys.set_combat_state(victim_id, v_cs_nos).await.unwrap();
 
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(0),
     ], &kw, None).await.expect("Activate Small Energy Nosferatu I");
-    assert_eq!(sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor, 1_200.0, "Nosferatu must NOT drain target at t = 0");
+    assert_eq!(sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor, 400.0, "Nosferatu must NOT drain target at t = 0");
     for _ in 0..6 { let _ = sys.tick().await; }
     let v_cap_abs = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
     let s_cap_abs = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
-    assert!(v_cap_abs < 1_200.0 && s_cap_abs > 800.0, "Nosferatu must drain on absolute GJ (1200 > 800) even when target % (40%) < self % (80%): got victim={v_cap_abs}, self={s_cap_abs}");
+    assert!(v_cap_abs < 400.0 && s_cap_abs > 500.0, "Nosferatu must drain on relative % (80% > 25%) even when target GJ (400) < self GJ (500): got victim={v_cap_abs}, self={s_cap_abs}");
 
     // Blood Raider hull dynamically derived from SDE attributes/effects overrides target_cap > self_cap:
     let nos_item = DogmaItemState::from_sde(nos_id, 530, &ctx.sde);
@@ -262,33 +262,33 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     assert_eq!(eval_energy_nosferatu_with_hull(&nos_item, 1_000.0, 500.0, 1000.0, 400.0, false, &ctx.sde).actual_transferred, 0.0);
     assert!(eval_energy_nosferatu_with_hull(&nos_item, 1_000.0, 500.0, 1000.0, 400.0, true, &ctx.sde).actual_transferred > 0.0);
 
-    // Standard hull cannot drain when target absolute GJ (400) < source absolute GJ (500), even if target % (80%) > source % (25%):
+    // Standard hull cannot drain when target % (40%) < source % (80%), even if target GJ (1200) > source GJ (800):
     let mut s_cs_std = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     s_cs_std.capacitor_recharge_time_ms = 0.0;
-    s_cs_std.max_capacitor = 2_000.0;
-    s_cs_std.capacitor = 500.0; // 25%
+    s_cs_std.max_capacitor = 1_000.0;
+    s_cs_std.capacitor = 800.0; // 80%
     sys.set_combat_state(ship_id, s_cs_std).await.unwrap();
     let mut v_cs_std = sys.get_combat_state(victim_id).await.unwrap().unwrap();
     v_cs_std.capacitor_recharge_time_ms = 0.0;
-    v_cs_std.max_capacitor = 500.0;
-    v_cs_std.capacitor = 400.0; // 80%
+    v_cs_std.max_capacitor = 3_000.0;
+    v_cs_std.capacitor = 1_200.0; // 40%
     sys.set_combat_state(victim_id, v_cs_std).await.unwrap();
 
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(0),
-    ], &kw, None).await.expect("Activate Nosferatu on standard hull when target GJ < self GJ");
+    ], &kw, None).await.expect("Activate Nosferatu on standard hull when target % < self %");
     for _ in 0..6 { let _ = sys.tick().await; }
-    assert_eq!(sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor, 400.0, "Standard hull cannot drain when target GJ < self GJ");
+    assert_eq!(sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor, 1_200.0, "Standard hull cannot drain when target % < self %");
 
-    // Blood Raider Bhaalgorn (17920) drains target even when target GJ (400) < self GJ (500):
+    // Blood Raider Bhaalgorn (17920) drains target even when target % (40%) < self % (80%):
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship_item) = snap.items.get_mut(&ship_id) { ship_item.type_id = 17920; }
     });
     ctx.invalidate_ship_fitting(ship_id);
     let mut ship_cs_br = sys.get_combat_state(ship_id).await.unwrap().unwrap();
     ship_cs_br.capacitor_recharge_time_ms = 0.0;
-    ship_cs_br.max_capacitor = 2000.0;
-    ship_cs_br.capacitor = 500.0;
+    ship_cs_br.max_capacitor = 1000.0;
+    ship_cs_br.capacitor = 800.0;
     sys.set_combat_state(ship_id, ship_cs_br).await.unwrap();
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(victim_id), PyRep::Integer(0),
@@ -296,7 +296,7 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     for _ in 0..6 { let _ = sys.tick().await; }
     let v_cap_br = sys.get_combat_state(victim_id).await.unwrap().unwrap().capacitor;
     let s_cap_br = sys.get_combat_state(ship_id).await.unwrap().unwrap().capacitor;
-    assert!(v_cap_br < 400.0 && s_cap_br > 500.0, "Blood Raider hull bonus must override absolute cap limitation and drain target");
+    assert!(v_cap_br < 1_200.0 && s_cap_br > 800.0, "Blood Raider hull bonus must override relative cap limitation and drain target");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship_item) = snap.items.get_mut(&ship_id) { ship_item.type_id = 640; }
     });

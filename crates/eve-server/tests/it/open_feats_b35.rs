@@ -577,11 +577,11 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
         "Second Mobile Depot within 5km of existing Mobile Depot must be rejected"
     );
 
-    // Invulnerable during 60s anchoring timer AND cannot refit before anchoring finishes
-    let (applied_invuln, _) = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
-        &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(500.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix_secs(),
+    // During 60s anchoring timer: takes direct damage without reinforcing AND cannot refit before anchoring finishes
+    let (applied_anchor, _) = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+        &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(100.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix_secs(),
     ).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-    assert_eq!(applied_invuln, 0.0, "Mobile Depot must be invulnerable during 60s anchoring countdown");
+    assert!(applied_anchor > 0.0, "Mobile Depot takes direct damage without reinforcing during 60s anchoring countdown");
 
     let mod_item = 971_210;
     give_item(&ctx, mod_item, 3041, char_id, ship_id, InventoryFlag::Cargo, 1);

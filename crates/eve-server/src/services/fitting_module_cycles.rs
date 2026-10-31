@@ -48,17 +48,28 @@ pub(crate) async fn handle_module_cycles(
             } else {
                 fit.modules
                     .values()
-                    .find(|m| {
-                        ctx.sde
-                            .types
-                            .get(&m.type_id)
-                            .is_some_and(|t| t.group_id == 481)
-                    })
+                    .find(|m| ctx.sde.types.get(&m.type_id).is_some_and(|t| t.group_id == 481))
                     .map(|m| m.item_id)
+                    .or_else(|| {
+                        ctx.db.with_snapshot(|s| {
+                            s.items
+                                .values()
+                                .find(|i| {
+                                    i.location_id == ship_id
+                                        && (11..=34).contains(&(i.flag as u16))
+                                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 481)
+                                })
+                                .map(|i| i.item_id)
+                        })
+                    })
                     .unwrap_or(0)
             };
 
-            let m_opt = fit.modules.get(&module_id).cloned();
+            let m_opt = fit
+                .modules
+                .get(&module_id)
+                .cloned()
+                .or_else(|| resolve_snapshot_fitted_module(ctx, ship_id, module_id));
             let Some(m) = m_opt else {
                 let has_online_weapon = fit.modules.values().any(|wm| {
                     (27..=34).contains(&wm.flag_id)
@@ -740,6 +751,9 @@ pub(crate) async fn handle_module_cycles(
                 let is_covert_cloak = mod_type.effect_ids.iter().any(|&eid| {
                     ctx.sde.effects.get(&eid).is_some_and(|e| e.name == "cloakingWarpSafe" || e.is_warp_safe)
                 });
+                if is_covert_cloak && fit.ship.get_attribute(906, &ctx.sde) <= 0.0 && !matches!(ship_group_id, 830 | 833 | 898 | 963 | 1202 | 1283 | 1527 | 1972) {
+                    return Some(Err(BridgeRpcError { code: "ShipCannotUseCovertCloak".into(), message: "Ship cannot activate Covert Ops Cloaking Device".into() }));
+                }
                 let vel_mod = mod_state.get_attribute(306, &ctx.sde);
                 if is_covert_cloak || (vel_mod - 1.0).abs() < 1e-6 { 0.0 } else if vel_mod > 0.0 && vel_mod < 1.0 { vel_mod - 1.0 } else { 0.0 }
             } else if speed_factor > 0.0 { speed_factor / 100.0 } else { 0.0 };

@@ -532,6 +532,19 @@ pub(crate) async fn handle_dogma_ops(
                     message: "No active ship in session".into(),
                 }));
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotRepairNaniteWhileDocked".into(),
+                    message: "Nanite Repair Paste can only be used in space; use station/structure repair services while docked".into(),
+                }));
+            }
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Session has no solarSystemID".into(),
+                }));
+            };
+            let sys = ctx.systems.get_or_spawn(sys_id);
 
             let mut mod_ids = Vec::new();
             if let Some(PyRep::List(list)) | Some(PyRep::Tuple(list)) = args.first() {
@@ -562,7 +575,7 @@ pub(crate) async fn handle_dogma_ops(
                                     .is_some_and(|t| t.effect_ids.contains(&6484));
                             it.owner_id == char_id
                                 && it.location_id == ship_id
-                                && (11..=34).contains(&(it.flag as i64))
+                                && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
                                 && !is_ehe
                         });
                         let dmg = m_opt
@@ -589,15 +602,14 @@ pub(crate) async fn handle_dogma_ops(
                         (is_valid, active, dmg, hp, mod_tid, thermo_lvl, op_lvl, int_lvl)
                     });
 
-                if !is_valid || is_active || cur_dmg >= max_hp - 1e-6 {
+                if !is_valid
+                    || is_active
+                    || sys.has_active_module_cycle_sync(ship_id, module_id)
+                    || cur_dmg >= max_hp - 1e-6
+                    || sys.has_active_nanite_repair_sync(ship_id, module_id)
+                {
                     failed.push(PyRep::Integer(module_id));
                     continue;
-                }
-                if let Some(sys_id) = session.solar_system_id {
-                    if ctx.systems.get_or_spawn(sys_id).has_active_nanite_repair_sync(ship_id, module_id) {
-                        failed.push(PyRep::Integer(module_id));
-                        continue;
-                    }
                 }
                 if cur_dmg <= 1e-6 {
                     skipped.push(PyRep::Integer(module_id));
@@ -640,27 +652,17 @@ pub(crate) async fn handle_dogma_ops(
                 });
 
                 if deduct_ok.is_ok() {
-                    if let Some(sys_id) = session.solar_system_id {
-                        let sys = ctx.systems.get_or_spawn(sys_id);
-                        let _ = sys
-                            .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
-                                char_id,
-                                ship_id,
-                                module_id,
-                                initial_damage_hp: cur_dmg,
-                                paste_reserved: paste_needed,
-                                duration_s,
-                                elapsed_s: 0.0,
-                            })
-                            .await;
-                    } else {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            if let Some(m_item) = snap.items.get_mut(&module_id) {
-                                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
-                            }
-                        });
-                        ctx.invalidate_ship_fitting(ship_id);
-                    }
+                    let _ = sys
+                        .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
+                            char_id,
+                            ship_id,
+                            module_id,
+                            initial_damage_hp: cur_dmg,
+                            paste_reserved: paste_needed,
+                            duration_s,
+                            elapsed_s: 0.0,
+                        })
+                        .await;
                     repaired.push(PyRep::Integer(module_id));
                 } else {
                     failed.push(PyRep::Integer(module_id));

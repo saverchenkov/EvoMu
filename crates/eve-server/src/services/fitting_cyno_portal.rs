@@ -88,11 +88,16 @@ struct CynoPortalState {
     bridges: HashMap<(usize, i64), ActiveJumpBridge>,
 }
 
+pub fn is_covert_beacon_type(beacon_type_id: TypeId) -> bool {
+    matches!(beacon_type_id, 28646 | 28650 | 59630 | 59631)
+}
+
 pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     let key = ctx_key(ctx);
     let now = ctx.now_unix_secs();
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
     st.destroyed_beacons.retain(|_, b| b.expires_at_unix > now);
+    st.bridges.retain(|&(k, _), br| !(k == key && br.bridger_ship_id == ship_id));
     let matched: Vec<(usize, i64)> = st
         .beacons
         .iter()
@@ -386,7 +391,14 @@ fn consume_from_ship(snap: &mut eve_db::WorldStateSnapshot, ship_id: i64, type_i
     let mut stacks: Vec<(u8, i64)> = snap
         .items
         .values()
-        .filter(|i| i.location_id == ship_id && i.type_id == type_id && !matches!(i.flag as u16, 11..=34 | 92..=99))
+        .filter(|i| {
+            i.location_id == ship_id
+                && i.type_id == type_id
+                && matches!(
+                    i.flag,
+                    eve_db::InventoryFlag::SpecializedFuelBay | eve_db::InventoryFlag::Cargo
+                )
+        })
         .map(|i| (if i.flag == eve_db::InventoryFlag::SpecializedFuelBay { 0 } else { 1 }, i.item_id))
         .collect();
     stacks.sort_by_key(|&(prio, id)| (prio, id));
@@ -543,10 +555,6 @@ async fn light_cyno(
         1.0
     };
     let fuel_qty = (raw_base * role_mult * cft_mult).max(min_floor).ceil() as i64;
-    consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
-        format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-    })?;
-
     let duration_s = duration_ms / 1000.0;
     sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
@@ -557,6 +565,12 @@ async fn light_cyno(
     ))
     .await
     .map_err(|e| err("ModuleActivationFailed", e))?;
+    if let Err(e) = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
+        format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+    }) {
+        let _ = sys.remove_module_cycle(ship_id, module_id).await;
+        return Err(e);
+    }
 
     let ship_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);
     let spawn_radius = type_attr(ctx, mod_type, ATTR_CYNO_SPAWN_RADIUS);
@@ -859,12 +873,18 @@ pub(super) async fn caller_in_space(
         return Err(err("ShipInWarp", "Cannot jump while in warp"));
     }
     let now = ctx.now_unix();
-    let release_portal_mod = cyno_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .bridges
-        .get(&(ctx_key(ctx), char_id))
-        .and_then(|b| (b.bridger_ship_id == ship_id).then_some(b.portal_module_id));
+    let release_portal_mod = {
+        let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        let pmod = st
+            .bridges
+            .get(&(ctx_key(ctx), char_id))
+            .filter(|b| b.bridger_ship_id == ship_id)
+            .map(|b| b.portal_module_id);
+        if pmod.is_some() {
+            st.bridges.remove(&(ctx_key(ctx), char_id));
+        }
+        pmod
+    };
     if let Some(pmod_id) = release_portal_mod {
         let _ = handle.remove_module_cycle(ship_id, pmod_id).await;
     }
@@ -1166,6 +1186,9 @@ pub(super) async fn jump_to_fleet_beacon(
             ));
         }
         post_jump_cap = Some((cs.capacitor - cap_needed).max(0.0));
+    }
+    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
+        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
         format!("Jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")

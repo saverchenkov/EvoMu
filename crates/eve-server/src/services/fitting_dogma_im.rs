@@ -400,6 +400,18 @@ pub(crate) async fn handle_dogma_im(
                     } else if undocked && (Some(loc) != session.ship_id || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)) {
                         return Err(BridgeRpcError { code: "ItemNotFittedToActiveShip".into(), message: "In-space DestroyFitting requires a fitted item on the active ship".into() });
                     }
+                    if snap.module_active_states.contains(&item_id) {
+                        return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
+                    }
+                    if let Some(sys_id) = session.solar_system_id {
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        if sys.has_active_module_cycle_sync(loc, item_id) {
+                            return Err(BridgeRpcError { code: "ModuleIsActive".into(), message: format!("Module {item_id} cannot be destroyed while active") });
+                        }
+                        if sys.has_active_nanite_repair_sync(loc, item_id) {
+                            return Err(BridgeRpcError { code: "ModuleBeingRepaired".into(), message: format!("Module {item_id} cannot be destroyed while undergoing nanite repair") });
+                        }
+                    }
                     if (125..=129).contains(&flag_u16) {
                         let has_fitted_modules = snap.items.values().any(|other| {
                             other.location_id == loc && other.item_id != item_id && (11..=34).contains(&(other.flag as u16)) && ctx.sde.types.get(&other.type_id).is_none_or(|t| t.category_id != 8)

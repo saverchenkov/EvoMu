@@ -592,7 +592,8 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         .await;
     assert!(titan_conduit_mod.is_err(), "Titan cannot perform conduit jumps");
 
-    // 4. Titan solo jump to deployable beacon
+    // 4. Titan solo jump to deployable beacon (after 60s portal cycle expires)
+    ctx.advance_secs(65);
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
     let jump_dep = ctx
         .dispatch_rpc(&mut sess1, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None)

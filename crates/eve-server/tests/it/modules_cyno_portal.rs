@@ -420,7 +420,7 @@ async fn test_covert_cyno_black_ops_jump_and_covert_portal() {
 
     // A Black Ops jump drive can jump to the covert cyno itself.
     let before = qty_of(&ctx, 930_032);
-    ctx.advance_secs(12);
+    ctx.advance_secs(25);
     let bo_jump = call(&ctx, &mut s2, "beyonce", "CmdJumpToFleetModuleBeacon", beacon_args(C1, &cyno)).await.expect("BO jump");
     assert_eq!(s2.solar_system_id, Some(b));
     assert_eq!(int(&bo_jump, "fuelConsumed"), before - qty_of(&ctx, 930_032));

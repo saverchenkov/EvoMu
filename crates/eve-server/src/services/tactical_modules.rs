@@ -58,53 +58,40 @@ pub(crate) fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_p
 
 pub fn has_lance_caster_lock(ctx: &ServerContext, ship_id: i64) -> bool {
     let now_unix = ctx.now_unix_secs();
-    let db_key = db_key_of(ctx);
-    ctx.tactical_state
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .lance_caster_lock_until
-        .get(&(db_key, ship_id))
-        .is_some_and(|&until| now_unix < until)
+    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
+    let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
+    st.lance_caster_lock_until.get(&(db_key, ship_id)).or_else(|| st.lance_caster_lock_until.get(&(inst_key, ship_id))).is_some_and(|&until| now_unix < until)
 }
 
 /// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
-    let db_key = db_key_of(ctx);
+    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
     let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)) {
+    if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)).or_else(|| st.lance_caster_lock_until.get(&(inst_key, ship_id))) {
         if now_unix < until {
             return Err(BridgeRpcError { code: "LanceFiringLockActive".into(), message: format!("Cannot {action} while Disruptive Lance 5-minute firing lock is active ({}s remaining)", until - now_unix) });
         }
     }
-    if let Some(&until) = st.lance_victim_debuff_until.get(&(db_key, ship_id)) {
+    if let Some(&until) = st.lance_victim_debuff_until.get(&(db_key, ship_id)).or_else(|| st.lance_victim_debuff_until.get(&(inst_key, ship_id))) {
         if now_unix < until {
             return Err(BridgeRpcError { code: "DisruptiveLanceDebuffActive".into(), message: format!("Cannot {action} while Disruptive Lance debuff is active ({}s remaining)", until - now_unix) });
         }
     }
-    if let Some(ent) = st.entosis_active_links.get(&(db_key, ship_id)) {
+    if let Some(ent) = st.entosis_active_links.get(&(db_key, ship_id)).or_else(|| st.entosis_active_links.get(&(inst_key, ship_id))) {
         if now_unix < ent.expires_unix {
             return Err(BridgeRpcError { code: "EntosisLinkActive".into(), message: format!("Cannot {action} while Entosis Link cycle is active ({}s remaining)", ent.expires_unix - now_unix) });
         }
     }
     if crate::services::inventory_fitting::fitting_cyno_portal::is_ship_cyno_active(ctx, ship_id) {
-        return Err(BridgeRpcError {
-            code: "CynosuralFieldActive".into(),
-            message: format!("Cannot {action} while Cynosural Field Generator is active"),
-        });
+        return Err(BridgeRpcError { code: "CynosuralFieldActive".into(), message: format!("Cannot {action} while Cynosural Field Generator is active") });
     }
     drop(st);
     if crate::services::sov_gameplay::is_ship_skyhook_linked(ctx, ship_id, now_unix) {
-        return Err(BridgeRpcError {
-            code: "SkyhookLinkActive".into(),
-            message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo"),
-        });
+        return Err(BridgeRpcError { code: "SkyhookLinkActive".into(), message: format!("Cannot {action} while linked to an Orbital Skyhook Reagent Silo") });
     }
     if crate::services::pve_crab_beacons::is_ship_crab_linked(ctx, ship_id, now_unix) {
-        return Err(BridgeRpcError {
-            code: "CrabLinkActive".into(),
-            message: format!("Cannot {action} while linked to a CONCORD Rogue Analysis Beacon"),
-        });
+        return Err(BridgeRpcError { code: "CrabLinkActive".into(), message: format!("Cannot {action} while linked to a CONCORD Rogue Analysis Beacon") });
     }
     Ok(())
 }
@@ -112,9 +99,9 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
 /// Returns the incoming remote repair multiplier for `target_ship_id` (`0.50` when under a Disruptive Lance victim debuff, `1.0` otherwise).
 pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i64) -> f64 {
     let now_unix = ctx.now_unix_secs();
-    let db_key = db_key_of(ctx);
+    let (db_key, inst_key) = (db_key_of(ctx), ctx.instance_id as usize);
     let st = ctx.tactical_state.read().unwrap_or_else(|e| e.into_inner());
-    if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).is_some_and(|&u| now_unix < u) { 0.50 } else { 1.0 }
+    if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).or_else(|| st.lance_victim_debuff_until.get(&(inst_key, target_ship_id))).is_some_and(|&u| now_unix < u) { 0.50 } else { 1.0 }
 }
 
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
@@ -725,16 +712,15 @@ pub async fn activate_superweapon_with_args(
 
         // Pre-validate and consume 25,000 isotopes BEFORE applying capacitor drain, beam damage, or debuffs (#203)
         let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
-            let cand = snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity >= 25_000)
-                .or_else(|| snap.items.values().find(|i| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && i.quantity > 0))
+            let is_fuel = |i: &&eve_db::InventoryItemRecord| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && matches!(i.flag as u16, 5 | 133);
+            let cand = snap.items.values().find(|i| is_fuel(i) && (i.flag as u16) == 133 && i.quantity >= 25_000)
+                .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity >= 25_000))
+                .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity > 0))
                 .map(|i| (i.item_id, i.quantity));
             match cand {
                 Some((fid, avail)) if avail >= 25_000 => {
                     let mut rem = 0;
-                    if let Some(it) = snap.items.get_mut(&fid) {
-                        it.quantity -= 25_000;
-                        rem = it.quantity;
-                    }
+                    if let Some(it) = snap.items.get_mut(&fid) { it.quantity -= 25_000; rem = it.quantity; }
                     if rem <= 0 { snap.items.remove(&fid); }
                     Ok(25_000)
                 }
@@ -861,7 +847,11 @@ pub async fn activate_superweapon_with_args(
     let fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
     let fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(50_000);
     let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
-        let cand = snap.items.values().find(|i| i.location_id == ship_id && i.type_id == fuel_tid && i.quantity > 0).map(|i| (i.item_id, i.quantity));
+        let is_fuel = |i: &&eve_db::InventoryItemRecord| i.location_id == ship_id && i.type_id == fuel_tid && matches!(i.flag as u16, 5 | 133) && i.quantity > 0;
+        let cand = snap.items.values().find(|i| is_fuel(i) && (i.flag as u16) == 133 && i.quantity >= fuel_qty)
+            .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity >= fuel_qty))
+            .or_else(|| snap.items.values().find(|i| is_fuel(i)))
+            .map(|i| (i.item_id, i.quantity));
         match cand {
             Some((fid, avail)) if avail >= fuel_qty => {
                 let mut rem = 0;
@@ -896,6 +886,15 @@ pub async fn activate_superweapon_with_args(
             (a, b) => a.or(b),
         };
         let beam_dir = raw_dir.map(|v| if v.length_squared() > 1e-4 { v.normalize() } else { default_fwd }).unwrap_or(default_fwd);
+        if let (Some(sb), Ok(balls)) = (&ship_ball, sys.list_balls().await) {
+            for b in balls {
+                if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
+                    let rel = b.position - sb.position;
+                    let al = rel.dot(beam_dir);
+                    if (0.0..=300_000.0).contains(&al) && (rel - beam_dir * al).length() <= 20_000.0 { hit_targets.push(b.id); }
+                }
+            }
+        }
         ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key_of(ctx), ship_id), now_unix + 300);
         let _ = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
             ship_id, module_id, module_type_id: mod_type_id, owner_char_id: Some(char_id),
@@ -933,7 +932,7 @@ pub async fn activate_superweapon_with_args(
         ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
         ("warmupSeconds", PyRep::Real(if is_slash { 15.0 } else { 0.0 })),
         ("tickCount", PyRep::Integer(1)),
-        ("immobilizeSeconds", PyRep::Real(if is_slash { 300.0 } else { 15.0 })), ("jumpBlockSeconds", PyRep::Real(300.0)),
+        ("immobilizeSeconds", PyRep::Real(if is_slash { 300.0 } else { 30.0 })), ("jumpBlockSeconds", PyRep::Real(300.0)),
         ("jumpWarpSuppressionSeconds", PyRep::Real(if is_slash { 300.0 } else { 0.0 })),
         ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
     ]))

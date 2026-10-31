@@ -591,26 +591,20 @@ pub fn step_mobile_deployables_in_actor(
         write_deployable_state_snap(snap, |st| {
             for rec in st.deployables.values_mut() {
                 if rec.solar_system_id == solar_system_id {
-                    if let Some(reinf_until) = rec.reinforced_until_unix {
-                        if now_unix >= reinf_until {
-                            rec.reinforced_until_unix = None;
-                        }
+                    if rec.reinforced_until_unix.is_some_and(|u| now_unix >= u) {
+                        rec.reinforced_until_unix = None;
                     }
-                    if !rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0 {
-                        if now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs) {
-                            rec.anchor_completed = true;
-                        }
+                    if !rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0
+                        && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                    {
+                        rec.anchor_completed = true;
                     }
                     if rec.group_id == GROUP_MOBILE_OBSERVATORY
                         && !rec.is_unanchored
                         && now_unix >= rec.anchor_start_unix.saturating_add(OBSERVATORY_DEPLOY_SECS)
                         && now_unix < rec.expires_at_unix
                     {
-                        let should_ping = match rec.last_ping_unix {
-                            None => true,
-                            Some(last) => now_unix >= last.saturating_add(OBSERVATORY_PING_INTERVAL_SECS),
-                        };
-                        if should_ping {
+                        if rec.last_ping_unix.is_none_or(|last| now_unix >= last.saturating_add(OBSERVATORY_PING_INTERVAL_SECS)) {
                             rec.last_ping_unix = Some(now_unix);
                             observatory_pings.push(rec.item_id);
                         }
@@ -1022,14 +1016,6 @@ pub fn handle_ball_damage_in_actor(
                 if now_unix < reinf_until {
                     return Some((0.0, false, ball_snap));
                 }
-            }
-
-            // Mobile Depot is invulnerable during its 60s anchoring countdown (`feat:modules.mobile-depot-deployment-and-refitting`)
-            let is_anchoring = !rec.is_unanchored
-                && !rec.anchor_completed
-                && (rec.anchor_start_unix > 0 && now_unix < rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs));
-            if is_anchoring && rec.group_id == GROUP_MOBILE_DEPOT {
-                return Some((0.0, false, ball_snap));
             }
 
             // Anchoring phase or unanchored: takes direct damage, never reinforces!

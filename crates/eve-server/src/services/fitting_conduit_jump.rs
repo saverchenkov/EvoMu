@@ -162,11 +162,6 @@ pub(super) async fn bridge_to_fleet_beacon(
     } else {
         raw_act_qty.ceil() as i64
     };
-    if act_type != 0 && act_qty > 0 {
-        consume_or_err(ctx, ship_id, act_type, act_qty, |have| {
-            format!("Portal activation requires {act_qty} x type {act_type}, ship holds {have}")
-        })?;
-    }
     let dur_ms = if mod_vals[1] > 0.0 {
         mod_vals[1]
     } else {
@@ -183,6 +178,14 @@ pub(super) async fn bridge_to_fleet_beacon(
     ))
     .await
     .map_err(|e| err("ModuleActivationFailed", e))?;
+    if act_type != 0 && act_qty > 0 {
+        if let Err(e) = consume_or_err(ctx, ship_id, act_type, act_qty, |have| {
+            format!("Portal activation requires {act_qty} x type {act_type}, ship holds {have}")
+        }) {
+            let _ = sys.remove_module_cycle(ship_id, portal_id).await;
+            return Err(e);
+        }
+    }
     let expires_at_unix = ctx.now_unix_secs() + duration_s.round() as u64;
     cyno_state()
         .write()
@@ -379,6 +382,9 @@ pub(super) async fn group_jump_to_fleet_beacon(
             ));
         }
         post_jump_cap = Some((cs.capacitor - cap_needed).max(0.0));
+    }
+    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
+        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
     }
     consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
         format!("Conduit jump requires {fuel_qty} x type {fuel_type}, ship holds {have}")
@@ -655,14 +661,16 @@ pub(super) async fn jump_through_fleet(
             "Cannot jump through a portal bridge while tethered to a structure",
         ));
     }
-    if let Some(bridger_pos) = origin_handle.get_ball_position_sync(bridge.bridger_ship_id) {
-        let dist_m = ball.position.distance(bridger_pos);
-        if dist_m > 2_500.0 {
-            return Err(err(
-                "OutOfPortalRange",
-                format!("Ship is {dist_m:.1} m from bridging ship (must be <= 2,500 m)"),
-            ));
-        }
+    let Some(bridger_pos) = origin_handle.get_ball_position_sync(bridge.bridger_ship_id) else {
+        cyno_state().write().unwrap_or_else(|e| e.into_inner()).bridges.remove(&key);
+        return Err(err("NoActiveBridge", "Bridging ship is no longer in space"));
+    };
+    let dist_m = ball.position.distance(bridger_pos);
+    if dist_m > 2_500.0 {
+        return Err(err(
+            "OutOfPortalRange",
+            format!("Ship is {dist_m:.1} m from bridging ship (must be <= 2,500 m)"),
+        ));
     }
     let mut landed_at_star = false;
     let beacon = match live_beacon(
@@ -736,6 +744,9 @@ pub(super) async fn jump_through_fleet(
     // DERIVED: portal fuel = bridger effective jumpDriveConsumptionAmount * jumpPortalConsumptionMassFactor * passenger mass * LY.
     let factor = type_attr(ctx, portal_type, ATTR_JUMP_PORTAL_MASS_FACTOR);
     let fuel_qty = (bridger_per_ly * factor * mass * bridge.distance_ly).ceil() as i64;
+    if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, ctx.now_unix(), None).is_some() {
+        return Err(err("SessionChangeTimerActive", "Session change timer is active"));
+    }
     consume_or_err(ctx, bridge.bridger_ship_id, fuel_type, fuel_qty, |have| {
         format!("Bridge requires {fuel_qty} x type {fuel_type}, bridging ship holds {have}")
     })?;

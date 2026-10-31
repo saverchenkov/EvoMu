@@ -12,6 +12,57 @@ use eve_sde::{attr_ids, InvType};
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub(crate) fn resolve_snapshot_fitted_module(
+    ctx: &ServerContext,
+    ship_id: i64,
+    module_id: i64,
+) -> Option<eve_dogma::FittedModule> {
+    ctx.db.with_snapshot(|snap| {
+        let item = snap.items.get(&module_id)?;
+        let flag_u16 = item.flag as u16;
+        if item.location_id != ship_id
+            || !matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
+        {
+            return None;
+        }
+        let is_online = snap.module_online_states.get(&module_id).copied().unwrap_or(true);
+        let charge_item = snap.items.values().find(|c| {
+            c.location_id == ship_id && c.flag == item.flag && c.item_id != module_id && c.quantity > 0
+        });
+        let charge_tid = charge_item
+            .map(|c| c.type_id)
+            .or_else(|| snap.module_active_charges.get(&module_id).copied());
+        let charge_qty = charge_item.map(|c| c.quantity.max(0) as u32).unwrap_or(100);
+        let damage_hp = item.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0);
+        let max_hp = item
+            .dynamic_attributes
+            .get(&attr_ids::HP_STRUCT)
+            .copied()
+            .or_else(|| {
+                ctx.sde
+                    .types
+                    .get(&item.type_id)
+                    .and_then(|t| t.default_attributes.get(&attr_ids::HP_STRUCT).copied())
+            })
+            .unwrap_or(40.0);
+        Some(eve_dogma::FittedModule {
+            item_id: module_id,
+            type_id: item.type_id,
+            flag_id: flag_u16,
+            state: if is_online {
+                eve_dogma::ModuleState::Online
+            } else {
+                eve_dogma::ModuleState::Offline
+            },
+            charge_type_id: charge_tid,
+            charge_quantity: charge_qty,
+            damage_hp,
+            max_hp,
+            dynamic_attribute_overrides: item.dynamic_attributes.clone(),
+        })
+    })
+}
+
 pub(crate) fn set_modules_reload_until(
     ctx: &ServerContext,
     module_ids: &[i64],

@@ -236,7 +236,8 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let station_id = 60_003_760_i64;
-    let (sys_jita, sys_per) = (30_000_142_u32, 30_000_144_u32);
+    let sys_jita = 30_000_142_u32;
+    let sys_per = ctx.sde.solar_systems.values().find(|s| s.security_status > 0.0 && s.security_status < 0.45 && { let p = ctx.sde.solar_systems[&sys_jita].galactic_pos_ly; ((s.galactic_pos_ly[0]-p[0]).powi(2)+(s.galactic_pos_ly[1]-p[1]).powi(2)+(s.galactic_pos_ly[2]-p[2]).powi(2)).sqrt() < 7.0 }).unwrap().solar_system_id;
     let corp_id = 2_100_010_i64;
     let (boss_id, sc_id, target_id) = (96_002_001_i64, 96_002_002_i64, 96_002_003_i64);
     let (boss_ship, sc_ship, space_unpiloted_ship) = (890_002_001_i64, 890_002_002_i64, 890_002_003_i64);

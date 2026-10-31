@@ -177,7 +177,7 @@ pub async fn is_near_in_space_fitting_service(ctx: &ServerContext, sys_id: u32, 
                         }
                     }
                     Some((i.item_id, true))
-                } else if is_ship_fitting {
+                } else if is_ship_fitting && can_character_access_ship_bay_with_password_snap(snap, char_id, i.item_id, i.owner_id, true, None) {
                     Some((i.item_id, false))
                 } else {
                     None
@@ -189,12 +189,14 @@ pub async fn is_near_in_space_fitting_service(ctx: &ServerContext, sys_id: u32, 
         return false;
     }
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else { return true };
+    let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else { return false };
     for (pid, is_depot) in providers {
         let p_pos = if let Ok(Some((_, p_ball))) = sys_handle.get_ball_snapshot(pid).await {
             Some(p_ball.position)
-        } else {
+        } else if is_depot {
             ctx.db.with_snapshot(|snap| snap.item_positions.get(&pid).map(|p| glam::DVec3::from_array(*p)))
+        } else {
+            None
         };
         if let Some(pos) = p_pos {
             let max_range = if is_depot { 2_500.0 } else { 3_000.0 };

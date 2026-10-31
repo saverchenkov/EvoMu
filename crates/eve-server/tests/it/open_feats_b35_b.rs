@@ -181,8 +181,16 @@ async fn test_b35_06_jump_portal_bridge_rules() {
 
     assert!(ctx.dispatch_rpc(&mut orca_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(rorq_char), PyRep::Integer(rorq_ship)], &kw, None).await.is_err(), "Orca must be rejected by Rorqual portal");
     assert!(ctx.dispatch_rpc(&mut noncov_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(rorq_char), PyRep::Integer(rorq_ship)], &kw, None).await.is_err(), "Combat cruiser must be rejected by Rorqual portal");
+    // BF-B35-01: Active session-change timer on passenger must fail before deducting host fuel
+    let rorq_fuel_before_sc = ctx.db.with_snapshot(|s| s.items.get(&972_321).unwrap().quantity);
+    eve_server::services::space_destiny::record_session_change_timer(&ctx, ven_j, ctx.now_unix_secs(), NULL_SYS, 1, "jump");
+    assert_eq!(ctx.dispatch_rpc(&mut ven_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(rorq_char), PyRep::Integer(rorq_ship)], &kw, None).await.unwrap_err().code, "SessionChangeTimerActive");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&972_321).unwrap().quantity), rorq_fuel_before_sc, "SessionChangeTimerActive must not deduct host portal fuel");
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, ven_j);
     assert!(ctx.dispatch_rpc(&mut ven_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(rorq_char), PyRep::Integer(rorq_ship)], &kw, None).await.is_ok(), "Venture must be accepted by Rorqual portal");
-    assert!(ctx.dispatch_rpc(&mut porp_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(rorq_char), PyRep::Integer(rorq_ship)], &kw, None).await.is_ok(), "Porpoise must be accepted by Rorqual portal");
+    // BF-B35-02: Destroying or removing the bridging ship ball invalidates the bridge for remaining passengers
+    origin_sys.try_remove_ball(rorq_ship);
+    assert_eq!(ctx.dispatch_rpc(&mut porp_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(rorq_char), PyRep::Integer(rorq_ship)], &kw, None).await.unwrap_err().code, "NoActiveBridge");
 }
 
 #[tokio::test]
