@@ -185,3 +185,86 @@ fn test_t2_sde_fsdbinary_contribution_methods_dungeon_objectives_and_surveys() {
         "sde:res:/staticdata/surveys.fsdbinary",
     ]);
 }
+
+const CHALLENGE_RESOURCES: &[Nested] = &[
+    Nested {
+        path: "res:/staticdata/challengeconditions.fsdbinary",
+        md5: "98130467f9be372c3ba4c31a130b57d4",
+        bytes: 1932,
+        stride: 16,
+        str_key: true,
+        count: 33,
+        spots: &[("weaponGroupID", "23"), ("factionID", "2"), ("chargeTypeID", "29")],
+    },
+    Nested {
+        path: "res:/staticdata/challengeevents.fsdbinary",
+        md5: "f0b477ad21c6001332a58136cb4d394c",
+        bytes: 2320,
+        stride: 16,
+        str_key: true,
+        count: 35,
+        spots: &[
+            ("volumeMined", "35"),
+            ("hackingMiniGameWon", "17"),
+            ("destroyHostileNPC", "1"),
+        ],
+    },
+    Nested {
+        path: "res:/staticdata/challenges.fsdbinary",
+        md5: "049195f98d3de52310e2239eac6d003f",
+        bytes: 247832,
+        stride: 112,
+        str_key: false,
+        count: 1210,
+        spots: &[
+            (
+                "2724",
+                r#"{"achievement_event_type":"dungeonEntered","challenge_category":"Exploration","challenge_security":"Any","display_name_id":574964,"event_conditions":{"dungeonID":[9071]},"expiration_time_minutes":0,"is_chained":1,"is_coop":0,"isk_awarded":0,"max_progress":1,"message_text_id":574966,"next_challenge":2743,"points_awarded":20,"progress_text_id":574965,"reward":{"amount":15,"reward_type_soul_bound":0,"type_id":92391},"should_be_active_on_season_start":0,"should_not_expire_at_downtime":1,"should_only_appear_once_per_season":0}"#,
+            ),
+            (
+                "3178",
+                r#"{"achievement_event_type":"hackingMiniGameWon","challenge_category":"Exploration","challenge_security":"Any","display_name_id":600560,"event_conditions":{"targetTypeID":[63871,63872]},"expiration_time_minutes":0,"is_chained":1,"is_coop":0,"isk_awarded":0,"max_progress":2,"message_text_id":600562,"next_challenge":3177,"points_awarded":15,"progress_text_id":600561,"should_be_active_on_season_start":0,"should_not_expire_at_downtime":1,"should_only_appear_once_per_season":0}"#,
+            ),
+        ],
+    },
+];
+
+#[test]
+fn test_t2_sde_fsdbinary_challenges_events_and_conditions() {
+    // parity: sde:res:/staticdata/challengeconditions.fsdbinary
+    // parity: sde:res:/staticdata/challengeevents.fsdbinary
+    // parity: sde:res:/staticdata/challenges.fsdbinary
+    let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
+    let t: Vec<BTreeMap<String, Value>> = CHALLENGE_RESOURCES.iter().map(|n| verify(&sde, n)).collect();
+
+    assert_eq!(sde.challenge_conditions().expect("challenge_conditions"), t[0]);
+    assert_eq!(sde.challenge_events().expect("challenge_events"), t[1]);
+    assert_eq!(sde.challenges().expect("challenges"), t[2]);
+
+    // Every challenge's achievement_event_type and event_conditions keys exist in challengeevents and challengeconditions.
+    for (cid, ch) in &t[2] {
+        let ev = ch["achievement_event_type"].as_str().expect("achievement_event_type");
+        assert!(t[1].contains_key(ev), "challenge {cid} unknown event {ev}");
+        if let Some(conds) = ch.get("event_conditions").and_then(Value::as_object) {
+            for k in conds.keys() {
+                assert!(t[0].contains_key(k), "challenge {cid} unknown condition {k}");
+            }
+        }
+        if let Some(tid) = ch
+            .get("reward")
+            .and_then(|r| r.get("type_id"))
+            .and_then(Value::as_u64)
+        {
+            assert!(
+                sde.types.contains_key(&(tid as u32)),
+                "challenge {cid} unknown reward type_id {tid}"
+            );
+        }
+    }
+
+    eve_testkit::attest(&[
+        "sde:res:/staticdata/challengeconditions.fsdbinary",
+        "sde:res:/staticdata/challengeevents.fsdbinary",
+        "sde:res:/staticdata/challenges.fsdbinary",
+    ]);
+}

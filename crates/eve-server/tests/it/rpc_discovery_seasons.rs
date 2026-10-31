@@ -264,16 +264,21 @@ async fn test_project_discovery_tutorial_and_rewards() {
 
 #[tokio::test]
 async fn test_season_manager_rpc_suite() {
-    // DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
-    // parity: rpc:seasonManager.get_challenge_expiration_date
-    // parity: rpc:seasonManager.get_loot_table_by_typeID
-    // parity: rpc:seasonManager.process_client_event
-    // parity: rpc:seasonManager.reload_fsd_data
+    // parity: rpc:seasonManager.get_max_active_challenges
+    // parity: rpc:seasonManager.fill_up_and_return_challenges_for_character, rpc:seasonManager.get_challenge
+    // parity: rpc:seasonManager.challenge_is_dormant, rpc:seasonManager.get_challenge_expiration_date
+    // parity: rpc:seasonManager.process_client_event, rpc:seasonManager.claim_challenge_rewards
+    // parity: rpc:seasonManager.reload_fsd_data, rpc:seasonManager.get_loot_table_by_typeID
     eve_testkit::attest(&[
+        "rpc:seasonManager.get_max_active_challenges",
+        "rpc:seasonManager.fill_up_and_return_challenges_for_character",
+        "rpc:seasonManager.get_challenge",
+        "rpc:seasonManager.challenge_is_dormant",
         "rpc:seasonManager.get_challenge_expiration_date",
-        "rpc:seasonManager.get_loot_table_by_typeID",
         "rpc:seasonManager.process_client_event",
+        "rpc:seasonManager.claim_challenge_rewards",
         "rpc:seasonManager.reload_fsd_data",
+        "rpc:seasonManager.get_loot_table_by_typeID",
     ]);
 
     let ctx = ServerContext::new();
@@ -324,68 +329,76 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(season_data.dict_get("agencyLargeSeasonSelectionTitleID").and_then(|v| v.as_i64()), Some(583_380));
     assert_eq!(season_data.dict_get("end_time").and_then(|v| v.as_i64()), Some(end_ft));
 
-    // 5. fill_up_and_return_challenges_for_character
+    // 5. fill_up_and_return_challenges_for_character (loads real V24 challenges from challenges.fsdbinary)
     let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
     let PyRep::List(ch_list) = filled else { panic!("expected List of challenges") };
-    assert_eq!(ch_list.len(), 4);
+    assert_eq!(ch_list.len(), 6);
 
-    // 6. get_challenge (rejects unknown challenge ID)
-    assert!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
-    let ch = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
-    assert_eq!(ch.dict_get("challengeID").and_then(|v| v.as_i64()), Some(1002));
+    // 6. get_challenge (rejects missing/unknown challenge ID; returns real V24 challenge 297 destroyHostileNPC)
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[]).await.is_err());
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(999_999)]).await.is_err());
+    let ch = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("get_challenge");
+    assert_eq!(ch.dict_get("challengeID").and_then(|v| v.as_i64()), Some(297));
+    assert_eq!(ch.dict_get("maxProgress").and_then(|v| v.as_i64()), Some(15));
+    assert_eq!(ch.dict_get("points").and_then(|v| v.as_i64()), Some(10));
     assert_eq!(ch.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
 
-    // 7. challenge_is_dormant
-    let dormant = rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("challenge_is_dormant");
-    assert_eq!(dormant, PyRep::Bool(false));
+    // 7. challenge_is_dormant (active starter 297 is false; chained follow-up 2743 is true)
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(297)]).await.expect("challenge_is_dormant 297"), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(2743)]).await.expect("challenge_is_dormant 2743"), PyRep::Bool(true));
 
     // 8. get_challenge_expiration_date
-    let exp_date = rpc(&ctx, &mut p1, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1002)]).await.expect("get_challenge_expiration_date");
+    let exp_date = rpc(&ctx, &mut p1, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(297)]).await.expect("get_challenge_expiration_date");
     let PyRep::Integer(exp_ft) = exp_date else { panic!("expected Integer expiration date") };
     assert!(exp_ft > 0);
 
     // 9. claim_challenge_rewards (uncompleted challenge fails)
-    let err_uncomp = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
-    assert!(err_uncomp.is_err());
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(297)]).await.is_err());
 
-    // BF-SEASON-TRUST-01: Server-observable challenges reject client event progress
-    let err_client_1002 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await;
-    assert_eq!(err_client_1002.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+    // BF-SEASON-TRUST-01: Server-observable challenge 297 (destroyHostileNPC) rejects client event progress
+    let err_client_297 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(297), PyRep::Integer(5)]).await;
+    assert_eq!(err_client_297.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
 
-    // Progress server-driven combat challenge 1002 via NPC killmails
+    // Progress server-driven combat challenge 297 (max_progress=15) via NPC killmails
     ctx.db.with_mut_snapshot(|s| {
-        for i in 1..=5 {
+        for i in 1..=15 {
             s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 500_000_100, attacker_character_id: P1, ..Default::default() });
         }
     });
 
-    let claim = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
-    assert_eq!(claim.dict_get("challengeID").and_then(|v| v.as_i64()), Some(1002));
+    let claim = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(297)]).await.expect("claim_challenge_rewards");
+    assert_eq!(claim.dict_get("challengeID").and_then(|v| v.as_i64()), Some(297));
     assert_eq!(claim.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
-    assert!(claim.dict_get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0) >= 50);
+    assert!(claim.dict_get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0) >= 10);
     assert_eq!(claim.dict_get("deliveredItemID"), Some(&PyRep::None));
 
     // Repeat claim fails
-    let err_claimed = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
-    assert!(err_claimed.is_err());
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(297)]).await.is_err());
 
-    // BF-SEASON-TRUST-01: Mining challenge 1001 rejects client event progress
-    let err_client_1001 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1001), PyRep::Integer(1)]).await;
-    assert_eq!(err_client_1001.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
-
-    // Complete server-side mining challenge 1001 and verify docked reward item delivery
-    ctx.db.with_mut_snapshot(|s| s.mining_ledger.push(eve_db::MiningLedgerRecord {
-        character_id: P1, solar_system_id: 30000142, type_id: 1230, quantity: 1000, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
-    }));
-    let claim_1001 = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1001)]).await.expect("claim ch 1001");
-    let reward_item_id = claim_1001.dict_get("deliveredItemID").and_then(|v| v.as_i64()).expect("deliveredItemID");
-    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&reward_item_id)));
-
-    // BF-SEASON-TRUST-01: Exploration challenge 1003 rejects client event progress; progress via server state
-    let err_client_1003 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1003), PyRep::Integer(2)]).await;
-    assert_eq!(err_client_1003.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+    // Real V24 item-reward & chained challenge 2724 (reward type_id 92391 x 15, next_challenge 2743)
+    // Locked chain step 2743 must fail to claim before predecessor 2724 is claimed.
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)]).await.is_err());
+    // Unit-level shortcut: seed completed chain predecessor 2724 directly in state to exercise item-reward delivery and chain unlock 2724 -> 2743.
     ctx.db.with_mut_snapshot(|s| {
-        s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "2".into());
+        let mut st = eve_server::services::season_manager::load_season_state_from_blobs(s, P1);
+        let def2724 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 2724).unwrap().clone();
+        let mut ch2724 = def2724.to_character_challenge(st.selected_season_id, ctx.now_blueos_filetime_ticks());
+        ch2724.is_dormant = false;
+        ch2724.progress = 1;
+        ch2724.completed = true;
+        st.challenges.insert(2724, ch2724);
+        eve_server::services::season_manager::save_season_state_to_blobs(s, P1, &st);
+    });
+    let claim_2724 = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2724)]).await.expect("claim ch 2724");
+    let reward_item_id = claim_2724.dict_get("deliveredItemID").and_then(|v| v.as_i64()).expect("deliveredItemID");
+    assert!(ctx.db.with_snapshot(|s| s.items.get(&reward_item_id).is_some_and(|it| it.type_id == 92391 && it.quantity == 15)));
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(2743)]).await.expect("unlocked 2743"), PyRep::Bool(false));
+
+    // BF-SEASON-TRUST-01: Exploration challenge 239 (hackingMiniGameWon) rejects client event progress; progress via server state
+    let err_client_239 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(239), PyRep::Integer(1)]).await;
+    assert_eq!(err_client_239.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "1".into());
     });
 
     // 10. get_loot_table_by_typeID (backed by res:/staticdata/crates.fsdbinary fixedLootItems)
@@ -394,69 +407,37 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::List(loot_items) = loot else { panic!("expected List of loot items") };
     assert_eq!(loot_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(50_051));
 
-    // 11. reload_fsd_data (requires GM role)
+    // 11. reload_fsd_data (requires GM role; reloads real V24 challenges from challenges.fsdbinary)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.is_err());
     p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let reload = rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.expect("reload_fsd_data");
     assert_eq!(reload, PyRep::Bool(true));
     assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_manager:challenge_definitions")));
 
-    // 12. process_client_event (BF-SEASON-CONST-01, BF-SEASON-PCE-TEST-01: canonical string event and kwargs)
+    // 12. process_client_event on real V24 client_lookAtObject challenge 274 (max_progress=4, points=40)
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
-    ctx.db.with_mut_snapshot(|s| {
-        let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
-        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2001, season_id: 1, event_type: "client".into(), title: "C".into(), description: "D".into(), points: 10, max_progress: 10, client_event_driven: true, reward_type_id: 0, reward_quantity: 0, is_dormant: false });
-        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2002, season_id: 1, event_type: "client".into(), title: "D".into(), description: "D".into(), points: 10, max_progress: 10, client_event_driven: true, reward_type_id: 0, reward_quantity: 0, is_dormant: true });
-        s.service_state_blobs.insert("season_manager:challenge_definitions".into(), serde_json::to_string(&defs).unwrap());
-    });
-    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(2001), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
-    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(5)), ("extra_data".into(), PyRep::Dict(vec![]))]);
-    ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::String("client".into())], &pce_kw, None).await.expect("canonical kwargs pce");
-    let ch2001 = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(2001)]).await.expect("get_challenge");
-    assert_eq!(ch2001.dict_get("progress").and_then(|v| v.as_i64()), Some(6));
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
+    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(2)), ("extra_data".into(), PyRep::Dict(vec![]))]);
+    ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::Integer(274)], &pce_kw, None).await.expect("canonical kwargs pce");
+    let ch274 = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("get_challenge 274");
+    assert_eq!(ch274.dict_get("progress").and_then(|v| v.as_i64()), Some(2));
 
     // 13. Character-specific challenge tracking & SQLite persistence across restart
-    // BF-SEASON-SEM-01: Seed P2 with prior mining ledger and active industry job before challenge creation
     ctx.db.with_mut_snapshot(|s| {
-        s.mining_ledger.push(eve_db::MiningLedgerRecord {
-            character_id: P2, solar_system_id: 30000142, type_id: 1230, quantity: 500, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
-        });
         s.industry_jobs.insert(88001, eve_db::IndustryJobRecord {
             job_id: 88001, installer_id: P2, facility_id: 60003760, blueprint_item_id: 7001, blueprint_type_id: 681,
-            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 3600, start_unix: ctx.now_unix(),
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Delivered".into(), duration_seconds: 3600, start_unix: ctx.now_unix(),
         });
     });
     let mut p2 = select(&ctx, 61_004, "other", "other-secret", P2).await;
-    let p2_ch = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("p2 get_challenge");
+    let p2_ch = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("p2 get_challenge");
     assert_eq!(p2_ch.dict_get("progress").and_then(|v| v.as_i64()), Some(0), "P2 progress must start at 0 independent of P1");
     assert_eq!(p2_ch.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("dormant"), PyRep::Bool(false));
-    assert_eq!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(2002)]).await.expect("dormant"), PyRep::Bool(true));
-    assert!(matches!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1002)]).await, Ok(PyRep::Integer(t)) if t > 0));
-    assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
-    assert!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(9999)]).await.is_err());
-    assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(9999)]).await.is_err());
-    assert!(rpc(&ctx, &mut p2, "seasonManager", "process_client_event", &[PyRep::Integer(9999), PyRep::Integer(1)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(999_999)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(999_999)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(999_999)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "process_client_event", &[PyRep::Integer(999_999), PyRep::Integer(1)]).await.is_err());
     assert!(!ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_state:90000002")));
-
-    // BF-SEASON-SEM-01: Initialize challenges for P2 locking in baseline; active job is not counted
-    rpc(&ctx, &mut p2, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("p2 init");
-    let p2_min = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1001)]).await.expect("p2 get 1001");
-    assert_eq!(p2_min.dict_get("progress").and_then(|v| v.as_i64()), Some(0));
-    let p2_ind = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1004)]).await.expect("p2 get 1004");
-    assert_eq!(p2_ind.dict_get("progress").and_then(|v| v.as_i64()), Some(0));
-
-    // Deliver industry job and add 300 post-baseline ore: progress updates correctly
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(j) = s.industry_jobs.get_mut(&88001) { j.status = "Delivered".into(); }
-        s.mining_ledger.push(eve_db::MiningLedgerRecord {
-            character_id: P2, solar_system_id: 30000142, type_id: 1230, quantity: 300, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
-        });
-    });
-    let p2_ind2 = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1004)]).await.expect("p2 get 1004 del");
-    assert_eq!(p2_ind2.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
-    let p2_min2 = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1001)]).await.expect("p2 get 1001 post");
-    assert_eq!(p2_min2.dict_get("progress").and_then(|v| v.as_i64()), Some(300));
 
     let tmp_db = std::env::temp_dir().join(format!("evomu_seasons_roundtrip_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);
@@ -465,11 +446,11 @@ async fn test_season_manager_rpc_suite() {
     let _ = std::fs::remove_file(&tmp_db);
 
     let mut p1_reloaded = select(&ctx_reloaded, 61_091, "demo", "demo-secret", P1).await;
-    let ch1003_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(1003)]).await.expect("p1 get_challenge 1003");
-    assert_eq!(ch1003_reloaded.dict_get("progress").and_then(|v| v.as_i64()), Some(2), "P1 challenge 1003 progress must survive SQLite reload");
+    let ch274_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("p1 get_challenge 274");
+    assert_eq!(ch274_reloaded.dict_get("progress").and_then(|v| v.as_i64()), Some(2), "P1 challenge 274 progress must survive SQLite reload");
 
-    let ch1002_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("p1 get_challenge 1002");
-    assert_eq!(ch1002_reloaded.dict_get("claimed").and_then(|v| v.as_bool()), Some(true), "P1 challenge 1002 claimed state must survive SQLite reload");
+    let ch297_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("p1 get_challenge 297");
+    assert_eq!(ch297_reloaded.dict_get("claimed").and_then(|v| v.as_bool()), Some(true), "P1 challenge 297 claimed state must survive SQLite reload");
 }
 
 #[tokio::test]

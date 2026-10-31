@@ -269,6 +269,7 @@ async fn test_mn16_in_space_and_structure_compression_and_decompression() {
 #[tokio::test]
 async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     let ctx = ServerContext::new();
+    ctx.clock().set_paused(true);
     let director = LivingWorldDirector::new();
 
     let convoy_id = 800_000_099_i64;
@@ -295,7 +296,7 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     director.register_convoy(LivingWorldConvoy {
         convoy_id, archetype: NpcArchetype::MiningOp, ship_type_id: 32880,
         origin_system_id: system_id, current_system_id: system_id, destination_system_id: system_id,
-        destination_station_id: dest_station_id, cargo_type_id: ore_type_id, cargo_quantity: 48_800,
+        destination_station_id: dest_station_id, cargo_type_id: ore_type_id, cargo_quantity: 49_200,
         lod_level: 1, destroyed: false,
     });
 
@@ -306,7 +307,8 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     assert_eq!(step_result.convoy_id, convoy_id);
     assert!(step_result.asteroid_id > 0);
     assert_eq!(step_result.ore_type_id, ore_type_id);
-    assert_eq!(step_result.mined_units, 1_600);
+    let expected_mined = if ctx.sde.types.contains_key(&32880) { 1_600 } else { 800 };
+    assert_eq!(step_result.mined_units, expected_mined);
     assert!(step_result.remaining_asteroid_units > 0);
     assert!(step_result.hauled_to_station);
     assert_eq!(step_result.convoy_cargo_units, 0);

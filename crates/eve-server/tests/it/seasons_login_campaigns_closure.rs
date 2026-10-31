@@ -154,28 +154,7 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         "Must populate at least 4 default seasonal challenges"
     );
 
-    // 5. feat:pve.seasons-challenges: Progress from client events
-    ctx.db.with_mut_snapshot(|s| {
-        let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
-        defs.push(eve_server::services::season_manager::SeasonalChallengeDef {
-            challenge_id: 2001,
-            season_id: 1,
-            event_type: "client".into(),
-            title: "Client Event".into(),
-            description: "Test client event".into(),
-            points: 10,
-            max_progress: 10,
-            client_event_driven: true,
-            reward_type_id: 0,
-            reward_quantity: 0,
-            is_dormant: false,
-        });
-        s.service_state_blobs.insert(
-            "season_manager:challenge_definitions".into(),
-            serde_json::to_string(&defs).unwrap(),
-        );
-    });
-
+    // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274)
     let kw = HashMap::new();
     let pce_res = ctx
         .dispatch_rpc(
@@ -183,7 +162,7 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
             "seasonManager",
             None,
             "process_client_event",
-            &[PyRep::Integer(2001), PyRep::Integer(1)],
+            &[PyRep::Integer(274), PyRep::Integer(1)],
             &kw,
             None,
         )
@@ -191,15 +170,15 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .expect("process_client_event progress");
     assert_eq!(pce_res, PyRep::None);
 
-    let ch_2001 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(2001)])
+    let ch_274 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
         .await
-        .expect("get_challenge 2001");
-    assert_eq!(ch_2001.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
+        .expect("get_challenge 274");
+    assert_eq!(ch_274.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
 
     // 6. feat:pve.seasons-challenges: Challenge expiration and automatic refresh
-    let exp_date = rpc(&ctx, &mut sess, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1001)])
+    let exp_date = rpc(&ctx, &mut sess, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(274)])
         .await
-        .expect("get_challenge_expiration_date 1001");
+        .expect("get_challenge_expiration_date 274");
     let exp_ticks = match exp_date {
         PyRep::Integer(t) => t,
         other => panic!("expected Integer expiration ticks, got {other:?}"),
@@ -209,9 +188,9 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     // Simulate expiration: set expiration_date to the past in character season state
     ctx.db.with_mut_snapshot(|snap| {
         let mut st = load_season_state_from_blobs(snap, PILOT_1);
-        if let Some(ch) = st.challenges.get_mut(&1001) {
+        if let Some(ch) = st.challenges.get_mut(&274) {
             ch.expiration_date = 100; // past timestamp
-            ch.progress = 50;
+            ch.progress = 2;
         }
         save_season_state_to_blobs(snap, PILOT_1, &st);
     });
@@ -222,40 +201,124 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .expect("refill challenges post-expiration");
     assert!(matches!(refilled, PyRep::List(_)));
 
-    let ch_1001_refreshed = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1001)])
+    let ch_274_refreshed = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
         .await
-        .expect("get_challenge 1001 refreshed");
-    let new_exp = ch_1001_refreshed.dict_get("expirationDate").and_then(|v| v.as_i64()).unwrap_or(0);
+        .expect("get_challenge 274 refreshed");
+    let new_exp = ch_274_refreshed.dict_get("expirationDate").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(
         new_exp > now_ft,
         "Expired challenge must be refreshed with future expiration date"
     );
 
     // 7. feat:pve.seasons-challenges: Claiming challenge rewards grants rewards and season points
-    // Mark challenge 1002 completed and ready to claim
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut st = load_season_state_from_blobs(snap, PILOT_1);
-        if let Some(ch) = st.challenges.get_mut(&1002) {
-            ch.completed = true;
-            ch.progress = ch.max_progress;
-            ch.claimed = false;
-        }
-        save_season_state_to_blobs(snap, PILOT_1, &st);
-    });
-
-    let claim_res = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)])
+    // Complete real V24 client_lookAtObject challenge 274 (max_progress = 4, points = 40).
+    // Per-event increment is capped to 1 even if client supplies amount = 4.
+    ctx.dispatch_rpc(
+        &mut sess,
+        "seasonManager",
+        None,
+        "process_client_event",
+        &[PyRep::Integer(274), PyRep::Integer(4)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("capped client event 1");
+    let ch_274_capped = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
         .await
-        .expect("claim_challenge_rewards 1002");
+        .expect("get_challenge 274 capped");
+    assert_eq!(
+        ch_274_capped.dict_get("progress").and_then(|v| v.as_i64()),
+        Some(1),
+        "Client-supplied amount=4 must be capped to 1 per event"
+    );
+
+    for _ in 0..3 {
+        ctx.dispatch_rpc(
+            &mut sess,
+            "seasonManager",
+            None,
+            "process_client_event",
+            &[PyRep::Integer(274), PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("progress challenge 274");
+    }
+
+    let claim_res = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(274)])
+        .await
+        .expect("claim_challenge_rewards 274");
     assert_eq!(claim_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(claim_res.dict_get("rewardGranted").and_then(|v| v.as_bool()), Some(true));
 
     let pts = claim_res.dict_get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert!(pts >= 50, "Season points must increase after claiming challenge 1002");
+    assert!(pts >= 40, "Season points must increase after claiming challenge 274");
 
     // Repeat claim of already claimed challenge must fail
-    let repeat_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)])
+    let repeat_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(274)])
         .await;
     assert!(repeat_err.is_err(), "repeat claim_challenge_rewards must fail");
+
+    // Negative trust checks: dormant, unassigned starter (when all active slots are full), and locked chain step claims must fail
+    // with no change to ISK or items.
+    let _ = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
+        .await
+        .expect("fill all active slots before testing unassigned claim");
+    let (dormant_id, unassigned_starter_id, unassigned_client_id) = ctx.db.with_snapshot(|snap| {
+        let st = load_season_state_from_blobs(snap, PILOT_1);
+        let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
+        let dormant = defs.iter().find(|d| d.is_dormant && d.challenge_id != 2743).unwrap().challenge_id;
+        let unassigned_starter = defs
+            .iter()
+            .find(|d| !d.is_dormant && !st.challenges.contains_key(&d.challenge_id))
+            .unwrap()
+            .challenge_id;
+        let unassigned_client = defs
+            .iter()
+            .filter(|d| d.client_event_driven && !st.challenges.contains_key(&d.challenge_id))
+            .nth(1)
+            .unwrap()
+            .challenge_id;
+        (dormant, unassigned_starter, unassigned_client)
+    });
+    let (isk_before, items_before) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+            snap.items.len(),
+        )
+    });
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(dormant_id)])
+            .await
+            .is_err(),
+        "Claiming a dormant challenge must fail"
+    );
+    let unassigned_err = rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(unassigned_starter_id)])
+        .await
+        .expect_err("Claiming an unassigned starter challenge when all active slots are full must fail");
+    assert_eq!(unassigned_err.code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(2743)])
+            .await
+            .is_err(),
+        "Claiming a chain step whose predecessor is unclaimed must fail"
+    );
+    assert!(
+        rpc(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(unassigned_client_id), PyRep::Integer(1)])
+            .await
+            .is_err(),
+        "Progressing an unassigned client-driven challenge must fail"
+    );
+    let (isk_after, items_after) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0),
+            snap.items.len(),
+        )
+    });
+    assert_eq!(isk_after, isk_before, "Rejected claims must not alter ISK");
+    assert_eq!(items_after, items_before, "Rejected claims must not mint items");
 
     // 8. feat:pve.seasons-challenges: Claim career goal reward (claim_goal_reward)
     // Pre-populate completed career goal in npe_progress
@@ -407,4 +470,142 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         .await
         .expect_err("ClaimRewards must fail closed with UnimplementedRPC");
     assert_eq!(claim_err.code, "UnimplementedRPC");
+}
+
+#[tokio::test]
+async fn test_season_challenge_isk_award_trust_and_claim_guards() {
+    let ctx = new_ctx();
+    let mut sess = setup_pilot(&ctx, PILOT_1).await;
+
+    let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
+    let server_isk_def = defs
+        .iter()
+        .find(|d| !d.client_event_driven && d.isk_awarded > 0)
+        .expect("real FSD server-driven challenge with isk_awarded > 0")
+        .clone();
+    let now_ft = ctx.clock().now_blueos_filetime_ticks();
+    let end_ft = now_ft + 86_400 * 30 * 10_000_000;
+
+    // Seed the server-driven ISK challenge as active and uncompleted
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        let mut ch = server_isk_def.to_character_challenge_with_end(st.selected_season_id, now_ft, end_ft);
+        ch.is_dormant = false;
+        ch.completed = false;
+        ch.progress = 0;
+        st.challenges.insert(server_isk_def.challenge_id, ch);
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+
+    let isk_before = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+
+    // 1. Uncompleted claim must fail and pay 0 ISK
+    let uncompleted_err = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(server_isk_def.challenge_id)],
+    )
+    .await
+    .expect_err("uncompleted challenge claim must fail");
+    assert_eq!(uncompleted_err.code, "ChallengeNotCompleted"); // rpc-lint: allow error code assertion
+    let isk_after_uncompleted = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(isk_after_uncompleted, isk_before, "uncompleted claim must not pay ISK");
+
+    // 2. Completed server-driven FSD challenge pays exact IskCents delta
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        if let Some(ch) = st.challenges.get_mut(&server_isk_def.challenge_id) {
+            ch.progress = ch.max_progress;
+            ch.completed = true;
+        }
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+
+    let claim_res = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(server_isk_def.challenge_id)],
+    )
+    .await
+    .expect("completed server-driven ISK challenge claim must succeed");
+    assert_eq!(claim_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+
+    let isk_after_claim = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    let expected_delta = eve_db::IskCents::from_isk(server_isk_def.isk_awarded).0;
+    assert_eq!(
+        isk_after_claim - isk_before,
+        expected_delta,
+        "claim_challenge_rewards must credit exact IskCents delta for server-driven FSD challenge"
+    );
+
+    // 3. Repeated claim must fail and pay 0 additional ISK
+    let repeat_err = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(server_isk_def.challenge_id)],
+    )
+    .await
+    .expect_err("repeated challenge claim must fail");
+    assert_eq!(repeat_err.code, "ChallengeAlreadyClaimed"); // rpc-lint: allow error code assertion
+    let isk_after_repeat = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(isk_after_repeat, isk_after_claim, "repeated claim must not pay ISK");
+
+    // 4. Client-event-driven challenge with isk_awarded > 0 must withhold ISK on claim
+    let mut client_def = defs
+        .iter()
+        .find(|d| d.client_event_driven)
+        .expect("expected at least one client_event_driven def in FSD")
+        .clone();
+    client_def.isk_awarded = 5_000_000;
+    let mut all_defs = defs.to_vec();
+    if let Some(pos) = all_defs.iter().position(|d| d.challenge_id == client_def.challenge_id) {
+        all_defs[pos] = client_def.clone();
+    } else {
+        all_defs.push(client_def.clone());
+    }
+    let defs_json = serde_json::to_string(&all_defs).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            eve_server::services::season_manager::SEASONAL_CHALLENGES_CONFIG_KEY.into(),
+            defs_json,
+        );
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        let mut ch = client_def.to_character_challenge_with_end(st.selected_season_id, now_ft, end_ft);
+        ch.is_dormant = false;
+        ch.progress = ch.max_progress;
+        ch.completed = true;
+        st.challenges.insert(client_def.challenge_id, ch);
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+    let client_claim = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(client_def.challenge_id)],
+    )
+    .await
+    .expect("client-driven challenge claim succeeds for points");
+    assert_eq!(client_claim.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    let isk_after_client = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(
+        isk_after_client, isk_after_claim,
+        "client_event_driven challenge must withhold isk_awarded even when isk_awarded > 0"
+    );
 }

@@ -44,6 +44,17 @@ static LOGIN_REWARD: CfsdObject = obj(
 );
 const LOGIN_REWARDS: CfsdType = Dict(&U32, &Obj(&LOGIN_REWARD), 56, 8);
 
+// ---- challenges ----
+static CHALLENGE_REWARD: CfsdObject = obj(
+    16,
+    Some(12),
+    &[
+        a("amount", 0, U32, 0),
+        a("type_id", 4, U32, 0),
+        a("reward_type_soul_bound", 8, Bool, 1),
+    ],
+);
+
 // ---- atoms / nodetypes parameter value union ----
 static ATOM_VALUE: [(u64, CfsdType); 19] = [
     (4, U32),
@@ -680,6 +691,47 @@ pub static CFSD_NESTED_LAYOUTS_OPS: &[CfsdNestedLayout] = &[
                 a("claimLabelID", 88, U32, 1),
                 a("gracePeriod", 92, U32, 0),
                 a("minAccountAgeHours", 96, U32, 16),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/challengeconditions.fsdbinary",
+        Str,
+        obj(16, None, &[a("value", 8, U64, 0)]),
+        true,
+    ),
+    rec(
+        "res:/staticdata/challengeevents.fsdbinary",
+        Str,
+        obj(16, None, &[a("value", 8, U64, 0)]),
+        true,
+    ),
+    rec(
+        "res:/staticdata/challenges.fsdbinary",
+        U64,
+        obj(
+            112,
+            Some(104),
+            &[
+                a("achievement_event_type", 8, Str, 0),
+                a("challenge_category", 16, Str, 0),
+                a("challenge_security", 24, Str, 0),
+                a("event_conditions", 32, Dict(&Str, &U32_LIST, 16, 8), 1),
+                a("display_name_id", 48, U32, 0),
+                a("expiration_time_minutes", 52, U32, 0),
+                a("isk_awarded", 56, U32, 0),
+                a("max_progress", 60, U32, 0),
+                a("message_text_id", 64, U32, 0),
+                a("next_challenge", 68, U32, 2),
+                a("points_awarded", 72, U32, 0),
+                a("progress_text_id", 76, U32, 0),
+                a("reward", 80, Obj(&CHALLENGE_REWARD), 4),
+                a("is_chained", 96, Bool, 0),
+                a("is_coop", 97, Bool, 0),
+                a("should_be_active_on_season_start", 98, Bool, 0),
+                a("should_not_expire_at_downtime", 99, Bool, 0),
+                a("should_only_appear_once_per_season", 100, Bool, 0),
             ],
         ),
         false,
