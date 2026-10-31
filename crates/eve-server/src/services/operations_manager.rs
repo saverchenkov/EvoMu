@@ -50,6 +50,8 @@ pub struct CharacterOperationsRecord {
     #[serde(default)]
     pub claimed_vgs_rewards: Vec<u32>,
     #[serde(default)]
+    pub claimed_operation_rewards: HashSet<String>,
+    #[serde(default)]
     pub operation_events: Vec<(String, i64)>,
     pub client_events_logged: u64,
     #[serde(default)]
@@ -495,18 +497,29 @@ pub fn handle(
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let op_defs = get_operation_defs(&ctx.sde);
+            let cat_isk = op_defs.category_isk_rewards.get(&cat_id).copied().unwrap_or(0);
+            let new_bal = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                if rec.completed_categories.len() < 128 {
-                    rec.completed_categories.insert(cat_id);
-                }
-                if rec.active_category_id == Some(cat_id) {
-                    rec.active_category_id = None;
-                    rec.active_operation_id = None;
-                }
+                let mut claimed = {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    if rec.completed_categories.len() < 128 {
+                        rec.completed_categories.insert(cat_id);
+                    }
+                    if rec.active_category_id == Some(cat_id) {
+                        rec.active_category_id = None;
+                        rec.active_operation_id = None;
+                    }
+                    std::mem::take(&mut rec.claimed_operation_rewards)
+                };
+                let bal = grant_operation_reward_bundle(snap, char_id, &format!("cat:{cat_id}"), &mut claimed, cat_isk, &[], now);
+                store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
                 save_store(snap, &store, now);
+                bal
             });
+            if let Some(bal) = new_bal {
+                let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+            }
             crate::services::character_expert_systems::stop_active_operation_node_graph(ctx, char_id, cat_id);
             ctx.notify(NotificationTarget::Character(char_id), "OnOperationCategoryCompleted", "charid", vec![PyRep::Integer(cat_id)]);
             Some(Ok(PyRep::Bool(true)))
@@ -630,16 +643,23 @@ pub fn handle(
                 curr_sys
             };
             let now = ctx.now_unix();
+            let op_defs = get_operation_defs(&ctx.sde);
+            let act_rws = op_defs.op_activation_rewards.get(&op_id).map(Vec::as_slice).unwrap_or(&[]);
             let cat_id = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.solar_system_id = op_sys;
                 }
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.active_operation_id = Some(op_id);
-                rec.active_operation_system_id = Some(op_sys);
-                let cat_id = args.get(2).and_then(|a| a.as_i64()).or(rec.active_category_id).unwrap_or(1);
-                rec.active_category_id = Some(cat_id);
+                let (cat_id, mut claimed) = {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    rec.active_operation_id = Some(op_id);
+                    rec.active_operation_system_id = Some(op_sys);
+                    let cat_id = args.get(2).and_then(|a| a.as_i64()).or(rec.active_category_id).unwrap_or(1);
+                    rec.active_category_id = Some(cat_id);
+                    (cat_id, std::mem::take(&mut rec.claimed_operation_rewards))
+                };
+                let _ = grant_operation_reward_bundle(snap, char_id, &format!("op_act:{op_id}"), &mut claimed, 0, act_rws, now);
+                store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
                 save_store(snap, &store, now);
                 cat_id
             });
@@ -1088,6 +1108,7 @@ pub fn handle(
                 });
                 push_operation_event(rec, event_name, target_task.unwrap_or(0));
                 let mut transitioned = None;
+                let mut reward_ops: Option<(i64, i64, bool)> = None;
                 if let Some(tid) = target_task {
                     if !rec.blocked_tasks.contains(&tid) {
                         rec.completed_tasks.insert(tid);
@@ -1099,13 +1120,29 @@ pub fn handle(
                             .active_operation_id
                             .or_else(|| op_defs.task_to_op.get(&tid).copied())
                             .unwrap_or(1);
+                        let op_all_done = op_defs.op_tasks.get(&op_id).is_some_and(|ts| {
+                            !ts.is_empty() && ts.iter().all(|t| rec.completed_tasks.contains(t) || rec.skipped_tasks.contains(t))
+                        });
+                        if op_all_done {
+                            rec.completed_operations.insert(op_id);
+                        }
                         transitioned = Some((cat_id, op_id, tid));
+                        reward_ops = Some((tid, op_id, op_all_done));
                     }
                 }
+                let mut new_bal = None;
+                if let Some((tid, op_id, op_all_done)) = reward_ops {
+                    let mut claimed = std::mem::take(&mut rec.claimed_operation_rewards);
+                    new_bal = grant_task_and_op_completion_rewards(snap, op_defs, char_id, tid, op_id, op_all_done, &mut claimed, now);
+                    store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
+                }
                 save_store(snap, &store, now);
-                transitioned
+                (transitioned, new_bal)
             });
-            if let Some((cat_id, op_id, tid)) = completed_task {
+            if let Some(bal) = completed_task.1 {
+                let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+            }
+            if let Some((cat_id, op_id, tid)) = completed_task.0 {
                 ctx.notify(
                     NotificationTarget::Character(char_id),
                     "OnOperationTaskCompleted",

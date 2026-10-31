@@ -1070,17 +1070,13 @@ async fn handle_cone_scan(
     }
     let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
     let balls = sys_handle.list_balls().await.unwrap_or_default();
+    // DERIVED: 30_000.0 m Mobile Scan Inhibitor (`33_589`, group `1275`) cloak sphere radius
+    // (`sde_types` 33589 lacks scanBlocker radius attribute; ships inside can still d-scan outward).
     let inhibitor_positions: Vec<DVec3> = balls
         .iter()
         .filter(|b| b.type_id == 33_589)
         .map(|b| b.position)
         .collect();
-    if inhibitor_positions
-        .iter()
-        .any(|pos| caller_pos.distance(*pos) <= 30_000.0)
-    {
-        return Some(Ok(PyRep::List(Vec::new())));
-    }
     let all_ball_ids: std::collections::HashSet<i64> = balls.iter().map(|b| b.id).collect();
     let mut matches: Vec<PyRep> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -1089,7 +1085,12 @@ async fn handle_cone_scan(
         if Some(ball.id) == caller_ship {
             continue;
         }
-        if ball.type_id != 33_589
+        let is_ship_or_drone = ctx
+            .sde
+            .types
+            .get(&ball.type_id)
+            .is_some_and(|t| matches!(t.category_id, 6 | 18 | 87));
+        if is_ship_or_drone
             && inhibitor_positions
                 .iter()
                 .any(|pos| ball.position.distance(*pos) <= 30_000.0)

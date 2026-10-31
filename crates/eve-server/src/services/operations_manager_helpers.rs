@@ -154,16 +154,50 @@ pub fn combined_survey_catalog(
     catalog
 }
 
-/// Operation definitions and task mappings loaded from SDE `operations.fsdbinary` / `operationtasks.fsdbinary`
-/// or structured operation definitions.
+/// Operation definitions, task mappings, and SDE rewards loaded from
+/// `operationcategories.fsdbinary`, `operations.fsdbinary`, and `operationtasks.fsdbinary`.
 #[derive(Debug, Clone, Default)]
 pub struct OperationDefinitions {
     pub op_tasks: HashMap<i64, Vec<i64>>,
     pub task_to_op: HashMap<i64, i64>,
+    pub category_isk_rewards: HashMap<i64, i64>,
+    pub op_isk_rewards: HashMap<i64, i64>,
+    pub op_activation_rewards: HashMap<i64, Vec<(u32, u32, Option<u32>)>>,
+    pub op_completion_rewards: HashMap<i64, Vec<(u32, u32, Option<u32>)>>,
+    pub task_completion_rewards: HashMap<i64, Vec<(u32, u32)>>,
+}
+
+fn parse_op_rewards(arr: Option<&Vec<serde_json::Value>>) -> Vec<(u32, u32, Option<u32>)> {
+    arr.map(|list| {
+        list.iter()
+            .filter_map(|item| {
+                let tid = item.get("typeID").and_then(|v| v.as_u64())? as u32;
+                if tid == 0 {
+                    return None;
+                }
+                let amt = item.get("amount").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as u32;
+                let race_id = item
+                    .get("raceID")
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32)
+                    .filter(|&r| r > 0);
+                Some((tid, amt, race_id))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefinitions {
     let mut defs = OperationDefinitions::default();
+    if let Ok(cats) = sde.operation_categories() {
+        for (cat_id_str, val) in cats {
+            let Ok(cat_id) = cat_id_str.parse::<i64>() else { continue };
+            if let Some(isk) = val.get("iskReward").and_then(|v| v.as_i64()).filter(|&x| x > 0) {
+                defs.category_isk_rewards.insert(cat_id, isk);
+            }
+        }
+    }
     if let Ok(ops) = sde.operations() {
         for (op_id_str, val) in ops {
             let Ok(op_id) = op_id_str.parse::<i64>() else { continue; };
@@ -176,6 +210,38 @@ pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefini
                     }
                 }
                 defs.op_tasks.insert(op_id, task_ids);
+            }
+            if let Some(isk) = val.get("iskReward").and_then(|v| v.as_i64()).filter(|&x| x > 0) {
+                defs.op_isk_rewards.insert(op_id, isk);
+            }
+            let act_rws = parse_op_rewards(val.get("onActivationRewards").and_then(|v| v.as_array()));
+            if !act_rws.is_empty() {
+                defs.op_activation_rewards.insert(op_id, act_rws);
+            }
+            let cmp_rws = parse_op_rewards(val.get("onCompletionRewards").and_then(|v| v.as_array()));
+            if !cmp_rws.is_empty() {
+                defs.op_completion_rewards.insert(op_id, cmp_rws);
+            }
+        }
+    }
+    if let Ok(tasks) = sde.operation_tasks() {
+        for (tid_str, val) in tasks {
+            let Ok(tid) = tid_str.parse::<i64>() else { continue };
+            if let Some(arr) = val.get("onCompletionRewards").and_then(|v| v.as_array()) {
+                let rws: Vec<(u32, u32)> = arr
+                    .iter()
+                    .filter_map(|item| {
+                        let type_id = item.get("typeID").and_then(|v| v.as_u64())? as u32;
+                        if type_id == 0 {
+                            return None;
+                        }
+                        let amt = item.get("amount").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as u32;
+                        Some((type_id, amt))
+                    })
+                    .collect();
+                if !rws.is_empty() {
+                    defs.task_completion_rewards.insert(tid, rws);
+                }
             }
         }
     }
@@ -197,6 +263,100 @@ pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefini
         defs.task_to_op.entry(extra_t).or_insert(501);
     }
     defs
+}
+
+/// Grants once-per-key SDE ISK and/or item rewards for an operation, task, or category transition.
+pub fn grant_operation_reward_bundle(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    reward_key: &str,
+    claimed: &mut std::collections::HashSet<String>,
+    isk_reward: i64,
+    items: &[(u32, u32, Option<u32>)],
+    now_unix: u64,
+) -> Option<eve_db::IskCents> {
+    if (isk_reward <= 0 && items.is_empty()) || !claimed.insert(reward_key.to_string()) {
+        return None;
+    }
+    let (char_race, delivery_loc) = snap
+        .characters
+        .get(&char_id)
+        .map(|c| {
+            let loc = c
+                .station_id
+                .or(c.structure_id)
+                .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
+                .unwrap_or(60_003_760);
+            (c.race_id, loc)
+        })
+        .unwrap_or((0, 60_003_760));
+    for &(type_id, qty, race_filter) in items {
+        if let Some(req_race) = race_filter {
+            if char_race != 0 && req_race != char_race {
+                continue;
+            }
+        }
+        snap.next_entity_id += 1;
+        let item_id = snap.next_entity_id;
+        snap.items.insert(
+            item_id,
+            eve_db::InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id: char_id,
+                location_id: delivery_loc,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: qty.max(1) as i32,
+                singleton: qty == 1,
+                ..Default::default()
+            },
+        );
+    }
+    if isk_reward > 0 {
+        let amt = eve_db::IskCents::from_isk(isk_reward);
+        let bal_after = if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.balance = ch.balance.checked_add(amt).unwrap_or(ch.balance);
+            ch.balance
+        } else {
+            amt
+        };
+        snap.next_entity_id += 1;
+        let jid = snap.next_entity_id;
+        snap.wallet_journal.push(eve_db::WalletJournalEntry {
+            entry_id: jid,
+            character_id: char_id,
+            entry_type: "operation_reward".to_string(),
+            amount: amt,
+            balance_after: bal_after,
+            reason: format!("AIR Operation reward ({reward_key})"),
+        });
+        snap.wallet_journal_timestamps.insert(jid, now_unix);
+        return Some(bal_after);
+    }
+    None
+}
+
+/// Applies task and (when all tasks in `op_id` are finished) operation completion rewards.
+pub fn grant_task_and_op_completion_rewards(
+    snap: &mut eve_db::WorldStateSnapshot,
+    op_defs: &OperationDefinitions,
+    char_id: i64,
+    tid: i64,
+    op_id: i64,
+    op_all_done: bool,
+    claimed: &mut std::collections::HashSet<String>,
+    now_unix: u64,
+) -> Option<eve_db::IskCents> {
+    if let Some(trws) = op_defs.task_completion_rewards.get(&tid) {
+        let mapped: Vec<(u32, u32, Option<u32>)> = trws.iter().map(|&(t, a)| (t, a, None)).collect();
+        let _ = grant_operation_reward_bundle(snap, char_id, &format!("task:{tid}"), claimed, 0, &mapped, now_unix);
+    }
+    if op_all_done {
+        let op_isk = op_defs.op_isk_rewards.get(&op_id).copied().unwrap_or(0);
+        let op_rws = op_defs.op_completion_rewards.get(&op_id).map(Vec::as_slice).unwrap_or(&[]);
+        return grant_operation_reward_bundle(snap, char_id, &format!("op:{op_id}"), claimed, op_isk, op_rws, now_unix);
+    }
+    None
 }
 
 static SURVEY_CATALOG_CACHE: std::sync::OnceLock<Vec<SurveyDefinition>> = std::sync::OnceLock::new();

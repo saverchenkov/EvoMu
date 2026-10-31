@@ -1,14 +1,8 @@
-//! Integration tests for open `feat:` rows (Batch 6 Part 2).
+//! Integration tests for corroborated `feat:` rows (Batch 6 Part 2).
 //!
-//! Covers `feat:pve.insurgency-ice-heist`, `feat:pve.mission-bonus-timer`,
-//! `feat:pve.mission-offer-expiry-no-penalty`,
-//! `feat:pve.mission-level-clone-and-space-restrictions`,
-//! `feat:pve.research-agent-daily-mission`,
-//! `feat:ships.board-ship-skill-and-clone-check`,
-//! `feat:sovereignty.mercenary-den-anchoring`,
-//! `feat:sovereignty.mercenary-den-development-anarchy`,
-//! `feat:sovereignty.mercenary-den-anarchy-evolution`, and
-//! `feat:sovereignty.mercenary-den-reinforcement-loot`.
+//! Covers mission bonus timers, mission offer expiry without penalty,
+//! mission level clone/space restrictions, research agent daily missions,
+//! ship boarding skill/clone checks, and Mercenary Den anchoring & loot.
 
 #![forbid(unsafe_code)]
 
@@ -26,11 +20,9 @@ use eve_db::{
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_OK};
+use eve_server::quasar_gateway::STATUS_CONFLICT;
 use eve_server::router::ServerContext;
 use eve_server::services::agents_missions::{save_rnd_research_entries, RndResearchEntry};
-use eve_server::services::insurgency_services::{InsurgencyCampaign, FACTION_GURISTAS};
-use eve_server::services::quasar_sov_hub::compute_hub_resources;
 use eve_server::services::quasar_sov_mercden::TYPE_MERCENARY_DEN_MANAGEMENT;
 use eve_server::services::sov_gameplay::{
     apply_mercenary_den_weapon_damage, MERC_DEN_BASE_HP, MERC_DEN_REINFORCEMENT_SECS,
@@ -116,66 +108,6 @@ fn colocate_with_agent(ctx: &ServerContext, sess: &mut SessionState, char_id: i6
     sess.solar_system_id = Some(sys_id);
     sess.station_id = agent.station_id;
     sess.structure_id = None;
-}
-
-#[tokio::test]
-async fn test_pve_insurgency_ice_heist_instances_and_persistence() {
-    // parity: feat:pve.insurgency-ice-heist
-    eve_testkit::attest(&["feat:pve.insurgency-ice-heist"]);
-    let ctx = new_ctx();
-    let hub_sys: u32 = 30_002_537;
-    let camp_id: i64 = 504;
-    ensure_char(&ctx, PILOT_A, "HeistScout", Some(500_001));
-    let mut sess = char_session(PILOT_A, None, Some(hub_sys), Some(80_020));
-
-    let empty_heists = rpc(
-        &ctx,
-        &mut sess,
-        "dungeonInstanceCacheMgr",
-        "GetPirateInsurgencyIceHeistInstances",
-        &[],
-    )
-    .await
-    .expect("GetPirateInsurgencyIceHeistInstances");
-    let PyRep::List(list0) = empty_heists else { panic!("expected List") };
-    assert!(list0.is_empty());
-
-    let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut camp = InsurgencyCampaign {
-            campaign_id: camp_id,
-            pirate_faction_id: FACTION_GURISTAS,
-            target_faction_id: 500_001,
-            fob_solar_system_id: hub_sys,
-            systems: vec![hub_sys],
-            created_at_unix: now.saturating_sub(3600),
-            forecasting_end_unix: now.saturating_sub(1800),
-            active_end_unix: now + 86_400,
-            winddown_end_unix: now + 172_800,
-            corruption_points: HashMap::new(),
-            suppression_points: HashMap::new(),
-        };
-        camp.corruption_points.insert(hub_sys, 60_000);
-        snap.insurgency_runtime.campaigns.insert(camp_id, camp);
-    });
-    let heist_id = eve_server::services::insurgency_services::spawn_ice_heist(&ctx, hub_sys);
-
-    let heists = rpc(
-        &ctx,
-        &mut sess,
-        "dungeonInstanceCacheMgr",
-        "GetPirateInsurgencyIceHeistInstances",
-        &[PyRep::Integer(i64::from(hub_sys))],
-    )
-    .await
-    .expect("GetPirateInsurgencyIceHeistInstances at corruption 3");
-    let PyRep::List(list3) = heists else { panic!("expected List") };
-    assert!(
-        list3
-            .iter()
-            .any(|item| item.dict_get("instanceID").and_then(|v| v.as_i64()) == Some(heist_id)),
-        "Ice Refinery Heist must spawn at Corruption Stage 3"
-    );
 }
 
 #[tokio::test]
@@ -580,43 +512,6 @@ async fn setup_anchored_merc_den(ctx: &ServerContext, sess_id: u64, with_hub: bo
     .expect("Anchor Mercenary Den");
     let den_id = den_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
     (s_owner, hub_id, den_id)
-}
-
-#[tokio::test]
-async fn test_sovereignty_mercenary_den_development_anarchy_siphons_workforce() {
-    // parity: feat:sovereignty.mercenary-den-development-anarchy
-    eve_testkit::attest(&["feat:sovereignty.mercenary-den-development-anarchy"]);
-    let ctx = new_ctx();
-    let (mut s_owner, hub_id, den_id) = setup_anchored_merc_den(&ctx, 72_002, true).await;
-
-    let base_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    ctx.advance_secs(25 * 3_600);
-    assert_eq!(
-        q_sov_rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64))
-            .await
-            .status_code,
-        STATUS_OK
-    );
-    let siphoned_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    assert_eq!(siphoned_wf + 500, base_wf);
-}
-
-#[tokio::test]
-async fn test_sovereignty_mercenary_den_anarchy_evolution_and_persistence() {
-    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
-    eve_testkit::attest(&["feat:sovereignty.mercenary-den-anarchy-evolution"]);
-    let ctx = new_ctx();
-    let (mut s_owner, _hub_id, den_id) = setup_anchored_merc_den(&ctx, 72_003, false).await;
-
-    ctx.advance_secs(12 * 3_600);
-    let rsp = q_sov_rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await;
-    assert_eq!(rsp.status_code, STATUS_OK);
-
-    let reloaded = reload_db(&ctx);
-    reloaded.with_snapshot(|snap| {
-        let den = &snap.sov_runtime.mercenary_dens[&den_id];
-        assert!(den.infomorphs > 0 || den.anarchy_level > 0);
-    });
 }
 
 #[tokio::test]

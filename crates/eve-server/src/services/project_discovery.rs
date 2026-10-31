@@ -745,6 +745,26 @@ pub fn handle_project_discovery(
                     } else {
                         LOOT_CRATE_TYPE_ID
                     };
+                    let delivery_loc = snap
+                        .characters
+                        .get(&char_id)
+                        .and_then(|c| c.station_id.or(c.structure_id).or_else(|| (c.home_station_id > 0).then_some(c.home_station_id)))
+                        .unwrap_or(60_003_760);
+                    snap.next_entity_id += 1;
+                    let crate_item_id = snap.next_entity_id;
+                    snap.items.insert(
+                        crate_item_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: crate_item_id,
+                            type_id: crate_type_id,
+                            owner_id: char_id,
+                            location_id: delivery_loc,
+                            flag: eve_db::InventoryFlag::Hangar,
+                            quantity: 1,
+                            singleton: false,
+                            ..Default::default()
+                        },
+                    );
                     crates_granted.push(PyRep::Integer(crate_type_id as i64));
                 }
                 let xp_for_new_rank = project_discovery_total_needed_xp_from_store(&store, st.rank);

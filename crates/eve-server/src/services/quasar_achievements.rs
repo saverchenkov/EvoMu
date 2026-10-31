@@ -296,6 +296,33 @@ impl AchievementManager {
                 if let Ok(cat_json) = serde_json::to_string(&cat_map) {
                     snap.quasar_state_blobs.insert("quasar_achievement_cat_scores".into(), cat_json);
                 }
+                let mut opp_state: serde_json::Value = snap
+                    .quasar_state_blobs
+                    .get("quasar_opportunities")
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if !opp_state.is_object() {
+                    opp_state = serde_json::json!({});
+                }
+                if let Some(obj) = opp_state.as_object_mut() {
+                    for (&cid, list) in &*map {
+                        let completed_ids: Vec<u32> = list
+                            .iter()
+                            .filter(|a| a.completed)
+                            .map(|a| a.def.id)
+                            .collect();
+                        if !completed_ids.is_empty() {
+                            let entry = obj
+                                .entry(cid.to_string())
+                                .or_insert_with(|| serde_json::json!({"tracked": [], "history": [], "completed": []}));
+                            if let Some(eobj) = entry.as_object_mut() {
+                                eobj.insert("completed".into(), serde_json::json!(completed_ids));
+                            }
+                        }
+                    }
+                    snap.quasar_state_blobs
+                        .insert("quasar_opportunities".into(), opp_state.to_string());
+                }
                 Ok::<(), String>(())
             });
         }

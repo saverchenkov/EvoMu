@@ -967,6 +967,7 @@ async fn handle_request_scans(
     if !combat_probes.is_empty() {
         let caller_ship = session.ship_id;
         let balls = sys_handle.list_balls().await.unwrap_or_default();
+        // DERIVED: 30_000.0 m Mobile Scan Inhibitor (`33_589`) sphere hides ships/drones/fighters.
         let inhibitor_positions: Vec<DVec3> = balls
             .iter()
             .filter(|b| b.type_id == 33_589)
@@ -976,7 +977,10 @@ async fn handle_request_scans(
             if Some(ball.id) == caller_ship {
                 continue;
             }
-            if ball.type_id != 33_589
+            let Some(type_rec) = ctx.sde.types.get(&ball.type_id) else { continue };
+            let group_id = type_rec.group_id;
+            let category_id = type_rec.category_id;
+            if matches!(category_id, 6 | 18 | 87)
                 && inhibitor_positions
                     .iter()
                     .any(|pos| ball.position.distance(*pos) <= 30_000.0)
