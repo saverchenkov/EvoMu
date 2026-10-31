@@ -7,10 +7,11 @@ use super::structure_upwell_ops::{
     apply_entity_to_profile, arg_i64, err, load_ext_state, require_corp_profile_manager,
     require_structure_corp_manager, save_ext_state, sync_assigned_structures_for_profile,
     sync_assigned_structures_for_profile_with_snap, validate_and_classify_entity,
-    StructureAccessProfile, PROFILE_CHANGE_DELAY_SECS,
+    StructureAccessProfile, StructureExtendedState, PROFILE_CHANGE_DELAY_SECS,
 };
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::structure_profile_services as svc_acl;
+use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -305,10 +306,12 @@ fn handle_get_profile_settings(
             docking_entries,
         );
         for (&gid, &flag) in &prof.general_settings {
-            by_setting.entry(gid).or_default().push(PyRep::keyval([
-                ("groupID", PyRep::Integer(0)),
-                ("value", PyRep::Integer(if flag { 1 } else { 0 })),
-            ]));
+            if matches!(gid, 3 | 4 | 17 | 20 | 23 | 24 | 26..=36) {
+                by_setting.entry(gid).or_default().push(PyRep::keyval([
+                    ("groupID", PyRep::Integer(0)),
+                    ("value", PyRep::Integer(if flag { 1 } else { 0 })),
+                ]));
+            }
         }
         for (&sid, rows) in &prof.service_acl_rules {
             let entry = by_setting.entry(sid).or_default();
@@ -471,8 +474,122 @@ fn parse_setting_scalar(
     }
 }
 
-fn split_3tuple_gid_and_val<'a>(a: &'a PyRep, b: &'a PyRep) -> (i64, &'a PyRep) {
-    (a.as_i64().unwrap_or(0), b)
+#[derive(Default)]
+struct DefensePolicyPatch {
+    auto_enabled: Option<bool>,
+    auto_attackers: Option<bool>,
+    auto_war: Option<bool>,
+    standing_thresh: Option<f64>,
+    target_blocked: Option<bool>,
+}
+
+impl DefensePolicyPatch {
+    fn is_any(&self) -> bool {
+        self.auto_enabled.is_some()
+            || self.auto_attackers.is_some()
+            || self.auto_war.is_some()
+            || self.standing_thresh.is_some()
+            || self.target_blocked.is_some()
+    }
+}
+
+fn validate_defense_standing_threshold(v: f64) -> Result<f64, BridgeRpcError> {
+    if !v.is_finite() || !(-10.0..=10.0).contains(&v) {
+        return Err(err(
+            "InvalidDefenseStandingThreshold",
+            "Defense standing threshold must be a finite number in [-10.0, 10.0]",
+        ));
+    }
+    Ok(v)
+}
+
+// DERIVED: V24 `structureSettingsWnd.pyj` (`SaveProfile`) sends `(settingID, value, groupID)` tuples
+// where `NO_GROUP_ID = 0` (`ownergroups/ownergroupConst.pyj`), `SETTING_DEFENSE_CAN_CONTROL_STRUCTURE = 17`,
+// and `CATEGORY_HULL_DEFENSE = 1003` (`structures/settings.pyj`). Under `groupID == 0` for `17` or `1003`,
+// accepts `(auto_defense_enabled, auto_target_attackers, auto_target_war_targets, standing_threshold, target_blocked_acl)`
+// (or scalar `bool` / `f64`) so `feat:structures.defense-settings` is configurable via `SaveProfileSettings`
+// without inventing non-client string dict keys.
+fn try_parse_defense_policy_value(
+    val: &PyRep,
+    patch: &mut DefensePolicyPatch,
+) -> Result<bool, BridgeRpcError> {
+    match val {
+        PyRep::Bool(b) => {
+            patch.auto_enabled = Some(*b);
+            Ok(true)
+        }
+        PyRep::Real(r) => {
+            patch.standing_thresh = Some(validate_defense_standing_threshold(*r)?);
+            Ok(true)
+        }
+        PyRep::Tuple(xs) | PyRep::List(xs) if matches!(xs.first(), Some(PyRep::Bool(_))) => {
+            if let Some(b0) = xs.first().and_then(PyRep::as_bool) {
+                patch.auto_enabled = Some(b0);
+            }
+            if let Some(x1) = xs.get(1).filter(|x| !matches!(x, PyRep::None)) {
+                let b1 = x1.as_bool().ok_or_else(|| {
+                    err("InvalidDefenseSettings", "auto_target_attackers must be a boolean")
+                })?;
+                patch.auto_attackers = Some(b1);
+            }
+            if let Some(x2) = xs.get(2).filter(|x| !matches!(x, PyRep::None)) {
+                let b2 = x2.as_bool().ok_or_else(|| {
+                    err("InvalidDefenseSettings", "auto_target_war_targets must be a boolean")
+                })?;
+                patch.auto_war = Some(b2);
+            }
+            if let Some(x3) = xs.get(3).filter(|x| !matches!(x, PyRep::None)) {
+                let r3 = x3.as_f64().ok_or_else(|| {
+                    err("InvalidDefenseStandingThreshold", "standing_threshold must be numeric")
+                })?;
+                patch.standing_thresh = Some(validate_defense_standing_threshold(r3)?);
+            }
+            if let Some(x4) = xs.get(4).filter(|x| !matches!(x, PyRep::None)) {
+                let b4 = x4.as_bool().ok_or_else(|| {
+                    err("InvalidDefenseSettings", "target_blocked_acl must be a boolean")
+                })?;
+                patch.target_blocked = Some(b4);
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn resolve_3tuple_gid_and_val<'a>(
+    snap: &WorldStateSnapshot,
+    ext: &StructureExtendedState,
+    a: &'a PyRep,
+    b: &'a PyRep,
+) -> (i64, &'a PyRep) {
+    match (a, b) {
+        (PyRep::Integer(ia), PyRep::Integer(ib)) => {
+            let is_known = |id: i64| {
+                ext.owner_groups.contains_key(&id)
+                    || snap.characters.contains_key(&id)
+                    || snap.corporations.contains_key(&id)
+                    || snap.alliances.contains_key(&id)
+            };
+            if *ia == 0 {
+                (0, b)
+            } else if is_known(*ia) {
+                (*ia, b)
+            } else if is_known(*ib) {
+                (*ib, a)
+            } else if *ib == 0 && (-1..=1).contains(ia) {
+                (0, a)
+            } else if (-1..=1).contains(ib) && !(-1..=1).contains(ia) {
+                (*ia, b)
+            } else if (-1..=1).contains(ia) && !(-1..=1).contains(ib) {
+                (*ib, a)
+            } else {
+                (*ia, b)
+            }
+        }
+        (_, PyRep::Integer(ib)) => (*ib, a),
+        (PyRep::Integer(ia), _) => (*ia, b),
+        _ => (0, b),
+    }
 }
 
 fn push_service_acl_row(
@@ -505,243 +622,11 @@ fn handle_save_profile_settings(
     let target_id = arg_i64(args, 0)
         .or(session.structure_id)
         .ok_or_else(|| err("MissingProfileId", "SaveProfileSettings requires profileID"))?;
-    let mut corp_only = None;
-    let mut service_taxes = Vec::new();
-    let mut service_acl_updates: HashMap<i64, Vec<(i64, f64)>> = HashMap::new();
-    let mut general_settings = Vec::new();
-    let mut blocked = Vec::new();
-    let mut allowed = Vec::new();
-    let mut group_ids = Vec::new();
-    let mut raw_docking_1_ids: Vec<(i64, bool)> = Vec::new();
-    let mut raw_defense_17_ids: Vec<(i64, bool)> = Vec::new();
-    let mut defense_group_ids = Vec::new();
-    let mut defense_allowed = Vec::new();
-    let mut defense_blocked = Vec::new();
-    let mut has_docking_groups = false;
-    let mut has_blocked = false;
-    let mut has_allowed = false;
-    let mut has_setting_17 = false;
-    let has_defense_groups = false;
-    let mut has_defense_allowed = false;
-    let mut has_defense_blocked = false;
-    let def_auto_enabled: Option<bool> = None;
-    let def_auto_attackers: Option<bool> = None;
-    let def_auto_war: Option<bool> = None;
-    let def_standing_thresh: Option<f64> = None;
-    let def_target_blocked: Option<bool> = None;
-    let payload = args.get(1).or_else(|| args.get(2));
-    if let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload {
-        for r in rows {
-            if let PyRep::Tuple(items) | PyRep::List(items) = r {
-                if let Some(sid) = items.first().and_then(|x| x.as_i64()) {
-                    if sid == 17 {
-                        has_setting_17 = true;
-                    }
-                    if items.len() >= 3 {
-                        let (gid, v2) = split_3tuple_gid_and_val(&items[1], &items[2]);
-                        if sid == 17 {
-                            if gid > 0 {
-                                let is_blk = matches!(v2, PyRep::Bool(false))
-                                    || v2.as_i64().is_some_and(|x| x < 0);
-                                raw_defense_17_ids.push((gid, is_blk));
-                            }
-                        } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
-                            if gid > 0 {
-                                let is_blk = matches!(v2, PyRep::Bool(false))
-                                    || v2.as_i64().is_some_and(|x| x < 0);
-                                raw_docking_1_ids.push((gid, is_blk));
-                            } else if let Some(b) = v2.as_bool() {
-                                corp_only = Some(!b);
-                                general_settings.push((1, b));
-                            } else if let Some(iv) = v2.as_i64() {
-                                corp_only = Some(iv == 0);
-                                general_settings.push((1, iv != 0));
-                            }
-                            if sid == 1 {
-                                if let PyRep::Real(rate) = v2 {
-                                    service_taxes.push((1, *rate));
-                                }
-                            }
-                        } else {
-                            push_service_acl_row(
-                                sid,
-                                gid,
-                                v2,
-                                &mut service_acl_updates,
-                                &mut service_taxes,
-                                &mut general_settings,
-                            );
-                        }
-                    } else if let Some(val) = items.get(1) {
-                        if sid == 17 {
-                            match val {
-                                PyRep::List(xs) | PyRep::Tuple(xs) => {
-                                    for x in xs {
-                                        if let Some(v) = x.as_i64().filter(|&v| v > 0) {
-                                            raw_defense_17_ids.push((v, false));
-                                        }
-                                    }
-                                }
-                                PyRep::Integer(v) if *v > 0 => {
-                                    raw_defense_17_ids.push((*v, false));
-                                }
-                                PyRep::Bool(flag) => general_settings.push((17, *flag)),
-                                _ => {}
-                            }
-                        } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
-                            match val {
-                                PyRep::List(xs) | PyRep::Tuple(xs) => {
-                                    has_docking_groups = true;
-                                    for x in xs {
-                                        if let Some(v) = x.as_i64().filter(|&v| v > 0) {
-                                            raw_docking_1_ids.push((v, false));
-                                        }
-                                    }
-                                }
-                                PyRep::Bool(flag) => {
-                                    corp_only = Some(!*flag);
-                                    general_settings.push((1, *flag));
-                                }
-                                PyRep::Integer(v) if *v == 0 || *v == 1 => {
-                                    corp_only = Some(*v == 0);
-                                    general_settings.push((1, *v != 0));
-                                }
-                                PyRep::Integer(v) if *v > 1 => {
-                                    raw_docking_1_ids.push((*v, false));
-                                }
-                                PyRep::Real(rate) if sid == 1 => service_taxes.push((1, *rate)),
-                                _ => {}
-                            }
-                        } else {
-                            match val {
-                                PyRep::Real(rate) => service_taxes.push((sid, *rate)),
-                                PyRep::Bool(flag) => general_settings.push((sid, *flag)),
-                                PyRep::Integer(v) => service_taxes.push((sid, *v as f64)),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if let Some(PyRep::Dict(d)) = payload {
-        for (k, v) in d {
-            if let Some(sid) = k.as_i64() {
-                if sid == 17 {
-                    has_setting_17 = true;
-                }
-                match v {
-                    PyRep::List(entries) | PyRep::Tuple(entries) => {
-                        if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && entries.is_empty() {
-                            has_docking_groups = true;
-                        } else if sid != 1 && sid != svc_acl::SETTING_HOUSING_CAN_DOCK && sid != 17 && entries.is_empty() {
-                            service_acl_updates.entry(sid).or_default();
-                        }
-                        for entry in entries {
-                            if let Some(id_val) = entry.as_i64() {
-                                if sid == 17 && id_val > 0 {
-                                    raw_defense_17_ids.push((id_val, false));
-                                } else if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && id_val > 0 {
-                                    raw_docking_1_ids.push((id_val, false));
-                                } else if id_val >= 0 {
-                                    service_acl_updates.entry(sid).or_default().push((id_val, 0.0));
-                                }
-                                continue;
-                            }
-                            if let PyRep::Tuple(titems) | PyRep::List(titems) = entry {
-                                if titems.len() >= 2 {
-                                    let (gid, val) = split_3tuple_gid_and_val(&titems[0], &titems[1]);
-                                    push_service_acl_row(
-                                        sid,
-                                        gid,
-                                        val,
-                                        &mut service_acl_updates,
-                                        &mut service_taxes,
-                                        &mut general_settings,
-                                    );
-                                    continue;
-                                }
-                            }
-                            let kv_pairs: Option<Vec<(String, PyRep)>> = match entry {
-                                PyRep::KeyVal(kv) => {
-                                    Some(kv.iter().map(|(ek, ev)| (ek.clone(), ev.clone())).collect())
-                                }
-                                PyRep::Dict(ed) => Some(
-                                    ed.iter()
-                                        .filter_map(|(ek, ev)| {
-                                            ek.as_str().map(|s| (s.to_string(), ev.clone()))
-                                        })
-                                        .collect(),
-                                ),
-                                _ => None,
-                            };
-                            if let Some(kv) = kv_pairs {
-                                let gid = kv
-                                    .iter()
-                                    .find(|(ek, _)| ek == "groupID")
-                                    .and_then(|(_, ev)| ev.as_i64())
-                                    .unwrap_or(0);
-                                if let Some((_, val)) = kv.iter().find(|(ek, _)| ek == "value") {
-                                    if sid == 17 {
-                                        if gid > 0 {
-                                            let is_blk = matches!(val, PyRep::Bool(false))
-                                                || val.as_i64().is_some_and(|x| x < 0);
-                                            raw_defense_17_ids.push((gid, is_blk));
-                                        }
-                                    } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
-                                        if gid > 0 {
-                                            has_docking_groups = true;
-                                            group_ids.push(gid);
-                                        } else if let Some(b) = val.as_bool() {
-                                            corp_only = Some(!b);
-                                            general_settings.push((1, b));
-                                        } else if let Some(iv) = val.as_i64() {
-                                            corp_only = Some(iv == 0);
-                                            general_settings.push((1, iv != 0));
-                                        }
-                                        if sid == 1 {
-                                            if let PyRep::Real(rate) = val {
-                                                service_taxes.push((1, *rate));
-                                            }
-                                        }
-                                    } else {
-                                        push_service_acl_row(
-                                            sid,
-                                            gid,
-                                            val,
-                                            &mut service_acl_updates,
-                                            &mut service_taxes,
-                                            &mut general_settings,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    PyRep::Integer(iv) if sid == 17 && *iv > 0 => {
-                        raw_defense_17_ids.push((*iv, false));
-                    }
-                    PyRep::Integer(iv) if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && *iv > 1 => {
-                        raw_docking_1_ids.push((*iv, false));
-                    }
-                    PyRep::Integer(iv) if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && (*iv == 0 || *iv == 1) => {
-                        corp_only = Some(*iv == 0);
-                        general_settings.push((1, *iv != 0));
-                    }
-                    other => {
-                        parse_setting_scalar(sid, other, &mut service_taxes, &mut general_settings);
-                    }
-                }
-            }
-        }
-    }
-    let is_standalone_profile = ctx
-        .db
-        .with_snapshot(|snap| load_ext_state(snap).profiles_by_id.contains_key(&target_id));
     let (_, char_id) = ServerContext::require_character(session)?;
+    let payload = args.get(1).or_else(|| args.get(2));
     let released = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
+        let is_standalone_profile = ext.profiles_by_id.contains_key(&target_id);
         let owner_corp = if is_standalone_profile {
             let corp = ext
                 .profiles_by_id
@@ -753,10 +638,298 @@ fn handle_save_profile_settings(
         } else {
             require_structure_corp_manager(snap, session, char_id, target_id)?.owner_corp_id
         };
+        let mut corp_only = None;
+        let mut service_taxes = Vec::new();
+        let mut service_acl_updates: HashMap<i64, Vec<(i64, f64)>> = HashMap::new();
+        let mut general_settings = Vec::new();
+        let mut blocked = Vec::new();
+        let mut allowed = Vec::new();
+        let mut group_ids = Vec::new();
+        let mut raw_docking_1_ids: Vec<(i64, bool)> = Vec::new();
+        let mut raw_defense_17_ids: Vec<(i64, bool)> = Vec::new();
+        let mut defense_group_ids = Vec::new();
+        let mut defense_allowed = Vec::new();
+        let mut defense_blocked = Vec::new();
+        let mut has_docking_groups = false;
+        let mut has_blocked = false;
+        let mut has_allowed = false;
+        let mut has_setting_17 = false;
+        let mut has_defense_groups = false;
+        let mut has_defense_allowed = false;
+        let mut has_defense_blocked = false;
+        let mut def_patch = DefensePolicyPatch::default();
+        let is_def_sid = |sid: i64| {
+            sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE
+                || sid == svc_acl::CATEGORY_HULL_DEFENSE
+        };
+        if let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload {
+            for r in rows {
+                if let PyRep::Tuple(items) | PyRep::List(items) = r {
+                    if let Some(sid) = items.first().and_then(|x| x.as_i64()) {
+                        if items.len() >= 3 {
+                            let (gid, v2) =
+                                resolve_3tuple_gid_and_val(snap, &ext, &items[1], &items[2]);
+                            if is_def_sid(sid) {
+                                if gid > 0 && sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                    let is_blk = matches!(v2, PyRep::Bool(false))
+                                        || v2.as_i64().is_some_and(|x| x < 0);
+                                    raw_defense_17_ids.push((gid, is_blk));
+                                } else if gid == svc_acl::NO_GROUP_ID {
+                                    if try_parse_defense_policy_value(v2, &mut def_patch)? {
+                                        if let PyRep::Bool(flag) = v2 {
+                                            if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                                general_settings.push((17, *flag));
+                                            }
+                                        }
+                                    } else if let Some(iv) = v2.as_i64() {
+                                        def_patch.auto_enabled = Some(iv != 0);
+                                        if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                            general_settings.push((17, iv != 0));
+                                        }
+                                    }
+                                }
+                            } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
+                                if gid > 0 {
+                                    let is_blk = matches!(v2, PyRep::Bool(false))
+                                        || v2.as_i64().is_some_and(|x| x < 0);
+                                    raw_docking_1_ids.push((gid, is_blk));
+                                } else if let Some(b) = v2.as_bool() {
+                                    corp_only = Some(!b);
+                                    general_settings.push((1, b));
+                                } else if let Some(iv) = v2.as_i64() {
+                                    corp_only = Some(iv == 0);
+                                    general_settings.push((1, iv != 0));
+                                }
+                                if sid == 1 {
+                                    if let PyRep::Real(rate) = v2 {
+                                        service_taxes.push((1, *rate));
+                                    }
+                                }
+                            } else {
+                                push_service_acl_row(
+                                    sid,
+                                    gid,
+                                    v2,
+                                    &mut service_acl_updates,
+                                    &mut service_taxes,
+                                    &mut general_settings,
+                                );
+                            }
+                        } else if let Some(val) = items.get(1) {
+                            if is_def_sid(sid) {
+                                if try_parse_defense_policy_value(val, &mut def_patch)? {
+                                    if let PyRep::Bool(flag) = val {
+                                        if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                            general_settings.push((17, *flag));
+                                        }
+                                    }
+                                } else if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                    match val {
+                                        PyRep::List(xs) | PyRep::Tuple(xs) => {
+                                            has_setting_17 = true;
+                                            for x in xs {
+                                                if let Some(v) = x.as_i64().filter(|&v| v > 0) {
+                                                    raw_defense_17_ids.push((v, false));
+                                                }
+                                            }
+                                        }
+                                        PyRep::Integer(v) if *v > 0 => {
+                                            has_setting_17 = true;
+                                            raw_defense_17_ids.push((*v, false));
+                                        }
+                                        PyRep::Integer(0) => {
+                                            def_patch.auto_enabled = Some(false);
+                                            general_settings.push((17, false));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
+                                match val {
+                                    PyRep::List(xs) | PyRep::Tuple(xs) => {
+                                        has_docking_groups = true;
+                                        for x in xs {
+                                            if let Some(v) = x.as_i64().filter(|&v| v > 0) {
+                                                raw_docking_1_ids.push((v, false));
+                                            }
+                                        }
+                                    }
+                                    PyRep::Bool(flag) => {
+                                        corp_only = Some(!*flag);
+                                        general_settings.push((1, *flag));
+                                    }
+                                    PyRep::Integer(v) if *v == 0 || *v == 1 => {
+                                        corp_only = Some(*v == 0);
+                                        general_settings.push((1, *v != 0));
+                                    }
+                                    PyRep::Integer(v) if *v > 1 => {
+                                        raw_docking_1_ids.push((*v, false));
+                                    }
+                                    PyRep::Real(rate) if sid == 1 => service_taxes.push((1, *rate)),
+                                    _ => {}
+                                }
+                            } else {
+                                match val {
+                                    PyRep::Real(rate) => service_taxes.push((sid, *rate)),
+                                    PyRep::Bool(flag) => general_settings.push((sid, *flag)),
+                                    PyRep::Integer(v) => service_taxes.push((sid, *v as f64)),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(PyRep::Dict(d)) = payload {
+            for (k, v) in d {
+                if let Some(sid) = k.as_i64() {
+                    if is_def_sid(sid) && try_parse_defense_policy_value(v, &mut def_patch)? {
+                        if let PyRep::Bool(flag) = v {
+                            if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                general_settings.push((17, *flag));
+                            }
+                        }
+                        continue;
+                    }
+                    match v {
+                        PyRep::List(entries) | PyRep::Tuple(entries) => {
+                            if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && entries.is_empty() {
+                                has_docking_groups = true;
+                            } else if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE && entries.is_empty() {
+                                has_setting_17 = true;
+                            } else if sid != 1
+                                && sid != svc_acl::SETTING_HOUSING_CAN_DOCK
+                                && !is_def_sid(sid)
+                                && entries.is_empty()
+                            {
+                                service_acl_updates.entry(sid).or_default();
+                            }
+                            for entry in entries {
+                                if let Some(id_val) = entry.as_i64() {
+                                    if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE && id_val > 0 {
+                                        has_setting_17 = true;
+                                        raw_defense_17_ids.push((id_val, false));
+                                    } else if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && id_val > 0 {
+                                        raw_docking_1_ids.push((id_val, false));
+                                    } else if !is_def_sid(sid) && id_val >= 0 {
+                                        service_acl_updates.entry(sid).or_default().push((id_val, 0.0));
+                                    }
+                                    continue;
+                                }
+                                if let PyRep::Tuple(titems) | PyRep::List(titems) = entry {
+                                    if titems.len() >= 2 {
+                                        let (gid, val) =
+                                            resolve_3tuple_gid_and_val(snap, &ext, &titems[0], &titems[1]);
+                                        if is_def_sid(sid) {
+                                            if gid > 0 && sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                                let is_blk = matches!(val, PyRep::Bool(false))
+                                                    || val.as_i64().is_some_and(|x| x < 0);
+                                                raw_defense_17_ids.push((gid, is_blk));
+                                            } else if gid == svc_acl::NO_GROUP_ID {
+                                                let _ = try_parse_defense_policy_value(val, &mut def_patch)?;
+                                            }
+                                        } else {
+                                            push_service_acl_row(
+                                                sid,
+                                                gid,
+                                                val,
+                                                &mut service_acl_updates,
+                                                &mut service_taxes,
+                                                &mut general_settings,
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                }
+                                let kv_pairs: Option<Vec<(String, PyRep)>> = match entry {
+                                    PyRep::KeyVal(kv) => {
+                                        Some(kv.iter().map(|(ek, ev)| (ek.clone(), ev.clone())).collect())
+                                    }
+                                    PyRep::Dict(ed) => Some(
+                                        ed.iter()
+                                            .filter_map(|(ek, ev)| {
+                                                ek.as_str().map(|s| (s.to_string(), ev.clone()))
+                                            })
+                                            .collect(),
+                                    ),
+                                    _ => None,
+                                };
+                                if let Some(kv) = kv_pairs {
+                                    let gid = kv
+                                        .iter()
+                                        .find(|(ek, _)| ek == "groupID")
+                                        .and_then(|(_, ev)| ev.as_i64())
+                                        .unwrap_or(0);
+                                    if let Some((_, val)) = kv.iter().find(|(ek, _)| ek == "value") {
+                                        if is_def_sid(sid) {
+                                            if gid > 0 && sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+                                                let is_blk = matches!(val, PyRep::Bool(false))
+                                                    || val.as_i64().is_some_and(|x| x < 0);
+                                                raw_defense_17_ids.push((gid, is_blk));
+                                            } else if gid == svc_acl::NO_GROUP_ID {
+                                                let _ = try_parse_defense_policy_value(val, &mut def_patch)?;
+                                            }
+                                        } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
+                                            if gid > 0 {
+                                                has_docking_groups = true;
+                                                group_ids.push(gid);
+                                            } else if let Some(b) = val.as_bool() {
+                                                corp_only = Some(!b);
+                                                general_settings.push((1, b));
+                                            } else if let Some(iv) = val.as_i64() {
+                                                corp_only = Some(iv == 0);
+                                                general_settings.push((1, iv != 0));
+                                            }
+                                            if sid == 1 {
+                                                if let PyRep::Real(rate) = val {
+                                                    service_taxes.push((1, *rate));
+                                                }
+                                            }
+                                        } else {
+                                            push_service_acl_row(
+                                                sid,
+                                                gid,
+                                                val,
+                                                &mut service_acl_updates,
+                                                &mut service_taxes,
+                                                &mut general_settings,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        PyRep::Integer(iv)
+                            if sid == svc_acl::SETTING_DEFENSE_CAN_CONTROL_STRUCTURE && *iv > 0 =>
+                        {
+                            has_setting_17 = true;
+                            raw_defense_17_ids.push((*iv, false));
+                        }
+                        PyRep::Integer(iv)
+                            if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK) && *iv > 1 =>
+                        {
+                            raw_docking_1_ids.push((*iv, false));
+                        }
+                        PyRep::Integer(iv)
+                            if (sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK)
+                                && (*iv == 0 || *iv == 1) =>
+                        {
+                            corp_only = Some(*iv == 0);
+                            general_settings.push((1, *iv != 0));
+                        }
+                        other => {
+                            parse_setting_scalar(sid, other, &mut service_taxes, &mut general_settings);
+                        }
+                    }
+                }
+            }
+        }
         // Classify raw IDs under settingID == 17 against actual DB/state tables (`ext.owner_groups`
         // vs `validate_and_classify_entity`) instead of comparing against a numeric ID threshold.
         for (v, is_blk) in raw_defense_17_ids {
             if ext.owner_groups.contains_key(&v) {
+                has_defense_groups = true;
                 if !defense_group_ids.contains(&v) {
                     defense_group_ids.push(v);
                 }
@@ -878,11 +1051,7 @@ fn handle_save_profile_settings(
                 }
             }
         }
-        let has_defense_flag_updates = def_auto_enabled.is_some()
-            || def_auto_attackers.is_some()
-            || def_auto_war.is_some()
-            || def_standing_thresh.is_some()
-            || def_target_blocked.is_some();
+        let has_defense_flag_updates = def_patch.is_any();
         let existing_structure_ds = if !is_standalone_profile && has_defense_flag_updates {
             Some(crate::services::structure_acl_defense_rules::load_defense_settings(snap, target_id))
         } else {
@@ -959,21 +1128,23 @@ fn handle_save_profile_settings(
                     .clone()
                     .or(existing_structure_ds)
                     .unwrap_or_default();
-                if let Some(v) = def_auto_enabled {
+                if let Some(v) = def_patch.auto_enabled {
                     ds.auto_defense_enabled = v;
                 }
-                if let Some(v) = def_auto_attackers {
+                if let Some(v) = def_patch.auto_attackers {
                     ds.auto_target_attackers = v;
                 }
-                if let Some(v) = def_auto_war {
+                if let Some(v) = def_patch.auto_war {
                     ds.auto_target_war_targets = v;
                 }
-                if let Some(v) = def_standing_thresh {
+                if let Some(v) = def_patch.standing_thresh {
                     ds.standing_threshold = v;
                 }
-                if let Some(v) = def_target_blocked {
+                if let Some(v) = def_patch.target_blocked {
                     ds.target_blocked_acl = v;
                 }
+                ds.known_attackers.clear();
+                ds.known_attacker_timestamps.clear();
                 prof.defense_settings = Some(ds);
             }
         }
@@ -988,10 +1159,8 @@ fn handle_save_profile_settings(
                 crate::services::structure_acl_defense_rules::load_defense_settings(snap, target_id);
             let mut ds = ds_tmpl;
             ds.structure_id = target_id;
-            if ds.known_attackers.is_empty() {
-                ds.known_attackers = existing.known_attackers;
-                ds.known_attacker_timestamps = existing.known_attacker_timestamps;
-            }
+            ds.known_attackers = existing.known_attackers;
+            ds.known_attacker_timestamps = existing.known_attacker_timestamps;
             crate::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
         }
         save_ext_state(snap, &ext);

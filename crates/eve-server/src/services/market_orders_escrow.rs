@@ -677,16 +677,16 @@ pub fn handle_orders_escrow(
                             pilot_bps_opt,
                         );
                         if owner_share.0 > 0 {
-                            if let Some(str_corp) = snap.corporations.get_mut(&owner_corp_id) {
-                                str_corp.ensure_wallet_divisions();
-                                str_corp.master_wallet = str_corp
-                                    .master_wallet
-                                    .checked_add(owner_share)
-                                    .unwrap_or(str_corp.master_wallet);
-                                if let Some(d) = str_corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
-                                    d.balance = d.balance.checked_add(owner_share).unwrap_or(d.balance);
-                                }
-                            }
+                            crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                                snap,
+                                owner_corp_id,
+                                owner_share,
+                                eve_db::ledger::ref_types::BROKER_FEE,
+                                "MarketBrokerFee",
+                                order_owner_id,
+                                format!("Structure market broker fee for sell order on type {type_id}"),
+                                now_unix,
+                            );
                         }
                     }
                     total_broker_fee = total_broker_fee

@@ -214,17 +214,12 @@ pub(crate) fn is_structure_market_online(snap: &eve_db::WorldStateSnapshot, stru
 }
 
 pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> f64 {
-    let nid = -(1_100_000_000_000_i64.saturating_add(structure_id.abs()));
+    let nid = -(1_000_000_000_000_i64.saturating_add(structure_id.abs()));
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(map) = serde_json::from_str::<HashMap<u8, f64>>(&note.note) {
             if let Some(&owner_rate) = map.get(&0) {
                 if owner_rate.is_finite() && owner_rate >= 0.0 {
                     return 0.005 + owner_rate.clamp(0.0, 1.0);
-                }
-            }
-            if let Some(&rate) = map.get(&1) {
-                if rate.is_finite() && rate >= 0.0 {
-                    return if rate < 0.01 { 0.005 + rate } else { rate.clamp(0.01, 1.0) };
                 }
             }
         }
@@ -270,20 +265,16 @@ pub(crate) fn structure_owner_broker_share(
     if broker_fee.0 <= 0 {
         return IskCents(0);
     }
-    let nid = -(1_100_000_000_000_i64.saturating_add(structure_id.abs()));
+    let nid = -(1_000_000_000_000_i64.saturating_add(structure_id.abs()));
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(map) = serde_json::from_str::<HashMap<u8, f64>>(&note.note) {
             if let Some(&owner_rate) = map.get(&0) {
-                if owner_rate <= 0.0 {
+                if !owner_rate.is_finite() || owner_rate <= 0.0 {
                     return IskCents(0);
                 }
-                let total_rate = 0.005 + owner_rate.clamp(0.0, 1.0);
-                return IskCents(((broker_fee.0 as f64) * (owner_rate / total_rate)).round() as i64);
-            }
-            if let Some(&rate) = map.get(&1) {
-                if rate <= 0.0 {
-                    return IskCents(0);
-                }
+                let clamped = owner_rate.clamp(0.0, 1.0);
+                let total_rate = 0.005 + clamped;
+                return IskCents(((broker_fee.0 as f64) * (clamped / total_rate)).round() as i64);
             }
         }
     }
@@ -1004,32 +995,16 @@ pub fn handle(
                     if broker_fee.0 > 0 {
                         let owner_share = structure_owner_broker_share_with_pilot(snap, station_id, broker_fee, pilot_bps);
                         if owner_share.0 > 0 {
-                            if let Some(corp_mut) = snap.corporations.get_mut(&st_corp_id) {
-                                if corp_mut.wallet_divisions.is_empty() {
-                                    corp_mut.ensure_wallet_divisions();
-                                }
-                                corp_mut.master_wallet = corp_mut
-                                    .master_wallet
-                                    .checked_add(owner_share)
-                                    .unwrap_or(corp_mut.master_wallet);
-                                if let Some(d) = corp_mut.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
-                                    d.balance = d.balance.checked_add(owner_share).unwrap_or(d.balance);
-                                }
-                                let c_bal = corp_mut.master_wallet;
-                                snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
-                                    owner_id: st_corp_id,
-                                    entry_type: "MarketBrokerFee",
-                                    amount: owner_share,
-                                    balance_after: c_bal,
-                                    reason: format!("Structure market broker fee for order on type {type_id}"),
-                                    meta: eve_db::ledger::JournalMeta::new(
-                                        eve_db::ledger::ref_types::BROKER_FEE,
-                                        order_owner_id,
-                                        st_corp_id,
-                                        now_unix,
-                                    ),
-                                });
-                            }
+                            crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                                snap,
+                                st_corp_id,
+                                owner_share,
+                                eve_db::ledger::ref_types::BROKER_FEE,
+                                "MarketBrokerFee",
+                                order_owner_id,
+                                format!("Structure market broker fee for order on type {type_id}"),
+                                now_unix,
+                            );
                         }
                     }
                 }

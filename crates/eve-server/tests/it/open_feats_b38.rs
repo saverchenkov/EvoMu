@@ -39,7 +39,7 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, corp_na
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await.expect("Select");
     ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String(corp_name.into()), PyRep::String(ticker.into())]).await.expect("AddCorporation");
-    ctx.advance_secs(12);
+    ctx.advance_secs(7 * 86_400 + 12);
     let ship_id = sess.ship_id.expect("ship");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {

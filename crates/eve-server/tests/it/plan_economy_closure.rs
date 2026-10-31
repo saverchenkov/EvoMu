@@ -189,7 +189,7 @@ async fn test_e2_structure_market_service_and_order_expiry() {
         snap.module_online_states.insert(struct_id + 11, true);
         let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
         let prof = ext.access_profiles.entry(struct_id).or_default();
-        prof.service_settings.insert(1, 200); // 200 bps = 2.0% owner market rate (+ 0.5% SCC = 2.5% total)
+        prof.service_settings.insert(4, 200); // SETTING_MARKET_TAX (4): 200 bps = 2.0% owner market rate (+ 0.5% SCC = 2.5% total)
         prof.blocked_characters.insert(P2);
         eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
         if let Some(ch2) = snap.characters.get_mut(&P2) {

@@ -1111,19 +1111,16 @@ pub fn handle(
                                 snap, station_id, broker_fee, pilot_bps,
                             );
                             if owner_share.0 > 0 {
-                                if let Some(st_corp) = snap.corporations.get_mut(&st_corp_id) {
-                                    st_corp.ensure_wallet_divisions();
-                                    st_corp.master_wallet = st_corp.master_wallet.checked_add(owner_share).unwrap_or(st_corp.master_wallet);
-                                    if let Some(d1) = st_corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) {
-                                        d1.balance = d1.balance.checked_add(owner_share).unwrap_or(d1.balance);
-                                    }
-                                    let c_bal = st_corp.master_wallet;
-                                    snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
-                                        owner_id: st_corp_id, entry_type: "MarketBrokerFee", amount: owner_share, balance_after: c_bal,
-                                        reason: "Structure market broker fee for PLEX sell order".into(),
-                                        meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, st_corp_id, now_unix),
-                                    });
-                                }
+                                crate::services::station_structure::structure_upwell_ops::credit_structure_owner_corp_div1(
+                                    snap,
+                                    st_corp_id,
+                                    owner_share,
+                                    eve_db::ledger::ref_types::BROKER_FEE,
+                                    "MarketBrokerFee",
+                                    char_id,
+                                    "Structure market broker fee for PLEX sell order".into(),
+                                    now_unix,
+                                );
                             }
                         }
                     }

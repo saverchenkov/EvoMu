@@ -453,7 +453,10 @@ async fn test_market_broker_fee_and_sales_tax() {
         "SetFacilityTaxes",
         &[
             PyRep::Integer(struct_id),
-            PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Real(0.025))]),
+            PyRep::Dict(vec![
+                (PyRep::Integer(1), PyRep::Real(0.10)),
+                (PyRep::String("market".into()), PyRep::Real(0.02)),
+            ]),
         ],
         &kw,
         None,
@@ -501,7 +504,7 @@ async fn test_market_broker_fee_and_sales_tax() {
     let corp_wallet = ctx
         .db
         .with_snapshot(|snap| snap.corporations[&struct_corp_id].master_wallet);
-    assert_eq!(corp_wallet, IskCents(12_500));
+    assert_eq!(corp_wallet, IskCents(20_000));
 }
 
 #[tokio::test]

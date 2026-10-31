@@ -384,8 +384,24 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
         ("duration", PyRep::Integer(90)),
     ]);
     let vip_bal_1 = ctx.db.get_character(vip_cid).unwrap().balance.0;
+    let (div1_pre_sell, cj_pre_sell, wj_pre_sell) = ctx.db.with_snapshot(|s| {
+        (
+            s.corporations[&corp_id].division_balance(1).0,
+            s.corp_wallet_journals.get(&(corp_id, 1)).map_or(0, Vec::len),
+            s.wallet_journal.len(),
+        )
+    });
     rpc(&ctx, &mut sess_vip, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![sell_entry]), PyRep::Bool(false), PyRep::Integer(90)]).await.unwrap();
     assert_eq!(vip_bal_1 - ctx.db.get_character(vip_cid).unwrap().balance.0, 3_000_00);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].division_balance(1).0 - div1_pre_sell, 2_000_00, "PlaceMultiSellOrder must credit 2k ISK owner share to corp div 1");
+        let cj = s.corp_wallet_journals.get(&(corp_id, 1)).expect("corp div 1 journal after PlaceMultiSellOrder");
+        assert_eq!(cj.len(), cj_pre_sell + 1, "PlaceMultiSellOrder must append to corp_wallet_journals[(corp_id, 1)]");
+        let entry = &cj[cj_pre_sell];
+        assert_eq!(entry.ref_type, "MarketBrokerFee");
+        assert!((entry.amount - 2_000.0).abs() < 1e-6);
+        assert!(s.wallet_journal[wj_pre_sell..].iter().any(|e| e.character_id == corp_id && e.entry_type == "MarketBrokerFee" && e.amount.0 == 2_000_00));
+    });
     let sell_oid = ctx.db.with_snapshot(|s| s.market_orders.values().find(|o| !o.is_bid && o.owner_id == vip_cid).unwrap().order_id);
 
     // Advance 301s past order modification cooldown and test ModifyCharOrder per-pilot broker fee
@@ -505,7 +521,7 @@ async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_struc
     rpc(&ctx, &mut owner_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(dock_grp), PyRep::List(vec![PyRep::Integer(gunner_cid), PyRep::Integer(blocked_cid)])]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(def_grp), PyRep::List(vec![PyRep::Integer(gunner_cid)])]).await.unwrap();
 
-    // Positive (BF-04): Direct SaveProfileSettings on structure_id persists docking ACLs and defense ACLs
+    // Positive (BF-04): Direct SaveProfileSettings on structure_id persists docking ACLs, defense ACLs, and defense policy flags
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(st_id),
         PyRep::List(vec![
@@ -515,16 +531,9 @@ async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_struc
             PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(blocked_cid), PyRep::Integer(-1)]),
             PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)]),
             PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(blocked_cid), PyRep::Integer(-1)]),
+            PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(false), PyRep::Real(-2.5), PyRep::Bool(true)]), PyRep::Integer(0)]),
         ]),
     ]).await.unwrap();
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, st_id);
-        ds.auto_defense_enabled = true;
-        ds.auto_target_attackers = true;
-        ds.standing_threshold = -2.5;
-        ds.target_blocked_acl = true;
-        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
-    });
 
     ctx.db.with_snapshot(|snap| {
         let ext = ops::load_ext_state(snap);

@@ -9,7 +9,6 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::station_structure::structure_lifecycle as life;
-use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -503,18 +502,22 @@ async fn test_remediated_structure_defense_settings_and_auto_fire_ballpark() {
     )
     .await
     .expect("SaveProfileSettings");
-    let set_def = |auto_atk: bool, auto_war: bool, target_acl: bool| {
-        ctx.db.with_mut_snapshot(|snap| {
-            let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
-            ds.auto_defense_enabled = true;
-            ds.auto_target_attackers = auto_atk;
-            ds.auto_target_war_targets = auto_war;
-            ds.target_blocked_acl = target_acl;
-            ds.standing_threshold = -1.0;
-            eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
-        });
-    };
-    set_def(false, false, true);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[
+            PyRep::Integer(prof_id),
+            PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(false), PyRep::Bool(false), PyRep::Real(f64::NAN), PyRep::Bool(true)]), PyRep::Integer(0)])]),
+        ]).await.expect_err("NaN standing threshold").code,
+        "InvalidDefenseStandingThreshold"
+    );
+    macro_rules! set_def {
+        ($atk:expr, $war:expr, $acl:expr) => {
+            rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[
+                PyRep::Integer(prof_id),
+                PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool($atk), PyRep::Bool($war), PyRep::Real(-1.0), PyRep::Bool($acl)]), PyRep::Integer(0)])]),
+            ]).await.expect("SaveProfileSettings defense");
+        };
+    }
+    set_def!(false, false, true);
 
     // Spawn friendly ship at 15 km, hostile_close at 15 km (inside PDB 25 km), and hostile_far at 60 km (outside PDB 25 km).
     let sys = ctx.systems.get_or_spawn(RANCER);
@@ -646,12 +649,12 @@ async fn test_remediated_structure_defense_settings_and_auto_fire_ballpark() {
     .expect("attacker hits structure");
 
     // 4a. Both flags OFF -> neither attacker nor war target is engaged.
-    set_def(false, false, false);
+    set_def!(false, false, false);
     let _ = sys.step_manual(5.0).await.expect("step_flags_off");
     assert!(sys.get_target_locks(struct_id).await.unwrap_or_default().is_empty(), "No locks when flags are off");
 
     // 4b. autoTargetAttackers ON, autoTargetWarTargets OFF -> engages attacker_ship, ignores war_ship!
-    set_def(true, false, false);
+    set_def!(true, false, false);
     let _ = sys.step_manual(1.0).await.expect("step_attacker_lock_start");
     let _ = sys.step_manual(60.0).await.expect("step_attacker_on");
     assert!(sys.get_combat_state(attacker_ship).await.unwrap().unwrap().shield_hp < 5_000.0, "Attacker must be damaged when autoTargetAttackers=true");
@@ -664,13 +667,8 @@ async fn test_remediated_structure_defense_settings_and_auto_fire_ballpark() {
     assert!(sys.get_target_locks(struct_id).await.unwrap_or_default().is_empty(), "Expired attacker must no longer be targeted");
 
     // 4d. autoTargetWarTargets ON, autoTargetAttackers OFF -> engages war_ship!
-    set_def(false, true, false);
+    set_def!(false, true, false);
     let _ = sys.step_manual(1.0).await.expect("step_war_lock_start");
     let _ = sys.step_manual(60.0).await.expect("step_war_on");
     assert!(sys.get_combat_state(war_ship).await.unwrap().unwrap().shield_hp < 5_000.0, "War target must be damaged when autoTargetWarTargets=true");
-
-    let _ = ctx.db.with_mut_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        save_ext_state(snap, &ext);
-    });
 }

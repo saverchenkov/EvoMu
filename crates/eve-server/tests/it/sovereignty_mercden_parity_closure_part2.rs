@@ -136,6 +136,7 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
     place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 11_957, deep).await;
     let tenebrex_id = rpc_call(&ctx, &mut s_dir, "structureDeployment", "Anchor", &[PyRep::Integer(984_010), PyRep::String("Tenebrex".into())])
         .await.unwrap().dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 11_957, deep + DVec3::new(60_000.0, 0.0, 0.0)).await;
     rpc_call(&ctx, &mut s_dir, "invbroker", "Add", &[PyRep::Integer(984_011), PyRep::Integer(tenebrex_id), PyRep::Integer(133), PyRep::Integer(500)])
         .await.expect("fuel Tenebrex");
     ctx.advance_secs(15 * 60 + 24 * 3_600 + 15 * 60 + 10);

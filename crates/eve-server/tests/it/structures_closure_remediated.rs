@@ -260,6 +260,29 @@ async fn test_remediated_upwell_anchoring_restrictions_end_to_end() {
     let open_perim = DVec3::new(0.0, 5.0e9, 0.0);
     move_pilot_to_system(&ctx, &mut sess, PERIMETER, open_perim).await;
 
+    // 0. Player corporations younger than 7 days (604,800 s) cannot anchor Upwell structures, preserving the cargo item.
+    let young_item = grant(&ctx, OWNER, sess.ship_id.unwrap(), 35832, InventoryFlag::Cargo, 1);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(young_item), PyRep::String("Young Corp Citadel".into())])
+            .await
+            .expect_err("corp age 0s < 7d")
+            .code,
+        "CorporationTooYoungToAnchor"
+    );
+    assert!(ctx.db.get_item(young_item).is_some(), "Rejected anchor must leave structure item in cargo");
+    ctx.advance_virtual_clock(7 * 86_400 - 1);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "structureDeployment", "Anchor", &[PyRep::Integer(young_item), PyRep::String("6d23h59m59s Corp".into())])
+            .await
+            .expect_err("corp age 7d-1s < 7d")
+            .code,
+        "CorporationTooYoungToAnchor"
+    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&young_item);
+    });
+    ctx.advance_virtual_clock(1);
+
     // 1. Trade hub systems (Jita, Amarr, Dodixie, Rens, Hek) reject Upwell anchoring.
     for hub_sys in [30_000_142u32, 30_002_187, 30_002_659, 30_002_510, 30_002_053] {
         move_pilot_to_system(&ctx, &mut sess, hub_sys, DVec3::new(0.0, 5.0e9, 0.0)).await;

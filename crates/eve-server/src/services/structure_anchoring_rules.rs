@@ -25,14 +25,16 @@ pub const TRADE_HUB_SYSTEM_IDS: [u32; 5] = [
 pub const MIN_ANCHOR_SHIP_DISTANCE_M: f64 = 50_000.0;
 /// Maximum distance from deploying ship when explicit anchoring coordinates are supplied (`Anchoring_structures.md`: 75 km).
 pub const MAX_ANCHOR_SHIP_DISTANCE_M: f64 = 75_000.0;
-/// Default offset from deploying ship when no explicit anchoring coordinates are supplied (`60 km` in `[50 km, 75 km]`).
+/// DERIVED: server fallback offset (`60 km` inside `[50 km, 75 km]`) when 2-arg `Anchor` omits explicit coordinates.
 pub const DEFAULT_ANCHOR_SHIP_OFFSET_M: f64 = 60_000.0;
 /// Minimum distance from other Upwell structures when anchoring a FLEX structure (`500 km`).
 pub const FLEX_MIN_STRUCTURE_DISTANCE_M: f64 = 500_000.0;
 /// Minimum distance from stargates when anchoring an Ansiblex Jump Gate (`35841`, `100,000 km`).
 pub const ANSIBLEX_MIN_STARGATE_DISTANCE_M: f64 = 100_000_000.0;
-/// Base anchoring duration for FLEX structures (`45 minutes = 2,700 s`, `Anchoring_structures.md`).
+/// Base anchoring duration for FLEX structures (`45 minutes = 2,700 s`, V24 `structures/const.pyj` `FLEX_DEPLOYING_TIME = 2700`).
 pub const ANSIBLEX_BASE_ANCHORING_SECS: u64 = 45 * 60;
+/// Minimum corporation age required before a capsuleer corporation may anchor an Upwell/FLEX structure (`7 days = 604,800 s`, `Anchoring_structures.md`).
+pub const MIN_ANCHOR_CORP_AGE_SECS: u64 = 7 * 86_400;
 /// Minimum Triglavian Collective (`500026`) standing required to deploy/upgrade a Customs Office in Pochven.
 pub const POCHVEN_CUSTOMS_OFFICE_MIN_TRIG_STANDING: f64 = 1.5;
 
@@ -244,8 +246,23 @@ pub fn validate_and_resolve_anchor(
     corp_id: i64,
     ship_pos: DVec3,
     explicit_pos: Option<DVec3>,
-    _now_unix: u64,
+    now_unix: u64,
 ) -> Result<(DVec3, u64), BridgeRpcError> {
+    if corp_id >= 98_000_000 {
+        let corp_created_unix = snap
+            .corp_governance
+            .get(&corp_id)
+            .map(|g| g.created_unix)
+            .unwrap_or(0);
+        if now_unix.saturating_sub(corp_created_unix) < MIN_ANCHOR_CORP_AGE_SECS {
+            return Err(err(
+                "CorporationTooYoungToAnchor",
+                format!(
+                    "Corporation {corp_id} must be at least 7 days old before anchoring an Upwell structure"
+                ),
+            ));
+        }
+    }
     let anchor_pos = match explicit_pos {
         Some(pos) => pos,
         None => ship_pos + DVec3::new(DEFAULT_ANCHOR_SHIP_OFFSET_M, 0.0, 0.0),
@@ -279,6 +296,8 @@ pub fn validate_and_resolve_anchor(
         .get(&sys_id)
         .map(|s| u64::from(s.strategic_index))
         .unwrap_or(0);
+    // V24 base FLEX deploying time is 2,700 s (`FLEX_DEPLOYING_TIME`); DERIVED `(1 + strat_idx)` scaling
+    // extends FLEX anchoring duration per Strategic Index level.
     let mut anchoring_duration_secs = if profile.hull_class == HullClass::Flex {
         ANSIBLEX_BASE_ANCHORING_SECS * (1 + strat_idx)
     } else {

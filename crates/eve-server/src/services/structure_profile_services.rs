@@ -18,7 +18,9 @@ use crate::services::station_structure::{
     },
 };
 
-// V24 `structures/settings.pyj` setting IDs:
+// V24 `structures/settings.pyj` & `ownergroups/ownergroupConst.pyj` IDs:
+pub const NO_GROUP_ID: i64 = 0;
+pub const CATEGORY_HULL_DEFENSE: i64 = 1003;
 pub const SETTING_REPROCESSING_TAX: i64 = 3;
 pub const SETTING_MARKET_TAX: i64 = 4;
 pub const SETTING_DEFENSE_CAN_CONTROL_STRUCTURE: i64 = 17;

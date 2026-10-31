@@ -107,9 +107,15 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             let prof_arg = args.get(2).and_then(|a| a.as_i64()).filter(|&p| p > 0);
             let rw = match args.get(3) {
                 Some(PyRep::Tuple(seq)) | Some(PyRep::List(seq)) if seq.len() >= 2 => {
-                    let a = seq[0].as_i64().unwrap_or(0) as u64;
-                    let b = seq[1].as_i64().unwrap_or(0) as u64;
-                    if a < 24 && b < 7 { Some((a, b)) } else { Some((b, a)) }
+                    let a = seq[0].as_i64().unwrap_or(-1);
+                    let b = seq[1].as_i64().unwrap_or(-1);
+                    if (0..24).contains(&a) && (0..7).contains(&b) {
+                        Some((a as u64, b as u64))
+                    } else if (0..7).contains(&a) && (0..24).contains(&b) {
+                        Some((b as u64, a as u64))
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
