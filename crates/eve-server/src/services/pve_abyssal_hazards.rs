@@ -158,6 +158,16 @@ pub async fn check_not_in_deadspace_pocket(
             "Cannot activate filament while inside Abyssal or Void deadspace",
         ));
     }
+    if crate::services::pve_dungeon_runtime::is_ship_in_deadspace_pocket(
+        ctx,
+        cur_sys,
+        ship_pos.to_array(),
+    ) {
+        return Err(rpc_err(
+            "ShipInDungeon",
+            "Cannot activate filament while inside a deadspace pocket",
+        ));
+    }
     let near_deadspace_gate = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
         reg.sites_by_system.get(&cur_sys).is_some_and(|sites| {
             sites.iter().any(|s| {

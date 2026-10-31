@@ -501,6 +501,8 @@ pub struct AgentInfo {
     pub division_id: u32,
     pub agent_type_id: u32,
     pub is_locator: bool,
+    #[serde(default)]
+    pub research_skills: Vec<TypeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,6 +702,8 @@ pub struct MissionTemplate {
     pub has_standing_rewards: bool,
     #[serde(default)]
     pub content_template: Option<String>,
+    #[serde(default)]
+    pub dungeon_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

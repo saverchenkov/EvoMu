@@ -718,14 +718,27 @@ impl SdeRegistry {
             }
         }
 
+        #[derive(serde::Deserialize, Default)]
+        struct SdeAgentMissionExt {
+            #[serde(default)]
+            rnd_agent_skills: HashMap<i64, Vec<TypeId>>,
+            #[serde(default)]
+            mission_dungeons: HashMap<u32, u32>,
+        }
+        let agent_mission_ext: SdeAgentMissionExt = serde_json::from_str(include_str!(
+            "../../../data/sde_agent_mission_ext.json"
+        ))
+        .unwrap_or_default();
+
         let mut agents = HashMap::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT agent_id, name, corporation_id, station_id, solar_system_id, level, division_id, agent_type_id, is_locator FROM sde_agents",
             )?;
             let rows = stmt.query_map([], |r| {
+                let agent_id: i64 = r.get(0)?;
                 Ok(AgentInfo {
-                    agent_id: r.get(0)?,
+                    agent_id,
                     name: r.get(1)?,
                     corporation_id: r.get(2)?,
                     station_id: r.get(3)?,
@@ -734,6 +747,11 @@ impl SdeRegistry {
                     division_id: r.get::<_, i64>(6)? as u32,
                     agent_type_id: r.get::<_, i64>(7)? as u32,
                     is_locator: r.get::<_, i64>(8)? != 0,
+                    research_skills: agent_mission_ext
+                        .rnd_agent_skills
+                        .get(&agent_id)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             })?;
             for r in rows {
@@ -1149,14 +1167,16 @@ impl SdeRegistry {
                 "SELECT mission_id, name, is_courier, lp_alpha, lp_omega, has_standing_rewards, content_template FROM sde_missions",
             )?;
             let rows = stmt.query_map([], |r| {
+                let mission_id = r.get::<_, i64>(0)? as u32;
                 Ok(MissionTemplate {
-                    mission_id: r.get::<_, i64>(0)? as u32,
+                    mission_id,
                     title: r.get(1)?,
                     is_courier: r.get::<_, i64>(2)? != 0,
                     lp_alpha: r.get(3)?,
                     lp_omega: r.get(4)?,
                     has_standing_rewards: r.get::<_, i64>(5)? != 0,
                     content_template: r.get(6)?,
+                    dungeon_id: agent_mission_ext.mission_dungeons.get(&mission_id).copied(),
                 })
             })?;
             for r in rows {

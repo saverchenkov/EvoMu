@@ -48,6 +48,8 @@ pub struct MissionTimingAndCargoMeta {
     pub destination_station_id: Option<i64>,
     #[serde(default)]
     pub origin_station_id: Option<i64>,
+    #[serde(default)]
+    pub offered_level: Option<u8>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -546,33 +548,38 @@ pub fn handle_special_dialogue_action(
     match action_id {
         // 12 = agentDialogueButtonStartResearch (feat:pve.research-agent-rp-formula; see GAP(sde) below for access-requirements)
         12 => {
-            const SKILL_RESEARCH_PROJECT_MANAGEMENT: TypeId = 12_179;
             let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
             if agent_info.agent_type_id != 4 {
                 return Some(Err(BridgeRpcError { code: "NotResearchAgent".into(), message: format!("Agent {agent_id} is not an R&D research agent") }));
             }
-            let req_field_skill = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .map(|v| v as TypeId)
-                .unwrap_or(11448); // Minmatar Starship Engineering
-            if !ctx.sde.types.get(&req_field_skill).is_some_and(|t| t.group_id == 270 && t.type_id != 3402 && t.type_id != 12179) {
-                return Some(Err(BridgeRpcError { code: "InvalidResearchSkill".into(), message: format!("Type {req_field_skill} is not a valid R&D science field skill") }));
-            }
+            let requested_field_skill: Option<TypeId> = match args.get(2) {
+                None | Some(PyRep::None) => None,
+                Some(arg) => match arg.as_i64().and_then(|v| TypeId::try_from(v).ok()) {
+                    Some(sk) => Some(sk),
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidResearchSkill".into(),
+                            message: "Research skill argument must be a valid skill typeID".into(),
+                        }));
+                    }
+                },
+            };
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let skill_lvl = crate::services::pve_open_feats_b36::validate_rnd_research_access(
-                    ctx,
-                    session.station_id,
-                    sys_id,
-                    snap,
-                    char_id,
-                    agent_info,
-                    req_field_skill,
-                )?;
+                let (req_field_skill, skill_lvl) =
+                    crate::services::pve_open_feats_b36::validate_rnd_research_access(
+                        ctx,
+                        session.station_id,
+                        sys_id,
+                        snap,
+                        char_id,
+                        agent_info,
+                        requested_field_skill,
+                    )?;
                 let rp_per_day = crate::services::pve_open_feats_b36::compute_rnd_rp_per_day(
+                    ctx,
                     snap,
                     char_id,
                     agent_id,
@@ -596,10 +603,10 @@ pub fn handle_special_dialogue_action(
                     });
                 }
                 save_rnd_research_entries(snap, char_id, &entries);
-                Ok(rp_per_day)
+                Ok((req_field_skill, rp_per_day))
             });
             match res {
-                Ok(rp_per_day) => Some(Ok(PyRep::keyval([
+                Ok((req_field_skill, rp_per_day)) => Some(Ok(PyRep::keyval([
                     ("agentID", PyRep::Integer(agent_id)),
                     ("researchTypeID", PyRep::Integer(req_field_skill as i64)),
                     ("pointsPerDay", PyRep::Real(rp_per_day)),

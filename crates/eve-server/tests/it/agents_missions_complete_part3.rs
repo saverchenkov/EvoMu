@@ -331,7 +331,7 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
     assert_eq!(dc_repeat_err.code, "OneTimeAgentMissionCompleted");
 
     // 5. R&D Agents (`DoAction` action 12 = StartResearch, action 14 = BuyDatacores)
-    let (rd_agent_id, rd_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 4);
+    let (rd_agent_id, rd_corp_id) = ctx.sde.agents.values().find(|a| a.level == 1 && a.agent_type_id == 4 && a.station_id.is_some() && a.research_skills.contains(&11_448)).map(|a| (a.agent_id, a.corporation_id)).expect("L1 R&D agent for 11448");
     colocate_with_agent(&ctx, &mut sess, char_id, rd_agent_id);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {

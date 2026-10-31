@@ -766,6 +766,12 @@ pub async fn handle_ship_or_npc_destruction(
             )
             .await;
         }
+        crate::services::agents_missions::on_mission_npc_destroyed_core(
+            &ctx.db,
+            sys_id,
+            target_ball_id,
+            (attacker_char_id > 0).then_some(attacker_char_id),
+        );
         ctx.db.with_mut_snapshot(|snap| {
             let is_unpiloted_hull = snap.items.get(&target_ball_id).is_some_and(|it| {
                 ctx.sde
@@ -797,6 +803,9 @@ pub async fn handle_ship_or_npc_destruction(
             with_mut_combat_runtime(ctx, |rt| {
                 let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
                 if attacker_char_id > 0 && rt.bounty_credited_balls.insert(target_ball_id) {
+                    rt.pending_bounty_tick_started_unix
+                        .entry((sys_id, attacker_char_id))
+                        .or_insert(now_unix);
                     *rt.pending_bounty_ticks
                         .entry((sys_id, attacker_char_id))
                         .or_insert(0.0) += eff_bounty;

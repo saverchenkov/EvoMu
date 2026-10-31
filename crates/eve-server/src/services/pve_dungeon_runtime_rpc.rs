@@ -798,7 +798,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
     );
     let sde_disallow = sde_dungeon
         .is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
-    let disallow_mwd = editor_disallow || sde_disallow || category == "Deadspace";
+    let disallow_mwd = editor_disallow || sde_disallow;
     let rooms = build_sde_deadspace_rooms(
         ctx,
         sys_id,

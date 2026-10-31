@@ -21,6 +21,13 @@ pub fn parse_mission_id(args: &[PyRep]) -> Result<u32, BridgeRpcError> {
 }
 
 pub fn is_storyline_template(tmpl: &eve_sde::MissionTemplate) -> bool {
+    if tmpl
+        .content_template
+        .as_deref()
+        .is_some_and(|ct| ct.contains("Storyline"))
+    {
+        return true;
+    }
     let t = tmpl.title.to_lowercase();
     t.contains("storyline") || t.contains("important") || t.contains("materials for war")
 }
@@ -262,24 +269,27 @@ pub fn compute_character_mission_rewards(
         .map(|s| s.security_status)
         .unwrap_or(1.0);
 
-    let (is_alpha, neg_lvl, dist_conn, mining_conn, sec_conn) = ctx.db.with_snapshot(|snap| {
-        let alpha = snap
-            .characters
-            .get(&char_id)
-            .is_some_and(|c| c.clone_grade <= 1);
-        let sk = snap.skills.get(&char_id);
-        let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
-        let dist = sk.and_then(|m| m.get(&3894)).map_or(0, |s| s.level);
-        let mining = sk.and_then(|m| m.get(&3893)).map_or(0, |s| s.level);
-        let sec = sk.and_then(|m| m.get(&3895)).map_or(0, |s| s.level);
-        (alpha, neg, dist, mining, sec)
-    });
+    let (is_alpha, neg_lvl, dist_conn, mining_conn, sec_conn, offered_lvl) =
+        ctx.db.with_snapshot(|snap| {
+            let alpha = snap
+                .characters
+                .get(&char_id)
+                .is_some_and(|c| c.clone_grade <= 1);
+            let sk = snap.skills.get(&char_id);
+            let neg = sk.and_then(|m| m.get(&3356)).map_or(0, |s| s.level);
+            let dist = sk.and_then(|m| m.get(&3894)).map_or(0, |s| s.level);
+            let mining = sk.and_then(|m| m.get(&3893)).map_or(0, |s| s.level);
+            let sec = sk.and_then(|m| m.get(&3895)).map_or(0, |s| s.level);
+            let olvl = load_mission_meta(snap, char_id, mission_id).and_then(|m| m.offered_level);
+            (alpha, neg, dist, mining, sec, olvl)
+        });
 
-    let base_lp = tmpl.map_or(100, |t| {
+    let min_level_lp = i64::from(offered_lvl.unwrap_or(1).max(1)) * 100;
+    let base_lp = tmpl.map_or(min_level_lp, |t| {
         if is_alpha && t.lp_alpha > 0 {
-            t.lp_alpha
+            t.lp_alpha.max(min_level_lp)
         } else {
-            t.lp_omega.max(100)
+            t.lp_omega.max(min_level_lp)
         }
     });
 

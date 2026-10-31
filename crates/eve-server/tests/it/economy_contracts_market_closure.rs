@@ -423,7 +423,7 @@ async fn test_e5_research_agent_access_and_rp_formula() {
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 4 && a.level == 4 && a.station_id.is_some())
+        .find(|a| a.agent_type_id == 4 && a.level == 4 && a.station_id.is_some() && a.research_skills.contains(&11_448))
         .cloned()
         .expect("Level 4 R&D agent in SDE");
     let rd_agent_id = rd_agent.agent_id;
@@ -517,9 +517,21 @@ async fn test_e5_research_agent_access_and_rp_formula() {
         .sde
         .agents
         .values()
-        .find(|a| a.agent_type_id == 4 && a.level == 1 && a.station_id.is_some() && a.agent_id != rd_agent_id)
+        .find(|a| {
+            a.agent_type_id == 4
+                && a.level == 1
+                && a.station_id.is_some()
+                && a.agent_id != rd_agent_id
+                && !a.research_skills.is_empty()
+        })
         .cloned()
         .expect("Second R&D agent in SDE");
+    let second_skill_id = if second_rd.research_skills.contains(&11_448) {
+        11_448
+    } else {
+        second_rd.research_skills[0]
+    };
+    seed_skills(&ctx, char_id, &[(second_skill_id, 5)]);
     let second_station_id = second_rd.station_id.unwrap();
     let second_sys_id = second_rd.solar_system_id.unwrap_or(JITA_SYSTEM_ID);
     ctx.db.with_mut_snapshot(|snap| {
@@ -534,7 +546,7 @@ async fn test_e5_research_agent_access_and_rp_formula() {
         &mut sess2,
         "agentMgr",
         "DoAction",
-        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(11_448)],
+        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(i64::from(second_skill_id))],
     )
     .await
     .expect_err("Second R&D agent with RPM 0 must fail");
@@ -551,7 +563,7 @@ async fn test_e5_research_agent_access_and_rp_formula() {
         &mut sess2,
         "agentMgr",
         "DoAction",
-        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(11_448)],
+        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(i64::from(second_skill_id))],
     )
     .await
     .expect("Second R&D agent with RPM 1 must succeed");
@@ -580,7 +592,7 @@ async fn test_e5_research_agent_access_and_rp_formula() {
         &mut sess2,
         "agentMgr",
         "DoAction",
-        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(11_448)],
+        &[PyRep::Integer(12), PyRep::Integer(second_rd.agent_id), PyRep::Integer(i64::from(second_skill_id))],
     )
     .await
     .expect("Second R&D agent after completed mission must succeed");

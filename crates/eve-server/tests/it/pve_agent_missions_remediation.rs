@@ -321,6 +321,7 @@ async fn test_pve_trade_mission_commodity_delivery_and_consumption() {
                     chosen_branch: None,
                     destination_station_id: None,
                     origin_station_id: Some(agent_station_id),
+                    offered_level: None,
                 },
             );
             snap.active_missions.insert(

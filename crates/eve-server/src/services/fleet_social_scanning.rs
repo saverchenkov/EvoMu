@@ -723,6 +723,13 @@ pub(super) async fn handle_scanning_and_wormholes(
                     .await,
                 );
             }
+            if let Some(res) = crate::services::pve_open_feats_b36::try_activate_ess_acceleration_gate(
+                ctx, sys_id, ship_id, gate_id,
+            )
+            .await
+            {
+                return Some(res);
+            }
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
                 return Some(Err(BridgeRpcError {

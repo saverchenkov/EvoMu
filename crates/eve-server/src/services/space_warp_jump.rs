@@ -253,7 +253,6 @@ async fn handle_cmd_warp_to_stuff(
             resolved_pos = Some(pos);
         }
         "mission" | "dungeon" | "location" | "epinstance" => {
-            crate::services::pve_open_feats_b36::mark_wormhole_site_activated(ctx, sys_id, &target_id.to_string());
             resolved_pos =
                 crate::services::pve_dungeon_runtime::resolve_deadspace_or_escalation_warp_target(
                     ctx,
@@ -437,6 +436,13 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos.to_array(),
         preview_dest.to_array(),
     )?;
+    crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+        ctx,
+        sys_id,
+        anchor_pos,
+        preview_dest,
+    )
+    .await?;
 
     let warp_dist = current_ball.position.distance(anchor_pos);
     if warp_dist < 150_000.0 {

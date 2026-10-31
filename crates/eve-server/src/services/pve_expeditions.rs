@@ -322,8 +322,6 @@ pub async fn spawn_expedition_site_instance_core(
             sleeper_sentry_disabled: true,
             sleeper_gas_cloud_active: false,
             cleared: false,
-            activated: false,
-            downtimes_since_activation: 0,
             created_unix: entry.created_at_sec,
             lifetime_seconds: entry.expires_at_sec.saturating_sub(entry.created_at_sec),
             expedition_instance_id: Some(entry.instance_id),

@@ -356,6 +356,7 @@ pub struct CombatRuntimeState {
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
     pub pending_bounty_ticks: HashMap<(u32, i64), f64>,
     pub bounty_tick_next_flush_unix: HashMap<(u32, i64), u64>,
+    pub pending_bounty_tick_started_unix: HashMap<(u32, i64), u64>,
     pub encounter_waves: HashMap<u32, EncounterWaveDirector>,
     pub insurance_contracts: HashMap<i64, InsuranceContractState>,
     pub player_bounty_pool: HashMap<i64, f64>,

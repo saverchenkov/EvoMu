@@ -232,7 +232,26 @@ fn is_pocket_mwd_disallowed(
     ctx.sde
         .dungeons
         .get(&inst.dungeon_id)
-        .is_some_and(|d| d.archetype_id == Some(51))
+        .is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)))
+}
+
+/// Returns `true` if `ship_pos` lies inside an active k-space `DungeonRuntimeInstance` pocket.
+pub fn is_ship_in_deadspace_pocket(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+    ship_pos: [f64; 3],
+) -> bool {
+    if !has_dungeon_runtime_store(ctx) {
+        return false;
+    }
+    with_dungeon_runtime_store(ctx, |store| {
+        store.instances.values().any(|inst| {
+            !inst.completed
+                && !inst.despawned
+                && inst.solar_system_id == sys_id
+                && inst.rooms.iter().any(|r| dist3(ship_pos, r.position) <= POCKET_RADIUS_M)
+        })
+    })
 }
 
 /// Checks whether activating a MicroWarpdrive is permitted at `ship_pos` in `sys_id`.

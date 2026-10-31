@@ -254,8 +254,6 @@ fn run_daily_downtime_and_jobs_inner(ctx: &ServerContext, force_abyssal_evac: bo
     let (npc_wrecks_cleaned, mission_npcs_respawned) =
         crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
     crate::services::wormhole_pve_escalations::process_wormhole_sites_on_downtime(ctx);
-    let _ = crate::services::pve_open_feats_b36::tick_ess_main_bank_autopayout(ctx, now);
-    let _ = crate::services::pve_open_feats_b36::tick_wormhole_sites_downtime(ctx);
     let (replenished_asteroids, expired_order_list, expired_contracts, sov_decayed) =
         ctx.db.with_mut_snapshot(|snap| {
             let mut ast_count = 0_i64;

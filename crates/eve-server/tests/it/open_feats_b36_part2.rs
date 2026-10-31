@@ -1,18 +1,14 @@
-//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 2).
+//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 2: Storyline offer counter).
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
-use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::pve_open_feats_b36::{
-    SLEEPER_SENTRY_RESTLESS, SLEEPER_SENTRY_VIGILANT, SLEEPER_SENTRY_WAKEFUL,
-};
 use glam::DVec3;
 
 fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
@@ -29,340 +25,437 @@ fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
     }
 }
 
-#[tokio::test]
-async fn test_b36_ess_grid_restrictions_main_autopayout_and_reserve_tiers() {
-    // parity: feat:pve.ess-grid-warp-mwd-restrictions, feat:pve.ess-main-bank-autopayout, feat:pve.ess-reserve-bank-key-tiers
-    eve_testkit::attest(&[
-        "feat:pve.ess-grid-warp-mwd-restrictions",
-        "feat:pve.ess-main-bank-autopayout",
-        "feat:pve.ess-reserve-bank-key-tiers",
-    ]);
-    let ctx = Arc::new(ServerContext::new());
-    crate::common::pin_clock(&ctx);
-    let sys_id = ctx
-        .sde
-        .solar_systems
-        .values()
-        .find(|s| s.security_status <= -0.1 && s.solar_system_id < 31_000_000)
-        .map(|s| s.solar_system_id)
-        .unwrap_or(30_004_759); // Null-sec
-    let pilot_a = 100_001_i64;
-    let pilot_b = 100_002_i64;
-    let ship_a = 960_001_i64;
-    let ess_id = 820_000_000 + sys_id as i64;
-    let kw = HashMap::new();
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ess_id, type_id: 32882, position: DVec3::ZERO,
-                velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000.0,
-                radius: 500.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-            },
-            CombatState::default(),
-        )
-        .await;
-    let _ = sys_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_a, type_id: 587, position: DVec3::new(1_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0,
-                radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-            },
-            CombatState::default(),
-        )
-        .await;
-
-    // 1. Inside 75 km ESS intrusion bubble: warp, MWD, MJD, cloak, cyno all blocked
-    for action in ["warp", "mwd", "mjd", "cloak", "cyno"] {
-        let err = eve_server::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
-            &ctx, sys_id, ship_a, action,
-        )
-        .await
-        .expect_err("ESS 75km bubble must block action");
-        assert!(err.code.starts_with("EssIntrusionBubble"));
-    }
-
-    // 2. ESS Main Bank 2h45m autopayout (persisted in system_states, deferred while hacked, proportional 2:1 when unlinked)
-    let now = ctx.now_unix();
+fn dock_at_station(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    sys_id: u32,
+    station_id: Option<i64>,
+) {
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = station_id;
     ctx.db.with_mut_snapshot(|snap| {
-        let base = snap.characters.values().next().cloned().expect("base char");
-        let mut ca = base.clone();
-        ca.character_id = pilot_a;
-        ca.station_id = None;
-        ca.solar_system_id = sys_id;
-        ca.active_ship_id = ship_a;
-        ca.balance = IskCents(0);
-        let mut cb = base;
-        cb.character_id = pilot_b;
-        cb.balance = IskCents(0);
-        snap.characters.insert(pilot_a, ca);
-        snap.characters.insert(pilot_b, cb);
-        let st = snap.system_states.entry(sys_id).or_default();
-        st.solar_system_id = sys_id;
-        st.ess_main_bank = IskCents(300_000);
-        st.ess_reserve_bank = IskCents(1_500_000);
-        st.ess_linked_character_id = Some(pilot_a);
-        eve_server::services::pve_open_feats_b36::record_ess_main_bank_contribution(st, pilot_a, 200_000, now);
-        eve_server::services::pve_open_feats_b36::record_ess_main_bank_contribution(st, pilot_b, 100_000, now);
-    });
-
-    ctx.db.clock().advance_secs(9_900); // 2h45m
-    // While hacked, autopayout must NOT fire
-    assert_eq!(eve_server::services::pve_open_feats_b36::tick_ess_main_bank_autopayout(&ctx, ctx.now_unix()), 0);
-
-    // Unlink hacker and trigger autopayout -> 200,000 to pilot_a, 100,000 to pilot_b
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.system_states.get_mut(&sys_id) {
-            st.ess_linked_character_id = None;
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = station_id;
         }
     });
-    assert_eq!(eve_server::services::pve_open_feats_b36::tick_ess_main_bank_autopayout(&ctx, ctx.now_unix()), 1);
-    let (bal_a, bal_b, main_rem, journal_a, journal_b) = ctx.db.with_snapshot(|s| {
-        (
-            s.characters.get(&pilot_a).map(|c| c.balance.0).unwrap_or(0),
-            s.characters.get(&pilot_b).map(|c| c.balance.0).unwrap_or(0),
-            s.system_states.get(&sys_id).map(|st| st.ess_main_bank.0).unwrap_or(-1),
-            s.wallet_journal.iter().any(|j| j.character_id == pilot_a && j.entry_type == "ESSMainBankPayout" && j.amount.0 == 200_000),
-            s.wallet_journal.iter().any(|j| j.character_id == pilot_b && j.entry_type == "ESSMainBankPayout" && j.amount.0 == 100_000),
-        )
-    });
-    assert_eq!(bal_a, 200_000);
-    assert_eq!(bal_b, 100_000);
-    assert_eq!(main_rem, 0);
-    assert!(journal_a, "pilot_a must receive ESSMainBankPayout journal entry");
-    assert!(journal_b, "pilot_b must receive ESSMainBankPayout journal entry");
-
-    // 3. ESS Reserve Bank key tiers (15-min vs 45-min quadrant key)
-    let mut sess_a = SessionState::new(3603);
-    sess_a.user_id = Some(1);
-    sess_a.character_id = Some(pilot_a);
-    sess_a.solar_system_id = Some(sys_id);
-    sess_a.station_id = None;
-    sess_a.ship_id = Some(ship_a);
-
-    // Test all 4 quadrant 15m and 45m reserve keys: 3 quadrants fail, 1 quadrant matches sys_id
-    let keys_15m: [u32; 4] = [57714, 57716, 57717, 57720];
-    let keys_45m: [u32; 4] = [57715, 57719, 57718, 57721];
-
-    let mut matched_15m = false;
-    let mut wrong_quad_rejected = false;
-    let mut last_err = None;
-    for (idx, &tid) in keys_15m.iter().enumerate() {
-        let item_id = 960_010 + idx as i64;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.insert(
-                item_id,
-                InventoryItemRecord {
-                    item_id, type_id: tid, owner_id: pilot_a,
-                    location_id: ship_a, flag: InventoryFlag::Cargo,
-                    quantity: 1, singleton: false, ..Default::default()
-                },
-            );
-        });
-        match ctx
-            .dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(item_id)], &kw, None)
-            .await
-        {
-            Ok(res_15) => {
-                let kv_15 = kv_map(&res_15);
-                assert_eq!(kv_15.get("unlocked").and_then(|v| v.as_bool()), Some(true));
-                assert_eq!(kv_15.get("durationMinutes").and_then(|v| v.as_i64()), Some(15));
-                let (consumed, pulses_tot, pulses_rem) = ctx.db.with_snapshot(|s| {
-                    let p = eve_server::services::space_destiny::get_ess_reserve_pulses(s, sys_id);
-                    (!s.items.contains_key(&item_id), p.pulses_total, p.pulses_remaining)
-                });
-                assert!(consumed, "15m key must be consumed");
-                assert_eq!(pulses_tot, 15);
-                assert_eq!(pulses_rem, 15);
-                let notifs = sess_a.drain_notifications();
-                assert!(notifs.iter().any(|(name, _)| name == "OnReserveBankUnlock"), "Must emit OnReserveBankUnlock");
-                matched_15m = true;
-            }
-            Err(e) => {
-                wrong_quad_rejected = true;
-                last_err = Some(e);
-            }
-        }
-    }
-    assert!(wrong_quad_rejected, "Wrong-quadrant ESS reserve key must be rejected");
-    assert!(matched_15m, "Matching-quadrant 15m ESS reserve key must unlock 15 pulses: {last_err:?}");
-
-    let mut matched_45m = false;
-    for (idx, &tid) in keys_45m.iter().enumerate() {
-        let item_id = 960_020 + idx as i64;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.insert(
-                item_id,
-                InventoryItemRecord {
-                    item_id, type_id: tid, owner_id: pilot_a,
-                    location_id: ship_a, flag: InventoryFlag::Cargo,
-                    quantity: 1, singleton: false, ..Default::default()
-                },
-            );
-        });
-        if let Ok(res_45) = ctx
-            .dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(item_id)], &kw, None)
-            .await
-        {
-            let kv_45 = kv_map(&res_45);
-            assert_eq!(kv_45.get("unlocked").and_then(|v| v.as_bool()), Some(true));
-            assert_eq!(kv_45.get("durationMinutes").and_then(|v| v.as_i64()), Some(45));
-            let (consumed, pulses_tot, pulses_rem) = ctx.db.with_snapshot(|s| {
-                let p = eve_server::services::space_destiny::get_ess_reserve_pulses(s, sys_id);
-                (!s.items.contains_key(&item_id), p.pulses_total, p.pulses_remaining)
-            });
-            assert!(consumed, "45m key must be consumed");
-            assert_eq!(pulses_tot, 45);
-            assert_eq!(pulses_rem, 45);
-            matched_45m = true;
-        }
-    }
-    assert!(matched_45m, "Matching-quadrant 45m ESS reserve key must unlock 45 pulses");
 }
 
-#[tokio::test]
-async fn test_b36_insurgency_heist_and_fob() {
-    // parity: feat:pve.insurgency-ice-heist, feat:pve.pirate-fob-forward-operating-base
-    eve_testkit::attest(&[
-        "feat:pve.insurgency-ice-heist",
-        "feat:pve.pirate-fob-forward-operating-base",
-    ]);
-    let ctx = ServerContext::new();
+async fn query_journal_missions(
+    ctx: &ServerContext,
+    s: &mut SessionState,
+) -> Vec<HashMap<String, PyRep>> {
     let kw = HashMap::new();
-    let mut sess = SessionState::new(3604);
-    sess.user_id = Some(1);
-    sess.character_id = Some(90_000_001);
-    sess.solar_system_id = Some(30_002_537);
+    let rep = ctx
+        .dispatch_rpc(s, "agentMgr", None, "GetMyJournalDetails", &[], &kw, None)
+        .await
+        .expect("GetMyJournalDetails");
+    let PyRep::Tuple(tup) = rep else {
+        panic!("Expected Tuple from GetMyJournalDetails");
+    };
+    let PyRep::List(missions) = &tup[0] else {
+        panic!("Expected missions list");
+    };
+    missions.iter().map(kv_map).collect()
+}
 
-    let cid = 900_001_i64;
-    eve_server::services::insurgency_services::init_insurgency_campaign(
-        &ctx, cid, 500_011, 500_002, 30_002_537, vec![30_002_537],
+async fn complete_live_courier(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    agent: &eve_sde::AgentInfo,
+) {
+    let kw = HashMap::new();
+    dock_at_station(
+        ctx,
+        sess,
+        char_id,
+        agent.solar_system_id.unwrap(),
+        agent.station_id,
     );
-    let _ = eve_server::services::insurgency_services::add_system_corruption(&ctx, cid, 30_002_537, 600);
-    let heist_id = eve_server::services::insurgency_services::spawn_ice_heist(&ctx, 30_002_537);
-    assert!(heist_id > 0);
-
-    let heists_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "dungeonInstanceCacheMgr",
+    let offer = kv_map(
+        &ctx.dispatch_rpc(
+            sess,
+            "agentMgr",
             None,
-            "GetPirateInsurgencyIceHeistInstances",
-            &[PyRep::Integer(30_002_537)],
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(agent.agent_id)],
             &kw,
             None,
         )
         .await
-        .expect("GetPirateInsurgencyIceHeistInstances");
-    let PyRep::List(heists) = heists_rep else {
-        panic!("Expected List of ice heists");
-    };
-    assert_eq!(heists.len(), 1);
-    let h_kv = kv_map(&heists[0]);
-    assert_eq!(h_kv.get("instanceID").and_then(|v| v.as_i64()), Some(heist_id));
-    assert_eq!(h_kv.get("solarSystemID").and_then(|v| v.as_i64()), Some(30_002_537));
-    assert_eq!(h_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
+        .expect("Request courier mission"),
+    );
+    let mid = offer["missionID"].as_i64().unwrap();
+    let dest_sta = offer["destinationStationID"].as_i64().unwrap();
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        None,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(mid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Accept courier mission");
 
-    let fob_id = eve_server::services::fw_gameplay::fw_gameplay_insurgency::ensure_campaign_pirate_fob(&ctx, cid)
-        .await
-        .expect("Pirate FOB spawned");
-    assert!(fob_id > 0);
-    let fob_in_db = ctx.db.with_snapshot(|s| {
-        s.structures
-            .get(&fob_id)
-            .is_some_and(|st| st.solar_system_id == 30_002_537 && st.state == "ShieldVulnerable")
+    let tag = format!("courier_cargo:{char_id}:{mid}");
+    ctx.db.with_mut_snapshot(|snap| {
+        let cid = snap
+            .item_custom_names
+            .iter()
+            .find(|(_, v)| *v == &tag)
+            .map(|(&k, _)| k)
+            .expect("granted courier cargo item");
+        if let Some(it) = snap.items.get_mut(&cid) {
+            it.location_id = ship_id;
+            it.flag = InventoryFlag::Cargo;
+        }
     });
-    assert!(fob_in_db, "Pirate FOB structure must be persisted in FOB system");
-    let sys_handle = ctx.systems.get_or_spawn(30_002_537);
-    assert!(sys_handle.get_ball_snapshot(fob_id).await.unwrap().is_some(), "Pirate FOB ball must exist in space");
+    let dest_sys = ctx.sde.stations[&dest_sta].solar_system_id;
+    dock_at_station(ctx, sess, char_id, dest_sys, Some(dest_sta));
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        None,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(mid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Complete courier mission");
+}
+
+async fn complete_live_fw_mission(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    fw_agent: &eve_sde::AgentInfo,
+) {
+    let kw = HashMap::new();
+    let sys_id = fw_agent.solar_system_id.unwrap();
+    dock_at_station(ctx, sess, char_id, sys_id, fw_agent.station_id);
+    let offer = kv_map(
+        &ctx.dispatch_rpc(
+            sess,
+            "agentMgr",
+            None,
+            "DoAction",
+            &[PyRep::Integer(2), PyRep::Integer(fw_agent.agent_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Request FW mission"),
+    );
+    let mid = offer["missionID"].as_i64().unwrap();
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        None,
+        "DoAction",
+        &[PyRep::Integer(3), PyRep::Integer(mid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Accept FW mission");
+    let (m_sys_id, npc_ids) = ctx.db.with_snapshot(|s| {
+        let m = &s.active_missions[&(char_id, mid as u32)];
+        (m.solar_system_id, m.spawned_npc_ball_ids.clone())
+    });
+
+    dock_at_station(ctx, sess, char_id, m_sys_id, None);
+    let sys_h = ctx.systems.get_or_spawn(m_sys_id);
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 639,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 100_000_000.0,
+                radius: 250.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(639),
+        )
+        .await;
+    for nid in npc_ids {
+        let _ = sys_h.set_ball_position(nid, DVec3::new(5_000.0, 0.0, 0.0)).await;
+        ctx.dispatch_rpc(sess, "dogmaIM", None, "AddTarget", &[PyRep::Integer(nid)], &kw, None)
+            .await
+            .expect("AddTarget FW mission NPC");
+        for _ in 0..30 {
+            if sys_h.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == nid && l.locked) {
+                break;
+            }
+            let _ = sys_h.step_manual(1.0).await;
+        }
+        ctx.dispatch_rpc(
+            sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(820_002), PyRep::Integer(nid)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Fire weapon at FW mission NPC");
+        for _ in 0..180 {
+            if sys_h.get_ball_snapshot(nid).await.unwrap().is_none() {
+                break;
+            }
+            let _ = sys_h.step_manual(1.0).await;
+        }
+        assert!(
+            sys_h.get_ball_snapshot(nid).await.unwrap().is_none(),
+            "FW mission NPC {nid} must be destroyed"
+        );
+    }
+    dock_at_station(ctx, sess, char_id, sys_id, fw_agent.station_id);
+    ctx.dispatch_rpc(
+        sess,
+        "agentMgr",
+        None,
+        "DoAction",
+        &[PyRep::Integer(6), PyRep::Integer(mid)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Complete FW mission");
 }
 
 #[tokio::test]
-async fn test_b36_sleeper_sentries_and_wh_downtime_despawn() {
-    // parity: feat:pve.sleeper-sentry-towers, feat:pve.wormhole-site-downtime-despawn
-    eve_testkit::attest(&[
-        "feat:pve.sleeper-sentry-towers",
-        "feat:pve.wormhole-site-downtime-despawn",
-    ]);
+async fn test_b36_storyline_offer_counter() {
+    // parity: feat:pve.storyline-offer-counter
+    eve_testkit::attest(&["feat:pve.storyline-offer-counter"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let wh_sys = 31_000_005_u32;
+    let kw = HashMap::new();
+    let char_id = 90_000_001_i64;
+    let ship_id = 820_001_i64;
+    let weapon_id = 820_002_i64;
+    let ammo_id = 820_003_i64;
 
-    // 1. Sleeper Sentry Towers (30460 Vigilant C1, 30461 Wakeful C3, 30462 Restless C5)
-    //    with 50 m signature radius, 250 km optimal range, and EM/Thermal damage
-    for (wh_class, expected_tid) in [
-        (1_u8, SLEEPER_SENTRY_VIGILANT),
-        (3_u8, SLEEPER_SENTRY_WAKEFUL),
-        (5_u8, SLEEPER_SENTRY_RESTLESS),
-    ] {
-        let spawned = eve_server::services::pve_exploration_sites::spawn_sleeper_wave_in_system(
-            &ctx, wh_sys, wh_class, 1, DVec3::ZERO,
-        )
-        .await;
-        let sentry_bid = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
-            spawned.iter().copied().find(|bid| {
-                rt.npc_entities.get(bid).is_some_and(|e| {
-                    e.type_id == expected_tid
-                        && (e.optimal_range - 250_000.0).abs() < 1.0
-                        && e.damage_vector.em > 0.0
-                        && e.damage_vector.thermal > 0.0
-                        && e.damage_vector.kinetic == 0.0
-                        && e.damage_vector.explosive == 0.0
-                })
-            })
-        })
-        .expect("Sleeper Sentry Tower with 250km optimal range and EM/Thermal damage");
-        let sys_handle = ctx.systems.get_or_spawn(wh_sys);
-        let cs = sys_handle
-            .get_combat_state(sentry_bid)
-            .await
-            .unwrap()
-            .expect("Sentry combat state");
-        let expected_sig = ctx
-            .sde
-            .types
-            .get(&expected_tid)
-            .and_then(|t| t.default_attributes.get(&552).copied())
-            .unwrap_or(50.0);
-        assert!((cs.signature_radius - expected_sig).abs() < 1e-3, "Expected {expected_sig}m signature radius");
-    }
-
-    // 2. W-space site downtime despawn: 3rd downtime if completed, 4th if unfinished
-    let base_site = eve_server::services::pve_exploration::PveSiteInstance {
-        site_id: "970001".into(),
-        dungeon_id: 1,
-        dungeon_name: "WH Site".into(),
-        solar_system_id: wh_sys,
-        site_category: "WormholeCombat".into(),
-        ded_rating: None,
-        wormhole_class: Some(3),
-        position: [0.0, 0.0, 0.0],
-        probe_required: false,
-        signal_strength: 100.0,
-        current_room: 1,
-        total_rooms: 1,
-        current_wave: 1,
-        total_waves: 1,
-        active_npc_ball_ids: Vec::new(), hackable_can_ids: Vec::new(), npc_guards_spawned: true,
-        ghost_timer_started_at: None, ghost_detonate_after_sec: 0, ghost_detonated: false,
-        sleeper_rift_stabilized: false, sleeper_sentry_disabled: false, sleeper_gas_cloud_active: false,
-        cleared: true, activated: true, downtimes_since_activation: 0,
-        created_unix: 0, lifetime_seconds: 86_400, expedition_instance_id: None, gate_ball_id: None, activated_at_downtime: None, dread_escalation_triggers: 0, carrier_escalation_triggers: 0, active_escalation_capitals: Vec::new(), is_shattered_resource_site: false, delayed_wave_triggered: false, relay_spawned: false,
-    };
-    let mut unfinished_site = base_site.clone();
-    unfinished_site.site_id = "970002".into();
-    unfinished_site.cleared = false;
-    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
-        reg.sites_by_system.insert(wh_sys, vec![base_site, unfinished_site]);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.active_ship_id = ship_id;
+            ch.standings.insert(500_001, 6.0);
+            ch.standings.insert(1_000_148, 5.0);
+            ch.standings.insert(1_000_182, 5.0);
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 639,
+                owner_id: char_id,
+                location_id: 30_000_142,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            weapon_id,
+            InventoryItemRecord {
+                item_id: weapon_id,
+                type_id: 2961,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ammo_id,
+            InventoryItemRecord {
+                item_id: ammo_id,
+                type_id: 21894,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 5_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(weapon_id, true);
+        let sk = snap.skills.entry(char_id).or_default();
+        for sid in [3300_u32, 3302, 3305, 3308, 3310, 3311, 3312, 3315, 3316, 3318, 3334, 3413, 3418, 3426, 20327, 21667] {
+            sk.insert(
+                sid,
+                TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 1_280_000.0,
+                },
+            );
+        }
+        for tid in [639_u32, 2961, 21894] {
+            if let Some(t) = ctx.sde.types.get(&tid) {
+                for sa in [182_u16, 183, 184] {
+                    if let Some(&req_f) = t.default_attributes.get(&sa) {
+                        let rsid = req_f as u32;
+                        if rsid > 0 {
+                            sk.insert(rsid, TrainedSkillRecord { type_id: rsid, level: 5, skill_points: 1_280_000.0 });
+                        }
+                    }
+                }
+            }
+        }
     });
+    ctx.invalidate_ship_fitting(ship_id);
 
-    // Downtime 1 & 2: both survive
-    assert_eq!(eve_server::services::pve_open_feats_b36::tick_wormhole_sites_downtime(&ctx), 0);
-    assert_eq!(eve_server::services::pve_open_feats_b36::tick_wormhole_sites_downtime(&ctx), 0);
-    // Downtime 3: completed site despawns, unfinished survives
-    assert_eq!(eve_server::services::pve_open_feats_b36::tick_wormhole_sites_downtime(&ctx), 1);
-    // Downtime 4: unfinished site despawns
-    assert_eq!(eve_server::services::pve_open_feats_b36::tick_wormhole_sites_downtime(&ctx), 1);
+    let mut sess = SessionState::new(3602);
+    sess.user_id = Some(1);
+    sess.character_id = Some(char_id);
+    sess.ship_id = Some(ship_id);
+
+    let count_storyline_offers = |missions: &[HashMap<String, PyRep>]| -> Vec<(i64, i64, i64)> {
+        missions
+            .iter()
+            .filter(|m| {
+                m.get("state").and_then(|v| v.as_str()) == Some("Offered")
+                    && m.get("agentID")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|aid| ctx.sde.agents.get(&aid))
+                        .is_some_and(|a| matches!(a.agent_type_id, 6 | 7))
+            })
+            .map(|m| {
+                (
+                    m["agentID"].as_i64().unwrap(),
+                    m["missionID"].as_i64().unwrap(),
+                    m.get("level").and_then(|v| v.as_i64()).unwrap_or(0),
+                )
+            })
+            .collect()
+    };
+
+    // Negative RPC check: completing an unaccepted mission is refused
+    assert!(ctx
+        .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(999_999)], &kw, None)
+        .await
+        .is_err());
+
+    // 1. Real SDE InterBus agent (3015955, corp 1000148): 16 live completions -> 0 storyline offers
+    let interbus_agent = ctx.sde.agents[&3_015_955].clone();
+    for _ in 0..16 {
+        complete_live_courier(&ctx, &mut sess, char_id, ship_id, &interbus_agent).await;
+    }
+    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+
+    // 2. Real SDE FW militia agent (3019210, corp 1000182 Tribal Liberation Force): 16 live completions -> 0 storyline offers
+    let fw_agent = ctx.sde.agents[&3_019_210].clone();
+    dock_at_station(&ctx, &mut sess, char_id, fw_agent.solar_system_id.unwrap(), fw_agent.station_id);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(fw_agent.agent_id)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "NotEnlistedInMilitia"
+    );
+    ctx.dispatch_rpc(&mut sess, "facWarMgr", None, "JoinFactionAsCharacter", &[PyRep::Integer(500_002)], &kw, None)
+        .await
+        .expect("Enlist in Minmatar militia");
+    for _ in 0..16 {
+        complete_live_fw_mission(&ctx, &mut sess, char_id, ship_id, &fw_agent).await;
+    }
+    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+
+    // 3. Separate (faction, level) counters: 15 L3 + 1 L1 Caldari high-sec missions -> 0 offers; 16th L3 -> triggers L3 Storyline!
+    let caldari_l3 = ctx.sde.agents[&3_008_423].clone();
+    let caldari_l1 = ctx.sde.agents[&3_008_416].clone();
+    for _ in 0..15 {
+        complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l3).await;
+    }
+    complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l1).await;
+    assert!(count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await).is_empty());
+
+    complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l3).await;
+    let sl_offers_1 = count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await);
+    assert_eq!(sl_offers_1.len(), 1);
+    let (first_sl_aid, first_sl_mid, first_sl_lvl) = sl_offers_1[0];
+    assert_eq!(first_sl_lvl, 3);
+
+    let briefing_1 = kv_map(
+        &ctx.dispatch_rpc(&mut sess, "agentMgr", None, "GetMissionBriefingInfo", &[PyRep::Integer(first_sl_mid)], &kw, None)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(briefing_1["level"].as_i64(), Some(3));
+    let sl_tmpl_diff = ctx
+        .sde
+        .missions
+        .get(&(first_sl_mid as u32))
+        .and_then(|t| t.dungeon_id)
+        .and_then(|did| ctx.sde.dungeons.get(&did))
+        .and_then(|d| d.difficulty);
+    assert_eq!(sl_tmpl_diff, Some(3));
+
+    let first_sl_info = &ctx.sde.agents[&first_sl_aid];
+    assert!(ctx.sde.solar_systems[&first_sl_info.solar_system_id.unwrap()].security_status >= 0.45);
+
+    let origin_sys = caldari_l3.solar_system_id.unwrap();
+    let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
+    for j in ctx.sde.jumps.values() {
+        adj.entry(j.from_solar_system_id)
+            .or_default()
+            .push(j.to_solar_system_id);
+    }
+    let mut dists = HashMap::from([(origin_sys, 0_u32)]);
+    let mut q = VecDeque::from([origin_sys]);
+    while let Some(u) = q.pop_front() {
+        let nd = dists[&u] + 1;
+        if let Some(nbs) = adj.get(&u) {
+            for &v in nbs {
+                if !dists.contains_key(&v) {
+                    dists.insert(v, nd);
+                    q.push_back(v);
+                }
+            }
+        }
+    }
+    let min_jumps = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            matches!(a.agent_type_id, 6 | 7)
+                && ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id) == Some(500_001)
+                && a.solar_system_id.and_then(|s| ctx.sde.solar_systems.get(&s)).is_some_and(|s| s.security_status >= 0.45)
+        })
+        .filter_map(|a| dists.get(&a.solar_system_id?))
+        .copied()
+        .min()
+        .unwrap();
+    assert_eq!(dists[&first_sl_info.solar_system_id.unwrap()], min_jumps);
+
+    // 4. With nearest storyline agent's offer still pending, 32nd L3 completion picks second-nearest high-sec Storyline agent!
+    for _ in 0..16 {
+        complete_live_courier(&ctx, &mut sess, char_id, ship_id, &caldari_l3).await;
+    }
+    let sl_offers_2 = count_storyline_offers(&query_journal_missions(&ctx, &mut sess).await);
+    assert_eq!(sl_offers_2.len(), 2);
+    let second_sl_aid = sl_offers_2
+        .iter()
+        .map(|&(aid, _, _)| aid)
+        .find(|&aid| aid != first_sl_aid)
+        .expect("second-nearest storyline agent");
+    assert!(ctx.sde.solar_systems[&ctx.sde.agents[&second_sl_aid].solar_system_id.unwrap()].security_status >= 0.45);
 }

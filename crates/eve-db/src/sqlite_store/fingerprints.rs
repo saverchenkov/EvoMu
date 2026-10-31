@@ -287,6 +287,18 @@ pub(crate) fn fp_system_state(s: &SystemDynamicState) -> u64 {
     h.write_u64(s.fw_capture_duration_seconds);
     h.write_u64(s.last_fw_capture_tick);
     h.write_u64(s.last_sov_claim_tick);
+    h.write_u64(s.ess_cycle_started_unix);
+    let mut contribs: Vec<(i64, i64)> = s
+        .ess_main_bank_contributors
+        .iter()
+        .map(|(&cid, &cents)| (cid, cents))
+        .collect();
+    contribs.sort_unstable_by_key(|&(cid, _)| cid);
+    h.write_u64(contribs.len() as u64);
+    for (cid, cents) in contribs {
+        h.write_i64(cid);
+        h.write_i64(cents);
+    }
     h.finish()
 }
 

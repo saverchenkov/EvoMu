@@ -228,11 +228,17 @@ pub async fn handle(
                                 ])
                             })
                             .collect();
+                        let offer_lvl = meta
+                            .as_ref()
+                            .and_then(|mt| mt.offered_level)
+                            .or_else(|| ctx.sde.agents.get(&m.agent_id).map(|a| a.level))
+                            .unwrap_or(1);
                         PyRep::keyval([
                             ("missionID", PyRep::Integer(m.mission_id as i64)),
                             ("contentID", PyRep::Integer(m.mission_id as i64)),
                             ("agentID", PyRep::Integer(m.agent_id)),
                             ("solarSystemID", PyRep::Integer(m.solar_system_id as i64)),
+                            ("level", PyRep::Integer(offer_lvl as i64)),
                             ("state", PyRep::String(m.state)),
                             ("missionState", PyRep::Integer(mission_state)),
                             ("importantMission", PyRep::Bool(important)),
@@ -326,12 +332,18 @@ pub async fn handle(
                 "Quit" => 6_i64,
                 _ => 0_i64,
             };
+            let offer_lvl = meta
+                .as_ref()
+                .and_then(|mt| mt.offered_level)
+                .or_else(|| ctx.sde.agents.get(&m.agent_id).map(|a| a.level))
+                .unwrap_or(1);
             let (isk_reward, lp_reward, bonus_reward) =
                 compute_character_mission_rewards(ctx, char_id, m.agent_id, mission_id, sys_id);
             Some(Ok(PyRep::keyval([
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("contentID", PyRep::Integer(mission_id as i64)),
                 ("agentID", PyRep::Integer(m.agent_id)),
+                ("level", PyRep::Integer(offer_lvl as i64)),
                 ("title", PyRep::String(title)),
                 ("state", PyRep::String(m.state)),
                 ("missionState", PyRep::Integer(mission_state)),
@@ -589,7 +601,7 @@ pub async fn handle(
                         save_mission_meta(
                             snap,
                             char_id,
-                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, origin_station_id: origin_sid, },
+                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, origin_station_id: origin_sid, offered_level: Some(agent_info.level), },
                         );
                         let target_sys = if is_fw_agent(agent_info) { resolve_fw_warzone_system(agent_info.corporation_id) } else { sys_id };
                         snap.active_missions.insert((char_id, mission_id), ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
@@ -1152,9 +1164,15 @@ pub async fn handle(
 
                         let is_rnd = ctx.sde.agents.get(&m_agent_id).is_some_and(is_rnd_agent);
                         if is_rnd {
+                            crate::services::pve_open_feats_b36::record_agent_mission_completed(snap, char_id, m_agent_id);
+                            let ag_lvl = ctx.sde.agents.get(&m_agent_id).map_or(1, |a| a.level);
                             let mut research = load_rnd_research_entries(snap, char_id);
                             if let Some(re) = research.iter_mut().find(|r| r.agent_id == m_agent_id) {
-                                re.initial_points += re.points_per_day;
+                                let elapsed_days = (now.saturating_sub(re.started_unix) as f64) / 86_400.0;
+                                re.initial_points += re.points_per_day * elapsed_days + re.points_per_day;
+                                let sk_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&re.research_type_id)).map_or(1, |s| s.level);
+                                re.points_per_day = crate::services::pve_open_feats_b36::compute_rnd_rp_per_day(ctx, snap, char_id, m_agent_id, ag_lvl, sk_lvl);
+                                re.started_unix = now;
                             }
                             save_rnd_research_entries(snap, char_id, &research);
                         }
@@ -1182,28 +1200,31 @@ pub async fn handle(
                         }
 
                         let mut resolved_storyline_agent_id = storyline_agent_id;
+                        let mut resolved_storyline_level = ctx.sde.agents.get(&m_agent_id).map_or(1, |a| a.level.clamp(1, 5));
                         let (t, storyline) = if (!is_storyline && tmpl.has_standing_rewards) || is_rnd {
-                            let t = {
-                                let count = snap.mission_tally.entry(char_id).or_insert(0);
-                                *count += 1;
-                                *count
-                            };
                             let sl_opt = ctx.sde.agents.get(&m_agent_id).and_then(|ca| crate::services::pve_open_feats_b36::record_mission_completion_and_resolve_storyline(ctx, snap, char_id, ca));
-                            if let Some(sl_id) = sl_opt { resolved_storyline_agent_id = sl_id; }
+                            let t = if crate::services::pve_open_feats_b36::is_interbus_or_militia_corp(&ctx.sde, corp_id) {
+                                snap.mission_tally.get(&char_id).copied().unwrap_or(0)
+                            } else {
+                                let count = snap.mission_tally.entry(char_id).or_insert(0); *count += 1; *count
+                            };
+                            if let Some((sl_id, sl_lvl)) = sl_opt { resolved_storyline_agent_id = sl_id; resolved_storyline_level = sl_lvl; }
                             (t, sl_opt.is_some())
                         } else {
                             (snap.mission_tally.get(&char_id).copied().unwrap_or(0), false)
                         };
                         if storyline {
                             let storyline_agent_id = resolved_storyline_agent_id;
-                            if let Some(storyline_tmpl) = ctx.sde.missions
-                                .values().filter(|sm| {
-                                    is_storyline_template(sm)
-                                        && !snap.active_missions.contains_key(&(char_id, sm.mission_id))
-                                }).min_by_key(|sm| sm.mission_id)
+                            if let Some(storyline_tmpl) = crate::services::pve_open_feats_b36::select_storyline_mission_for_level(
+                                &ctx.sde,
+                                &snap.active_missions,
+                                char_id,
+                                resolved_storyline_level,
+                            )
                             {
                                 let storyline_mission_id = storyline_tmpl.mission_id;
                                 let sl_agent = ctx.sde.agents.get(&storyline_agent_id);
+                                let sl_sys_id = sl_agent.and_then(|a| a.solar_system_id).unwrap_or(sys_id);
                                 let ct = storyline_tmpl.content_template.as_deref().unwrap_or_default();
                                 let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
                                 let is_courier = !is_trade && (storyline_tmpl.is_courier || ct.contains("BasicCourier"));
@@ -1224,7 +1245,9 @@ pub async fn handle(
                                     let md = resolve_mining_mission_details(ctx, storyline_tmpl);
                                     (Some(md.ore_type_id), md.required_units, sl_agent.and_then(|a| a.station_id), None, 0)
                                 } else if let Some(sa) = sl_agent {
-                                    let enc = resolve_security_mission_encounter(ctx, storyline_tmpl, sa, sys_id);
+                                    let mut scaled_sa = sa.clone();
+                                    scaled_sa.level = resolved_storyline_level;
+                                    let enc = resolve_security_mission_encounter(ctx, storyline_tmpl, &scaled_sa, sl_sys_id);
                                     (None, 0, sa.station_id, None, enc.wave_npc_count)
                                 } else {
                                     (None, 0, None, None, 1)
@@ -1249,11 +1272,12 @@ pub async fn handle(
                                         chosen_branch: None,
                                         destination_station_id: dest_sid,
                                         origin_station_id: origin_sid,
+                                        offered_level: Some(resolved_storyline_level),
                                     },
                                 );
                                 snap.active_missions
                                     .entry((char_id, storyline_mission_id))
-                                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
+                                    .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sl_sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
                             }
                         }
                         Ok((new_st, t, storyline, bonus_paid, st_changes))

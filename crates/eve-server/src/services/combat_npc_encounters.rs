@@ -351,6 +351,9 @@ pub async fn handle_npc_destroyed_in_space(
                 && killer > 0
                 && rt.bounty_credited_balls.insert(killed_ball_id)
             {
+                rt.pending_bounty_tick_started_unix
+                    .entry((solar_system_id, killer))
+                    .or_insert_with(|| db.clock().now_unix_secs());
                 *rt.pending_bounty_ticks
                     .entry((solar_system_id, killer))
                     .or_insert(0.0) += eff_bounty;
@@ -375,6 +378,27 @@ pub async fn handle_npc_destroyed_in_space(
     }
 }
 
+/// Flushes all pending 20-minute (`1,200 s`) NPC bounty ticks that have matured by `now_unix`.
+pub fn tick_overdue_npc_bounty_payouts(ctx: &ServerContext, now_unix: u64) {
+    let due_keys: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
+        rt.pending_bounty_ticks
+            .keys()
+            .copied()
+            .filter(|k| {
+                let started = rt
+                    .pending_bounty_tick_started_unix
+                    .get(k)
+                    .copied()
+                    .unwrap_or(now_unix);
+                now_unix.saturating_sub(started) >= 1_200
+            })
+            .collect()
+    });
+    for (sys_id, char_id) in due_keys {
+        let _ = flush_npc_bounty_tick(ctx, sys_id, char_id, 0.0);
+    }
+}
+
 /// Flushes the 20-minute (`1,200s`) batched NPC bounty tick for `(solar_system_id, char_id)`
 /// applying the system's Dynamic Bounty System (`dbs_multiplier`), corporation tax, and K-space null-sec ESS split (`feat:combat.bounty-payout-npc`).
 pub fn flush_npc_bounty_tick(
@@ -388,6 +412,8 @@ pub fn flush_npc_bounty_tick(
 
     let raw_bounty = with_mut_combat_runtime(ctx, |rt| {
         rt.bounty_tick_next_flush_unix
+            .remove(&(solar_system_id, char_id));
+        rt.pending_bounty_tick_started_unix
             .remove(&(solar_system_id, char_id));
         rt.pending_bounty_ticks
             .remove(&(solar_system_id, char_id))

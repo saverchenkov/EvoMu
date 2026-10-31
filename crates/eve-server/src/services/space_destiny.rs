@@ -435,6 +435,7 @@ pub async fn handle(
             if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
                 return Some(Ok(PyRep::None));
             }
+            crate::services::pve_open_feats_b36::ensure_ess_intrusion_site_balls(ctx, sys_id).await;
             let rep = ctx.db.with_snapshot(|snap| {
                 let Some(st) = snap.system_states.get(&sys_id) else {
                     return PyRep::None;
@@ -444,6 +445,10 @@ pub async fn handle(
                     (
                         PyRep::String("essID".into()),
                         PyRep::Integer(820_000_000 + sys_id as i64),
+                    ),
+                    (
+                        PyRep::String("essGateID".into()),
+                        PyRep::Integer(821_000_000 + sys_id as i64),
                     ),
                     (
                         PyRep::String("mainValue".into()),

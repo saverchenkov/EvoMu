@@ -631,7 +631,7 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
     assert_eq!(bal_before_swap.0 - bal_after_swap.0, 90_000_000);
 
     // #237: StartResearch rejects non-science skill & non-colocated caller; BuyDatacores journals DatacoreFee
-    let rd_agent_id = ctx.sde.agents.values().find(|a| a.level == 1 && a.agent_type_id == 4 && a.station_id.is_some()).map(|a| a.agent_id).expect("R&D agent");
+    let rd_agent_id = ctx.sde.agents.values().find(|a| a.level == 1 && a.agent_type_id == 4 && a.station_id.is_some() && a.research_skills.contains(&11448)).map(|a| a.agent_id).expect("R&D agent");
     let err_not_coloc = ctx
         .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(12), PyRep::Integer(rd_agent_id), PyRep::Integer(11448)], &kw, None)
         .await
