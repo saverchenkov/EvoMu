@@ -1186,12 +1186,14 @@ pub async fn activate_command_burst(
     let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
         let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
         let is_burst_charge = |i: &eve_db::InventoryItemRecord| {
-            i.location_id == ship_id && i.item_id != module_id && i.quantity > 0 && is_valid_charge_type(i.type_id)
+            i.location_id == ship_id && i.item_id != module_id && i.quantity > 0
+                && is_valid_charge_type(i.type_id)
+                && charge_tid_opt.is_none_or(|req| i.type_id == req)
         };
         if let Some(found) = snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i)).or_else(|| snap.items.values().find(|i| is_burst_charge(i))) {
             (Some(found.type_id), Some(found.item_id))
         } else {
-            (charge_tid_opt, None)
+            (None, None)
         }
     });
     let Some(c_tid) = charge_tid else {
@@ -1318,7 +1320,7 @@ pub async fn activate_command_burst(
         } else if let Ok(Some((_, m_ball))) = sys.get_ball_snapshot(member_ship_id).await {
             (m_ball.position - booster_pos).length() <= aoe_range
         } else {
-            true
+            false
         };
         if in_range { affected_ships.push((member_char_id, member_ship_id)); }
     }

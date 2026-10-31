@@ -389,6 +389,9 @@ pub async fn spawn_abyssal_room_contents(
     let cache_pos = base + DVec3::new(0.0, -5_000.0, z);
     let cache_ball = make_site_npc_ball(cache_item_id, BIOADAPTIVE_CACHE_TYPE_ID, cache_pos);
     let mut cache_cs = ctx.build_type_combat_state(BIOADAPTIVE_CACHE_TYPE_ID);
+    // DERIVED: Bioadaptive Cache has a single SDE type with 300 base structure HP;
+    // tier-scaled HP multipliers (1x for T0-T2, 5x for T3-T4, 25x for T5-T6) approximate
+    // higher-tier Abyssal cache durability in the absence of per-tier SDE cache type entries.
     let cache_hp_mult = if tier >= 5 { 25.0 } else if tier >= 3 { 5.0 } else { 1.0 };
     cache_cs.max_structure_hp *= cache_hp_mult;
     cache_cs.structure_hp *= cache_hp_mult;

@@ -4,20 +4,9 @@
 //! - `feat:abyssal.bioadaptive-cache-rewards`
 //! - `feat:abyssal.spatial-hazard-clouds`
 //! - `feat:mining.foreman-burst-charges`
-//! - `feat:modules.mutadaptive-remote-armor-repairer`
-//! - `feat:modules.overheat-damage-propagation`
-//! - `feat:modules.overheat-rack-heat-generation`
 //! - `feat:modules.stasis-grappler-mechanics`
 //! - `feat:navigation.micro-jump-drive-spool`
-//! - `feat:navigation.warp-bubble-drag-and-catch`
-//! - `feat:navigation.warp-landing-points`
 //! - `feat:navigation.warp-scramble-propulsion-shutoff`
-//! - `feat:navigation.zarzakh-emanation-lock`
-//! - `feat:navigation.zarzakh-gate-toll`
-//! - `feat:ships.blockade-runner-cargo-scan-immunity`
-//! - `feat:ships.covert-cyno-beacon`
-//! - `feat:ships.cynosural-beacon-spawning`
-//! - `feat:ships.frigate-escape-bay`
 
 #![forbid(unsafe_code)]
 
@@ -59,16 +48,7 @@ async fn setup_pilot_in_space(ctx: &ServerContext, conn_id: u64, char_id: i64, s
         }
         s.items.insert(
             ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: ship_type_id,
-                owner_id: char_id,
-                location_id: sys_id as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
+            InventoryItemRecord { item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: sys_id as i64, flag: InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() },
         );
     });
     sess.user_id = Some(uid);
@@ -76,39 +56,14 @@ async fn setup_pilot_in_space(ctx: &ServerContext, conn_id: u64, char_id: i64, s
     sess.solar_system_id = Some(sys_id);
     sess.ship_id = Some(ship_id);
     let h = ctx.systems.get_or_spawn(sys_id);
-    let _ = h
-        .spawn_ball(Ball {
-            id: ship_id,
-            type_id: ship_type_id,
-            position: pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 300.0,
-            inertia: 0.5,
-            mass: 10_000_000.0,
-            radius: 50.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
-        .await;
+    let _ = h.spawn_ball(Ball { id: ship_id, type_id: ship_type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 0.5, mass: 10_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     let _ = h.set_combat_state(ship_id, ctx.build_type_combat_state(ship_type_id)).await;
     sess
 }
 
 fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_id: i64, location_id: i64, flag: InventoryFlag, quantity: i32, singleton: bool) {
     ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id,
-                location_id,
-                flag,
-                quantity,
-                singleton,
-                ..Default::default()
-            },
-        );
+        s.items.insert(item_id, InventoryItemRecord { item_id, type_id, owner_id, location_id, flag, quantity, singleton, ..Default::default() });
         if matches!(flag as u16, 11..=34 | 92..=94 | 125..=132) {
             s.module_online_states.insert(item_id, true);
         }
@@ -119,10 +74,7 @@ fn grant_skills(ctx: &ServerContext, char_id: i64, skills: &[(u32, u8)]) {
     ctx.db.with_mut_snapshot(|s| {
         let entry = s.skills.entry(char_id).or_default();
         for &(skill_type_id, level) in skills {
-            entry.insert(
-                skill_type_id,
-                TrainedSkillRecord { type_id: skill_type_id, level, skill_points: 256_000.0 },
-            );
+            entry.insert(skill_type_id, TrainedSkillRecord { type_id: skill_type_id, level, skill_points: 256_000.0 });
         }
     });
 }
@@ -198,17 +150,28 @@ async fn test_b42_abyssal_cache_and_spatial_clouds() {
     let restored_vel = h0.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.max_velocity;
     assert!((restored_vel - base_vel).abs() < 1e-3, "Leaving cloud restores velocity");
 
+    let base_cs = h0.get_combat_state(ship_id).await.unwrap().unwrap();
     let _ = h0.set_ball_position(ship_id, DVec3::new(301_000.0, 0.0, 0.0)).await;
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, sys0, ship_id).await, Some("BioluminescentCloud"));
+    let bio_cs = h0.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(bio_cs.signature_radius > base_cs.signature_radius * 2.0, "Bioluminescent cloud inflates signature radius");
+
     let _ = h0.set_ball_position(ship_id, DVec3::new(401_000.0, 0.0, 0.0)).await;
     assert_eq!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, sys0, ship_id).await, Some("FilamentCloud"));
+    let fil_cs = h0.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((fil_cs.shield_boost_multiplier - 0.6).abs() < 1e-3, "Filament cloud applies shield booster penalty");
+
+    let _ = h0.set_ball_position(ship_id, DVec3::new(200_000.0, 0.0, 0.0)).await;
+    assert!(evaluate_abyssal_spatial_clouds_for_ship(&ctx, sys0, ship_id).await.is_none());
+    let restored_cs = h0.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!((restored_cs.signature_radius - base_cs.signature_radius).abs() < 1e-3, "Leaving cloud restores signature radius");
+    assert!((restored_cs.shield_boost_multiplier - 1.0).abs() < 1e-3, "Leaving cloud restores shield boost multiplier");
 }
 #[tokio::test]
 async fn test_b42_mining_foreman_burst_and_mutadaptive_rar() {
-    // parity: feat:mining.foreman-burst-charges, feat:modules.mutadaptive-remote-armor-repairer
+    // parity: feat:mining.foreman-burst-charges
     eve_testkit::attest(&[
         "feat:mining.foreman-burst-charges",
-        "feat:modules.mutadaptive-remote-armor-repairer",
     ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -217,43 +180,54 @@ async fn test_b42_mining_foreman_burst_and_mutadaptive_rar() {
     let c1 = 90_000_001_i64;
     let c2 = 90_000_002_i64;
     let c3 = 90_000_003_i64;
+    let c4 = 90_000_004_i64;
     let orca_id = 742_010_001_i64;
     let hulk_near_id = 742_010_002_i64;
     let hulk_far_id = 742_010_003_i64;
+    let hulk_noball_id = 742_010_004_i64;
 
     let mut sess1 = setup_pilot_in_space(&ctx, 892_010, c1, orca_id, 28_606, sys_id, DVec3::ZERO).await;
     let _sess2 = setup_pilot_in_space(&ctx, 892_011, c2, hulk_near_id, 22_544, sys_id, DVec3::new(5_000.0, 0.0, 0.0)).await;
     let _sess3 = setup_pilot_in_space(&ctx, 892_012, c3, hulk_far_id, 22_544, sys_id, DVec3::new(500_000.0, 0.0, 0.0)).await;
-
-    grant_skills(&ctx, c1, &[(22536, 5), (22552, 5), (28609, 5), (11574, 5), (24764, 5), (3434, 5), (16069, 5)]);
     ctx.db.with_mut_snapshot(|s| {
+        let mut base = s.characters[&90_000_001].clone();
+        base.character_id = c4;
+        base.solar_system_id = sys_id;
+        base.active_ship_id = hulk_noball_id;
+        base.station_id = None;
+        s.characters.insert(c4, base);
         s.fleets.insert(
             99_001,
-            FleetRecord { fleet_id: 99_001, boss_id: c1, motd: String::new(), members: vec![c1, c2, c3], ..Default::default() },
+            FleetRecord { fleet_id: 99_001, boss_id: c1, motd: String::new(), members: vec![c1, c2, c3, c4], ..Default::default() },
         );
     });
 
-    // 1. Mining Foreman Burst module (42528) + Mining Laser Optimization Charge (42530)
+    grant_skills(&ctx, c1, &[(22536, 5), (22552, 5), (28609, 5), (11574, 5), (24764, 5), (3434, 5), (16069, 5)]);
+
+    // 1. Mining Foreman Burst module (42528) + Mining Laser Optimization Charge (42830) via dogmaIM.Activate RPC
     let burst_mod_id = 742_010_101_i64;
     let charge_id = 742_010_102_i64;
     seed_item(&ctx, burst_mod_id, 42_528, c1, orca_id, InventoryFlag::HiSlot0, 1, true);
     let h = ctx.systems.get_or_spawn(sys_id);
-    let mod_type = ctx.sde.types.get(&42_528).unwrap().clone();
-    let fit = ShipFittingEngine::from_sde(orca_id, 28_606, &ctx.sde);
-    let mod_state = eve_dogma::DogmaItemState::from_sde(burst_mod_id, 42_528, &ctx.sde);
-    let no_charge_err = eve_server::services::tactical_modules::activate_command_burst(
-        &ctx, &h, c1, orca_id, sys_id, burst_mod_id, &mod_type, &mod_state, None, &fit,
-    )
-    .await
-    .expect_err("Unloaded Mining Foreman Burst must fail");
+    let no_charge_err = ctx
+        .dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_mod_id), PyRep::String("commandBurst".into())], &kw, None)
+        .await
+        .expect_err("Unloaded Mining Foreman Burst must fail");
     assert_eq!(no_charge_err.code, "NoChargesLoaded");
 
-    seed_item(&ctx, charge_id, 42_530, c1, orca_id, InventoryFlag::HiSlot0, 10, false);
-    let res = eve_server::services::tactical_modules::activate_command_burst(
-        &ctx, &h, c1, orca_id, sys_id, burst_mod_id, &mod_type, &mod_state, Some(42_530), &fit,
-    )
-    .await
-    .expect("Mining Foreman Burst activates with charge");
+    seed_item(&ctx, charge_id, 42_830, c1, orca_id, InventoryFlag::Cargo, 10, false);
+    ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "LoadAmmo", &[PyRep::Integer(orca_id), PyRep::Integer(burst_mod_id), PyRep::Integer(charge_id)], &kw, None)
+        .await
+        .expect("Load Mining Laser Optimization Charge via LoadAmmo RPC");
+    ctx.advance_secs(61);
+    let res = ctx
+        .dispatch_rpc(&mut sess1, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_mod_id), PyRep::String("commandBurst".into())], &kw, None)
+        .await
+        .expect("Mining Foreman Burst activates with charge via RPC");
+    let qty_after: i32 = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == orca_id && i.type_id == 42_830).map(|i| i.quantity).sum());
+    assert_eq!(qty_after, 9, "Command burst consumes 1 charge per cycle");
+    let buff_strength = res.dict_get("buffStrength").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!(buff_strength != 0.0, "Mining Foreman Burst applies non-zero mining buff: {buff_strength}");
     let affected = res
         .dict_get("affectedShipIDs")
         .and_then(|v| match v {
@@ -263,6 +237,7 @@ async fn test_b42_mining_foreman_burst_and_mutadaptive_rar() {
         .unwrap_or_default();
     assert!(affected.contains(&orca_id) && affected.contains(&hulk_near_id), "In-range fleet ships affected: {affected:?}");
     assert!(!affected.contains(&hulk_far_id), "Out-of-range fleet ship excluded: {affected:?}");
+    assert!(!affected.contains(&hulk_noball_id), "Fleet ship without ball excluded: {affected:?}");
 
     // 2. Triglavian Mutadaptive Remote Armor Repairer (49770) spool-up (feat:modules.mutadaptive-remote-armor-repairer)
     let mut_rar_id = 742_010_201_i64;
@@ -304,11 +279,6 @@ async fn test_b42_mining_foreman_burst_and_mutadaptive_rar() {
 
 #[tokio::test]
 async fn test_b42_overheat_rack_heat_and_damage_propagation() {
-    // parity: feat:modules.overheat-rack-heat-generation, feat:modules.overheat-damage-propagation
-    eve_testkit::attest(&[
-        "feat:modules.overheat-rack-heat-generation",
-        "feat:modules.overheat-damage-propagation",
-    ]);
     let ctx = ServerContext::new();
     let ship_id = 742_020_001_i64;
     let mut fit_no_skill = ShipFittingEngine::from_sde(ship_id, 638, &ctx.sde);
@@ -371,7 +341,7 @@ async fn test_b42_stasis_grappler_and_mjd_spool() {
     grant_skills(&ctx, char_id, &[(3434, 5), (4385, 5), (3449, 5)]);
     grant_skills(&ctx, 90_000_002, &[(3434, 5)]);
 
-    // 1. Stasis Grappler hull & max-1 restrictions (feat:modules.stasis-grappler-mechanics)
+    // 1. Stasis Grappler hull & max-1 restrictions, velocity reduction, and falloff (feat:modules.stasis-grappler-mechanics)
     let mut cruiser_fit = ShipFittingEngine::from_sde(vexor_id, 626, &ctx.sde);
     assert!(cruiser_fit.fit_module(g1, 41_057, 19, &ctx.sde).is_err(), "Cruiser cannot fit Heavy Stasis Grappler");
     let mut bs_fit = ShipFittingEngine::from_sde(raven_id, 638, &ctx.sde);
@@ -380,8 +350,34 @@ async fn test_b42_stasis_grappler_and_mjd_spool() {
     bs_fit.fit_module(g1, 41_057, 19, &ctx.sde).expect("Battleship fits 1 Heavy Stasis Grappler");
     assert!(bs_fit.fit_module(g2, 41_057, 20, &ctx.sde).is_err(), "Max 1 Stasis Grappler per ship");
 
-    // 2. Micro Jump Drive 12s spool, scram cancellation, and 100 km vector jump (feat:navigation.micro-jump-drive-spool)
     let h = ctx.systems.get_or_spawn(sys_id);
+    seed_item(&ctx, g1, 41_057, char_id, raven_id, InventoryFlag::MedSlot0, 1, true);
+    let _ = h
+        .add_target_lock(
+            raven_id,
+            TargetLock { target_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) },
+        )
+        .await;
+    let base_target_vel = h.get_ball_snapshot(target_id).await.unwrap().unwrap().1.max_velocity;
+    let _ = h.set_ball_position(target_id, DVec3::new(500.0, 0.0, 0.0)).await;
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(g1), PyRep::String("decreaseTargetSpeed".into()), PyRep::Integer(target_id)], &kw, None)
+        .await
+        .expect("Activate Heavy Stasis Grappler at close range");
+    let vel_close = h.get_ball_snapshot(target_id).await.unwrap().unwrap().1.max_velocity;
+    assert!(vel_close < base_target_vel * 0.25, "Stasis Grappler reduces target velocity by ~85% at optimal: {vel_close} vs {base_target_vel}");
+
+    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(g1), PyRep::String("decreaseTargetSpeed".into())], &kw, None).await;
+    let _ = h.set_ball_position(target_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let _ = h.set_ball_position(target_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
+    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(g1), PyRep::String("decreaseTargetSpeed".into()), PyRep::Integer(target_id)], &kw, None)
+        .await
+        .expect("Activate Heavy Stasis Grappler in falloff");
+    let vel_falloff = h.get_ball_snapshot(target_id).await.unwrap().unwrap().1.max_velocity;
+    assert!(vel_falloff > vel_close && vel_falloff < base_target_vel, "Stasis Grappler decays in falloff: close={vel_close}, falloff={vel_falloff}, base={base_target_vel}");
+    let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Deactivate", &[PyRep::Integer(g1), PyRep::String("decreaseTargetSpeed".into())], &kw, None).await;
+    let _ = h.set_ball_position(target_id, DVec3::new(1_000.0, 0.0, 0.0)).await;
+
+    // 2. Micro Jump Drive 12s spool, scram cancellation, and 100 km vector jump (feat:navigation.micro-jump-drive-spool)
     let mjd_id = 742_030_201_i64;
     let scram_id = 742_030_202_i64;
     seed_item(&ctx, mjd_id, 4_383, char_id, raven_id, InventoryFlag::MedSlot2, 1, true);
@@ -398,29 +394,34 @@ async fn test_b42_stasis_grappler_and_mjd_spool() {
     ctx.dispatch_rpc(&mut sess_t, "dogmaIM", None, "Activate", &[PyRep::Integer(scram_id), PyRep::String("warpScramble".into()), PyRep::Integer(raven_id)], &kw, None)
         .await
         .expect("Activate Warp Scrambler");
-    h.step_manual(1.0).await.unwrap();
+    for _ in 0..13 {
+        h.step_manual(1.0).await.unwrap();
+    }
     let pos_after_scram = h.get_ball_snapshot(raven_id).await.unwrap().unwrap().1.position;
-    assert!(pos_after_scram.length() < 1_000.0, "Scram during spool cancels MJD jump");
+    assert!(pos_after_scram.length() < 1_000.0, "Scram during spool cancels MJD jump even past 12s: {pos_after_scram:?}");
 
     let _ = ctx.dispatch_rpc(&mut sess_t, "dogmaIM", None, "Deactivate", &[PyRep::Integer(scram_id), PyRep::String("warpScramble".into())], &kw, None).await;
     ctx.advance_secs(200);
-    h.step_manual(11.0).await.unwrap();
+    h.step_manual(1.0).await.unwrap();
     let start_pos = h.get_ball_snapshot(raven_id).await.unwrap().unwrap().1.position;
     ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mjd_id), PyRep::String("microJumpDrive".into())], &kw, None)
         .await
         .expect("Activate MJD unscrambled");
-    for _ in 0..13 {
+    for _ in 0..11 {
+        h.step_manual(1.0).await.unwrap();
+    }
+    let mid_pos = h.get_ball_snapshot(raven_id).await.unwrap().unwrap().1.position;
+    assert!((mid_pos - start_pos).length() < 5_000.0, "MJD must not jump before 12s spool completes");
+    for _ in 0..2 {
         h.step_manual(1.0).await.unwrap();
     }
     let end_pos = h.get_ball_snapshot(raven_id).await.unwrap().unwrap().1.position;
-    assert!((end_pos - start_pos).length() >= 95_000.0, "MJD jumps ~100 km forward: start={start_pos:?}, end={end_pos:?}");
+    assert!((end_pos - start_pos).length() >= 95_000.0, "MJD jumps ~100 km forward at 12s: start={start_pos:?}, end={end_pos:?}");
 }
 #[tokio::test]
 async fn test_b42_warp_landing_bubbles_and_scram_shutoff() {
-    // parity: feat:navigation.warp-landing-points, feat:navigation.warp-bubble-drag-and-catch, feat:navigation.warp-scramble-propulsion-shutoff
+    // parity: feat:navigation.warp-scramble-propulsion-shutoff
     eve_testkit::attest(&[
-        "feat:navigation.warp-landing-points",
-        "feat:navigation.warp-bubble-drag-and-catch",
         "feat:navigation.warp-scramble-propulsion-shutoff",
     ]);
     let ctx = ServerContext::new();
@@ -517,19 +518,16 @@ async fn test_b42_warp_landing_bubbles_and_scram_shutoff() {
     let cs_scrambled = h.get_combat_state(ship_id).await.unwrap().unwrap();
     assert_eq!(cs_scrambled.warp_scramble_strength, 3);
     assert!(cs_scrambled.is_mwd_mjd_disabled, "Warp Scrambler must disable MWD");
+    let post_scram_vel = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.max_velocity;
+    assert!(post_scram_vel < 350.0, "Warp Scrambler shuts off active MWD cycle and restores base velocity: {post_scram_vel}");
+    let reactivate_err = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())], &kw, None)
+        .await;
+    assert!(reactivate_err.is_err(), "MWD reactivation must be refused while scrambled");
 }
 
 #[tokio::test]
 async fn test_b42_zarzakh_and_ship_mechanics() {
-    // parity: feat:navigation.zarzakh-emanation-lock, feat:navigation.zarzakh-gate-toll, feat:ships.blockade-runner-cargo-scan-immunity, feat:ships.covert-cyno-beacon, feat:ships.cynosural-beacon-spawning, feat:ships.frigate-escape-bay
-    eve_testkit::attest(&[
-        "feat:navigation.zarzakh-emanation-lock",
-        "feat:navigation.zarzakh-gate-toll",
-        "feat:ships.blockade-runner-cargo-scan-immunity",
-        "feat:ships.covert-cyno-beacon",
-        "feat:ships.cynosural-beacon-spawning",
-        "feat:ships.frigate-escape-bay",
-    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
