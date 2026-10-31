@@ -2,7 +2,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED,
+    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -554,7 +554,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.payment.schedule.api.GetRequest",
         Arc::new(move |ctx, any, dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let sched_id = extract_u64_id(&any.value, dyn_msg).filter(|id| *id > 0).ok_or_else(|| {
                 (STATUS_BAD_REQUEST, "Missing schedule ID".to_string())
             })?;
@@ -597,7 +597,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.payment.schedule.api.GetActiveByTypeRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let stype = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
@@ -646,7 +646,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.payment.token.api.GetQuickPayRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let tokens: Vec<PaymentTokenRecord> = db_quick_pay.with_snapshot(|snap| {
                 snap.service_state_blobs
                     .get("payment_tokens")
@@ -676,7 +676,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.payment.token.api.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let tok_id = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
@@ -732,7 +732,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.payment.token.api.DisableAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let disabled_ids = db_token_disable.with_mut_snapshot(|snap| {
                 let mut tokens: Vec<PaymentTokenRecord> = snap
                     .service_state_blobs
@@ -945,7 +945,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.payment.purchase.api.TokenRequest",
         Arc::new(move |ctx, any, dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let raw_fields = parse_raw_varints(&any.value);
             let offer_id_opt = if let Some(DynamicValue::Message(order)) = dyn_msg.get(1) {
                 if let Some(DynamicValue::Message(off)) = order.get(1) {
@@ -1154,13 +1154,13 @@ fn register_payment_token_and_purchase_handlers(
                     let is_omega = offer_id == 1001 || offer.category_id == 1;
                     let mut omega_notice = None;
                     if is_omega {
-                        let (_, notice) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                        let (new_expiry, notice) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
                             snap,
                             uid,
                             30 * 86_400 * u64::from(qty),
                             now_unix,
                         );
-                        upsert_user_payment_schedule_in_snapshot(snap, uid, 1, now_unix + 30 * 86_400 * u64::from(qty), &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
+                        upsert_user_payment_schedule_in_snapshot(snap, uid, 1, new_expiry, &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
                         omega_notice = Some(notice);
                     }
 

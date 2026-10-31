@@ -303,4 +303,61 @@ async fn test_payment_schedule_lifecycle_from_omega_purchase_and_auth() {
     )
     .await;
     assert_eq!(rsp_no_type.status_code, STATUS_NOT_FOUND);
+
+    // 5. Stacked Omega renewal extends `next_payment_unix` to cumulative `new_expiry`, and unauthenticated calls get 401
+    let first_next = persisted_scheds[0].next_payment_unix;
+    ctx.db.with_mut_snapshot(|snap| {
+        let tokens = vec![PaymentTokenRecord {
+            id: 78,
+            user_id: USER_ID,
+            token_str: "tok_live_omega_78".to_string(),
+            is_quick_pay: true,
+            consumed: false,
+        }];
+        snap.service_state_blobs.insert(
+            "payment_tokens".to_string(),
+            serde_json::to_string(&tokens).unwrap(),
+        );
+    });
+    let mut renew_req = Vec::new();
+    let mut order2 = Vec::new();
+    let mut off_ident2 = Vec::new();
+    encode_string_field(1, "VEVC-1001", &mut off_ident2);
+    encode_bytes_field(1, &off_ident2, &mut order2);
+    encode_varint_field(2, 1, &mut order2);
+    encode_bytes_field(1, &order2, &mut renew_req);
+    encode_bytes_field(2, &idm(78), &mut renew_req);
+    assert_eq!(
+        rpc(
+            &ctx,
+            &mut player_sess,
+            "eve_public.payment.purchase.api.TokenRequest",
+            renew_req,
+        )
+        .await
+        .status_code,
+        STATUS_OK
+    );
+    let stacked_scheds: Vec<PaymentScheduleRecord> = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("payment_schedules")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default()
+    });
+    assert_eq!(stacked_scheds[0].next_payment_unix, first_next + 30 * 86_400);
+
+    let mut unauth_sess = eve_machonet::SessionState::new(29);
+    for method in [
+        "eve_public.payment.token.api.GetQuickPayRequest",
+        "eve_public.payment.token.api.GetRequest",
+        "eve_public.payment.token.api.DisableAllRequest",
+        "eve_public.payment.schedule.api.GetRequest",
+    ] {
+        let rsp_unauth = rpc(&ctx, &mut unauth_sess, method, id_req(1, 78)).await;
+        assert_eq!(
+            rsp_unauth.status_code,
+            eve_server::quasar_gateway::STATUS_UNAUTHORIZED,
+            "{method} must reject unauthenticated session"
+        );
+    }
 }

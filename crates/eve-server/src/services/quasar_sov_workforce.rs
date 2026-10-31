@@ -28,7 +28,10 @@ pub const WORKFORCE_TRANSFER_MAX_JUMPS: usize = 5;
 const CONFIGURED_NOTICE: &str = "eve_public.sovereignty.resource.transfer.workforce.api.ConfiguredNotice";
 
 fn hub_sys(snap: &WorldStateSnapshot, hub_id: i64) -> Option<u32> {
-    snap.structures.get(&hub_id).map(|s| s.solar_system_id)
+    snap.structures
+        .get(&hub_id)
+        .filter(|s| !s.state.eq_ignore_ascii_case("destroyed"))
+        .map(|s| s.solar_system_id)
 }
 
 fn hub_owner(snap: &WorldStateSnapshot, hub_id: i64) -> Option<i64> {
@@ -246,6 +249,7 @@ pub fn networkable_hubs(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i6
         let reach = systems_within_jumps(sde, cur_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
         for s in snap.structures.values() {
             if s.type_id != TYPE_SOVEREIGNTY_HUB
+                || s.state.eq_ignore_ascii_case("destroyed")
                 || s.solar_system_id == cur_sys
                 || !reach.contains_key(&s.solar_system_id)
                 || !linked_owners(snap, hub_id, s.structure_id)

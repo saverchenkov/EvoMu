@@ -90,6 +90,26 @@ fn map_contract_availability(avail: &str) -> &'static str {
     }
 }
 
+const CONTRACT_RETENTION_SECS: u64 = 30 * 86_400;
+
+fn is_contract_expired(c: &eve_db::ContractRecord, now: u64) -> bool {
+    c.expiration_unix > 0 && now >= c.expiration_unix
+}
+
+fn contract_retained_in_list(c: &eve_db::ContractRecord, now: u64) -> bool {
+    if map_contract_status(&c.status) == "in_progress" {
+        return true;
+    }
+    if c.date_issued_unix > 0 {
+        return now.saturating_sub(c.date_issued_unix) <= CONTRACT_RETENTION_SECS;
+    }
+    if c.expiration_unix > 0 {
+        return c.expiration_unix > now
+            || now.saturating_sub(c.expiration_unix) <= CONTRACT_RETENTION_SECS;
+    }
+    true
+}
+
 fn is_character_party_to_contract(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -100,8 +120,6 @@ fn is_character_party_to_contract(
         || c.assignee_id == char_id
         || c.current_bidder_id == Some(char_id)
         || c.bid_history.iter().any(|&(b, _, _)| b == char_id)
-        || ((c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
-            && c.assignee_id == 0)
     {
         return true;
     }
@@ -218,7 +236,7 @@ pub fn dispatch_economy_route(
     claims: Option<&SsoTokenClaims>,
     page: usize,
 ) -> Option<RouteExecutionResult> {
-    let _now = ctx.now_unix();
+    let now = ctx.now_unix();
 
     match (method, path) {
         // 1. Market Routes (ESI-6)
@@ -861,9 +879,10 @@ pub fn dispatch_economy_route(
                     .filter(|c| {
                         // Corporation-issued contracts (`c.for_corp == true`) belong on `/corporations/{id}/contracts`,
                         // not on the issuing character's personal contract list unless personally accepted/assigned.
-                        (c.issuer_id == char_id && !c.for_corp)
+                        ((c.issuer_id == char_id && !c.for_corp)
                             || c.acceptor_id == Some(char_id)
-                            || c.assignee_id == char_id
+                            || c.assignee_id == char_id)
+                            && contract_retained_in_list(c, now)
                     })
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
@@ -997,7 +1016,8 @@ pub fn dispatch_economy_route(
                     .contracts
                     .values()
                     .filter(|c| {
-                        c.status == "Outstanding"
+                        c.status.eq_ignore_ascii_case("Outstanding")
+                            && !is_contract_expired(c, now)
                             && (c.availability.is_empty()
                                 || c.availability.eq_ignore_ascii_case("Public"))
                             && contract_in_region(ctx, snap, c, reg_u32)
@@ -1058,6 +1078,9 @@ pub fn dispatch_economy_route(
                         format!("Public contract {contract_id} not found"),
                     );
                 };
+                if !c.status.eq_ignore_ascii_case("Outstanding") || is_contract_expired(c, now) {
+                    return RouteExecutionResult::no_content(3600);
+                }
                 let rows = contract_item_rows(snap, c, true);
                 match paginate_slice(&rows, page, 1000) {
                     Ok((page_rows, total_pages)) => {
@@ -1082,6 +1105,9 @@ pub fn dispatch_economy_route(
                         format!("Public contract {contract_id} not found"),
                     );
                 };
+                if !c.status.eq_ignore_ascii_case("Outstanding") || is_contract_expired(c, now) {
+                    return RouteExecutionResult::no_content(300);
+                }
                 let rows = contract_bid_rows(c, false);
                 match paginate_slice(&rows, page, 1000) {
                     Ok((page_rows, total_pages)) => {
@@ -1107,7 +1133,7 @@ pub fn dispatch_economy_route(
                 let mut contracts: Vec<_> = snap
                     .contracts
                     .values()
-                    .filter(|c| is_corp_contract(corp, corp_id, c))
+                    .filter(|c| is_corp_contract(corp, corp_id, c) && contract_retained_in_list(c, now))
                     .collect();
                 contracts.sort_by_key(|c| c.contract_id);
                 let rows: Vec<Value> = contracts

@@ -434,6 +434,7 @@ mod esi_market_industry_pi_part2;
 mod esi_market_industry_pi_part3;
 mod esi_market_industry_pi_part4;
 mod esi_p6_closure;
+mod esi_p6_closure_part2;
 mod quasar_daily_goals_remediation;
 mod quasar_q3_q9_closure;
 mod quasar_q5_q6_closure;

@@ -535,8 +535,10 @@ async fn test_r5_241_242_248_249_250_corp_wallet_sync_lp_tax_goal_rewards_indust
     let corp_contracts: serde_json::Value = serde_json::from_slice(&corp_contracts_resp.body).unwrap();
     assert!(!corp_contracts.as_array().unwrap().iter().any(|c| c["contract_id"] == 700_250));
     let token2 = issue_token_with_scopes(&ctx, 90_000_002, vec!["esi-contracts.read_character_contracts.v1"]);
-    let pub_item_resp = router.handle_request(
+    let char_non_party_resp = router.handle_request(
         &EsiHttpRequest::new("GET", "/v1/characters/90000002/contracts/700250/items/").with_header("Authorization", &format!("Bearer {token2}")),
     );
+    assert_eq!(char_non_party_resp.status_code, 403);
+    let pub_item_resp = router.handle_request(&EsiHttpRequest::new("GET", "/v1/contracts/public/items/700250/"));
     assert_eq!(pub_item_resp.status_code, 200);
 }

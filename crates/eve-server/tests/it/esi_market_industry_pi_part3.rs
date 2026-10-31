@@ -135,7 +135,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
         PyRep::String(String::new()),
         PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(personal_item_id), PyRep::Integer(1)])]),
         PyRep::Integer(4),
-        PyRep::List(vec![]),
+        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(1_000)])]),
         PyRep::Bool(false), // personal
     ];
     let personal_rep = rpc_call(&ctx, &mut issuer_sess, "contractProxy", "CreateContract", &personal_args).await;
@@ -151,9 +151,13 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
 
     let bid1 = [PyRep::Integer(public_contract_id), PyRep::Real(2_000_000.0)];
     rpc_call(&ctx, &mut rival_sess, "contractProxy", "PlaceBid", &bid1).await;
+    let p_bid1 = [PyRep::Integer(personal_contract_id), PyRep::Real(2_000_000.0)];
+    rpc_call(&ctx, &mut rival_sess, "contractProxy", "PlaceBid", &p_bid1).await;
     ctx.db.clock().advance_secs(600);
     let bid2 = [PyRep::Integer(public_contract_id), PyRep::Real(2_500_000.0)];
     rpc_call(&ctx, &mut rival_sess, "contractProxy", "PlaceBid", &bid2).await;
+    let p_bid2 = [PyRep::Integer(personal_contract_id), PyRep::Real(2_500_000.0)];
+    rpc_call(&ctx, &mut rival_sess, "contractProxy", "PlaceBid", &p_bid2).await;
 
     let priv_args = [
         PyRep::Integer(1), // ItemExchange
@@ -196,7 +200,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     let char_items = get_json(
         &router,
         &spec,
-        format!("/v1/characters/{char_id}/contracts/{public_contract_id}/items/"),
+        format!("/v1/characters/{char_id}/contracts/{personal_contract_id}/items/"),
         Some(&token),
     );
     let char_items_arr = char_items.as_array().unwrap();
@@ -204,6 +208,12 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     assert!(char_items_arr.iter().any(|i| i["type_id"] == json!(587) && i["is_included"] == json!(true)));
     assert!(char_items_arr.iter().any(|i| i["type_id"] == json!(34) && i["is_included"] == json!(false)));
 
+    assert_status(
+        &router,
+        format!("/v1/characters/{char_id}/contracts/{public_contract_id}/items/"),
+        Some(&token),
+        403,
+    );
     assert_status(
         &router,
         format!("/v1/characters/{char_id}/contracts/{private_contract_id}/items/"),
@@ -214,7 +224,7 @@ async fn test_esi6_contracts_character_corporation_and_public_routes() {
     let char_bids = get_json(
         &router,
         &spec,
-        format!("/v1/characters/{char_id}/contracts/{public_contract_id}/bids/"),
+        format!("/v1/characters/{char_id}/contracts/{personal_contract_id}/bids/"),
         Some(&token),
     );
     let char_bids_arr = char_bids.as_array().unwrap();

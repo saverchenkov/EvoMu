@@ -329,4 +329,17 @@ async fn test_sov_workforce_transit_disconnect_drops_starved_upgrades_to_low_pow
     assert_eq!(get_hu.status_code, STATUS_OK);
     let up_after = field(&field(&get_hu.payload.unwrap().value, 1).unwrap(), 2).unwrap();
     assert_eq!(field(&up_after, 2).and_then(|a| varint(&a, 2)), Some(3), "GetHubUpgradesRequest must persist POWER_STATE_LOW (3)");
+
+    // 4. Destroyed structures in `snap.structures` must be excluded from `GetNetworkableHubsRequest`.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(s) = snap.structures.get_mut(&HUB_B) {
+            s.state = "destroyed".to_string();
+        }
+    });
+    let net_after_destroy = rpc(&ctx, &mut sc, "eve_public.sovereignty.hub.workforce.api.GetNetworkableHubsRequest", id_req(1, HUB_C as u64)).await;
+    assert_eq!(net_after_destroy.status_code, STATUS_OK);
+    assert!(
+        fields(&net_after_destroy.payload.unwrap().value, 1).is_empty(),
+        "Destroyed sovereignty hub must not appear in networkable_hubs"
+    );
 }
