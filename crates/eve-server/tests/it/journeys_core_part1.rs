@@ -231,7 +231,7 @@ async fn test_journey_station_ui() {
     let fittings = call_rpc(&ctx, &mut sess, "charFittingMgr", "GetFittings", &[PyRep::Integer(90_000_001)])
         .await
         .expect("GetFittings");
-    assert!(matches!(fittings, PyRep::List(_) | PyRep::Rowset { .. }));
+    assert!(matches!(fittings, PyRep::Dict(_)));
 
     // 4. Market
     let mkt = call_rpc(&ctx, &mut sess, "marketProxy", "GetMarketGroups", &[])
