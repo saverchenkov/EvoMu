@@ -7,13 +7,31 @@ use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
 use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_IMPLEMENTED, STATUS_OK};
 use eve_server::router::ServerContext;
-use eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB;
+use eve_server::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
 
 const PILOT: i64 = 90_000_001;
 const CORP: i64 = 98_000_001;
 const JITA: u32 = 30_000_142;
 const PERIMETER: u32 = 30_000_144;
 const URLEN: u32 = 30_000_138;
+
+fn anchor_jita_skyhooks(ctx: &ServerContext) {
+    let jita_planets: Vec<i64> = ctx
+        .sde
+        .celestials_in_system(JITA)
+        .into_iter()
+        .filter(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .collect();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (idx, pid) in jita_planets.into_iter().enumerate() {
+            let sh_id = 1_020_000_200 + idx as i64;
+            snap.structures.insert(sh_id, structure(sh_id, CORP, JITA, TYPE_ORBITAL_SKYHOOK));
+            snap.sov_runtime.skyhook_planets.insert(sh_id, pid);
+            snap.sov_runtime.skyhook_active.insert(sh_id, true);
+        }
+    });
+}
 
 #[tokio::test]
 async fn test_sov_hub_and_star_resource_configurations() {
@@ -25,6 +43,7 @@ async fn test_sov_hub_and_star_resource_configurations() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(hub_id, structure(hub_id, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
     });
+    anchor_jita_skyhooks(&ctx);
 
     let res = rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_id as u64)).await;
     assert_eq!(res.status_code, STATUS_OK);
@@ -77,6 +96,7 @@ async fn test_sov_hub_workforce_transit_relay_network() {
         snap.structures.insert(hub_b, structure(hub_b, CORP, PERIMETER, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(hub_c, structure(hub_c, CORP, URLEN, TYPE_SOVEREIGNTY_HUB));
     });
+    anchor_jita_skyhooks(&ctx);
 
     // Export 1000 from Jita to Perimeter, and Import in Urlen from Jita.
     let mut exp = Vec::new();
