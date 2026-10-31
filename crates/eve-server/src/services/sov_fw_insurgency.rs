@@ -949,15 +949,22 @@ pub async fn handle(
             };
             let structs_list = ctx.db.with_snapshot(|snap| {
                 let is_sov_struct = |type_id: u32| -> bool {
-                    ctx.sde
-                        .types
-                        .get(&type_id)
-                        .and_then(|t| ctx.sde.groups.get(&t.group_id))
-                        .is_some_and(|g| {
-                            g.name == "Sovereignty Hub"
-                                || g.name == "Territorial Claim Unit"
-                                || g.name == "Infrastructure Hub"
-                        })
+                    type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                        || type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
+                        || ctx
+                            .sde
+                            .types
+                            .get(&type_id)
+                            .and_then(|t| ctx.sde.groups.get(&t.group_id))
+                            .is_some_and(|g| {
+                                matches!(
+                                    g.name.as_str(),
+                                    "Sovereignty Hub"
+                                        | "Territorial Claim Unit"
+                                        | "Infrastructure Hub"
+                                        | "Orbital Skyhook"
+                                )
+                            })
                 };
                 snap.structures
                     .values()

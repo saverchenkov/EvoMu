@@ -104,6 +104,7 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     .await;
 
     // 1. Negative space checks: high-sec, low-sec, wormhole, Pochven, Zarzakh, and NPC-sov nullsec all fail closed.
+    let _ = ctx.systems.get_or_spawn(30_000_142).remove_ball(PILOT_SHIP).await;
     for blocked_sys in [30_000_142u32, 30_000_144, wh_sys, pochven_sys, 30_100_000, npc_sov_sys] {
         set_pilot_location(&ctx, &mut s_dir, blocked_sys, None);
         place_ship_ball(&ctx, blocked_sys, PILOT, PILOT_SHIP, 639, hub_pos).await;
@@ -120,6 +121,7 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
             ),
             "CannotAnchorSovHubOutsideNullSec"
         );
+        let _ = ctx.systems.get_or_spawn(blocked_sys).remove_ball(PILOT_SHIP).await;
     }
 
     // 2. Negative alliance, role, and missing cargo item checks in claimable null-sec.
@@ -260,6 +262,7 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.entry(alt_null_sys).or_default().sov_alliance_id = Some(ALLIANCE);
     });
+    let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(100_000_113).await;
     set_pilot_location(&ctx, &mut s_hostile, alt_null_sys, None);
     place_ship_ball(&ctx, alt_null_sys, 90_000_113, 100_000_113, 621, hub_pos).await;
     assert_eq!(
@@ -275,6 +278,7 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
         ),
         "SovereigntyHeldByAnotherAlliance"
     );
+    let _ = ctx.systems.get_or_spawn(alt_null_sys).remove_ball(100_000_113).await;
 
     // Complete 15-minute onlining timer -> system claimed + OnSovereigntyChanged & OnSolarSystemSovStructuresUpdated broadcast!
     let _ = drain_notif_events(&ctx, PILOT);

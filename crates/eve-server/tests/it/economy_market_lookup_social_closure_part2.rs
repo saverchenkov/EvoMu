@@ -240,31 +240,32 @@ async fn test_cosmetics_apparel_inventory_and_paperdoll_shape() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            990_000_778,
+            eve_db::InventoryItemRecord {
+                item_id: 990_000_778,
+                type_id: apparel_type_id,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
     });
 
-    // Negative 2 & 3 & 4: remote-station, contract-locked, and undocked sessions rejected
+    // Negative 2..5: remote-station, contract-locked, undocked, duplicate item, and same wearable group rejected
     let remote_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(remote_item_id)]))]);
-    let remote_err = rpc(
-        &ctx,
-        &mut sess,
-        "paperDollServer",
-        "UpdateExistingCharacterLimited",
-        &[PyRep::Integer(90_000_001), remote_doll, PyRep::None],
-    )
-    .await
-    .expect_err("remote-station apparel must fail");
+    let remote_err = rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), remote_doll, PyRep::None])
+        .await
+        .expect_err("remote-station apparel must fail");
     assert_eq!(remote_err.code, "InvalidApparelItem");
 
     let locked_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(locked_item_id)]))]);
-    let locked_err = rpc(
-        &ctx,
-        &mut sess,
-        "paperDollServer",
-        "UpdateExistingCharacterLimited",
-        &[PyRep::Integer(90_000_001), locked_doll, PyRep::None],
-    )
-    .await
-    .expect_err("contract-locked apparel must fail");
+    let locked_err = rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), locked_doll, PyRep::None])
+        .await
+        .expect_err("contract-locked apparel must fail");
     assert_eq!(locked_err.code, "ItemLockedInContractOrJob");
 
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = None);
@@ -272,29 +273,22 @@ async fn test_cosmetics_apparel_inventory_and_paperdoll_shape() {
         ("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id)])),
         ("colors", PyRep::keyval([("skin", PyRep::Integer(7))])),
     ]);
-    let undocked_err = rpc(
-        &ctx,
-        &mut sess,
-        "paperDollServer",
-        "UpdateExistingCharacterLimited",
-        &[PyRep::Integer(90_000_001), stack_doll.clone(), PyRep::None],
-    )
-    .await
-    .expect_err("undocked apparel equip must fail");
+    let undocked_err = rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), stack_doll.clone(), PyRep::None])
+        .await
+        .expect_err("undocked apparel equip must fail");
     assert_eq!(undocked_err.code, "NotDocked");
 
-    // Positive: docked equip splits stack of 3 -> 2 in hangar + 1 singleton in Wardrobe, emits OnItemChange
+    // Positive: docked equip splits stack of 3 -> 2 in hangar + 1 singleton in Wardrobe (flag 3), emits OnItemChange
+    assert_eq!(eve_db::InventoryFlag::Wardrobe as u16, 3);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760));
+    let dup_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id), PyRep::Integer(stack_item_id)]))]);
+    assert_eq!(rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), dup_doll, PyRep::None]).await.unwrap_err().code, "InvalidApparelItem");
+    let same_grp_doll = PyRep::keyval([("apparel", PyRep::List(vec![PyRep::Integer(stack_item_id), PyRep::Integer(990_000_778)]))]);
+    assert_eq!(rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), same_grp_doll, PyRep::None]).await.unwrap_err().code, "InvalidApparelItem");
     let _ = sess.drain_notifications();
-    rpc(
-        &ctx,
-        &mut sess,
-        "paperDollServer",
-        "UpdateExistingCharacterLimited",
-        &[PyRep::Integer(90_000_001), stack_doll, PyRep::None],
-    )
-    .await
-    .expect("UpdateExistingCharacterLimited stack split");
+    rpc(&ctx, &mut sess, "paperDollServer", "UpdateExistingCharacterLimited", &[PyRep::Integer(90_000_001), stack_doll, PyRep::None])
+        .await
+        .expect("UpdateExistingCharacterLimited stack split");
 
     assert!(
         sess.drain_notifications().iter().any(|(name, _)| name == "OnItemChange"),
@@ -532,7 +526,7 @@ async fn test_star_map_data_feeds_and_fw_zone_upgrades() {
     let PyRep::Dict(beacons) = rpc(&ctx, &mut sess, "map", "GetBeaconCount", &[]).await.unwrap() else {
         panic!("expected Dict from GetBeaconCount");
     };
-    assert!(beacons.iter().any(|(k, v)| k == &PyRep::Integer(30_000_142) && v.as_i64().unwrap_or(0) >= 1));
+    assert!(beacons.iter().any(|(k, v)| k == &PyRep::Integer(30_000_142) && matches!(v, PyRep::Tuple(t) if t.len() == 2 && t[1].as_i64().unwrap_or(0) >= 1)));
 
     // 2. Incursion global report & per-system incursion map
     let PyRep::List(inc_reports) = rpc(&ctx, &mut sess, "map", "GetIncursionGlobalReport", &[]).await.unwrap() else {
@@ -582,11 +576,25 @@ async fn test_star_map_data_feeds_and_fw_zone_upgrades() {
     };
     assert!(!fortresses.is_empty() && !eden_min.is_empty() && !trig_min.is_empty());
 
-    // 5. Deadspace complex & agent maps
+    // 5. Deadspace complex & agent maps: 4-column (solarSystemID, dungeonID, difficulty, dungeonName)
     let complexes = rpc(&ctx, &mut sess, "map", "GetDeadspaceComplexMap", &[]).await.unwrap();
-    assert!(!complexes.crowset_rows().expect("complex crowset").is_empty());
+    let complex_rows = complexes.crowset_rows().expect("complex crowset");
+    assert!(matches!(complex_rows.first(), Some(PyRep::DBRow { columns, .. }) if columns.len() == 4 && columns[0].0 == "solarSystemID" && columns[3].0 == "dungeonName"));
+
+    let now_unix = ctx.now_unix();
+    let mk_esc = |id: i64, cid: i64, did: u32, name: &str, sys: u32, step: u8| eve_server::services::pve_exploration::EscalatingPathEntry {
+        instance_id: id, character_id: cid, source_dungeon_id: 1001, expedition_dungeon_id: did,
+        expedition_name: name.into(), destination_solar_system_id: sys, step_index: step, total_steps: 4,
+        journal_text: name.into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001],
+    };
+    eve_server::services::pve_exploration::with_pve_exploration_reg_db(&ctx.db, now_unix, |reg| {
+        reg.escalations_by_char.entry(90_000_001).or_default().push(mk_esc(910_001, 90_000_001, 2001, "Caller Escalation", 30_000_142, 2));
+        reg.escalations_by_char.entry(90_000_002).or_default().push(mk_esc(910_002, 90_000_002, 2002, "Other Pilot Escalation", 30_002_187, 1));
+    });
     let agents = rpc(&ctx, &mut sess, "map", "GetDeadspaceAgentsMap", &[]).await.unwrap();
-    assert!(agents.crowset_rows().expect("agents crowset").len() > 32);
+    let agent_rows = agents.crowset_rows().expect("agents crowset");
+    assert_eq!(agent_rows.len(), 1);
+    assert!(matches!(agent_rows.first(), Some(PyRep::DBRow { columns, .. }) if columns.len() == 4 && columns[0] == ("solarSystemID".into(), PyRep::Integer(30_000_142)) && columns[1] == ("dungeonID".into(), PyRep::Integer(2001)) && columns[2] == ("difficulty".into(), PyRep::Integer(2)) && columns[3] == ("dungeonName".into(), PyRep::String("Caller Escalation".into()))));
 }
 
 #[tokio::test]
@@ -661,12 +669,14 @@ async fn test_map_history_jumps_kills_timeframes_and_visit_stats() {
     assert_eq!(crowset_row_vals(&jumps_24h, 30_000_142), Some((5, 0, 0)));
 
     let kills_1h = rpc(&ctx, &mut sess, "map", "GetHistory", &[PyRep::Integer(2), PyRep::Integer(1)]).await.unwrap();
-    assert_eq!(crowset_row_vals(&kills_1h, 30_000_142), Some((1, 3, 1)));
+    assert_eq!(crowset_row_vals(&kills_1h, 30_000_142), Some((4, 3, 1)));
     let kills_24h = rpc(&ctx, &mut sess, "map", "GetHistory", &[PyRep::Integer(2), PyRep::Integer(24)]).await.unwrap();
-    assert_eq!(crowset_row_vals(&kills_24h, 30_000_142), Some((2, 5, 1)));
+    assert_eq!(crowset_row_vals(&kills_24h, 30_000_142), Some((7, 5, 1)));
 
     let active_1h = rpc(&ctx, &mut sess, "map", "GetHistory", &[PyRep::Integer(3), PyRep::Integer(1)]).await.unwrap();
-    assert!(crowset_row_vals(&active_1h, 30_000_142).is_some_and(|(pilots, _, _)| pilots >= 1));
+    assert_eq!(crowset_row_vals(&active_1h, 30_000_142), Some((1, 0, 0)));
+    let active_24h = rpc(&ctx, &mut sess, "map", "GetHistory", &[PyRep::Integer(3), PyRep::Integer(24)]).await.unwrap();
+    assert_eq!(crowset_row_vals(&active_24h, 30_000_142), Some((2, 0, 0)));
 
     let pods_1h = rpc(&ctx, &mut sess, "map", "GetHistory", &[PyRep::Integer(4), PyRep::Integer(1)]).await.unwrap();
     assert_eq!(crowset_row_vals(&pods_1h, 30_000_142), Some((1, 0, 1)));

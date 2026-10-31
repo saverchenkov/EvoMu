@@ -471,7 +471,6 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
 
     let mut kw = HashMap::new();
     kw.insert("blueprintItemID".to_string(), PyRep::Integer(bp_item_id));
-    kw.insert("useCorp".to_string(), PyRep::Bool(true));
     let install_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -549,6 +548,44 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
     assert!(done_obj.get("completed_date").is_some());
     assert_eq!(done_obj["completed_character_id"], serde_json::json!(char_id));
 
+    // Also install & complete a corporate job and verify /corporations/{corp_id}/industry/jobs/
+    kw.insert("useCorp".to_string(), PyRep::Bool(true));
+    let corp_install = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "industryManager",
+            None,
+            "InstallJob",
+            &[
+                PyRep::Integer(i64::from(bp_type_id)),
+                PyRep::Integer(1),
+                PyRep::Integer(1),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("InstallJob corp");
+    let corp_job_id = dict_get(&corp_install, "jobID")
+        .and_then(PyRep::as_i64)
+        .expect("corp jobID");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(j) = snap.industry_jobs.get_mut(&corp_job_id) {
+            j.start_unix = j.start_unix.saturating_sub(j.duration_seconds + 10);
+        }
+    });
+    ctx.dispatch_rpc(
+        &mut sess,
+        "industryManager",
+        None,
+        "CompleteJob",
+        &[PyRep::Integer(corp_job_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CompleteJob corp");
+
     let corp_jobs = get_json(
         &router,
         &spec,
@@ -559,5 +596,5 @@ async fn test_esi_industry_facilities_and_jobs_driven_by_real_industry_rpcs() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|j| j["job_id"] == serde_json::json!(job_id) && j["status"] == serde_json::json!("delivered")));
+        .any(|j| j["job_id"] == serde_json::json!(corp_job_id) && j["status"] == serde_json::json!("delivered")));
 }

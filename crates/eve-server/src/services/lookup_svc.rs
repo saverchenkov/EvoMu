@@ -514,6 +514,7 @@ pub fn handle(
                         }))
                     }
                 }
+                // DERIVED: V24 check_words_allowed returns None when given null or empty input.
                 _ => Some(Ok(PyRep::None)),
             }
         }

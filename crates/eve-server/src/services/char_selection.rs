@@ -77,7 +77,10 @@ pub fn get_character_selection_data(
                 .get(&c.active_ship_id)
                 .map(|i| PyRep::Integer(i64::from(i.type_id)))
                 .unwrap_or(PyRep::None);
-            let queue_head = snap.skill_queues.get(&c.character_id).and_then(|q| q.first());
+            let is_queue_paused = snap.paused_skill_queues.contains(&c.character_id);
+            let queue_head = (!is_queue_paused)
+                .then(|| snap.skill_queues.get(&c.character_id).and_then(|q| q.first()))
+                .flatten();
             let (skill_type, to_level, start_t, end_t, finish_sp, trained_sp) = match queue_head {
                 Some(e) => {
                     let start = e.started_at_unix.unwrap_or(now_unix);
@@ -93,11 +96,14 @@ pub fn get_character_selection_data(
                 }
                 None => (PyRep::None, PyRep::None, PyRep::None, PyRep::None, PyRep::None, PyRep::None),
             };
-            let queue_end = snap.skill_queues.get(&c.character_id).filter(|q| !q.is_empty()).map(|q| {
-                let start = q[0].started_at_unix.unwrap_or(now_unix);
-                let total: f64 = q.iter().map(|e| e.duration_seconds.max(0.0)).sum();
-                PyRep::Integer(unix_to_filetime(start + total as u64))
-            });
+            let queue_end = (!is_queue_paused)
+                .then(|| snap.skill_queues.get(&c.character_id).filter(|q| !q.is_empty()))
+                .flatten()
+                .map(|q| {
+                    let start = q[0].started_at_unix.unwrap_or(now_unix);
+                    let total: f64 = q.iter().map(|e| e.duration_seconds.max(0.0)).sum();
+                    PyRep::Integer(unix_to_filetime(start + total as u64))
+                });
             let unread = snap
                 .mails
                 .iter()

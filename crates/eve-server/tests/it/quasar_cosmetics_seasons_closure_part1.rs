@@ -191,7 +191,8 @@ async fn test_cosmetics_apparel_broadcast_and_emblems() {
     assert_eq!(wear_kv.get("wornApparel"), Some(&PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])));
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
-        assert_eq!(it.flag, InventoryFlag::Pilot, "worn apparel flag must persist as Pilot");
+        assert_eq!(it.flag, InventoryFlag::Wardrobe, "worn apparel flag must persist as Wardrobe (3)");
+        assert_eq!(it.flag as u16, 3);
     });
 
     // Unwear apparel: item flag resets to Hangar

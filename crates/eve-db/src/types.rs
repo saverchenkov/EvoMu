@@ -160,6 +160,7 @@ impl IskCents {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InventoryFlag {
     None = 0,
+    Wardrobe = 3,
     Hangar = 4,
     Cargo = 5,
     Skill = 7,
@@ -250,11 +251,11 @@ impl InventoryFlag {
     #[allow(non_upper_case_globals)] pub const MobileDepotHold: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
     #[allow(non_upper_case_globals)] pub const FrigateEscapeBay: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
     #[allow(non_upper_case_globals)] pub const InfrastructureHold: InventoryFlag = InventoryFlag::SpecializedInfrastructureHold;
-    #[allow(non_upper_case_globals)] pub const Wardrobe: InventoryFlag = InventoryFlag::Pilot;
     #[allow(non_upper_case_globals)] pub const CorpHangar: InventoryFlag = InventoryFlag::CorpSAG1;
 
     pub fn from_u16(v: u16) -> Self {
         match v {
+            3 => Self::Wardrobe,
             4 => Self::Hangar,
             5 => Self::Cargo,
             7 => Self::Skill,

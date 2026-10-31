@@ -644,7 +644,6 @@ async fn handle_random_jump_filament(
     session.region_id = Some(dest_sys.region_id);
     session.station_id = None;
     session.structure_id = None;
-    crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
     Ok(PyRep::keyval([

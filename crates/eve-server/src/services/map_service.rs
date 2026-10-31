@@ -102,14 +102,18 @@ pub fn handle(
 
     match (service, method) {
         ("map", "GetBeaconCount") => {
-            // Count active cynosural beacons per solar system (Pharolux 35840, lit ship/deployable cyno fields, in-space cyno beacons).
-            let mut counts: HashMap<i64, i64> =
+            // V24 MapFilterCynosuralFields unpacks per-system 2-tuples `(module_beacon_count, structure_beacon_count)`.
+            let module_cyno_counts: HashMap<i64, i64> =
                 crate::services::inventory_fitting::fitting_cyno_portal::active_cyno_beacon_counts(ctx);
+            let mut counts: HashMap<i64, (i64, i64)> = module_cyno_counts
+                .into_iter()
+                .map(|(sys_id, cnt)| (sys_id, (cnt, 0)))
+                .collect();
             ctx.db.with_snapshot(|snap| {
                 for s in snap.structures.values() {
                     // Pharolux Cyno Beacon structure type 35840 (NOT 35841 Ansiblex Jump Gate)
                     if s.type_id == 35840 && s.state != "Destroyed" {
-                        *counts.entry(i64::from(s.solar_system_id)).or_insert(0) += 1;
+                        counts.entry(i64::from(s.solar_system_id)).or_insert((0, 0)).1 += 1;
                     }
                 }
                 let now_unix = ctx.now_unix();
@@ -119,14 +123,14 @@ pub fn handle(
                         continue;
                     }
                     if matches!(it.type_id, 21096 | 49746 | 56099) {
-                        *counts.entry(it.location_id).or_insert(0) += 1;
+                        counts.entry(it.location_id).or_insert((0, 0)).0 += 1;
                     } else if it.type_id == 57319 {
                         if let Some(rec) = dep_state.deployables.get(&it.item_id) {
                             if !rec.is_unanchored
                                 && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
                                 && now_unix < rec.expires_at_unix
                             {
-                                *counts.entry(it.location_id).or_insert(0) += 1;
+                                counts.entry(it.location_id).or_insert((0, 0)).0 += 1;
                             }
                         }
                     }
@@ -134,7 +138,13 @@ pub fn handle(
             });
             let dict = counts
                 .into_iter()
-                .map(|(k, v)| (PyRep::Integer(k), PyRep::Integer(v)))
+                .filter(|&(_, (mod_cnt, st_cnt))| mod_cnt > 0 || st_cnt > 0)
+                .map(|(k, (mod_cnt, st_cnt))| {
+                    (
+                        PyRep::Integer(k),
+                        PyRep::Tuple(vec![PyRep::Integer(mod_cnt), PyRep::Integer(st_cnt)]),
+                    )
+                })
                 .collect();
             Some(Ok(PyRep::Dict(dict)))
         }
@@ -185,32 +195,40 @@ pub fn handle(
 
         ("map", "GetDeadspaceAgentsMap") => {
             let desc = DBRowDescriptor::new([
-                ("locationID", DbColumnType::I4),
                 ("solarSystemID", DbColumnType::I4),
-                ("agentID", DbColumnType::I4),
+                ("dungeonID", DbColumnType::I4),
+                ("difficulty", DbColumnType::I4),
+                ("dungeonName", DbColumnType::WStr),
             ]);
-            let rows = ctx
-                .sde
-                .agents
-                .values()
-                .filter_map(|a| {
-                    let loc = a.station_id?;
-                    let sys = a.solar_system_id?;
-                    Some(vec![
-                        PyRep::Integer(loc),
-                        PyRep::Integer(i64::from(sys)),
-                        PyRep::Integer(a.agent_id),
-                    ])
+            let rows: Vec<Vec<PyRep>> = session
+                .character_id
+                .map(|char_id| {
+                    crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+                        reg.escalations_by_char
+                            .get(&char_id)
+                            .into_iter()
+                            .flatten()
+                            .map(|e| {
+                                vec![
+                                    PyRep::Integer(i64::from(e.destination_solar_system_id)),
+                                    PyRep::Integer(i64::from(e.expedition_dungeon_id)),
+                                    PyRep::Integer(i64::from(e.step_index.max(1))),
+                                    PyRep::String(e.expedition_name.clone()),
+                                ]
+                            })
+                            .collect()
+                    })
                 })
-                .collect();
+                .unwrap_or_default();
             Some(Ok(desc.build_crowset(rows)))
         }
 
         ("map", "GetDeadspaceComplexMap") => {
             let desc = DBRowDescriptor::new([
-                ("dungeonID", DbColumnType::I4),
                 ("solarSystemID", DbColumnType::I4),
+                ("dungeonID", DbColumnType::I4),
                 ("difficulty", DbColumnType::I4),
+                ("dungeonName", DbColumnType::WStr),
             ]);
             let mut rows: Vec<Vec<PyRep>> = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
                 reg.sites_by_system
@@ -219,9 +237,10 @@ pub fn handle(
                     .filter(|s| !s.cleared)
                     .map(|s| {
                         vec![
-                            PyRep::Integer(i64::from(s.dungeon_id)),
                             PyRep::Integer(i64::from(s.solar_system_id)),
+                            PyRep::Integer(i64::from(s.dungeon_id)),
                             PyRep::Integer(i64::from(s.ded_rating.unwrap_or(1))),
+                            PyRep::String(s.dungeon_name.clone()),
                         ]
                     })
                     .collect()
@@ -229,11 +248,12 @@ pub fn handle(
             if rows.is_empty() {
                 if let Some(sys_id) = session.solar_system_id {
                     let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.9);
-                    for (did, _, _, _, _) in crate::services::pve_exploration::anomaly_dungeons_for_system(&ctx.sde, sys_id, sec) {
+                    for (did, name, _, tier, _) in crate::services::pve_exploration::anomaly_dungeons_for_system(&ctx.sde, sys_id, sec) {
                         rows.push(vec![
-                            PyRep::Integer(i64::from(did)),
                             PyRep::Integer(i64::from(sys_id)),
-                            PyRep::Integer(1),
+                            PyRep::Integer(i64::from(did)),
+                            PyRep::Integer(i64::from(tier)),
+                            PyRep::String(name.to_string()),
                         ]);
                     }
                 }
@@ -351,15 +371,27 @@ pub fn handle(
                 let mut sys_ids: std::collections::BTreeSet<u32> = snap.system_states.keys().copied().collect();
                 let mut jump_counts: HashMap<u32, i64> = HashMap::new();
                 let mut kill_totals: HashMap<u32, (i64, i64, i64)> = HashMap::new();
-                let mut pilot_counts: HashMap<u32, i64> = HashMap::new();
+                let mut active_pilots: HashMap<u32, std::collections::HashSet<i64>> = HashMap::new();
                 for ch in snap.characters.values() {
                     sys_ids.insert(ch.solar_system_id);
-                    *pilot_counts.entry(ch.solar_system_id).or_insert(0) += 1;
+                    let in_space = ch.station_id.is_none() && ch.structure_id.is_none();
+                    if in_space && ctx.is_character_online(ch.character_id, ch.user_id) {
+                        active_pilots
+                            .entry(ch.solar_system_id)
+                            .or_default()
+                            .insert(ch.character_id);
+                    }
                 }
                 for ev in &snap.system_jump_events {
                     sys_ids.insert(ev.solar_system_id);
                     if ev.timestamp_unix >= window_start && ev.timestamp_unix <= now_unix {
                         *jump_counts.entry(ev.solar_system_id).or_insert(0) += 1;
+                        if ev.character_id > 0 {
+                            active_pilots
+                                .entry(ev.solar_system_id)
+                                .or_default()
+                                .insert(ev.character_id);
+                        }
                     }
                 }
                 for ev in &snap.system_kill_events {
@@ -383,7 +415,6 @@ pub fn handle(
                     }
                     let sde_type = ctx.sde.types.get(&km.ship_type_id);
                     let is_npc_victim = km.victim_character_id <= 0
-                        || km.victim_character_id >= 700_000_000
                         || sde_type.is_some_and(|t| t.category_id == 11);
                     let is_pod = km.ship_type_id == 670
                         || km.ship_type_id == 33328
@@ -405,10 +436,10 @@ pub fn handle(
                     .map(|sid| {
                         let jumps = jump_counts.get(&sid).copied().unwrap_or(0);
                         let (ship_kills, npc_kills, pod_kills) = kill_totals.get(&sid).copied().unwrap_or((0, 0, 0));
-                        let pilots = pilot_counts.get(&sid).copied().unwrap_or(0);
+                        let pilots = active_pilots.get(&sid).map_or(0, |s| s.len() as i64);
                         let (v1, v2, v3) = match stat_type {
                             1 => (jumps, 0, 0),
-                            2 => (ship_kills, npc_kills, pod_kills),
+                            2 => (ship_kills + npc_kills, npc_kills, pod_kills),
                             3 => (pilots, 0, 0),
                             4 => (pod_kills, 0, pod_kills),
                             5 => (npc_kills, npc_kills, 0),

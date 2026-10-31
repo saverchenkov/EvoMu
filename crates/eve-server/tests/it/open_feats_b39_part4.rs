@@ -275,11 +275,11 @@ async fn test_b39_covert_cyno_rules() {
 
     // 3. On-grid-only visibility: hidden from `map.GetBeaconCount` and off-grid `scanMgr.ConeScan`, visible to on-grid `scanMgr.ConeScan`!
     let map_counts = ctx.dispatch_rpc(&mut sess_cov, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
-    let sys_b_count = match &map_counts {
-        PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_i64() == Some(sys_b as i64)).and_then(|(_, v)| v.as_i64()),
+    let sys_b_entry = match &map_counts {
+        PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_i64() == Some(sys_b as i64)),
         _ => None,
     };
-    assert!(sys_b_count.is_none(), "Covert cyno hidden from system map beacon count");
+    assert!(sys_b_entry.is_none(), "Covert cyno hidden from system map beacon count");
 
     let au_m = 14.3 * 149_597_870_700.0;
     let offgrid_dscan = ctx

@@ -133,26 +133,26 @@ async fn test_rpc_map_svc_part1_batch() {
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
     let kw = HashMap::new();
 
-    // 1. GetBeaconCount — counts Pharolux Cyno Beacon (35840) + Mobile Cyno Beacon (56099) in 30000142,
+    // 1. GetBeaconCount — returns per-system (module_count, structure_count) 2-tuple:
+    // Mobile Cyno Beacon (56099) + Pharolux Cyno Beacon (35840) in 30000142 => (1, 1),
     // and excludes Ansiblex Jump Gate (35841) in 30000144.
     let res = ctx
         .dispatch_rpc(&mut sess, "map", None, "GetBeaconCount", &[], &kw, None)
         .await
         .expect("GetBeaconCount");
     let beacons = as_dict(&res);
-    let jita_count = beacons
+    let jita_tuple = beacons
         .iter()
         .find(|(k, _)| k.as_i64() == Some(30_000_142))
-        .and_then(|(_, v)| v.as_i64())
-        .expect("beacon count for 30000142");
-    assert_eq!(jita_count, 2);
-    let maurasi_count = beacons
-        .iter()
-        .find(|(k, _)| k.as_i64() == Some(30_000_144))
-        .and_then(|(_, v)| v.as_i64())
-        .unwrap_or(0);
+        .map(|(_, v)| v)
+        .expect("beacon tuple for 30000142");
     assert_eq!(
-        maurasi_count, 0,
+        jita_tuple,
+        &PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1)])
+    );
+    let has_maurasi = beacons.iter().any(|(k, _)| k.as_i64() == Some(30_000_144));
+    assert!(
+        !has_maurasi,
         "Ansiblex Jump Gate (35841) must not be counted by map.GetBeaconCount"
     );
 
@@ -189,7 +189,7 @@ async fn test_rpc_map_svc_part1_batch() {
         Some(99_000_001)
     );
 
-    // 4. GetDeadspaceAgentsMap
+    // 4. GetDeadspaceAgentsMap — 4-column (solarSystemID, dungeonID, difficulty, dungeonName)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -203,11 +203,13 @@ async fn test_rpc_map_svc_part1_batch() {
         .await
         .expect("GetDeadspaceAgentsMap");
     assert!(res.is_crowset());
-    assert!(crowset_header_has_column(&res, "agentID"));
+    for col in ["solarSystemID", "dungeonID", "difficulty", "dungeonName"] {
+        assert!(crowset_header_has_column(&res, col));
+    }
     let agent_rows = res.crowset_rows().expect("agent rows");
     assert!(!agent_rows.is_empty());
 
-    // 5. GetDeadspaceComplexMap
+    // 5. GetDeadspaceComplexMap — 4-column (solarSystemID, dungeonID, difficulty, dungeonName)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -221,7 +223,9 @@ async fn test_rpc_map_svc_part1_batch() {
         .await
         .expect("GetDeadspaceComplexMap");
     assert!(res.is_crowset());
-    assert!(crowset_header_has_column(&res, "dungeonID"));
+    for col in ["solarSystemID", "dungeonID", "difficulty", "dungeonName"] {
+        assert!(crowset_header_has_column(&res, col));
+    }
 
     // 6. GetEdencomFortressSystems
     let res = ctx

@@ -393,7 +393,7 @@ async fn test_people_and_places_search_query_and_quick_query() {
             "search",
             None,
             "Query",
-            &[PyRep::String(char_name), PyRep::List(vec![PyRep::Integer(2)])],
+            &[PyRep::String(char_name.clone()), PyRep::List(vec![PyRep::Integer(2)])],
             &empty_kw,
             None,
         )
@@ -533,4 +533,40 @@ async fn test_people_and_places_search_query_and_quick_query() {
         !quick_structs.contains(&PyRep::Integer(denied_struct_id)),
         "ACL-denied private structure must be omitted from search.QuickQuery"
     );
+
+    // hideNPC=1 must drop NPC agents (group 1), NPC corporations (group 3), and factions (group 5)
+    // while keeping player characters (group 2), player corporations (group 3), and player alliances (group 4).
+    let sample_agent = ctx.sde.agents.values().find(|a| a.name.len() >= 3).expect("SDE agent");
+    let sample_npc_corp = ctx.sde.npc_corporations.values().find(|c| c.name.len() >= 3).expect("SDE NPC corp");
+    let sample_faction = ctx.sde.factions.values().find(|f| f.name.len() >= 3).expect("SDE faction");
+
+    for (query_str, grp_id, expected_id) in [
+        (sample_agent.name.clone(), 1i64, sample_agent.agent_id),
+        (sample_npc_corp.name.clone(), 3i64, sample_npc_corp.corporation_id),
+        (sample_faction.name.clone(), 5i64, i64::from(sample_faction.faction_id)),
+    ] {
+        let with_npc = ctx
+            .dispatch_rpc(&mut sess, "search", None, "Query", &[PyRep::String(query_str.clone()), PyRep::List(vec![PyRep::Integer(grp_id)]), PyRep::Integer(0), PyRep::Integer(0)], &empty_kw, None)
+            .await
+            .expect("Query hideNPC=0");
+        assert!(group_ids(&with_npc, grp_id).contains(&PyRep::Integer(expected_id)));
+
+        let hide_npc = ctx
+            .dispatch_rpc(&mut sess, "search", None, "Query", &[PyRep::String(query_str), PyRep::List(vec![PyRep::Integer(grp_id)]), PyRep::Integer(0), PyRep::Integer(1)], &empty_kw, None)
+            .await
+            .expect("Query hideNPC=1");
+        assert!(!group_ids(&hide_npc, grp_id).contains(&PyRep::Integer(expected_id)));
+    }
+
+    for (query_str, grp_id, expected_id) in [
+        (char_name, 2i64, 90_000_001i64),
+        ("Vanguard Logistics".into(), 3i64, 98_000_001i64),
+        ("Nebula Accord".into(), 4i64, 99_000_222i64),
+    ] {
+        let hide_npc = ctx
+            .dispatch_rpc(&mut sess, "search", None, "Query", &[PyRep::String(query_str), PyRep::List(vec![PyRep::Integer(grp_id)]), PyRep::Integer(0), PyRep::Integer(1)], &empty_kw, None)
+            .await
+            .expect("Query player hideNPC=1");
+        assert!(group_ids(&hide_npc, grp_id).contains(&PyRep::Integer(expected_id)));
+    }
 }

@@ -841,7 +841,7 @@ pub fn handle_clones_and_sheet(
                         .values()
                         .filter(|i| {
                             i.owner_id == char_id
-                                && i.flag == InventoryFlag::Pilot
+                                && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
                                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                         })
                         .map(|i| i.type_id)
@@ -900,7 +900,7 @@ pub fn handle_clones_and_sheet(
                         .values()
                         .filter(|i| {
                             i.owner_id == target_cid
-                                && i.flag == InventoryFlag::Pilot
+                                && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
                                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                         })
                         .map(|i| i.type_id)
@@ -962,7 +962,7 @@ pub fn handle_clones_and_sheet(
                             .values()
                             .filter(|i| {
                                 i.owner_id == cid
-                                    && i.flag == InventoryFlag::Pilot
+                                    && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
                                     && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                             })
                             .map(|i| i.type_id)
@@ -1112,7 +1112,19 @@ pub fn handle_clones_and_sheet(
                             message: "Must be docked at a station or structure to equip or unequip apparel".into(),
                         })?;
                     let mut equipped_item_ids: Vec<i64> = Vec::with_capacity(req_apparel.len());
+                    let mut seen_requests: std::collections::HashSet<i64> =
+                        std::collections::HashSet::with_capacity(req_apparel.len());
+                    let mut consumed_source_ids: std::collections::HashSet<i64> =
+                        std::collections::HashSet::with_capacity(req_apparel.len());
+                    let mut occupied_apparel_groups: std::collections::HashSet<u32> =
+                        std::collections::HashSet::with_capacity(req_apparel.len());
                     for &id_or_tid in req_apparel {
+                        if !seen_requests.insert(id_or_tid) {
+                            return Err(BridgeRpcError {
+                                code: "InvalidApparelItem".into(),
+                                message: format!("Duplicate apparel entry {id_or_tid} in request"),
+                            });
+                        }
                         let mut candidates: Vec<(i64, bool, bool)> = snap
                             .items
                             .values()
@@ -1120,11 +1132,12 @@ pub fn handle_clones_and_sheet(
                                 i.owner_id == char_id
                                     && i.quantity > 0
                                     && !equipped_item_ids.contains(&i.item_id)
+                                    && !consumed_source_ids.contains(&i.item_id)
                                     && (i.item_id == id_or_tid || i64::from(i.type_id) == id_or_tid)
                                     && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                             })
                             .map(|i| {
-                                let already_worn = i.flag == InventoryFlag::Wardrobe
+                                let already_worn = matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
                                     && (i.location_id == char_id || i.location_id == docked_loc);
                                 let in_local_hangar =
                                     i.location_id == docked_loc && i.flag == InventoryFlag::Hangar;
@@ -1152,6 +1165,14 @@ pub fn handle_clones_and_sheet(
                             });
                         }
                         let src = snap.items.get(&iid).unwrap().clone();
+                        let apparel_group = ctx.sde.types.get(&src.type_id).map(|t| t.group_id).unwrap_or(0);
+                        if apparel_group > 0 && !occupied_apparel_groups.insert(apparel_group) {
+                            return Err(BridgeRpcError {
+                                code: "InvalidApparelItem".into(),
+                                message: format!("Cannot equip multiple garments in wearable group {apparel_group}"),
+                            });
+                        }
+                        consumed_source_ids.insert(iid);
                         worn_types.push(src.type_id);
                         if src.quantity > 1 {
                             if let Some(it) = snap.items.get_mut(&iid) {
@@ -1160,14 +1181,12 @@ pub fn handle_clones_and_sheet(
                                 it.version += 1;
                                 item_changes.push((it.clone(), src.location_id, src.flag as i64, old_qty));
                             }
-                            if snap.next_entity_id < 1_000_000_000 {
-                                snap.next_entity_id = 1_000_000_000;
-                            }
-                            while snap.items.contains_key(&snap.next_entity_id) {
-                                snap.next_entity_id += 1;
-                            }
-                            let split_id = snap.next_entity_id;
-                            snap.next_entity_id += 1;
+                            let max_existing = snap.items.keys().copied().max().unwrap_or(0);
+                            let split_id = snap
+                                .next_entity_id
+                                .max(1_000_000_000)
+                                .max(max_existing.saturating_add(1));
+                            snap.next_entity_id = split_id.saturating_add(1);
                             let worn_unit = eve_db::InventoryItemRecord {
                                 item_id: split_id,
                                 type_id: src.type_id,
@@ -1202,7 +1221,7 @@ pub fn handle_clones_and_sheet(
                         .filter(|it| {
                             it.owner_id == char_id
                                 && !equipped_item_ids.contains(&it.item_id)
-                                && it.flag == InventoryFlag::Wardrobe
+                                && matches!(it.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
                                 && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 30)
                         })
                         .map(|it| it.item_id)
@@ -1224,7 +1243,7 @@ pub fn handle_clones_and_sheet(
                         .values()
                         .filter(|i| {
                             i.owner_id == char_id
-                                && i.flag == InventoryFlag::Wardrobe
+                                && matches!(i.flag, InventoryFlag::Wardrobe | InventoryFlag::Pilot)
                                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                         })
                         .map(|i| i.type_id)

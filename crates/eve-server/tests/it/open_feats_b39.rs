@@ -12,9 +12,12 @@ use eve_server::services::mobile_deployables::{
 use glam::DVec3;
 use std::collections::HashMap;
 
-fn dict_int_lookup(rep: &PyRep, key: i64) -> Option<i64> {
+fn dict_beacon_tuple(rep: &PyRep, key: i64) -> Option<(i64, i64)> {
     match rep {
-        PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_i64() == Some(key)).and_then(|(_, v)| v.as_i64()),
+        PyRep::Dict(d) => d.iter().find(|(k, _)| k.as_i64() == Some(key)).and_then(|(_, v)| match v {
+            PyRep::Tuple(t) if t.len() == 2 => Some((t[0].as_i64()?, t[1].as_i64()?)),
+            _ => None,
+        }),
         _ => None,
     }
 }
@@ -131,14 +134,14 @@ async fn test_b39_mobile_cyno_beacon_and_covert_variant() {
 
     // During 1m spool: not counted on map.GetBeaconCount and jump fails
     let map_spool = ctx.dispatch_rpc(&mut sess1, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
-    assert!(dict_int_lookup(&map_spool, dest_sys as i64).is_none());
+    assert!(dict_beacon_tuple(&map_spool, dest_sys as i64).is_none());
     let j_args = [PyRep::Integer(c1), PyRep::Integer(dest_sys as i64), PyRep::Integer(beacon_id)];
     assert_eq!(ctx.dispatch_rpc(&mut sess_carrier, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &j_args, &kw, None).await.unwrap_err().code, "NoActiveBeacon");
 
     // After 61s spool: counted on map, fleet carrier jumps, non-fleet carrier rejected
     ctx.advance_secs(61);
     let map_active = ctx.dispatch_rpc(&mut sess1, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
-    assert_eq!(dict_int_lookup(&map_active, dest_sys as i64), Some(1));
+    assert_eq!(dict_beacon_tuple(&map_active, dest_sys as i64), Some((1, 0)));
 
     let mut sess_out = setup_pilot(&ctx, 91_000_013, 101_000_013, 23915, origin_sys, DVec3::new(500_000.0, 0.0, 0.0), 1_000_010).await;
     assert_eq!(ctx.dispatch_rpc(&mut sess_out, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &j_args, &kw, None).await.unwrap_err().code, "NoActiveBeacon");
@@ -171,7 +174,7 @@ async fn test_b39_mobile_cyno_beacon_and_covert_variant() {
 
     ctx.advance_secs(61);
     let map_cov = ctx.dispatch_rpc(&mut sess1, "map", None, "GetBeaconCount", &[], &kw, None).await.unwrap();
-    assert!(dict_int_lookup(&map_cov, dest_sys as i64).is_none(), "Covert Mobile Cyno Beacon is hidden from map");
+    assert!(dict_beacon_tuple(&map_cov, dest_sys as i64).is_none(), "Covert Mobile Cyno Beacon is hidden from map");
 
     let mut sess_dread = setup_pilot(&ctx, 91_000_017, 101_000_017, 19720, origin_sys, DVec3::new(510_000.0, 0.0, 0.0), 1_000_009).await;
     sess_dread.fleet_id = Some(777);

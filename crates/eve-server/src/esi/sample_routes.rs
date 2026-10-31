@@ -179,6 +179,7 @@ pub fn civil_from_unix(unix_secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 
 pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static str> {
     match flag {
+        InventoryFlag::Wardrobe => Some("Wardrobe"),
         InventoryFlag::Hangar => Some("Hangar"),
         InventoryFlag::Cargo => Some("Cargo"),
         InventoryFlag::Skill => Some("Skill"),
