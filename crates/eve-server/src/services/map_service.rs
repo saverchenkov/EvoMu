@@ -62,6 +62,18 @@ pub fn record_solar_system_visit(ctx: &ServerContext, char_id: i64, solar_system
     });
 }
 
+/// Records both a character solar-system visit and a timestamped `SystemJumpEvent` for `map.GetHistory` and ESI `/universe/system_jumps`.
+pub fn record_solar_system_jump(ctx: &ServerContext, char_id: i64, solar_system_id: u32) {
+    if char_id <= 0 || solar_system_id == 0 {
+        return;
+    }
+    record_solar_system_visit(ctx, char_id, solar_system_id);
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.record_system_jump(solar_system_id, char_id, now_unix);
+    });
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,
@@ -215,14 +227,15 @@ pub fn handle(
                     .collect()
             });
             if rows.is_empty() {
-                let sys_id = session.solar_system_id.unwrap_or(30_000_142);
-                let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.9);
-                for (did, _, _, _, _) in crate::services::pve_exploration::anomaly_dungeons_for_system(&ctx.sde, sys_id, sec) {
-                    rows.push(vec![
-                        PyRep::Integer(i64::from(did)),
-                        PyRep::Integer(i64::from(sys_id)),
-                        PyRep::Integer(1),
-                    ]);
+                if let Some(sys_id) = session.solar_system_id {
+                    let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.9);
+                    for (did, _, _, _, _) in crate::services::pve_exploration::anomaly_dungeons_for_system(&ctx.sde, sys_id, sec) {
+                        rows.push(vec![
+                            PyRep::Integer(i64::from(did)),
+                            PyRep::Integer(i64::from(sys_id)),
+                            PyRep::Integer(1),
+                        ]);
+                    }
                 }
             }
             Some(Ok(desc.build_crowset(rows)))
@@ -254,14 +267,25 @@ pub fn handle(
 
         ("map", "GetFacWarZoneInfo") => {
             let faction_id = args.first().and_then(|a| a.as_i64()).unwrap_or(500_001);
-            let total_vp = crate::services::fw_services::read_fw_runtime(ctx, |rt| {
-                rt.system_victory_points.values().copied().sum::<i64>()
-            });
+            let in_warzone = |fac: i64| -> bool {
+                match faction_id {
+                    500_001 | 500_004 | 500_010 => matches!(fac, 500_001 | 500_004 | 500_010),
+                    500_002 | 500_003 | 500_011 => matches!(fac, 500_002 | 500_003 | 500_011),
+                    other => fac == other,
+                }
+            };
             let systems = crate::services::sov_warzone_dynamic::collect_all_warzone_systems(ctx);
             let mut contested_count: i64 = 0;
             let mut controlled_count: i64 = 0;
             let mut systems_rep = Vec::new();
+            let mut solar_system_ids = Vec::new();
+            let mut warzone_sys_ids: Vec<u32> = Vec::new();
             for &(sys_id, contested, owner_fac, occupier_fac, frontline) in &systems {
+                if !in_warzone(owner_fac) && !in_warzone(occupier_fac) {
+                    continue;
+                }
+                warzone_sys_ids.push(sys_id);
+                solar_system_ids.push(PyRep::Integer(i64::from(sys_id)));
                 if contested > 0.0 {
                     contested_count += 1;
                 }
@@ -277,18 +301,46 @@ pub fn handle(
                     ("contested", PyRep::Bool(contested > 0.0)),
                 ]));
             }
+            let (warzone_vp, warzone_vp_threshold, upgrade_levels) = ctx.db.with_snapshot(|snap| {
+                let mut vp_sum = 0i64;
+                let mut thresh_sum = 0i64;
+                let mut upgrades = Vec::with_capacity(warzone_sys_ids.len());
+                for &sid in &warzone_sys_ids {
+                    let occ = snap.fw_system_occupations.get(&sid);
+                    let vp = snap
+                        .fw_runtime
+                        .system_victory_points
+                        .get(&sid)
+                        .copied()
+                        .or_else(|| occ.map(|o| o.victory_points))
+                        .unwrap_or(0);
+                    let thresh = occ.map(|o| o.victory_points_threshold).unwrap_or(3_000);
+                    let lvl = snap.fw_runtime.ihub_tiers.get(&sid).copied().unwrap_or(0);
+                    vp_sum += vp;
+                    thresh_sum += thresh;
+                    upgrades.push((PyRep::Integer(i64::from(sid)), PyRep::Integer(i64::from(lvl))));
+                }
+                (vp_sum, thresh_sum, upgrades)
+            });
             Some(Ok(PyRep::keyval([
                 ("factionID", PyRep::Integer(faction_id)),
-                ("factionPoints", PyRep::Integer(total_vp)),
+                ("factionPoints", PyRep::Integer(warzone_vp)),
+                ("victoryPoints", PyRep::Integer(warzone_vp)),
+                ("victoryPointThreshold", PyRep::Integer(warzone_vp_threshold)),
                 ("maxWarZonePoints", PyRep::Integer(100_000)),
                 ("controlledCount", PyRep::Integer(controlled_count)),
                 ("contestedCount", PyRep::Integer(contested_count)),
+                ("solarSystemIds", PyRep::List(solar_system_ids)),
+                ("systemUpgradeLevel", PyRep::Dict(upgrade_levels)),
                 ("systems", PyRep::List(systems_rep)),
             ])))
         }
 
         ("map", "GetHistory") => {
             let stat_type = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let hours = args.get(1).and_then(|a| a.as_i64()).unwrap_or(24).clamp(1, 24) as u64;
+            let now_unix = ctx.now_unix();
+            let window_start = now_unix.saturating_sub(hours * 3_600);
             let desc = DBRowDescriptor::new([
                 ("solarSystemID", DbColumnType::I4),
                 ("value1", DbColumnType::I4),
@@ -297,11 +349,53 @@ pub fn handle(
             ]);
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 let mut sys_ids: std::collections::BTreeSet<u32> = snap.system_states.keys().copied().collect();
+                let mut jump_counts: HashMap<u32, i64> = HashMap::new();
+                let mut kill_totals: HashMap<u32, (i64, i64, i64)> = HashMap::new();
+                let mut pilot_counts: HashMap<u32, i64> = HashMap::new();
                 for ch in snap.characters.values() {
                     sys_ids.insert(ch.solar_system_id);
+                    *pilot_counts.entry(ch.solar_system_id).or_insert(0) += 1;
+                }
+                for ev in &snap.system_jump_events {
+                    sys_ids.insert(ev.solar_system_id);
+                    if ev.timestamp_unix >= window_start && ev.timestamp_unix <= now_unix {
+                        *jump_counts.entry(ev.solar_system_id).or_insert(0) += 1;
+                    }
+                }
+                for ev in &snap.system_kill_events {
+                    sys_ids.insert(ev.solar_system_id);
+                    if ev.timestamp_unix >= window_start && ev.timestamp_unix <= now_unix {
+                        let e = kill_totals.entry(ev.solar_system_id).or_insert((0, 0, 0));
+                        e.0 += i64::from(ev.ship_kills);
+                        e.1 += i64::from(ev.npc_kills);
+                        e.2 += i64::from(ev.pod_kills);
+                    }
                 }
                 for km in snap.killmails.values() {
                     sys_ids.insert(km.solar_system_id);
+                    let km_ts = if km.killed_unix > 0 {
+                        km.killed_unix
+                    } else {
+                        snap.killmail_details.get(&km.kill_id).map(|d| d.killmail_time_unix).unwrap_or(0)
+                    };
+                    if km_ts < window_start || km_ts > now_unix {
+                        continue;
+                    }
+                    let sde_type = ctx.sde.types.get(&km.ship_type_id);
+                    let is_npc_victim = km.victim_character_id <= 0
+                        || km.victim_character_id >= 700_000_000
+                        || sde_type.is_some_and(|t| t.category_id == 11);
+                    let is_pod = km.ship_type_id == 670
+                        || km.ship_type_id == 33328
+                        || sde_type.is_some_and(|t| t.group_id == 29);
+                    let e = kill_totals.entry(km.solar_system_id).or_insert((0, 0, 0));
+                    if is_npc_victim {
+                        e.1 += 1;
+                    } else if is_pod {
+                        e.2 += 1;
+                    } else {
+                        e.0 += 1;
+                    }
                 }
                 if let Some(sid) = session.solar_system_id {
                     sys_ids.insert(sid);
@@ -309,13 +403,16 @@ pub fn handle(
                 sys_ids
                     .into_iter()
                     .map(|sid| {
-                        let pilots = snap.characters.values().filter(|c| c.solar_system_id == sid).count() as i64;
-                        let ship_kills = snap.killmails.values().filter(|k| k.solar_system_id == sid && k.ship_type_id != 670).count() as i64;
-                        let pod_kills = snap.killmails.values().filter(|k| k.solar_system_id == sid && k.ship_type_id == 670).count() as i64;
-                        let npc_kills = snap.killmails.values().filter(|k| k.solar_system_id == sid && k.victim_character_id == 0).count() as i64;
+                        let jumps = jump_counts.get(&sid).copied().unwrap_or(0);
+                        let (ship_kills, npc_kills, pod_kills) = kill_totals.get(&sid).copied().unwrap_or((0, 0, 0));
+                        let pilots = pilot_counts.get(&sid).copied().unwrap_or(0);
                         let (v1, v2, v3) = match stat_type {
-                            3 => (pilots.max(1), 0, 0),
-                            _ => (ship_kills, npc_kills, pod_kills),
+                            1 => (jumps, 0, 0),
+                            2 => (ship_kills, npc_kills, pod_kills),
+                            3 => (pilots, 0, 0),
+                            4 => (pod_kills, 0, pod_kills),
+                            5 => (npc_kills, npc_kills, 0),
+                            _ => (jumps, 0, 0),
                         };
                         vec![
                             PyRep::Integer(i64::from(sid)),

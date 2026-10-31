@@ -880,7 +880,7 @@ async fn handle_cmd_stargate_jump(
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None;
     session.structure_id = None;
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
+    crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
     ctx.quasar_gateway.on_session_changed(session, now_unix);
     if let Some(expiry) = zarzakh_lock_expiry {

@@ -915,7 +915,8 @@ pub fn handle_clones_and_sheet(
                     message: format!("Character {target_cid} not found"),
                 }));
             };
-            Some(Ok(PyRep::keyval([
+            let gender_label = if gender == 0 { "female" } else { "male" };
+            let details = PyRep::keyval([
                 ("characterID", PyRep::Integer(target_cid)),
                 ("dollDNA", PyRep::String(doll_dna.clone())),
                 ("dollInfo", PyRep::String(doll_dna.clone())),
@@ -924,6 +925,10 @@ pub fn handle_clones_and_sheet(
                 ("gender", PyRep::Integer(gender as i64)),
                 ("bloodlineID", PyRep::Integer(bloodline_id as i64)),
                 ("wornApparel", PyRep::List(worn_apparel.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
+            ]);
+            Some(Ok(PyRep::List(vec![
+                PyRep::String(gender_label.into()),
+                details,
             ])))
         }
 
@@ -1097,34 +1102,120 @@ pub fn handle_clones_and_sheet(
                     }
                 }
                 let mut worn_types = Vec::new();
+                let mut item_changes: Vec<(eve_db::InventoryItemRecord, i64, i64, i32)> = Vec::new();
                 if let Some(ref req_apparel) = apparel_list_opt {
-                    let mut chosen_item_ids = Vec::with_capacity(req_apparel.len());
+                    let docked_loc = session
+                        .station_id
+                        .or(session.structure_id)
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "NotDocked".into(),
+                            message: "Must be docked at a station or structure to equip or unequip apparel".into(),
+                        })?;
+                    let mut equipped_item_ids: Vec<i64> = Vec::with_capacity(req_apparel.len());
                     for &id_or_tid in req_apparel {
-                        let found = snap
+                        let mut candidates: Vec<(i64, bool, bool)> = snap
                             .items
                             .values()
-                            .find(|i| {
+                            .filter(|i| {
                                 i.owner_id == char_id
+                                    && i.quantity > 0
+                                    && !equipped_item_ids.contains(&i.item_id)
                                     && (i.item_id == id_or_tid || i64::from(i.type_id) == id_or_tid)
                                     && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                             })
-                            .map(|i| (i.item_id, i.type_id));
-                        let Some((iid, tid)) = found else {
+                            .map(|i| {
+                                let already_worn = i.flag == InventoryFlag::Wardrobe
+                                    && (i.location_id == char_id || i.location_id == docked_loc);
+                                let in_local_hangar =
+                                    i.location_id == docked_loc && i.flag == InventoryFlag::Hangar;
+                                let locked = snap.is_item_locked_in_contract_or_job(i.item_id);
+                                (i.item_id, already_worn || in_local_hangar, locked)
+                            })
+                            .collect();
+                        candidates.sort_by_key(|&(iid, valid_loc, locked)| (!valid_loc, locked, iid));
+                        let Some(&(iid, valid_loc, locked)) = candidates.first() else {
                             return Err(BridgeRpcError {
                                 code: "InvalidApparelItem".into(),
                                 message: format!("Character {char_id} does not own apparel item/type {id_or_tid} (category 30)"),
                             });
                         };
-                        chosen_item_ids.push(iid);
-                        worn_types.push(tid);
+                        if !valid_loc {
+                            return Err(BridgeRpcError {
+                                code: "InvalidApparelItem".into(),
+                                message: format!("Apparel item/type {id_or_tid} is not in current docked hangar ({docked_loc}) or wardrobe"),
+                            });
+                        }
+                        if locked {
+                            return Err(BridgeRpcError {
+                                code: "ItemLockedInContractOrJob".into(),
+                                message: format!("Apparel item/type {id_or_tid} is locked in an open contract or industry job"),
+                            });
+                        }
+                        let src = snap.items.get(&iid).unwrap().clone();
+                        worn_types.push(src.type_id);
+                        if src.quantity > 1 {
+                            if let Some(it) = snap.items.get_mut(&iid) {
+                                let old_qty = it.quantity;
+                                it.quantity -= 1;
+                                it.version += 1;
+                                item_changes.push((it.clone(), src.location_id, src.flag as i64, old_qty));
+                            }
+                            if snap.next_entity_id < 1_000_000_000 {
+                                snap.next_entity_id = 1_000_000_000;
+                            }
+                            while snap.items.contains_key(&snap.next_entity_id) {
+                                snap.next_entity_id += 1;
+                            }
+                            let split_id = snap.next_entity_id;
+                            snap.next_entity_id += 1;
+                            let worn_unit = eve_db::InventoryItemRecord {
+                                item_id: split_id,
+                                type_id: src.type_id,
+                                owner_id: char_id,
+                                location_id: char_id,
+                                flag: InventoryFlag::Wardrobe,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                ..Default::default()
+                            };
+                            snap.items.insert(split_id, worn_unit.clone());
+                            item_changes.push((worn_unit, src.location_id, src.flag as i64, 0));
+                            equipped_item_ids.push(split_id);
+                        } else if let Some(it) = snap.items.get_mut(&iid) {
+                            let old_loc = it.location_id;
+                            let old_flag = it.flag as i64;
+                            let old_qty = it.quantity;
+                            if it.location_id != char_id || it.flag != InventoryFlag::Wardrobe {
+                                it.location_id = char_id;
+                                it.flag = InventoryFlag::Wardrobe;
+                                it.singleton = true;
+                                it.version += 1;
+                                item_changes.push((it.clone(), old_loc, old_flag, old_qty));
+                            }
+                            equipped_item_ids.push(iid);
+                        }
                     }
-                    for it in snap.items.values_mut().filter(|i| i.owner_id == char_id) {
-                        if chosen_item_ids.contains(&it.item_id) {
-                            it.flag = InventoryFlag::Pilot;
-                        } else if it.flag == InventoryFlag::Pilot
-                            && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 30)
-                        {
+                    let unequip_ids: Vec<i64> = snap
+                        .items
+                        .values()
+                        .filter(|it| {
+                            it.owner_id == char_id
+                                && !equipped_item_ids.contains(&it.item_id)
+                                && it.flag == InventoryFlag::Wardrobe
+                                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 30)
+                        })
+                        .map(|it| it.item_id)
+                        .collect();
+                    for uid in unequip_ids {
+                        if let Some(it) = snap.items.get_mut(&uid) {
+                            let old_loc = it.location_id;
+                            let old_flag = it.flag as i64;
+                            let old_qty = it.quantity;
+                            it.location_id = docked_loc;
                             it.flag = InventoryFlag::Hangar;
+                            it.version += 1;
+                            item_changes.push((it.clone(), old_loc, old_flag, old_qty));
                         }
                     }
                 } else {
@@ -1133,7 +1224,7 @@ pub fn handle_clones_and_sheet(
                         .values()
                         .filter(|i| {
                             i.owner_id == char_id
-                                && i.flag == InventoryFlag::Pilot
+                                && i.flag == InventoryFlag::Wardrobe
                                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
                         })
                         .map(|i| i.type_id)
@@ -1145,17 +1236,50 @@ pub fn handle_clones_and_sheet(
                 let existing_portrait = snap.character_doll_info.get(&char_id).map(|(_, p)| p.clone()).unwrap_or_else(|| format!("portrait:bloodline:{}", ch.bloodline_id));
                 let final_portrait = new_portrait_opt.unwrap_or(existing_portrait);
                 snap.character_doll_info.insert(char_id, (new_doll_str.clone(), final_portrait.clone()));
-                Ok((new_doll_str, final_portrait, worn_types))
+                Ok((new_doll_str, final_portrait, worn_types, item_changes))
             });
             match res {
-                Ok((doll, portrait, worn_types)) => Some(Ok(PyRep::keyval([
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("dollDNA", PyRep::String(doll.clone())),
-                    ("dollInfo", PyRep::String(doll)),
-                    ("portraitInfo", PyRep::String(portrait)),
-                    ("wornApparel", PyRep::List(worn_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
-                    ("updated", PyRep::Bool(true)),
-                ]))),
+                Ok((doll, portrait, worn_types, item_changes)) => {
+                    for (it, old_loc, old_flag, old_qty) in item_changes {
+                        let mut change_entries = Vec::new();
+                        if it.location_id != old_loc {
+                            change_entries.push((PyRep::Integer(3), PyRep::Integer(old_loc)));
+                        }
+                        if (it.flag as i64) != old_flag {
+                            change_entries.push((PyRep::Integer(4), PyRep::Integer(old_flag)));
+                        }
+                        if it.quantity != old_qty {
+                            change_entries.push((PyRep::Integer(5), PyRep::Integer(i64::from(old_qty))));
+                        }
+                        let notif_args = vec![
+                            PyRep::keyval([
+                                ("itemID", PyRep::Integer(it.item_id)),
+                                ("typeID", PyRep::Integer(i64::from(it.type_id))),
+                                ("ownerID", PyRep::Integer(it.owner_id)),
+                                ("locationID", PyRep::Integer(it.location_id)),
+                                ("flagID", PyRep::Integer(it.flag as i64)),
+                                ("quantity", PyRep::Integer(i64::from(it.quantity))),
+                                ("singleton", PyRep::Integer(if it.singleton { 1 } else { 0 })),
+                            ]),
+                            PyRep::Dict(change_entries),
+                        ];
+                        session.push_notification("OnItemChange", notif_args.clone());
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnItemChange",
+                            "charid",
+                            notif_args,
+                        );
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("dollDNA", PyRep::String(doll.clone())),
+                        ("dollInfo", PyRep::String(doll)),
+                        ("portraitInfo", PyRep::String(portrait)),
+                        ("wornApparel", PyRep::List(worn_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
+                        ("updated", PyRep::Bool(true)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

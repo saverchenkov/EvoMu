@@ -260,18 +260,33 @@ async fn test_nes_store_plex_purchase_delivery_and_negative_cases() {
 }
 #[tokio::test]
 async fn test_people_and_places_search_query_and_quick_query() {
-    // parity: feat:ui.search
+    // parity: feat:ui.search, rpc:search.Query, rpc:search.QuickQuery
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let empty_kw = HashMap::new();
+    let allowed_struct_id = 1_030_000_111_001i64;
+    let denied_struct_id = 1_030_000_111_002i64;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.corporation_id = 98_000_001;
+        }
+        snap.corporations.insert(
+            98_000_001,
+            CorporationRecord {
+                corporation_id: 98_000_001,
+                name: "Vanguard Logistics".into(),
+                ticker: "VGLG".into(),
+                ceo_id: 90_000_001,
+                ..Default::default()
+            },
+        );
         snap.corporations.insert(
             98_000_222,
             CorporationRecord {
                 corporation_id: 98_000_222,
                 name: "Starlight Cartography".into(),
                 ticker: "SLCT".into(),
-                ceo_id: 90_000_001,
+                ceo_id: 90_000_002,
                 ..Default::default()
             },
         );
@@ -285,10 +300,53 @@ async fn test_people_and_places_search_query_and_quick_query() {
                 ..Default::default()
             },
         );
+        snap.structures.insert(
+            allowed_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: allowed_struct_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita - Starlight Hub".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            denied_struct_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: denied_struct_id,
+                type_id: 35832,
+                owner_corp_id: 98_000_222,
+                solar_system_id: 30_000_142,
+                name: "Jita - Starlight BlackSite".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structure_docking_acl_denied
+            .entry(denied_struct_id)
+            .or_default()
+            .insert(90_000_001);
     });
+    // Negative: unauthenticated / character-unselected session rejected
+    let mut no_char = SessionState::new(4104);
+    no_char.user_id = Some(1);
+    assert!(
+        ctx.dispatch_rpc(&mut no_char, "search", None, "Query", &[PyRep::String("Jita".into())], &empty_kw, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        ctx.dispatch_rpc(&mut no_char, "search", None, "QuickQuery", &[PyRep::String("Jita".into())], &empty_kw, None)
+            .await
+            .is_err()
+    );
+
     let mut sess = SessionState::new(4105);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
+    let char_name = ctx.db.with_snapshot(|s| s.characters[&90_000_001].name.clone());
     // Negative: empty query and banned word
     let short_err = ctx
         .dispatch_rpc(
@@ -316,8 +374,34 @@ async fn test_people_and_places_search_query_and_quick_query() {
         .await
         .expect_err("banned word must fail");
     assert_eq!(banned_err.code, "UserError");
-    // Partial match for corp & alliance
-    let rep = ctx
+
+    // Helper for grouped search.Query result list lookup
+    let group_ids = |rep: &PyRep, gid: i64| -> Vec<PyRep> {
+        let PyRep::Dict(entries) = rep else {
+            panic!("expected search result dict");
+        };
+        let Some(PyRep::List(ids)) = entries.iter().find_map(|(k, v)| (k.as_i64() == Some(gid)).then_some(v)) else {
+            panic!("expected group {gid} list");
+        };
+        ids.clone()
+    };
+
+    // Characters (2), corps (3), alliances (4), structures (11) with ACL filtering
+    let char_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "search",
+            None,
+            "Query",
+            &[PyRep::String(char_name), PyRep::List(vec![PyRep::Integer(2)])],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("search.Query character");
+    assert!(group_ids(&char_rep, 2).contains(&PyRep::Integer(90_000_001)));
+
+    let starlight_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "search",
@@ -325,25 +409,62 @@ async fn test_people_and_places_search_query_and_quick_query() {
             "Query",
             &[
                 PyRep::String("Starlight".into()),
-                PyRep::List(vec![PyRep::Integer(3)]),
+                PyRep::List(vec![PyRep::Integer(3), PyRep::Integer(11)]),
             ],
             &empty_kw,
             None,
         )
         .await
-        .expect("search.Query corp");
-    let PyRep::Dict(entries) = rep else {
-        panic!("expected search result dict");
-    };
-    let corp_hits = entries
-        .iter()
-        .find_map(|(k, v)| (k.as_i64() == Some(3)).then_some(v))
-        .expect("group 3 key");
-    let PyRep::List(ids) = corp_hits else {
-        panic!("expected corp id list");
-    };
-    assert!(ids.contains(&PyRep::Integer(98_000_222)));
-    // Exact match miss vs hit via QuickQuery
+        .expect("search.Query corp & structures");
+    assert!(group_ids(&starlight_rep, 3).contains(&PyRep::Integer(98_000_222)));
+    let struct_hits = group_ids(&starlight_rep, 11);
+    assert!(
+        struct_hits.contains(&PyRep::Integer(allowed_struct_id)),
+        "ACL-accessible corp structure must appear in search.Query"
+    );
+    assert!(
+        !struct_hits.contains(&PyRep::Integer(denied_struct_id)),
+        "ACL-denied private structure must be omitted from search.Query"
+    );
+
+    // Solar systems (7), stations (9), and published inventory types (10)
+    let jita_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "search",
+            None,
+            "Query",
+            &[
+                PyRep::String("Jita".into()),
+                PyRep::List(vec![PyRep::Integer(7), PyRep::Integer(9)]),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("search.Query Jita");
+    assert!(group_ids(&jita_rep, 7).contains(&PyRep::Integer(30_000_142)));
+    assert!(group_ids(&jita_rep, 9).contains(&PyRep::Integer(60_003_760)));
+
+    let type_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "search",
+            None,
+            "Query",
+            &[
+                PyRep::String("Tritanium".into()),
+                PyRep::List(vec![PyRep::Integer(10)]),
+                PyRep::Bool(true),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("search.Query exact type");
+    assert!(group_ids(&type_rep, 10).contains(&PyRep::Integer(34)));
+
+    // Exact match miss vs hit + structure ACL filter via QuickQuery
     let PyRep::List(quick_miss) = ctx
         .dispatch_rpc(
             &mut sess,
@@ -388,4 +509,28 @@ async fn test_people_and_places_search_query_and_quick_query() {
         panic!("expected QuickQuery list");
     };
     assert!(quick_hit.contains(&PyRep::Integer(99_000_222)));
+
+    let PyRep::List(quick_structs) = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "search",
+            None,
+            "QuickQuery",
+            &[
+                PyRep::String("Starlight".into()),
+                PyRep::List(vec![PyRep::Integer(11)]),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("QuickQuery structures")
+    else {
+        panic!("expected QuickQuery structure list");
+    };
+    assert!(quick_structs.contains(&PyRep::Integer(allowed_struct_id)));
+    assert!(
+        !quick_structs.contains(&PyRep::Integer(denied_struct_id)),
+        "ACL-denied private structure must be omitted from search.QuickQuery"
+    );
 }

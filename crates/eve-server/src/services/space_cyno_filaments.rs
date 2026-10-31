@@ -349,7 +349,7 @@ async fn handle_wormhole_jump(
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None;
     session.structure_id = None;
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
+    crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
     Ok(PyRep::keyval([
@@ -578,7 +578,7 @@ async fn handle_random_jump_filament(
         let _ = old_handle.remove_ball(p_ship).await;
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
         ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
-        crate::services::map_service::record_solar_system_visit(ctx, p_char, dest_sys_id);
+        crate::services::map_service::record_solar_system_jump(ctx, p_char, dest_sys_id);
 
         b.position = landing_base + DVec3::new((j_idx as f64) * 200.0, 0.0, 0.0);
         b.velocity = DVec3::ZERO;
@@ -644,7 +644,7 @@ async fn handle_random_jump_filament(
     session.region_id = Some(dest_sys.region_id);
     session.station_id = None;
     session.structure_id = None;
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
+    crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
 
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
     Ok(PyRep::keyval([
@@ -885,7 +885,7 @@ async fn handle_cmd_jump_to_structure_beacon(
     }
     session.station_id = None;
     session.structure_id = None;
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, target_sys_id);
+    crate::services::map_service::record_solar_system_jump(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
     Ok(PyRep::keyval([
@@ -1262,7 +1262,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     if dest_const_id != 0 { session.constellation_id = Some(dest_const_id); session.region_id = Some(dest_reg_id); }
     session.station_id = None;
     session.structure_id = None;
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, target_sys_id);
+    crate::services::map_service::record_solar_system_jump(ctx, char_id, target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
     Ok(PyRep::keyval([

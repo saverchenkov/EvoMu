@@ -536,7 +536,7 @@ pub(super) async fn group_jump_to_fleet_beacon(
             .is_ok()
         {
             jumped_passengers.push(*m_char);
-            crate::services::map_service::record_solar_system_visit(ctx, *m_char, beacon.solar_system_id);
+            crate::services::map_service::record_solar_system_jump(ctx, *m_char, beacon.solar_system_id);
             ctx.notify(
                 crate::router::NotificationTarget::Character(*m_char),
                 "OnSessionChanged",

@@ -1189,6 +1189,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             session.region_id = Some(updated_ch.region_id);
             session.station_id = None;
             session.structure_id = None;
+            crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys_id);
 
             let _ = ensure_system_signatures_and_anomalies(ctx, dest_sys_id).await;
             let (dest_wh_class, dest_is_thera, dest_is_shattered, env_effect) =

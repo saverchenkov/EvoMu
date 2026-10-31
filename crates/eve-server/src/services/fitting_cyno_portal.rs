@@ -880,7 +880,7 @@ pub(super) async fn relocate_caller(
 ) -> Result<(f64, f64, u64), BridgeRpcError> {
     let (cd_min, fat_min) = relocate_ship(ctx, char_id, ship_id, from_sys, to_sys, pos, dist_ly, fatigue_mult).await?;
     session.solar_system_id = Some(to_sys);
-    crate::services::map_service::record_solar_system_visit(ctx, char_id, to_sys);
+    crate::services::map_service::record_solar_system_jump(ctx, char_id, to_sys);
     let bound = ctx.bind_object(session, "beyonce", to_sys as i64)?;
     Ok((cd_min, fat_min, bound))
 }

@@ -407,11 +407,37 @@ pub fn emit_structure_cfg_data_changed(
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FlaggedSiteEntry {
+    pub site_url: String,
+    pub site_flag: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum StoredFlaggedSite {
+    Structured(FlaggedSiteEntry),
+    LegacyUrl(String),
+}
+
+impl From<StoredFlaggedSite> for FlaggedSiteEntry {
+    fn from(v: StoredFlaggedSite) -> Self {
+        match v {
+            StoredFlaggedSite::Structured(e) => e,
+            StoredFlaggedSite::LegacyUrl(site_url) => Self {
+                site_url,
+                site_flag: 2,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct BrowserLockdownPolicy {
     lockdown: bool,
     default_home_page: String,
-    flagged_sites: Vec<String>,
+    #[serde(default)]
+    flagged_sites: Vec<StoredFlaggedSite>,
 }
 
 impl Default for BrowserLockdownPolicy {
@@ -424,18 +450,25 @@ impl Default for BrowserLockdownPolicy {
     }
 }
 
-fn load_browser_lockdown_policy(snap: &eve_db::WorldStateSnapshot) -> BrowserLockdownPolicy {
-    snap.service_state_blobs
+fn load_browser_lockdown_policy(snap: &eve_db::WorldStateSnapshot) -> (bool, String, Vec<FlaggedSiteEntry>) {
+    let raw = snap
+        .service_state_blobs
         .get("browser_lockdown_policy")
-        .and_then(|raw| serde_json::from_str::<BrowserLockdownPolicy>(raw).ok())
-        .unwrap_or_default()
+        .and_then(|s| serde_json::from_str::<BrowserLockdownPolicy>(s).ok())
+        .unwrap_or_default();
+    let entries = raw.flagged_sites.into_iter().map(FlaggedSiteEntry::from).collect();
+    (raw.lockdown, raw.default_home_page, entries)
 }
 
-fn compute_flagged_sites_hash(sites: &[String]) -> String {
+fn compute_flagged_sites_hash(sites: &[FlaggedSiteEntry]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for site in sites {
-        for b in site.as_bytes() {
+        for b in site.site_url.as_bytes() {
             hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        for b in site.site_flag.to_le_bytes() {
+            hash ^= u64::from(b);
             hash = hash.wrapping_mul(0x100000001b3);
         }
         hash ^= 0xff;
@@ -448,12 +481,17 @@ pub fn set_browser_lockdown_policy(
     snap: &mut eve_db::WorldStateSnapshot,
     lockdown: bool,
     default_home_page: &str,
-    flagged_sites: Vec<String>,
+    flagged_sites: Vec<(String, i64)>,
 ) {
     let policy = BrowserLockdownPolicy {
         lockdown,
         default_home_page: default_home_page.to_string(),
-        flagged_sites,
+        flagged_sites: flagged_sites
+            .into_iter()
+            .map(|(site_url, site_flag)| {
+                StoredFlaggedSite::Structured(FlaggedSiteEntry { site_url, site_flag })
+            })
+            .collect(),
     };
     if let Ok(json) = serde_json::to_string(&policy) {
         snap.service_state_blobs
@@ -476,7 +514,7 @@ pub fn handle_misc_batch9(
             }
             let lockdown = ctx
                 .db
-                .with_snapshot(|snap| load_browser_lockdown_policy(snap).lockdown);
+                .with_snapshot(|snap| load_browser_lockdown_policy(snap).0);
             Some(Ok(PyRep::Bool(lockdown)))
         }
         ("browserLockdownSvc", "GetDefaultHomePage") => {
@@ -485,7 +523,7 @@ pub fn handle_misc_batch9(
             }
             let home = ctx
                 .db
-                .with_snapshot(|snap| load_browser_lockdown_policy(snap).default_home_page);
+                .with_snapshot(|snap| load_browser_lockdown_policy(snap).1);
             Some(Ok(PyRep::String(home)))
         }
         ("browserLockdownSvc", "GetFlaggedSitesList") => {
@@ -494,9 +532,17 @@ pub fn handle_misc_batch9(
             }
             let sites = ctx
                 .db
-                .with_snapshot(|snap| load_browser_lockdown_policy(snap).flagged_sites);
+                .with_snapshot(|snap| load_browser_lockdown_policy(snap).2);
             Some(Ok(PyRep::List(
-                sites.into_iter().map(PyRep::String).collect(),
+                sites
+                    .into_iter()
+                    .map(|entry| {
+                        PyRep::Dict(vec![
+                            (PyRep::String("siteUrl".into()), PyRep::String(entry.site_url)),
+                            (PyRep::String("siteFlag".into()), PyRep::Integer(entry.site_flag)),
+                        ])
+                    })
+                    .collect(),
             )))
         }
         ("browserLockdownSvc", "GetFlaggedSitesHash") => {
@@ -504,8 +550,8 @@ pub fn handle_misc_batch9(
                 return Some(Err(e));
             }
             let hash = ctx.db.with_snapshot(|snap| {
-                let policy = load_browser_lockdown_policy(snap);
-                compute_flagged_sites_hash(&policy.flagged_sites)
+                let (_, _, sites) = load_browser_lockdown_policy(snap);
+                compute_flagged_sites_hash(&sites)
             });
             Some(Ok(PyRep::String(hash)))
         }

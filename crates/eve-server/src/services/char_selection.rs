@@ -98,7 +98,15 @@ pub fn get_character_selection_data(
                 let total: f64 = q.iter().map(|e| e.duration_seconds.max(0.0)).sum();
                 PyRep::Integer(unix_to_filetime(start + total as u64))
             });
-            let unread = snap.mails.iter().filter(|m| m.recipient_id == c.character_id && !snap.read_mails.contains(&(c.character_id, m.message_id))).count();
+            let unread = snap
+                .mails
+                .iter()
+                .filter(|m| {
+                    m.recipient_id == c.character_id
+                        && !snap.deleted_mails.contains(&(c.character_id, m.message_id))
+                        && !snap.read_mails.contains(&(c.character_id, m.message_id))
+                })
+                .count();
             let is_resculpt_pending = store.resculpt_pending.contains(&c.character_id)
                 || snap
                     .service_state_blobs

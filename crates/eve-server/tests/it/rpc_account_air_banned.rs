@@ -367,7 +367,7 @@ async fn test_paperdoll_server_rpcs() {
         });
     });
 
-    // 1. paperDollServer.GetPaperDollData: returns character doll DNA and apparel
+    // 1. paperDollServer.GetPaperDollData: returns [gender, details] sequence per V24 AvatarCharacterSceneContext
     let doll_rep = rpc(
         &ctx,
         &mut sess1,
@@ -377,10 +377,15 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollData");
-    assert_eq!(field(&doll_rep, "characterID"), &PyRep::Integer(PILOT_1));
-    assert_eq!(field(&doll_rep, "dollDNA"), &PyRep::String("dna:pilot1_custom".into()));
-    assert_eq!(field(&doll_rep, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
-    assert_eq!(field(&doll_rep, "wornApparel"), &PyRep::List(vec![]));
+    let PyRep::List(doll_seq) = &doll_rep else {
+        panic!("expected sequence from GetPaperDollData, got {doll_rep:?}");
+    };
+    assert_eq!(doll_seq.first(), Some(&PyRep::String("female".into())));
+    let doll_details = &doll_seq[1];
+    assert_eq!(field(doll_details, "characterID"), &PyRep::Integer(PILOT_1));
+    assert_eq!(field(doll_details, "dollDNA"), &PyRep::String("dna:pilot1_custom".into()));
+    assert_eq!(field(doll_details, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
+    assert_eq!(field(doll_details, "wornApparel"), &PyRep::List(vec![]));
 
     // 2. paperDollServer.GetPaperDollDataBatch: queries multiple characters
     let batch_rep = rpc(
@@ -440,7 +445,7 @@ async fn test_paperdoll_server_rpcs() {
         &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
     );
 
-    // Verify GetPaperDollData reflects worn apparel and item flag persists as Pilot
+    // Verify GetPaperDollData reflects worn apparel and item moves to Wardrobe on character
     let doll_rep2 = rpc(
         &ctx,
         &mut sess1,
@@ -450,18 +455,22 @@ async fn test_paperdoll_server_rpcs() {
     )
     .await
     .expect("GetPaperDollData after apparel update");
+    let PyRep::List(doll_seq2) = &doll_rep2 else {
+        panic!("expected sequence from GetPaperDollData, got {doll_rep2:?}");
+    };
     assert_eq!(
-        field(&doll_rep2, "wornApparel"),
+        field(&doll_seq2[1], "wornApparel"),
         &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
     );
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
-        assert_eq!(it.flag, eve_db::InventoryFlag::Pilot);
+        assert_eq!(it.location_id, PILOT_1);
+        assert_eq!(it.flag, eve_db::InventoryFlag::Wardrobe);
         let cap = snap.items.get(&capsule_item_id).expect("capsule item in snapshot");
         assert_eq!(cap.flag, eve_db::InventoryFlag::Pilot, "capsule flag must remain Pilot");
     });
 
-    // Unwear apparel (empty list): apparel moves to Hangar, but in-space capsule flag remains Pilot
+    // Unwear apparel (empty list): apparel moves back to docked station Hangar, capsule flag remains Pilot
     let unwear_kv = PyRep::keyval([
         ("apparel", PyRep::List(vec![])),
     ]);
@@ -477,6 +486,7 @@ async fn test_paperdoll_server_rpcs() {
     assert_eq!(field(&unwear_rep, "wornApparel"), &PyRep::List(vec![]));
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
+        assert_eq!(it.location_id, 60_003_760, "unequipped apparel returned to docked station");
         assert_eq!(it.flag, eve_db::InventoryFlag::Hangar, "previously worn apparel reset to Hangar");
         let cap = snap.items.get(&capsule_item_id).expect("capsule item in snapshot");
         assert_eq!(cap.flag, eve_db::InventoryFlag::Pilot, "in-space capsule must never be reset to Hangar");

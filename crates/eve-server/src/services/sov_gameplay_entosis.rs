@@ -895,6 +895,8 @@ pub fn record_rat_kill_military_index(
                 .any(|w| w.contains(&target_ball_id))
         });
     if category_id == 11 || was_site_or_tracked_npc || in_npc_spawns || in_combat_npc || in_fw_or_convoy {
+        let now_unix = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| snap.record_system_kill(solar_system_id, 0, 1, 0, now_unix));
         record_sov_system_activity(ctx, solar_system_id, 1, 0.0);
     }
 }

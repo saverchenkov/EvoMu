@@ -549,8 +549,8 @@ pub fn handle(
             Some(Ok(PyRep::Bool(all_ok)))
         }
 
-        ("search", "Query") => Some(handle_search_query(ctx, args, kwargs)),
-        ("search", "QuickQuery") => Some(handle_search_quick_query(ctx, args, kwargs)),
+        ("search", "Query") => Some(handle_search_query(ctx, session, args, kwargs)),
+        ("search", "QuickQuery") => Some(handle_search_quick_query(ctx, session, args, kwargs)),
 
         _ => None,
     }
@@ -613,6 +613,7 @@ fn parse_search_query_params(
 
 fn search_ids_for_group(
     ctx: &ServerContext,
+    caller_char_id: Option<i64>,
     group_id: i64,
     query: &str,
     exact: bool,
@@ -727,13 +728,26 @@ fn search_ids_for_group(
             .filter(|t| t.published && matches_query(&t.name, query, exact))
             .map(|t| i64::from(t.type_id))
             .collect(),
-        11 | 1404 | 1657 => ctx.db.with_snapshot(|snap| {
-            snap.structures
-                .values()
-                .filter(|st| st.state != "Destroyed" && matches_query(&st.name, query, exact))
-                .map(|st| st.structure_id)
-                .collect()
-        }),
+        11 | 1404 | 1657 => {
+            let Some(char_id) = caller_char_id else {
+                return Vec::new();
+            };
+            ctx.db.with_snapshot(|snap| {
+                snap.structures
+                    .values()
+                    .filter(|st| {
+                        st.state != "Destroyed"
+                            && matches_query(&st.name, query, exact)
+                            && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                                snap,
+                                st.structure_id,
+                                char_id,
+                            )
+                    })
+                    .map(|st| st.structure_id)
+                    .collect()
+            })
+        }
         _ => Vec::new(),
     };
     ids.sort_unstable();
@@ -745,13 +759,15 @@ fn search_ids_for_group(
 /// `search.Query(searchStr, groupIDList, exact=0, hideNPC=0, onlyAltName=0)` (`searchUtil.pyj:306`).
 pub fn handle_search_query(
     ctx: &ServerContext,
+    session: &SessionState,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
     let (query, groups, exact, hide_npc, only_alt) = parse_search_query_params(args, kwargs, false)?;
     let mut dict_entries = Vec::with_capacity(groups.len());
     for gid in groups {
-        let ids = search_ids_for_group(ctx, gid, &query, exact, hide_npc, only_alt);
+        let ids = search_ids_for_group(ctx, Some(char_id), gid, &query, exact, hide_npc, only_alt);
         dict_entries.push((
             PyRep::Integer(gid),
             PyRep::List(ids.into_iter().map(PyRep::Integer).collect()),
@@ -763,14 +779,16 @@ pub fn handle_search_query(
 /// `search.QuickQuery(searchStr, groupIDList, hideNPC=0, onlyAltName=0, exact=0)` (`searchUtil.pyj:327`).
 pub fn handle_search_quick_query(
     ctx: &ServerContext,
+    session: &SessionState,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
     let (query, groups, exact, hide_npc, only_alt) = parse_search_query_params(args, kwargs, true)?;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for gid in groups {
-        for id in search_ids_for_group(ctx, gid, &query, exact, hide_npc, only_alt) {
+        for id in search_ids_for_group(ctx, Some(char_id), gid, &query, exact, hide_npc, only_alt) {
             if seen.insert(id) {
                 out.push(PyRep::Integer(id));
             }
