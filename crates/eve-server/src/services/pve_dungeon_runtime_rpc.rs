@@ -1105,7 +1105,7 @@ pub async fn on_dungeon_item_looted(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 pub fn dispatch_dungeon_notify_actions(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<

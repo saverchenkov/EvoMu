@@ -784,30 +784,118 @@ impl WorldRepository {
         Ok(())
     }
 
+    fn run_read_snapshot(&self, f: &mut dyn FnMut(&WorldStateSnapshot)) {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        f(&guard);
+    }
+
+    fn run_try_read_snapshot(&self, f: &mut dyn FnMut(&WorldStateSnapshot)) -> bool {
+        if let Ok(guard) = self.inner.try_read() {
+            f(&guard);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn run_mut_snapshot_tx(
+        &self,
+        f: &mut dyn FnMut(&mut WorldStateSnapshot) -> bool,
+    ) -> Result<(), String> {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let _write_depth_guard = DbWriteLockDepthGuard::enter();
+        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
+        if f(&mut guard) {
+            for (&sid, st) in &mut guard.system_states {
+                st.solar_system_id = sid;
+            }
+            guard.wal_seq = guard.wal_seq.saturating_add(1);
+            let need_wal_delta = self.snapshot_path.is_some();
+            let mut staged_fp = fp.clone();
+            let persist_res = (|| -> Result<(), String> {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|e| e.to_string())?;
+                let delta = sqlite_store::sync_dirty_to_sqlite(
+                    &tx,
+                    &guard,
+                    &mut staged_fp,
+                    need_wal_delta,
+                )?;
+                if let Some(ref p) = self.snapshot_path {
+                    let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    self.append_wal_delta_locked(p, &guard, &delta)?;
+                }
+                tx.commit().map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            match persist_res {
+                Ok(()) => {
+                    *fp = staged_fp;
+                    Ok(())
+                }
+                Err(persist_err) => {
+                    sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp)
+                        .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
+                    Err(persist_err)
+                }
+            }
+        } else {
+            sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp).expect(
+                "Fatal: failed to roll back dirty state from SQLite after transaction error",
+            );
+            Ok(())
+        }
+    }
+
     pub fn with_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&WorldStateSnapshot) -> R,
     {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        f(&guard)
+        let mut f_opt = Some(f);
+        let mut out: Option<R> = None;
+        self.run_read_snapshot(&mut |snap| {
+            if let Some(cb) = f_opt.take() {
+                out = Some(cb(snap));
+            }
+        });
+        out.expect("with_snapshot closure must run")
     }
 
     pub fn try_with_snapshot<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&WorldStateSnapshot) -> R,
     {
-        self.inner.try_read().ok().map(|guard| f(&guard))
+        let mut f_opt = Some(f);
+        let mut out: Option<R> = None;
+        if self.run_try_read_snapshot(&mut |snap| {
+            if let Some(cb) = f_opt.take() {
+                out = Some(cb(snap));
+            }
+        }) {
+            out
+        } else {
+            None
+        }
     }
 
-    /// Delegates infallible snapshot mutations through `try_with_mut_snapshot`.
+    /// Delegates infallible snapshot mutations through `run_mut_snapshot_tx`.
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
     {
-        match self.try_with_mut_snapshot(|snap| Ok::<R, std::convert::Infallible>(f(snap))) {
-            Ok(out) => out,
-            Err(infallible) => match infallible {},
+        let mut f_opt = Some(f);
+        let mut out: Option<R> = None;
+        if let Err(persist_err) = self.run_mut_snapshot_tx(&mut |snap| {
+            if let Some(cb) = f_opt.take() {
+                out = Some(cb(snap));
+            }
+            true
+        }) {
+            panic!("Durable WAL persistence failure: {persist_err}");
         }
+        out.expect("with_mut_snapshot closure must run")
     }
 
     /// Returns `true` if the current thread currently holds the `WorldRepository` write lock
@@ -826,53 +914,18 @@ impl WorldRepository {
         F: FnOnce(&mut WorldStateSnapshot) -> Result<T, E>,
         E: FromWalError,
     {
-        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let _write_depth_guard = DbWriteLockDepthGuard::enter();
-        let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
-        match f(&mut guard) {
-            Ok(val) => {
-                for (&sid, st) in &mut guard.system_states {
-                    st.solar_system_id = sid;
-                }
-                guard.wal_seq = guard.wal_seq.saturating_add(1);
-                let need_wal_delta = self.snapshot_path.is_some();
-                let mut staged_fp = fp.clone();
-                let persist_res = (|| -> Result<(), String> {
-                    let tx = conn
-                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                        .map_err(|e| e.to_string())?;
-                    let delta = sqlite_store::sync_dirty_to_sqlite(
-                        &tx,
-                        &guard,
-                        &mut staged_fp,
-                        need_wal_delta,
-                    )?;
-                    if let Some(ref p) = self.snapshot_path {
-                        let _wal_guard = self.wal_lock.lock().unwrap_or_else(|e| e.into_inner());
-                        self.append_wal_delta_locked(p, &guard, &delta)?;
-                    }
-                    tx.commit().map_err(|e| e.to_string())?;
-                    Ok(())
-                })();
-                match persist_res {
-                    Ok(()) => {
-                        *fp = staged_fp;
-                        Ok(val)
-                    }
-                    Err(persist_err) => {
-                        sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp)
-                            .expect("Fatal: failed to roll back dirty state from SQLite after persist error");
-                        Err(E::from_wal_error(persist_err))
-                    }
-                }
-            }
-            Err(err) => {
-                sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp).expect(
-                    "Fatal: failed to roll back dirty state from SQLite after transaction error",
-                );
-                Err(err)
-            }
+        let mut f_opt = Some(f);
+        let mut out: Option<Result<T, E>> = None;
+        let persist_res = self.run_mut_snapshot_tx(&mut |snap| {
+            let res = (f_opt.take().expect("try_with_mut_snapshot closure called once"))(snap);
+            let is_ok = res.is_ok();
+            out = Some(res);
+            is_ok
+        });
+        match (out.expect("try_with_mut_snapshot closure must run"), persist_res) {
+            (Ok(val), Ok(())) => Ok(val),
+            (Ok(_), Err(persist_err)) => Err(E::from_wal_error(persist_err)),
+            (Err(err), _) => Err(err),
         }
     }
 
