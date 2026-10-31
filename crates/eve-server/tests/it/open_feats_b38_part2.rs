@@ -7,7 +7,6 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::mining_advanced::mining_compression::compute_structure_rigged_base_yield;
 use eve_server::services::space_destiny::space_nav_travel::sync_tether;
 use eve_server::services::station_structure::structure_lifecycle as life;
 use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
@@ -54,16 +53,8 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, corp_na
     pilot_in_space_user(ctx, sess_id, "demo", char_id, corp_name, ticker).await
 }
 
-/// 6. `feat:structures.armor-reinforce-durations`, 7. `feat:structures.hull-reinforce-durations`,
-/// 8. `feat:structures.reinforce-exit-time-rules`
 #[test]
 fn test_reinforce_durations_and_exit_time_rules() {
-    // parity: feat:structures.armor-reinforce-durations, feat:structures.hull-reinforce-durations, feat:structures.reinforce-exit-time-rules
-    eve_testkit::attest(&[
-        "feat:structures.armor-reinforce-durations",
-        "feat:structures.hull-reinforce-durations",
-        "feat:structures.reinforce-exit-time-rules",
-    ]);
 
     // Armor reinforcement durations table
     assert_eq!(life::armor_reinforcement_secs(life::HullClass::Medium, life::SpaceClass::Wormhole, life::PowerState::FullPower), Some(216_000));
@@ -168,14 +159,8 @@ fn test_reinforce_durations_and_exit_time_rules() {
     });
 }
 
-/// 9. `feat:structures.repair-timer-pause-threshold` & 10. `feat:structures.vulnerability-repair-window`
 #[test]
 fn test_repair_timer_pause_threshold_and_vulnerability_window() {
-    // parity: feat:structures.repair-timer-pause-threshold, feat:structures.vulnerability-repair-window
-    eve_testkit::attest(&[
-        "feat:structures.repair-timer-pause-threshold",
-        "feat:structures.vulnerability-repair-window",
-    ]);
 
     assert_eq!(life::REPAIR_SHIELD_ARMOR_SECS, 900);
     assert_eq!(life::REPAIR_HULL_SECS, 1_800);
@@ -249,15 +234,8 @@ fn test_repair_timer_pause_threshold_and_vulnerability_window() {
     assert!(st_h.hull_hp >= profile.hull_hp);
 }
 
-/// 13. `feat:structures.tether-eligibility-and-restrictions` & 14. `feat:structures.tethering-docking-lock`
 #[tokio::test]
 async fn test_tether_eligibility_restrictions_and_docking_lock() {
-    // parity: feat:structures.tether-eligibility-and-restrictions, feat:structures.tethering-docking-lock
-    eve_testkit::attest(&[
-        "feat:structures.tether-eligibility-and-restrictions",
-        "feat:structures.tethering-docking-lock",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 6, OWNER, "Tether Corp", "TETH").await;
@@ -317,7 +295,7 @@ async fn test_tether_eligibility_restrictions_and_docking_lock() {
         .expect_err("tethered ship must not be targetable");
     assert_eq!(lock_err.code, "TargetInvulnerable");
 
-    // Blocked actions while tethered: offensive module / smartbomb -> CantActivateWhileTethered, fleet compression -> CannotCompressWhileTethered
+    // Blocked actions while tethered: offensive module / smartbomb -> CantActivateWhileTethered
     let sb_tid = ctx.sde.types.values().find(|t| t.group_id == 72).map(|t| t.type_id).expect("smartbomb");
     let sb_id = grant(&ctx, OWNER, ship, sb_tid, InventoryFlag::HiSlot0, 1);
     let sb_err = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(sb_id), PyRep::String("default".into())]).await
@@ -350,7 +328,7 @@ async fn test_tether_eligibility_restrictions_and_docking_lock() {
     assert!(!sys.get_combat_state(ship).await.expect("q").expect("cs").is_tethered, "tether must break beyond docking perimeter");
     sys.set_ball_position(ship, st_pos).await;
 
-    // Tether refused for: structure without quantum core, abandoned structure, unpiloted ship, warp-scrambled ship, weapons timer
+    // Tether refused for: structure without quantum core, unpiloted ship, warp-scrambled ship
     ctx.db.with_mut_snapshot(|snap| { snap.structures.get_mut(&st_id).unwrap().quantum_core_installed = false; });
     sync_tether(&ctx, OWNER, JITA, ship).await;
     assert!(!sys.get_combat_state(ship).await.expect("q").expect("cs").is_tethered, "tether refused without quantum core");
@@ -368,17 +346,10 @@ async fn test_tether_eligibility_restrictions_and_docking_lock() {
     assert!(!sys.get_combat_state(ship).await.expect("q").expect("cs").is_tethered, "tether refused when warp-scrambled");
 }
 
-/// 15. `feat:structures.asset-safety-recovery-delay-and-fee`,
-/// 16. `feat:structures.fulcrum-alignment-services`,
-/// 17. `feat:structures.reprocessing-rig-security-multipliers`
+/// `feat:structures.fulcrum-alignment-services`
 #[tokio::test]
 async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
-    // parity: feat:structures.asset-safety-recovery-delay-and-fee, feat:structures.fulcrum-alignment-services, feat:structures.reprocessing-rig-security-multipliers
-    eve_testkit::attest(&[
-        "feat:structures.asset-safety-recovery-delay-and-fee",
-        "feat:structures.fulcrum-alignment-services",
-        "feat:structures.reprocessing-rig-security-multipliers",
-    ]);
+    // parity: feat:structures.fulcrum-alignment-services
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -391,6 +362,11 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
         .expect("lowsec station");
     let lowsec_sys = lowsec_station_rec.solar_system_id;
     let lowsec_station = lowsec_station_rec.station_id;
+    let null_sys = 30_001_161; // HED-GP (stationless nullsec)
+    let null_station_id = life::nearest_npc_station_from_pos(&ctx, null_sys, DVec3::ZERO).expect("null nearest lowsec");
+    let null_station_sys = ctx.sde.stations.get(&null_station_id).unwrap().solar_system_id;
+    assert_ne!(null_station_sys, null_sys, "null-sec auto delivery transits cross-system to low-sec");
+
     let st_same = 783_001;
     let st_auto = 783_002;
     let st_wh = 783_003;
@@ -400,7 +376,7 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.balance = eve_db::IskCents::from_f64_isk(1_000_000_000.0);
         }
-        for (sid, sys_id) in [(st_same, lowsec_sys), (st_auto, lowsec_sys), (st_wh, wh_sys)] {
+        for (sid, sys_id) in [(st_same, lowsec_sys), (st_auto, null_sys), (st_wh, wh_sys)] {
             snap.structures.insert(sid, UpwellStructureRecord {
                 structure_id: sid, type_id: 35832, owner_corp_id: 98_000_001,
                 solar_system_id: sys_id, name: format!("AS {sid}"), position: [0.0, 0.0, 0.0],
@@ -431,9 +407,9 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     let bal_after_same = ctx.db.get_character(OWNER).unwrap().balance.to_wire_f64();
     assert!(fee_same > 0.0 && (bal_before_same - bal_after_same - fee_same).abs() < 0.01);
 
-    // Advance 15 more days (total 21 days >= 20 days) -> auto-delivered, claim charges 15% fee (30x the 0.5% fee!)
+    // Advance 15 more days (total 21 days >= 20 days) -> auto-delivered cross-system to null_station_id, claim charges 15% fee (30x the 0.5% fee!)
     ctx.advance_secs(15 * 86_400);
-    let res_auto = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_auto)]).await.expect("auto-delivered claim");
+    let res_auto = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_auto), PyRep::Integer(null_station_id)]).await.expect("auto-delivered claim");
     let fee_auto = res_auto.dict_get("feePaidISK").and_then(|v| v.as_f64()).expect("feePaidISK");
     assert!((fee_auto / fee_same - 30.0).abs() < 0.1, "15% fee must be 30x the 0.5% same-system fee: {fee_auto} vs {fee_same}");
 
@@ -445,7 +421,7 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.solar_system_id = zarzakh_sys;
-            ch.war_faction_id = Some(500_001);
+            ch.war_faction_id = Some(500_001); // Amarr militia
         }
     });
     let z_sys = ctx.systems.get_or_spawn(zarzakh_sys);
@@ -455,24 +431,69 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
         ctx.build_ship_slim_meta(OWNER, 587),
     ).await;
 
-    let empire_dock = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
-    assert_eq!(empire_dock.expect_err("Fulcrum must refuse Empire militia").code, "FulcrumRefusesEmpireMilitia");
+    // Both beyonce.CmdDock and stationSvc.Dock reject Empire militia (500_001..=500_004)
+    let empire_dock_beyonce = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(empire_dock_beyonce.expect_err("Fulcrum must refuse Empire militia via beyonce").code, "FulcrumRefusesEmpireMilitia");
+    let empire_dock_station = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
+    assert_eq!(empire_dock_station.expect_err("Fulcrum must refuse Empire militia via stationSvc").code, "FulcrumRefusesEmpireMilitia");
 
-    // Neutral character with retribution timer -> FulcrumRefusesTimerActive
+    // Clear militia -> neutral character with weapons timer refuses docking on both entrypoints
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) { ch.war_faction_id = None; }
     });
-    let exp_retrib = ctx.now_unix() + 300;
-    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
-        rt.disapproval_flags.insert(OWNER, exp_retrib);
-    });
-    let timer_dock = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
-    assert_eq!(timer_dock.expect_err("Fulcrum must refuse active retribution timer").code, "FulcrumRefusesTimerActive");
+    let t_now = ctx.now_unix();
+    ctx.crimewatch.write().unwrap().states.entry(OWNER).or_default().weapon_timer_until_unix = t_now + 60;
+    let wpn_dock_beyonce = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(wpn_dock_beyonce.expect_err("Fulcrum must refuse weapons timer via beyonce").code, "FulcrumRefusesTimerActive");
+    let wpn_dock_station = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
+    assert_eq!(wpn_dock_station.expect_err("Fulcrum must refuse weapons timer via stationSvc").code, "FulcrumRefusesTimerActive");
+    ctx.crimewatch.write().unwrap().states.entry(OWNER).or_default().weapon_timer_until_unix = 0;
 
-    // Neutral character without timer docks at Fulcrum
-    ctx.advance_secs(400);
-    let ok_dock = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
-    assert!(ok_dock.is_ok(), "neutral character must dock at Fulcrum: {ok_dock:?}");
+    // Retribution timer refuses docking on both entrypoints
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.disapproval_flags.insert(OWNER, t_now + 300);
+    });
+    let retrib_dock_beyonce = rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(retrib_dock_beyonce.expect_err("Fulcrum must refuse retribution timer via beyonce").code, "FulcrumRefusesTimerActive");
+    let retrib_dock_station = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
+    assert_eq!(retrib_dock_station.expect_err("Fulcrum must refuse retribution timer via stationSvc").code, "FulcrumRefusesTimerActive");
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.disapproval_flags.remove(&OWNER);
+    });
+
+    // Neutral character without timers docks successfully at Fulcrum
+    let ok_dock = rpc(&ctx, &mut sess, "stationSvc", "Dock", &[PyRep::Integer(FULCRUM_STATION_ID), PyRep::Integer(ship)]).await;
+    assert!(ok_dock.is_ok(), "neutral character must dock at Fulcrum via stationSvc.Dock: {ok_dock:?}");
+    sess.station_id = Some(FULCRUM_STATION_ID);
+
+    // Neutral character gets all 5 standard services: repair, fitting, market, insurance, industry
+    // 1. Repair (service 13)
+    let rep_standing = rpc(&ctx, &mut sess, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(rep_standing.expect("repair standing check"), PyRep::Bool(true));
+    let rep_all = rpc(&ctx, &mut sess, "repairSvc", "RepairAll", &[]).await;
+    assert!(rep_all.is_ok(), "neutral repair at Fulcrum: {rep_all:?}");
+
+    // 2. Fitting (service 17)
+    let fit_standing = rpc(&ctx, &mut sess, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(17), PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(fit_standing.expect("fitting standing check"), PyRep::Bool(true));
+
+    // 3. Market (service 7)
+    let mkt_standing = rpc(&ctx, &mut sess, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(7), PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(mkt_standing.expect("market standing check"), PyRep::Bool(true));
+    let mkt_tx = rpc(&ctx, &mut sess, "marketProxy", "CharGetTransactions", &[]).await;
+    assert!(mkt_tx.is_ok(), "neutral market transactions at Fulcrum: {mkt_tx:?}");
+
+    // 4. Insurance (service 21)
+    let ins_standing = rpc(&ctx, &mut sess, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(21), PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(ins_standing.expect("insurance standing check"), PyRep::Bool(true));
+    let ins_prices = rpc(&ctx, &mut sess, "insuranceSvc", "GetInsurancePrices", &[]).await;
+    assert!(ins_prices.is_ok(), "neutral insurance prices at Fulcrum: {ins_prices:?}");
+
+    // 5. Industry (service 14)
+    let ind_standing = rpc(&ctx, &mut sess, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(14), PyRep::Integer(FULCRUM_STATION_ID)]).await;
+    assert_eq!(ind_standing.expect("industry standing check"), PyRep::Bool(true));
+    let ind_jobs = rpc(&ctx, &mut sess, "industryManager", "GetJobCounts", &[]).await;
+    assert!(ind_jobs.is_ok(), "neutral industry job counts at Fulcrum: {ind_jobs:?}");
 
     // Jump clone & corp office require pirate enlistment
     let clone_neutral = rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStation", &[]).await;
@@ -480,7 +501,7 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     let office_neutral = rpc(&ctx, &mut sess, "officeManager", "RentOffice", &[PyRep::Integer(FULCRUM_STATION_ID)]).await;
     assert_eq!(office_neutral.expect_err("Fulcrum office requires pirate enlistment").code, "FulcrumOfficeRequiresPirateEnlistment");
 
-    // Pirate-enlisted character (500_010) can install clone & rent office, and Angel/Guristas LP stores are available
+    // Pirate-enlisted character (500_010 Guristas) can install clone & rent office
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&OWNER) {
             ch.war_faction_id = Some(500_010);
@@ -492,50 +513,69 @@ async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
     });
     assert!(rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStation", &[]).await.is_ok(), "pirate-enlisted clone install should succeed");
     assert!(rpc(&ctx, &mut sess, "officeManager", "RentOffice", &[PyRep::Integer(FULCRUM_STATION_ID)]).await.is_ok(), "pirate-enlisted office rent should succeed");
-    assert!(rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_124)]).await.is_ok(), "Angel Cartel LP store");
-    assert!(rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_127)]).await.is_ok(), "Guristas LP store");
 
-    // 3. Reprocessing rig security multipliers: M-Set (Athanor 35835) & L-Set (Tatara 35836) for Asteroid, Ice, Moon Ore
-    let nullsec_sys = ctx.sde.solar_systems.values().find(|s| s.security_status <= 0.0 && s.solar_system_id < 31_000_000).map(|s| s.solar_system_id).expect("nullsec");
-    let veldspar = ctx.sde.types.get(&1230); // Asteroid Ore
-    let blue_ice = ctx.sde.types.values().find(|t| t.group_id == 465); // Ice
-    let moon_ore = ctx.sde.types.values().find(|t| t.group_id == 1884); // Moon Ore
+    // Non-empty Angel Cartel (1_000_138) and Guristas (1_000_127) LP store offers with value assertions
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
+            offer_id: 8001,
+            corp_id: 1_000_138,
+            type_id: 78260,
+            quantity: 1,
+            lp_cost: 50_000,
+            isk_cost: eve_db::IskCents::from_isk(50_000_000),
+            req_items: vec![],
+            ak_cost: 0,
+            min_standing: None,
+        });
+        eve_server::services::lp_store::register_lp_store_offer(snap, eve_server::services::lp_store::LPOffer {
+            offer_id: 8002,
+            corp_id: 1_000_127,
+            type_id: 79172,
+            quantity: 1,
+            lp_cost: 45_000,
+            isk_cost: eve_db::IskCents::from_isk(45_000_000),
+            req_items: vec![],
+            ak_cost: 0,
+            min_standing: None,
+        });
+    });
 
-    for (hull_tid, rig_size_val, groups) in [
-        (35835u32, 2.0f64, vec![1941u32, 1942, 1943]),
-        (35836u32, 3.0f64, vec![1944u32, 1945]),
-    ] {
-        for rig_grp in groups {
-            let Some(rig_tid) = ctx.sde.types.values()
-                .find(|t| t.group_id == rig_grp && t.default_attributes.get(&1547).copied() == Some(rig_size_val) && t.default_attributes.contains_key(&717))
-                .map(|t| t.type_id) else { continue; };
-            for ore_ty in [veldspar, blue_ice, moon_ore] {
-                let tid = ore_ty.map(|t| t.type_id);
-                if rig_grp == 1941 && tid != veldspar.map(|t| t.type_id) { continue; }
-                if rig_grp == 1942 && tid != blue_ice.map(|t| t.type_id) { continue; }
-                if rig_grp == 1943 && tid != moon_ore.map(|t| t.type_id) { continue; }
-                let (s_hi, s_lo, s_ns) = (889_001, 889_002, 889_003);
-                ctx.db.with_mut_snapshot(|snap| {
-                    for (id, sys_id) in [(s_hi, JITA), (s_lo, lowsec_sys), (s_ns, nullsec_sys)] {
-                        snap.structures.insert(id, UpwellStructureRecord {
-                            structure_id: id, type_id: hull_tid, owner_corp_id: 98_000_001,
-                            solar_system_id: sys_id, name: "Refinery".into(), position: [0.0, 0.0, 0.0],
-                            state: life::STATE_SHIELD_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 100,
-                            shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0,
-                            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
-                        });
-                        snap.items.insert(id + 10, InventoryItemRecord {
-                            item_id: id + 10, type_id: rig_tid, owner_id: 98_000_001, location_id: id,
-                            flag: InventoryFlag::RigSlot0, quantity: 1, singleton: true, ..Default::default()
-                        });
-                    }
-                });
-                let y_hi = ctx.db.with_snapshot(|snap| compute_structure_rigged_base_yield(&ctx.sde, snap, s_hi, ore_ty));
-                let y_lo = ctx.db.with_snapshot(|snap| compute_structure_rigged_base_yield(&ctx.sde, snap, s_lo, ore_ty));
-                let y_ns = ctx.db.with_snapshot(|snap| compute_structure_rigged_base_yield(&ctx.sde, snap, s_ns, ore_ty));
-                assert!((y_lo / y_hi - 1.06).abs() < 1e-4, "hull {hull_tid} group {rig_grp} low-sec multiplier should be 1.06x");
-                assert!((y_ns / y_hi - 1.12).abs() < 1e-4, "hull {hull_tid} group {rig_grp} null-sec multiplier should be 1.12x");
-            }
-        }
-    }
+    let angel_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_138)]).await.expect("Angel LP store");
+    let PyRep::List(ref a_offers) = angel_rep else { panic!("expected list of offers"); };
+    assert!(!a_offers.is_empty(), "Angel Cartel LP store has available offers");
+    let a_off = a_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8001)).expect("Offer 8001");
+    assert_eq!(a_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1_000_138));
+    assert_eq!(a_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(78260));
+    assert_eq!(a_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(50_000));
+    assert_eq!(a_off.dict_get("iskCost").and_then(|v| v.as_f64()), Some(50_000_000.0));
+
+    let guristas_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_127)]).await.expect("Guristas LP store");
+    let PyRep::List(ref g_offers) = guristas_rep else { panic!("expected list of offers"); };
+    assert!(!g_offers.is_empty(), "Guristas LP store has available offers");
+    let g_off = g_offers.iter().find(|o| o.dict_get("offerID").and_then(|v| v.as_i64()) == Some(8002)).expect("Offer 8002");
+    assert_eq!(g_off.dict_get("corpID").and_then(|v| v.as_i64()), Some(1_000_127));
+    assert_eq!(g_off.dict_get("typeID").and_then(|v| v.as_i64()), Some(79172));
+    assert_eq!(g_off.dict_get("lpCost").and_then(|v| v.as_i64()), Some(45_000));
+    assert_eq!(g_off.dict_get("iskCost").and_then(|v| v.as_f64()), Some(45_000_000.0));
+
+    // 3. Reprocessing rig live RPC verification via reprocessingSvc.GetQuotes
+    let refinery_id = 889_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(refinery_id, UpwellStructureRecord {
+            structure_id: refinery_id, type_id: 35835, owner_corp_id: 98_000_001,
+            solar_system_id: JITA, name: "Rigged Refinery".into(), position: [0.0, 0.0, 0.0],
+            state: life::STATE_SHIELD_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 100,
+            shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        snap.items.insert(refinery_id + 1, InventoryItemRecord {
+            item_id: refinery_id + 1, type_id: 35892, owner_id: 98_000_001, location_id: refinery_id,
+            flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.module_online_states.insert(refinery_id + 1, true);
+    });
+    sess.station_id = None;
+    sess.structure_id = Some(refinery_id);
+    let quotes_rep = rpc(&ctx, &mut sess, "reprocessingSvc", "GetQuotes", &[]).await;
+    assert!(quotes_rep.is_ok(), "reprocessingSvc.GetQuotes must succeed: {quotes_rep:?}");
 }

@@ -1021,6 +1021,12 @@ async fn handle_dock(
         .unwrap_or(0);
     let is_capsule = ship_type_id == 670 || ship_group_id == 29;
 
+    let is_structure = dock_id >= 1_000_000_000_000
+        || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dock_id));
+    if let Err(e) = crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, is_structure) {
+        return Err(e);
+    }
+
     {
         let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
         if let Some(cw_state) = cw.states.get(&char_id) {
@@ -1046,34 +1052,6 @@ async fn handle_dock(
         });
     }
 
-    // The Fulcrum Alignment Services (`feat:structures.fulcrum-alignment-services`):
-    // Refuses docking to characters enlisted in an Empire militia (500001..=500004) or with active weapons/retribution timer.
-    if dock_id == 60_015_187 {
-        let char_war_fac = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
-        if matches!(char_war_fac, Some(500_001..=500_004)) {
-            return Err(BridgeRpcError::user_error("FulcrumRefusesEmpireMilitia"));
-        }
-        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
-        let weapons_active = cw
-            .states
-            .get(&char_id)
-            .is_some_and(|s| s.is_weapon_timer_active(now_unix) || s.is_pvp_active(now_unix));
-        let retribution_active = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-            rt.disapproval_flags
-                .get(&char_id)
-                .copied()
-                .is_some_and(|exp| now_unix < exp)
-        });
-        if weapons_active || retribution_active {
-            return Err(BridgeRpcError::user_error("FulcrumRefusesTimerActive"));
-        }
-    }
-
-    let is_structure = dock_id >= 1_000_000_000_000
-        || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dock_id));
-    if let Err(e) = crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, is_structure) {
-        return Err(e);
-    }
     let target_pos = if is_structure {
         let st_opt = ctx
             .db

@@ -668,6 +668,9 @@ pub async fn handle(
             if let Err(e) = crate::services::space_navigation_advanced::validate_npc_station_docking(ship_group_id, !is_structure) {
                 return Some(Err(e));
             }
+            if let Err(e) = crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, is_structure) {
+                return Some(Err(e));
+            }
             let is_capsule = ship_type_id == 670 || ship_group_id == 29;
             {
                 let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
@@ -695,9 +698,6 @@ pub async fn handle(
             }
 
             if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock") {
-                return Some(Err(e));
-            }
-            if let Err(e) = crate::services::fw_gameplay::check_docking_allowed(ctx, char_id, sys_id, dock_id, is_structure) {
                 return Some(Err(e));
             }
 

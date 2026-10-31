@@ -270,6 +270,30 @@ pub fn check_docking_allowed(
     dock_id: i64,
     _is_structure: bool,
 ) -> Result<(), BridgeRpcError> {
+    // The Fulcrum Alignment Services (`feat:structures.fulcrum-alignment-services`):
+    // Refuses docking to characters enlisted in an Empire militia (500001..=500004) or with active weapons/retribution timer.
+    if dock_id == 60_015_187 {
+        let char_war_fac = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
+        if matches!(char_war_fac, Some(500_001..=500_004)) {
+            return Err(BridgeRpcError::user_error("FulcrumRefusesEmpireMilitia"));
+        }
+        let now_unix = ctx.now_unix();
+        let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
+        let weapons_active = cw
+            .states
+            .get(&char_id)
+            .is_some_and(|s| s.is_weapon_timer_active(now_unix) || s.is_pvp_active(now_unix));
+        let retribution_active = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.disapproval_flags
+                .get(&char_id)
+                .copied()
+                .is_some_and(|exp| now_unix < exp)
+        });
+        if weapons_active || retribution_active {
+            return Err(BridgeRpcError::user_error("FulcrumRefusesTimerActive"));
+        }
+    }
+
     let check = ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&dock_id)?;
         let is_fob = matches!(

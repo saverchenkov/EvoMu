@@ -8,7 +8,6 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::station_structure::structure_lifecycle as life;
-use eve_server::services::station_structure::structure_lifecycle_rpc::{handle_structure_fit_move, handle_structure_module_online};
 use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -59,11 +58,8 @@ fn extract_id(rep: &PyRep) -> i64 {
     rep.as_i64().unwrap_or_else(|| rep.dict_get("structureID").and_then(|v| v.as_i64()).expect("structureID"))
 }
 
-/// 1. `feat:structures.upwell-palatine-keepstar-limit`
 #[tokio::test]
 async fn test_palatine_keepstar_cluster_uniqueness() {
-    // parity: feat:structures.upwell-palatine-keepstar-limit
-    eve_testkit::attest(&["feat:structures.upwell-palatine-keepstar-limit"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -95,15 +91,8 @@ async fn test_palatine_keepstar_cluster_uniqueness() {
     assert_eq!(err.code, "PalatineKeepstarLimitReached");
 }
 
-/// 2. `feat:structures.quantum-core-gate` & 3. `feat:structures.anchoring-onlining-phases`
 #[tokio::test]
 async fn test_quantum_core_gate_and_anchoring_onlining_phases() {
-    // parity: feat:structures.quantum-core-gate, feat:structures.anchoring-onlining-phases
-    eve_testkit::attest(&[
-        "feat:structures.quantum-core-gate",
-        "feat:structures.anchoring-onlining-phases",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 2, OWNER, "Core Gate Corp", "CORE").await;
@@ -171,7 +160,7 @@ async fn test_quantum_core_gate_and_anchoring_onlining_phases() {
     assert_eq!(st.state, life::STATE_NO_CORE);
 
     let srv_id = grant(&ctx, st.owner_corp_id, st_id, 35894, InventoryFlag::ServiceSlot0, 1);
-    let online_no_core = handle_structure_module_online(&ctx, &mut sess, st_id, srv_id, true);
+    let online_no_core = rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(srv_id)]).await;
     assert_eq!(online_no_core.expect_err("service module must not online without Quantum Core").code, "QuantumCoreRequired");
 
     // Wrong-hull Quantum Core (Fortizar core in Astrahus) must NOT install
@@ -240,15 +229,8 @@ async fn test_quantum_core_gate_and_anchoring_onlining_phases() {
     assert!(core_exists, "Quantum Core item must exist in dropped items");
 }
 
-/// 4. `feat:structures.fitting-state-locks` & 5. `feat:structures.pochven-anchoring-restrictions`
 #[tokio::test]
 async fn test_fitting_state_locks_and_pochven_anchoring() {
-    // parity: feat:structures.fitting-state-locks, feat:structures.pochven-anchoring-restrictions
-    eve_testkit::attest(&[
-        "feat:structures.fitting-state-locks",
-        "feat:structures.pochven-anchoring-restrictions",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 3, OWNER, "Fit Lock Corp", "FLCK").await;
@@ -258,7 +240,7 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     let mod_id = grant(&ctx, OWNER, st_id, 35894, InventoryFlag::Hangar, 1);
 
     // Refit refused while AnchorVulnerable -> StructureFittingLockedInState
-    let err_anchor = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+    let err_anchor = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await
         .expect_err("refit must be refused while AnchorVulnerable");
     assert_eq!(err_anchor.code, "StructureFittingLockedInState");
 
@@ -268,7 +250,7 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
             st.state = life::STATE_ONLINING.into();
         }
     });
-    let err_onlining = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+    let err_onlining = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await
         .expect_err("refit must be refused while Onlining");
     assert_eq!(err_onlining.code, "StructureFittingLockedInState");
 
@@ -278,7 +260,7 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
             st.state = life::STATE_ARMOR_REINFORCED.into();
         }
     });
-    let err_reinf = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+    let err_reinf = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await
         .expect_err("refit must be refused while Reinforced");
     assert_eq!(err_reinf.code, "StructureFittingLockedInState");
 
@@ -294,7 +276,7 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
         ext.lifecycle.entry(st_id).or_default().repair_until_unix = Some(ctx.now_unix() + 600);
         save_ext_state(snap, &ext);
     });
-    let err_repairing = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+    let err_repairing = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await
         .expect_err("refit must be refused while repairing");
     assert_eq!(err_repairing.code, "StructureRepairingCannotRefit");
 
@@ -307,7 +289,7 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
             st.shield_hp = profile.shield_hp * 0.85;
         }
     });
-    let err_damaged = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false))
+    let err_damaged = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await
         .expect_err("refit must be refused when shields < 100%");
     assert_eq!(err_damaged.code, "StructureDamagedCannotRefit");
 
@@ -317,7 +299,7 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
             st.shield_hp = profile.shield_hp;
         }
     });
-    let ok_refit = handle_structure_fit_move(&ctx, &mut sess, mod_id, st_id, InventoryFlag::ServiceSlot0, Some(false));
+    let ok_refit = rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(mod_id), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await;
     assert!(ok_refit.is_ok(), "refit must succeed at full shields in ShieldVulnerable: {ok_refit:?}");
 
     // Pochven anchoring restrictions: Upwell refused, existing ones remain, Customs Office requires >= 1.5 Triglavian standing
@@ -372,15 +354,8 @@ async fn test_fitting_state_locks_and_pochven_anchoring() {
     assert!(ok_standing.is_ok(), "Pochven POCO with >= 1.5 Trig standing should succeed: {ok_standing:?}");
 }
 
-/// 11. `feat:structures.reinforce-hour-hack-reveal` & 12. `feat:structures.ewar-immunity`
 #[tokio::test]
 async fn test_reinforce_hour_hack_reveal_and_ewar_immunity() {
-    // parity: feat:structures.reinforce-hour-hack-reveal, feat:structures.ewar-immunity
-    eve_testkit::attest(&[
-        "feat:structures.reinforce-hour-hack-reveal",
-        "feat:structures.ewar-immunity",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = pilot_in_space(&ctx, 4, OWNER, "Hack Owner Corp", "HACK").await;

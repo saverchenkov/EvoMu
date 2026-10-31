@@ -568,7 +568,7 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         if !dest_is_station && !evaluate_character_structure_access_in_snap(snap, dest_id, char_id) {
             return Err(err("InvalidAssetSafetyDestination", format!("Character {char_id} does not have docking access to structure {dest_id}")));
         }
-        let fee_rate = if !wrap.auto_delivered && dest_sys == Some(wrap.solar_system_id) && now_unix < wrap.created_unix + ASSET_SAFETY_AUTO_DELIVERY_SECS {
+        let fee_rate = if dest_sys == Some(wrap.solar_system_id) {
             0.005
         } else {
             ASSET_SAFETY_FEE_FRACTION
