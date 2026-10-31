@@ -496,6 +496,27 @@ async fn notify_batch8_combat_ewar_cloak_and_invuln() {
     );
 
     let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    // Negative (B8-01): victim PILOT_B cannot cleanse attacker's web by calling Deactivate(web_id)
+    assert_eq!(
+        rpc(&ctx, &mut sess_b, "dogmaIM", "Deactivate", &[PyRep::Integer(web_id)])
+            .await
+            .unwrap_err()
+            .code,
+        "ModuleNotOwnedByShip"
+    );
+    assert!(
+        drain_all(&ctx, &mut sess_a, PILOT_A).iter().all(|(e, _)| e != "OnEwarEnd"),
+        "unauthorized Deactivate must not emit OnEwarEnd"
+    );
+    assert!(
+        drain_all(&ctx, &mut sess_b, PILOT_B).iter().all(|(e, _)| e != "OnEwarEnd"),
+        "unauthorized Deactivate must not emit OnEwarEnd to victim"
+    );
+    assert!(
+        ctx.projected_ewar.read().unwrap().get(&ship_b).is_some_and(|v| !v.is_empty()),
+        "unauthorized Deactivate must not cleanse projected_ewar on victim"
+    );
+
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(web_id)])
         .await
         .expect("Deactivate Stasis Webifier I");
@@ -595,4 +616,38 @@ async fn notify_batch8_combat_ewar_cloak_and_invuln() {
         assert_eq!(find_notif(&end_notifs_a, "OnEwarEnd"), &expected_args);
         assert_eq!(find_notif(&end_notifs_b, "OnEwarEnd"), &expected_args);
     }
+
+    // 6. TakeModuleOffline on an active EWAR module flushes projected_ewar and emits OnEwarEnd
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(gd_id),
+            PyRep::String("defaultEffect".into()),
+            PyRep::Integer(ship_b),
+        ],
+    )
+    .await
+    .expect("Activate Guidance Disruptor before TakeModuleOffline");
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let _ = drain_all(&ctx, &mut sess_b, PILOT_B);
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "dogmaIM",
+        "TakeModuleOffline",
+        &[PyRep::Integer(ship_a), PyRep::Integer(gd_id)],
+    )
+    .await
+    .expect("TakeModuleOffline active Guidance Disruptor");
+    let expected_gd_end = [
+        PyRep::Integer(ship_a),
+        PyRep::Integer(gd_id),
+        PyRep::Integer(ship_b),
+        PyRep::String("ewGuidanceDisrupt".into()),
+    ];
+    assert_eq!(find_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnEwarEnd"), &expected_gd_end);
+    assert_eq!(find_notif(&drain_all(&ctx, &mut sess_b, PILOT_B), "OnEwarEnd"), &expected_gd_end);
 }

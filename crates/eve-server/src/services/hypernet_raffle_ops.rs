@@ -49,7 +49,7 @@ pub struct RaffleStateRecord {
     pub expired: bool,
 }
 
-fn raffle_note_id(raffle_id: i64) -> i64 {
+pub(crate) fn raffle_note_id(raffle_id: i64) -> i64 {
     -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()))
 }
 
@@ -453,7 +453,7 @@ pub fn handle(
                 if let Some(it) = snap.items.get_mut(&item_id) {
                     it.owner_id = -52_568;
                     it.location_id = -52_568;
-                    it.flag = InventoryFlag::Hangar;
+                    it.flag = InventoryFlag::Locked;
                     it.version += 1;
                 }
                 snap.next_entity_id += 1;

@@ -581,6 +581,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         }
                     }
                     ctx.upsert_projected_ewar_on_ship(
+                        ship_id,
                         target_id,
                         eve_dogma::ProjectedEwarEffect {
                             source_module_id: module_id,
@@ -756,6 +757,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             synth_mod.base_attributes.insert(54, 1_000_000_000.0);
                             for &vid in &victims {
                                 ctx.upsert_projected_ewar_on_ship(
+                                    ship_id,
                                     vid,
                                     eve_dogma::ProjectedEwarEffect {
                                         source_module_id: module_id,
@@ -893,7 +895,7 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
     ctx.active_ewar_starts
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .entry(module_id)
+        .entry((ship_id, module_id))
         .or_default()
         .push((target_id, jam_type));
     ctx.notify(

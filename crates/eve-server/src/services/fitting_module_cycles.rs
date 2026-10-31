@@ -1223,7 +1223,7 @@ pub(crate) async fn handle_module_cycles(
             };
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
-                ctx.remove_projected_ewar_by_module(module_id);
+                ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 let code = if e.contains("WarpScrambled") { "WarpScrambled" } else { "NotEnoughCapacitor" };
                 return Some(Err(BridgeRpcError { code: code.into(), message: e }));
             }
@@ -1231,44 +1231,27 @@ pub(crate) async fn handle_module_cycles(
             if let Err(e) = evaluate_module_cycle_aggression_or_assistance(
                 ctx, &sys, sys_id, char_id, ship_id, mod_type.group_id, target_id_opt,
             ).await {
-                ctx.remove_projected_ewar_by_module(module_id);
+                ctx.remove_projected_ewar_by_module(ship_id, module_id);
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
                 if cap_need > 0.0 {
                     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                        let _ = sys
-                            .set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor))
-                            .await;
+                        let _ = sys.set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor)).await;
                     }
                 }
                 return Some(Err(e));
             }
 
             let instant_rep_opt = match run_pre_notify_instant_module_effects(
-                ctx,
-                &sys,
-                sys_id,
-                char_id,
-                ship_id,
-                module_id,
-                &m,
-                mod_type,
-                &mod_state,
-                is_overloaded,
-                target_id_opt,
-                duration_s,
-                kwargs,
-            )
-            .await
-            {
+                ctx, &sys, sys_id, char_id, ship_id, module_id, &m, mod_type, &mod_state,
+                is_overloaded, target_id_opt, duration_s, kwargs,
+            ).await {
                 Ok(rep_opt) => rep_opt,
                 Err(e) => {
-                    ctx.remove_projected_ewar_by_module(module_id);
+                    ctx.remove_projected_ewar_by_module(ship_id, module_id);
                     let _ = sys.remove_module_cycle(ship_id, module_id).await;
                     if cap_need > 0.0 {
                         if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-                            let _ = sys
-                                .set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor))
-                                .await;
+                            let _ = sys.set_capacitor(ship_id, (cs.capacitor + cap_need).min(cs.max_capacitor)).await;
                         }
                     }
                     return Some(Err(e));

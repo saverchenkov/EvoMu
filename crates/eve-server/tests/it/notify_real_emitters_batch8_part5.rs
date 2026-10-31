@@ -226,20 +226,47 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
             .unwrap_or_default()
     });
     assert!(reload_blob.contains("en-us.pickle"));
+    let reload_json: serde_json::Value = serde_json::from_str(&reload_blob).expect("reload_blob json");
+    assert!(
+        reload_json["localized_entries_count"].as_u64().unwrap_or(0) > 1_000,
+        "ReloadFSDPickle must scan real SDE localized entries"
+    );
 
-    // Negative: boolean toggle rejected with UnimplementedRPC
+    // Normal V24 character login calls UpdateLocalizationQAWrap(bool) without GM roles
+    let qa_bool_on = rpc(
+        &ctx,
+        &mut sess_b,
+        "localizationServer",
+        "UpdateLocalizationQAWrap",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect("non-GM UpdateLocalizationQAWrap(true)");
+    assert_eq!(qa_bool_on, PyRep::Bool(true));
+    let qa_bool_off = rpc(
+        &ctx,
+        &mut sess_b,
+        "localizationServer",
+        "UpdateLocalizationQAWrap",
+        &[PyRep::Bool(false)],
+    )
+    .await
+    .expect("non-GM UpdateLocalizationQAWrap(false)");
+    assert_eq!(qa_bool_off, PyRep::Bool(false));
+
+    // Negative: non-boolean, non-dict argument rejected with InvalidArgument
     assert_eq!(
         rpc(
             &ctx,
             &mut sess_a,
             "localizationServer",
             "UpdateLocalizationQAWrap",
-            &[PyRep::Bool(true)],
+            &[PyRep::String("invalid".into())],
         )
         .await
         .unwrap_err()
         .code,
-        "UnimplementedRPC"
+        "InvalidArgument"
     );
     let qa_wrap_rep = rpc(
         &ctx,
@@ -261,6 +288,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         .expect("GetTotalStats initial");
     assert_eq!(stats_0.dict_get("active").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(stats_0.dict_get("runs_started").and_then(|v| v.as_i64()), Some(0));
+    assert!(stats_0.dict_get("sde_types_count").and_then(|v| v.as_i64()).unwrap_or(0) > 1_000);
 
     let start_rep = rpc(
         &ctx,
@@ -279,6 +307,10 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
     assert_eq!(stats_1.dict_get("active").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(stats_1.dict_get("runs_started").and_then(|v| v.as_i64()), Some(1));
     assert_eq!(stats_1.dict_get("total_requests").and_then(|v| v.as_i64()), Some(1));
+    assert!(stats_1.dict_get("systems_stepped").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    assert!(stats_1.dict_get("active_systems_count").and_then(|v| v.as_i64()).unwrap_or(0) >= 1);
+    assert!(stats_1.dict_get("world_items_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(stats_1.dict_get("world_characters_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
     let stop_rep = rpc(&ctx, &mut sess_a, "loadService", "StopLoad", &[])
         .await

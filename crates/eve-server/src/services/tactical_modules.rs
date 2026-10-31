@@ -121,8 +121,8 @@ pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_
     }
 }
 
-/// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `source_module_id`.
-pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id: i64) {
+/// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `(source_ship_id, source_module_id)`.
+pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_ship_id: i64, source_module_id: i64) {
     let db_key = db_key_of(ctx);
     let mut affected = Vec::new();
     {
@@ -130,7 +130,7 @@ pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id:
         for (&(k, tid), list) in st.remote_assistance.iter_mut() {
             if k == db_key {
                 let before = list.len();
-                list.retain(|e| e.module_id != source_module_id);
+                list.retain(|e| !(e.source_ship_id == source_ship_id && e.module_id == source_module_id));
                 if list.len() != before { affected.push(tid); }
             }
         }

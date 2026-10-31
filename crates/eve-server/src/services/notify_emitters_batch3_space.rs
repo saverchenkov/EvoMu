@@ -620,13 +620,23 @@ pub fn flush_module_profile_and_ewar_end(
         .active_ewar_starts
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&module_id)
+        .remove(&(ship_id, module_id))
         .unwrap_or_default();
-    let affected_projected = ctx.remove_projected_ewar_by_module(module_id);
     let ewar_targets: Vec<(i64, &'static str)> = if !started_targets.is_empty() {
         started_targets
     } else {
-        let projected_targets: Vec<(i64, u32, Option<u32>, bool)> = {
+        let source_matches = ctx
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&module_id)
+            .copied()
+            .map(|sid| sid == ship_id)
+            .unwrap_or_else(|| {
+                ctx.db
+                    .with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.location_id == ship_id))
+            });
+        let projected_targets: Vec<(i64, u32, Option<u32>, bool)> = if source_matches {
             let guard = ctx
                 .projected_ewar
                 .read()
@@ -656,6 +666,8 @@ pub fn flush_module_profile_and_ewar_end(
                 }
             }
             out
+        } else {
+            Vec::new()
         };
         projected_targets
             .into_iter()
@@ -677,6 +689,7 @@ pub fn flush_module_profile_and_ewar_end(
             })
             .collect()
     };
+    let affected_projected = ctx.remove_projected_ewar_by_module(ship_id, module_id);
     for (target_sid, jamming_type) in ewar_targets {
         let ewar_args = vec![
             PyRep::Integer(ship_id),
@@ -719,6 +732,70 @@ pub fn flush_module_profile_and_ewar_end(
         }
     }
     affected_projected
+}
+
+/// Flushes all active EWAR projections and remote assistance originating from OR targeting `ship_id`,
+/// emitting `OnEwarEnd` to both attacker and victim.
+pub fn flush_ship_all_ewar_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    solar_system_id: Option<u32>,
+    ship_id: i64,
+) -> Vec<(i64, i64)> {
+    let mut pairs: Vec<(i64, i64)> = Vec::new();
+    {
+        let guard = ctx
+            .active_ewar_starts
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for (&(src_sid, mod_id), targets) in guard.iter() {
+            if src_sid == ship_id || targets.iter().any(|&(tid, _)| tid == ship_id) {
+                if !pairs.contains(&(src_sid, mod_id)) {
+                    pairs.push((src_sid, mod_id));
+                }
+            }
+        }
+    }
+    {
+        let src_guard = ctx
+            .projected_ewar_sources
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for (&mod_id, &src_sid) in src_guard.iter() {
+            if src_sid == ship_id && !pairs.contains(&(src_sid, mod_id)) {
+                pairs.push((src_sid, mod_id));
+            }
+        }
+        let pe_guard = ctx
+            .projected_ewar
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = pe_guard.get(&ship_id) {
+            for eff in list {
+                let mod_id = eff.source_module_id;
+                let src_sid = src_guard.get(&mod_id).copied().unwrap_or_else(|| {
+                    ctx.db
+                        .with_snapshot(|s| s.items.get(&mod_id).map(|i| i.location_id))
+                        .unwrap_or(0)
+                });
+                if src_sid > 0 && !pairs.contains(&(src_sid, mod_id)) {
+                    pairs.push((src_sid, mod_id));
+                }
+            }
+        }
+    }
+    for &(src_sid, mod_id) in &pairs {
+        let src_char = if src_sid == ship_id && char_id > 0 {
+            char_id
+        } else {
+            ctx.db
+                .with_snapshot(|s| s.items.get(&src_sid).map(|i| i.owner_id))
+                .unwrap_or(0)
+        };
+        let _ = flush_module_profile_and_ewar_end(ctx, src_char, solar_system_id, src_sid, mod_id);
+        crate::services::tactical_modules::remove_projected_remote_assistance(ctx, src_sid, mod_id);
+    }
+    pairs
 }
 
 /// Emits `OnJamStart(sourceBallID, moduleID, targetBallID, "electronic", startTime, durationMs)`

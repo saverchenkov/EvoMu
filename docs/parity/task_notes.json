@@ -180,7 +180,7 @@
     "note": "Regional ice belts with 4h respawn, ice harvester 1,000 m3 block cycles and duration modifiers (Ice Harvesting, Barge/Exhumer, IHU II, rig), and K-space/W-space gas harvesting tested."
   },
   "MN-09": {
-    "assessment": "DONE",
+    "assessment": "PARTIAL",
     "note": "Mining drone (I/II, Ice, Harvester) and Rorqual Excavator drone cycle yield, Drone Interfacing + Mining Drone Operation skill scaling, Mining Drone Specialization, and ore hold delivery tested."
   },
   "MN-10": {

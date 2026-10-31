@@ -830,6 +830,9 @@ pub async fn handle_wrecks_killmails(
             };
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let ship_id = session.ship_id.unwrap_or(0);
+            if !ctx.db.with_snapshot(|s| s.items.get(&module_id).is_some_and(|i| i.owner_id == char_id && i.location_id == ship_id)) {
+                return Some(Err(BridgeRpcError { code: "ModuleNotOwnedByShip".into(), message: format!("Module {module_id} is not fitted to active ship {ship_id}") }));
+            }
             with_mut_combat_runtime(ctx, |rt| { rt.entropic_spools.remove(&(ship_id, module_id)); });
             if let Some(sys_id) = session.solar_system_id {
                 let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(ship_id, module_id).await;

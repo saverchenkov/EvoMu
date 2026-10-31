@@ -904,6 +904,14 @@ async fn deactivate_repeating_cycle_after_action(
     effect_name: &str,
 ) {
     let _ = sys.remove_module_cycle(ship_id, module_id).await;
+    let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+        ctx,
+        owner_char_id.unwrap_or(0),
+        Some(sys.solar_system_id),
+        ship_id,
+        module_id,
+    );
+    crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, module_id);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.remove(&module_id);
         snap.module_active_charges.remove(&module_id);

@@ -372,6 +372,11 @@ pub async fn handle(
                     }))
                 }
             };
+            crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
+                ctx,
+                char_id,
+                ship.item_id,
+            );
 
             if kwargs
                 .get("onlineModules")

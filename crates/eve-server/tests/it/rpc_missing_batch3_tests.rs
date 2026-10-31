@@ -523,13 +523,15 @@ async fn test_rpc_missing_batch3_part2() {
         }
         other => panic!("Unexpected QA_SeedRaffles shape: {other:?}"),
     }
-    let (seeded_notes, item_is_neg) = ctx.db.with_snapshot(|s| {
+    let (seeded_notes, item_is_escrowed) = ctx.db.with_snapshot(|s| {
         let count = s.owner_notes.values().filter(|n| n.label.starts_with("raffle:")).count();
-        let neg = s.items.keys().any(|&k| k < 0);
-        (count, neg)
+        let escrowed = s.items.values().any(|it| {
+            it.owner_id == -52_568 && it.location_id == -52_568 && it.flag == eve_db::InventoryFlag::Locked
+        });
+        (count, escrowed)
     });
     assert!(seeded_notes >= 2);
-    assert!(item_is_neg, "Seeded raffle item must use negative item ID in snap.items");
+    assert!(item_is_escrowed, "Seeded raffle item must be escrowed at -52_568 with Locked flag");
 
     // 19. rpc:DB2.CallProc (2 args: proc_name, role_mask)
     let mut unpriv = SessionState::new(9999);

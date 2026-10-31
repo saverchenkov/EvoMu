@@ -309,6 +309,28 @@ impl SystemHandle {
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let super::SystemActorState {
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            asteroids,
+            db_opt,
+            ..
+        } = &mut *st;
+        super::cycles::remove_all_ship_module_cycles(
+            &mut bp,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            ball_id,
+            deact_guard.as_ref(),
+        );
+        base_scramble_strengths.remove(&ball_id);
+        base_core_strengths.remove(&ball_id);
+        asteroids.remove(&ball_id);
         let _ = bp.remove_ball(ball_id);
         super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }

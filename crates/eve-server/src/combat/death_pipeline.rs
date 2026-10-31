@@ -81,6 +81,12 @@ pub fn execute_death_pipeline_sync_inner(
         Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
     })?;
 
+    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(
+        ctx,
+        victim_char_id,
+        Some(sys_id),
+        victim_ship_id,
+    );
     let fitted_mods: Vec<(i64, u32, u16)> = ctx
         .ship_fittings
         .write()

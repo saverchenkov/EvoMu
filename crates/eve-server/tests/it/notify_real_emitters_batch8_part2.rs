@@ -134,6 +134,7 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
         "InsufficientRole"
     );
     sess_a.role |= ROLE_GM_DEFAULT;
+    let _ = drain_all(&ctx, &mut sess_a, PILOT_A);
     let seeded_rep = rpc(&ctx, &mut sess_a, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(3)])
         .await
         .expect("QA_SeedRaffles");
@@ -141,7 +142,36 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
         panic!("expected List from QA_SeedRaffles, got {seeded_rep:?}");
     };
     assert_eq!(seeded_list.len(), 3);
-    assert!(seeded_list[0].dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let seeded_rid_0 = seeded_list[0].dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let seeded_iid_0 = seeded_list[0].dict_get("item_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!(seeded_rid_0 > 0 && seeded_iid_0 > 0);
+    assert!(seeded_list[0].dict_get("sold_tickets").is_some(), "QA_SeedRaffles must include sold_tickets");
+    let seeded_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let created_rids: std::collections::BTreeSet<i64> = seeded_notifs
+        .iter()
+        .filter(|(n, _)| n == "OnRaffleCreatedServer")
+        .filter_map(|(_, a)| a.first().and_then(|v| v.as_i64()))
+        .collect();
+    assert_eq!(
+        created_rids.len(),
+        3,
+        "QA_SeedRaffles(3) must emit OnRaffleCreatedServer for all 3 seeded raffles"
+    );
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&seeded_iid_0).expect("seeded item in snap.items");
+        assert_eq!((it.owner_id, it.location_id, it.flag), (-52_568, -52_568, InventoryFlag::Locked));
+    });
+    let _ = rpc(&ctx, &mut sess_b, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(seeded_rid_0), PyRep::Integer(8)])
+        .await
+        .expect("BuyRandomTickets on seeded raffle");
+    let claimed_seeded = rpc(&ctx, &mut sess_b, "raffleProxy", "AwardItem", &[PyRep::Integer(seeded_rid_0)])
+        .await
+        .expect("AwardItem on seeded raffle");
+    assert_eq!(claimed_seeded.as_i64(), Some(seeded_iid_0));
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&seeded_iid_0).expect("awarded seeded item");
+        assert_eq!((it.owner_id, it.location_id, it.flag), (PILOT_B, JITA_STATION, InventoryFlag::Hangar));
+    });
     let seeded_tc = seeded_list[0].dict_get("ticket_count").and_then(|v| v.as_i64()).unwrap_or(0);
     assert!(
         [8, 16, 48, 512].contains(&seeded_tc),
@@ -245,6 +275,19 @@ async fn notify_batch8_hypernet_raffles_and_plex_vault() {
         created_args[1].dict_get("ticket_count").and_then(|v| v.as_i64()),
         Some(8)
     );
+    // Calling QA_SeedRaffles after CreateRaffle must not collide with or overwrite raffle_id
+    let post_seed_rep = rpc(&ctx, &mut sess_a, "raffleMgr", "QA_SeedRaffles", &[PyRep::Integer(1)])
+        .await
+        .expect("QA_SeedRaffles after CreateRaffle");
+    let PyRep::List(post_seed_list) = post_seed_rep else {
+        panic!("expected List from QA_SeedRaffles");
+    };
+    let post_seed_rid = post_seed_list[0].dict_get("raffle_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert_ne!(post_seed_rid, raffle_id, "QA_SeedRaffles must not collide with CreateRaffle raffle_id");
+    let live_raffle = rpc(&ctx, &mut sess_a, "raffleProxy", "GetRaffle", &[PyRep::Integer(raffle_id)])
+        .await
+        .expect("GetRaffle live");
+    assert_eq!(live_raffle.dict_get("item_id").and_then(|v| v.as_i64()), Some(item_1));
 
     // 3. BuyTicket & BuyRandomTickets -> emits OnRaffleUpdatedServer & OnTicketsUpdatedServer,
     // and buying the final ticket emits OnRaffleFinishedServer(raffle_id, winning_ticket)

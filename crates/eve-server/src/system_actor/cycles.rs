@@ -1176,7 +1176,7 @@ pub(crate) fn remove_all_ship_module_cycles(
     let mut removed_cycles = Vec::new();
     let mut i = 0;
     while i < active_module_cycles.len() {
-        if active_module_cycles[i].ship_id == ship_id {
+        if active_module_cycles[i].ship_id == ship_id || active_module_cycles[i].target_id == Some(ship_id) {
             let removed = active_module_cycles.swap_remove(i);
             cleanup_removed_module_cycle(ballpark, &removed, db_opt);
             removed_cycles.push(removed);

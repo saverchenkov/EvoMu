@@ -313,7 +313,8 @@ pub fn validate_npc_station_docking(
 }
 
 pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
-    let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+    let (solar_system_id, active_mods): (Option<u32>, Vec<i64>) = ctx.db.with_mut_snapshot(|snap| {
+        let sys_id = snap.characters.get(&char_id).map(|c| c.solar_system_id);
         let mods: Vec<i64> = snap
             .items
             .values()
@@ -324,12 +325,27 @@ pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64,
             .collect();
         for mid in &mods {
             snap.module_active_states.remove(mid);
+            snap.module_active_charges.remove(mid);
         }
-        mods
+        (sys_id, mods)
     });
+    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(
+        ctx,
+        char_id,
+        solar_system_id,
+        ship_id,
+    );
     if !active_mods.is_empty() {
         ctx.invalidate_ship_fitting(ship_id);
         for mid in active_mods {
+            let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                ctx,
+                char_id,
+                solar_system_id,
+                ship_id,
+                mid,
+            );
+            crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, mid);
             ctx.notify_godma_ship_effect(
                 crate::router::NotificationTarget::Character(char_id),
                 mid,

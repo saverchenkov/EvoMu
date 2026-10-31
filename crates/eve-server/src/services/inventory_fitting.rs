@@ -295,12 +295,9 @@ pub async fn handle(
                         let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(src_item.location_id, item_id).await;
                     }
                     let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
-                        ctx,
-                        char_id,
-                        session.solar_system_id,
-                        src_item.location_id,
-                        item_id,
+                        ctx, char_id, session.solar_system_id, src_item.location_id, item_id,
                     );
+                    crate::services::tactical_modules::remove_projected_remote_assistance(ctx, src_item.location_id, item_id);
                 }
             }
 

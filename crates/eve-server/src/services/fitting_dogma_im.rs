@@ -421,6 +421,24 @@ pub(crate) async fn handle_dogma_im(
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.remove_module_cycle(loc, item_id).await;
                 }
+                let affected_ewar = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                    ctx,
+                    char_id,
+                    session.solar_system_id,
+                    loc,
+                    item_id,
+                );
+                if let Some(sys_id) = session.solar_system_id {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    for tid in affected_ewar {
+                        if let Ok(Some(mut t_cs)) = sys.get_combat_state(tid).await {
+                            let base_sig = t_cs.base_signature_radius.unwrap_or(t_cs.signature_radius);
+                            t_cs.signature_radius = ctx.effective_target_signature_radius(tid, base_sig);
+                            let _ = sys.set_combat_state(tid, t_cs).await;
+                        }
+                    }
+                }
+                crate::services::tactical_modules::remove_projected_remote_assistance(ctx, loc, item_id);
                 ctx.invalidate_ship_fitting(loc);
                 let _ = ctx.get_or_rebuild_ship_fitting(char_id, loc);
                 // V24 client derives `OnModuleUnfitted` from this `OnItemChange` (`ixFlag` change).
@@ -574,6 +592,25 @@ pub(crate) async fn handle_dogma_im(
                 }
             });
             ctx.invalidate_ship_fitting(ship_id);
+            let mut cleanup_mods = vec![module_id];
+            for &mid in &offline_mod_ids {
+                if mid != module_id {
+                    cleanup_mods.push(mid);
+                }
+            }
+            let mut affected_ewar = Vec::new();
+            for &mid in &cleanup_mods {
+                affected_ewar.extend(
+                    crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                        ctx,
+                        char_id,
+                        session.solar_system_id,
+                        ship_id,
+                        mid,
+                    ),
+                );
+                crate::services::tactical_modules::remove_projected_remote_assistance(ctx, ship_id, mid);
+            }
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let is_cycle_gated = ctx
@@ -591,6 +628,13 @@ pub(crate) async fn handle_dogma_im(
                 for &mid in &offline_mod_ids {
                     if mid != module_id {
                         let _ = sys.remove_module_cycle(ship_id, mid).await;
+                    }
+                }
+                for tid in affected_ewar {
+                    if let Ok(Some(mut t_cs)) = sys.get_combat_state(tid).await {
+                        let base_sig = t_cs.base_signature_radius.unwrap_or(t_cs.signature_radius);
+                        t_cs.signature_radius = ctx.effective_target_signature_radius(tid, base_sig);
+                        let _ = sys.set_combat_state(tid, t_cs).await;
                     }
                 }
             }
