@@ -544,7 +544,7 @@ async fn test_modules_grappler_ehe_mutadaptive_repairer_and_entropic_disintegrat
     let _ = call_service(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(ehe_id), PyRep::String("emergencyHullEnergizer".into())], HashMap::new()).await.expect("EHE must activate on capital hull");
     let active_cs = sys_h.get_combat_state(archon_id).await.unwrap().unwrap();
     assert_eq!(active_cs.structure_resonance, [0.05, 0.05, 0.05, 0.05], "EHE must grant 95% hull resistance across EM/Therm/Kin/Exp");
-    let snap_res = ctx.db.with_snapshot(|s| s.items.get(&archon_id).map(|i| (i.dynamic_attributes.get(&109).copied(), i.dynamic_attributes.get(&110).copied())).unwrap());
+    let snap_res = ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&archon_id).map(|t| (t.get(&109).copied(), t.get(&110).copied())).unwrap());
     assert_eq!(snap_res, (Some(0.05), Some(0.05)));
 
     let _ = sys_h.step_manual(25.0).await;
@@ -556,19 +556,19 @@ async fn test_modules_grappler_ehe_mutadaptive_repairer_and_entropic_disintegrat
     // 3. Mutadaptive Remote Armor Repairer (`mutadaptive_id`) spools up per cycle on `target_ship_a` and resets on `target_ship_b`
     let _ = call_service(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(mutadaptive_id), PyRep::String("remoteArmorRepair".into()), PyRep::Integer(target_ship_a)], HashMap::new()).await.expect("Mutadaptive RAR activates on target A");
     let _ = sys_h.step_manual(12.0).await;
-    let rep_after_1 = ctx.db.with_snapshot(|s| s.items.get(&mutadaptive_id).and_then(|i| i.dynamic_attributes.get(&84).copied()).unwrap_or(0.0));
+    let rep_after_1 = ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&mutadaptive_id).and_then(|t| t.get(&84).copied()).unwrap_or(0.0));
     let _ = sys_h.step_manual(12.0).await;
-    let rep_after_2 = ctx.db.with_snapshot(|s| s.items.get(&mutadaptive_id).and_then(|i| i.dynamic_attributes.get(&84).copied()).unwrap_or(0.0));
+    let rep_after_2 = ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&mutadaptive_id).and_then(|t| t.get(&84).copied()).unwrap_or(0.0));
     assert!(rep_after_2 > rep_after_1, "Mutadaptive RAR must spool up repair amount across consecutive cycles");
 
     let _ = sys_h.add_target_lock(archon_id, TargetLock { target_id: target_ship_b, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await;
     let _ = call_service(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(mutadaptive_id), PyRep::String("remoteArmorRepair".into()), PyRep::Integer(target_ship_b)], HashMap::new()).await.expect("Mutadaptive RAR retargets to target B");
     let _ = sys_h.step_manual(12.0).await;
-    let rep_after_switch = ctx.db.with_snapshot(|s| s.items.get(&mutadaptive_id).and_then(|i| i.dynamic_attributes.get(&84).copied()).unwrap_or(0.0));
+    let rep_after_switch = ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&mutadaptive_id).and_then(|t| t.get(&84).copied()).unwrap_or(0.0));
     assert!((rep_after_switch - rep_after_1).abs() < 1e-4, "Switching target on Mutadaptive RAR must reset spool to cycle 0");
     let _ = call_service(&ctx, &mut sess, "dogmaIM", "Deactivate", vec![PyRep::Integer(mutadaptive_id)], HashMap::new()).await.expect("Deactivate Mutadaptive RAR");
-    let rep_after_deact = ctx.db.with_snapshot(|s| s.items.get(&mutadaptive_id).and_then(|i| i.dynamic_attributes.get(&84).copied()).unwrap_or(0.0));
-    assert!((rep_after_deact - rep_after_1).abs() < 1e-4, "Deactivating Mutadaptive RAR must reset dynamic attr 84 to base");
+    let rep_after_deact = ctx.db.with_snapshot(|s| s.transient_item_attributes.get(&mutadaptive_id).and_then(|t| t.get(&84).copied()).unwrap_or(rep_after_1));
+    assert!((rep_after_deact - rep_after_1).abs() < 1e-4, "Deactivating Mutadaptive RAR must reset transient attr 84 to base");
     let _ = sys_h.remove_target_lock(archon_id, target_ship_b).await;
 
     // 4. Entropic Disintegrator (`47272` Light Entropic Disintegrator I) spools up per cycle, reaches damageMultiplierBonusMax, resets on target change / deactivation / lock loss

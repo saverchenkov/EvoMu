@@ -267,7 +267,7 @@ async fn test_authentication_and_ownership_enforcement() {
             panic!("Expected job KeyVal");
         };
         let jid = jkv.get("jobID").unwrap().as_i64().unwrap();
-        ctx.advance_virtual_clock(30_000);
+        ctx.advance_virtual_clock(10_000_000);
         ctx.dispatch_rpc(
             &mut session,
             "industryManager",

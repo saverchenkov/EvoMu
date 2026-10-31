@@ -314,6 +314,7 @@ pub(crate) async fn handle_dogma_im(
                 }
             }
 
+            crate::services::tactical_modules::apply_transient_item_attrs(ctx, raw_id, &mut merged_attrs);
             let mut attr_entries: Vec<(PyRep, PyRep)> = merged_attrs
                 .into_iter()
                 .map(|(k, v)| (PyRep::Integer(k as i64), PyRep::Real(v)))

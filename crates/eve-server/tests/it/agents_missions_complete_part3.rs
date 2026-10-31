@@ -346,6 +346,16 @@ async fn test_special_agents_storyline_epic_arcs_cosmos_datacenter_career_rd_and
                 skill_points: 45_255.0,
             },
         );
+        for sid in [3_402_u32, 3_392_u32] {
+            snap.skills.entry(char_id).or_default().insert(
+                sid,
+                TrainedSkillRecord {
+                    type_id: sid,
+                    level: 5,
+                    skill_points: 256_000.0,
+                },
+            );
+        }
     });
     let start_rd = rpc_call(
         &ctx,

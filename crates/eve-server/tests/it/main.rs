@@ -74,6 +74,8 @@ mod dogma_tank_logistics_part3;
 mod drones_fighters_advanced;
 mod e2e_journeys;
 mod economy_contracts;
+mod economy_contracts_market_closure;
+mod economy_contracts_market_closure_part2;
 mod economy_industry_pi;
 mod economy_industry_pi_extended;
 mod economy_industry_pi_extended_part2;

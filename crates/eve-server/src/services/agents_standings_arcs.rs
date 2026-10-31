@@ -544,48 +544,51 @@ pub fn handle_special_dialogue_action(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match action_id {
-        // 12 = agentDialogueButtonStartResearch (feat:pve.research-agents)
+        // 12 = agentDialogueButtonStartResearch (feat:pve.research-agent-rp-formula; see GAP(sde) below for access-requirements)
         12 => {
+            const SKILL_RESEARCH_PROJECT_MANAGEMENT: TypeId = 12_179;
             let Some(agent_info) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
             if agent_info.agent_type_id != 4 {
                 return Some(Err(BridgeRpcError { code: "NotResearchAgent".into(), message: format!("Agent {agent_id} is not an R&D research agent") }));
             }
-            if agent_info.solar_system_id.is_some_and(|asys| asys != sys_id)
-                || (session.station_id.is_some()
-                    && agent_info.station_id.is_some()
-                    && agent_info.station_id != session.station_id)
-            {
-                return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Must be co-located with R&D agent {agent_id} to start research") }));
+            if session.station_id.is_none() || agent_info.station_id != session.station_id {
+                return Some(Err(BridgeRpcError { code: "AgentNotCoLocated".into(), message: format!("Must be docked in R&D agent {agent_id}'s station to start research") }));
             }
-            let req_field_skill = args
-                .get(2)
-                .and_then(|a| a.as_i64())
-                .map(|v| v as TypeId)
-                .unwrap_or(11448); // Minmatar Starship Engineering
+            // GAP(sde): V24 sde_agents does not yet import per-agent researchAgents field skills;
+            // accepts any group-270 science skill except Science (3402).
+            let req_field_skill = args.get(2).and_then(|a| a.as_i64()).map(|v| v as TypeId).unwrap_or(11448);
             if !ctx.sde.types.get(&req_field_skill).is_some_and(|t| t.group_id == 270 && t.type_id != 3402) {
                 return Some(Err(BridgeRpcError { code: "InvalidResearchSkill".into(), message: format!("Type {req_field_skill} is not a valid R&D science field skill") }));
             }
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let skill_lvl = snap.skills.get(&char_id)
-                    .and_then(|m| m.get(&req_field_skill))
-                    .map(|s| s.level)
-                    .unwrap_or(0);
-                if skill_lvl < 1 {
-                    return Err(BridgeRpcError { code: "ErrorNoRelevantResearchSkills".into(), message: format!("Starting R&D research with agent {agent_id} requires research skill {req_field_skill} >= 1") });
+                let sk = |sid: TypeId| snap.skills.get(&char_id).and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0);
+                let skill_lvl = sk(req_field_skill);
+                if sk(3402) < 5 || (sk(3392) < 5 && sk(3413) < 5 && sk(3426) < 5) || skill_lvl < 1 {
+                    return Err(BridgeRpcError { code: "ErrorNoRelevantResearchSkills".into(), message: format!("R&D research requires Science V, Mechanics/PG/CPU Management V, and field skill {req_field_skill} >= 1") });
                 }
-                let eff_st = compute_effective_agent_standing(ctx, snap, char_id, agent_id, agent_info.corporation_id, None);
+                let mut entries = load_rnd_research_entries(snap, char_id);
+                let max_agents = (1 + sk(SKILL_RESEARCH_PROJECT_MANAGEMENT).min(5)) as usize;
+                if !entries.iter().any(|e| e.agent_id == agent_id) && entries.len() >= max_agents {
+                    return Err(BridgeRpcError { code: "MaxResearchAgentsReached".into(), message: format!("Maximum concurrent R&D agents ({max_agents}) reached") });
+                }
+                let fac_id = ctx.sde.npc_corporations.get(&agent_info.corporation_id).and_then(|c| c.faction_id).map(|f| f as i64);
+                let eff_st = compute_effective_agent_standing(ctx, snap, char_id, agent_id, agent_info.corporation_id, fac_id);
+                let eff_corp_st = compute_effective_agent_standing(ctx, snap, char_id, 0, agent_info.corporation_id, None);
                 if agent_info.level > 1 {
                     let req_st = ((agent_info.level as f64) - 1.0) * 2.0 - 1.0;
-                    if eff_st < req_st {
-                        return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("R&D agent {agent_id} (level {}) requires effective standing >= {req_st:.1} (have {eff_st:.2})", agent_info.level) });
+                    if eff_st < req_st || eff_corp_st < (req_st - 2.0) {
+                        return Err(BridgeRpcError { code: "InsufficientAgentStanding".into(), message: format!("R&D agent {agent_id} (level {}) requires effective standing >= {req_st:.1} and corp standing >= {:.1}", agent_info.level, req_st - 2.0) });
                     }
                 }
-                let rp_per_day =
-                    (10.0 + 12.0 * (skill_lvl as f64) + 2.5 * eff_st.max(0.0)) * (agent_info.level as f64);
-                let mut entries = load_rnd_research_entries(snap, char_id);
+                let neg_lvl = sk(3356).min(5) as f64;
+                let has_completed_mission = snap.active_missions.values().any(|m| m.character_id == char_id && m.agent_id == agent_id && m.state == "Completed");
+                let agent_standing = snap.characters.get(&char_id).and_then(|c| c.standings.get(&agent_id)).map(|&raw| {
+                    if has_completed_mission || raw < 0.0 { compute_effective_standing_breakdown(ctx, snap, char_id, agent_id, raw, true).0 } else { raw.clamp(-10.0, 10.0) }
+                }).unwrap_or(0.0);
+                let rp_per_day = (1.0 + (20.0 + 5.0 * neg_lvl + agent_standing) / 100.0) * ((skill_lvl as f64) + (agent_info.level as f64)).powi(2);
                 if let Some(existing) = entries.iter_mut().find(|e| e.agent_id == agent_id) {
                     let elapsed_days = (now_unix.saturating_sub(existing.started_unix) as f64) / 86_400.0;
                     existing.initial_points += existing.points_per_day * elapsed_days;

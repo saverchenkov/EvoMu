@@ -234,8 +234,9 @@ async fn test_industry_blueprint_copying_me_te_and_repackage() {
         ("activityID", PyRep::Integer(4)), ("runs", PyRep::Integer(9)),
     ])], &kw, None).await.expect("Install ME 1->10 job");
     let me_dur_skilled_9 = me_skilled_9.dict_get("durationSeconds").and_then(|v| v.as_i64()).unwrap();
-    let expected_me_1 = ((me_dur_unskilled_1 as f64) * 0.75 * 0.85).round() as i64;
-    assert_eq!(me_dur_skilled_9, expected_me_1 * 9);
+    let exp_9_sum: u64 = [250, 595, 1_414, 3_360, 8_000, 19_000, 45_255, 107_700, 256_000].iter().sum();
+    let expected_me_9 = ((exp_9_sum as f64) * ((me_dur_unskilled_1 as f64) / 105.0) * 0.75 * 0.85).round() as i64;
+    assert_eq!(me_dur_skilled_9, expected_me_9);
     let me_job_9 = me_skilled_9.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
 
     let te_skilled_9 = ctx.dispatch_rpc(&mut sess, "industryManager", None, "InstallJob", &[PyRep::keyval([
@@ -243,11 +244,11 @@ async fn test_industry_blueprint_copying_me_te_and_repackage() {
         ("activityID", PyRep::Integer(3)), ("runs", PyRep::Integer(9)),
     ])], &kw, None).await.expect("Install TE 2->20 job");
     let te_dur_skilled_9 = te_skilled_9.dict_get("durationSeconds").and_then(|v| v.as_i64()).unwrap();
-    let expected_te_1 = ((te_dur_unskilled_1 as f64) * 0.75 * 0.85).round() as i64;
-    assert_eq!(te_dur_skilled_9, expected_te_1 * 9);
+    let expected_te_9 = ((exp_9_sum as f64) * ((te_dur_unskilled_1 as f64) / 105.0) * 0.75 * 0.85).round() as i64;
+    assert_eq!(te_dur_skilled_9, expected_te_9);
     let te_job_9 = te_skilled_9.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
 
-    ctx.advance_virtual_clock(500_000);
+    ctx.advance_virtual_clock(6_000_000);
     ctx.dispatch_rpc(&mut sess, "industryManager", None, "CompleteJob", &[PyRep::Integer(me_job_9)], &kw, None).await.expect("Complete ME 10 job");
     ctx.dispatch_rpc(&mut sess, "industryManager", None, "CompleteJob", &[PyRep::Integer(te_job_9)], &kw, None).await.expect("Complete TE 20 job");
     assert_eq!(ctx.db.get_item(bpo_me).unwrap().dynamic_attributes.get(&1112).copied(), Some(10.0));

@@ -1227,3 +1227,14 @@ pub async fn activate_command_burst(
     ]))
 }
 
+/// Overlays cycle-transient item attributes (RAH/ADC/EHE resonances, mutadaptive spool, rack heat) onto `ItemGetInfo` attributes.
+pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attrs: &mut HashMap<u16, f64>) {
+    ctx.db.with_snapshot(|snap| {
+        if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) {
+            for (&attr_id, &val) in tr_attrs {
+                merged_attrs.insert(attr_id, val);
+            }
+        }
+    });
+}
+

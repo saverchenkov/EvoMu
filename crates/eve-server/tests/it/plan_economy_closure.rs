@@ -551,17 +551,37 @@ async fn test_e4_structure_industry_service_pause_and_many_jobs() {
         }
     });
 
-    let job_done_before = 880_001i64;
-    let job_done_before_2 = 880_004i64;
-    let job_active_during = 880_002i64;
-
     ctx.db.with_mut_snapshot(|snap| {
-        for (bp_id, jid) in [(700_001i64, job_done_before), (700_004i64, job_done_before_2)] {
-            snap.items.insert(bp_id, make_item(bp_id, 681, P1, struct_id, InventoryFlag::Locked, 1, true));
-            snap.industry_jobs.insert(jid, make_job(jid, struct_id, bp_id, 1_800, now_u));
+        for bp_id in [700_001i64, 700_004i64, 700_002i64] {
+            snap.items.insert(bp_id, make_item(bp_id, 681, P1, struct_id, InventoryFlag::Hangar, 1, true));
         }
-        snap.industry_jobs.insert(job_active_during, make_job(job_active_during, struct_id, 700_002, 10_000, now_u));
+        for (idx, m_tid) in (34_u32..=40_u32).enumerate() {
+            let iid = 700_100 + idx as i64;
+            snap.items.insert(iid, make_item(iid, m_tid, P1, struct_id, InventoryFlag::Hangar, 100_000, false));
+        }
     });
+    let j1_rep = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
+        ("blueprintID", PyRep::Integer(700_001)), ("facilityID", PyRep::Integer(struct_id)),
+        ("activityID", PyRep::Integer(1)), ("runs", PyRep::Integer(1)),
+    ])])
+        .await
+        .expect("InstallJob 1");
+    let job_done_before = j1_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let j2_rep = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
+        ("blueprintID", PyRep::Integer(700_004)), ("facilityID", PyRep::Integer(struct_id)),
+        ("activityID", PyRep::Integer(1)), ("runs", PyRep::Integer(1)),
+    ])])
+        .await
+        .expect("InstallJob 2");
+    let job_done_before_2 = j2_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let j3_rep = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
+        ("blueprintID", PyRep::Integer(700_002)), ("facilityID", PyRep::Integer(struct_id)),
+        ("activityID", PyRep::Integer(1)), ("runs", PyRep::Integer(10)),
+    ])])
+        .await
+        .expect("InstallJob 3 (long)");
+    let job_active_during = j3_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let orig_dur_3 = ctx.db.with_snapshot(|snap| snap.industry_jobs.get(&job_active_during).unwrap().duration_seconds);
 
     // Advance clock to now_u + 7_200 (2 hours later; fuel ran out at now_u + 3_600)
     ctx.advance_secs(7_200);
@@ -601,7 +621,7 @@ async fn test_e4_structure_industry_service_pause_and_many_jobs() {
     ctx.db.with_snapshot(|snap| {
         let j2 = snap.industry_jobs.get(&job_active_during).unwrap();
         assert_eq!(j2.status, "Active");
-        assert_eq!(j2.duration_seconds, 10_000 + 3_600);
+        assert_eq!(j2.duration_seconds, orig_dur_3 + 3_600);
     });
 
     // 3. CompleteManyJobs delivers all ready jobs

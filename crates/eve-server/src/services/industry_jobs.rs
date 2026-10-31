@@ -373,7 +373,9 @@ pub fn handle_industry_jobs(
                                 ),
                             });
                         }
-                    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883 | 902 | 513) {
+                    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883 | 902)
+                        && bp.product_type_id != 28606
+                    {
                         if ctx.sde.solar_systems.get(&fac_sys_id).map(|s| s.region_id) == Some(10_000_070) {
                             return Err(BridgeRpcError::user_error("CapitalConstructionForbiddenInPochven"));
                         }
@@ -386,7 +388,7 @@ pub fn handle_industry_jobs(
                             });
                         }
                         let has_cap_shipyard = matches!(fac_type_id, 35826 | 35827 | 35833 | 35834)
-                            || snap.items.values().any(|i| {
+                            && snap.items.values().any(|i| {
                                 i.location_id == station_id
                                     && (164..=171).contains(&(i.flag as u16))
                                     && matches!(i.type_id, 35881 | 35877)
@@ -396,7 +398,7 @@ pub fn handle_industry_jobs(
                             return Err(BridgeRpcError {
                                 code: "FacilityNotCapitalCapable".into(),
                                 message: format!(
-                                    "Facility {station_id} (type {fac_type_id}) is not a capital-capable shipyard facility"
+                                    "Facility {station_id} (type {fac_type_id}) requires an online Standup Capital Shipyard I (35881)"
                                 ),
                             });
                         }
@@ -583,14 +585,16 @@ pub fn handle_industry_jobs(
                         adv_industry_lvl,
                         eff_time_bonus_pct,
                     ),
-                    3 => (((bp.research_te_time_sec.max(1) as f64) * te_skill_mult * eff_time_mod)
-                        .round()
-                        .max(1.0) as u64)
-                        .saturating_mul(runs as u64),
-                    4 => (((bp.research_me_time_sec.max(1) as f64) * me_skill_mult * eff_time_mod)
-                        .round()
-                        .max(1.0) as u64)
-                        .saturating_mul(runs as u64),
+                    3 | 4 => {
+                        const LVL_SECS: [u64; 10] = [105, 250, 595, 1_414, 3_360, 8_000, 19_000, 45_255, 107_700, 256_000];
+                        let (cur_lvl, base_sec, skill_mult) = if activity_id == 4 {
+                            (me_level as usize, bp.research_me_time_sec.max(1) as f64, me_skill_mult)
+                        } else {
+                            ((te_level / 2) as usize, bp.research_te_time_sec.max(1) as f64, te_skill_mult)
+                        };
+                        let raw_sum: u64 = LVL_SECS[cur_lvl.min(10)..(cur_lvl + runs as usize).min(10)].iter().sum();
+                        ((raw_sum as f64) * (base_sec / 105.0) * skill_mult * eff_time_mod).round().max(1.0) as u64
+                    }
                     5 => (((bp.copy_time_sec.max(1) as f64) * copy_skill_mult * eff_time_mod)
                         .round()
                         .max(1.0) as u64)
@@ -1307,7 +1311,6 @@ pub fn handle_industry_jobs(
                         Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job)))
                     }
                 });
-
                 match res {
                     Ok(Ok((prod_item_id, prod_type, job))) => {
                         emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
@@ -1341,7 +1344,6 @@ pub fn handle_industry_jobs(
                 Some(Ok(completed_kvs.into_iter().next().unwrap_or(PyRep::None)))
             }
         }
-
         _ => None,
     }
 }

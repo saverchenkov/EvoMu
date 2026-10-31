@@ -643,7 +643,9 @@ async fn r5_232_234_235_236_237_projects_skills_fitting_clones_and_agents() {
         ch.solar_system_id = rd_sys;
         ch.station_id = Some(rd_sta);
         ch.standings.insert(rd_corp, 5.0);
-        snap.skills.entry(pilot_id).or_default().insert(11448, TrainedSkillRecord { type_id: 11448, level: 4, skill_points: 45_255.0 });
+        for (sid, lvl, sp) in [(3402, 5, 256_000.0), (3392, 5, 256_000.0), (11448, 4, 45_255.0)] {
+            snap.skills.entry(pilot_id).or_default().insert(sid, TrainedSkillRecord { type_id: sid, level: lvl, skill_points: sp });
+        }
     });
     sess.solar_system_id = Some(rd_sys);
     sess.station_id = Some(rd_sta);

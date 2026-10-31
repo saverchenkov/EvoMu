@@ -129,11 +129,10 @@ pub(crate) fn step_cycles_and_capacitor(
             let heat_snap = *racks;
             if let Some(db_ref) = db_opt {
                 db_ref.with_mut_snapshot(|snap| {
-                    if let Some(ship_item) = snap.items.get_mut(&sid) {
-                        ship_item.dynamic_attributes.insert(1177, heat_snap[0]);
-                        ship_item.dynamic_attributes.insert(1176, heat_snap[1]);
-                        ship_item.dynamic_attributes.insert(1175, heat_snap[2]);
-                    }
+                    let entry = snap.transient_item_attributes.entry(sid).or_default();
+                    entry.insert(1177, heat_snap[0]);
+                    entry.insert(1176, heat_snap[1]);
+                    entry.insert(1175, heat_snap[2]);
                 });
             }
         }
@@ -268,29 +267,27 @@ pub(crate) fn step_cycles_and_capacitor(
                 if let Some(db_ref) = db_opt {
                     let mut new_resonances = [0.85, 0.85, 0.85, 0.85];
                     db_ref.with_mut_snapshot(|snap| {
-                        let cur = if let Some(m_item) = snap.items.get(&cycle.module_id) {
+                        let cur = if let Some(tr) = snap.transient_item_attributes.get(&cycle.module_id) {
                             [
-                                m_item.dynamic_attributes.get(&267).copied().unwrap_or(0.85),
-                                m_item.dynamic_attributes.get(&268).copied().unwrap_or(0.85),
-                                m_item.dynamic_attributes.get(&269).copied().unwrap_or(0.85),
-                                m_item.dynamic_attributes.get(&270).copied().unwrap_or(0.85),
+                                tr.get(&267).copied().unwrap_or(0.85),
+                                tr.get(&268).copied().unwrap_or(0.85),
+                                tr.get(&269).copied().unwrap_or(0.85),
+                                tr.get(&270).copied().unwrap_or(0.85),
                             ]
                         } else {
                             [0.85, 0.85, 0.85, 0.85]
                         };
                         new_resonances = step_rah_resonances(cur, inc_dmg, cycle.rah_shift_amount);
-                        if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                            m_item.dynamic_attributes.insert(267, new_resonances[0]);
-                            m_item.dynamic_attributes.insert(268, new_resonances[1]);
-                            m_item.dynamic_attributes.insert(269, new_resonances[2]);
-                            m_item.dynamic_attributes.insert(270, new_resonances[3]);
-                        }
-                        if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
-                            s_item.dynamic_attributes.insert(267, new_resonances[0]);
-                            s_item.dynamic_attributes.insert(268, new_resonances[1]);
-                            s_item.dynamic_attributes.insert(269, new_resonances[2]);
-                            s_item.dynamic_attributes.insert(270, new_resonances[3]);
-                        }
+                        let m_entry = snap.transient_item_attributes.entry(cycle.module_id).or_default();
+                        m_entry.insert(267, new_resonances[0]);
+                        m_entry.insert(268, new_resonances[1]);
+                        m_entry.insert(269, new_resonances[2]);
+                        m_entry.insert(270, new_resonances[3]);
+                        let s_entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
+                        s_entry.insert(267, new_resonances[0]);
+                        s_entry.insert(268, new_resonances[1]);
+                        s_entry.insert(269, new_resonances[2]);
+                        s_entry.insert(270, new_resonances[3]);
                     });
                     if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
                         cs.armor_resonance = [
@@ -394,9 +391,10 @@ pub(crate) fn step_cycles_and_capacitor(
                     if let Some(db_ref) = db_opt {
                         let spooled_rep = cycle.remote_armor_amount * mult;
                         db_ref.with_mut_snapshot(|snap| {
-                            if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                                m_item.dynamic_attributes.insert(84, spooled_rep);
-                            }
+                            snap.transient_item_attributes
+                                .entry(cycle.module_id)
+                                .or_default()
+                                .insert(84, spooled_rep);
                         });
                     }
                     mult
@@ -524,11 +522,10 @@ pub(crate) fn step_cycles_and_capacitor(
                             cycle.heat_damage_per_cycle,
                             thermo_lvl,
                         );
-                        if let Some(ship_item) = snap.items.get_mut(&cycle.ship_id) {
-                            ship_item.dynamic_attributes.insert(1177, heat_snap[0]);
-                            ship_item.dynamic_attributes.insert(1176, heat_snap[1]);
-                            ship_item.dynamic_attributes.insert(1175, heat_snap[2]);
-                        }
+                        let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
+                        entry.insert(1177, heat_snap[0]);
+                        entry.insert(1176, heat_snap[1]);
+                        entry.insert(1175, heat_snap[2]);
                         let active_flag = snap
                             .items
                             .get(&cycle.module_id)
@@ -1074,9 +1071,9 @@ pub(crate) fn cleanup_removed_module_cycle(
         }
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(s_item) = snap.items.get_mut(&removed.ship_id) {
+                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
                     for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
-                        s_item.dynamic_attributes.remove(&aid);
+                        tr.remove(&aid);
                     }
                 }
             });
@@ -1085,8 +1082,8 @@ pub(crate) fn cleanup_removed_module_cycle(
     if removed.mutadaptive_spool_step > 0.0 {
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(m_item) = snap.items.get_mut(&removed.module_id) {
-                    m_item.dynamic_attributes.insert(84, removed.remote_armor_amount);
+                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
+                    tr.remove(&84);
                 }
             });
         }
@@ -1094,11 +1091,11 @@ pub(crate) fn cleanup_removed_module_cycle(
     if removed.is_rah {
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
-                if let Some(m_item) = snap.items.get_mut(&removed.module_id) {
-                    for aid in 267..=270 { m_item.dynamic_attributes.insert(aid, 0.85); }
+                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.module_id) {
+                    for aid in 267..=270 { tr.remove(&aid); }
                 }
-                if let Some(s_item) = snap.items.get_mut(&removed.ship_id) {
-                    for aid in 267..=270 { s_item.dynamic_attributes.remove(&aid); }
+                if let Some(tr) = snap.transient_item_attributes.get_mut(&removed.ship_id) {
+                    for aid in 267..=270 { tr.remove(&aid); }
                 }
             });
         }
