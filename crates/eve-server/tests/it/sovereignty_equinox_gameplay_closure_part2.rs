@@ -24,21 +24,22 @@ use glam::DVec3;
 
 #[tokio::test]
 async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() {
-    // DATA GAP: feat:sovereignty.mercenary-den (open until real SDE tables imported)
+    // DATA GAP: feat:sovereignty.mercenary-den / mercenary-den-development-anarchy / mercenary-den-anarchy-evolution — synthetic yield/capacity/anarchy values pending V24.01 client/SDE tables (docs/BLOCKERS.md §10)
     // parity: feat:sovereignty.mercenary-den-anchoring
-    // DATA GAP: feat:sovereignty.mercenary-den-development-anarchy (open until real SDE tables imported)
-    // DATA GAP: feat:sovereignty.mercenary-den-anarchy-evolution (open until real SDE tables imported)
     // DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)
     // parity: feat:sovereignty.mercenary-den-reinforcement-loot
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj (open until real SDE tables imported)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj (open until real SDE tables imported)
-    // DATA GAP: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj (open until real SDE tables imported)
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj
     // parity: notify:OnMercenaryDenRegistrationInvalid
     // parity: notify:OnMercenaryDenRegistrationSuccess
     // parity: notify:OnMyMercenaryDenRemoved
     eve_testkit::attest(&[
         "feat:sovereignty.mercenary-den-anchoring",
         "feat:sovereignty.mercenary-den-reinforcement-loot",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
         "notify:OnMercenaryDenRegistrationInvalid",
         "notify:OnMercenaryDenRegistrationSuccess",
         "notify:OnMyMercenaryDenRemoved",
@@ -96,7 +97,7 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let notifs_inv = ctx.drain_notifications_for_char(PILOT);
     let inv_ev = notifs_inv.iter().find(|n| n.event == "OnMercenaryDenRegistrationInvalid").expect("OnMercenaryDenRegistrationInvalid");
     assert_eq!(inv_ev.args.first().and_then(|a| a.as_str()), Some("MercenaryDenTooFarFromSkyhook"));
-    assert_eq!(inv_ev.args.get(1).and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()), Some(skyhook_id));
+    assert_eq!(inv_ev.args.get(1).and_then(|a| a.dict_get("itemID")).and_then(|v| v.as_i64()), Some(990_201));
 
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball(make_ball(PILOT_SHIP, 639, sh_pos + DVec3::new(3_000.0, 0.0, 0.0))).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -132,15 +133,15 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
         "MercenaryDenCapExceeded"
     );
 
-    // 2. Anarchy rises over 25h without MTO completion, siphoning 500 workforce from host Hub/Skyhook.
+    // 2. Anarchy rises over 8 days (+5/24h -> Anarchy 40, stage 3 / UI level 2), siphoning 10% of host Temperate Skyhook workforce (150 of 1,500).
     let base_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    ctx.advance_secs(25 * 3_600);
+    ctx.advance_secs(8 * 86_400);
     assert_eq!(
         rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.status_code,
         STATUS_OK
     );
     let siphoned_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
-    assert_eq!(siphoned_wf + 500, base_wf);
+    assert_eq!(siphoned_wf + 150, base_wf);
 
     // 3. Quasar MTO requests spawn live MTO combat target ball (`24690`), completed via live `dogmaIM.AddTarget` + `Activate`!
     assert_eq!(rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest", Vec::new()).await.status_code, STATUS_OK);
@@ -191,15 +192,23 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball_with_combat(make_ball(PILOT_SHIP, 19_722, mto_pos + DVec3::new(2_500.0, 0.0, 0.0)), cs_owner).await;
     lock_target_via_rpc(&ctx, &mut s_owner, null_sys, PILOT_SHIP, mto_ball_id).await;
     let _ = drain_quasar(&mut rx);
-    for gun in [992_000i64, 992_002, 992_004] {
-        ctx.set_invention_roll_override(Some(0.05));
-        let shot = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball_id)])
-            .await
-            .expect("dogmaIM.Activate turret on MTO ball");
-        if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
-            || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id))
-        {
+    for round in 0..8 {
+        for gun in [992_000i64, 992_002, 992_004] {
+            ctx.set_invention_roll_override(Some(0.005));
+            let shot = rpc_call(&ctx, &mut s_owner, "dogmaIM", "Activate", &[PyRep::Integer(gun), PyRep::Integer(mto_ball_id)])
+                .await
+                .expect("dogmaIM.Activate turret on MTO ball");
+            if shot.dict_get("destroyed") == Some(&PyRep::Bool(true))
+                || ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id))
+            {
+                break;
+            }
+        }
+        if ctx.db.with_snapshot(|s| !s.sov_runtime.mto_site_balls.contains_key(&mto_ball_id)) {
             break;
+        }
+        if round % 3 == 2 {
+            step_weapon_ticks(&ctx, null_sys).await;
         }
     }
     let mto_q = drain_quasar(&mut rx);
@@ -208,13 +217,13 @@ async fn test_mercenary_den_live_anchoring_anarchy_mto_combat_repair_and_loot() 
     let restored_wf = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().workforce_available);
     assert_eq!(restored_wf, base_wf);
 
-    // MTO completion routes real IskCents with WalletJournalEntry and OnAccountChange notification
+    // MTO completion grants Development / Anarchy / Infomorph rewards with ZERO synthetic wallet ISK minting
     let post_mto_bal = ctx.db.with_snapshot(|s| s.characters[&PILOT].balance.0);
-    assert!(post_mto_bal > pre_mto_bal, "MTO completion awards real journaled ISK");
+    assert_eq!(post_mto_bal, pre_mto_bal, "MTO completion must not mint synthetic wallet ISK");
     let has_mto_journal = ctx.db.with_snapshot(|s| {
         s.wallet_journal.iter().any(|e| e.character_id == PILOT && e.entry_type == "MercenaryTacticalOperationReward")
     });
-    assert!(has_mto_journal, "MTO completion appends MercenaryTacticalOperationReward wallet journal entry");
+    assert!(!has_mto_journal, "MTO completion must not append synthetic MercenaryTacticalOperationReward wallet journal entry");
 
     // Start an MTO that times out: uncompleted expiry despawns site ball and awards 0 ISK
     let acts_second = rpc(&ctx, &mut s_owner, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64))

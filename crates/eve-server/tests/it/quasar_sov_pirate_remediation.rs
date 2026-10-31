@@ -370,44 +370,98 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     assert!(rest_rsp.payload.expect("rest payload").value.is_empty(), "no restricted systems once expired");
 }
 
-fn den_record(den_id: i64, skyhook_id: i64, now: u64) -> eve_db::PersistedMercenaryDen {
-    eve_db::PersistedMercenaryDen {
-        den_id,
-        type_id: 85_230,
-        owner_char_id: PILOT,
-        skyhook_id,
-        solar_system_id: 30_000_142,
-        planet_id: 40_009_077,
-        enabled: true,
-        cargo_extraction_enabled: true,
-        development_level: 15,
-        anarchy_level: 0,
-        infomorphs: 0,
-        simulated_at_unix: now,
-        next_activity_generation_unix: 0,
-    }
-}
-
-// DATA GAP: Mercenary Den evolution rates and activity generation tables are server-only and not shipped in V24 client FSD.
 #[tokio::test]
 async fn test_mercenary_den_activities_and_evolution_state_backed() {
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let (sys_id, skyhook_id, den_id) = (30_000_142u32, 1_000_000_050i64, 1_000_000_060i64);
-    let mut s = sess(60_003, PILOT, 98_000_001, sys_id, 0);
+    let sys_id = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| {
+            s.security_status <= 0.0
+                && s.solar_system_id < 31_000_000
+                && s.solar_system_id != 30_100_000
+                && s.region_id != 10_000_070
+                && ctx.sde.constellations.get(&s.constellation_id).and_then(|c| c.faction_id).is_none()
+                && ctx.sde.regions.get(&s.region_id).and_then(|r| r.faction_id).is_none()
+                && ctx.sde.celestials_in_system(s.solar_system_id).iter().any(|c| c.type_id == 11)
+        })
+        .map(|s| s.solar_system_id)
+        .expect("claimable nullsec system with Temperate planet");
+    let temp_planet = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.type_id == 11).unwrap();
+    let (hub_id, skyhook_id, ship_id) = (1_000_000_049i64, 1_000_000_050i64, 100_000_001i64);
+    let mut s = sess(60_003, PILOT, 98_000_001, sys_id, eve_db::corp_roles::ROLE_DIRECTOR);
+    s.alliance_id = Some(99_000_001);
+    s.ship_id = Some(ship_id);
     let mut rx = subscribe(&ctx, &mut s).await;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(skyhook_id, structure(skyhook_id, 98_000_001, sys_id, TYPE_ORBITAL_SKYHOOK));
-        snap.structures.insert(den_id, structure(den_id, 98_000_001, sys_id, 85_230));
-        snap.sov_runtime.mercenary_dens.insert(den_id, den_record(den_id, skyhook_id, ctx.now_unix()));
+        snap.system_states.entry(sys_id).or_default().sov_alliance_id = Some(99_000_001);
+        snap.structures.insert(hub_id, structure(hub_id, 98_000_001, sys_id, eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB));
+        let mut sh = structure(skyhook_id, 98_000_001, sys_id, TYPE_ORBITAL_SKYHOOK);
+        sh.position = temp_planet.position.to_array();
+        snap.structures.insert(skyhook_id, sh);
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, temp_planet.celestial_id);
         snap.skills.entry(PILOT).or_default().insert(85_233, eve_db::TrainedSkillRecord { type_id: 85_233, level: 3, skill_points: 0.0 });
+        snap.items.insert(
+            990_701,
+            eve_db::InventoryItemRecord {
+                item_id: 990_701,
+                type_id: 85_230,
+                owner_id: PILOT,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.station_id = None;
             ch.structure_id = None;
             ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
         }
     });
+    let sys_h = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_h.spawn_ball(eve_destiny::Ball {
+        id: skyhook_id,
+        type_id: TYPE_ORBITAL_SKYHOOK,
+        position: temp_planet.position,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 65.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await;
+    let _ = sys_h.spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 639,
+        position: temp_planet.position + glam::DVec3::new(2_500.0, 0.0, 0.0),
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 1_500.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 65.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await;
+
+    let anchor_rep = ctx
+        .dispatch_rpc(
+            &mut s,
+            "structureDeployment",
+            None,
+            "Anchor",
+            &[PyRep::Integer(85_230), PyRep::Integer(skyhook_id), PyRep::Integer(temp_planet.celestial_id)],
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await
+        .expect("anchor Mercenary Den");
+    let den_id = anchor_rep.dict_get("structureID").and_then(|v| v.as_i64()).expect("den_id");
+    let _ = drain(&mut rx);
 
     let max = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.api.GetMaximumForCharacterRequest", Vec::new()).await;
     let max = max.payload.expect("max").value;
@@ -417,16 +471,23 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
     let mut other = sess(60_004, OTHER, 98_000_002, sys_id, 0);
     assert_eq!(rpc(&ctx, &mut other, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.status_code, STATUS_FORBIDDEN);
 
-    // Lazy evolution: 6 hours lift development 15 -> 21 (stage 1 -> 2) and emit the notice.
-    ctx.advance_secs(6 * 3_600);
-    let den = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.expect("den").value;
+    // Canonical evolution (+5/24h): 3 days lift development 0 -> 15 (still stage 1), +24h lifts 15 -> 20 (stage 1 -> 2) and emits EvolutionStateChangedNotice.
+    ctx.advance_secs(3 * 86_400);
+    let den_day3 = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.expect("den day 3").value;
+    let dev_day3 = field(&field(&field(&den_day3, 3).unwrap(), 2).unwrap(), 3).unwrap();
+    assert_eq!((varint(&dev_day3, 1), varint(&dev_day3, 2)), (Some(15), Some(1)));
+    let info_day3 = field(&field(&den_day3, 4).unwrap(), 2).unwrap();
+    assert_eq!(varint(&info_day3, 1), Some(3_000), "72h * 65/h caps at 3,000 infomorph capacity");
+
+    ctx.advance_secs(86_400);
+    let den = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.api.GetAsOwnerRequest", id_req(1, den_id as u64)).await.payload.expect("den day 4").value;
     let dev = field(&field(&field(&den, 3).unwrap(), 2).unwrap(), 3).unwrap();
-    assert_eq!((varint(&dev, 1), varint(&dev, 2)), (Some(21), Some(2)));
+    assert_eq!((varint(&dev, 1), varint(&dev, 2)), (Some(20), Some(2)));
     assert!(drain(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"));
 
-    // GM admin development change -> EvolutionStateChangedNotice; players are rejected.
+    // GM admin development change to max (100 = stage 5) -> EvolutionStateChangedNotice; players are rejected.
     let mut modify = id_req(1, den_id as u64);
-    encode_varint_field(2, 85, &mut modify);
+    encode_varint_field(2, 100, &mut modify);
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.api.admin.ModifyDevelopmentLevelRequest", modify.clone()).await.status_code, STATUS_FORBIDDEN);
     let mut gm = sess(60_005, OTHER, 98_000_002, sys_id, 0);
     gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
@@ -435,11 +496,13 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
     assert!(gm_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"));
     assert!(gm_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice"));
 
-    // Activity generation at stage 5 fills 7 slots (AddedNotice each); capacity matches.
+    // Activity generation at stage 5 expires the 4-day-old initial 3 ops and fills all 7 slots; capacity matches.
     let acts = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await.payload.expect("acts").value;
     let list = fields(&acts, 1);
     assert_eq!(list.len(), 7);
-    assert_eq!(drain(&mut rx).iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice").count(), 7);
+    let gen_notices = drain(&mut rx);
+    assert_eq!(gen_notices.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice").count(), 3);
+    assert_eq!(gen_notices.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice").count(), 7);
     let cap = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetCapacityRequest", Vec::new()).await.payload.expect("cap").value;
     assert_eq!(varint(&cap, 1), Some(7));
     let all = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest", Vec::new()).await.payload.expect("all").value;
@@ -492,6 +555,8 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     let mut rx = subscribe(&ctx, &mut s).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(skyhook_id, structure(skyhook_id, 98_000_001, sys_id, TYPE_ORBITAL_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(skyhook_id, 40_009_080); // Jita III (non-first planet)
+        snap.structures.insert(1_000_000_052, structure(1_000_000_052, 98_000_002, sys_id, TYPE_ORBITAL_SKYHOOK));
     });
 
     // Star configurations come from the SDE star celestial of the caller's system (Jita - Star).
@@ -563,16 +628,19 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     assert_eq!(ctx.db.with_snapshot(|snap| snap.structures[&skyhook_id].state.clone()), "ShieldVulnerable", "UpwellStructureRecord.state preserved");
     let sk_deact = rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await.payload.expect("get skyhook").value;
     assert_eq!(varint(&sk_deact, 3), Some(0), "skyhook active==false after DeactivateRequest");
+    let sk_unbound = rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, 1_000_000_052)).await.payload.expect("get unbound skyhook").value;
+    assert!(field(&sk_unbound, 6).is_none(), "unbound Skyhook omits planet_id instead of fabricating Jita I");
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_BAD_REQUEST, "already inactive");
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
     let sk_act = rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await.payload.expect("get skyhook").value;
     assert_eq!(varint(&sk_act, 3), Some(1), "skyhook active==true after ActivateRequest");
+    assert_eq!(field(&sk_act, 6).and_then(|i| varint(&i, 1)), Some(40_009_080), "bound non-first planet_id");
     let act_notices: Vec<_> = drain(&mut rx).into_iter().filter(|(t, _)| t == "eve_public.sovereignty.skyhook.api.ActivationNotice").collect();
     assert_eq!(act_notices.len(), 2);
     for (idx, expected_active) in [(0usize, 0u64), (1usize, 1u64)] {
         let body = &act_notices[idx].1;
         assert_eq!(field(body, 1).and_then(|i| varint(&i, 1)), Some(sys_id as u64), "solar_system(1)");
-        assert_eq!(field(body, 2).and_then(|i| varint(&i, 1)), Some(40_009_077), "planet(2) Jita I");
+        assert_eq!(field(body, 2).and_then(|i| varint(&i, 1)), Some(40_009_080), "planet(2) bound Jita III");
         assert_eq!(field(body, 3).and_then(|i| varint(&i, 1)), Some(skyhook_id as u64), "skyhook(3)");
         assert_eq!(varint(body, 4), Some(expected_active), "active(4)");
     }

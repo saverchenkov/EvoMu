@@ -952,6 +952,9 @@ pub async fn handle(
                     message: "AnchorStructure requires an itemID".into(),
                 }));
             };
+            if item_id == i64::from(crate::services::sov_gameplay::TYPE_MERCENARY_DEN) {
+                return Some(crate::services::sov_gameplay::handle_anchor_mercenary_den_rpc(ctx, session, args).await);
+            }
             let item = match ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned()) {
                 Some(it) => it,
                 None => {
@@ -961,6 +964,9 @@ pub async fn handle(
                     }));
                 }
             };
+            if item.type_id == crate::services::sov_gameplay::TYPE_MERCENARY_DEN {
+                return Some(crate::services::sov_gameplay::handle_anchor_mercenary_den_rpc(ctx, session, args).await);
+            }
             let Some(item_type) = ctx.sde.types.get(&item.type_id) else {
                 return Some(Err(BridgeRpcError {
                     code: "StarbaseRemoved".into(),

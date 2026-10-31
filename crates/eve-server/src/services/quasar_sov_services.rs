@@ -58,24 +58,24 @@ pub fn register_handlers(
     super::quasar_sov_skyhook::register_query_handlers(router, Arc::clone(&db));
     {
         let db_act = Arc::clone(&db);
-        let sde_act = Arc::clone(&sde);
         let pending = Arc::clone(&router.pending_notices);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.ActivateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
-                let sys_id = transact(&db_act, |snap| {
+                let (sys_id, planet_id) = transact(&db_act, |snap| {
                     let sys = authorize_skyhook(ctx, snap, structure_id, "activate skyhook")?;
                     if snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) {
                         return Err((STATUS_BAD_REQUEST, format!("Skyhook {structure_id} is already active")));
                     }
                     snap.sov_runtime.skyhook_active.insert(structure_id, true);
-                    Ok::<_, (u32, String)>(sys)
+                    let pid = snap.sov_runtime.skyhook_planets.get(&structure_id).copied();
+                    Ok::<_, (u32, String)>((sys, pid))
                 })?;
 
                 let mut payload = Vec::new();
                 encode_id_field(1, sys_id as u64, &mut payload);
-                if let Some(pid) = sde_act.solar_systems.get(&sys_id).and_then(|s| s.planet_ids.first().copied()) {
+                if let Some(pid) = planet_id {
                     encode_id_field(2, pid as u64, &mut payload);
                 }
                 encode_id_field(3, structure_id as u64, &mut payload);
@@ -97,24 +97,24 @@ pub fn register_handlers(
     }
     {
         let db_deact = Arc::clone(&db);
-        let sde_deact = Arc::clone(&sde);
         let pending = Arc::clone(&router.pending_notices);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.DeactivateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
                 let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
-                let sys_id = transact(&db_deact, |snap| {
+                let (sys_id, planet_id) = transact(&db_deact, |snap| {
                     let sys = authorize_skyhook(ctx, snap, structure_id, "deactivate skyhook")?;
                     if !snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) {
                         return Err((STATUS_BAD_REQUEST, format!("Skyhook {structure_id} is already inactive")));
                     }
                     snap.sov_runtime.skyhook_active.insert(structure_id, false);
-                    Ok::<_, (u32, String)>(sys)
+                    let pid = snap.sov_runtime.skyhook_planets.get(&structure_id).copied();
+                    Ok::<_, (u32, String)>((sys, pid))
                 })?;
 
                 let mut payload = Vec::new();
                 encode_id_field(1, sys_id as u64, &mut payload);
-                if let Some(pid) = sde_deact.solar_systems.get(&sys_id).and_then(|s| s.planet_ids.first().copied()) {
+                if let Some(pid) = planet_id {
                     encode_id_field(2, pid as u64, &mut payload);
                 }
                 encode_id_field(3, structure_id as u64, &mut payload);

@@ -42,11 +42,11 @@ pub const SKYHOOK_SILO_LINK_MAX_SPEED_MS: f64 = 1_000.0;
 /// Base shield HP assigned to an anchored Orbital Skyhook (`10%` threshold = `1,000.0` HP).
 pub const SKYHOOK_BASE_SHIELD_HP: f64 = 10_000.0;
 
-/// Maps SDE planet type to extracted Colony Reagent:
-/// Ice (`12`) -> Superionic Ice (`81144`), Lava (`2015`) -> Magmatic Gas (`81143`).
+/// Maps SDE planet type to extracted Colony Reagent (`Sovereignty.md` / `Orbital_Skyhook.md`):
+/// Ice (`12`) and Oceanic (`2014`) -> Superionic Ice (`81144`), Lava (`2015`) -> Magmatic Gas (`81143`).
 pub fn planet_reagent_type(planet_type_id: u32) -> Option<u32> {
     match planet_type_id {
-        12 => Some(TYPE_SUPERIONIC_ICE),
+        12 | 2014 => Some(TYPE_SUPERIONIC_ICE),
         2015 => Some(TYPE_MAGMATIC_GAS),
         _ => None,
     }
@@ -83,7 +83,7 @@ pub fn advance_skyhook_reagents_in_snap(
         && snap
             .structures
             .get(&skyhook_id)
-            .is_none_or(|st| st.state != "Destroyed");
+            .is_none_or(|st| !st.state.eq_ignore_ascii_case("destroyed"));
 
     let mut harvested_now = 0u64;
     if is_active && snap.sov_runtime.skyhook_reagent_bays.contains_key(&skyhook_id) {
@@ -281,6 +281,7 @@ pub async fn handle_anchor_skyhook_rpc(
         });
     }
 
+    let first_arg = flat_args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let now = ctx.now_unix();
     let skyhook_id = ctx.db.try_with_mut_snapshot(|snap| {
         let sov_alliance = snap
@@ -288,7 +289,9 @@ pub async fn handle_anchor_skyhook_rpc(
             .get(&sys_id)
             .and_then(|s| s.sov_alliance_id)
             .unwrap_or(0);
-        if sys_sec > 0.0 || sov_alliance == 0 {
+        if !crate::services::sov_gameplay::is_claimable_nullsec_system(&ctx.sde, sys_id)
+            || sov_alliance == 0
+        {
             return Err(BridgeRpcError {
                 code: "CannotAnchorSkyhookInEmpireSpace".into(),
                 message: format!(
@@ -313,29 +316,70 @@ pub async fn handle_anchor_skyhook_rpc(
             .sov_runtime
             .skyhook_planets
             .iter()
-            .any(|(&sh_id, &pid)| pid == planet_id && snap.structures.contains_key(&sh_id))
+            .any(|(&sh_id, &pid)| {
+                pid == planet_id
+                    && snap
+                        .structures
+                        .get(&sh_id)
+                        .is_some_and(|s| !s.state.eq_ignore_ascii_case("destroyed"))
+            })
         {
             return Err(BridgeRpcError {
                 code: "SkyhookAlreadyExistsAtPlanet".into(),
                 message: format!("Planet {planet_id} already has an anchored Orbital Skyhook"),
             });
         }
-        let item_id = snap
-            .items
-            .values()
-            .find(|i| {
-                (i.owner_id == char_id || i.owner_id == corp_id)
-                    && i.location_id == ship_id
-                    && i.type_id == TYPE_ORBITAL_SKYHOOK
-                    && i.quantity >= 1
-            })
-            .map(|i| i.item_id)
-            .ok_or_else(|| BridgeRpcError {
-                code: "MissingSkyhookItem".into(),
-                message: format!(
-                    "Anchoring requires Orbital Skyhook item (type {TYPE_ORBITAL_SKYHOOK}) in ship cargo"
-                ),
-            })?;
+        let item_id = if first_arg > 0
+            && first_arg != i64::from(TYPE_ORBITAL_SKYHOOK)
+            && first_arg != planet_id
+        {
+            let it = snap
+                .items
+                .get(&first_arg)
+                .filter(|i| i.type_id == TYPE_ORBITAL_SKYHOOK && i.quantity >= 1)
+                .ok_or_else(|| BridgeRpcError {
+                    code: "MissingSkyhookItem".into(),
+                    message: format!("Orbital Skyhook item {first_arg} not found"),
+                })?;
+            if it.owner_id != char_id && it.owner_id != corp_id {
+                return Err(BridgeRpcError {
+                    code: "ItemOwnershipViolation".into(),
+                    message: format!("Character {char_id} does not own Orbital Skyhook item {first_arg}"),
+                });
+            }
+            if it.location_id != ship_id || it.flag != InventoryFlag::Cargo {
+                return Err(BridgeRpcError {
+                    code: "ItemNotInCargo".into(),
+                    message: format!("Orbital Skyhook item {first_arg} must be in active ship cargo"),
+                });
+            }
+            if snap.is_item_locked_in_contract_or_job(first_arg) {
+                return Err(BridgeRpcError {
+                    code: "ItemLockedInContractOrJob".into(),
+                    message: format!("Orbital Skyhook item {first_arg} is locked in an open contract or industry job"),
+                });
+            }
+            first_arg
+        } else {
+            snap.items
+                .values()
+                .filter(|i| {
+                    (i.owner_id == char_id || i.owner_id == corp_id)
+                        && i.location_id == ship_id
+                        && i.flag == InventoryFlag::Cargo
+                        && i.type_id == TYPE_ORBITAL_SKYHOOK
+                        && i.quantity >= 1
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| i.item_id)
+                .min()
+                .ok_or_else(|| BridgeRpcError {
+                    code: "MissingSkyhookItem".into(),
+                    message: format!(
+                        "Anchoring requires an unlocked Orbital Skyhook item (type {TYPE_ORBITAL_SKYHOOK}) in ship cargo"
+                    ),
+                })?
+        };
         if let Some(it) = snap.items.get_mut(&item_id) {
             it.quantity -= 1;
             if it.quantity <= 0 {
@@ -403,11 +447,7 @@ pub async fn handle_anchor_skyhook_rpc(
             mode: MovementMode::Rigid,
         })
         .await;
-    crate::services::sov_services::emit_sov_structures_updated(
-        ctx,
-        sys_id,
-        vec![PyRep::Integer(skyhook_id)],
-    );
+    crate::services::sov_services::emit_sov_structures_updated(ctx, sys_id, &[skyhook_id]);
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
         "OnSkyhookFirstActivation",

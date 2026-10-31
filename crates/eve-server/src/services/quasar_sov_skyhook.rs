@@ -73,13 +73,9 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
         None => encode_varint_field(1, 0, &mut theft),
     }
     encode_bytes_field(5, &theft, &mut b);
-    let planet_id = snap
-        .sov_runtime
-        .skyhook_planets
-        .get(&id)
-        .copied()
-        .unwrap_or(40_009_077);
-    id_field(6, planet_id as u64, &mut b);
+    if let Some(planet_id) = snap.sov_runtime.skyhook_planets.get(&id).copied() {
+        id_field(6, planet_id as u64, &mut b);
+    }
     let mut wf = Vec::new();
     encode_varint_field(2, 1, &mut wf); // Workforce.none: skyhook workforce is not simulated
     encode_bytes_field(7, &wf, &mut b);

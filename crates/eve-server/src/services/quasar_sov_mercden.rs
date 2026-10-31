@@ -23,41 +23,74 @@ use eve_db::{PersistedMercenaryActivity, PersistedMercenaryDen, WorldRepository,
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicValue};
 use std::sync::Arc;
 
-/// SDE skill `Mercenary Den Management` (each trained level allows one more den).
+/// SDE skill `Mercenary Den Management` (each trained level allows one more den, up to 5).
 pub const TYPE_MERCENARY_DEN_MANAGEMENT: u32 = 85_233;
+/// SDE item type `Infomorph Decryption Key` (`85746`).
+pub const TYPE_INFOMORPH_DECRYPTION_KEY: u32 = 85_746;
 
-// DERIVED (synthetic — the client mercenary den evolution / infomorph / activity-template FSD
-// tables are not part of the EvoMu SDE import). Every rate below is a server balance constant,
-// not CCP data: den cap, 1 development + 1 anarchy level per hour while enabled, five 20-level
-// stages, a 2000-infomorph cargo cap, `3 * stage` infomorphs per hour, daily activity generation,
-// 3-day activity lifetime, `2 + stage` concurrent activities and `5 * stage` activity impacts.
-/// DERIVED (synthetic): absolute number of dens a character may own.
+/// V24 SDE & Wiki (`Mercenary_Den_Guide.md`): absolute number of dens a character may own.
 pub const MERCENARY_DEN_ABSOLUTE_MAX: u64 = 5;
-/// DERIVED (synthetic): seconds per development / anarchy level gained while a den is enabled.
-pub const EVOLUTION_UNIT_SECS: u64 = 3_600;
-/// DERIVED (synthetic): seconds between Mercenary Tactical Operation generation passes.
-pub const ACTIVITY_GENERATION_SECS: u64 = 86_400;
-/// DERIVED (synthetic): lifetime of a generated (unstarted) operation.
+/// Hourly Infomorph Decryption Key generation tick (`3,600 s`).
+pub const INFOMORPH_UNIT_SECS: u64 = 3_600;
+/// Wiki (`Mercenary_Tactical_Operation.md:26,39`): passive Development / Anarchy evolution tick (`+5` points per `86,400 s`).
+pub const EVOLUTION_UNIT_SECS: u64 = 86_400;
+/// Wiki (`Mercenary_Tactical_Operation.md:26,39`): passive Development and Anarchy gain per 24h cycle.
+pub const EVOLUTION_DELTA_PER_DAY: u32 = 5;
+/// DERIVED (synthetic — deterministic 72h cadence matching `Mercenary_Tactical_Operation.md:14`
+/// "MTOs spawn approximately every 3 days from the time they are onlined"): seconds between MTO generation passes.
+pub const ACTIVITY_GENERATION_SECS: u64 = 3 * 86_400;
+/// Wiki (`Mercenary_Tactical_Operation.md:14`): lifetime of a generated (unstarted) operation (`3` days).
 pub const ACTIVITY_LIFETIME_SECS: u64 = 3 * 86_400;
 const MAX_LEVEL: u32 = 100;
-/// DERIVED (synthetic): levels per development / anarchy stage.
-const STAGE_WIDTH: u32 = 20;
-/// SDE (V24 type_id = 85230 Mercenary Den capacity): infomorph cargo capacity at stage 5.
+/// V24 SDE (`type_id = 85230` Mercenary Den `capacity = 3000.0`): infomorph bay capacity.
 pub const INFOMORPH_CARGO_CAPACITY: u32 = 3_000;
+/// Wiki (`Mercenary_Tactical_Operation.md:28-34,41-47`): Development / Anarchy progress bounds per level (`0..=4` -> proto enum `1..=5`).
+pub const STAGE_BOUNDS: [(u32, u32); 5] = [(0, 19), (20, 39), (40, 69), (70, 99), (100, 100)];
 
-/// DERIVED (synthetic): infomorph cargo capacity scaled by development stage (`1..=5`, `1000 + 400 * stage`) up to the 3,000 SDE capacity cap.
-pub fn infomorph_cargo_capacity(dev_stage: u32) -> u32 {
-    (1_000 + 400 * dev_stage.clamp(1, 5)).min(INFOMORPH_CARGO_CAPACITY)
+/// Infomorph bay capacity (`3,000` units from V24 SDE `type_id = 85230`).
+pub fn infomorph_cargo_capacity(_dev_stage: u32) -> u32 {
+    INFOMORPH_CARGO_CAPACITY
 }
 
 const EVOLUTION_NOTICE: &str = "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice";
 
-/// Development / anarchy stage (1..=5) for a level (0..=100).
+/// Protobuf `DevelopmentStage` / `AnarchyStage` enum (`1..=5`, corresponding to UI levels `0..=4`)
+/// for a progress value (`0..=100`) per `Mercenary_Tactical_Operation.md`.
 pub fn stage_for_level(level: u32) -> u32 {
-    (level / STAGE_WIDTH + 1).min(5)
+    match level {
+        0..=19 => 1,
+        20..=39 => 2,
+        40..=69 => 3,
+        70..=99 => 4,
+        _ => 5,
+    }
 }
 
-/// DERIVED (synthetic): concurrent operations offered by a den at a development stage.
+/// DERIVED (synthetic deterministic lower bound of each stage's `Mercenary_Tactical_Operation.md:28-34`
+/// range: `65-100`, `68-105`, `71-110`, `74-115`, `78-120` IDK/hr across stages `1..=5`; exact server
+/// per-planet formula is not in `.fsdbinary`).
+pub fn infomorphs_per_hour(dev_stage: u32) -> u32 {
+    match dev_stage {
+        1 => 65,
+        2 => 68,
+        3 => 71,
+        4 => 74,
+        _ => 78,
+    }
+}
+
+/// Wiki (`Mercenary_Tactical_Operation.md:41-47`): host Skyhook workforce disruption percentage by Anarchy stage (`1..=5`: `0%`, `0%`, `-10%`, `-20%`, `-40%`).
+pub fn anarchy_workforce_disruption_pct(anarchy_stage: u32) -> u64 {
+    match anarchy_stage {
+        1 | 2 => 0,
+        3 => 10,
+        4 => 20,
+        _ => 40,
+    }
+}
+
+/// DERIVED (synthetic — server-only MTO slot capacity formula is not in `.fsdbinary`):
+/// concurrent operations offered by a den at a development stage (`3..=7` across stages `1..=5`).
 pub fn activity_capacity(stage: u32) -> u32 {
     2 + stage
 }
@@ -88,29 +121,63 @@ fn owned_den(snap: &WorldStateSnapshot, cid: i64, den_id: i64) -> Result<Persist
     Ok(den.clone())
 }
 
-/// Advances development, anarchy and infomorph generation for whole elapsed units.
-/// Returns `true` when the development or anarchy stage changed.
-pub fn simulate_den(den: &mut PersistedMercenaryDen, now: u64) -> bool {
+/// Advances hourly infomorph generation and 24-hour development / anarchy evolution (`+5`/day),
+/// tracking sub-24h remainder in `evo_rem_secs`. Returns `true` when the development or anarchy stage changed.
+pub fn simulate_den_with_rem(den: &mut PersistedMercenaryDen, evo_rem_secs: &mut u64, now: u64) -> bool {
     if den.simulated_at_unix == 0 || !den.enabled || now <= den.simulated_at_unix {
         if den.simulated_at_unix == 0 || !den.enabled {
             den.simulated_at_unix = now;
         }
         return false;
     }
-    let units = (now - den.simulated_at_unix) / EVOLUTION_UNIT_SECS;
-    if units == 0 {
+    let hours = (now - den.simulated_at_unix) / INFOMORPH_UNIT_SECS;
+    if hours == 0 {
         return false;
     }
     let before = (stage_for_level(den.development_level), stage_for_level(den.anarchy_level));
-    den.simulated_at_unix += units * EVOLUTION_UNIT_SECS;
-    let units = units.min(u64::from(MAX_LEVEL)) as u32;
-    den.development_level = (den.development_level + units).min(MAX_LEVEL);
-    den.anarchy_level = (den.anarchy_level + units).min(MAX_LEVEL);
-    let dev_stage = stage_for_level(den.development_level);
-    let per_unit = 3 * dev_stage;
-    let cap = infomorph_cargo_capacity(dev_stage);
-    den.infomorphs = (den.infomorphs + per_unit * units).min(cap);
-    before != (dev_stage, stage_for_level(den.anarchy_level))
+    let stepped = hours.min(720);
+    for _ in 0..stepped {
+        let rate = infomorphs_per_hour(stage_for_level(den.development_level));
+        den.infomorphs = den.infomorphs.saturating_add(rate).min(INFOMORPH_CARGO_CAPACITY);
+        *evo_rem_secs += INFOMORPH_UNIT_SECS;
+        if *evo_rem_secs >= EVOLUTION_UNIT_SECS {
+            *evo_rem_secs -= EVOLUTION_UNIT_SECS;
+            den.development_level = (den.development_level + EVOLUTION_DELTA_PER_DAY).min(MAX_LEVEL);
+            den.anarchy_level = (den.anarchy_level + EVOLUTION_DELTA_PER_DAY).min(MAX_LEVEL);
+        }
+    }
+    let extra_hours = hours.saturating_sub(stepped);
+    if extra_hours > 0 {
+        let rate = infomorphs_per_hour(stage_for_level(den.development_level));
+        let added = u64::from(rate).saturating_mul(extra_hours).min(u64::from(INFOMORPH_CARGO_CAPACITY)) as u32;
+        den.infomorphs = den.infomorphs.saturating_add(added).min(INFOMORPH_CARGO_CAPACITY);
+        let total_rem = *evo_rem_secs + extra_hours * INFOMORPH_UNIT_SECS;
+        let days = (total_rem / EVOLUTION_UNIT_SECS).min(u64::from(MAX_LEVEL)) as u32;
+        *evo_rem_secs = total_rem % EVOLUTION_UNIT_SECS;
+        if days > 0 {
+            let delta = days.saturating_mul(EVOLUTION_DELTA_PER_DAY);
+            den.development_level = (den.development_level + delta).min(MAX_LEVEL);
+            den.anarchy_level = (den.anarchy_level + delta).min(MAX_LEVEL);
+        }
+    }
+    den.simulated_at_unix += hours * INFOMORPH_UNIT_SECS;
+    before != (stage_for_level(den.development_level), stage_for_level(den.anarchy_level))
+}
+
+/// Advances development, anarchy and infomorph generation for whole elapsed units.
+/// Returns `true` when the development or anarchy stage changed.
+pub fn simulate_den(den: &mut PersistedMercenaryDen, now: u64) -> bool {
+    let mut rem = 0u64;
+    simulate_den_with_rem(den, &mut rem, now)
+}
+
+/// Simulates a den in `sov_runtime` while preserving sub-24h evolution remainder.
+pub fn simulate_den_in_snap(sov_rt: &mut eve_db::PersistedSovState, den_id: i64, now: u64) -> bool {
+    let Some(den) = sov_rt.mercenary_dens.get_mut(&den_id) else {
+        return false;
+    };
+    let rem = sov_rt.mercenary_den_evo_rem.entry(den_id).or_insert(0);
+    simulate_den_with_rem(den, rem, now)
 }
 
 fn encode_level_sim(level: u32, simulated_at: u64) -> Vec<u8> {
@@ -134,21 +201,36 @@ fn encode_evolution_definition() -> Vec<u8> {
     let (mut dev, mut anarchy) = (Vec::new(), Vec::new());
     encode_varint_field(1, EVOLUTION_UNIT_SECS, &mut dev);
     encode_varint_field(1, EVOLUTION_UNIT_SECS, &mut anarchy);
-    for stage in 1..=5u32 {
-        let lower = (stage - 1) * STAGE_WIDTH;
-        let upper = if stage == 5 { MAX_LEVEL } else { stage * STAGE_WIDTH - 1 };
+    for (idx, &(lower, upper)) in STAGE_BOUNDS.iter().enumerate() {
+        let stage = (idx as u32) + 1;
         let mut s = Vec::new();
         encode_varint_field(1, u64::from(stage), &mut s);
         encode_varint_field(2, u64::from(lower), &mut s);
         encode_varint_field(3, u64::from(upper), &mut s);
         encode_bytes_field(2, &s, &mut dev);
-        encode_varint_field(4, 500 * u64::from(stage), &mut s);
+        encode_varint_field(4, anarchy_workforce_disruption_pct(stage), &mut s);
         encode_bytes_field(2, &s, &mut anarchy);
     }
     let mut b = Vec::new();
     encode_bytes_field(1, &dev, &mut b);
     encode_bytes_field(2, &anarchy, &mut b);
     b
+}
+
+fn encode_infomorphs_gen_definition(cap: u32) -> Vec<u8> {
+    let mut info_def = Vec::new();
+    id_field(1, u64::from(TYPE_INFOMORPH_DECRYPTION_KEY), &mut info_def);
+    encode_varint_field(2, INFOMORPH_UNIT_SECS, &mut info_def);
+    for stage in 1..=5u32 {
+        let rate = infomorphs_per_hour(stage);
+        let mut band = Vec::new();
+        encode_varint_field(1, u64::from(stage), &mut band);
+        encode_varint_field(2, u64::from(rate), &mut band);
+        encode_varint_field(3, u64::from(rate), &mut band);
+        encode_bytes_field(3, &band, &mut info_def);
+    }
+    encode_varint_field(4, u64::from(cap), &mut info_def);
+    info_def
 }
 
 fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
@@ -162,10 +244,7 @@ pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &Persisted
     let mut n = Vec::new();
     id_field(1, den.den_id as u64, &mut n);
     encode_bytes_field(2, &encode_evolution_definition(), &mut n);
-    let mut info_def = Vec::new();
-    encode_varint_field(2, EVOLUTION_UNIT_SECS, &mut info_def);
-    encode_varint_field(4, u64::from(INFOMORPH_CARGO_CAPACITY), &mut info_def);
-    encode_bytes_field(3, &info_def, &mut n);
+    encode_bytes_field(3, &encode_infomorphs_gen_definition(INFOMORPH_CARGO_CAPACITY), &mut n);
     push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
 }
 
@@ -202,8 +281,8 @@ pub fn push_activity_expiry_changed_notice(
 
 /// Simulates a den in place and emits `EvolutionStateChangedNotice` on a stage change.
 fn tick_den(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
-    if let Some(den) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-        if simulate_den(den, now) {
+    if simulate_den_in_snap(&mut snap.sov_runtime, den_id, now) {
+        if let Some(den) = snap.sov_runtime.mercenary_dens.get(&den_id) {
             push_evolution_notice(pending, den);
         }
     }
@@ -250,39 +329,25 @@ pub(crate) fn complete_mercenary_activity_in_snap(
     a: &PersistedMercenaryActivity,
     den_id: i64,
     solar_system_id: u32,
-    now_unix: u64,
-) -> Option<(i64, f64)> {
-    let mut owner_cid = a.started_by;
+) {
+    let mut applied_dev_impact = 0i32;
+    let mut applied_infomorph_bonus = 0u32;
     if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
-        if owner_cid <= 0 {
-            owner_cid = den_mut.owner_char_id;
+        // Wiki (`Mercenary_Tactical_Operation.md:24`): completing an MTO increases Development
+        // by +10 points (or grants +350 bonus Encrypted Infomorphs into den cargo at max Development 100)
+        // and reduces Anarchy, with zero direct wallet ISK minting.
+        if den_mut.development_level >= MAX_LEVEL {
+            applied_infomorph_bonus = a.infomorph_bonus.max(350);
+            let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
+            den_mut.infomorphs = den_mut.infomorphs.saturating_add(applied_infomorph_bonus).min(cap);
+        } else {
+            applied_dev_impact = a.development_impact;
+            den_mut.development_level = (den_mut.development_level as i32 + a.development_impact)
+                .clamp(0, MAX_LEVEL as i32) as u32;
         }
-        den_mut.development_level = (den_mut.development_level as i32 + a.development_impact)
-            .clamp(0, MAX_LEVEL as i32) as u32;
         den_mut.anarchy_level =
             (den_mut.anarchy_level as i32 + a.anarchy_impact).clamp(0, MAX_LEVEL as i32) as u32;
-        let cap = infomorph_cargo_capacity(stage_for_level(den_mut.development_level));
-        den_mut.infomorphs = den_mut.infomorphs.saturating_add(a.infomorph_bonus).min(cap);
         push_evolution_notice(pending, den_mut);
-    }
-    // DERIVED (synthetic): ISK completion reward per Mercenary Tactical Operation (50,000 ISK per infomorph bonus unit).
-    let isk_reward = i64::from(a.infomorph_bonus.max(10)) * 50_000;
-    let reward_cents = eve_db::IskCents::from_isk(isk_reward);
-    let mut account_change = None;
-    if owner_cid > 0 {
-        if let Some(ch) = snap.characters.get_mut(&owner_cid) {
-            ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-            let new_bal = ch.balance;
-            let _ = now_unix;
-            snap.append_journal(
-                owner_cid,
-                "MercenaryTacticalOperationReward",
-                reward_cents,
-                new_bal,
-                format!("Mercenary Tactical Operation reward at den {den_id}"),
-            );
-            account_change = Some((owner_cid, new_bal.to_wire_f64()));
-        }
     }
     let hex_key = hex(&a.uuid);
     snap.sov_runtime.mto_site_balls.retain(|&bid, v| {
@@ -299,11 +364,10 @@ pub(crate) fn complete_mercenary_activity_in_snap(
         solar_system_id,
         den_id,
         &a.uuid,
-        a.development_impact,
+        applied_dev_impact,
         a.anarchy_impact,
-        a.infomorph_bonus,
+        applied_infomorph_bonus,
     );
-    account_change
 }
 
 /// Expires stale operations (including timed-out started operations without completion rewards)
@@ -357,9 +421,10 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
             started: false,
             started_by: 0,
             expiry_unix: now + ACTIVITY_LIFETIME_SECS,
-            development_impact: 5 * stage as i32,
-            anarchy_impact: -(5 * stage as i32),
-            infomorph_bonus: 10 * stage,
+            development_impact: 10,
+            // DERIVED: synthetic MTO anarchy delta (-10) pending V24.01 client/SDE MTO tables
+            anarchy_impact: -10,
+            infomorph_bonus: 350,
         };
         let mut n = Vec::new();
         encode_bytes_field(1, &encode_activity_id(&uuid), &mut n);
@@ -484,10 +549,9 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 let mut evo = Vec::new();
                 encode_bytes_field(1, &encode_evolution_definition(), &mut evo);
                 encode_bytes_field(2, &encode_evolution_simulation(&den), &mut evo);
-                let (mut info_def, mut contents, mut infomorphs) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut contents, mut infomorphs) = (Vec::new(), Vec::new());
                 let cap = infomorph_cargo_capacity(stage_for_level(den.development_level));
-                encode_varint_field(2, EVOLUTION_UNIT_SECS, &mut info_def);
-                encode_varint_field(4, u64::from(cap), &mut info_def);
+                let info_def = encode_infomorphs_gen_definition(cap);
                 encode_varint_field(1, u64::from(den.infomorphs), &mut contents);
                 ts_field(2, den.simulated_at_unix, &mut contents);
                 encode_bytes_field(1, &info_def, &mut infomorphs);
@@ -543,20 +607,18 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
         );
     }
     {
-        let (db, pending) = (Arc::clone(&db), Arc::clone(&router.pending_notices));
+        let db = Arc::clone(&db);
         router.register_handler(
             "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let cid = require_character(ctx)?;
-                let acts = db.with_mut_snapshot(|snap| {
+                let now = ctx.now_unix();
+                let acts = db.with_snapshot(|snap| {
                     let dens = owned_den_ids(snap, cid);
-                    for den_id in &dens {
-                        refresh_activities(snap, &pending, *den_id, ctx.now_unix());
-                    }
                     snap.sov_runtime
                         .mercenary_activities
                         .values()
-                        .filter(|a| dens.contains(&a.den_id))
+                        .filter(|a| dens.contains(&a.den_id) && a.expiry_unix > now)
                         .cloned()
                         .collect::<Vec<_>>()
                 });
