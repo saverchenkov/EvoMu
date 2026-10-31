@@ -19,8 +19,20 @@ const HUB_C: i64 = 1_020_000_103;
 const DEN_ID: i64 = 1_020_000_201;
 
 fn seed_hub(ctx: &ServerContext, hub_id: i64, sys: u32) {
+    let planets: Vec<i64> = ctx
+        .sde
+        .celestials_in_system(sys)
+        .into_iter()
+        .filter(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .collect();
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(hub_id, structure(hub_id, CORP, sys, TYPE_SOVEREIGNTY_HUB));
+        for (idx, pid) in planets.into_iter().enumerate() {
+            let sh_id = hub_id * 100 + (idx as i64) + 1;
+            snap.structures.insert(sh_id, structure(sh_id, CORP, sys, 81_080));
+            snap.sov_runtime.skyhook_planets.insert(sh_id, pid);
+        }
     });
 }
 
@@ -145,7 +157,7 @@ async fn test_sov_workforce_transit_relay_traversal_and_notices() {
 
 #[tokio::test]
 async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     let sys_a = 30_000_142u32;
     seed_hub(&ctx, HUB_A, sys_a);

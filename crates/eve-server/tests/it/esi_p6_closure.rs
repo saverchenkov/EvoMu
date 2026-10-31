@@ -184,7 +184,7 @@ async fn test_esi_p6_char_and_public_contracts_live_rpc_and_sqlite_persistence()
         .with_bearer_token(&tok1);
     let items_resp = router.handle_request(&items_req);
     assert_eq!(items_resp.status_code, 200);
-    assert!(items_resp.header("X-Pages").is_some());
+    assert!(items_resp.header("X-Pages").is_none());
     let char_items = validate_and_json(&router, &spec, &items_req, 200);
     assert_eq!(char_items.as_array().unwrap().len(), 1);
     assert_eq!(char_items[0]["type_id"], 34);

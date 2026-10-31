@@ -273,12 +273,7 @@ pub fn dispatch_economy_industry_route(
                     .into_iter()
                     .map(|j| format_industry_job_json(snap, j, false))
                     .collect();
-                match paginate_slice(&out, page, 1000) {
-                    Ok((page_rows, total_pages)) => {
-                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
-                    }
-                    Err(e) => e,
-                }
+                RouteExecutionResult::ok_json(json!(out), 300)
             }))
         }
 

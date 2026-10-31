@@ -937,13 +937,7 @@ pub fn dispatch_economy_route(
                         format!("Character {char_id} is not a party to contract {contract_id}"),
                     );
                 }
-                let rows = contract_item_rows(snap, c, false);
-                match paginate_slice(&rows, page, 1000) {
-                    Ok((page_rows, total_pages)) => {
-                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
-                    }
-                    Err(e) => e,
-                }
+                RouteExecutionResult::ok_json(json!(contract_item_rows(snap, c, false)), 300)
             }))
         }
 
@@ -975,13 +969,7 @@ pub fn dispatch_economy_route(
                         format!("Character {char_id} is not a party to contract {contract_id}"),
                     );
                 }
-                let rows = contract_bid_rows(c, true);
-                match paginate_slice(&rows, page, 1000) {
-                    Ok((page_rows, total_pages)) => {
-                        RouteExecutionResult::ok_paginated(json!(page_rows), 300, total_pages)
-                    }
-                    Err(e) => e,
-                }
+                RouteExecutionResult::ok_json(json!(contract_bid_rows(c, true)), 300)
             }))
         }
 
@@ -1183,13 +1171,7 @@ pub fn dispatch_economy_route(
                         format!("Contract {contract_id} not found for corporation {corp_id}"),
                     );
                 };
-                let rows = contract_item_rows(snap, c, false);
-                match paginate_slice(&rows, page, 1000) {
-                    Ok((page_rows, total_pages)) => {
-                        RouteExecutionResult::ok_paginated(json!(page_rows), 3600, total_pages)
-                    }
-                    Err(e) => e,
-                }
+                RouteExecutionResult::ok_json(json!(contract_item_rows(snap, c, false)), 3600)
             }))
         }
 
