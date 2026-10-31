@@ -199,7 +199,8 @@ fn handle_office_manager(
         .unwrap_or(0);
     let default_station_id = session
         .station_id
-        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id)))
+        .or(session.structure_id)
+        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id))))
         .unwrap_or(0);
 
     match method {
@@ -207,10 +208,20 @@ fn handle_office_manager(
 
         "GetPriceQuote" => {
             let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
-            let occupied = ctx.db.with_snapshot(|snap| {
-                snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count()
+            let now_unix = ctx.now_unix();
+            let quote = ctx.db.with_snapshot(|snap| {
+                let occupied = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count();
+                if snap.structures.contains_key(&station_id) {
+                    let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+                    crate::services::station_structure::structure_upwell_ops::apply_pending_profile_applications(&mut ext, now_unix);
+                    if let Some(bps) = crate::services::station_structure_handlers::resolve_character_service_tax_bps(snap, &ext, station_id, char_id, 10, -1) {
+                        if bps >= 0 {
+                            return bps as f64 / 10_000.0;
+                        }
+                    }
+                }
+                10_000.0 * (1.0 + (occupied as f64) * 0.5)
             });
-            let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
             Some(Ok(PyRep::Real(quote)))
         }
 
@@ -274,12 +285,12 @@ fn handle_office_manager(
                         });
                     }
                 }
-                let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                if !snap.corporations.contains_key(&corp_id) {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
                         message: format!("Corporation {corp_id} not found"),
                     });
-                };
+                }
                 let occupied = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count();
                 if occupied >= 16 {
                     return Err(BridgeRpcError {
@@ -294,8 +305,22 @@ fn handle_office_manager(
                         message: format!("Corporation {corp_id} already rents an office at station {station_id}"),
                     });
                 }
-                let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
-                let fee = eve_db::IskCents((quote * 100.0) as i64);
+                let mut quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
+                if snap.structures.contains_key(&station_id) {
+                    let now_unix = ctx.now_unix();
+                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, station_id, char_id, now_unix) {
+                        return Err(BridgeRpcError { code: "OfficeRentalAccessDenied".into(), message: format!("Character {char_id} lacks structure access to rent an office at {station_id}") });
+                    }
+                    let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+                    crate::services::station_structure::structure_upwell_ops::apply_pending_profile_applications(&mut ext, now_unix);
+                    match crate::services::station_structure_handlers::resolve_character_service_tax_bps(snap, &ext, station_id, char_id, 10, -1) {
+                        None => return Err(BridgeRpcError { code: "OfficeRentalAccessDenied".into(), message: format!("Office rental ACL at structure {station_id} excludes character {char_id}") }),
+                        Some(bps) if bps >= 0 => quote = bps as f64 / 10_000.0,
+                        Some(_) => {}
+                    }
+                }
+                let corp = snap.corporations.get_mut(&corp_id).unwrap();
+                let fee = eve_db::IskCents((quote * 100.0).round() as i64);
                 if !corp.wallet_divisions.is_empty() {
                     if corp.wallet_divisions[0].balance.0 < fee.0 {
                         return Err(BridgeRpcError {

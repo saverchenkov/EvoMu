@@ -820,11 +820,6 @@ pub fn handle_season_manager(
                 .or_else(|| args.get(2))
                 .or_else(|| args.get(1).filter(|a| matches!(a, PyRep::Dict(_) | PyRep::KeyVal(_))))
                 .filter(|a| !matches!(a, PyRep::None));
-            let extra_data_nonempty = extra_data.is_some_and(|ed| match ed {
-                PyRep::Dict(entries) => !entries.is_empty(),
-                PyRep::KeyVal(_) => true,
-                _ => false,
-            });
             let cond_catalog = fsd_challenge_conditions(&ctx.sde);
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let now_ft = ctx.now_blueos_filetime_ticks();
@@ -861,7 +856,7 @@ pub fn handle_season_manager(
                             message: "Server-side activity challenge cannot be progressed via client events".into(),
                         });
                     }
-                    if extra_data_nonempty && def_opt.is_some_and(|d| !matches_challenge_conditions(d, extra_data, cond_catalog)) {
+                    if def_opt.is_some_and(|d| !matches_challenge_conditions(d, extra_data, cond_catalog)) {
                         return Ok((expired, st.season_points, updates));
                     }
                     let was_completed = ch.completed;

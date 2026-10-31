@@ -598,6 +598,7 @@ pub fn dispatch_economy_route(
                         snap,
                         structure_id,
                         caller_char_id,
+                        ctx.now_unix(),
                     );
                 if !acl_ok {
                     return RouteExecutionResult::error(

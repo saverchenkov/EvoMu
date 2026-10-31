@@ -19,9 +19,12 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::SdeRegistry;
 use eve_server::router::ServerContext;
 use eve_server::services::account_services;
-use eve_server::services::operations_manager_helpers::get_operation_defs;
+use eve_server::services::operations_manager_helpers::{
+    get_operation_defs, record_server_operation_event,
+};
+use eve_server::services::station_structure::structure_lifecycle::sync_all_structures;
 use eve_server::services::station_structure::structure_upwell_ops::{
-    PROFILE_CHANGE_DELAY_SECS, load_ext_state, save_ext_state,
+    PROFILE_CHANGE_DELAY_SECS, evaluate_character_structure_access, load_ext_state, save_ext_state,
 };
 use glam::DVec3;
 
@@ -67,11 +70,16 @@ async fn login_demo_pilot(ctx: &ServerContext, char_id: i64) -> SessionState {
 }
 
 fn seed_corp_and_pilots(ctx: &ServerContext, corp_id: i64, ceo_id: i64, members_with_roles: &[(i64, u64, &str)]) {
+    let uid_map: HashMap<i64, u64> = members_with_roles
+        .iter()
+        .map(|&(cid, _, _)| (cid, ctx.db.provision_player_account(&format!("b37_{cid}"), "b37-pw")))
+        .collect();
     ctx.db.with_mut_snapshot(|snap| {
         let base_char = snap.characters.get(&PILOT_1).expect("demo pilot 1").clone();
         let mut member_ids = HashSet::new();
         let mut role_map = HashMap::new();
         for &(cid, roles, name) in members_with_roles {
+            let uid = uid_map[&cid];
             member_ids.insert(cid);
             role_map.insert(cid, roles);
             let ship_id = 770_000_000 + cid;
@@ -80,11 +88,12 @@ fn seed_corp_and_pilots(ctx: &ServerContext, corp_id: i64, ceo_id: i64, members_
                 flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
             });
             let ch = snap.characters.entry(cid).or_insert_with(|| CharacterRecord {
-                character_id: cid, user_id: cid as u64, name: name.to_string(), corporation_id: corp_id,
+                character_id: cid, user_id: uid, name: name.to_string(), corporation_id: corp_id,
                 solar_system_id: JITA_SYS, constellation_id: 20_000_020, region_id: 10_000_002,
-                active_ship_id: ship_id, home_station_id: JITA_STATION, balance: IskCents(100_000_00),
+                active_ship_id: ship_id, home_station_id: JITA_STATION, balance: IskCents(100_000_000_00),
                 race_id: 1, bloodline_id: 1, ancestry_id: 1, clone_grade: 2, ..base_char.clone()
             });
+            ch.user_id = uid;
             ch.corporation_id = corp_id;
             ch.solar_system_id = JITA_SYS;
             ch.station_id = None;
@@ -93,19 +102,24 @@ fn seed_corp_and_pilots(ctx: &ServerContext, corp_id: i64, ceo_id: i64, members_
         }
         snap.corporations.insert(corp_id, CorporationRecord {
             corporation_id: corp_id, name: format!("Corp {corp_id}"), ticker: "TST".into(),
-            ceo_id, hq_station_id: Some(JITA_STATION), members: member_ids, member_roles: role_map, ..Default::default()
+            ceo_id, hq_station_id: Some(JITA_STATION), members: member_ids, member_roles: role_map,
+            master_wallet: IskCents(500_000_000_00), ..Default::default()
         });
     });
 }
 
 async fn make_space_session(ctx: &ServerContext, char_id: i64, corp_id: i64, corp_role: u64) -> SessionState {
-    let ship_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id).unwrap());
+    let (uid, ship_id) = ctx.db.with_snapshot(|s| {
+        let ch = s.characters.get(&char_id).unwrap();
+        (ch.user_id, ch.active_ship_id)
+    });
+    let _ = ctx.db.acquire_online_lock(uid, char_id as u64, Some(char_id), true, ctx.now_unix());
     let _ = ctx.systems.get_or_spawn(JITA_SYS).spawn_ball(Ball {
         id: ship_id, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO,
         max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     let mut sess = SessionState::new(char_id as u64);
-    sess.user_id = Some(char_id as u64);
+    sess.user_id = Some(uid);
     sess.character_id = Some(char_id);
     sess.corporation_id = Some(corp_id);
     sess.corp_role = corp_role;
@@ -146,6 +160,65 @@ async fn seed_structure_with_services(ctx: &ServerContext, structure_id: i64, ow
     }).await;
 }
 
+async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64, op_id: i64) {
+    let defs = get_operation_defs(&ctx.sde);
+    rpc(ctx, sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(op_id), PyRep::Integer(i64::from(JITA_SYS)), PyRep::Integer(cat_id)]).await.unwrap();
+    for &tid in defs.op_tasks.get(&op_id).into_iter().flatten() {
+        let ev = defs.task_event_names.get(&tid).cloned().unwrap_or_default();
+        let target = defs.task_target_values.get(&tid).copied().unwrap_or(1);
+        let conds = defs.task_event_conditions.get(&tid).cloned().unwrap_or_default();
+        if ev.starts_with("client_") {
+            let py_conds: Vec<(PyRep, PyRep)> = conds.iter().filter_map(|(k, vs)| {
+                let v = vs.first()?;
+                let pv = v.parse::<i64>().map(PyRep::Integer).unwrap_or_else(|_| PyRep::String(v.clone()));
+                Some((PyRep::String(k.clone()), pv))
+            }).collect();
+            let mut kw = HashMap::new();
+            if !py_conds.is_empty() { kw.insert("extra_data".into(), PyRep::Dict(py_conds)); }
+            for _ in 0..target {
+                rpc_kw(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev.clone())], &kw).await.unwrap();
+            }
+        } else {
+            let owned: Vec<(String, String)> = conds.into_iter().filter_map(|(k, vs)| Some((k, vs.into_iter().next()?))).collect();
+            let refs: Vec<(&str, String)> = owned.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            record_server_operation_event(ctx, char_id, &ev, &refs, target);
+        }
+    }
+}
+
+async fn complete_tree_ops(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64) {
+    let defs = get_operation_defs(&ctx.sde);
+    let tree_ops = defs.cat_operation_trees.get(&cat_id).cloned().unwrap_or_default();
+    let PyRep::List(done_list) = rpc(ctx, sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
+    let mut done: HashSet<i64> = done_list.iter().filter_map(|x| x.as_i64()).collect();
+    for _ in 0..tree_ops.len() {
+        for &oid in &tree_ops {
+            if !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) {
+                complete_op_authoritatively(ctx, sess, char_id, cat_id, oid).await;
+                done.insert(oid);
+            }
+        }
+    }
+}
+
+async fn unlock_prereqs_for_op(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64, target_op: i64) {
+    let defs = get_operation_defs(&ctx.sde);
+    let PyRep::List(dl) = rpc(ctx, sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
+    let mut done: HashSet<i64> = dl.iter().filter_map(|x| x.as_i64()).collect();
+    let mut candidates: Vec<i64> = defs.cat_operation_trees.get(&cat_id).cloned().unwrap_or_else(|| defs.sde_operations.iter().copied().collect());
+    candidates.sort_unstable();
+    for _ in 0..candidates.len().max(1) {
+        if defs.are_prerequisites_met(target_op, &done) { return; }
+        for &oid in &candidates {
+            if oid != target_op && !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) {
+                complete_op_authoritatively(ctx, sess, char_id, cat_id, oid).await;
+                done.insert(oid);
+                if defs.are_prerequisites_met(target_op, &done) { return; }
+            }
+        }
+    }
+}
+
 #[tokio::test]
 // parity: feat:pve.operations-tutorial
 async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
@@ -153,109 +226,127 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     let ctx = new_ctx();
     common::pin_clock(&ctx);
 
-    // Negative 1: unauthenticated / characterless session rejected
     let mut anon = SessionState::new(77);
     assert!(rpc(&ctx, &mut anon, "operationsManager", "get_character_progress", &[]).await.is_err());
 
     let mut sess = login_demo_pilot(&ctx, PILOT_1).await;
-
-    // Negative 2: non-existent SDE operation ID & non-existent category ID rejected
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(999_999)]).await.unwrap_err().code, "CustomInfo");
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(999_999)]).await.unwrap_err().code, "CustomInfo");
-
     let defs = get_operation_defs(&ctx.sde);
-    let (&op_id, op_tasks) = defs
-        .op_tasks
-        .iter()
-        .filter(|(oid, ts)| {
-            defs.sde_operations.contains(oid)
-                && ts.len() >= 2
-                && (defs.op_isk_rewards.get(oid).copied().unwrap_or(0) > 0
-                    || defs.op_completion_rewards.get(oid).is_some_and(|r| !r.is_empty())
-                    || defs.op_skill_rewards.get(oid).is_some_and(|r| !r.is_empty()))
-        })
-        .min_by_key(|(oid, _)| **oid)
-        .expect("SDE multi-task operation with rewards");
-    let op_tasks = op_tasks.clone();
-    let cat_id = defs
-        .cat_isk_rewards
-        .iter()
-        .filter(|(_, isk)| **isk > 0)
-        .map(|(cid, _)| *cid)
-        .min()
-        .or_else(|| defs.sde_categories.iter().copied().min())
-        .expect("SDE operation category");
 
-    // Negative 3 & 4: wrong solar system rejected; cross-character tutorial query without GM rejected
-    assert_eq!(
-        rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(op_id), PyRep::Integer(i64::from(AMARR_SYS)), PyRep::Integer(cat_id)]).await.unwrap_err().code,
-        "CustomInfo"
-    );
+    // Negative guards: unknown SDE op/category, wrong solar system, cross-character checks, and unmet prerequisites
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(999_999)]).await.unwrap_err().code, "CustomInfo");
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(999_999)]).await.unwrap_err().code, "CustomInfo");
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(i64::from(AMARR_SYS)), PyRep::Integer(31)]).await.unwrap_err().code, "CustomInfo");
     assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "is_main_tutorial_finished", &[PyRep::Integer(PILOT_2)]).await.unwrap_err().code, "UserError");
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_2), PyRep::Integer(31)]).await.unwrap_err().code, "InsufficientRole"); // rpc-lint: allow error code assertion
+    let child_op = defs.sde_operations.iter().copied().find(|&oid| !defs.are_prerequisites_met(oid, &HashSet::new())).expect("child op with prereq");
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(child_op), PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap_err().code, "OperationPrerequisitesNotMet"); // rpc-lint: allow error code assertion
 
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(cat_id)]).await.unwrap(), PyRep::Integer(1));
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(cat_id)]).await.unwrap(), PyRep::Bool(false));
+    // Intro tutorial Op 157 (Cat 31, SDE tasks [344=dockInStation, 345=shipBoarded, 346=client_agencyContentExpanded])
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Integer(1));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(31)]).await.unwrap_err().code, "OperationCategoryIncomplete"); // rpc-lint: allow error code assertion
 
-    let wallet_before = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
-    let items_before: i32 = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).map(|i| i.quantity).sum());
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(i64::from(JITA_SYS)), PyRep::Integer(31)]).await.unwrap(), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnOperationCategoryChanged" && n.args == vec![PyRep::Integer(31), PyRep::Integer(157)]));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[]).await.unwrap(), PyRep::Integer(31));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Integer(2));
 
-    assert_eq!(
-        rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(op_id), PyRep::Integer(i64::from(JITA_SYS)), PyRep::Integer(cat_id)]).await.unwrap(),
-        PyRep::Bool(true)
-    );
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[]).await.unwrap(), PyRep::Integer(cat_id));
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(cat_id)]).await.unwrap(), PyRep::Integer(2));
+    // Block task 344 -> event rejected; unblock & skip_task(344) (SDE clientSkipConditions) -> partial progress
+    rpc(&ctx, &mut sess, "operationsManager", "block_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("dockInStation".into())]).await.unwrap(), PyRep::Bool(false));
+    rpc(&ctx, &mut sess, "operationsManager", "unblock_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap(), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnOperationTaskCompleted" && n.args == vec![PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(344)]));
+    let PyRep::Dict(prog_mid) = rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.unwrap() else { panic!("Dict") };
+    assert!((1..100).contains(&prog_mid.iter().find(|(k, _)| k.as_i64() == Some(157)).and_then(|(_, v)| v.as_i64()).unwrap_or(0)));
 
-    // Blocking first task prevents completion when client event fires
-    let (t0, t1) = (op_tasks[0], op_tasks[1]);
-    rpc(&ctx, &mut sess, "operationsManager", "block_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(t0)]).await.unwrap();
-    let mut kw_t0 = HashMap::new();
-    kw_t0.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("task_id".into()), PyRep::Integer(t0))]));
-    rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_progress".into())], &kw_t0).await.unwrap();
-    let PyRep::Dict(prog_b) = rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.unwrap() else { panic!("Dict") };
-    assert_eq!(prog_b.iter().find(|(k, _)| k.as_i64() == Some(t0)).and_then(|(_, v)| v.as_i64()), Some(0));
+    // Task 345 is non-skippable and rejects spoofed client events; server-verified shipBoarded completes it
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(31), PyRep::Integer(157), PyRep::Integer(345)]).await.unwrap_err().code, "TaskNotSkippable"); // rpc-lint: allow error code assertion
+    let mut spoof_kw = HashMap::new();
+    spoof_kw.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("task_id".into()), PyRep::Integer(345))]));
+    assert_eq!(rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_progress".into())], &spoof_kw).await.unwrap(), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("operation_completed".into())]).await.unwrap(), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_claim_rewards_btn_click".into())]).await.unwrap(), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.unwrap(), PyRep::Bool(true));
 
-    // Unblock t0 and complete via SDE eventCondition -> partial op progress (1..100), not yet completed
-    rpc(&ctx, &mut sess, "operationsManager", "unblock_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(t0)]).await.unwrap();
-    let ev_name = defs.task_event_conditions.get(&t0).and_then(|cs| cs.first().cloned()).unwrap_or_else(|| "task_progress".into());
-    rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String(ev_name)], &kw_t0).await.unwrap();
-    let PyRep::Dict(prog_partial) = rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.unwrap() else { panic!("Dict") };
-    assert_eq!(prog_partial.iter().find(|(k, _)| k.as_i64() == Some(t0)).and_then(|(_, v)| v.as_i64()), Some(100));
-    let op_pct = prog_partial.iter().find(|(k, _)| k.as_i64() == Some(op_id)).and_then(|(_, v)| v.as_i64()).unwrap_or(0);
-    assert!((1..100).contains(&op_pct), "expected partial progress in 1..100, got {op_pct}");
-    let PyRep::List(completed_mid) = rpc(&ctx, &mut sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
-    assert!(!completed_mid.contains(&PyRep::Integer(op_id)));
+    // Task 346 (client_agencyContentExpanded) enforces contentPieceType == 18
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())]).await.unwrap(), PyRep::Bool(false));
+    let mut bad_kw = HashMap::new();
+    bad_kw.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(99))]));
+    assert_eq!(rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &bad_kw).await.unwrap(), PyRep::Bool(false));
+    let mut ok_kw = HashMap::new();
+    ok_kw.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
+    assert_eq!(rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ok_kw).await.unwrap(), PyRep::Bool(true));
+    let PyRep::List(done_157) = rpc(&ctx, &mut sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
+    assert!(done_157.contains(&PyRep::Integer(157)));
 
-    // Skip t1 and finish remaining tasks -> operation reaches 100% and delivers SDE rewards once
-    rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(t1)]).await.unwrap();
-    for &tn in op_tasks.iter().skip(2) {
-        let mut kw_tn = HashMap::new();
-        kw_tn.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("task_id".into()), PyRep::Integer(tn))]));
-        rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_progress".into())], &kw_tn).await.unwrap();
+    complete_tree_ops(&ctx, &mut sess, PILOT_1, 31).await;
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(31)]).await.unwrap(), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnOperationCategoryCompleted" && n.args == vec![PyRep::Integer(31)]));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Integer(3));
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(31)]).await.unwrap(), PyRep::Bool(true));
+
+    // Authoritative server-verified SDE item/ISK rewards (docked OnItemChange vs undocked OnRedeemingTokensUpdated) & category ISK gate
+    let p1_race = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().race_id);
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_2).unwrap().race_id = p1_race);
+    let rw_item_op = defs.sde_operations.iter().copied().filter(|&oid| {
+        defs.op_tasks.get(&oid).is_some_and(|ts| ts.iter().any(|t| defs.task_event_names.get(t).is_some_and(|e| !e.starts_with("client_"))))
+            && (defs.op_completion_rewards.get(&oid).is_some_and(|rs| rs.iter().any(|r| r.race_id.is_none_or(|rc| rc == 0 || rc == p1_race)))
+                || defs.op_skill_rewards.get(&oid).is_some_and(|r| !r.is_empty()))
+    }).min_by_key(|&oid| defs.op_default_category.get(&oid).and_then(|c| defs.cat_operation_trees.get(c)).map_or(99, Vec::len)).expect("SDE item/skill-rewarding op");
+    let rw_op_cat = defs.op_default_category.get(&rw_item_op).copied().unwrap_or(31);
+    unlock_prereqs_for_op(&ctx, &mut sess, PILOT_1, rw_op_cat, rw_item_op).await;
+    let items_before: usize = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).count());
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    complete_op_authoritatively(&ctx, &mut sess, PILOT_1, rw_op_cat, rw_item_op).await;
+    let items_after: usize = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).count());
+    assert!(items_after > items_before, "docked completion of {rw_item_op} must deliver SDE item/skillbook rewards");
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnItemChange"), "docked item delivery must emit OnItemChange");
+    complete_op_authoritatively(&ctx, &mut sess, PILOT_1, rw_op_cat, rw_item_op).await;
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).count()), items_after);
+
+    // Undocked PILOT_2 receives SDE item/skill rewards in redeeming queue + OnRedeemingTokensUpdated
+    let mut sess2 = login_demo_pilot(&ctx, PILOT_2).await;
+    sess2.station_id = None;
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_2).unwrap().station_id = None);
+    unlock_prereqs_for_op(&ctx, &mut sess2, PILOT_2, rw_op_cat, rw_item_op).await;
+    let uid2 = sess2.user_id.unwrap();
+    let toks_before = ctx.db.with_snapshot(|s| account_services::load_store(s).redeem_tokens.get(&uid2).map_or(0, Vec::len));
+    let _ = ctx.drain_notifications_for_char(PILOT_2);
+    complete_op_authoritatively(&ctx, &mut sess2, PILOT_2, rw_op_cat, rw_item_op).await;
+    assert!(ctx.db.with_snapshot(|s| account_services::load_store(s).redeem_tokens.get(&uid2).map_or(0, Vec::len)) > toks_before);
+    assert!(ctx.drain_notifications_for_char(PILOT_2).iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
+
+    // Authoritative ISK operation payout + OnAccountChange (when present in SDE) & multi-op category tree gate
+    let PyRep::List(done_p2_list) = rpc(&ctx, &mut sess2, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
+    let done_p2: HashSet<i64> = done_p2_list.iter().filter_map(|x| x.as_i64()).collect();
+    if let Some((&rw_isk_op, &op_isk)) = defs.op_isk_rewards.iter().filter(|(oid, isk)| {
+        **isk > 0 && !done_p2.contains(oid) && defs.op_tasks.get(oid).is_some_and(|ts| ts.iter().any(|t| defs.task_event_names.get(t).is_some_and(|e| !e.starts_with("client_"))))
+    }).min_by_key(|(oid, _)| *oid) {
+        let isk_cat = defs.op_default_category.get(&rw_isk_op).copied().unwrap_or(31);
+        unlock_prereqs_for_op(&ctx, &mut sess2, PILOT_2, isk_cat, rw_isk_op).await;
+        let bal_pre = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_2).unwrap().balance.0);
+        let _ = ctx.drain_notifications_for_char(PILOT_2);
+        complete_op_authoritatively(&ctx, &mut sess2, PILOT_2, isk_cat, rw_isk_op).await;
+        assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_2).unwrap().balance.0) - bal_pre, (op_isk as i64) * 100);
+        assert!(ctx.drain_notifications_for_char(PILOT_2).iter().any(|n| n.event == "OnAccountChange"));
     }
-    let PyRep::Dict(prog_done) = rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.unwrap() else { panic!("Dict") };
-    assert_eq!(prog_done.iter().find(|(k, _)| k.as_i64() == Some(op_id)).and_then(|(_, v)| v.as_i64()), Some(100));
-    let PyRep::List(completed_ops) = rpc(&ctx, &mut sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
-    assert!(completed_ops.contains(&PyRep::Integer(op_id)));
-
-    let wallet_after_op = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
-    let items_after_op: i32 = ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).map(|i| i.quantity).sum());
-    assert!(wallet_after_op > wallet_before || items_after_op > items_before, "completing SDE operation {op_id} must grant real SDE rewards");
-
-    // Idempotency: re-firing task event does not double-grant operation rewards
-    rpc_kw(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_progress".into())], &kw_t0).await.unwrap();
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0), wallet_after_op);
-    assert_eq!(ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).map(|i| i.quantity).sum::<i32>()), items_after_op);
-
-    // Complete category -> state 3 (COMPLETE), is_category_complete == true, SDE category ISK reward delivered once
-    let expected_cat_isk_cents = (defs.cat_isk_rewards.get(&cat_id).copied().unwrap_or(0) as i64) * 100;
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(cat_id)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(cat_id)]).await.unwrap(), PyRep::Integer(3));
-    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(cat_id)]).await.unwrap(), PyRep::Bool(true));
-    let wallet_after_cat = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
-    assert_eq!(wallet_after_cat - wallet_after_op, expected_cat_isk_cents);
-    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(cat_id)]).await.unwrap();
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0), wallet_after_cat);
+    let rw_cat_id = defs.cat_isk_rewards.iter().filter(|(cid, isk)| **isk > 0 && defs.cat_operation_trees.get(cid).is_some_and(|t| !t.is_empty())).map(|(c, _)| *c).min()
+        .or_else(|| defs.cat_operation_trees.iter().filter(|(&cid, t)| cid != 31 && t.len() >= 2).min_by_key(|(_, t)| t.len()).map(|(&c, _)| c)).expect("multi-op SDE category");
+    let cat_isk = defs.cat_isk_rewards.get(&rw_cat_id).copied().unwrap_or(0);
+    let bal_pre_cat = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(rw_cat_id)]).await.unwrap_err().code, "OperationCategoryIncomplete"); // rpc-lint: allow error code assertion
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0), bal_pre_cat);
+    complete_tree_ops(&ctx, &mut sess, PILOT_1, rw_cat_id).await;
+    let bal_before_claim = ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    assert_eq!(rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(rw_cat_id)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0) - bal_before_claim, (cat_isk as i64) * 100);
+    if cat_isk > 0 { assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnAccountChange")); }
+    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_1), PyRep::Integer(rw_cat_id)]).await.unwrap();
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0) - bal_before_claim, (cat_isk as i64) * 100);
 }
 
 #[tokio::test]
@@ -392,33 +483,42 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
 
     let prof_1 = rpc(&ctx, &mut dir_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Tiered Trade".into()), PyRep::String("ACL tiered".into())]).await.unwrap().as_i64().unwrap();
 
-    // Negative 2 & 3: cross-corp SaveProfileSettings rejected; invalid tax > 1.0 rejected
+    // Negative 2, 3 & 4: cross-corp SaveProfileSettings rejected; percentage tax > 1.0 rejected; negative flat ISK fee rejected
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), PyRep::Dict(vec![])]).await.unwrap_err().code, "StructureOwnershipViolation");
     let bad_tax = PyRep::Dict(vec![(PyRep::Integer(1), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(1.5))])]))]);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), bad_tax]).await.unwrap_err().code, "InvalidStructureTaxRate");
+    let bad_flat_fee = PyRep::Dict(vec![(PyRep::Integer(23), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(-10.0))])]))]);
+    assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), bad_flat_fee]).await.unwrap_err().code, "InvalidStructureTaxRate");
 
-    // Save V24 Dict<settingID, List<KeyVal(groupID, value)>> mapping docking (19), multi-ACL market tax (1), VIP clone bay (23 -> svc 2), and defense (17)
+    // Save V24 Dict<settingID, List<KeyVal(groupID, value)>> mapping docking (19), multi-ACL market tax (1), flat-ISK Clone Bay (23 -> svc 2), flat-ISK Corp Office (21 -> svc 10), and defense (17)
     let v24_settings = PyRep::Dict(vec![
         (PyRep::Integer(19), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Integer(1))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Integer(1))])])),
         (PyRep::Integer(1), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(0.01))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Real(0.05))])])),
-        (PyRep::Integer(23), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(0.02))])])),
+        (PyRep::Integer(23), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(500_000.0))])])),
+        (PyRep::Integer(21), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(1_000_000.0))])])),
         (PyRep::Integer(17), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(def_acl)), ("value", PyRep::Integer(1))])])),
     ]);
+    let _ = ctx.drain_notifications_for_char(DIR_PILOT);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), v24_settings]).await.unwrap(), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(prof_1)])]));
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SetDefaultProfile", &[PyRep::Integer(prof_1)]).await.unwrap(), PyRep::Bool(true));
 
     let dup_id = rpc(&ctx, &mut dir_sess, "structureProfiles", "DuplicateProfile", &[PyRep::Integer(prof_1)]).await.unwrap().as_i64().unwrap();
     let PyRep::List(profs) = rpc(&ctx, &mut dir_sess, "structureProfiles", "GetProfiles", &[]).await.unwrap() else { panic!("List") };
     assert_eq!(profs.len(), 2);
     let PyRep::Dict(saved_cfg) = rpc(&ctx, &mut dir_sess, "structureProfiles", "GetProfileSettings", &[PyRep::Integer(prof_1)]).await.unwrap() else { panic!("Dict") };
-    assert_eq!(saved_cfg.len(), 4);
+    assert_eq!(saved_cfg.len(), 5);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "DeleteProfile", &[PyRep::Integer(dup_id)]).await.unwrap(), PyRep::Bool(true));
 
-    // Initial profile assignment applies immediately; in-use profile cannot be deleted
+    // Initial profile assignment applies immediately and emits OnProfileSettingsChange([prof_1]) + OnDockingAccessChangedForCurrentSolarSystem
+    let _ = ctx.drain_notifications_for_char(DIR_PILOT);
+    let _ = ctx.drain_notifications_for_char(VIP_PILOT);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(ST_ID)]), PyRep::Integer(prof_1)]).await.unwrap(), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(prof_1)])]));
+    assert!(ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "DeleteProfile", &[PyRep::Integer(prof_1)]).await.unwrap_err().code, "ProfileInUse");
 
-    // Verify Capsuleer > Corporation specificity on docking, tiered Market tax (1% vs 5%), VIP-only Clone Bay (2%), and Defense control (17)
+    // Verify Capsuleer > Corporation specificity on docking, tiered Market tax (1% vs 5%), flat-ISK Clone Bay (500k) & Corp Office (1M), and Defense control (17)
     assert_eq!(rpc(&ctx, &mut blk_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "StructureDockingAccessDenied");
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "StructureDockingAccessDenied");
     rpc(&ctx, &mut vip_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.expect("VIP docks");
@@ -426,26 +526,42 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
 
     assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.01).abs() < 1e-6);
     assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
-    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap().as_f64().unwrap() - 0.02).abs() < 1e-6);
+    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap().as_f64().unwrap() - 500_000.0).abs() < 1e-3);
+    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(10)]).await.unwrap().as_f64().unwrap() - 1_000_000.0).abs() < 1e-3);
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap(), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(10)]).await.unwrap(), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap_err().code, "StructureServiceAccessDenied");
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "DefenseAccessDenied");
     rpc(&ctx, &mut vip_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.expect("VIP gunner TakeControl");
     rpc(&ctx, &mut vip_sess, "structureControl", "ReleaseControl", &[PyRep::Integer(ST_ID)]).await.expect("VIP ReleaseControl");
 
-    // Switch active structure to restrictive corp-only profile -> delayed apply (PROFILE_CHANGE_DELAY_SECS = 300s)
+    // In-place ACL mutation on operational structure stages behind PROFILE_CHANGE_DELAY_SECS (300s) without premature docking notification
+    let _ = ctx.drain_notifications_for_char(PUB_PILOT);
+    rpc(&ctx, &mut dir_sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(pub_acl), PyRep::List(vec![PyRep::Integer(CORP_GUEST)])]).await.unwrap();
+    assert!(!ctx.drain_notifications_for_char(PUB_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
+    ctx.advance_secs(PROFILE_CHANGE_DELAY_SECS - 180);
+    assert!(ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)));
+    assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
+    ctx.advance_secs(185);
+    assert!(!ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)), "non-RPC access check must enforce due pending profile at now_unix");
+    sync_all_structures(&ctx);
+    assert!(ctx.drain_notifications_for_char(PUB_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
+
+    // Switch active structure to restrictive corp-only profile -> OnProfileSettingsChange([prof_locked]), delayed apply & due notification
     let prof_locked = rpc(&ctx, &mut dir_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Lockdown".into()), PyRep::String("Corp only".into())]).await.unwrap().as_i64().unwrap();
     rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_locked), PyRep::Dict(vec![(PyRep::String("corpOnly".into()), PyRep::Bool(true))])]).await.unwrap();
+    let _ = ctx.drain_notifications_for_char(DIR_PILOT);
+    let _ = ctx.drain_notifications_for_char(VIP_PILOT);
     rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(ST_ID)]), PyRep::Integer(prof_locked)]).await.unwrap();
+    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(prof_locked)])]));
+    assert!(!ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
 
-    // At +120s (< 300s), old profile still governs services, taxes, docking, and defense
     ctx.advance_secs(PROFILE_CHANGE_DELAY_SECS - 180);
-    assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_ID)])]).await.unwrap(), PyRep::List(vec![PyRep::Integer(ST_ID)]));
 
-    // At +305s (>= 300s), lockdown profile applies automatically across docking, services, and defense
     ctx.advance_secs(185);
-    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap(), PyRep::Bool(false));
+    sync_all_structures(&ctx);
+    assert!(ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetServices", &[PyRep::Integer(ST_ID)]).await.unwrap(), PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_ID)])]).await.unwrap(), PyRep::List(vec![]));
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "DefenseAccessDenied");

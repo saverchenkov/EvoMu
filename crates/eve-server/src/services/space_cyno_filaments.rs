@@ -664,6 +664,7 @@ fn validate_structure_cyno_beacon(
     char_id: i64,
     target_struct_id: i64,
     target_sys_hint: Option<u32>,
+    now_unix: u64,
 ) -> Result<eve_db::types::UpwellStructureRecord, BridgeRpcError> {
     let st = snap.structures.get(&target_struct_id).cloned().ok_or_else(|| BridgeRpcError {
         code: "BeaconNotFound".into(),
@@ -685,6 +686,7 @@ fn validate_structure_cyno_beacon(
         snap,
         target_struct_id,
         char_id,
+        now_unix,
     ) {
         return Err(BridgeRpcError {
             code: "BeaconAccessDenied".into(),
@@ -707,10 +709,11 @@ fn handle_get_beacon_structures(
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    let now_unix = ctx.now_unix();
     let beacons: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
         snap.structures
             .values()
-            .filter(|st| validate_structure_cyno_beacon(snap, char_id, st.structure_id, None).is_ok())
+            .filter(|st| validate_structure_cyno_beacon(snap, char_id, st.structure_id, None, now_unix).is_ok())
             .map(|st| {
                 PyRep::keyval([
                     ("structureID", PyRep::Integer(st.structure_id)),
@@ -784,7 +787,7 @@ async fn handle_cmd_jump_to_structure_beacon(
 
     let target_struct = ctx
         .db
-        .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
+        .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint, now_check))?;
     let target_sys_id = target_struct.solar_system_id;
     if (31_000_000..32_000_000).contains(&cur_sys_id)
         || (31_000_000..32_000_000).contains(&target_sys_id)
@@ -930,7 +933,7 @@ fn validate_beacon_and_distance(
     } else {
         (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
-    let target_struct = ctx.db.with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
+    let target_struct = ctx.db.with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint, now_check))?;
     if (31_000_000..32_000_000).contains(&cur_sys_id) || (31_000_000..32_000_000).contains(&target_struct.solar_system_id) {
         return Err(BridgeRpcError { code: "JumpDriveForbiddenInWormholeSpace".into(), message: "Jump drive and cynosural beacon operations are prohibited in wormhole space".into() });
     }

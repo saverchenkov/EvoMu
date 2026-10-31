@@ -385,7 +385,6 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     ctx.advance_secs(12);
     rpc(&ctx, &mut sess_a, "corpRegistry", "AddCorporation", &[PyRep::String("Mutual Corp A".into()), PyRep::String("MWCA".into()), PyRep::Real(0.05)]).await.expect("AddCorporation A");
     rpc(&ctx, &mut sess_b, "corpRegistry", "AddCorporation", &[PyRep::String("Mutual Corp B".into()), PyRep::String("MWCB".into()), PyRep::Real(0.05)]).await.expect("AddCorporation B");
-    ctx.advance_secs(7 * 86_400);
     let (corp_a, corp_b) = (sess_a.corporation_id.expect("corp_a"), sess_b.corporation_id.expect("corp_b"));
 
     // Return PILOT_A to space in sys_lowsec far from celestials to anchor, core, & unanchor an Astrahus
@@ -412,7 +411,6 @@ async fn notify_batch2_fighters_ewar_mutual_wars_strip_and_tracker() {
     assert!(matches!(&st_add[1], PyRep::Dict(d) if d.len() == 1 && d[0].0 == PyRep::Integer(structure_id) && d[0].1.dict_get("categoryID") == Some(&PyRep::Integer(65))));
 
     ctx.advance_secs(25 * 3_600);
-    let _ = sys_handle.set_ball_position(carrier_id, open_pos + DVec3::new(60_000.0, 0.0, 0.0)).await;
     rpc(&ctx, &mut sess_a, "structureDocking", "Dock", &[PyRep::Integer(structure_id)]).await.expect("Dock Citadel");
     rpc(&ctx, &mut sess_a, "invbroker", "Add", &[PyRep::Integer(core_item_id), PyRep::Integer(structure_id), PyRep::Integer(172)]).await.expect("Insert Core");
     ctx.advance_secs(12);
@@ -664,15 +662,22 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     let es_rem_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&es_rem_notifs, "OnExpertSystemsUpdated"), &[PyRep::Dict(vec![]), PyRep::Bool(false), PyRep::Integer(EXPERT_SYSTEM_TYPE_ID as i64)]);
 
-    // 4. Node Graph lifecycle via operationsManager, node_graph, and air_npe (DATA GAP: server-only)
-    let (&real_op, _) = eve_server::services::operations_manager::get_operation_defs(&ctx.sde).op_tasks.iter().next().expect("SDE op");
-    sess.role |= eve_machonet::service_roles::ROLE_GMH;
-    rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(real_op), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(1)]).await.expect("activate op");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStartClientNodeGraph"));
+    // 4. Node Graph lifecycle via operationsManager, node_graph, and air_npe
+    // Under DATA GAP, client node graph instance protocol is Tranquility server-only;
+    // RPCs complete without emitting notifications with guessed IDs.
+    rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(31)]).await.expect("activate op");
+    let ng_start_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!ng_start_notifs.iter().any(|(e, _)| e == "OnStartClientNodeGraph"));
+
     rpc(&ctx, &mut sess, "node_graph", "process_client_graph_message", &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("client_action".into()), PyRep::Integer(42)]).await.expect("update");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnClientNodeGraphUpdate"));
-    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await.expect("complete category");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStopClientNodeGraph"));
+    let ng_upd_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!ng_upd_notifs.iter().any(|(e, _)| e == "OnClientNodeGraphUpdate"));
+
+    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_A), PyRep::Integer(31)]).await.expect("complete category");
+    let ng_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!ng_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraph"));
+
     rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[]).await.expect("skip_air_npe");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
+    let npe_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!npe_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
 }

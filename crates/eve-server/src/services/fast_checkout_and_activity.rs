@@ -314,6 +314,7 @@ fn handle_request_mining_cycle_output(
                 snap,
                 structure_id,
                 char_id,
+                ctx.now_unix(),
             );
         if !is_allowed {
             return Err(BridgeRpcError {
@@ -383,6 +384,7 @@ fn handle_request_mining_details(
                     snap,
                     structure_id,
                     char_id,
+                    now,
                 );
             if !is_allowed {
                 return Err(BridgeRpcError {

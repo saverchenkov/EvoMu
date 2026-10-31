@@ -236,101 +236,43 @@ async fn test_operations_tutorial_and_categories() {
         .expect("get_active_category_id initial");
     assert_eq!(active_cat_initial, PyRep::None);
 
-    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
-    let (&any_sde_op, _) = op_defs.op_tasks.iter().next().expect("SDE operation");
-    let cat_id = 42;
-    let is_cat_comp_before = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "is_category_complete",
-        &[PyRep::Integer(cat_id)],
-    )
-    .await
-    .expect("is_category_complete before");
+    let cat_id = 31;
+    let is_cat_comp_before = call_rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(cat_id)]).await.expect("is_category_complete before");
     assert_eq!(is_cat_comp_before, PyRep::Bool(false));
 
-    let is_cat_comp_out_of_bounds = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "is_category_complete",
-        &[PyRep::Integer(0)],
-    )
-    .await
-    .expect("is_category_complete 0");
+    let is_cat_comp_out_of_bounds = call_rpc(&ctx, &mut sess, "operationsManager", "is_category_complete", &[PyRep::Integer(0)]).await.expect("is_category_complete 0");
     assert_eq!(is_cat_comp_out_of_bounds, PyRep::Bool(false));
 
-    let cat_state_before = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "get_category_state",
-        &[PyRep::Integer(cat_id)],
-    )
-    .await
-    .expect("get_category_state before");
+    let cat_state_before = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(cat_id)]).await.expect("get_category_state before");
     assert_eq!(cat_state_before, PyRep::Integer(1)); // AVAILABLE = 1
 
-    let cat_state_invalid = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "get_category_state",
-        &[PyRep::Integer(0)],
-    )
-    .await
-    .expect_err("get_category_state invalid cat_id 0");
+    let cat_state_invalid = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(0)]).await.expect_err("get_category_state invalid cat_id 0");
     assert_eq!(cat_state_invalid.code, "CustomInfo");
 
-    // Activate category: operationsManager.activate_operation_in_solar_system
-    let act_cat = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "activate_operation_in_solar_system",
-        &[PyRep::Integer(any_sde_op), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(cat_id)],
-    )
-    .await
-    .expect("activate_operation_in_solar_system");
+    // Activate category: operationsManager.activate_operation_in_solar_system (SDE op 157 in category 31)
+    let act_cat = call_rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(cat_id)]).await.expect("activate_operation_in_solar_system");
     assert_eq!(act_cat, PyRep::Bool(true));
 
-    let active_cat_after_act = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[])
-        .await
-        .expect("get_active_category_id after activate");
+    let active_cat_after_act = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[]).await.expect("get_active_category_id after activate");
     assert_eq!(active_cat_after_act, PyRep::Integer(cat_id));
 
-    let cat_state_active = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "get_category_state",
-        &[PyRep::Integer(cat_id)],
-    )
-    .await
-    .expect("get_category_state active");
+    let cat_state_active = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(cat_id)]).await.expect("get_category_state active");
     assert_eq!(cat_state_active, PyRep::Integer(2)); // ACTIVE = 2
 
-    // 5. Complete category: complete_category_for_character (rejected without GM/finished ops; succeeds with GM role)
-    assert!(
-        call_rpc(
-            &ctx,
-            &mut sess,
-            "operationsManager",
-            "complete_category_for_character",
-            &[PyRep::Integer(cat_id)],
-        )
-        .await
-        .is_err(),
-        "unprivileged complete_category_for_character must reject unfinished category"
-    );
-    sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    // Complete SDE operation 157 tasks [344 (skipped in space), 345, 346], then complete category 31
+    call_rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(cat_id), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap();
+    call_rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.unwrap();
+    let mut ed_346 = HashMap::new();
+    ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
+    ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.unwrap();
+
+    // 5. Complete category: complete_category_for_character (V24 2-arg signature)
     let complete_rep = call_rpc(
         &ctx,
         &mut sess,
         "operationsManager",
         "complete_category_for_character",
-        &[PyRep::Integer(cat_id)],
+        &[PyRep::Integer(PILOT_AIR), PyRep::Integer(cat_id)],
     )
     .await
     .expect("complete_category_for_character");
@@ -474,159 +416,57 @@ async fn test_operations_tasks_sites_and_events() {
     .expect("get_operations_completed_at_least_once init");
     assert_eq!(completed_ops_init, PyRep::List(Vec::new()));
 
-    // 2. Activate operation: activate_operation_in_solar_system (real 2-task SDE operation)
-    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
-    let (&op_id, op_task_vec) = op_defs
-        .op_tasks
-        .iter()
-        .find(|(_, ts)| ts.len() == 2 && ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
-        .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| ts.len() == 2))
-        .expect("SDE must contain a 2-task operation");
-    let client_idx = op_task_vec
-        .iter()
-        .position(|t| op_defs.client_completable_tasks.contains(t))
-        .unwrap_or(1);
-    let task_id_2 = op_task_vec[client_idx];
-    let task_id = op_task_vec[1 - client_idx];
-    let act_rep = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "activate_operation_in_solar_system",
-        &[PyRep::Integer(op_id), PyRep::Integer(SYS_JITA as i64)],
-    )
-    .await
-    .expect("activate_operation_in_solar_system");
+    // 2. Activate SDE operation 157 (category 31, tasks [344, 345, 346])
+    let op_id = 157;
+    let act_rep = call_rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(op_id), PyRep::Integer(SYS_JITA as i64)]).await.expect("activate_operation_in_solar_system");
     assert_eq!(act_rep, PyRep::Bool(true));
 
-    let act_err = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "activate_operation_in_solar_system",
-        &[PyRep::Integer(0)],
-    )
-    .await
-    .expect_err("activate_operation_in_solar_system invalid op_id");
+    let act_err = call_rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(0)]).await.expect_err("activate_operation_in_solar_system invalid op_id");
     assert_eq!(act_err.code, "CustomInfo");
 
     let notifs = ctx.drain_notifications_for_char(PILOT_AIR);
-    assert!(
-        notifs.iter().any(|n| n.event == "OnOperationCategoryChanged"),
-        "expected OnOperationCategoryChanged notification"
-    );
+    assert!(notifs.iter().any(|n| n.event == "OnOperationCategoryChanged"), "expected OnOperationCategoryChanged notification");
 
-    // 3. Task blocking and unblocking: block_task, unblock_task
-    let block_rep = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "block_task",
-        &[PyRep::Integer(1), PyRep::Integer(op_id), PyRep::Integer(task_id)],
-    )
-    .await
-    .expect("block_task");
+    // 3. Task blocking and unblocking: block_task, unblock_task on SDE task 344
+    let task_id = 344;
+    let block_rep = call_rpc(&ctx, &mut sess, "operationsManager", "block_task", &[PyRep::Integer(31), PyRep::Integer(op_id), PyRep::Integer(task_id)]).await.expect("block_task");
     assert_eq!(block_rep, PyRep::Bool(true));
 
-    let prog_blocked = call_rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[])
-        .await
-        .expect("get_character_progress blocked");
-    let PyRep::Dict(dict_blocked) = prog_blocked else {
-        panic!("expected Dict from get_character_progress");
-    };
-    let task_blocked_entry = dict_blocked
-        .iter()
-        .find(|(k, _)| k.as_i64() == Some(task_id))
-        .map(|(_, v)| v);
-    assert_eq!(task_blocked_entry, Some(&PyRep::Integer(0)));
+    let prog_blocked = call_rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.expect("get_character_progress blocked");
+    let PyRep::Dict(dict_blocked) = prog_blocked else { panic!("expected Dict from get_character_progress"); };
+    assert_eq!(dict_blocked.iter().find(|(k, _)| k.as_i64() == Some(task_id)).map(|(_, v)| v), Some(&PyRep::Integer(0)));
 
-    let unblock_rep = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "unblock_task",
-        &[PyRep::Integer(1), PyRep::Integer(op_id), PyRep::Integer(task_id)],
-    )
-    .await
-    .expect("unblock_task");
+    let unblock_rep = call_rpc(&ctx, &mut sess, "operationsManager", "unblock_task", &[PyRep::Integer(31), PyRep::Integer(op_id), PyRep::Integer(task_id)]).await.expect("unblock_task");
     assert_eq!(unblock_rep, PyRep::Bool(true));
 
-    // 4. Skip task: skip_task
-    let prev_role = sess.role;
-    if !op_defs.client_completable_tasks.contains(&task_id) {
-        sess.role |= eve_machonet::service_roles::ROLE_GMH;
-    }
-    let skip_rep = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "skip_task",
-        &[PyRep::Integer(1), PyRep::Integer(op_id), PyRep::Integer(task_id)],
-    )
-    .await
-    .expect("skip_task");
-    sess.role = prev_role;
+    // 4. Skip skippable SDE task 344: skip_task
+    let skip_rep = call_rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(31), PyRep::Integer(op_id), PyRep::Integer(task_id)]).await.expect("skip_task");
     assert_eq!(skip_rep, PyRep::Bool(true));
 
     let skip_notifs = ctx.drain_notifications_for_char(PILOT_AIR);
-    assert!(
-        skip_notifs.iter().any(|n| n.event == "OnOperationTaskCompleted"),
-        "expected OnOperationTaskCompleted after skip_task"
-    );
+    assert!(skip_notifs.iter().any(|n| n.event == "OnOperationTaskCompleted"), "expected OnOperationTaskCompleted after skip_task");
 
-    let prog_skipped = call_rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[])
-        .await
-        .expect("get_character_progress skipped");
-    let PyRep::Dict(dict_skipped) = prog_skipped else {
-        panic!("expected Dict from get_character_progress");
-    };
-    let task_skipped_entry = dict_skipped
-        .iter()
-        .find(|(k, _)| k.as_i64() == Some(task_id))
-        .map(|(_, v)| v);
-    assert_eq!(task_skipped_entry, Some(&PyRep::Integer(100)));
+    let prog_skipped = call_rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.expect("get_character_progress skipped");
+    let PyRep::Dict(dict_skipped) = prog_skipped else { panic!("expected Dict from get_character_progress"); };
+    assert_eq!(dict_skipped.iter().find(|(k, _)| k.as_i64() == Some(task_id)).map(|(_, v)| v), Some(&PyRep::Integer(100)));
 
     // 5. Start site: start_site
-    let start_err = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "start_site",
-        &[PyRep::Integer(999_999)],
-    )
-    .await
-    .expect_err("start_site invalid dungeon");
+    let start_err = call_rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(999_999)]).await.expect_err("start_site invalid dungeon");
     assert_eq!(start_err.code, "CustomInfo");
 
     // Dungeon 43 exists in SDE ("Pith Merchant Depot")
-    let start_rep = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "start_site",
-        &[PyRep::Integer(43)],
-    )
-    .await
-    .expect("start_site valid dungeon 43");
+    let start_rep = call_rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(43)]).await.expect("start_site valid dungeon 43");
     assert_eq!(start_rep, PyRep::Bool(true));
 
-    // 6. Process client event: process_client_event
-    let event_rep = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("air_operation_completed_event".into()), PyRep::Integer(task_id_2)],
-    )
-    .await
-    .expect("process_client_event");
+    // 6. Process client event: complete SDE tasks 345 (shipBoarded) and 346 (client_agencyContentExpanded)
+    assert_eq!(call_rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.expect("task 345"), PyRep::Bool(true));
+    let mut ed_346 = HashMap::new();
+    ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
+    let event_rep = ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.expect("task 346");
     assert_eq!(event_rep, PyRep::Bool(true));
 
     let event_notifs = ctx.drain_notifications_for_char(PILOT_AIR);
-    assert!(
-        event_notifs.iter().any(|n| n.event == "OnOperationTaskCompleted"),
-        "expected OnOperationTaskCompleted after client event"
-    );
+    assert!(event_notifs.iter().any(|n| n.event == "OnOperationTaskCompleted"), "expected OnOperationTaskCompleted after client event");
 
     // Verify completed operations now includes active op_id
     let completed_ops_after = call_rpc(

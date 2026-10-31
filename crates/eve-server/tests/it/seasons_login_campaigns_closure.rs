@@ -155,25 +155,15 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     );
     assert!(challenges_dict.iter().all(|(k, v)| k.as_i64() == v.dict_get("challengeID").and_then(|c| c.as_i64())));
 
-    // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274)
-    let kw = HashMap::new();
-    let pce_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "seasonManager",
-            None,
-            "process_client_event",
-            &[PyRep::Integer(274), PyRep::Integer(1)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("process_client_event progress");
+    // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274) requires SDE event_conditions
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &HashMap::new(), None).await.unwrap(), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
+    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).expect("challenge 274");
+    let ed274: Vec<(PyRep, PyRep)> = def274.event_conditions.iter().filter_map(|(k, vs)| Some((PyRep::String(k.clone()), PyRep::Integer(*vs.first()?)))).collect();
+    let kw = HashMap::from([("extra_data".to_string(), PyRep::Dict(ed274))]);
+    let pce_res = ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &kw, None).await.expect("process_client_event progress");
     assert_eq!(pce_res, PyRep::None);
-
-    let ch_274 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
-        .await
-        .expect("get_challenge 274");
+    let ch_274 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("get_challenge 274");
     assert_eq!(ch_274.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
 
     // 6. feat:pve.seasons-challenges: Challenge expiration and automatic refresh
@@ -655,6 +645,8 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
     assert!(ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::String(c1.event_type.clone())], &bad_amt, None).await.is_err());
     let wrong_ed = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String(cond_key.clone()), PyRep::Integer(99))]))]);
     ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::String(c1.event_type.clone())], &wrong_ed, None).await.unwrap();
+    rpc(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(990_001)]).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(990_001)], &HashMap::from([("extra_data".into(), PyRep::Dict(vec![]))]), None).await.unwrap();
     assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(990_001)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
     let right_ed = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String(cond_key), PyRep::Integer(42))]))]);
     ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::String(c1.event_type.clone())], &right_ed, None).await.unwrap();

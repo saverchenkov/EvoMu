@@ -459,6 +459,7 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
         PyRep::Tuple(vec![PyRep::Integer(23), PyRep::Real(0.025)]),
     ]);
     rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), settings_payload]).await.expect("SaveProfileSettings");
+    ctx.advance_virtual_clock(305);
 
     assert!((rpc(&ctx, &mut guest_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.unwrap().as_f64().unwrap() - 0.025).abs() < 1e-6);
     assert_eq!(rpc(&ctx, &mut outsider_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.unwrap(), PyRep::None);
@@ -493,6 +494,7 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
         PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_group_id), PyRep::Integer(1)]),
     ]);
     rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id_2), profile_rows]).await.unwrap();
+    ctx.advance_virtual_clock(305);
     guest_sess.structure_id = Some(st_id);
     assert_eq!(rpc(&ctx, &mut guest_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect_err("docking guest denied").code, "DefenseAccessDenied");
     outsider_sess.structure_id = Some(st_id); outsider_sess.station_id = None;

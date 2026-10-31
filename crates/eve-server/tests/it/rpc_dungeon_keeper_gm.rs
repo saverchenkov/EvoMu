@@ -473,18 +473,13 @@ async fn test_keeper_and_alpha_injector_services() {
     .expect("GetOperationSpawnpointSolarSystem");
     assert_eq!(spawn_sys, PyRep::Integer(30_002_547)); // Malukker (Republic Military School 14 in SDE)
 
-    let (&real_op_id, _) = eve_server::services::operations_manager::get_operation_defs(&ctx.sde)
-        .op_tasks
-        .iter()
-        .next()
-        .expect("SDE operation");
     assert!(
         rpc(
             &ctx,
             &mut sess2,
             "operationsManager",
             "activate_operation_in_solar_system",
-            &[PyRep::Integer(real_op_id), PyRep::Integer(30_002_187)],
+            &[PyRep::Integer(157), PyRep::Integer(30_002_187)],
         )
         .await
         .is_err(),
@@ -501,7 +496,7 @@ async fn test_keeper_and_alpha_injector_services() {
         &mut sess2,
         "operationsManager",
         "activate_operation_in_solar_system",
-        &[PyRep::Integer(real_op_id), PyRep::Integer(30_002_187)],
+        &[PyRep::Integer(157), PyRep::Integer(30_002_187)],
     )
     .await
     .expect("activate_operation_in_solar_system");
@@ -510,7 +505,7 @@ async fn test_keeper_and_alpha_injector_services() {
         &mut sess2,
         "keeper",
         "GetOperationSpawnpointSolarSystem",
-        &[PyRep::Integer(CHAR_ID), PyRep::Integer(real_op_id)],
+        &[PyRep::Integer(CHAR_ID), PyRep::Integer(157)],
     )
     .await
     .expect("GetOperationSpawnpointSolarSystem active");
@@ -522,9 +517,9 @@ async fn test_keeper_and_alpha_injector_services() {
         .expect("IsOperationSite Jita");
     assert_eq!(is_op_jita, PyRep::Bool(false));
 
-    let is_op_site_id = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(real_op_id)])
+    let is_op_site_id = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(157)])
         .await
-        .expect("IsOperationSite active operation");
+        .expect("IsOperationSite active operation 157");
     assert_eq!(is_op_site_id, PyRep::Bool(true));
 
     let is_op_activated = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(30_002_187)])

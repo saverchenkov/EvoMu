@@ -525,7 +525,7 @@ pub fn handle_structure_compression_mgr(
                     });
                 }
                 if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                    snap, structure_id, char_id,
+                    snap, structure_id, char_id, ctx.now_unix(),
                 ) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
@@ -717,7 +717,7 @@ pub fn handle_structure_compression_mgr(
                     });
                 }
                 if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                    snap, structure_id, char_id,
+                    snap, structure_id, char_id, ctx.now_unix(),
                 ) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),

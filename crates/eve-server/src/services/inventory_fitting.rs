@@ -918,7 +918,7 @@ pub async fn handle(
                             }
                             let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
                             if st.owner_corp_id != caller_corp
-                                && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, new_loc, char_id)
+                                && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, new_loc, char_id, ctx.now_unix())
                             {
                                 return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Character {char_id} lacks structure access at {new_loc}") });
                             }

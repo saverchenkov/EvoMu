@@ -620,13 +620,14 @@ async fn q8_faction_warfare_and_operations() {
     }
     assert_eq!(rec_op_ids, vec![157, 158]);
 
-    // Completing all SDE tasks of operation 157 filters it out when allow_old=false, and includes it when allow_old=true.
-    ctx.dispatch_rpc(&mut session, "operationsManager", None, "activate_operation_in_solar_system", &[eve_proto::PyRep::Integer(157)], &std::collections::HashMap::new(), None).await.expect("activate_operation_in_solar_system");
-    session.role |= eve_machonet::service_roles::ROLE_GMH;
-    for &tid in &eve_server::services::operations_manager::get_operation_defs(&ctx.sde).op_tasks[&157] {
-        ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("task_completed".into()), eve_proto::PyRep::Integer(tid)], &std::collections::HashMap::new(), None).await.expect("process_client_event");
-    }
-    session.role &= !eve_machonet::service_roles::ROLE_GMH;
+    // Completing operation 157 filters it out when allow_old=false, and includes it when allow_old=true.
+    let empty_kw = std::collections::HashMap::new();
+    let mut ed_346 = std::collections::HashMap::new();
+    ed_346.insert("extra_data".into(), eve_proto::PyRep::Dict(vec![(eve_proto::PyRep::String("contentPieceType".into()), eve_proto::PyRep::Integer(18))]));
+    ctx.dispatch_rpc(&mut session, "operationsManager", None, "activate_operation_in_solar_system", &[eve_proto::PyRep::Integer(157)], &empty_kw, None).await.expect("activate 157");
+    ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("dockInStation".into())], &empty_kw, None).await.expect("task 344");
+    ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("shipBoarded".into())], &empty_kw, None).await.expect("task 345");
+    ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.expect("task 346");
     let rec_after = call_req(
         &ctx,
         &session,

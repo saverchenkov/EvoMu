@@ -434,10 +434,12 @@ async fn test_season_manager_rpc_suite() {
     // 12. process_client_event on real V24 client_lookAtObject challenge 274 (max_progress=4, points=40)
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::String("untrackedClientEvent".into())]).await.expect("benign untracked event_name"), PyRep::None);
-    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)]).await.expect("omitted extra_data rejected"), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
     let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).unwrap();
     let valid_ed: Vec<(PyRep, PyRep)> = def274.event_conditions.iter().filter_map(|(k, vals)| vals.first().map(|&v| (PyRep::String(k.clone()), PyRep::Integer(v)))).collect();
-    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(2)), ("extra_data".into(), PyRep::Dict(valid_ed))]);
+    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(1)), ("extra_data".into(), PyRep::Dict(valid_ed))]);
+    ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &pce_kw, None).await.expect("id + valid extra_data");
     ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::String(def274.event_type.clone())], &pce_kw, None).await.expect("canonical event_name + kwargs pce");
     let ch274 = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("get_challenge 274");
     assert_eq!(ch274.dict_get("progress").and_then(|v| v.as_i64()), Some(2));
