@@ -884,3 +884,39 @@ pub fn register_plex_vault_extra_handlers(router: &PublicGatewayRouter, db: Arc<
         }),
     );
 }
+
+pub(super) fn upsert_omega_payment_schedule(
+    snap: &mut eve_db::WorldStateSnapshot,
+    uid: u64,
+    offer_id: u32,
+    qty: u32,
+    now_unix: u64,
+) {
+    let mut schedules: Vec<PaymentScheduleRecord> = snap
+        .service_state_blobs
+        .get("payment_schedules")
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+    snap.next_entity_id += 1;
+    let sched_id = snap.next_entity_id as u64;
+    let interval_days = 30 * qty;
+    let next_payment_unix = now_unix + u64::from(interval_days) * 86_400;
+    if let Some(existing) = schedules.iter_mut().find(|s| s.user_id == uid && s.schedule_type == 1) {
+        existing.offer_id = offer_id.to_string();
+        existing.interval_days = interval_days;
+        existing.next_payment_unix = next_payment_unix;
+    } else {
+        schedules.push(PaymentScheduleRecord {
+            id: sched_id,
+            user_id: uid,
+            schedule_type: 1,
+            offer_id: offer_id.to_string(),
+            interval_days,
+            next_payment_unix,
+            created_unix: now_unix,
+        });
+    }
+    if let Ok(serialized) = serde_json::to_string(&schedules) {
+        snap.service_state_blobs.insert("payment_schedules".to_string(), serialized);
+    }
+}

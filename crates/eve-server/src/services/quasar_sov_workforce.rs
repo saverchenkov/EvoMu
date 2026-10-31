@@ -53,12 +53,63 @@ fn linked_owners(snap: &WorldStateSnapshot, a: i64, b: i64) -> bool {
     }
 }
 
+/// `true` when `exporter_id` (exporting to `dest_sys`) can reach `importer_id` directly or via `Transit` relay hubs.
+fn can_relay_export(
+    snap: &WorldStateSnapshot,
+    sde: &SdeRegistry,
+    exporter_id: i64,
+    dest_sys: u32,
+    importer_id: i64,
+) -> bool {
+    let Some(exp_sys) = hub_sys(snap, exporter_id) else { return false };
+    let Some(imp_sys) = hub_sys(snap, importer_id) else { return false };
+    if exporter_id == importer_id || !linked_owners(snap, exporter_id, importer_id) {
+        return false;
+    }
+    if dest_sys == imp_sys {
+        return systems_within_jumps(sde, exp_sys, WORKFORCE_TRANSFER_MAX_JUMPS).contains_key(&imp_sys);
+    }
+    if !systems_within_jumps(sde, exp_sys, WORKFORCE_TRANSFER_MAX_JUMPS).contains_key(&dest_sys) {
+        return false;
+    }
+    // Collect all Transit relay hubs belonging to the same owner/alliance.
+    let transit_hubs: Vec<(i64, u32)> = snap
+        .sov_runtime
+        .sov_hubs
+        .iter()
+        .filter(|(id, h)| {
+            **id != exporter_id
+                && **id != importer_id
+                && matches!(h.workforce, PersistedWorkforceMode::Transit)
+                && linked_owners(snap, exporter_id, **id)
+        })
+        .filter_map(|(id, _)| hub_sys(snap, *id).map(|sys| (*id, sys)))
+        .collect();
+
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = VecDeque::new();
+    for (tid, tsys) in &transit_hubs {
+        if *tsys == dest_sys && visited.insert(*tid) {
+            queue.push_back(*tsys);
+        }
+    }
+    while let Some(cur_sys) = queue.pop_front() {
+        let reach = systems_within_jumps(sde, cur_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
+        if reach.contains_key(&imp_sys) {
+            return true;
+        }
+        for (tid, tsys) in &transit_hubs {
+            if reach.contains_key(tsys) && visited.insert(*tid) {
+                queue.push_back(*tsys);
+            }
+        }
+    }
+    false
+}
+
 /// Workforce imported by `hub_id`, per configured source system (including `Transit` relays).
 pub fn imports(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec<(u32, u64)> {
     let PersistedWorkforceMode::Import { sources } = mode(snap, hub_id) else { return Vec::new() };
-    let Some(my_sys) = hub_sys(snap, hub_id) else { return Vec::new() };
-    let reachable: std::collections::HashSet<i64> =
-        networkable_hubs(snap, sde, hub_id).into_iter().map(|h| h.0).collect();
     sources
         .iter()
         .map(|src| {
@@ -66,14 +117,13 @@ pub fn imports(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Vec
                 .sov_runtime
                 .sov_hubs
                 .iter()
-                .filter(|(id, _)| {
-                    **id != hub_id
-                        && reachable.contains(id)
-                        && hub_sys(snap, **id) == Some(*src)
-                        && linked_owners(snap, hub_id, **id)
-                })
-                .filter_map(|(_, h)| match &h.workforce {
-                    PersistedWorkforceMode::Export { destination: Some(d), amount } if *d == my_sys => Some(*amount),
+                .filter(|(id, _)| **id != hub_id && hub_sys(snap, **id) == Some(*src))
+                .filter_map(|(id, h)| match &h.workforce {
+                    PersistedWorkforceMode::Export { destination: Some(d), amount }
+                        if can_relay_export(snap, sde, *id, *d, hub_id) =>
+                    {
+                        Some(*amount)
+                    }
                     _ => None,
                 })
                 .sum();
@@ -90,21 +140,17 @@ pub fn exported_amount(snap: &WorldStateSnapshot, hub_id: i64) -> u64 {
     }
 }
 
-/// `true` when the export destination has a reachable hub importing from this hub's system.
+/// `true` when the export destination has a hub importing from this hub's system (directly or via `Transit`).
 fn export_connected(snap: &WorldStateSnapshot, sde: &SdeRegistry, hub_id: i64) -> Option<u32> {
     let PersistedWorkforceMode::Export { destination: Some(dest), .. } = mode(snap, hub_id) else { return None };
     let my_sys = hub_sys(snap, hub_id)?;
-    let reachable: std::collections::HashSet<i64> =
-        networkable_hubs(snap, sde, hub_id).into_iter().map(|h| h.0).collect();
     snap.sov_runtime
         .sov_hubs
         .iter()
         .any(|(id, h)| {
             *id != hub_id
-                && reachable.contains(id)
-                && hub_sys(snap, *id) == Some(dest)
-                && linked_owners(snap, hub_id, *id)
                 && matches!(&h.workforce, PersistedWorkforceMode::Import { sources } if sources.contains(&my_sys))
+                && can_relay_export(snap, sde, hub_id, dest, *id)
         })
         .then_some(dest)
 }

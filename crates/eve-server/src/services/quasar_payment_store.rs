@@ -1166,6 +1166,7 @@ fn register_payment_token_and_purchase_handlers(
                         );
                         upsert_user_payment_schedule_in_snapshot(snap, uid, 1, new_expiry, &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
                         omega_notice = Some(notice);
+                        upsert_omega_payment_schedule(snap, uid, offer.id, qty, now_unix);
                     }
 
                     snap.next_entity_id += 1;

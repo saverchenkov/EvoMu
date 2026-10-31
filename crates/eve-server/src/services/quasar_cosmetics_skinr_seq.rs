@@ -1064,11 +1064,38 @@ fn handle_job_initiate(
     ))
 }
 
+fn settle_completed_jobs(state: &SkinrCosmeticsState, now: u64) {
+    let mut completed = Vec::new();
+    {
+        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+        for job in data.sequencing_jobs.values_mut() {
+            let end_unix = job.initiated_unix.saturating_add(job.planned_duration_secs);
+            if job.is_active() && now >= end_unix {
+                job.completed_unix = Some(end_unix);
+                completed.push((job.sequencer_id, job.job_uuid, job.skin_hex.clone(), job.quantity, end_unix));
+            }
+        }
+        for (_, _, ref sh, _, end_unix) in &completed {
+            if let Some(skin_rec) = data.skins.get_mut(sh) {
+                skin_rec.first_sequenced_unix.get_or_insert(*end_unix);
+            }
+        }
+    }
+    if !completed.is_empty() {
+        state.save();
+        for (seq_id, uuid, sh, qty, end_unix) in completed {
+            queue_job_completed_notice(seq_id, &uuid, end_unix);
+            grant_or_increment_skin_license(state, seq_id, &sh, qty as u64, end_unix);
+        }
+    }
+}
+
 fn handle_job_get_all_active(
     state: &SkinrCosmeticsState,
     ctx: &AuthoritativeContext,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
     for job in data.sequencing_jobs.values() {
@@ -1112,6 +1139,7 @@ fn handle_job_get(
         return Err((STATUS_BAD_REQUEST, "Missing sequencing job UUID".into()));
     };
     let key = hex_bytes(&uuid);
+    settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let Some(job) = data.sequencing_jobs.get(&key) else {
         return Err((STATUS_NOT_FOUND, "Sequencing job not found".into()));
