@@ -471,3 +471,141 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         .expect_err("ClaimRewards must fail closed with UnimplementedRPC");
     assert_eq!(claim_err.code, "UnimplementedRPC");
 }
+
+#[tokio::test]
+async fn test_season_challenge_isk_award_trust_and_claim_guards() {
+    let ctx = new_ctx();
+    let mut sess = setup_pilot(&ctx, PILOT_1).await;
+
+    let defs = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde);
+    let server_isk_def = defs
+        .iter()
+        .find(|d| !d.client_event_driven && d.isk_awarded > 0)
+        .expect("real FSD server-driven challenge with isk_awarded > 0")
+        .clone();
+    let now_ft = ctx.clock().now_blueos_filetime_ticks();
+    let end_ft = now_ft + 86_400 * 30 * 10_000_000;
+
+    // Seed the server-driven ISK challenge as active and uncompleted
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        let mut ch = server_isk_def.to_character_challenge_with_end(st.selected_season_id, now_ft, end_ft);
+        ch.is_dormant = false;
+        ch.completed = false;
+        ch.progress = 0;
+        st.challenges.insert(server_isk_def.challenge_id, ch);
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+
+    let isk_before = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+
+    // 1. Uncompleted claim must fail and pay 0 ISK
+    let uncompleted_err = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(server_isk_def.challenge_id)],
+    )
+    .await
+    .expect_err("uncompleted challenge claim must fail");
+    assert_eq!(uncompleted_err.code, "ChallengeNotCompleted"); // rpc-lint: allow error code assertion
+    let isk_after_uncompleted = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(isk_after_uncompleted, isk_before, "uncompleted claim must not pay ISK");
+
+    // 2. Completed server-driven FSD challenge pays exact IskCents delta
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        if let Some(ch) = st.challenges.get_mut(&server_isk_def.challenge_id) {
+            ch.progress = ch.max_progress;
+            ch.completed = true;
+        }
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+
+    let claim_res = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(server_isk_def.challenge_id)],
+    )
+    .await
+    .expect("completed server-driven ISK challenge claim must succeed");
+    assert_eq!(claim_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+
+    let isk_after_claim = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    let expected_delta = eve_db::IskCents::from_isk(server_isk_def.isk_awarded).0;
+    assert_eq!(
+        isk_after_claim - isk_before,
+        expected_delta,
+        "claim_challenge_rewards must credit exact IskCents delta for server-driven FSD challenge"
+    );
+
+    // 3. Repeated claim must fail and pay 0 additional ISK
+    let repeat_err = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(server_isk_def.challenge_id)],
+    )
+    .await
+    .expect_err("repeated challenge claim must fail");
+    assert_eq!(repeat_err.code, "ChallengeAlreadyClaimed"); // rpc-lint: allow error code assertion
+    let isk_after_repeat = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(isk_after_repeat, isk_after_claim, "repeated claim must not pay ISK");
+
+    // 4. Client-event-driven challenge with isk_awarded > 0 must withhold ISK on claim
+    let mut client_def = defs
+        .iter()
+        .find(|d| d.client_event_driven)
+        .expect("expected at least one client_event_driven def in FSD")
+        .clone();
+    client_def.isk_awarded = 5_000_000;
+    let mut all_defs = defs.to_vec();
+    if let Some(pos) = all_defs.iter().position(|d| d.challenge_id == client_def.challenge_id) {
+        all_defs[pos] = client_def.clone();
+    } else {
+        all_defs.push(client_def.clone());
+    }
+    let defs_json = serde_json::to_string(&all_defs).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            eve_server::services::season_manager::SEASONAL_CHALLENGES_CONFIG_KEY.into(),
+            defs_json,
+        );
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        let mut ch = client_def.to_character_challenge_with_end(st.selected_season_id, now_ft, end_ft);
+        ch.is_dormant = false;
+        ch.progress = ch.max_progress;
+        ch.completed = true;
+        st.challenges.insert(client_def.challenge_id, ch);
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+    let client_claim = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_challenge_rewards",
+        &[PyRep::Integer(client_def.challenge_id)],
+    )
+    .await
+    .expect("client-driven challenge claim succeeds for points");
+    assert_eq!(client_claim.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    let isk_after_client = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    assert_eq!(
+        isk_after_client, isk_after_claim,
+        "client_event_driven challenge must withhold isk_awarded even when isk_awarded > 0"
+    );
+}

@@ -348,18 +348,23 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
 
 /// Returns the starter active challenges from `res:/staticdata/challenges.fsdbinary`.
 pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
-    if let Ok(sde) = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        let defs: Vec<SeasonalChallengeDef> = fsd_challenge_definitions(&sde)
-            .iter()
-            .filter(|d| !d.is_dormant)
-            .take(4)
-            .cloned()
-            .collect();
-        if !defs.is_empty() {
-            return defs;
-        }
-    }
-    Vec::new()
+    static CACHED: OnceLock<Vec<SeasonalChallengeDef>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            if let Ok(sde) = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
+                let defs: Vec<SeasonalChallengeDef> = fsd_challenge_definitions(&sde)
+                    .iter()
+                    .filter(|d| !d.is_dormant)
+                    .take(4)
+                    .cloned()
+                    .collect();
+                if !defs.is_empty() {
+                    return defs;
+                }
+            }
+            Vec::new()
+        })
+        .clone()
 }
 
 /// Decodes authentic reward crate loot tables from `res:/staticdata/crates.fsdbinary`.

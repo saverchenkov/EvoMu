@@ -115,7 +115,8 @@ where
         let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
         let max_active = catalog
             .get(&st.selected_season_id)
-            .map(|c| c.max_active_challenges as usize)
+            .or_else(|| catalog.values().next())
+            .map(|c| c.max_active_challenges.max(1) as usize)
             .unwrap_or(4);
         ensure_character_challenges_with_limit(&mut st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
         sync_character_challenges_with_defs(&mut st, &defs, snap, char_id);
@@ -836,7 +837,7 @@ pub fn handle_season_manager(
                 st.season_points += reward_pts;
                 let pts = st.season_points;
                 if let Some(ref def) = def_opt {
-                    if def.isk_awarded > 0 {
+                    if !client_driven && def.isk_awarded > 0 {
                         if let Some(char_rec) = snap.characters.get_mut(&char_id) {
                             char_rec.balance = eve_db::IskCents(
                                 char_rec
@@ -847,7 +848,9 @@ pub fn handle_season_manager(
                         }
                     }
                     if let Some(next_id) = def.next_challenge {
-                        if let Some(next_def) = defs.iter().find(|d| d.challenge_id == next_id) {
+                        if let Some(existing) = st.challenges.get_mut(&next_id) {
+                            existing.is_dormant = false;
+                        } else if let Some(next_def) = defs.iter().find(|d| d.challenge_id == next_id) {
                             let mut next_ch = next_def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
                             next_ch.is_dormant = false;
                             next_ch.baseline_progress = get_current_activity_count(&next_def.event_type, snap, char_id);
