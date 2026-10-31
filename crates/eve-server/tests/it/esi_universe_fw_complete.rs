@@ -558,7 +558,23 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         .iter()
         .find(|s| s["faction_id"] == json!(500_002))
         .expect("Minmatar FW stats");
-    assert_eq!(minmatar_fw["pilots"], json!(0));
+    let (caldari_sys, minmatar_sys, gallente_sys) = ctx.db.with_snapshot(|s| {
+        let count_for = |fid: i64| {
+            s.fw_system_occupations
+                .values()
+                .filter(|fw| fw.occupier_faction_id == fid)
+                .count()
+        };
+        (count_for(500_001), count_for(500_002), count_for(500_004))
+    });
+    assert!(gallente_sys >= 1, "Gallente must control at least the contested FW system");
+    assert_eq!(caldari_fw["systems_controlled"], json!(caldari_sys));
+    assert_eq!(minmatar_fw["systems_controlled"], json!(minmatar_sys));
+    let gallente_fw = fac_stats_arr
+        .iter()
+        .find(|s| s["faction_id"] == json!(500_004))
+        .expect("Gallente FW stats");
+    assert_eq!(gallente_fw["systems_controlled"], json!(gallente_sys));
 
     // 5. FW Systems (`GET /fw/systems`) + live LP donation & second PvP kill via RPCs
     let fw_systems = call(&router, EsiHttpRequest::new("GET", "/v1/fw/systems/"), 200);

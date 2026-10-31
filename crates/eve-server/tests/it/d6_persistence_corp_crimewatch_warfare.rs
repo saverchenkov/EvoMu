@@ -48,7 +48,7 @@ fn open_ctx(db_path: &Path, now_unix: u64) -> (ServerContext, Arc<VirtualServerC
     }
     let clock = Arc::new(VirtualServerClock::with_fixed_base(now_unix));
     repo.set_clock(clock.clone());
-    let ctx = ServerContext::with_repository(repo);
+    let ctx = ServerContext::with_sde_and_repository(ServerContext::new().sde.clone(), repo);
     ctx.set_clock(clock.clone());
     (ctx, clock)
 }
@@ -308,10 +308,43 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         rpc(&ctx, &mut sess, "entity", "ChangeDroneSettings", &[PyRep::Bool(true), PyRep::Bool(true)]).await;
 
         // Turn in a Clone Soldier Negotiator Tag (35664) via ApplyTagsForSecStatus while docked
+        let security_office_svc_id = ctx
+            .sde
+            .station_services
+            .values()
+            .find(|s| s.name == "Security Office")
+            .map(|s| s.service_id)
+            .unwrap_or(26);
+        let concord_lowsec_station = ctx
+            .sde
+            .stations
+            .values()
+            .find(|st| {
+                let is_concord = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137)
+                    || st.owner_faction_id == Some(500_006);
+                let has_office = ctx
+                    .sde
+                    .station_operations
+                    .get(&st.operation_id)
+                    .is_some_and(|op| op.services.contains(&security_office_svc_id));
+                is_concord
+                    && has_office
+                    && ctx
+                        .sde
+                        .solar_systems
+                        .get(&st.solar_system_id)
+                        .is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45)
+            })
+            .map(|st| st.station_id)
+            .unwrap_or(60_003_760);
+        let prev_station = sess.station_id;
+        sess.station_id = Some(concord_lowsec_station);
         ctx.db.with_mut_snapshot(|snap| {
-            let station_id = snap.characters[&PILOT].station_id.unwrap_or(60_003_760);
-            snap.characters.get_mut(&PILOT).unwrap().security_status = -1.0;
-            snap.characters.get_mut(&PILOT).unwrap().balance = IskCents::from_isk(500_000_000);
+            let station_id = concord_lowsec_station;
+            let ch = snap.characters.get_mut(&PILOT).unwrap();
+            ch.security_status = -1.0;
+            ch.balance = IskCents::from_isk(500_000_000);
+            ch.station_id = Some(concord_lowsec_station);
             snap.items.insert(
                 880_001,
                 InventoryItemRecord {
@@ -332,6 +365,10 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
             );
         });
         rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await;
+        sess.station_id = prev_station;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&PILOT).unwrap().station_id = prev_station;
+        });
 
         // Undock, jump Turnur -> Zarzakh via CmdStargateJump (creates 6h Zarzakh gate lock),
         // then jump Zarzakh -> Thera via WormholeJump (creates 300s wormhole polarization)

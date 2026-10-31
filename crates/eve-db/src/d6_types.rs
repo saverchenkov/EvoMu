@@ -613,6 +613,12 @@ pub struct PersistedSecStatusTransaction {
     pub delta: f64,
     pub reason: String,
     pub solar_system_id: u32,
+    #[serde(default)]
+    pub event_type_id: i64,
+    #[serde(default)]
+    pub other_owner_id: Option<i64>,
+    #[serde(default)]
+    pub other_type_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -439,6 +439,7 @@ pub async fn step_sentry_gun_grid_aggression(
 pub fn apply_illegal_pvp_sec_status_loss(
     ctx: &ServerContext,
     char_id: i64,
+    victim_char_id: i64,
     sys_id: u32,
     sys_sec: f64,
     is_pod_target: bool,
@@ -447,8 +448,12 @@ pub fn apply_illegal_pvp_sec_status_loss(
     if sys_sec <= 0.0 {
         return;
     }
-    let old_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
-    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, 0.0, is_pod_target, sys_sec);
+    let (old_sec, target_sec) = ctx.db.with_snapshot(|snap| {
+        let old = snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0);
+        let tgt = snap.characters.get(&victim_char_id).map(|c| c.security_status).unwrap_or(0.0);
+        (old, tgt)
+    });
+    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod_target, sys_sec);
     let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -466,6 +471,9 @@ pub fn apply_illegal_pvp_sec_status_loss(
                 delta: new_sec - old_sec,
                 reason: if is_pod_target { "Illegal Capsule Aggression".into() } else { "Illegal Ship Aggression".into() },
                 solar_system_id: sys_id,
+                event_type_id: 15, // logConst.eventSecStatusAttack
+                other_owner_id: (victim_char_id > 0).then_some(victim_char_id),
+                other_type_id: None,
             });
     });
 }
@@ -788,24 +796,47 @@ pub async fn handle_crimewatch(
             let rows: Vec<Vec<PyRep>> = txs
                 .into_iter()
                 .map(|t| {
+                    let event_date_ft = (t.timestamp_unix as i64 + 11_644_473_600) * 10_000_000;
+                    let event_type_id = if t.event_type_id != 0 {
+                        t.event_type_id
+                    } else if t.reason.contains("Tag") {
+                        507
+                    } else if t.delta < 0.0 {
+                        15
+                    } else {
+                        14
+                    };
+                    let other_owner_rep = t.other_owner_id.map(PyRep::Integer).unwrap_or(PyRep::None);
+                    let other_type_rep = t
+                        .other_type_id
+                        .map(|id| PyRep::Integer(id as i64))
+                        .unwrap_or(PyRep::None);
                     vec![
-                        PyRep::Integer(t.timestamp_unix as i64),
+                        PyRep::Integer(event_date_ft),
+                        PyRep::Integer(event_type_id),
+                        PyRep::Integer(t.solar_system_id as i64),
+                        PyRep::Real(t.delta),
+                        PyRep::Real(t.new_sec),
+                        other_owner_rep,
+                        other_type_rep,
                         PyRep::Real(t.old_sec),
                         PyRep::Real(t.new_sec),
-                        PyRep::Real(t.delta),
                         PyRep::String(t.reason),
-                        PyRep::Integer(t.solar_system_id as i64),
                     ]
                 })
                 .collect();
             Some(Ok(PyRep::rowset(
                 vec![
-                    "timestamp",
+                    "eventDate",
+                    "eventTypeID",
+                    "locationID",
+                    "modification",
+                    "newValue",
+                    "otherOwnerID",
+                    "otherTypeID",
                     "oldSecurityStatus",
                     "newSecurityStatus",
-                    "modification",
                     "reason",
-                    "solarSystemID",
                 ],
                 rows,
             )))
@@ -964,10 +995,23 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if session.station_id.is_none() {
+            let Some(station_id) = session.station_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NotDockedInStation".into(),
                     message: "Security status tag turn-in requires being docked at a CONCORD station".into(),
+                }));
+            };
+            let security_office_svc_id = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
+            let is_valid_concord_lowsec_office = ctx.sde.stations.get(&station_id).is_some_and(|st| {
+                let is_concord_owner = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137) || st.owner_faction_id == Some(500_006);
+                let is_lowsec = ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45);
+                let has_sec_office = ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| op.services.contains(&security_office_svc_id));
+                is_concord_owner && is_lowsec && has_sec_office
+            });
+            if !is_valid_concord_lowsec_office {
+                return Some(Err(BridgeRpcError {
+                    code: "SecurityOfficeRequired".into(),
+                    message: "Security status tags can only be redeemed at a low-sec CONCORD/DED station with a Security Office".into(),
                 }));
             }
             let cur_sec = ctx
@@ -975,21 +1019,13 @@ pub async fn handle_crimewatch(
                 .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status))
                 .unwrap_or(0.0);
             let (tag_type_id, qty) = if args.len() >= 2 {
-                let t = args.first().and_then(|a| a.as_i64()).unwrap_or(35661) as u32;
-                let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
-                (t, q)
+                (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(35661) as u32,
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32,
+                )
             } else {
-                let t = if cur_sec < -8.0 {
-                    35661
-                } else if cur_sec < -5.0 {
-                    35662
-                } else if cur_sec < -2.0 {
-                    35663
-                } else {
-                    35664
-                };
-                let q = args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
-                (t, q)
+                let t = if cur_sec < -8.0 { 35661 } else if cur_sec < -5.0 { 35662 } else if cur_sec < -2.0 { 35663 } else { 35664 };
+                (t, args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32)
             };
             let now_unix = ctx.now_unix();
             let Some(sys_id) = session.solar_system_id.or_else(|| {
@@ -1007,18 +1043,19 @@ pub async fn handle_crimewatch(
             // 35663 Transporter:  -5.0 to -2.0
             // 35664 Negotiator:   -2.0 to  0.0
             let band_opt = match tag_type_id {
-                35661 | 35514 => Some((-10.0, -8.0)),
-                35662 | 35515 => Some((-8.0, -5.0)),
-                35663 | 35516 => Some((-5.0, -2.0)),
-                35664 | 35517 => Some((-2.0, 0.0)),
+                35661 | 35514 => Some((-10.0, -8.0, 1_000_000.0)),
+                35662 | 35515 => Some((-8.0, -5.0, 2_000_000.0)),
+                35663 | 35516 => Some((-5.0, -2.0, 3_000_000.0)),
+                35664 | 35517 => Some((-2.0, 0.0, 4_000_000.0)),
                 _ => None,
             };
-            let Some((min_band, max_band)) = band_opt else {
+            let Some((min_band, max_band, fee_per_tag_isk)) = band_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSecurityTagType".into(),
                     message: format!("Type {tag_type_id} is not a valid Clone Soldier Tag (35661..35664)"),
                 }));
             };
+            let total_fee_cents = eve_db::IskCents::from_f64_isk(fee_per_tag_isk * (qty as f64));
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let cur_sec = snap
@@ -1055,6 +1092,20 @@ pub async fn handle_crimewatch(
                         message: format!("Missing {qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"),
                     });
                 };
+                let cur_bal = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.balance)
+                    .unwrap_or(eve_db::IskCents(0));
+                if cur_bal < total_fee_cents {
+                    return Err(BridgeRpcError {
+                        code: "NotEnoughMoney".into(),
+                        message: format!(
+                            "Insufficient ISK for security tag redemption fee: need {} cents, have {} cents",
+                            total_fee_cents.0, cur_bal.0
+                        ),
+                    });
+                }
                 if let Some(it) = snap.items.get_mut(&iid) {
                     if it.quantity > qty {
                         it.quantity -= qty;
@@ -1065,6 +1116,7 @@ pub async fn handle_crimewatch(
                 }
                 let new_sec = (cur_sec + 0.5 * (qty as f64)).min(max_band).min(0.0);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.balance = eve_db::IskCents(ch.balance.0 - total_fee_cents.0);
                     ch.security_status = new_sec;
                 }
                 Ok((cur_sec, new_sec))
@@ -1083,6 +1135,9 @@ pub async fn handle_crimewatch(
                                 delta: new_sec - old_sec,
                                 reason: "Clone Soldier Security Tag".into(),
                                 solar_system_id: sys_id,
+                                event_type_id: 507, // logConst.eventSecStatusHandInTags
+                                other_owner_id: Some(1_000_125),
+                                other_type_id: Some(tag_type_id),
                             });
                     });
                     ctx.notify(

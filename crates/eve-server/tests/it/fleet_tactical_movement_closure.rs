@@ -514,3 +514,87 @@ async fn test_fleet_tactical_broadcasts_watchlist_and_tagging() {
     .expect("ClearTargetTags");
     assert_eq!(field(&clear_tags, "fleetID"), PyRep::Integer(fid));
 }
+
+#[tokio::test]
+async fn test_fleet_boss_handover_closure() {
+    // parity: feat:fleet.boss-handover
+    let ctx = std::sync::Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+
+    let sys_id = 30_000_142_u32;
+    let boss_id = 90_000_001_i64;
+    let fc_id = 90_000_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        for (cid, uid) in [(boss_id, 1_u64), (fc_id, 2_u64)] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.user_id = uid;
+                ch.solar_system_id = sys_id;
+                ch.station_id = None;
+            }
+        }
+    });
+
+    let mut sess1 = SessionState::new(64_001);
+    crate::common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    let mut sess2 = SessionState::new(64_002);
+    crate::common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
+
+    for (s, cid) in [(&mut sess1, boss_id), (&mut sess2, fc_id)] {
+        rpc(&ctx, s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(cid)])
+            .await
+            .expect("SelectCharacterID");
+    }
+    ctx.advance_secs(15);
+
+    let created = rpc(&ctx, &mut sess1, "fleetObjectHandler", "CreateFleet", &[])
+        .await
+        .expect("CreateFleet");
+    let fid = match created {
+        PyRep::Integer(v) => v,
+        _ => match field(&created, "fleetID") {
+            PyRep::Integer(v) => v,
+            other => panic!("expected fleetID, got {other:?}"),
+        },
+    };
+    sess1.fleet_id = Some(fid);
+
+    let _ = rpc(
+        &ctx,
+        &mut sess1,
+        "fleetObjectHandler",
+        "Invite",
+        &[PyRep::Integer(fc_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)],
+    )
+    .await
+    .expect("Invite");
+    let _ = rpc(&ctx, &mut sess2, "fleetObjectHandler", "AcceptInvite", &[PyRep::Integer(fid)])
+        .await
+        .expect("AcceptInvite");
+    sess2.fleet_id = Some(fid);
+
+    // Boss handover (`feat:fleet.boss-handover`): MakeLeader, LeaveFleet, and disconnect handover
+    let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "MakeLeader", &[PyRep::Integer(fc_id)])
+        .await
+        .expect("MakeLeader");
+    assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), fc_id);
+    assert!(ctx.drain_notifications_for_char(boss_id).iter().any(|n| n.event == "OnFleetMemberChanged"));
+
+    // Boss (fc_id) leaves -> boss passes automatically to boss_id
+    let left = rpc(&ctx, &mut sess2, "fleetObjectHandler", "LeaveFleet", &[])
+        .await
+        .expect("LeaveFleet");
+    assert_eq!(field(&left, "disbanded"), PyRep::Bool(false));
+    assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), boss_id);
+
+    // Re-invite fc_id, then disconnect boss_id -> boss passes automatically to fc_id
+    let _ = rpc(&ctx, &mut sess1, "fleetObjectHandler", "Invite", &[PyRep::Integer(fc_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)])
+        .await
+        .expect("Re-invite fc_id");
+    ctx.advance_secs(15);
+    let _ = rpc(&ctx, &mut sess2, "fleetObjectHandler", "AcceptInvite", &[PyRep::Integer(fid)])
+        .await
+        .expect("AcceptInvite 2");
+    let _ = eve_server::services::fleet_social::fleet_social_notify::remove_character_from_all_fleets(&ctx, boss_id);
+    assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), fc_id);
+}

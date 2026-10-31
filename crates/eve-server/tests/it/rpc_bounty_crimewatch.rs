@@ -559,19 +559,53 @@ async fn test_crimewatch_security_and_duels() {
     });
     assert!(has_le, "Mutual limited engagement must be active for 300 seconds");
 
-    // 5. ApplyTagsForSecStatus: P1 docked in station turns in Clone Soldier Trainer Tag (35661)
+    // 5. ApplyTagsForSecStatus: P1 docked in low-sec CONCORD Security Office station turns in Clone Soldier Trainer Tag (35661)
     // Valid for security band [-10.0, -8.0); P1 is at -8.5.
-    s1.station_id = Some(60_003_760);
-    s1.solar_system_id = Some(30_000_142);
+    let security_office_svc_id = ctx
+        .sde
+        .station_services
+        .values()
+        .find(|s| s.name == "Security Office")
+        .map(|s| s.service_id)
+        .unwrap_or(26);
+    let (concord_lowsec_station, concord_lowsec_sys) = ctx
+        .sde
+        .stations
+        .values()
+        .find(|st| {
+            let is_concord = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137)
+                || st.owner_faction_id == Some(500_006);
+            let has_office = ctx
+                .sde
+                .station_operations
+                .get(&st.operation_id)
+                .is_some_and(|op| op.services.contains(&security_office_svc_id));
+            is_concord
+                && has_office
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&st.solar_system_id)
+                    .is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45)
+        })
+        .map(|st| (st.station_id, st.solar_system_id))
+        .unwrap_or((60_003_760, 30_000_142));
+    s1.station_id = Some(concord_lowsec_station);
+    s1.solar_system_id = Some(concord_lowsec_sys);
     let tag_item_id = 880_001;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.balance = eve_db::IskCents::from_f64_isk(50_000_000.0);
+            ch.station_id = Some(concord_lowsec_station);
+            ch.solar_system_id = concord_lowsec_sys;
+        }
         snap.items.insert(
             tag_item_id,
             eve_db::InventoryItemRecord {
                 item_id: tag_item_id,
                 type_id: 35661, // Clone Soldier Trainer Tag
                 owner_id: P1,
-                location_id: 60_003_760,
+                location_id: concord_lowsec_station,
                 flag: eve_db::InventoryFlag::Hangar,
                 quantity: 1,
                 singleton: false,

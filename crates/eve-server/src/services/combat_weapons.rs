@@ -1054,7 +1054,7 @@ pub async fn handle_weapons(
                                 }
                                 if !is_legal && sys_sec > 0.0 && !is_arc_mobile && is_new_agg {
                                     crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
-                                        ctx, char_id, sys_id, sys_sec, is_arc_pod, now_unix,
+                                        ctx, char_id, vcid, sys_id, sys_sec, is_arc_pod, now_unix,
                                     );
                                 }
                                 crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
@@ -1258,8 +1258,21 @@ pub async fn handle_weapons(
                 }
                 if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg {
                     crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
-                        ctx, char_id, sys_id, sys_sec, is_pod_target, now_unix,
+                        ctx, char_id, victim_char_id, sys_id, sys_sec, is_pod_target, now_unix,
                     );
+                    if sys_sec < 0.45 && is_pod_target && victim_char_id > 0 {
+                        let kr_id = ctx.db.with_mut_snapshot(|snap| {
+                            snap.next_entity_id += 1;
+                            snap.next_entity_id
+                        });
+                        crate::services::combat_crimewatch::create_kill_right(
+                            ctx,
+                            kr_id,
+                            victim_char_id,
+                            char_id,
+                            0.0,
+                        );
+                    }
                 }
                 if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && !is_mobile_struct {
                     if let Some(sentry_origin) = crate::services::security_mgr::nearest_sentry_gun_origin(

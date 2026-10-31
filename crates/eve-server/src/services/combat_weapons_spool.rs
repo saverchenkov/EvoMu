@@ -849,6 +849,9 @@ pub async fn handle_ship_or_npc_destruction(
                             delta: new_sec - old_sec,
                             reason: "NPC Pirate Bounty".into(),
                             solar_system_id: sys_id,
+                            event_type_id: 14, // logConst.eventSecStatusKill
+                            other_owner_id: None,
+                            other_type_id: None,
                         });
                 });
             }

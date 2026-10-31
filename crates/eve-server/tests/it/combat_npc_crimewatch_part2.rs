@@ -244,24 +244,39 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
     assert_eq!(dict_get(&act_kr, "suspectFlagged").and_then(|v| v.as_bool()), Some(true));
 
     // 10. Clone Soldier Security Tags (`feat:crimewatch.security-tags`)
+    let security_office_svc_id = ctx
+        .sde
+        .station_services
+        .values()
+        .find(|s| s.name == "Security Office")
+        .map(|s| s.service_id)
+        .unwrap_or(26);
     let lowsec_station_id = ctx
         .sde
         .stations
         .values()
         .find(|st| {
-            ctx.sde
-                .solar_systems
-                .get(&st.solar_system_id)
-                .is_some_and(|sys| {
-                    let r = (sys.security_status * 10.0).round() / 10.0;
-                    (0.1..0.5).contains(&r)
-                })
+            let is_concord = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137)
+                || st.owner_faction_id == Some(500_006);
+            let has_office = ctx
+                .sde
+                .station_operations
+                .get(&st.operation_id)
+                .is_some_and(|op| op.services.contains(&security_office_svc_id));
+            is_concord
+                && has_office
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&st.solar_system_id)
+                    .is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45)
         })
-        .expect("lowsec station in SDE")
+        .expect("lowsec CONCORD Security Office station in SDE")
         .station_id;
     ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.characters.get_mut(&char_b) {
             c.security_status = -6.5;
+            c.balance = eve_db::IskCents::from_f64_isk(50_000_000.0);
             c.station_id = Some(lowsec_station_id);
         }
         s.items.insert(

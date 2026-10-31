@@ -605,15 +605,22 @@ async fn activate_single_fighter_ability(
                     now_unix,
                 );
                 if !is_legal && sec > 0.0 {
-                    let old_sec = ctx.db.with_snapshot(|snap| {
-                        snap.characters
+                    let (old_sec, target_sec) = ctx.db.with_snapshot(|snap| {
+                        let old = snap
+                            .characters
                             .get(&char_id)
                             .map(|c| c.security_status)
-                            .unwrap_or(0.0)
+                            .unwrap_or(0.0);
+                        let tgt = snap
+                            .characters
+                            .get(&victim_char_id)
+                            .map(|c| c.security_status)
+                            .unwrap_or(0.0);
+                        (old, tgt)
                     });
                     let loss = crate::combat::crimewatch::compute_sec_status_loss(
                         old_sec,
-                        0.0,
+                        target_sec,
                         false,
                         sec,
                     );
@@ -981,15 +988,22 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                                     now_unix,
                                 );
                                 if !is_legal && sys_sec > 0.0 {
-                                    let old_sec = ctx.db.with_snapshot(|snap| {
-                                        snap.characters
+                                    let (old_sec, target_sec) = ctx.db.with_snapshot(|snap| {
+                                        let old = snap
+                                            .characters
                                             .get(&char_id)
                                             .map(|c| c.security_status)
-                                            .unwrap_or(0.0)
+                                            .unwrap_or(0.0);
+                                        let tgt = snap
+                                            .characters
+                                            .get(&vcid)
+                                            .map(|c| c.security_status)
+                                            .unwrap_or(0.0);
+                                        (old, tgt)
                                     });
                                     let loss = crate::combat::crimewatch::compute_sec_status_loss(
                                         old_sec,
-                                        0.0,
+                                        target_sec,
                                         b.type_id == 670,
                                         sys_sec,
                                     );
