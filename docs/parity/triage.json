@@ -115,10 +115,6 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/evePhotosvc.pyj:599 EvePhoto.GetAllianceLogo() passes callback='OnAllianceLogoReady' (line 604) to EvePhoto.__FetchFromImageServer() at line 666: sm.ScatterEvent(callback, itemID, size) \u2014 client-only local HTTP image-cache callback scatter; no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
   },
-  "notify:OnAmmoInBankChanged": {
-    "disposition": "dead_client_code",
-    "evidence": "eve/client/script/ui/inflight/shipModuleButton/shipmodulebutton.pyj:744 ModuleButton.OnAmmoInBankChanged(self, masterID): unreferenced/dormant V24 client notification listener (0 sm.ScatterEvent/SendEvent callers in V24 code.ccp, 1 handler method(s)); no server MachoNet cast."
-  },
   "notify:OnAntiAddictionOnlineTimeBlockWarning": {
     "disposition": "dead_client_code",
     "evidence": "eve/client/script/parklife/gameui.pyj:1183 GameUI.OnAntiAddictionOnlineTimeBlockWarning(self, countdownSecond): China Serenity anti-addiction regulatory warning handler; Tranquility V24 never activates anti-addiction online time blocks."
@@ -374,10 +370,6 @@
   "notify:OnCharacterSessionChanged": {
     "disposition": "client_local",
     "evidence": "carbon/common/script/sys/sessions.pyj:659 SessionMgr.OnSessionChanged(): sm.ScatterEvent('OnCharacterSessionChanged', ...) \u2014 client-only local UI scatter (1 site(s)); no machoNet cast in client code; no V24.01 server emission. Line from V24 bytecode line table."
-  },
-  "notify:OnChargeLoadedToModule": {
-    "disposition": "dead_client_code",
-    "evidence": "eve/client/script/ui/inflight/scannerFiles/probeScannerPalette.pyj:1172 ProbeScannerPalette.OnChargeLoadedToModule(self): unreferenced/dormant V24 client notification listener (0 sm.ScatterEvent/SendEvent callers in V24 code.ccp, 1 handler method(s)); no server MachoNet cast."
   },
   "notify:OnChatWindowStartBlinking": {
     "disposition": "client_local",

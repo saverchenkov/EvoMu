@@ -801,6 +801,40 @@ pub(crate) async fn prepare_ewar_and_capital_module(
     }))
 }
 
+pub(crate) fn ewar_jamming_type(
+    mod_type: &eve_sde::InvType,
+    charge_type_id: Option<u32>,
+    disables_target_mwd_mjd: bool,
+    hic_bubble_radius_m: Option<f64>,
+) -> Option<&'static str> {
+    match mod_type.group_id {
+        52 => Some(if disables_target_mwd_mjd {
+            "warpScramblerMWD"
+        } else {
+            "warpScrambler"
+        }),
+        899 if hic_bubble_radius_m.is_none() => Some(if charge_type_id == Some(45010) {
+            "warpScramblerMWD"
+        } else {
+            "focusedWarpScrambler"
+        }),
+        65 | 1672 => Some("webify"),
+        201 => Some("electronic"),
+        208 => Some("ewRemoteSensorDamp"),
+        291 => Some(
+            if mod_type.effect_ids.contains(&6425) || mod_type.name.contains("Guidance") {
+                "ewGuidanceDisrupt"
+            } else {
+                "ewTrackingDisrupt"
+            },
+        ),
+        379 => Some("ewTargetPaint"),
+        71 => Some("ewEnergyNeut"),
+        68 => Some("ewEnergyVampire"),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
     ctx: &ServerContext,
@@ -841,33 +875,12 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
     let Some(target_id) = target_id_opt.filter(|&tid| tid > 0 && tid != ship_id) else {
         return;
     };
-    let jam_type_opt = match mod_type.group_id {
-        52 => Some(if disables_target_mwd_mjd {
-            "warpScramblerMWD"
-        } else {
-            "warpScrambler"
-        }),
-        899 if hic_bubble_radius_m.is_none() => Some(if charge_type_id == Some(45010) {
-            "warpScramblerMWD"
-        } else {
-            "focusedWarpScrambler"
-        }),
-        65 | 1672 => Some("webify"),
-        201 => Some("electronic"),
-        208 => Some("ewRemoteSensorDamp"),
-        291 => Some(
-            if mod_type.effect_ids.contains(&6425) || mod_type.name.contains("Guidance") {
-                "ewGuidanceDisrupt"
-            } else {
-                "ewTrackingDisrupt"
-            },
-        ),
-        379 => Some("ewTargetPaint"),
-        71 => Some("ewEnergyNeut"),
-        68 => Some("ewEnergyVampire"),
-        _ => None,
-    };
-    let Some(jam_type) = jam_type_opt else {
+    let Some(jam_type) = ewar_jamming_type(
+        mod_type,
+        charge_type_id,
+        disables_target_mwd_mjd,
+        hic_bubble_radius_m,
+    ) else {
         return;
     };
 
@@ -877,6 +890,12 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
         PyRep::Integer(target_id),
         PyRep::String(jam_type.into()),
     ];
+    ctx.active_ewar_starts
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(module_id)
+        .or_default()
+        .push((target_id, jam_type));
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnEwarStart",

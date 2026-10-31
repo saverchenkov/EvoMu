@@ -849,6 +849,7 @@ pub async fn handle_wrecks_killmails(
             }
             if let Some(sys_id) = session.solar_system_id {
                 crate::services::space_destiny::space_nav_travel::sync_tether(ctx, char_id, sys_id, ship_id).await;
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
             }
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),

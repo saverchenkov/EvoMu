@@ -294,8 +294,14 @@ pub async fn handle(
                     if let Some(sys_id) = session.solar_system_id {
                         let _ = ctx.systems.get_or_spawn(sys_id).remove_module_cycle(src_item.location_id, item_id).await;
                     }
+                    let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                        ctx,
+                        char_id,
+                        session.solar_system_id,
+                        src_item.location_id,
+                        item_id,
+                    );
                 }
-                ctx.remove_projected_ewar_by_module(item_id);
             }
 
             if let Some(src_item) = &source_item_opt {
@@ -336,14 +342,24 @@ pub async fn handle(
                 if item_cat_opt == Some(8) && matches!(flag_u16, 11..=34) {
                     let current_dock = session.station_id.or(session.structure_id);
                     return match ctx.load_charge_into_weapon_slot(char_id, new_loc, flag, item_id, current_dock) {
-                        Ok((loaded_id, loaded_type_id, loaded_qty, loaded_ver)) => Some(Ok(PyRep::keyval([
-                            ("itemID", PyRep::Integer(loaded_id)),
-                            ("typeID", PyRep::Integer(loaded_type_id as i64)),
-                            ("locationID", PyRep::Integer(new_loc)),
-                            ("flagID", PyRep::Integer(flag as i64)),
-                            ("quantity", PyRep::Integer(loaded_qty as i64)),
-                            ("version", PyRep::Integer(loaded_ver as i64)),
-                        ]))),
+                        Ok((loaded_id, loaded_type_id, loaded_qty, loaded_ver)) => {
+                            let mod_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                                snap.items
+                                    .values()
+                                    .filter(|i| i.location_id == new_loc && i.flag == flag && i.item_id != loaded_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 7))
+                                    .map(|i| i.item_id)
+                                    .collect()
+                            });
+                            crate::services::notify_emitters_batch8::emit_charge_and_bank_ammo_loaded(ctx, char_id, new_loc, &mod_ids);
+                            Some(Ok(PyRep::keyval([
+                                ("itemID", PyRep::Integer(loaded_id)),
+                                ("typeID", PyRep::Integer(loaded_type_id as i64)),
+                                ("locationID", PyRep::Integer(new_loc)),
+                                ("flagID", PyRep::Integer(flag as i64)),
+                                ("quantity", PyRep::Integer(loaded_qty as i64)),
+                                ("version", PyRep::Integer(loaded_ver as i64)),
+                            ])))
+                        }
                         Err(e) => Some(Err(e)),
                     };
                 }
@@ -1089,16 +1105,13 @@ pub async fn handle(
                     }
                 });
                 if let Ok(Some(merged_item)) = merged_opt {
-                    if looted_from_space {
-                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(
-                            ctx,
-                            session.solar_system_id,
-                            orig_source_loc_id,
-                        )
-                        .await;
-                    }
                     let moved_tid = source_item_opt.as_ref().map(|i| i.type_id).unwrap_or(merged_item.type_id);
                     let moved_qty = source_item_opt.as_ref().map(|i| i.quantity).unwrap_or(1);
+                    if looted_from_space {
+                        let fid = session.fleet_id.or_else(|| crate::services::notify_emitters_batch8::char_fleet_id(ctx, char_id));
+                        crate::services::notify_emitters_batch3::emit_fleet_loot_event_if_in_fleet(ctx, char_id, fid, &[(moved_tid, moved_qty)]);
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(ctx, session.solar_system_id, orig_source_loc_id).await;
+                    }
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
                     if let Some((cid, entry)) = pending_alsc_take {
                         fitting_containers_ships::write_container_ship_state(ctx, |st| {
@@ -1106,14 +1119,7 @@ pub async fn handle(
                         });
                     } else if orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
                         fitting_containers_ships::record_container_take_log(ctx, char_id, item_id, moved_tid, moved_qty, orig_source_loc_id);
-                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(
-                            ctx,
-                            char_id,
-                            session.solar_system_id,
-                            orig_source_loc_id,
-                            moved_tid,
-                        )
-                        .await;
+                        crate::services::pve_dungeon_runtime::on_dungeon_item_looted(ctx, char_id, session.solar_system_id, orig_source_loc_id, moved_tid).await;
                     }
                     if looted_foreign_jetcan {
                         super::inventory_stacking::apply_space_loot_suspect_flag(ctx, session, char_id);
@@ -1201,6 +1207,12 @@ pub async fn handle(
                         crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
                     }
                     if looted_from_space {
+                        crate::services::notify_emitters_batch3::emit_fleet_loot_event_if_in_fleet(
+                            ctx,
+                            char_id,
+                            session.fleet_id.or_else(|| crate::services::notify_emitters_batch8::char_fleet_id(ctx, char_id)),
+                            &[(updated.type_id, updated.quantity)],
+                        );
                         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::despawn_empty_jetcan_if_needed(
                             ctx,
                             session.solar_system_id,

@@ -14,7 +14,7 @@
 #![forbid(unsafe_code)]
 
 use super::market_contracts::PLEX_TYPE_ID;
-use crate::router::ServerContext;
+use crate::router::{NotificationTarget, ServerContext};
 use eve_db::corp_roles;
 use eve_db::ledger::{ref_types, JournalContext, JournalEntryInput, JournalMeta, ACCOUNTING_KEY_CASH};
 use eve_db::{InventoryFlag, IskCents};
@@ -309,8 +309,12 @@ fn market_transactions(
     ))
 }
 
-fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
+fn deposit_plex_inner(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    args: &[PyRep],
+) -> Result<(i64, u64, u64, i64, i64), BridgeRpcError> {
     let location_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| rpc_err("InvalidArgument", "locationID required"))?;
     let item_id = args.get(1).and_then(|a| a.as_i64()).ok_or_else(|| rpc_err("InvalidArgument", "itemID required"))?;
     let qty = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -321,7 +325,7 @@ fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> 
     if docked != Some(location_id) {
         return Err(rpc_err("NotDockedAtLocation", "PLEX can only be deposited from the hangar you are docked in"));
     }
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         let item = snap.items.get(&item_id).cloned().ok_or_else(|| rpc_err("ItemNotFound", "item not found"))?;
         if item.owner_id != char_id || item.location_id != location_id || item.flag != InventoryFlag::Hangar {
             return Err(rpc_err("ItemNotFound", "PLEX item is not in your hangar at this location"));
@@ -351,32 +355,38 @@ fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> 
             "PLEX Vault Deposit from hangar",
             ctx.now_unix(),
         );
-        Ok((snap.next_entity_id, user_id, tx_id, rem_plex))
-    });
-    match res {
-        Ok((entity_id, user_id, tx_id, rem_plex)) => {
-            crate::services::quasar_payment_store::emit_balance_changed_notice(
-                &ctx.quasar_gateway.pending_notices,
-                user_id,
-                tx_id,
-                qty,
-                rem_plex,
-                "PLEX Vault Deposit from hangar",
-                ctx.now_unix(),
-            );
-            Ok(PyRep::Integer(entity_id))
-        }
-        Err(e) => Err(e),
-    }
+        Ok((snap.next_entity_id, user_id, tx_id, rem_plex, qty))
+    })
 }
 
-fn withdraw_plex(
+fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (entity_id, user_id, tx_id, rem_plex, qty) = deposit_plex_inner(ctx, session, char_id, args)?;
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnPlexDeposited",
+        "charid",
+        vec![PyRep::Integer(entity_id)],
+    );
+    crate::services::quasar_payment_store::emit_balance_changed_notice(
+        &ctx.quasar_gateway.pending_notices,
+        user_id,
+        tx_id,
+        qty,
+        rem_plex,
+        "PLEX Vault Deposit from hangar",
+        ctx.now_unix(),
+    );
+    Ok(PyRep::Integer(entity_id))
+}
+
+fn withdraw_plex_inner(
     ctx: &ServerContext,
     session: &SessionState,
+    char_id: i64,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
+) -> Result<(PyRep, i64, u64, u64, i64, i64), BridgeRpcError> {
 
     let mut qty = kwargs
         .get("quantity")
@@ -462,7 +472,7 @@ fn withdraw_plex(
         }
     };
 
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
         let vault_bal = snap.plex_vault_balance(char_id);
         if vault_bal < qty {
             return Err(rpc_err(
@@ -536,25 +546,40 @@ fn withdraw_plex(
                 ("remainingVaultBalance", PyRep::Integer(rem_plex)),
                 ("locationID", PyRep::Integer(target_location)),
                 ("flag", PyRep::Integer(target_flag as u16 as i64)),
+                ("reference", PyRep::Integer(tx_id as i64)),
             ]),
+            final_item_id,
             user_id,
             tx_id,
             rem_plex,
+            qty,
         ))
-    });
-    match res {
-        Ok((rep, user_id, tx_id, rem_plex)) => {
-            crate::services::quasar_payment_store::emit_balance_changed_notice(
-                &ctx.quasar_gateway.pending_notices,
-                user_id,
-                tx_id,
-                -qty,
-                rem_plex,
-                "PLEX Vault Withdrawal to hangar",
-                ctx.now_unix(),
-            );
-            Ok(rep)
-        }
-        Err(e) => Err(e),
-    }
+    })
+}
+
+fn withdraw_plex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (rep, final_item_id, user_id, tx_id, rem_plex, qty) =
+        withdraw_plex_inner(ctx, session, char_id, args, kwargs)?;
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnPlexItemAddedToInventory",
+        "charid",
+        vec![PyRep::Integer(final_item_id), PyRep::Integer(tx_id as i64)],
+    );
+    crate::services::quasar_payment_store::emit_balance_changed_notice(
+        &ctx.quasar_gateway.pending_notices,
+        user_id,
+        tx_id,
+        -qty,
+        rem_plex,
+        "PLEX Vault Withdrawal to hangar",
+        ctx.now_unix(),
+    );
+    Ok(rep)
 }

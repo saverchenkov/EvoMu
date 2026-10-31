@@ -1215,6 +1215,7 @@ pub async fn activate_command_burst(
         ctx.invalidate_ship_fitting(member_sid);
         ctx.notify(NotificationTarget::Character(member_cid), "OnDbuffUpdated", "charid", vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())]);
     }
+    crate::services::notify_emitters_batch3_space::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("chargeTypeID", PyRep::Integer(c_tid as i64)),

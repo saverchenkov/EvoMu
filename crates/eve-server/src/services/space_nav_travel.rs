@@ -268,7 +268,7 @@ pub(crate) async fn handle_cmd_goto_point(
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = handle.break_gate_cloak(ship_id).await;
+    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
         .goto_point(ship_id, DVec3::new(x, y, z))
         .await
@@ -625,7 +625,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         });
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = handle.break_gate_cloak(ship_id).await;
+    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
@@ -720,7 +720,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     if fraction > 0.0 {
-        let _ = handle.break_gate_cloak(ship_id).await;
+        let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     }
     handle
         .set_speed_fraction(ship_id, fraction.clamp(0.0, 1.0))
@@ -800,7 +800,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         MovementMode::Follow { target_id, range }
     };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = handle.break_gate_cloak(ship_id).await;
+    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
         .set_movement_mode(ship_id, mode)
         .await
@@ -898,7 +898,7 @@ pub(crate) async fn handle_cmd_align_to(
     let dir = (target_pos - current_ball.position).normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = handle.break_gate_cloak(ship_id).await;
+    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     let res = handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
@@ -1045,12 +1045,6 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             ball_changed = true;
         }
         cs_changed = true;
-        crate::services::notify_emitters_batch3_space::emit_cloak_module_force_deactivated(
-            ctx,
-            char_id,
-            "DecloakProximityOrDeactivation",
-            2000.0,
-        );
     }
 
     if active_cap_mjfg && !cs.is_capital_mjfg && cs.mjfg_spool_remaining_s <= 0.0 {

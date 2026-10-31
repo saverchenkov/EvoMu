@@ -389,9 +389,10 @@ pub fn handle(
         }
 
         ("raffleMgr", "QA_SeedRaffles") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let qa_or_gm = eve_machonet::service_roles::ROLE_QA | eve_db::service_roles::ROLE_ADMIN;
             if !session.has_gm_role() && (session.role & qa_or_gm) == 0 {
                 return Some(Err(BridgeRpcError {
@@ -399,7 +400,28 @@ pub fn handle(
                     message: "NotAuthorized".into(),
                 }));
             }
+            let Some(station_id) = session.station_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "CharacterNotDocked".into(),
+                }));
+            };
             let count = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 100) as usize;
+            // DERIVED: QA_SeedRaffles uses caller-supplied type_id (arg 1) or the lowest published frigate in SDE (Rifter 587).
+            let seed_type_id = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|tid| ctx.sde.types.contains_key(tid))
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .values()
+                        .filter(|t| t.group_id == 25 && t.published)
+                        .map(|t| t.type_id)
+                        .min()
+                })
+                .unwrap_or(587);
             let now = ctx.now_unix();
             let mut seeded = Vec::new();
             ctx.db.with_mut_snapshot(|snap| {
@@ -412,9 +434,9 @@ pub fn handle(
                         item_id,
                         eve_db::InventoryItemRecord {
                             item_id,
-                            type_id: 587,
-                            owner_id: session.character_id.unwrap_or(90000001),
-                            location_id: 60003760,
+                            type_id: seed_type_id,
+                            owner_id: char_id,
+                            location_id: station_id,
                             flag: eve_db::InventoryFlag::Hangar,
                             quantity: 1,
                             singleton: true,
@@ -425,11 +447,11 @@ pub fn handle(
                     let note_id = -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()));
                     let rec_json = serde_json::json!({
                         "raffle_id": raffle_id,
-                        "creator_id": session.character_id.unwrap_or(90000001),
-                        "station_id": 60003760_i64,
+                        "creator_id": char_id,
+                        "station_id": station_id,
                         "item_id": item_id,
-                        "type_id": 587,
-                        "ticket_count": 100,
+                        "type_id": seed_type_id,
+                        "ticket_count": 8,
                         "ticket_price_cents": 100_000,
                         "hypercores_used": 10,
                         "created_unix": now,
@@ -454,12 +476,12 @@ pub fn handle(
                     seeded.push(PyRep::keyval([
                         ("raffle_id", PyRep::Integer(raffle_id)),
                         ("raffleID", PyRep::Integer(raffle_id)),
-                        ("owner_id", PyRep::Integer(session.character_id.unwrap_or(90000001))),
-                        ("location_id", PyRep::Integer(60003760)),
+                        ("owner_id", PyRep::Integer(char_id)),
+                        ("location_id", PyRep::Integer(station_id)),
                         ("item_id", PyRep::Integer(item_id)),
-                        ("type_id", PyRep::Integer(587)),
-                        ("ticket_count", PyRep::Integer(100)),
-                        ("tickets_remaining", PyRep::Integer(100)),
+                        ("type_id", PyRep::Integer(seed_type_id as i64)),
+                        ("ticket_count", PyRep::Integer(8)),
+                        ("tickets_remaining", PyRep::Integer(8)),
                         ("ticket_price", PyRep::Real(1000.0)),
                         ("hypercores_used", PyRep::Integer(10)),
                         ("expiration_time", PyRep::Integer((now + 86400 * 3) as i64)),

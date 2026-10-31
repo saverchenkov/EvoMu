@@ -999,6 +999,7 @@ impl ServerContext {
             session_closers: std::sync::RwLock::new(std::collections::HashMap::new()),
             ship_fittings,
             projected_ewar: std::sync::RwLock::new(std::collections::HashMap::new()),
+            active_ewar_starts: std::sync::RwLock::new(std::collections::HashMap::new()),
             weapon_cycle_state: std::sync::RwLock::new(std::collections::HashMap::new()),
             fighter_cooldown_state: std::sync::RwLock::new(std::collections::HashMap::new()),
             fighter_charge_state: std::sync::RwLock::new(std::collections::HashMap::new()),

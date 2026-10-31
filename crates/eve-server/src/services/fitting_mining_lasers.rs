@@ -44,7 +44,13 @@ pub(crate) async fn handle_mining_and_deactivate(
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
-            let affected_ewar_ships = ctx.remove_projected_ewar_by_module(module_id);
+            let affected_ewar_ships = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                ctx,
+                char_id,
+                session.solar_system_id,
+                ship_id,
+                module_id,
+            );
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 for tid in affected_ewar_ships {
@@ -126,6 +132,9 @@ pub(crate) async fn handle_mining_and_deactivate(
             }
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
+            if let Some(sys_id) = session.solar_system_id {
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
 
             if mod_item_opt
                 .and_then(|m| ctx.sde.types.get(&m.type_id))
@@ -202,6 +211,9 @@ pub(crate) async fn handle_mining_and_deactivate(
             fit.recalculate_stats(&ctx.sde);
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
+            if let Some(sys_id) = session.solar_system_id {
+                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+            }
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

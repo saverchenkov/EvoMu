@@ -312,6 +312,12 @@ pub(crate) fn handle_unload_ammo(
         Ok(())
     })?;
 
+    crate::services::notify_emitters_batch8::emit_bank_ammo_changed_if_grouped(
+        ctx,
+        char_id,
+        ship_id,
+        &all_target_modules,
+    );
     ctx.invalidate_ship_fitting(ship_id);
     Ok(PyRep::None)
 }
@@ -559,6 +565,15 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
         let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
         if roll < jam_chance && jam_chance > 0.0 {
             let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
+            crate::services::notify_emitters_batch3_space::emit_ecm_jam_landed(
+                ctx,
+                sys_id,
+                char_id,
+                ship_id,
+                module_id,
+                target_id,
+                jam_duration_s,
+            );
         }
     }
 
@@ -716,6 +731,15 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             .await
             .unwrap_or_default();
         for &jid in &jammed_ids {
+            crate::services::notify_emitters_batch3_space::emit_ecm_jam_landed(
+                ctx,
+                sys_id,
+                char_id,
+                ship_id,
+                module_id,
+                jid,
+                jam_duration_s,
+            );
             let jammed_owner_opt = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .values()
@@ -788,6 +812,16 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
     duration_s: f64,
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
+    crate::services::notify_emitters_batch3_space::emit_module_activation_godma_notifications(
+        ctx,
+        char_id,
+        ship_id,
+        module_id,
+        mod_type.type_id,
+        "defaultEffect",
+        duration_s,
+        target_id_opt,
+    );
     if matches!(mod_type.group_id, 201 | 80 | 353) {
         handle_ecm_or_burst_jammer_activation(
             ctx,

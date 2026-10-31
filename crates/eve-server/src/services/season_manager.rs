@@ -124,7 +124,7 @@ where
     })
 }
 
-fn with_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> Result<R, BridgeRpcError>
+pub fn with_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> Result<R, BridgeRpcError>
 where
     F: FnOnce(&mut CharacterSeasonState, &mut eve_db::WorldStateSnapshot) -> Result<R, BridgeRpcError>,
 {
@@ -136,7 +136,7 @@ where
     })
 }
 
-fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
+pub fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
     PyRep::keyval([
         ("challengeID", PyRep::Integer(c.challenge_id)),
         ("seasonID", PyRep::Integer(c.season_id)),
@@ -232,14 +232,19 @@ pub fn ensure_character_challenges_with_limit(
     now_ft: i64,
     season_end_ft: i64,
     max_active: usize,
-) {
+) -> Vec<(i64, PyRep)> {
+    let mut expired = Vec::new();
     let def_map: HashMap<i64, &SeasonalChallengeDef> = defs.iter().map(|d| (d.challenge_id, d)).collect();
+    let cur_pts = st.season_points;
     for (cid, existing) in st.challenges.iter_mut() {
         if existing.expiration_date > 0 && now_ft >= existing.expiration_date {
             if let Some(def) = def_map.get(cid) {
+                let expired_id = existing.challenge_id;
                 let mut fresh = def.to_character_challenge_with_end(st.selected_season_id, now_ft, season_end_ft);
                 fresh.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
+                let fresh_kv = challenge_to_keyval(&fresh, cur_pts);
                 *existing = fresh;
+                expired.push((expired_id, fresh_kv));
             }
         }
     }
@@ -260,6 +265,7 @@ pub fn ensure_character_challenges_with_limit(
         st.challenges.insert(def.challenge_id, ch);
         active_count += 1;
     }
+    expired
 }
 
 pub fn ensure_character_challenges(
@@ -268,7 +274,7 @@ pub fn ensure_character_challenges(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     now_ft: i64,
-) {
+) -> Vec<(i64, PyRep)> {
     ensure_character_challenges_with_limit(
         st,
         defs,
@@ -277,7 +283,7 @@ pub fn ensure_character_challenges(
         now_ft,
         now_ft + 30 * 86_400 * 10_000_000,
         4,
-    );
+    )
 }
 
 pub fn ensure_challenges_with_defs(st: &mut CharacterSeasonState, defs: &[SeasonalChallengeDef], now_ft: i64) {
@@ -434,6 +440,9 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(res) = crate::services::notify_emitters_batch8::handle_select_season_clear_if_none_or_zero(ctx, char_id, args.first()) {
+                return Some(res);
+            }
             let Some(season_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidSeasonId".into(),
@@ -560,12 +569,15 @@ pub fn handle_season_manager(
                     .map(|c| c.max_active_challenges as usize)
                     .unwrap_or(4);
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
-                Ok(sorted_challenge_keyvals(st))
+                Ok((sorted_challenge_keyvals(st), expired))
             });
             match res {
-                Ok(challenges) => Some(Ok(PyRep::List(challenges))),
+                Ok((challenges, expired)) => {
+                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
+                    Some(Ok(PyRep::List(challenges)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -705,7 +717,7 @@ pub fn handle_season_manager(
                     .map(|c| c.max_active_challenges.max(1) as usize)
                     .unwrap_or(4);
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let ch_id = if let Some(id) = arg0_int {
                     id
@@ -757,10 +769,11 @@ pub fn handle_season_manager(
                 if ch.progress >= ch.max_progress {
                     ch.completed = true;
                 }
-                Ok((ch_id, ch.progress, !was_completed && ch.completed))
+                Ok((ch_id, ch.progress, !was_completed && ch.completed, expired))
             });
             match res {
-                Ok((cid, new_prog, newly_completed)) => {
+                Ok((cid, new_prog, newly_completed, expired)) => {
+                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeProgressUpdate", "charid", vec![PyRep::Integer(cid), PyRep::Integer(new_prog)]);
                     if newly_completed {
                         ctx.notify(NotificationTarget::Character(char_id), "OnChallengeCompleted", "charid", vec![PyRep::Integer(cid)]);
@@ -803,7 +816,7 @@ pub fn handle_season_manager(
                     .map(|c| c.max_active_challenges.max(1) as usize)
                     .unwrap_or(4);
                 let defs = load_challenge_definitions_with_sde(snap, &ctx.sde);
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let expired = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 let def_opt = defs.iter().find(|d| d.challenge_id == ch_id).cloned();
                 sync_character_challenges_with_defs(st, &defs, snap, char_id);
                 let Some(ch) = st.challenges.get_mut(&ch_id) else {
@@ -876,10 +889,11 @@ pub fn handle_season_manager(
                     ("seasonPoints", PyRep::Integer(pts)), ("rewardGranted", PyRep::Bool(true)),
                     ("rewardPoints", PyRep::Integer(reward_pts)), ("deliveredItemID", delivered_rep),
                 ]);
-                Ok((rep, season_id, prev_pts, pts, is_omega))
+                Ok((rep, season_id, prev_pts, pts, is_omega, expired))
             });
             match res {
-                Ok((rep, season_id, prev_pts, pts, is_omega)) => {
+                Ok((rep, season_id, prev_pts, pts, is_omega, expired)) => {
+                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
                     ctx.notify(NotificationTarget::Character(char_id), "OnChallengeRewardsGranted", "charid", vec![PyRep::Integer(ch_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnSeasonalPointsUpdated", "charid", vec![PyRep::Integer(season_id), PyRep::Integer(pts)]);
                     // DATA GAP: V24 seasonselection.fsdbinary ships no static reward-track point thresholds or clone-grade requirements
@@ -973,7 +987,7 @@ pub fn handle_season_manager(
                     });
                 let res = with_season_state(ctx, char_id, |st, snap| {
                     let defs = load_challenge_definitions(snap);
-                    ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
+                    let expired = ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
                     sync_character_challenges(st, snap, char_id);
                     let prog = if is_mining_career {
                         snap.mining_ledger
@@ -989,7 +1003,7 @@ pub fn handle_season_manager(
                     };
                     let challenges = sorted_challenge_keyvals(st);
                     let claimed_cnt = st.challenges.values().filter(|c| c.claimed).count() as i64;
-                    Ok(PyRep::keyval([
+                    Ok((PyRep::keyval([
                         ("goalID", PyRep::Integer(goal_id as i64)),
                         ("currentProgress", PyRep::Integer(prog as i64)),
                         ("verifiedFromLedger", PyRep::Bool(is_mining_career)),
@@ -1000,18 +1014,21 @@ pub fn handle_season_manager(
                         ("seasonPoints", PyRep::Integer(st.season_points)),
                         ("current_reward_index", PyRep::Integer(claimed_cnt)),
                         ("challenges", PyRep::List(challenges)),
-                    ]))
+                    ]), expired))
                 });
-                return Some(res);
+                return Some(res.map(|(rep, expired)| {
+                    crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
+                    rep
+                }));
             }
 
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let defs = load_challenge_definitions(snap);
-                ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
+                let expired = ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
                 sync_character_challenges(st, snap, char_id);
                 let challenges = sorted_challenge_keyvals(st);
                 let claimed_cnt = st.challenges.values().filter(|c| c.claimed).count() as i64;
-                Ok(PyRep::keyval([
+                Ok((PyRep::keyval([
                     ("season_id", PyRep::Integer(st.selected_season_id)),
                     ("seasonID", PyRep::Integer(st.selected_season_id)),
                     ("total_points", PyRep::Integer(st.season_points)),
@@ -1019,9 +1036,12 @@ pub fn handle_season_manager(
                     ("seasonPoints", PyRep::Integer(st.season_points)),
                     ("current_reward_index", PyRep::Integer(claimed_cnt)),
                     ("challenges", PyRep::List(challenges)),
-                ]))
+                ]), expired))
             });
-            Some(res)
+            Some(res.map(|(rep, expired)| {
+                crate::services::notify_emitters_batch8::emit_expired_challenges(ctx, char_id, expired);
+                rep
+            }))
         }
         ("seasonManager", "claim_goal_reward") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1150,15 +1170,12 @@ pub fn handle_season_manager(
                 if let Ok(json) = serde_json::to_string(&seasons) {
                     snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                 }
-                ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
+                let _ = ensure_character_challenges_with_limit(st, &defs, snap, char_id, now_ft, season_end_ft, max_active);
                 Ok(())
             });
             match res {
                 Ok(()) => {
-                    let sent = ctx.notify(NotificationTarget::All, "OnSeasonsFsdDataChanged", "charid", vec![]);
-                    if !sent.iter().any(|n| n.recipient_char_id == char_id) {
-                        ctx.notify(NotificationTarget::Character(char_id), "OnSeasonsFsdDataChanged", "charid", vec![]);
-                    }
+                    crate::services::notify_emitters_batch8::reconcile_seasons_on_fsd_reload(ctx, char_id);
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),
