@@ -875,6 +875,11 @@ pub(super) async fn caller_in_space(
     let now = ctx.now_unix();
     let release_portal_mod = {
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = st.bridges.get(&(ctx_key(ctx), char_id)) {
+            if b.bridger_ship_id == ship_id && b.expires_at_unix > now {
+                return Err(err("JumpPortalOpen", "Cannot jump while own portal is open"));
+            }
+        }
         let pmod = st
             .bridges
             .get(&(ctx_key(ctx), char_id))
