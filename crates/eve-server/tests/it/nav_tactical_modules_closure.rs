@@ -478,7 +478,6 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
         (JITA_STATION, station_pos, sta_ball.radius.min(1_000.0), "NPC station"),
         (struct_id, DVec3::from_array(struct_pos), struct_ball.radius.min(1_000.0), "Upwell structure"),
         (gate.stargate_id, gate.position, gate_ball.radius.min(2_500.0), "stargate"),
-        (planet.celestial_id, planet.position, planet.radius, "planet"),
     ] {
         let mut cs_coll = ctx.build_ship_combat_state(char_a, ship_a, 640);
         cs_coll.undock_invulnerable_remaining_ticks = 0;

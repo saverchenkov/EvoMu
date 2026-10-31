@@ -259,9 +259,9 @@ impl Ballpark {
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                // Star (`group 6` - stellar corona warp-in radius up to 513,100 km around system origin)
-                // and Asteroid Belt (`group 9` - empty spatial warp-in marker; asteroids are `group 25`).
-                if matches!(group_a, 6 | 9) || matches!(group_b, 6 | 9) {
+                // Star (`group 6`), Planet (`group 7`), Moon (`group 8`), and Asteroid Belt (`group 9`)
+                // are large celestial spheres/markers that must not eject nearby anomalies, wormholes, or command nodes.
+                if matches!(group_a, 6 | 7 | 8 | 9) || matches!(group_b, 6 | 7 | 8 | 9) {
                     continue;
                 }
                 let is_station_or_struct_b =
