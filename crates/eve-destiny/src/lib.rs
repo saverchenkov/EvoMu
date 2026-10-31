@@ -224,6 +224,9 @@ pub struct CombatState {
     pub sync_invuln_with_undock_timer: bool,
     #[serde(default)]
     pub is_interdiction_nullified: bool,
+    /// True when the ship/NPC is immune to Stasis Webifiers (`feat:pve.insurgency-ice-heist`).
+    #[serde(default)]
+    pub is_web_immune: bool,
     /// Remaining seconds of active ECM jam suppression (`feat:modules.ecm`, `DG-5`).
     #[serde(default)]
     pub ecm_jammed_remaining_s: f64,
@@ -307,6 +310,7 @@ impl Default for CombatState {
             warp_exit_invulnerable_remaining_ticks: 0,
             sync_invuln_with_undock_timer: false,
             is_interdiction_nullified: false,
+            is_web_immune: false,
             ecm_jammed_remaining_s: 0.0,
             is_mwd_mjd_disabled: false,
             disallow_assistance: false,

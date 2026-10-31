@@ -14,7 +14,7 @@ use eve_proto::PyRep;
 use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    process_ship_insurance_payout, with_combat_runtime,
+    with_combat_runtime,
 };
 use eve_server::services::pve_exploration::ensure_system_pve_sites_seeded;
 use eve_server::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime;
@@ -192,10 +192,7 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         )
         .await
         .expect_err("Capital ship must not be able to use Pochven stargates");
-    assert!(
-        gate_err.code.contains("Capital") || gate_err.message.to_lowercase().contains("capital") || gate_err.message.to_lowercase().contains("pochven"),
-        "Unexpected Pochven capital gate error: {gate_err:?}"
-    );
+    assert_eq!(gate_err.code, "CapitalShipCannotJumpStargate");
 
     // 3. Capital manufacturing jobs in Pochven are refused
     let bp_id = 104_000_010i64;
@@ -242,15 +239,76 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         )
         .await
         .expect_err("Capital manufacturing in Pochven must be refused");
-    assert!(
-        ind_err.code.contains("Capital") || ind_err.code.contains("Pochven") || ind_err.message.to_lowercase().contains("pochven") || ind_err.message.to_lowercase().contains("capital"),
-        "Unexpected Pochven industry error: {ind_err:?}"
-    );
+    assert_eq!(ind_err.code, "CapitalConstructionForbiddenInPochven");
 
     // 4. Capitals already inside Pochven may jump out to an active low-sec cyno beacon
     let cyno_char_id = 90_000_002i64;
     let cyno_ship_id = 104_000_020i64;
-    seed_ship_in_space(&ctx, cyno_char_id, cyno_ship_id, 587, lowsec_sys, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let cyno_mod_id = 104_000_021i64;
+    let ozone_id = 104_000_022i64;
+    let fuel_id = 104_000_023i64;
+    seed_ship_in_space(&ctx, cyno_char_id, cyno_ship_id, 11_965, lowsec_sys, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(cyno_char_id).or_default().insert(
+            21_603,
+            eve_db::TrainedSkillRecord { type_id: 21_603, level: 5, skill_points: 256_000.0 },
+        );
+        snap.items.insert(
+            cyno_mod_id,
+            InventoryItemRecord {
+                item_id: cyno_mod_id,
+                type_id: 21_096, // Cynosural Field Generator I
+                owner_id: cyno_char_id,
+                location_id: cyno_ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            ozone_id,
+            InventoryItemRecord {
+                item_id: ozone_id,
+                type_id: 16_273, // Liquid Ozone
+                owner_id: cyno_char_id,
+                location_id: cyno_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            fuel_id,
+            InventoryItemRecord {
+                item_id: fuel_id,
+                type_id: 16_274, // Helium Isotopes
+                owner_id: char_id,
+                location_id: dread_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 10_000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut cyno_sess = make_sess(cyno_char_id, cyno_ship_id, lowsec_sys, None);
+    let _ = ctx
+        .dispatch_rpc(
+            &mut cyno_sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(cyno_mod_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("Activate low-sec cyno beacon");
     let jump_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -264,6 +322,8 @@ async fn test_pochven_capital_and_cyno_restrictions() {
         .await;
     if let Err(e) = jump_res {
         assert!(!e.message.to_lowercase().contains("pochven"), "Capital inside Pochven must not be blocked from jumping out: {e:?}");
+    } else {
+        assert_eq!(sess.solar_system_id, Some(lowsec_sys), "Capital jumping out of Pochven must arrive in low-sec");
     }
 }
 
@@ -560,99 +620,4 @@ async fn test_pochven_60pct_loot_drop_vs_highsec_50pct() {
         pochven_dropped > highsec_dropped && pochven_dropped >= 25,
         "Pochven 60% loot drop ({pochven_dropped}/50) must exceed Highsec 50% loot drop ({highsec_dropped}/50)"
     );
-}
-
-#[tokio::test]
-async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle() {
-    // parity: feat:industry.capital-construction-restrictions, feat:combat.insurance-void-and-expiry
-    eve_testkit::attest(&[
-        "feat:industry.capital-construction-restrictions",
-        "feat:combat.insurance-void-and-expiry",
-    ]);
-
-    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
-        Ok(reg) => std::sync::Arc::new(reg),
-        Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
-    };
-    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db)
-        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
-    pin_clock(&ctx);
-    let char_id = 90_000_001i64;
-    let ship_id = 104_000_301i64;
-    let highsec_sys = 30_000_142u32;
-    let jita_station = 60_003_760i64;
-
-    seed_ship_in_space(&ctx, char_id, ship_id, 587, highsec_sys, DVec3::ZERO).await;
-
-    // 1. Capital manufacturing job in high-sec NPC station is refused
-    let bp_id = 104_000_302i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(jita_station);
-        }
-        snap.items.insert(
-            bp_id,
-            InventoryItemRecord {
-                item_id: bp_id,
-                type_id: 19_721, // Revelation Blueprint
-                owner_id: char_id,
-                location_id: jita_station,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let mut sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
-    let cap_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "industryManager",
-            None,
-            "InstallJob",
-            &[PyRep::keyval([
-                ("blueprintID", PyRep::Integer(bp_id)),
-                ("facilityID", PyRep::Integer(jita_station)),
-                ("activityID", PyRep::Integer(1)),
-                ("runs", PyRep::Integer(1)),
-            ])],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect_err("Capital ship manufacturing in high-sec NPC station must be refused");
-    assert!(
-        cap_err.code.contains("Capital") || cap_err.message.to_lowercase().contains("capital") || cap_err.message.to_lowercase().contains("low"),
-        "Unexpected capital construction error: {cap_err:?}"
-    );
-
-    // 2. Insurance contract via real InsureShip RPC: 12-week expiry -> 40% fallback + EVE-mail
-    let cost_isk = 1.0_f64; // Platinum fraction (1.0)
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "insuranceSvc",
-            None,
-            "InsureShip",
-            &[PyRep::Integer(ship_id), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("InsureShip");
-    let full_payout = with_combat_runtime(&ctx, |rt| rt.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0));
-    assert!(full_payout > 0.0);
-
-    // Advance past 12 weeks (7,257,600s) -> expired contract falls back to 40% payout and sends EVE-mail
-    ctx.advance_secs(12 * 7 * 86_400 + 60);
-    let mails_before = ctx.db.with_snapshot(|s| s.mails.len());
-    let payout = process_ship_insurance_payout(&ctx, char_id, ship_id, 587, false);
-    assert!(payout > 0.0 && payout < full_payout, "Expired insurance must fall back to 40% payout");
-    let has_mail = ctx.db.with_snapshot(|s| {
-        s.mails.len() > mails_before && s.mails.iter().any(|m| m.recipient_id == char_id && m.subject.contains("Insurance Payout"))
-    });
-    assert!(has_mail, "Insurance payout must send an EVE-mail");
 }

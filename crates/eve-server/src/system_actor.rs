@@ -1069,6 +1069,14 @@ impl SystemRegistry {
                                         dt,
                                         step_now_unix,
                                     );
+                                    crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
+                                        &mut ballpark,
+                                        sde_opt.as_ref(),
+                                        db_opt.as_ref(),
+                                        solar_system_id,
+                                        step_now_unix,
+                                        &mut destroyed_balls,
+                                    );
                                     let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
                                     mod_guard.clear();
                                     for c in active_module_cycles.iter() {

@@ -12,9 +12,6 @@ use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::cluster_macho_misc_services::{
-    with_misc_state, LandingPadRecord, LauncherRecord,
-};
 use eve_server::services::pve_dungeon_runtime::{
     with_dungeon_runtime_store, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
 };
@@ -200,9 +197,11 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     seed_ship_in_space(&ctx, 90_002, cone_hit_id, 587, sys_id, DVec3::new(50_000.0, 0.0, 0.0)).await;
     seed_ship_in_space(&ctx, 90_003, cone_miss_id, 587, sys_id, DVec3::new(0.0, 50_000.0, 0.0)).await;
     seed_ship_in_space(&ctx, 90_004, gtfo_hit_id, 587, sys_id, DVec3::new(-40_000.0, 0.0, 0.0)).await;
-    seed_ship_in_space(&ctx, 90_005, reaper_hit_id, 587, sys_id, DVec3::new(0.0, -40_000.0, 20_000.0)).await;
+    seed_ship_in_space(&ctx, 90_005, reaper_hit_id, 587, sys_id, DVec3::new(0.0, -20_000.0, 10_000.0)).await;
 
     // 4. ActivateSlashModule with Bosonic Field Generator (Cone)
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let pre_hit_cs = sys.get_combat_state(cone_hit_id).await.unwrap().unwrap();
     let cone_res = call_svc(
         &ctx,
         &mut sess,
@@ -222,20 +221,64 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     assert!(hit_ids.contains(&cone_hit_id));
     assert!(!hit_ids.contains(&cone_miss_id));
 
-    // Verify Titan immobilized & tether-blocked
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    // Immediate refire must be blocked by reactivation delay
+    let refire_err = call_svc(
+        &ctx,
+        &mut sess,
+        "superWeaponMgr",
+        "ActivateSlashModule",
+        vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refire_err.code, "ModuleInReactivationDelay");
+
+    // Verify Titan immobilized & tether-blocked during cycle, and 0 damage during 10s warmup
     let (_, titan_ball) = sys.get_ball_snapshot(titan_id).await.unwrap().unwrap();
     assert_eq!(titan_ball.max_velocity, 0.0);
     let titan_cs = sys.get_combat_state(titan_id).await.unwrap().unwrap();
     assert!(titan_cs.disallow_assistance);
+    let mid_warmup_cs = sys.get_combat_state(cone_hit_id).await.unwrap().unwrap();
+    assert_eq!(mid_warmup_cs.shield_hp, pre_hit_cs.shield_hp);
 
-    // 5. ActivateSinglePointTargetedModule with GTFO (Spatial)
+    // Advance 10s -> warmup completes and tick 1 applies damage; advance 4s more -> all 5 ticks complete
+    ctx.advance_secs(10);
+    let _ = sys.tick().await;
+    let tick1_cs = sys.get_combat_state(cone_hit_id).await.unwrap();
+    assert!(tick1_cs.is_none_or(|c| c.shield_hp < pre_hit_cs.shield_hp));
+    ctx.advance_secs(4);
+    let _ = sys.tick().await;
+
+    // 5. Negative GTFO & Reaper out-of-range and non-finite checks
+    let oor_err = call_svc(
+        &ctx,
+        &mut sess,
+        "superWeaponMgr",
+        "ActivateSinglePointTargetedModule",
+        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(900_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(oor_err.code, "TargetOutOfRange");
+
+    let nan_err = call_svc(
+        &ctx,
+        &mut sess,
+        "superWeaponMgr",
+        "ActivateSinglePointTargetedModule",
+        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(nan_err.code, "InvalidTargetPoint");
+
+    // 6. ActivateSinglePointTargetedModule with GTFO (Spatial) within 30km range; 25km sphere covers gtfo_hit_id at -40km
     let gtfo_res = call_svc(
         &ctx,
         &mut sess,
         "superWeaponMgr",
         "ActivateSinglePointTargetedModule",
-        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(-40_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(-25_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
     )
     .await
     .unwrap();
@@ -248,7 +291,7 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     let (_, tp_ball) = sys.get_ball_snapshot(gtfo_hit_id).await.unwrap().unwrap();
     assert!(tp_ball.position.distance(DVec3::new(-40_000.0, 0.0, 0.0)) > 500_000.0);
 
-    // 6. ActivateSlashModule with Reaper (MultiPoint)
+    // 7. ActivateSlashModule with Reaper (MultiPoint)
     let reaper_res = call_svc(
         &ctx,
         &mut sess,
@@ -256,8 +299,8 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         "ActivateSlashModule",
         vec![
             PyRep::Integer(reaper_mod_id),
-            PyRep::Real(0.0), PyRep::Real(-40_000.0), PyRep::Real(0.0),
-            PyRep::Real(0.0), PyRep::Real(-40_000.0), PyRep::Real(50_000.0),
+            PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(0.0),
+            PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(20_000.0),
         ],
     )
     .await
@@ -268,6 +311,14 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
         _ => Vec::new(),
     };
     assert!(reaper_hits.contains(&reaper_hit_id));
+
+    // Advance past 30s immobilize window -> Titan mobility & assistance restored
+    ctx.advance_secs(30);
+    let _ = sys.tick().await;
+    let (_, titan_restored) = sys.get_ball_snapshot(titan_id).await.unwrap().unwrap();
+    assert!(titan_restored.max_velocity > 0.0);
+    let titan_cs_restored = sys.get_combat_state(titan_id).await.unwrap().unwrap();
+    assert!(!titan_cs_restored.disallow_assistance);
 }
 
 #[tokio::test]
@@ -344,6 +395,7 @@ async fn test_insurgency_ice_heist_lifecycle() {
     let tanker_id = 1_896_000_000 + inst_id * 10 + 1;
     let tanker_cs = sys.get_combat_state(tanker_id).await.unwrap().unwrap();
     assert!(tanker_cs.warp_core_strength >= 100);
+    assert!(tanker_cs.is_web_immune, "Ice Heist tanker must be web-immune");
 
     // Spawn a pirate ship near the Thunderchild guard (155_000, 0, 150_000) and verify destruction
     let pirate_char_id = 90_002;
@@ -379,7 +431,7 @@ async fn test_insurgency_ice_heist_lifecycle() {
     let lp_bal = ctx.db.with_snapshot(|snap| {
         snap.characters
             .get(&char_id)
-            .and_then(|c| c.loyalty_points.get(&1_000_137).copied())
+            .and_then(|c| c.loyalty_points.get(&1_000_180).copied())
             .unwrap_or(0)
     });
     assert!(lp_bal >= 150_000);
@@ -558,108 +610,4 @@ async fn test_deadspace_pocket_rules_and_mwd_disallowance() {
     .await
     .unwrap_err();
     assert_eq!(err_mwd.code, "MicroWarpdriveDisallowedInDeadspace");
-}
-
-#[tokio::test]
-async fn test_deathless_shipcaster_zarzakh_to_fob() {
-    // parity: feat:navigation.deathless-shipcaster-fob
-    eve_testkit::attest(&["feat:navigation.deathless-shipcaster-fob"]);
-
-    let ctx = ServerContext::new();
-    pin_clock(&ctx);
-    let zarzakh_id = 30_100_000;
-    let fob_sys_id = 30_000_142;
-    let char_id = 90_001;
-    let ship_id = 88_400_001;
-    let launcher_id = 88_400_010;
-    let guristas_pad_id = 88_400_011;
-
-    seed_ship_in_space(&ctx, char_id, ship_id, 587, zarzakh_id, DVec3::new(10_000.0, 0.0, 10_000.0)).await;
-    let sys = ctx.systems.get_or_spawn(zarzakh_id);
-    let mut l_ball = make_site_npc_ball(launcher_id, 77_262, DVec3::new(10_500.0, 0.0, 10_000.0));
-    l_ball.mode = MovementMode::Rigid;
-    let _ = sys.spawn_ball(l_ball).await;
-
-    with_misc_state(&ctx, |st| {
-        st.launchers.push(LauncherRecord {
-            item_id: launcher_id,
-            type_id: 77_262,
-            solar_system_id: zarzakh_id,
-            faction_id: 0,
-            position: DVec3::new(10_500.0, 0.0, 10_000.0),
-            linked_pad_ids: vec![guristas_pad_id],
-        });
-        st.landing_pads.push(LandingPadRecord {
-            item_id: guristas_pad_id,
-            type_id: 77_263,
-            solar_system_id: fob_sys_id,
-            faction_id: 500_010, // Guristas
-            position: DVec3::new(50_000.0, 0.0, 50_000.0),
-            is_built: true,
-            is_disrupted: false,
-            link_timestamp: 1,
-        });
-    });
-
-    let mut sess = make_sess(char_id, ship_id, zarzakh_id, None);
-
-    // 1. Negative: non-pirate character refused
-    let err_non_pirate = call_svc(
-        &ctx,
-        &mut sess,
-        "shipcasterTravelMgr",
-        "CmdJumpThroughShipcaster",
-        vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(fob_sys_id)), PyRep::Integer(guristas_pad_id)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err_non_pirate.code, "NonPirateRefused");
-
-    // 2. Negative: Angel Cartel (500011) refused on Guristas (500010) FOB pad
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.war_faction_id = Some(500_011);
-        }
-    });
-    let err_mismatch = call_svc(
-        &ctx,
-        &mut sess,
-        "shipcasterTravelMgr",
-        "CmdJumpThroughShipcaster",
-        vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(fob_sys_id)), PyRep::Integer(guristas_pad_id)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err_mismatch.code, "FobFactionMismatch");
-
-    // 3. Positive: Guristas (500010) jumps to FOB system
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.war_faction_id = Some(500_010);
-        }
-    });
-    call_svc(
-        &ctx,
-        &mut sess,
-        "shipcasterTravelMgr",
-        "CmdJumpThroughShipcaster",
-        vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(fob_sys_id)), PyRep::Integer(guristas_pad_id)],
-    )
-    .await
-    .unwrap();
-    assert_eq!(sess.solar_system_id, Some(fob_sys_id));
-
-    // 4. Negative: per-target cooldown blocks immediate repeat jump
-    seed_ship_in_space(&ctx, char_id, ship_id, 587, zarzakh_id, DVec3::new(10_000.0, 0.0, 10_000.0)).await;
-    sess.solar_system_id = Some(zarzakh_id);
-    let err_cd = call_svc(
-        &ctx,
-        &mut sess,
-        "shipcasterTravelMgr",
-        "CmdJumpThroughShipcaster",
-        vec![PyRep::Integer(launcher_id), PyRep::Integer(i64::from(fob_sys_id)), PyRep::Integer(guristas_pad_id)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err_cd.code, "ShipcasterTargetOnCooldown");
 }

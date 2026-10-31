@@ -673,8 +673,10 @@ pub(crate) async fn handle_module_cycles(
                             return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked") }));
                         }
                     }
-                    if matches!(mod_type.group_id, 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672)
-                        && ctx.db.with_snapshot(|s| crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(s, target_id))
+                    if (matches!(mod_type.group_id, 52 | 65 | 68 | 71 | 201 | 208 | 291 | 379 | 1672)
+                        && ctx.db.with_snapshot(|s| crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(s, target_id)))
+                        || (mod_type.group_id == 65
+                            && sys.get_combat_state(target_id).await.ok().flatten().is_some_and(|cs| cs.is_web_immune))
                     {
                         return Some(Ok(PyRep::keyval([
                             ("moduleID", PyRep::Integer(module_id)),

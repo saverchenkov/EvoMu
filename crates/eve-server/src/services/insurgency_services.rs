@@ -398,6 +398,29 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
     if in_active_phase && stage >= 3 && old_stage < 3 {
         let _ = crate::services::fw_gameplay::try_spread_insurgency_from_system(ctx, campaign_id, sys_id);
     }
+    if (3..=4).contains(&stage) {
+        let now_u = ctx.now_unix_secs();
+        let on_cd = ctx.db.with_snapshot(|snap| {
+            snap.service_state_blobs
+                .get(&format!("ice_heist_respawn_until:{sys_id}"))
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|u| now_u < u)
+        });
+        if !on_cd {
+            with_insurgency_runtime(ctx, |rt| {
+                if !rt.ice_heist_instances.iter().any(|h| h.solar_system_id == sys_id && !h.completed) {
+                    let id = (rt.ice_heist_instances.len() as i64) + 800_001;
+                    rt.ice_heist_instances.push(eve_db::PersistedIceHeistRecord {
+                        instance_id: id,
+                        solar_system_id: sys_id,
+                        pirate_tankers_saved: 0,
+                        empire_tankers_saved: 0,
+                        completed: false,
+                    });
+                }
+            });
+        }
+    }
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 

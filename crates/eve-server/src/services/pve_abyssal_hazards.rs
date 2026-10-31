@@ -581,8 +581,8 @@ pub fn apply_abyssal_weather_dogma_modifiers_to_ship(
             };
             match weather {
                 AbyssalWeatherKind::Electrical => {
-                    modify_attr(271, 1.0, 1.0, true); // shieldEmDamageResonance
-                    modify_attr(267, 0.5, 1.0, true); // armorEmDamageResonance
+                    modify_attr(271, 1.0, 1.0, true); // shieldEmDamageResonance (-50% EM shield resist)
+                    modify_attr(267, 0.5, (1.0 - bon).max(0.0), false); // armorEmDamageResonance (+50% EM armor resist)
                     modify_attr(113, 0.67, 1.0, true); // emDamageResonance
                     modify_attr(55, 250_000.0, (1.0 - bon).max(0.1), false); // rechargeRate
                 }
@@ -592,8 +592,8 @@ pub fn apply_abyssal_weather_dogma_modifiers_to_ship(
                     modify_attr(158, 10_000.0, range_mult, false); // falloff
                 }
                 AbyssalWeatherKind::Exotic => {
-                    modify_attr(273, 0.6, 1.0, true); // shieldKineticDamageResonance
-                    modify_attr(269, 0.65, 1.0, true); // armorKineticDamageResonance
+                    modify_attr(273, 0.6, 1.0, true); // shieldKineticDamageResonance (-50% Kinetic shield resist)
+                    modify_attr(269, 0.65, (1.0 - bon).max(0.0), false); // armorKineticDamageResonance (+50% Kinetic armor resist)
                     modify_attr(109, 0.67, 1.0, true); // kineticDamageResonance
                     modify_attr(564, 250.0, 1.0 + bon, false); // scanResolution
                 }

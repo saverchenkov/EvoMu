@@ -9,6 +9,98 @@ use crate::services::tactical_modules::is_combatant_ship_or_entity_ball;
 use eve_machonet::SessionState;
 use eve_destiny::{DamageVector, DVec3};
 use eve_proto::{BridgeRpcError, PyRep};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Clone, Debug)]
+struct BosonicActiveCycle {
+    db_key: usize,
+    sys_id: u32,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    mod_type_id: u32,
+    origin_pos: DVec3,
+    dir_vec: DVec3,
+    tick_dmg: DamageVector,
+    started_at_unix: u64,
+    warmup_secs: u64,
+    total_ticks: usize,
+    ticks_applied: usize,
+    immobilize_until_unix: u64,
+    orig_max_velocity: f64,
+    orig_warp_scramble_strength: i32,
+    orig_disallow_assistance: bool,
+    mobility_restored: bool,
+}
+
+static ACTIVE_BOSONIC_CYCLES: OnceLock<Mutex<Vec<BosonicActiveCycle>>> = OnceLock::new();
+
+fn active_bosonic_cycles() -> &'static Mutex<Vec<BosonicActiveCycle>> {
+    ACTIVE_BOSONIC_CYCLES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn step_bosonic_doomsday_in_ballpark(
+    ballpark: &mut eve_destiny::Ballpark,
+    sde_opt: Option<&std::sync::Arc<eve_sde::SdeRegistry>>,
+    db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    sys_id: u32,
+    now_unix: u64,
+    destroyed_balls: &mut Vec<(i64, Option<i64>)>,
+) {
+    let db_key = db_opt.map(|d| d.instance_id() as usize).unwrap_or(0);
+    let mut guard = active_bosonic_cycles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for cycle in guard.iter_mut() {
+        if cycle.sys_id != sys_id || (db_key != 0 && cycle.db_key != db_key) {
+            continue;
+        }
+        let elapsed = now_unix.saturating_sub(cycle.started_at_unix);
+        if elapsed >= cycle.warmup_secs && cycle.ticks_applied < cycle.total_ticks {
+            let target_ticks = ((elapsed - cycle.warmup_secs + 1) as usize).min(cycle.total_ticks);
+            while cycle.ticks_applied < target_ticks {
+                let candidate_ids: Vec<(i64, u32, DVec3)> = ballpark
+                    .balls
+                    .values()
+                    .filter(|b| {
+                        b.id != cycle.ship_id
+                            && is_combatant_ship_or_entity_ball(sde_opt, db_opt, b.id, b.type_id)
+                    })
+                    .map(|b| (b.id, b.type_id, b.position))
+                    .collect();
+                for (bid, _btid, bpos) in candidate_ids {
+                    let delta = bpos - cycle.origin_pos;
+                    let dist = delta.length();
+                    if dist <= 0.0 || dist > BOSONIC_CONE_LENGTH_M {
+                        continue;
+                    }
+                    if delta.normalize().dot(cycle.dir_vec) < BOSONIC_CONE_COS_HALF_ANGLE {
+                        continue;
+                    }
+                    if let Some((_, true, _)) = ballpark.apply_damage_to_ball(bid, cycle.tick_dmg) {
+                        if !destroyed_balls.iter().any(|(id, _)| *id == bid) {
+                            destroyed_balls.push((bid, Some(cycle.char_id)));
+                        }
+                    }
+                }
+                cycle.ticks_applied += 1;
+            }
+        }
+        if now_unix >= cycle.immobilize_until_unix && !cycle.mobility_restored {
+            if let Some(titan_ball) = ballpark.balls.get_mut(&cycle.ship_id) {
+                titan_ball.max_velocity = cycle.orig_max_velocity;
+            }
+            if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                cs.warp_scramble_strength = cycle.orig_warp_scramble_strength;
+                cs.disallow_assistance = cycle.orig_disallow_assistance;
+            }
+            cycle.mobility_restored = true;
+        }
+    }
+    guard.retain(|c| !c.mobility_restored || c.ticks_applied < c.total_ticks);
+}
 
 pub async fn dispatch_superweapon_aoe_rpc(
     ctx: &ServerContext,
@@ -52,6 +144,31 @@ struct TitanDoomsdaySetup {
     mod_type_id: u32,
     dmg_vec: DamageVector,
     now_unix: u64,
+    orig_max_velocity: f64,
+    orig_warp_scramble_strength: i32,
+    orig_disallow_assistance: bool,
+}
+
+fn validate_doomsday_target_points(
+    ship_pos: DVec3,
+    max_range_m: f64,
+    points: &[DVec3],
+) -> Result<(), BridgeRpcError> {
+    for pt in points {
+        if !pt.x.is_finite() || !pt.y.is_finite() || !pt.z.is_finite() {
+            return Err(BridgeRpcError {
+                code: "InvalidTargetPoint".into(),
+                message: "Doomsday target coordinates must be finite".into(),
+            });
+        }
+        if (*pt - ship_pos).length() > max_range_m {
+            return Err(BridgeRpcError {
+                code: "TargetOutOfRange".into(),
+                message: format!("Doomsday target point exceeds max range ({max_range_m} m)"),
+            });
+        }
+    }
+    Ok(())
 }
 
 async fn validate_and_consume_titan_doomsday(
@@ -60,6 +177,7 @@ async fn validate_and_consume_titan_doomsday(
     ship_id: i64,
     sys_id: u32,
     module_id: i64,
+    target_points: &[DVec3],
 ) -> Result<TitanDoomsdaySetup, BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
     let (ship_type_id, ship_group_id, mod_type_id) = ctx.db.with_snapshot(|snap| {
@@ -93,7 +211,28 @@ async fn validate_and_consume_titan_doomsday(
         });
     }
 
+    if ctx.is_module_in_reactivation_delay(ship_id, module_id) {
+        return Err(BridgeRpcError {
+            code: "ModuleInReactivationDelay".into(),
+            message: "Doomsday module is currently in reactivation delay".into(),
+        });
+    }
+
     let mod_type = ctx.sde.types.get(&mod_type_id);
+    let max_range_m = mod_type
+        .and_then(|t| t.default_attributes.get(&54).copied())
+        .filter(|&r| r > 0.0)
+        .unwrap_or(150_000.0);
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let ship_pos = all_balls
+        .iter()
+        .find(|b| b.id == ship_id)
+        .map(|b| b.position)
+        .unwrap_or(DVec3::ZERO);
+
+    validate_doomsday_target_points(ship_pos, max_range_m, target_points)?;
     let em_dmg = mod_type.and_then(|t| t.default_attributes.get(&114).copied()).unwrap_or(0.0);
     let ex_dmg = mod_type.and_then(|t| t.default_attributes.get(&116).copied()).unwrap_or(0.0);
     let ki_dmg = mod_type.and_then(|t| t.default_attributes.get(&117).copied()).unwrap_or(0.0);
@@ -147,14 +286,6 @@ async fn validate_and_consume_titan_doomsday(
             message,
         })?;
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let all_balls = sys.list_balls().await.unwrap_or_default();
-    let ship_pos = all_balls
-        .iter()
-        .find(|b| b.id == ship_id)
-        .map(|b| b.position)
-        .unwrap_or(DVec3::ZERO);
-
     // Immobilize & tether-block the Titan during Doomsday firing cycle
     let mut cs = sys
         .get_combat_state(ship_id)
@@ -162,15 +293,29 @@ async fn validate_and_consume_titan_doomsday(
         .ok()
         .flatten()
         .unwrap_or_else(|| ctx.build_type_combat_state(ship_type_id));
+    let existing_orig = ACTIVE_BOSONIC_CYCLES
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.iter()
+                .find(|c| c.ship_id == ship_id && !c.mobility_restored)
+                .map(|c| (c.orig_max_velocity, c.orig_warp_scramble_strength, c.orig_disallow_assistance))
+        });
+    let orig_warp_scramble_strength = existing_orig.map(|o| o.1).unwrap_or(cs.warp_scramble_strength);
+    let orig_disallow_assistance = existing_orig.map(|o| o.2).unwrap_or(cs.disallow_assistance);
     cs.warp_scramble_strength = cs.warp_scramble_strength.max(100);
     cs.disallow_assistance = true;
     cs.is_tethered = false;
-    if let Ok(Some((_, mut titan_ball))) = sys.get_ball_snapshot(ship_id).await {
+    let orig_max_velocity = if let Ok(Some((_, mut titan_ball))) = sys.get_ball_snapshot(ship_id).await {
+        let orig_v = existing_orig.map(|o| o.0).unwrap_or(titan_ball.max_velocity);
         titan_ball.max_velocity = 0.0;
         let _ = sys.spawn_ball_with_combat(titan_ball, cs).await;
+        orig_v
     } else {
         let _ = sys.set_combat_state(ship_id, cs).await;
-    }
+        0.0
+    };
     {
         let db_key = ctx.instance_id as usize;
         let mut st = ctx
@@ -196,6 +341,9 @@ async fn validate_and_consume_titan_doomsday(
         mod_type_id,
         dmg_vec,
         now_unix,
+        orig_max_velocity,
+        orig_warp_scramble_strength,
+        orig_disallow_assistance,
     })
 }
 
@@ -230,13 +378,24 @@ pub async fn activate_cone_doomsday(
     module_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let setup = validate_and_consume_titan_doomsday(ctx, char_id, ship_id, sys_id, module_id).await?;
     let dir_vec = if let Some(v) = parse_vec3_from_args(args, 1) {
+        if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {
+            return Err(BridgeRpcError {
+                code: "InvalidTargetPoint".into(),
+                message: "Doomsday direction vector must be finite".into(),
+            });
+        }
         if v.length_squared() > 1e-6 {
             v.normalize()
         } else {
             DVec3::new(1.0, 0.0, 0.0)
         }
+    } else {
+        DVec3::new(1.0, 0.0, 0.0)
+    };
+    let setup = validate_and_consume_titan_doomsday(ctx, char_id, ship_id, sys_id, module_id, &[]).await?;
+    let resolved_dir = if parse_vec3_from_args(args, 1).is_some() {
+        dir_vec
     } else if let Some(tid) = args.get(1).and_then(|a| a.as_i64()) {
         setup
             .all_balls
@@ -244,9 +403,9 @@ pub async fn activate_cone_doomsday(
             .find(|b| b.id == tid)
             .map(|b| (b.position - setup.ship_pos).normalize_or_zero())
             .filter(|v| v.length_squared() > 1e-6)
-            .unwrap_or(DVec3::new(1.0, 0.0, 0.0))
+            .unwrap_or(dir_vec)
     } else {
-        DVec3::new(1.0, 0.0, 0.0)
+        dir_vec
     };
 
     let tick_dmg = DamageVector::new(
@@ -255,71 +414,48 @@ pub async fn activate_cone_doomsday(
         setup.dmg_vec.kinetic / (BOSONIC_TICK_COUNT as f64),
         setup.dmg_vec.explosive / (BOSONIC_TICK_COUNT as f64),
     );
-    let mut hit_targets = Vec::new();
-    let mut total_applied = 0.0_f64;
+    let in_cone_targets: Vec<i64> = setup
+        .all_balls
+        .iter()
+        .filter(|b| {
+            if b.id == ship_id
+                || !is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id)
+            {
+                return false;
+            }
+            let delta = b.position - setup.ship_pos;
+            let dist = delta.length();
+            dist > 0.0
+                && dist <= BOSONIC_CONE_LENGTH_M
+                && delta.normalize().dot(resolved_dir) >= BOSONIC_CONE_COS_HALF_ANGLE
+        })
+        .map(|b| b.id)
+        .collect();
 
-    for b in &setup.all_balls {
-        if b.id == ship_id
-            || !is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id)
-        {
-            continue;
-        }
-        let delta = b.position - setup.ship_pos;
-        let dist = delta.length();
-        if dist <= 0.0 || dist > BOSONIC_CONE_LENGTH_M {
-            continue;
-        }
-        let cos_angle = delta.normalize().dot(dir_vec);
-        if cos_angle < BOSONIC_CONE_COS_HALF_ANGLE {
-            continue;
-        }
-        let mut target_destroyed = false;
-        for _tick in 0..BOSONIC_TICK_COUNT {
-            if target_destroyed {
-                break;
-            }
-            let (app, destroyed) =
-                crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
-                    ctx,
-                    &setup.sys,
-                    sys_id,
-                    char_id,
-                    b.id,
-                    tick_dmg,
-                    10.0,
-                    setup.now_unix,
-                )
-                .await
-                .ok()
-                .flatten()
-                .map(|(a, d, _)| (a, d))
-                .unwrap_or((0.0, false));
-            total_applied += app;
-            crate::services::combat_crimewatch::record_killmail_assist_action(
-                ctx,
-                b.id,
-                char_id,
-                setup.ship_type_id,
-                setup.mod_type_id,
-                app,
-                false,
-                setup.now_unix,
-            );
-            if destroyed {
-                target_destroyed = true;
-                crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
-                    ctx,
-                    sys_id,
-                    char_id,
-                    b.id,
-                    b.type_id,
-                    b.position,
-                    setup.now_unix,
-                )
-                .await;
-            }
-        }
-        hit_targets.push(b.id);
+    {
+        let mut guard = active_bosonic_cycles()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.push(BosonicActiveCycle {
+            db_key: ctx.instance_id as usize,
+            sys_id,
+            char_id,
+            ship_id,
+            ship_type_id: setup.ship_type_id,
+            mod_type_id: setup.mod_type_id,
+            origin_pos: setup.ship_pos,
+            dir_vec: resolved_dir,
+            tick_dmg,
+            started_at_unix: setup.now_unix,
+            warmup_secs: 10,
+            total_ticks: BOSONIC_TICK_COUNT,
+            ticks_applied: 0,
+            immobilize_until_unix: setup.now_unix + 30,
+            orig_max_velocity: setup.orig_max_velocity,
+            orig_warp_scramble_strength: setup.orig_warp_scramble_strength,
+            orig_disallow_assistance: setup.orig_disallow_assistance,
+            mobility_restored: false,
+        });
     }
 
     ctx.notify(
@@ -337,16 +473,17 @@ pub async fn activate_cone_doomsday(
         ("moduleID", PyRep::Integer(module_id)),
         ("shipID", PyRep::Integer(ship_id)),
         ("mode", PyRep::String("Cone".into())),
+        ("status", PyRep::String("WarmingUp".into())),
         ("warmupSeconds", PyRep::Real(10.0)),
         ("tickCount", PyRep::Integer(BOSONIC_TICK_COUNT as i64)),
         ("immobilizeSeconds", PyRep::Real(30.0)),
         ("tetherBlocked", PyRep::Bool(true)),
         ("jumpBlockSeconds", PyRep::Real(300.0)),
         ("fuelConsumed", PyRep::Integer(i64::from(DOOMSDAY_ISOTOPE_COST))),
-        ("totalDamageApplied", PyRep::Real(total_applied)),
+        ("totalDamageApplied", PyRep::Real(0.0)),
         (
             "hitTargetIDs",
-            PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect()),
+            PyRep::List(in_cone_targets.into_iter().map(PyRep::Integer).collect()),
         ),
     ]))
 }
@@ -360,19 +497,69 @@ pub async fn activate_spatial_gtfo_doomsday(
     module_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let setup = validate_and_consume_titan_doomsday(ctx, char_id, ship_id, sys_id, module_id).await?;
+    let sys_pre = ctx.systems.get_or_spawn(sys_id);
+    let pre_balls = sys_pre.list_balls().await.unwrap_or_default();
+    let ship_pos_pre = pre_balls
+        .iter()
+        .find(|b| b.id == ship_id)
+        .map(|b| b.position)
+        .unwrap_or(DVec3::ZERO);
     let center = if let Some(v) = parse_vec3_from_args(args, 1) {
         v
     } else if let Some(tid) = args.get(1).and_then(|a| a.as_i64()) {
-        setup
-            .all_balls
+        pre_balls
             .iter()
             .find(|b| b.id == tid)
             .map(|b| b.position)
-            .unwrap_or(setup.ship_pos + DVec3::new(30_000.0, 0.0, 0.0))
+            .unwrap_or(ship_pos_pre + DVec3::new(30_000.0, 0.0, 0.0))
     } else {
-        setup.ship_pos + DVec3::new(30_000.0, 0.0, 0.0)
+        ship_pos_pre + DVec3::new(30_000.0, 0.0, 0.0)
     };
+    let setup = validate_and_consume_titan_doomsday(ctx, char_id, ship_id, sys_id, module_id, &[center]).await?;
+    {
+        let mut guard = active_bosonic_cycles()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.push(BosonicActiveCycle {
+            db_key: ctx.instance_id as usize,
+            sys_id,
+            char_id,
+            ship_id,
+            ship_type_id: setup.ship_type_id,
+            mod_type_id: setup.mod_type_id,
+            origin_pos: setup.ship_pos,
+            dir_vec: DVec3::X,
+            tick_dmg: DamageVector::default(),
+            started_at_unix: setup.now_unix,
+            warmup_secs: 0,
+            total_ticks: 0,
+            ticks_applied: 0,
+            immobilize_until_unix: setup.now_unix + 30,
+            orig_max_velocity: setup.orig_max_velocity,
+            orig_warp_scramble_strength: setup.orig_warp_scramble_strength,
+            orig_disallow_assistance: setup.orig_disallow_assistance,
+            mobility_restored: false,
+        });
+    }
+
+    let mut candidate_anchors: Vec<DVec3> = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .iter()
+        .map(|c| c.position)
+        .filter(|p| p.distance(center) > 500_000.0)
+        .collect();
+    if candidate_anchors.is_empty() {
+        candidate_anchors = setup
+            .all_balls
+            .iter()
+            .filter(|b| {
+                !is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id)
+                    && b.position.distance(center) > 500_000.0
+            })
+            .map(|b| b.position)
+            .collect();
+    }
 
     let mut teleported_ids = Vec::new();
     for (idx, b) in setup.all_balls.iter().enumerate() {
@@ -382,13 +569,23 @@ pub async fn activate_spatial_gtfo_doomsday(
             continue;
         }
         if (b.position - center).length() <= GTFO_SPHERE_RADIUS_M {
+            let mut hasher = RandomState::new().build_hasher();
+            hasher.write_i64(b.id);
+            hasher.write_usize(idx);
+            hasher.write_u64(setup.now_unix);
+            let h = hasher.finish();
+            let dest = if !candidate_anchors.is_empty() {
+                let anchor = candidate_anchors[(h as usize) % candidate_anchors.len()];
+                let angle = ((h >> 16) as f64) * 0.001;
+                let jitter = 15_000.0 + ((h >> 32) % 30_000) as f64;
+                anchor + DVec3::new(angle.cos() * jitter, angle.sin() * jitter, 5_000.0)
+            } else {
+                let angle = ((h >> 8) as f64) * 0.001;
+                let dist = 1_500_000.0 + ((h >> 24) % 25_000_000) as f64;
+                center + DVec3::new(angle.cos() * dist, angle.sin() * dist, ((h % 1_000_000) as f64) - 500_000.0)
+            };
             let mut updated_ball = b.clone();
-            let offset_m = 750_000.0 + ((idx as f64) * 125_000.0);
-            updated_ball.position = DVec3::new(
-                center.x + offset_m,
-                center.y + 250_000.0,
-                center.z - offset_m * 0.5,
-            );
+            updated_ball.position = dest;
             updated_ball.velocity = DVec3::ZERO;
             let _ = setup.sys.spawn_ball(updated_ball).await;
             teleported_ids.push(b.id);
@@ -430,7 +627,13 @@ pub async fn activate_multipoint_reaper_doomsday(
     module_id: i64,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let setup = validate_and_consume_titan_doomsday(ctx, char_id, ship_id, sys_id, module_id).await?;
+    let sys_pre = ctx.systems.get_or_spawn(sys_id);
+    let pre_balls = sys_pre.list_balls().await.unwrap_or_default();
+    let ship_pos_pre = pre_balls
+        .iter()
+        .find(|b| b.id == ship_id)
+        .map(|b| b.position)
+        .unwrap_or(DVec3::ZERO);
     let (start_pt, end_pt) = if let (Some(s), Some(e)) = (
         parse_vec3_from_args(args, 1),
         parse_vec3_from_args(args, 4),
@@ -452,10 +655,44 @@ pub async fn activate_multipoint_reaper_doomsday(
         (sv, ev)
     } else {
         (
-            setup.ship_pos + DVec3::new(20_000.0, 0.0, 0.0),
-            setup.ship_pos + DVec3::new(20_000.0, 0.0, 60_000.0),
+            ship_pos_pre + DVec3::new(20_000.0, 0.0, 0.0),
+            ship_pos_pre + DVec3::new(20_000.0, 0.0, 60_000.0),
         )
     };
+    let setup = validate_and_consume_titan_doomsday(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        module_id,
+        &[start_pt, end_pt],
+    )
+    .await?;
+    {
+        let mut guard = active_bosonic_cycles()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.push(BosonicActiveCycle {
+            db_key: ctx.instance_id as usize,
+            sys_id,
+            char_id,
+            ship_id,
+            ship_type_id: setup.ship_type_id,
+            mod_type_id: setup.mod_type_id,
+            origin_pos: setup.ship_pos,
+            dir_vec: DVec3::X,
+            tick_dmg: DamageVector::default(),
+            started_at_unix: setup.now_unix,
+            warmup_secs: 0,
+            total_ticks: 0,
+            ticks_applied: 0,
+            immobilize_until_unix: setup.now_unix + 30,
+            orig_max_velocity: setup.orig_max_velocity,
+            orig_warp_scramble_strength: setup.orig_warp_scramble_strength,
+            orig_disallow_assistance: setup.orig_disallow_assistance,
+            mobility_restored: false,
+        });
+    }
 
     let seg = end_pt - start_pt;
     let seg_len_sq = seg.length_squared().max(1.0);

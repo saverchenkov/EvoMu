@@ -1315,6 +1315,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         .living_world
         .step_all_mining_ops(&ctx.systems, &ctx.db, &ctx.sde)
         .await;
+    crate::services::pve_fob_observatory::step_living_world_fob_and_observatory_spawns(ctx).await;
 
     for (sys_id, handle) in active_handles {
         let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, sys_id).await;

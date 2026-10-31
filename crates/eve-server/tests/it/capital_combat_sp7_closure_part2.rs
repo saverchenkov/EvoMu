@@ -224,6 +224,9 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     .await
     .expect("GetSecurityStatusTransactions");
     assert!(!matches!(tx_rep, PyRep::None), "GetSecurityStatusTransactions must return a rowset");
+    if let PyRep::List(rows) = &tx_rep {
+        assert!(!rows.is_empty(), "GetSecurityStatusTransactions must contain at least one transaction");
+    }
 
     // Verify victim earned a kill right on aggressor
     let kr_id = ctx.db.with_snapshot(|s| {
@@ -379,11 +382,16 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     .await
     .expect("Negotiator tag at -0.3");
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));
-    assert!(sec_post_tag <= 0.0, "Clone soldier tags must not raise security status above 0.0 (got {sec_post_tag})");
+    assert!(
+        sec_post_tag > -0.3 && sec_post_tag <= 0.0,
+        "Clone soldier tags must raise security status from -0.3 and cap at 0.0 (got {sec_post_tag})"
+    );
 
     // 3. NPC kill security status gain stops at +5.0
     let gain_at_cap = compute_sec_status_gain(5.0, 1_000_000.0);
     assert_eq!(gain_at_cap, 0.0, "NPC kill security status gain must stop at +5.0");
+    let gain_below_cap = compute_sec_status_gain(0.0, 1_000_000.0);
+    assert!(gain_below_cap > 0.0, "NPC kill security status gain must be positive below +5.0");
 }
 
 #[tokio::test]
@@ -418,6 +426,8 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
     // 2. NPC Hauler Convoy traveling gates via living_world
     ctx.living_world.seed_default_convoys();
     ctx.living_world.materialize_system_lod2(highsec_sys, &ctx.systems, &ctx.sde).await;
+    let convoy_steps = ctx.living_world.step_all_hauler_convoys(&ctx.systems, &ctx.db, &ctx.sde).await;
+    assert!(convoy_steps.iter().all(|(_, r)| r.is_ok()), "step_all_hauler_convoys must succeed");
     let hauler_count = ctx
         .living_world
         .list_convoys()
@@ -426,9 +436,187 @@ async fn test_npc_navy_police_hauler_convoy_and_serverops_downtime() {
         .count();
     assert!(hauler_count >= 1, "Active HaulerConvoy must be tracked in living_world (got {hauler_count})");
 
-    // 3. ServerOps Downtime & Daily Jobs at 11:00 UTC
+    // 3. ServerOps Downtime & Daily Jobs at 11:00 UTC: verify expired NPC wreck cleanup
+    let expired_wreck_id = 999_888_777i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(
+            expired_wreck_id,
+            InventoryItemRecord {
+                item_id: expired_wreck_id,
+                type_id: 26_468, // NPC Wreck
+                owner_id: 1_000_137,
+                location_id: highsec_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
     ctx.advance_secs(86_400 + 60);
+    let _ = eve_server::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(&ctx);
     tick_background_cluster(&ctx).await;
     let dt_ran = ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("metenox_last_tick_unix"));
     assert!(dt_ran, "Daily downtime and background cluster jobs must execute across 11:00 UTC window");
+}
+
+#[tokio::test]
+async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle() {
+    // parity: feat:industry.capital-construction-restrictions, feat:combat.insurance-void-and-expiry
+    eve_testkit::attest(&[
+        "feat:industry.capital-construction-restrictions",
+        "feat:combat.insurance-void-and-expiry",
+    ]);
+
+    let sde = match eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) {
+        Ok(reg) => std::sync::Arc::new(reg),
+        Err(_) => std::sync::Arc::new(eve_sde::SdeRegistry::with_canonical_seed()),
+    };
+    let db = std::sync::Arc::new(eve_db::WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db)
+        .with_seeded_rng(eve_server::rng::TEST_MODE_DEFAULT_SEED);
+    pin_clock(&ctx);
+    let char_id = 90_000_001i64;
+    let ship_id = 104_000_301i64;
+    let highsec_sys = 30_000_142u32;
+    let jita_station = 60_003_760i64;
+
+    seed_ship_in_space(&ctx, char_id, ship_id, 587, highsec_sys, DVec3::ZERO).await;
+
+    // 1. Capital manufacturing job in high-sec NPC station is refused
+    let bp_id = 104_000_302i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(jita_station);
+        }
+        snap.items.insert(
+            bp_id,
+            InventoryItemRecord {
+                item_id: bp_id,
+                type_id: 19_721, // Revelation Blueprint
+                owner_id: char_id,
+                location_id: jita_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
+    let cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "industryManager",
+            None,
+            "InstallJob",
+            &[PyRep::keyval([
+                ("blueprintID", PyRep::Integer(bp_id)),
+                ("facilityID", PyRep::Integer(jita_station)),
+                ("activityID", PyRep::Integer(1)),
+                ("runs", PyRep::Integer(1)),
+            ])],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Capital ship manufacturing in high-sec NPC station must be refused");
+    assert_eq!(cap_err.code, "CapitalConstructionForbiddenInHighSec");
+
+    // 1b. Supercapital manufacturing in low-sec NPC station is refused
+    let super_bp_id = 104_000_303i64;
+    let lowsec_sys = 30_002_537u32;
+    let lowsec_station = ctx
+        .sde
+        .solar_systems
+        .get(&lowsec_sys)
+        .and_then(|s| s.stations.first().map(|st| st.station_id))
+        .unwrap_or(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(lowsec_station);
+        }
+        snap.items.insert(
+            super_bp_id,
+            InventoryItemRecord {
+                item_id: super_bp_id,
+                type_id: 23_918, // Nyx Blueprint
+                owner_id: char_id,
+                location_id: lowsec_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut low_sess = make_sess(char_id, ship_id, lowsec_sys, Some(lowsec_station));
+    let super_err = ctx
+        .dispatch_rpc(
+            &mut low_sess,
+            "industryManager",
+            None,
+            "InstallJob",
+            &[PyRep::keyval([
+                ("blueprintID", PyRep::Integer(super_bp_id)),
+                ("facilityID", PyRep::Integer(lowsec_station)),
+                ("activityID", PyRep::Integer(1)),
+                ("runs", PyRep::Integer(1)),
+            ])],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Supercapital manufacturing in low-sec NPC station must be refused");
+    assert_eq!(super_err.code, "SupercapitalRequiresSovereignNullSec");
+
+    // 2. Insurance contract via real InsureShip RPC: 12-week expiry -> 40% fallback + EVE-mail, and CONCORD criminal voiding
+    let cost_isk = 1.0_f64; // Platinum fraction (1.0)
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(ship_id), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("InsureShip");
+    let full_payout = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        rt.insurance_contracts.get(&ship_id).map(|c| c.payout_isk).unwrap_or(0.0)
+    });
+    assert!(full_payout > 0.0);
+
+    // Advance past 12 weeks (7,257,600s) -> expired contract falls back to 40% payout and sends EVE-mail
+    ctx.advance_secs(12 * 7 * 86_400 + 60);
+    let mails_before = ctx.db.with_snapshot(|s| s.mails.len());
+    let payout = eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id, 587, false);
+    assert!(payout > 0.0 && payout < full_payout, "Expired insurance must fall back to 40% payout");
+    let has_mail = ctx.db.with_snapshot(|s| {
+        s.mails.len() > mails_before && s.mails.iter().any(|m| m.recipient_id == char_id && m.subject.contains("Insurance Payout"))
+    });
+    assert!(has_mail, "Insurance payout must send an EVE-mail");
+
+    // CONCORD criminal death voids active insurance contract (0.0 payout)
+    let ship_id_2 = 104_000_304i64;
+    seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "insuranceSvc",
+            None,
+            "InsureShip",
+            &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("InsureShip ship 2");
+    let void_payout = eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true);
+    assert_eq!(void_payout, 0.0, "CONCORD criminal death must void insurance payout");
 }

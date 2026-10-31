@@ -450,7 +450,12 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023))
                     })
                 });
-            if cand_id == nid || cand_id >= 700_000_000 || cand_ball.type_id == 26468
+            let is_targetable_category = ctx
+                .sde
+                .types
+                .get(&cand_ball.type_id)
+                .is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65));
+            if cand_id == nid || !is_targetable_category || cand_ball.type_id == 26468
                 || (cand_ball.max_velocity <= 0.0 && !is_player_drone) || !valid_target(cand_id)
             {
                 continue;
@@ -674,7 +679,10 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let st = &mut *st_guard;
-            if npc.web_speed_factor < 0.0 && dist <= npc.web_range {
+            if npc.web_speed_factor < 0.0
+                && dist <= npc.web_range
+                && !bp.combat_states.get(&target_id).is_some_and(|tcs| tcs.is_web_immune)
+            {
                 let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
                 let _ = bp.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult);
             }
@@ -729,8 +737,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
                 let candidates: Vec<(i64, DVec3)> = ball_map
                     .iter()
-                    .filter(|(&other_id, _)| {
-                        if other_id == nid || other_id == target_id || other_id >= 700_000_000 {
+                    .filter(|(&other_id, other_ball)| {
+                        let is_targetable_cat = ctx
+                            .sde
+                            .types
+                            .get(&other_ball.type_id)
+                            .is_none_or(|t| matches!(t.category_id, 6 | 11 | 18 | 65));
+                        if other_id == nid || other_id == target_id || !is_targetable_cat {
                             return false;
                         }
                         if npc.threat_table.contains_key(&other_id) {
