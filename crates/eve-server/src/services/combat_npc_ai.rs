@@ -297,6 +297,7 @@ pub fn is_candidate_hostile_to_edencom(
 /// `feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`, `feat:npc.drifters`, `feat:npc.triglavians`,
 /// `feat:npc.sleepers`, `feat:npc.edencom-npc`).
 pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
+    crate::services::mobile_deployables_ext::step_system_deployables_sync(ctx, solar_system_id);
     {
         let guard = ctx.combat_ephemeral.read().unwrap_or_else(|e| e.into_inner());
         let has_npcs = guard.npc_entities.values().any(|n| n.solar_system_id == solar_system_id);

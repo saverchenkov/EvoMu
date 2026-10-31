@@ -1238,7 +1238,7 @@ impl SystemHandle {
         let SystemActorState {
             active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt: _,
+            asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
         } = &mut *st;
         if dt > 0.0 && dt.is_finite() {
@@ -1266,21 +1266,25 @@ impl SystemHandle {
         let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
         );
-        let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let fallback_rng = crate::rng::MechanicRng::default();
+        let rng_ref = mechanic_rng_opt.as_deref().unwrap_or(&fallback_rng);
+        crate::services::mobile_deployables::step_mobile_deployables_in_actor(
+            &mut bp, active_module_cycles, rng_ref, deact_hook_guard.as_ref(),
+            sde_opt.as_deref(), db_opt.as_ref(), mechanic_rng_opt.as_deref(), self.solar_system_id, dt, step_now_unix,
+        );
+        let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let mut destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         destroyed.extend(sup_dead.into_iter().chain(pg_dead).map(|bid| (bid, None)));
-        destroyed.extend(
-            crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
-                &mut bp, sde_opt.as_deref(), self.solar_system_id,
-            )
-            .into_iter()
-            .map(|bid| (bid, None)),
+        let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
+            &mut bp, sde_opt.as_deref(), self.solar_system_id,
         );
+        destroyed.extend(zk_dead.into_iter().map(|bid| (bid, None)));
         let mut death_futs = Vec::new();
         for &(target_ball_id, owner_char_id) in &destroyed {
             if let Some(db) = db_opt.as_ref() {
@@ -1296,13 +1300,9 @@ impl SystemHandle {
             crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
                 db,
                 bp.combat_states.iter().filter_map(|(&bid, cs)| {
-                    if !bp.is_static_ball(bid)
-                        && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11)
-                    {
-                        Some((bid, cs))
-                    } else {
-                        None
-                    }
+                    (!bp.is_static_ball(bid)
+                        && bp.ball_slim_meta.get(&bid).is_none_or(|m| m.category_id != 11))
+                    .then_some((bid, cs))
                 }),
             );
         }
@@ -1310,9 +1310,7 @@ impl SystemHandle {
         {
             let mut mod_guard = self.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
             mod_guard.clear();
-            for c in active_module_cycles.iter() {
-                mod_guard.insert(c.ship_id);
-            }
+            mod_guard.extend(active_module_cycles.iter().map(|c| c.ship_id));
         }
         let tick = bp.current_tick;
         let broadcast = crate::system_actor::build_tick_broadcast(self.solar_system_id, &mut bp, events);
@@ -1320,12 +1318,8 @@ impl SystemHandle {
         drop(bp);
         let _ = self.event_tx.send(broadcast);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            for fut in death_futs {
-                let _ = handle.spawn(fut);
-            }
-            if let Some(fut) = step_fut {
-                let _ = handle.spawn(fut);
-            }
+            for fut in death_futs { let _ = handle.spawn(fut); }
+            if let Some(fut) = step_fut { let _ = handle.spawn(fut); }
         }
         tick
     }

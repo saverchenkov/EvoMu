@@ -241,7 +241,7 @@ fn is_hostile_to_structure(
         if bt.group_id == GROUP_STANDUP_GUIDED_BOMB {
             return false;
         }
-        if !is_fighter && !is_drone && !matches!(bt.category_id, 6 | 11 | 18 | 22 | 87) {
+        if !is_fighter && !is_drone && !matches!(bt.category_id, 6 | 8 | 11 | 18 | 22 | 87) {
             return false;
         }
     } else if !is_fighter && !is_drone {
@@ -679,7 +679,7 @@ pub async fn try_activate_standup_weapon(
             let mut destroyed_count = 0_i64;
 
             for b in &all_balls {
-                let dist = (b.position - attacker_ball.position).length();
+                let dist = ((b.position - attacker_ball.position).length() - attacker_ball.radius - b.radius).max(0.0);
                 let Some(falloff_mult) = standup_falloff_multiplier(dist, optimal_range, falloff_range) else {
                     continue;
                 };

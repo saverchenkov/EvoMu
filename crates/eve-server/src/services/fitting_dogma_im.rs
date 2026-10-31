@@ -499,6 +499,9 @@ pub(crate) async fn handle_dogma_im(
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "AddTarget requires integer targetID".into() }));
             };
+            if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
+                return Some(crate::services::structure_weapons_ops::handle_structure_add_target(ctx, session, char_id, ship_id, target_id).await);
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session is not in space".into() }));
             };

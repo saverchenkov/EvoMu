@@ -701,26 +701,7 @@ pub async fn handle(
             Some(Ok(PyRep::Integer(0)))
         }
         ("structureDirectory", "GetMyDockableStructures") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .or(session.solar_system_id)
-                .unwrap_or(0);
-            let ids: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
-                let mut v: Vec<i64> = snap
-                    .structures
-                    .values()
-                    .filter(|s| s.solar_system_id == sys_id)
-                    .map(|s| s.structure_id)
-                    .collect();
-                v.sort_unstable();
-                v.into_iter().map(PyRep::Integer).collect()
-            });
-            Some(Ok(PyRep::List(ids)))
+            Some(crate::services::station_structure::structure_profiles_directory::handle_get_my_dockable_structures(ctx, session, args))
         }
         ("map", "GetStationInfo") => {
             if let Err(e) = ServerContext::require_auth(session) {

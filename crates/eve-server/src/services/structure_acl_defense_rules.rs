@@ -256,6 +256,10 @@ pub fn handle_get_members(
 // 2. Docking ACL Verification (`feat:structures.docking-acl`)
 // ============================================================================
 
+pub fn apply_pending_profile_applications(ctx: &ServerContext) {
+    ops::sync_pending_profiles_in_ctx(ctx);
+}
+
 pub fn verify_structure_docking_acl(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
@@ -271,6 +275,7 @@ pub fn verify_structure_docking_acl(
     Ok(())
 }
 
+// ============================================================================
 // 4. Structure Auto-Defense Settings (`feat:structures.defense-settings`)
 // ============================================================================
 
@@ -363,114 +368,175 @@ pub fn save_defense_settings(snap: &mut WorldStateSnapshot, settings: &Structure
     }
 }
 
+fn resolve_owner_standing_toward_pilot(
+    snap: &WorldStateSnapshot,
+    owner_corp_id: i64,
+    owner_ally_id: i64,
+    pilot_id: i64,
+    pilot_corp: i64,
+    pilot_ally: i64,
+) -> f64 {
+    if let Some(list) = snap.corp_contacts.get(&owner_corp_id) {
+        for target in [pilot_id, pilot_corp, pilot_ally] {
+            if target > 0 {
+                if let Some(c) = list.iter().find(|c| c.contact_id == target) {
+                    return c.standing;
+                }
+            }
+        }
+    }
+    if owner_ally_id > 0 {
+        if let Some(list) = snap.alliance_contacts.get(&owner_ally_id) {
+            for target in [pilot_id, pilot_corp, pilot_ally] {
+                if target > 0 {
+                    if let Some(c) = list.iter().find(|c| c.contact_id == target) {
+                        return c.standing;
+                    }
+                }
+            }
+        }
+    }
+    0.0
+}
+
 pub fn evaluate_auto_defense_target(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
     structure_id: i64,
     pilot_id: i64,
 ) -> bool {
-    let settings = load_defense_settings(snap, structure_id);
-    if !settings.auto_defense_enabled {
-        return false;
-    }
-
     let Some(st) = snap.structures.get(&structure_id) else {
         return false;
     };
+    if matches!(
+        st.state.as_str(),
+        "Destroyed" | "Unanchored" | "AnchorVulnerable" | "Anchoring" | "NoCore"
+    ) {
+        return false;
+    }
+    let ext = load_ext_state(snap);
+    let legacy = load_defense_settings(snap, structure_id);
+    let (enabled, tgt_att, tgt_war, thresh, tgt_blk) =
+        if let Some(ds) = ext.access_profiles.get(&structure_id).and_then(|p| p.defense_settings.as_ref()) {
+            (
+                ds.auto_defense_enabled,
+                ds.auto_target_attackers,
+                ds.auto_target_war_targets,
+                ds.standing_threshold,
+                ds.target_blocked_acl,
+            )
+        } else if let Some(prof) = ext.access_profiles.get(&structure_id).filter(|p| p.has_defense_config) {
+            (
+                prof.auto_defense_enabled,
+                prof.auto_target_attackers,
+                prof.auto_target_war_targets,
+                prof.defense_standing_threshold,
+                prof.target_blocked_acl,
+            )
+        } else {
+            (
+                legacy.auto_defense_enabled,
+                legacy.auto_target_attackers,
+                legacy.auto_target_war_targets,
+                legacy.standing_threshold,
+                legacy.target_blocked_acl,
+            )
+        };
+    if !enabled {
+        return false;
+    }
+
     let (pilot_corp, pilot_ally) = snap
         .characters
         .get(&pilot_id)
         .map(|c| (c.corporation_id, c.alliance_id.unwrap_or(0)))
         .unwrap_or((0, 0));
-
-    // Friendly exemption: pilots belonging to owning corp or alliance are never auto-targeted
-    if pilot_corp == st.owner_corp_id {
-        return false;
-    }
-    if let Some(owner_corp) = snap.corporations.get(&st.owner_corp_id) {
-        if let Some(owner_ally) = owner_corp.alliance_id {
-            if owner_ally > 0 && pilot_ally == owner_ally {
-                return false;
-            }
-        }
-    }
-
-    // 1. Attackers targeting: check active (non-expired) known attackers
-    if settings.auto_target_attackers && settings.is_active_attacker(pilot_id, ctx.now_unix()) {
-        return true;
-    }
-
-    // 2. War targets: check active war between pilot's corp/alliance and structure owner
-    if settings.auto_target_war_targets {
-        if are_corps_at_war_in_snap(snap, pilot_corp, st.owner_corp_id, ctx.now_unix()) {
-            return true;
-        }
-    }
-
-    // Security-band / Crimewatch gating: in high-sec, unmanned defense may only engage active attackers or war targets.
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&st.solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(1.0);
-    if sys_sec >= 0.45 && st.solar_system_id < 31_000_000 {
-        return false;
-    }
-
-    // 3. Standing threshold check: owner corporation/alliance standing toward the pilot (or pilot's corp/alliance)
-    let lookup_contact = |list: &[eve_db::SocialContactRecord]| -> Option<f64> {
-        list.iter()
-            .find(|c| c.contact_id == pilot_id)
-            .or_else(|| (pilot_corp > 0).then(|| list.iter().find(|c| c.contact_id == pilot_corp)).flatten())
-            .or_else(|| (pilot_ally > 0).then(|| list.iter().find(|c| c.contact_id == pilot_ally)).flatten())
-            .map(|c| c.standing)
-    };
     let owner_ally = snap
         .corporations
         .get(&st.owner_corp_id)
         .and_then(|c| c.alliance_id)
         .unwrap_or(0);
-    let standing = snap
-        .corp_contacts
-        .get(&st.owner_corp_id)
-        .and_then(|list| lookup_contact(list))
-        .or_else(|| {
-            (owner_ally > 0)
-                .then(|| {
-                    snap.alliance_contacts
-                        .get(&owner_ally)
-                        .and_then(|list| lookup_contact(list))
-                })
-                .flatten()
-        })
-        .unwrap_or(0.0);
-    if standing < settings.standing_threshold {
+
+    // Friendly exemption: owning corp and alliance members are never auto-targeted.
+    if pilot_corp == st.owner_corp_id || (owner_ally > 0 && pilot_ally == owner_ally) {
+        return false;
+    }
+
+    let now_unix = ctx.now_unix();
+    if tgt_att && legacy.is_active_attacker(pilot_id, now_unix) {
+        return true;
+    }
+    if tgt_war && are_corps_at_war_in_snap(snap, pilot_corp, st.owner_corp_id, now_unix) {
         return true;
     }
 
-    // 4. Blocked ACL / Defense-Blocked ACL check: pilots denied by structure docking or defense ACL are targeted
-    if settings.target_blocked_acl {
-        if !ops::evaluate_character_structure_access(ctx, snap, structure_id, pilot_id) {
-            return true;
-        }
-        let ext = ops::load_ext_state(snap);
-        if let Some(prof) = ext.access_profiles.get(&structure_id) {
-            if prof.defense_blocked_characters.contains(&pilot_id)
-                || prof.defense_group_ids.iter().any(|gid| {
-                    ext.owner_groups
-                        .get(gid)
-                        .is_some_and(|g| g.members.get(&pilot_id) == Some(&-1))
+    // In high-security space (>= 0.45), automated targeting of non-attackers/non-wartargets
+    // via standing or ACL is disabled by CONCORD safety rules.
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&st.solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    if sys_sec >= 0.45 && st.solar_system_id < 31_000_000 {
+        return false;
+    }
+
+    let standing = resolve_owner_standing_toward_pilot(
+        snap,
+        st.owner_corp_id,
+        owner_ally,
+        pilot_id,
+        pilot_corp,
+        pilot_ally,
+    );
+    if standing < thresh {
+        return true;
+    }
+    if tgt_blk {
+        if let Some(p) = ext.access_profiles.get(&structure_id) {
+            let grp_blk = p.access_group_ids.iter().chain(&p.defense_group_ids).any(|gid| {
+                ext.owner_groups.get(gid).is_some_and(|g| {
+                    g.members.get(&pilot_id) == Some(&-1)
+                        || (pilot_corp > 0 && g.members.get(&pilot_corp) == Some(&-1))
+                        || (pilot_ally > 0 && g.members.get(&pilot_ally) == Some(&-1))
                 })
+            });
+            if grp_blk
+                || p.blocked_characters.contains(&pilot_id)
+                || p.defense_blocked_characters.contains(&pilot_id)
+                || p.blocked_corporations.contains(&pilot_corp)
+                || (pilot_ally > 0 && p.blocked_alliances.contains(&pilot_ally))
             {
                 return true;
             }
         }
     }
-
     false
 }
 
+pub async fn trigger_structure_auto_defense_on_grid(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    sys_id: u32,
+    structure_id: i64,
+    attacker_char_id: Option<i64>,
+    now_unix: u64,
+) {
+    crate::services::structure_weapons_ops::trigger_structure_auto_defense_on_grid(
+        ctx,
+        sys_handle,
+        sys_id,
+        structure_id,
+        attacker_char_id,
+        now_unix,
+    )
+    .await;
+}
+
+pub async fn trigger_system_structures_auto_defense(ctx: &ServerContext, sys_id: u32) {
+    crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(ctx, sys_id).await;
+}
 // ============================================================================
 // 5. Anchoring Restrictions (`feat:structures.anchor-restrictions`)
 // ============================================================================

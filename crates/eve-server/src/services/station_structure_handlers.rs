@@ -10,6 +10,7 @@ use crate::services::station_structure::{
 use eve_db::WorldStateSnapshot;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use std::collections::HashMap;
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -486,11 +487,13 @@ fn build_structure_dir_entry(
         ("nextReinforceHour", if can_see_pending { pending.map_or(PyRep::None, |(nh, _, _)| PyRep::Integer(nh as i64)) } else { PyRep::None }),
         ("nextReinforceWeekday", if can_see_pending { pending.map_or(PyRep::None, |(_, nd, _)| PyRep::Integer(nd as i64)) } else { PyRep::None }),
         ("applyAfterUnix", if can_see_pending { pending.map_or(PyRep::None, |(_, _, at)| PyRep::Integer(at as i64)) } else { PyRep::None }),
+        ("profileID", if is_corp_manager { ext.structure_profile_id.get(&st.structure_id).copied().map(PyRep::Integer).unwrap_or(PyRep::None) } else { PyRep::None }),
     ])
 }
 
 pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionState, corp_only: bool) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    structure_upwell_ops::sync_pending_profiles_in_ctx(ctx);
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
@@ -523,6 +526,7 @@ pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionSt
 pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = args.first().and_then(|a| a.as_i64()).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "GetStructureInfo requires structureID"))?;
+    structure_upwell_ops::sync_pending_profiles_in_ctx(ctx);
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
@@ -687,4 +691,182 @@ pub(crate) fn resolve_upwell_dock_target(
         ));
     }
     Ok(glam::DVec3::from_array(st.position))
+}
+
+pub fn load_station_standings_restrictions(sde: &eve_sde::SdeRegistry) -> HashMap<i64, HashMap<u32, f64>> {
+    let mut out = HashMap::new();
+    if let Ok(table) = sde.load_cfsd_nested("res:/staticdata/stationstandingsrestrictions.fsdbinary") {
+        for (entity_str, val) in table {
+            let Ok(entity_id) = entity_str.parse::<i64>() else { continue };
+            let mut svc_map = HashMap::new();
+            if let Some(svcs) = val.get("services").and_then(|v| v.as_object()) {
+                for (sid_str, req_val) in svcs {
+                    if let (Ok(sid), Some(req)) = (sid_str.parse::<u32>(), req_val.as_f64()) {
+                        svc_map.insert(sid, req);
+                    }
+                }
+            }
+            out.insert(entity_id, svc_map);
+        }
+    }
+    out
+}
+
+pub fn effective_standing_with_skills(raw: f64, diplomacy_lvl: u8, connections_lvl: u8) -> f64 {
+    if raw < -1e-9 {
+        (raw + (10.0 - raw) * 0.04 * (diplomacy_lvl.min(5) as f64)).clamp(-10.0, 10.0)
+    } else if raw > 1e-9 {
+        (raw + (10.0 - raw) * 0.04 * (connections_lvl.min(5) as f64)).clamp(-10.0, 10.0)
+    } else {
+        0.0
+    }
+}
+
+pub fn validate_npc_station_docking_gate(ctx: &ServerContext, char_id: i64, station_id: i64) -> Result<(), BridgeRpcError> {
+    let now_unix = ctx.now_unix();
+    if station_id == 60_015_187 {
+        let char_war_fac = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
+        if matches!(char_war_fac, Some(500_001..=500_004)) {
+            return Err(BridgeRpcError::user_error("FulcrumRefusesEmpireMilitia"));
+        }
+        let weapons_active = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner()).states
+            .get(&char_id)
+            .is_some_and(|s| s.is_weapon_timer_active(now_unix));
+        let retribution_active = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.disapproval_flags.get(&char_id).copied().is_some_and(|exp| now_unix < exp)
+        });
+        if weapons_active || retribution_active {
+            return Err(BridgeRpcError::user_error("FulcrumRefusesTimerActive"));
+        }
+    }
+    if let Some(st) = ctx.sde.stations.get(&station_id) {
+        let restrictions = load_station_standings_restrictions(&ctx.sde);
+        let req_opt = restrictions
+            .get(&st.owner_corporation_id)
+            .and_then(|m| m.get(&22).copied())
+            .or_else(|| st.owner_faction_id.and_then(|fid| restrictions.get(&fid)?.get(&22).copied()));
+        if let Some(req_st) = req_opt {
+            let eff = ctx.db.with_snapshot(|snap| {
+                let sk = snap.skills.get(&char_id);
+                let dip = sk.and_then(|m| m.get(&3357)).map(|s| s.level).unwrap_or(0);
+                let con = sk.and_then(|m| m.get(&3359)).map(|s| s.level).unwrap_or(0);
+                let ch = snap.characters.get(&char_id);
+                let entity = if restrictions.contains_key(&st.owner_corporation_id) {
+                    st.owner_corporation_id
+                } else {
+                    st.owner_faction_id.unwrap_or(st.owner_corporation_id)
+                };
+                let raw = ch.and_then(|c| c.standings.get(&entity).copied()).unwrap_or(0.0);
+                effective_standing_with_skills(raw, dip, con)
+            });
+            if eff + 1e-9 < req_st {
+                return Err(BridgeRpcError {
+                    code: "StandingTooLowForStationService".into(),
+                    message: format!("Standing {eff:.2} is below required {req_st:.2} to dock at station {station_id}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn evaluate_station_service_standing_gate(
+    ctx: &ServerContext,
+    char_id: i64,
+    station_id: i64,
+    raw_service_id: u32,
+) -> Result<PyRep, BridgeRpcError> {
+    let service_id = if raw_service_id.is_power_of_two() && raw_service_id >= 16 {
+        raw_service_id.trailing_zeros() + 1
+    } else {
+        raw_service_id
+    };
+    let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
+        if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, raw_service_id as i64) {
+            return Err(err(
+                "StationServiceUnavailable",
+                format!("Station {station_id} does not offer service {raw_service_id}"),
+            ));
+        }
+        (st.owner_corporation_id, st.owner_faction_id)
+    } else if let Some(struct_info) = ctx.db.with_snapshot(|s| s.structures.get(&station_id).map(|st| (st.owner_corp_id, None))) {
+        struct_info
+    } else {
+        return Err(err("StationNotFound", format!("Station {station_id} not found in SDE")));
+    };
+
+    if station_id == 60_015_187 && matches!(service_id, 23 | 24) {
+        let ok = ctx.db.with_snapshot(|snap| {
+            let Some(ch) = snap.characters.get(&char_id) else { return false };
+            if service_id == 23 {
+                snap.corporations.get(&ch.corporation_id).is_some_and(|corp| {
+                    snap.characters.get(&corp.ceo_id).and_then(|ceo| ceo.war_faction_id).is_some_and(|f| matches!(f, 500_010 | 500_011))
+                })
+            } else {
+                matches!(ch.war_faction_id, Some(500_010 | 500_011))
+            }
+        });
+        if !ok {
+            return Err(err(
+                "StandingTooLowForStationService",
+                format!("Service {service_id} at The Fulcrum requires pirate insurgency alignment"),
+            ));
+        }
+    }
+
+    let restrictions = load_station_standings_restrictions(&ctx.sde);
+    let fsd_gate = restrictions
+        .get(&owner_corp)
+        .and_then(|m| m.get(&service_id).map(|&req| (owner_corp, req)))
+        .or_else(|| owner_fac.and_then(|fid| restrictions.get(&fid)?.get(&service_id).map(|&req| (fid, req))));
+
+    ctx.db.with_snapshot(|snap| {
+        let sk = snap.skills.get(&char_id);
+        let dip = sk.and_then(|m| m.get(&3357)).map(|s| s.level).unwrap_or(0);
+        let con = sk.and_then(|m| m.get(&3359)).map(|s| s.level).unwrap_or(0);
+        let ch = snap.characters.get(&char_id);
+
+        if let Some((gate_entity, req_standing)) = fsd_gate {
+            let eff = if service_id == 23 && ch.is_some_and(|c| snap.corporations.contains_key(&c.corporation_id)) {
+                let cid = ch.map(|c| c.corporation_id).unwrap_or(0);
+                let ceo_id = snap.corporations.get(&cid).map(|cp| cp.ceo_id).unwrap_or(char_id);
+                snap.characters.get(&ceo_id).and_then(|c| c.standings.get(&gate_entity).copied()).unwrap_or(0.0)
+            } else {
+                let raw = ch.and_then(|c| c.standings.get(&gate_entity).copied()).unwrap_or(0.0);
+                effective_standing_with_skills(raw, dip, con)
+            };
+            if eff + 1e-9 < req_standing {
+                return Err(err(
+                    "StandingTooLowForStationService",
+                    format!("Effective standing {eff:.2} toward {gate_entity} is below FSD required {req_standing:.2} for service {service_id} at station {station_id}"),
+                ));
+            }
+            return Ok(PyRep::Bool(true));
+        }
+
+        let raw_corp = ch.and_then(|c| c.standings.get(&owner_corp).copied()).unwrap_or(0.0);
+        let raw_fac = ch.and_then(|c| owner_fac.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
+        let eff_corp = effective_standing_with_skills(raw_corp, dip, con);
+        let eff_fac = effective_standing_with_skills(raw_fac, dip, con);
+        if service_id == 26 {
+            let opposing = owner_fac.and_then(crate::services::fw_services::fw_opposing_faction);
+            let war_fac = ch.and_then(|c| c.war_faction_id);
+            if eff_fac < 0.0 || (opposing.is_some() && war_fac == opposing) {
+                return Err(err(
+                    "StandingTooLowForStationService",
+                    format!("Navy office access denied at station {station_id} (faction standing {eff_fac:.2})"),
+                ));
+            }
+        }
+        let min_standing = if matches!(service_id, 10 | 26) { 0.0 } else { -2.0 };
+        if eff_corp < min_standing || eff_fac < -2.0 {
+            return Err(err(
+                "StandingTooLowForStationService",
+                format!(
+                    "Character {char_id} effective standing (corp {eff_corp:.2}, faction {eff_fac:.2}) is below required {min_standing:.1} for service {raw_service_id} at station {station_id}"
+                ),
+            ));
+        }
+        Ok(PyRep::Bool(true))
+    })
 }

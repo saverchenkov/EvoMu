@@ -33,19 +33,30 @@ fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> {
     args.get(idx).and_then(|a| a.as_i64())
 }
 
-pub(crate) fn can_character_control_structure(
+pub(crate) fn can_character_control_structure_with_profile(
     snap: &WorldStateSnapshot,
     ext: &ops::StructureExtendedState,
     st: &eve_db::UpwellStructureRecord,
+    prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
 ) -> bool {
-    verify_control_acl_or_role(snap, ext, st, char_id).is_ok()
+    verify_control_acl_or_role_with_profile(snap, ext, st, prof_opt, char_id).is_ok()
 }
 
 fn verify_control_acl_or_role(
     snap: &WorldStateSnapshot,
     ext: &ops::StructureExtendedState,
     st: &eve_db::UpwellStructureRecord,
+    char_id: i64,
+) -> Result<(), BridgeRpcError> {
+    verify_control_acl_or_role_with_profile(snap, ext, st, ext.access_profiles.get(&st.structure_id), char_id)
+}
+
+fn verify_control_acl_or_role_with_profile(
+    snap: &WorldStateSnapshot,
+    ext: &ops::StructureExtendedState,
+    st: &eve_db::UpwellStructureRecord,
+    prof_opt: Option<&ops::StructureAccessProfile>,
     char_id: i64,
 ) -> Result<(), BridgeRpcError> {
     let caller_corp = snap
@@ -59,7 +70,7 @@ fn verify_control_acl_or_role(
         .and_then(|c| c.alliance_id)
         .or_else(|| snap.corporations.get(&caller_corp).and_then(|c| c.alliance_id))
         .unwrap_or(0);
-    let has_defense_acl = if let Some(p) = ext.access_profiles.get(&st.structure_id) {
+    let has_defense_acl = if let Some(p) = prof_opt {
         if p.blocked_characters.contains(&char_id)
             || p.defense_blocked_characters.contains(&char_id)
             || (caller_corp > 0 && p.blocked_corporations.contains(&caller_corp))
@@ -1017,6 +1028,7 @@ pub async fn step_structure_auto_defense(ctx: &ServerContext, sys_id: u32, dt: f
         return;
     }
 
+    ops::sync_pending_profiles_in_ctx(ctx);
     let now_unix = ctx.now_unix();
     let candidate_structures: Vec<(i64, DVec3, f64, f64, Vec<eve_db::InventoryItemRecord>)> =
         ctx.db.with_snapshot(|snap| {

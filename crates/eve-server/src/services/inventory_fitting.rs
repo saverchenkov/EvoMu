@@ -94,8 +94,10 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if service == "dogmaIM"
         && matches!(method, "Activate" | "Overload")
-        && session.structure_id.is_some()
-        && session.structure_id == session.ship_id
+        && session.ship_id.is_some_and(|sid| {
+            session.structure_id == Some(sid)
+                || ctx.db.with_snapshot(|s| s.structures.contains_key(&sid))
+        })
     {
         if let Some(res) = crate::services::combat_crimewatch::combat_weapons::handle_weapons(
             ctx, session, service, method, args, kwargs,
@@ -781,11 +783,11 @@ pub async fn handle(
                             }));
                         }
                         true
-                    } else if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || matches!(p_grp, 186 | 1250) {
+                    } else if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || matches!(p_grp, 186 | 1247 | 1250) {
                         let is_public_or_own = parent.owner_id == char_id
                             || parent.owner_id == 0
                             || parent.type_id == 23
-                            || matches!(p_grp, 186 | 1250)
+                            || matches!(p_grp, 186 | 1247 | 1250)
                             || (corp_id > 0 && parent.owner_id == corp_id);
                         if is_public_or_own {
                             is_loc_colocated(parent.item_id)

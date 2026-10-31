@@ -33,6 +33,13 @@ pub(crate) async fn handle_module_cycles(
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
+            if let Some(st_id) = ctx.db.with_snapshot(|s| {
+                s.structures.contains_key(&ship_id).then_some(ship_id).or_else(|| {
+                    s.items.get(&raw_module_id).and_then(|it| s.structures.contains_key(&it.location_id).then_some(it.location_id))
+                })
+            }) {
+                return Some(crate::services::structure_weapons_ops::handle_structure_module_activate(ctx, session, char_id, st_id, raw_module_id, &effect_name, target_id_opt, method == "Overload").await);
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Cannot activate modules outside of space".into() }));
             };

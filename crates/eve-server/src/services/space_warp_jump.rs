@@ -1101,6 +1101,7 @@ async fn handle_dock(
                 message: format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
             });
         }
+        crate::services::structure_acl_defense_rules::apply_pending_profile_applications(ctx);
         let acl_denied = ctx.db.with_snapshot(|snap| {
             !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
                 snap, dock_id, char_id,
@@ -1147,6 +1148,7 @@ async fn handle_dock(
                 ),
             });
         };
+        crate::services::station_structure_handlers::validate_npc_station_docking_gate(ctx, char_id, dock_id)?;
         st.position
     };
 

@@ -249,7 +249,15 @@ fn handle_office_manager(
                                 .get(&corp_id)
                                 .and_then(|c| c.faction_id.map(i64::from))
                         });
-                    if !matches!(corp_fac, Some(500_010 | 500_011)) {
+                    let is_pirate_corp = matches!(corp_fac, Some(500_010 | 500_011))
+                        || snap
+                            .corporations
+                            .get(&corp_id)
+                            .and_then(|cp| snap.characters.get(&cp.ceo_id))
+                            .filter(|ceo| !snap.fw_runtime.direct_enlisted_chars.contains_key(&ceo.character_id))
+                            .and_then(|ceo| ceo.war_faction_id)
+                            .is_some_and(|fid| matches!(fid, 500_010 | 500_011));
+                    if !is_pirate_corp {
                         return Err(BridgeRpcError {
                             code: "FulcrumOfficeRequiresPirateEnlistment".into(),
                             message: "Renting a corporation office at The Fulcrum requires a pirate-enlisted corporation".into(),

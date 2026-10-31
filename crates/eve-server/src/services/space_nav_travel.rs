@@ -1103,6 +1103,7 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             cs.is_covert_cloak = is_covert;
             cs.cloak_stabilization_remaining_s = 900.0;
             cs.cloak_configured_targeting_delay_s = targeting_delay_s;
+            crate::services::mobile_deployables_ext::record_ship_cloak_activated(ctx, ship_id);
             cs_changed = true;
             ball_changed = true;
         } else if (cs.cloak_configured_targeting_delay_s - targeting_delay_s).abs() > 1e-6 {
@@ -1113,6 +1114,7 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
         cs.is_cloaked = false;
         cs.is_covert_cloak = false;
         cs.cloak_stabilization_remaining_s = 0.0;
+        crate::services::mobile_deployables_ext::clear_ship_cloak_activated(ctx, ship_id);
         cs.decloak_targeting_delay_remaining_s = cs
             .decloak_targeting_delay_remaining_s
             .max(cs.cloak_configured_targeting_delay_s);

@@ -15,6 +15,8 @@ use std::collections::HashMap;
 pub mod structure_upwell_ops;
 #[path = "structure_profiles_rpc.rs"]
 pub mod structure_profiles_rpc;
+#[path = "structure_profiles_directory.rs"]
+pub mod structure_profiles_directory;
 #[path = "structure_lifecycle.rs"]
 pub mod structure_lifecycle;
 #[path = "structure_ansiblex_navigation.rs"]
@@ -269,90 +271,25 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if raw_service_id <= 0 {
+            let raw_service_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+            if raw_service_id == 0 {
                 return Some(Err(BridgeRpcError {
-                    code: "StationServiceUnavailable".into(),
-                    message: format!("Invalid station service ID {raw_service_id}"),
+                    code: "InvalidStationService".into(),
+                    message: "DoStandingCheckForStationService requires a positive stationServiceID".into(),
                 }));
             }
-            let Some(station_id) = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .or(session.structure_id)
-            else {
+            let Some(station_id) = args.get(1).and_then(|a| a.as_i64()).or(session.station_id) else {
                 return Some(Err(BridgeRpcError {
-                    code: "MissingStationId".into(),
-                    message: "DoStandingCheckForStationService requires a stationID argument or active session stationID".into(),
+                    code: "NotDocked".into(),
+                    message: "DoStandingCheckForStationService requires an active station session or stationID".into(),
                 }));
             };
-            let Ok(raw_u32) = u32::try_from(raw_service_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "StationServiceUnavailable".into(),
-                    message: format!("Invalid station service ID {raw_service_id}"),
-                }));
-            };
-            const MAX_STATION_SERVICE_ID: u32 = 27;
-            let (service_id, owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
-                let op_svcs = ctx
-                    .sde
-                    .station_operations
-                    .get(&st.operation_id)
-                    .map(|op| op.services.as_slice())
-                    .unwrap_or(&[]);
-                let resolved_sid = if raw_u32 <= MAX_STATION_SERVICE_ID {
-                    if op_svcs.contains(&raw_u32) {
-                        Some(raw_u32)
-                    } else if raw_u32 == 16 && op_svcs.contains(&5) {
-                        // Legacy EVE appConst.stationServiceReprocessingPlant bitmask (1 << 4 = 16 -> service 5)
-                        Some(5)
-                    } else {
-                        None
-                    }
-                } else if raw_u32.is_power_of_two() && raw_u32 <= (1 << (MAX_STATION_SERVICE_ID - 1)) {
-                    let bit_sid = raw_u32.trailing_zeros() + 1;
-                    op_svcs.contains(&bit_sid).then_some(bit_sid)
-                } else {
-                    None
-                };
-                let Some(sid) = resolved_sid else {
-                    return Some(Err(BridgeRpcError {
-                        code: "StationServiceUnavailable".into(),
-                        message: format!("Station {station_id} does not offer service {raw_service_id}"),
-                    }));
-                };
-                (sid, st.owner_corporation_id, st.owner_faction_id)
-            } else if let Some(struct_info) = ctx.db.with_snapshot(|s| s.structures.get(&station_id).map(|st| (st.owner_corp_id, None))) {
-                let sid = if raw_u32 <= MAX_STATION_SERVICE_ID {
-                    raw_u32
-                } else if raw_u32.is_power_of_two() && raw_u32 <= (1 << (MAX_STATION_SERVICE_ID - 1)) {
-                    raw_u32.trailing_zeros() + 1
-                } else {
-                    return Some(Err(BridgeRpcError {
-                        code: "StationServiceUnavailable".into(),
-                        message: format!("Invalid station service ID {raw_service_id}"),
-                    }));
-                };
-                (sid, struct_info.0, struct_info.1)
-            } else {
-                return Some(Err(BridgeRpcError {
-                    code: "StationNotFound".into(),
-                    message: format!("Station {station_id} not found in SDE"),
-                }));
-            };
-            if let Err(err) = crate::services::station_structure_handlers::check_station_service_standing(
+            Some(crate::services::station_structure_handlers::evaluate_station_service_standing_gate(
                 ctx,
                 char_id,
                 station_id,
                 raw_service_id,
-                service_id,
-                owner_corp,
-                owner_fac,
-            ) {
-                return Some(Err(err));
-            }
-            Some(Ok(PyRep::Bool(true)))
+            ))
         }
 
         ("stationSvc", "Undock") | ("structureDocking", "Undock") | ("ship", "Undock") => {
@@ -762,6 +699,9 @@ pub async fn handle(
                         ),
                     }));
                 };
+                if let Err(e) = crate::services::station_structure_handlers::validate_npc_station_docking_gate(ctx, char_id, dock_id) {
+                    return Some(Err(e));
+                }
                 st.position
             };
 
@@ -1173,7 +1113,7 @@ pub async fn handle(
                     } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_INHIBITOR {
                         (crate::services::mobile_deployables::CYNO_INHIBITOR_ACTIVATION_DELAY_SECS * 1_000) as f64
                     } else {
-                        60_000.0
+                        crate::services::mobile_deployables_ext::default_deploy_delay_secs(&ctx.sde, item.type_id, item_type.group_id) * 1_000.0
                     }
                 })
                 / 1_000.0)
@@ -1290,20 +1230,12 @@ pub async fn handle(
                     &ctx.sde,
                     item.type_id,
                 ))
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
-                now_unix.saturating_add(crate::services::mobile_deployables::DEPOT_LIFETIME_SECS)
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_TRACTOR {
-                now_unix.saturating_add(crate::services::mobile_deployables::MTU_LIFETIME_SECS)
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_MICRO_JUMP_UNIT {
-                now_unix.saturating_add(crate::services::mobile_deployables::MMJU_LIFETIME_SECS)
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_INHIBITOR {
-                now_unix.saturating_add(crate::services::mobile_deployables::CYNO_INHIBITOR_LIFETIME_SECS)
-            } else if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
-                if item.type_id == crate::services::mobile_deployables::TYPE_COVERT_MOBILE_CYNO_BEACON {
-                    now_unix.saturating_add(crate::services::mobile_deployables::COVERT_CYNO_BEACON_DURATION_SECS)
-                } else {
-                    now_unix.saturating_add(crate::services::mobile_deployables::CYNO_BEACON_DURATION_SECS)
-                }
+            } else if is_mobile {
+                now_unix.saturating_add(crate::services::mobile_deployables_ext::total_lifetime_secs(
+                    item.type_id,
+                    item_type.group_id,
+                    anchoring_delay_s.ceil() as u64,
+                ))
             } else {
                 0
             };
@@ -1336,6 +1268,9 @@ pub async fn handle(
                 return Some(structure_lifecycle_rpc::handle_jettison_structure_fuel(ctx, session, args).await);
             }
             if let Some(res) = super::structure_acl_defense_rules::handle(ctx, session, service, method, args, kwargs).await {
+                return Some(res);
+            }
+            if let Some(res) = structure_profiles_directory::handle(ctx, session, service, method, args, kwargs) {
                 return Some(res);
             }
             structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await

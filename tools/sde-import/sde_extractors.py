@@ -327,10 +327,12 @@ for tid, tm in typemats_raw.iteritems():
     rand_mats = []
     if getattr(tm, 'randomizedMaterials', None):
         for rm in tm.randomizedMaterials:
+            q_a = int(rm.quantityMin)
+            q_b = int(rm.quantityMax)
             rand_mats.append({
                 'material_type_id': int(rm.materialTypeID),
-                'quantity_min': int(rm.quantityMin),
-                'quantity_max': int(rm.quantityMax),
+                'quantity_min': min(q_a, q_b),
+                'quantity_max': max(q_a, q_b),
             })
     type_materials.append({'type_id': int(tid), 'materials': mats, 'randomized_materials': rand_mats})
 

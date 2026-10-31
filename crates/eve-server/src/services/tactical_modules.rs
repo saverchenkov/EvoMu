@@ -1169,11 +1169,24 @@ pub async fn activate_command_burst(
         return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") });
     }
 
+    let allowed_charge_groups: Vec<u32> = [604u16, 605, 606, 609, 610]
+        .into_iter()
+        .filter_map(|aid| mod_type.default_attributes.get(&aid).map(|&v| v as u32))
+        .filter(|&g| g > 0)
+        .collect();
+    let is_valid_charge_type = |tid: TypeId| {
+        ctx.sde.types.get(&tid).is_some_and(|t| {
+            if allowed_charge_groups.is_empty() {
+                matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905)
+            } else {
+                allowed_charge_groups.contains(&t.group_id)
+            }
+        })
+    };
     let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
         let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
         let is_burst_charge = |i: &eve_db::InventoryItemRecord| {
-            i.location_id == ship_id && i.item_id != module_id && i.quantity > 0
-                && ctx.sde.types.get(&i.type_id).is_some_and(|t| matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905))
+            i.location_id == ship_id && i.item_id != module_id && i.quantity > 0 && is_valid_charge_type(i.type_id)
         };
         if let Some(found) = snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i)).or_else(|| snap.items.values().find(|i| is_burst_charge(i))) {
             (Some(found.type_id), Some(found.item_id))
@@ -1182,8 +1195,18 @@ pub async fn activate_command_burst(
         }
     });
     let Some(c_tid) = charge_tid else {
+        let has_wrong_group_in_slot = ctx.db.with_snapshot(|snap| {
+            let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
+            snap.items.values().any(|i| i.location_id == ship_id && i.item_id != module_id && Some(i.flag) == mod_flag && i.quantity > 0)
+        });
+        if has_wrong_group_in_slot {
+            return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Loaded charge is incompatible with {}", mod_type.name) });
+        }
         return Err(BridgeRpcError { code: "NoChargesLoaded".into(), message: "Command Burst module requires a loaded Command Burst charge".into() });
     };
+    if !is_valid_charge_type(c_tid) {
+        return Err(BridgeRpcError { code: "InvalidChargeGroup".into(), message: format!("Charge {c_tid} is incompatible with {}", mod_type.name) });
+    }
 
     let skills = &fit.character_skills;
     let is_t2_module = mod_type.default_attributes.get(&422).copied().unwrap_or(1.0) >= 2.0;
@@ -1210,11 +1233,14 @@ pub async fn activate_command_burst(
 
     let wing_cmd_lvl = skills.get(&11574).or_else(|| skills.get(&11572)).copied().unwrap_or(0).min(5);
     let fleet_cmd_lvl = skills.get(&24764).or_else(|| skills.get(&3354)).copied().unwrap_or(0).min(5);
+    let ind_cmd_lvl = skills.get(&29637).copied().unwrap_or(0).min(5) as f64;
+    let cap_ind_lvl = skills.get(&28374).copied().unwrap_or(0).min(5) as f64;
     let ship_range_mult = match ship_group_id {
         30 | 547 | 659 | 1538 => 3.00,
         540 => 2.00,
-        883 => 1.50 * if is_mining_burst { 1.0 + 0.05 * (skills.get(&28374).copied().unwrap_or(5).min(5) as f64) } else { 1.0 },
-        941 if ship_type_id == 28606 => 1.50 * if is_mining_burst { 1.0 + 0.05 * (skills.get(&28609).copied().unwrap_or(5).min(5) as f64) } else { 1.0 },
+        883 => 1.50 * if is_mining_burst { 1.0 + 0.05 * cap_ind_lvl } else { 1.0 },
+        941 if ship_type_id == 28606 => 2.00 * if is_mining_burst { 1.0 + 0.05 * ind_cmd_lvl } else { 1.0 },
+        941 => 1.50 * if is_mining_burst { 1.0 + 0.05 * ind_cmd_lvl } else { 1.0 },
         419 | 963 => 1.50,
         _ => 1.0,
     };
@@ -1228,8 +1254,9 @@ pub async fn activate_command_burst(
     let ship_strength_bonus = match ship_group_id {
         540 => 0.04 * (skills.get(&33095).copied().unwrap_or(0).min(5) as f64),
         1534 => 0.02 * (skills.get(&37615).copied().unwrap_or(0).min(5) as f64),
-        883 if is_mining_burst => 0.05 * (skills.get(&28374).copied().unwrap_or(0).min(5) as f64),
-        941 if is_mining_burst => 0.03 * (skills.get(&28609).copied().unwrap_or(0).min(5) as f64),
+        883 if is_mining_burst => 0.05 * cap_ind_lvl,
+        941 if is_mining_burst && ship_type_id == 28606 => 0.03 * ind_cmd_lvl,
+        941 if is_mining_burst => 0.02 * ind_cmd_lvl,
         _ => 0.0,
     };
     let has_mindlink = fit.implants.iter().any(|&imp_tid| ctx.sde.types.get(&imp_tid).is_some_and(|t| t.name.contains("Mindlink")));
@@ -1273,7 +1300,7 @@ pub async fn activate_command_burst(
         let mut ships = Vec::new();
         for cid in fleet_chars {
             if let Some(ch) = snap.characters.get(&cid) {
-                if ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.active_ship_id > 0 {
+                if ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0 {
                     ships.push((cid, ch.active_ship_id));
                 }
             }
@@ -1342,12 +1369,8 @@ pub async fn activate_command_burst(
 
 /// Overlays cycle-transient item attributes (RAH/ADC/EHE resonances, mutadaptive spool, rack heat) onto `ItemGetInfo` attributes.
 pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attrs: &mut HashMap<u16, f64>) {
-    ctx.db.with_snapshot(|snap| {
-        if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) {
-            for (&attr_id, &val) in tr_attrs {
-                merged_attrs.insert(attr_id, val);
-            }
-        }
+    ctx.db.with_snapshot(|snap| if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) {
+        for (&attr_id, &val) in tr_attrs { merged_attrs.insert(attr_id, val); }
     });
 }
 

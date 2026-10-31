@@ -947,6 +947,18 @@ async fn handle_request_scans(
         rows.push(PyRep::keyval(kv));
     }
 
+    crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
+    let scan_inhibitors = crate::services::mobile_deployables_ext::active_scan_inhibitor_positions(ctx, sys_id);
+    if !scan_inhibitors.is_empty() && session.station_id.is_none() && session.structure_id.is_none() {
+        if let Some(sid) = session.ship_id {
+            if let Some(cpos) = sys_handle.get_ball_position_sync(sid) {
+                if crate::services::mobile_deployables_ext::is_pos_scan_inhibited(&scan_inhibitors, cpos) {
+                    return Some(Ok(PyRep::List(Vec::new())));
+                }
+            }
+        }
+    }
+
     // parity: feat:scanning.probe-target-classes
     let combat_probes: Vec<&crate::router::ActiveScannerProbe> = active_probes
         .iter()
@@ -962,6 +974,12 @@ async fn handle_request_scans(
             let Some(type_rec) = ctx.sde.types.get(&ball.type_id) else { continue };
             let group_id = type_rec.group_id;
             let category_id = type_rec.category_id;
+            if group_id != 1275
+                && matches!(category_id, 6 | 18 | 87)
+                && crate::services::mobile_deployables_ext::is_pos_scan_inhibited(&scan_inhibitors, ball.position)
+            {
+                continue;
+            }
             if group_id == 479
                 || group_id == 186
                 || matches!(group_id, 12 | 306 | 340 | 448 | 649)

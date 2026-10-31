@@ -87,6 +87,22 @@ pub fn is_structure_industry_service_online(
     })
 }
 
+/// Enforces exact Standup reactor service modules for Composite (`1888`), Hybrid (`1889`), and Biochemical (`1890`) reactions.
+pub fn is_structure_industry_service_online_for_bp(
+    sde: &eve_sde::SdeRegistry, snap: &eve_db::WorldStateSnapshot, facility_id: i64, activity_id: u8, bp_type_id: TypeId,
+) -> bool {
+    if !is_structure_industry_service_online(snap, facility_id, activity_id) { return false; }
+    if !matches!(activity_id, 9 | 11) || !snap.structures.contains_key(&facility_id) { return true; }
+    let Some(req_tid) = (match sde.types.get(&bp_type_id).map(|t| t.group_id) {
+        Some(1888) => Some(45537u32), Some(1889) => Some(45538u32), Some(1890) => Some(45539u32), _ => None,
+    }) else { return true };
+    snap.items.values().any(|it| {
+        it.location_id == facility_id && (164..=171).contains(&(it.flag as u16)) && it.type_id == req_tid
+            && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
+            && it.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+    })
+}
+
 /// Synchronizes active/paused industry jobs when a host structure loses or regains fuel/service (`feat:industry.job-pause-on-service-offline`, `feat:lifecycle.industry-pause-and-many`).
 pub fn sync_industry_job_pause_states(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64) {
     let job_ids: Vec<i64> = snap.industry_jobs.keys().copied().collect();

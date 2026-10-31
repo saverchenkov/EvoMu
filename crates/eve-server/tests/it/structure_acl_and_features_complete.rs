@@ -3,12 +3,11 @@
 //! and mobile cynosural inhibitors (`feat:structures.*`).
 
 use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
-use eve_destiny::{Ball, TargetLock};
+use eve_destiny::Ball;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::station_structure::structure_lifecycle as life;
-use eve_server::services::station_structure::structure_upwell_ops as ops;
 use eve_server::services::structure_acl_defense_rules as acl_rules;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -52,6 +51,7 @@ async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64) -> Ses
         .await
         .expect("AddCorporation");
     sess.corp_role |= eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    ctx.advance_secs(12);
     sess
 }
 
@@ -207,464 +207,384 @@ async fn test_structure_access_lists_and_docking_acl() {
     let PyRep::KeyVal(g_kv) = group_info else { panic!("expected keyval") };
     assert_eq!(g_kv.get("name").and_then(|v| v.as_str()), Some("Alpha ACL Renamed"));
 
-    // 2. Test feat:structures.docking-acl via live stationSvc.Dock / structureDocking.Dock RPCs
-    let struct_id = 100_001;
+    // 2. Test feat:structures.docking-acl end-to-end via structureProfiles + structureDocking.Dock + beyonce.CmdDock
+    let struct_id = 1_000_000_100_001;
     let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().corporation_id);
-    create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_142, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
+    let st_pos = [25_000_000.0, 0.0, 0.0];
+    create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_142, st_pos, life::STATE_SHIELD_VULNERABLE);
 
-    let prof_id = rpc(&ctx, &mut sess, "structureProfiles", "CreateProfile", &[PyRep::String("Docking ACL Profile".into()), PyRep::String("Test".into())]).await.expect("CreateProfile").as_i64().unwrap();
-    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Integer(1)])])]).await.expect("SaveProfileSettings");
-    rpc(&ctx, &mut sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)]).await.expect("ChangeProfiles");
+    let prof_id = rpc(
+        &ctx,
+        &mut sess,
+        "structureProfiles",
+        "CreateProfile",
+        &[PyRep::String("Docking Gate Profile".into()), PyRep::String("ACL Docking Test".into())],
+    )
+    .await
+    .expect("CreateProfile")
+    .as_i64()
+    .expect("profile id");
 
-    let mut other_sess = login(&ctx, 302, "other", "other-secret", other_char).await;
-    ctx.advance_virtual_clock(15);
-    rpc(&ctx, &mut other_sess, "stationSvc", "Undock", &[]).await.expect("Undock other_char");
-    let sys_handle = ctx.systems.get_or_spawn(30_000_142);
-    let _ = sys_handle.set_ball_position(other_sess.ship_id.unwrap(), DVec3::ZERO).await;
-    rpc(&ctx, &mut other_sess, "stationSvc", "Dock", &[PyRep::Integer(struct_id)]).await.expect("other_char on ACL must dock via stationSvc.Dock");
-    assert_eq!(other_sess.structure_id, Some(struct_id));
+    // setting_id 1 = setting_access_docking_tethering
+    rpc(
+        &ctx,
+        &mut sess,
+        "structureProfiles",
+        "SaveProfileSettings",
+        &[
+            PyRep::Integer(prof_id),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::Integer(1),
+                PyRep::Integer(group_id),
+                PyRep::Real(0.0),
+            ])]),
+        ],
+    )
+    .await
+    .expect("SaveProfileSettings docking ACL");
 
-    let blocked_ship = 100_901;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&blocked_char) {
-            ch.station_id = None; ch.structure_id = None; ch.solar_system_id = 30_000_142; ch.active_ship_id = blocked_ship;
-        }
-        snap.items.insert(blocked_ship, InventoryItemRecord {
-            item_id: blocked_ship, type_id: 587, owner_id: blocked_char, location_id: 30_000_142, flag: InventoryFlag::None,
-            quantity: 1, singleton: true, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+    rpc(
+        &ctx,
+        &mut sess,
+        "structureProfiles",
+        "ChangeProfiles",
+        &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)],
+    )
+    .await
+    .expect("ChangeProfiles");
+
+    // Helper to launch a pilot in space 1,500m from the structure
+    let place_near_structure = |cid: i64, ship_id: i64| {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = 30_000_142;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = ship_id;
+            }
+            snap.items.insert(
+                ship_id,
+                InventoryItemRecord {
+                    item_id: ship_id,
+                    type_id: 587,
+                    owner_id: cid,
+                    location_id: 30_000_142,
+                    flag: InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            snap.item_positions.insert(ship_id, [st_pos[0] + 1_500.0, st_pos[1], st_pos[2]]);
         });
-    });
-    let mut blocked_sess = SessionState::new(303);
-    (blocked_sess.user_id, blocked_sess.character_id, blocked_sess.corporation_id, blocked_sess.solar_system_id, blocked_sess.ship_id) =
-        (Some(303), Some(blocked_char), Some(98_000_002), Some(30_000_142), Some(blocked_ship));
-    let _ = sys_handle.spawn_ball(Ball {
-        id: blocked_ship, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
-    }).await;
-    let denied_err = rpc(&ctx, &mut blocked_sess, "stationSvc", "Dock", &[PyRep::Integer(struct_id)]).await.expect_err("blocked_char must be denied by stationSvc.Dock");
-    assert_eq!(denied_err.code, "StructureDockingAccessDenied");
-}
+    };
 
-#[tokio::test]
-async fn test_structure_board_eject_and_defense_settings() {
-    // parity: feat:structures.board-structure, feat:structures.defense-settings
-    eve_testkit::attest(&[
-        "feat:structures.board-structure",
-        "feat:structures.defense-settings",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-
-    let char_id = 90_000_001;
-    let mut sess = login_with_corp(&ctx, 401, char_id).await;
-    let original_ship = sess.ship_id.expect("ship_id");
-    let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().corporation_id);
-
-    let struct_id = 100_002;
-    create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_144, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
-    sess.structure_id = Some(struct_id);
-    sess.station_id = None;
-    sess.solar_system_id = Some(30_000_144);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.structure_id = Some(struct_id);
-            ch.station_id = None;
-            ch.solar_system_id = 30_000_144;
-        }
-        if let Some(sh) = snap.items.get_mut(&original_ship) {
-            sh.location_id = struct_id;
-        }
-    });
-
-    // 1. Test feat:structures.board-structure
-    let board_res = rpc(&ctx, &mut sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
-        .await
-        .expect("BoardStructure");
-    assert_eq!(kv_entry(&board_res, "boarded"), Some(&PyRep::Bool(true)));
-    assert_eq!(sess.ship_id, Some(struct_id));
-
-    // Verify OnSessionChanged was emitted with shipID = struct_id
-    let notifs = sess.drain_notifications();
-    assert!(
-        notifs.iter().any(|(name, _)| name == "OnSessionChanged"),
-        "OnSessionChanged notification must be emitted on boarding"
-    );
-
-    // Verify GetStructurePilot returns char_id
-    let pilot_rep = rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)])
-        .await
-        .expect("GetStructurePilot");
-    assert_eq!(pilot_rep, PyRep::Integer(char_id));
-
-    // Verify EjectFromStructure restores original ship
-    let eject_res = rpc(&ctx, &mut sess, "structureControl", "EjectFromStructure", &[PyRep::Integer(struct_id)])
-        .await
-        .expect("EjectFromStructure");
-    assert_eq!(kv_entry(&eject_res, "boarded"), Some(&PyRep::Bool(false)));
-    assert_eq!(sess.ship_id, Some(original_ship));
-
-    // Verify active pilot is cleared
-    let cleared_pilot = rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)])
-        .await
-        .expect("GetStructurePilot after eject");
-    assert_eq!(cleared_pilot, PyRep::None);
-
-    // 2. Test feat:structures.defense-settings via canonical structureSettings profile RPCs
-    let attacker_pilot = 90_000_005;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get(&90_000_002).cloned() {
-            let mut ca = c;
-            ca.character_id = attacker_pilot;
-            ca.corporation_id = 98_000_003;
-            ca.name = "Attacker Pilot".into();
-            snap.characters.insert(attacker_pilot, ca);
-        }
-        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
-        ds.record_attacker(attacker_pilot, ctx.now_unix());
-        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
-    });
-    let prof_id = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Citadel Defense".into()), PyRep::String("Auto defense".into())])
-        .await
-        .expect("CreateProfile")
-        .as_i64()
-        .unwrap();
-    rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)])
-        .await
-        .expect("ChangeProfiles");
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
-        ds.auto_defense_enabled = true;
-        ds.auto_target_attackers = true;
-        ds.auto_target_war_targets = true;
-        ds.standing_threshold = 0.0;
-        ds.target_blocked_acl = true;
-        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
-    });
-
-    // Non-client defense RPCs must return UnimplementedRPC
-    let expected_err = "UnimplementedRPC";
-    for bad_method in ["GetDefenseSettings", "SetDefenseSettings", "EvaluateDefenseTarget"] {
-        assert_eq!(
-            rpc(&ctx, &mut sess, "structureControl", bad_method, &[PyRep::Integer(struct_id)])
-                .await
-                .expect_err(bad_method)
-                .code,
-            expected_err
-        );
-    }
-
-    // Release manual control so auto-defense engages, then verify settings persisted and live ballpark auto-defense weapon fire
-    let _ = rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(struct_id)]).await;
-    let (attacker_ship, launcher_id, ammo_id) = (100_902, 100_903, 100_904);
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
-        ds.record_attacker(attacker_pilot, ctx.now_unix());
-        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
-        if let Some(ch) = snap.characters.get_mut(&attacker_pilot) {
-            (ch.station_id, ch.solar_system_id, ch.active_ship_id) = (None, 30_000_144, attacker_ship);
-        }
-        for (id, tid, owner, loc, flag, qty, dyn_attrs) in [(attacker_ship, 621_u32, attacker_pilot, 30_000_144_i64, InventoryFlag::None, 1, HashMap::new()), (launcher_id, 35922, corp_id, struct_id, InventoryFlag::HiSlot0, 1, HashMap::from([(2, 1.0)])), (ammo_id, 37847, corp_id, struct_id, InventoryFlag::HiSlot0, 200, HashMap::new())] {
-            snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: tid, owner_id: owner, location_id: loc, flag, quantity: qty, singleton: qty == 1, version: 1, dynamic_attributes: dyn_attrs, source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None });
-        }
-    });
-    let sys_144 = ctx.systems.get_or_spawn(30_000_144);
-    let _ = sys_144.spawn_ball(Ball { id: struct_id, type_id: 35832_u32, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 10_000_000.0, radius: 5_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }).await;
-    let mut attacker_cs = ctx.build_type_combat_state(621);
-    (attacker_cs.shield_hp, attacker_cs.max_shield_hp, attacker_cs.armor_hp, attacker_cs.max_armor_hp, attacker_cs.structure_hp, attacker_cs.max_structure_hp) = (5_000.0, 5_000.0, 5_000.0, 5_000.0, 5_000.0, 5_000.0);
-    sys_144.spawn_ball_with_combat(Ball { id: attacker_ship, type_id: 621, position: DVec3::new(15_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 10_000_000.0, radius: 140.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }, attacker_cs).await.expect("spawn attacker_ship");
-    let _ = sys_144.step_manual(5.0).await.expect("step_5s");
-    let _ = sys_144.step_manual(60.0).await.expect("step_60s");
-    let cs = sys_144.get_combat_state(attacker_ship).await.unwrap().expect("attacker combat state");
-    assert!(cs.shield_hp < 5_000.0, "Auto-defense Standup launcher must lock and damage attacker ship in ballpark");
-}
-
-#[tokio::test]
-async fn test_structure_anchor_restrictions_and_fitting_state_locks() {
-    // parity: feat:structures.anchor-restrictions, feat:structures.fitting-state-locks
-    eve_testkit::attest(&[
-        "feat:structures.anchor-restrictions",
-        "feat:structures.fitting-state-locks",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-
-    let astrahus_type = 35832;
-    let keepstar_type = 35834;
-    let sys_id = 30_000_144;
-    let profile = life::structure_profile(&ctx, astrahus_type).expect("astrahus profile");
-    let keepstar_prof = life::structure_profile(&ctx, keepstar_type).expect("keepstar profile");
-
-    // 1. Test feat:structures.anchor-restrictions
-    // 1A. Minimum distance < 1,000 km from station fails
-    let station = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).expect("station");
-    let too_close_pos = station.position + DVec3::new(500_000.0, 0.0, 0.0); // 500 km < 1,000 km
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, sys_id, too_close_pos);
-        assert!(res.is_err(), "must fail when < 1,000 km from station");
-        assert_eq!(res.unwrap_err().code, "TooCloseToStructureOrStation");
-    });
-
-    // 1B. Distance >= 1,000 km succeeds
-    let valid_pos = station.position + DVec3::new(50_000_000.0, 0.0, 0.0); // 50,000 km
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, sys_id, valid_pos);
-        assert!(res.is_ok(), "must succeed when >= 1,000 km clear");
-    });
-
-    // 1C. Per-system Keepstar limit: 1 per system
-    let ks_struct_id = 100_003;
-    create_test_structure(&ctx, ks_struct_id, keepstar_type, 1001, sys_id, [valid_pos.x, valid_pos.y, valid_pos.z], life::STATE_SHIELD_VULNERABLE);
-    let far_ks_pos = valid_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &keepstar_prof, sys_id, far_ks_pos);
-        assert!(res.is_err(), "second Keepstar in same system must be refused");
-        assert_eq!(res.unwrap_err().code, "KeepstarPerSystemLimit");
-    });
-
-    // 1D. Trade hub & Pochven restrictions
-    ctx.db.with_snapshot(|snap| {
-        let jita_res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, 30_000_142, valid_pos);
-        assert_eq!(jita_res.unwrap_err().code, "AnchoringDisallowedInTradeHub");
-    });
-    let pochven_sys = ctx.sde.solar_systems.values().find(|s| s.region_id == life::POCHVEN_REGION_ID).map(|s| s.solar_system_id).unwrap_or(30_000_157);
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_anchoring_restrictions(&ctx, snap, &profile, pochven_sys, valid_pos);
-        assert!(res.is_err(), "anchoring in Pochven must be refused");
-        assert_eq!(res.unwrap_err().code, "AnchoringDisallowedInPochven");
-    });
-
-    // 2. Test feat:structures.fitting-state-locks
-    let refit_struct_id = 100_004;
-    create_test_structure(&ctx, refit_struct_id, astrahus_type, 1001, sys_id, [valid_pos.x, valid_pos.y, valid_pos.z], life::STATE_SHIELD_VULNERABLE);
-
-    let ext = ops::StructureExtendedState::default();
-    let now = ctx.now_unix();
-
-    // Full shields and SHIELD_VULNERABLE -> Refit allowed
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_structure_fitting_state(&ctx, snap, &ext, refit_struct_id, now);
-        assert!(res.is_ok(), "refit must be allowed when at 100% shields in vulnerable state");
-    });
-
-    // Refit refused when damaged (shields < 100%)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.structures.get_mut(&refit_struct_id) {
-            st.shield_hp *= 0.5; // 50% shields
-        }
-    });
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_structure_fitting_state(&ctx, snap, &ext, refit_struct_id, now);
-        assert!(res.is_err(), "refit must be refused when damaged");
-        assert_eq!(res.unwrap_err().code, "StructureDamagedCannotRefit");
-    });
-
-    // Restore shields, but set state to Anchoring -> Refit refused
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(st) = snap.structures.get_mut(&refit_struct_id) {
-            st.shield_hp = profile.shield_hp;
-            st.state = life::STATE_ANCHORING.to_string();
-        }
-    });
-    ctx.db.with_snapshot(|snap| {
-        let res = acl_rules::validate_structure_fitting_state(&ctx, snap, &ext, refit_struct_id, now);
-        assert!(res.is_err(), "refit must be refused during anchoring");
-        assert_eq!(res.unwrap_err().code, "StructureFittingLockedInState");
-    });
-}
-
-#[tokio::test]
-async fn test_structure_ewar_immunity_and_mobile_cyno_inhibitor() {
-    // parity: feat:structures.ewar-immunity, feat:structures.mobile-cyno-inhibitor
-    eve_testkit::attest(&[
-        "feat:structures.ewar-immunity",
-        "feat:structures.mobile-cyno-inhibitor",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-
-    let struct_id = 100_005;
-    let ship_id = 100_006;
-    let sys_id = 30_000_142;
-
-    create_test_structure(&ctx, struct_id, 35832, 1001, sys_id, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
-
-    // 1. Test feat:structures.ewar-immunity
-    ctx.db.with_snapshot(|snap| {
-        // Upwell structure is immune to EWAR
-        let struct_immune = acl_rules::is_structure_immune_to_ewar(snap, struct_id);
-        assert_eq!(struct_immune, true, "Upwell structure must be immune to EWAR");
-        // Regular ship is NOT immune to EWAR
-        let ship_immune = acl_rules::is_structure_immune_to_ewar(snap, ship_id);
-        assert_eq!(ship_immune, false, "Regular ship must not be immune to EWAR");
-    });
-
-    // Live dogmaIM.Activate RPC with an EWAR module (Stasis Webifier I, group 65) against Upwell structure asserting immune: true end-to-end
-    let char_id = 90_000_001;
-    let mut sess = login(&ctx, 401, "demo", "demo-secret", char_id).await;
-    let web_mod_id = 100_008;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.active_ship_id = ship_id;
-            ch.station_id = None;
-            ch.solar_system_id = sys_id;
-        }
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: 587,
-                owner_id: char_id,
-                location_id: sys_id as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            web_mod_id,
-            InventoryItemRecord {
-                item_id: web_mod_id,
-                type_id: 526, // Stasis Webifier I (group 65)
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::MedSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    sess.ship_id = Some(ship_id);
-    sess.station_id = None;
-    sess.solar_system_id = Some(sys_id);
-
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    // 2A. Allowed pilot (`other_char`, member on `group_id`) docks via `structureDocking.Dock`, undocks, then docks via `beyonce.CmdDock`
+    place_near_structure(other_char, 770_001);
+    let sys_handle = ctx.systems.get_or_spawn(30_000_142);
     let _ = sys_handle
         .spawn_ball(Ball {
-            id: ship_id,
+            id: 770_001,
             type_id: 587,
-            position: DVec3::new(10_000.0, 0.0, 0.0),
+            position: DVec3::new(st_pos[0] + 1_500.0, st_pos[1], st_pos[2]),
             velocity: DVec3::ZERO,
             max_velocity: 350.0,
-            inertia: 3.0,
-            mass: 1_200_000.0,
+            inertia: 2.5,
+            mass: 1_100_000.0,
             radius: 40.0,
             speed_fraction: 0.0,
             mode: eve_destiny::MovementMode::Stop,
         })
         .await;
+    let mut other_sess = SessionState::new(302);
+    other_sess.user_id = Some(2);
+    other_sess.character_id = Some(other_char);
+    other_sess.corporation_id = Some(ctx.db.with_snapshot(|s| s.characters[&other_char].corporation_id));
+    other_sess.solar_system_id = Some(30_000_142);
+    other_sess.ship_id = Some(770_001);
 
-    // Unlocked target -> dogmaIM.Activate returns TargetNotLocked error via top-level router
-    let unlocked_err = rpc(
+    let check_allowed = rpc(
         &ctx,
-        &mut sess,
-        "dogmaIM",
-        "Activate",
-        &[
-            PyRep::Integer(web_mod_id),
-            PyRep::String("decreaseTargetSpeed".into()),
-            PyRep::Integer(struct_id),
-        ],
+        &mut other_sess,
+        "structureDirectory",
+        "CheckMyDockingAccessToStructures",
+        &[PyRep::List(vec![PyRep::Integer(struct_id)])],
     )
     .await
-    .unwrap_err();
-    assert_eq!(unlocked_err.code, "TargetNotLocked");
+    .expect("CheckMyDockingAccessToStructures");
+    assert_eq!(check_allowed, PyRep::List(vec![PyRep::Integer(struct_id)]));
 
-    // Lock the structure and activate Stasis Webifier I -> Upwell structure is immune end-to-end via top-level router
+    rpc(&ctx, &mut other_sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("ACL-allowed pilot must dock via structureDocking.Dock");
+    assert_eq!(other_sess.structure_id, Some(struct_id));
+
+    rpc(&ctx, &mut other_sess, "structureDocking", "Undock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("Undock from structure");
+    assert_eq!(other_sess.structure_id, None);
+    ctx.advance_secs(12);
+
+    rpc(&ctx, &mut other_sess, "beyonce", "CmdDock", &[PyRep::Integer(struct_id), PyRep::Integer(770_001)])
+        .await
+        .expect("ACL-allowed pilot must also dock via beyonce.CmdDock");
+    assert_eq!(other_sess.structure_id, Some(struct_id));
+
+    // 2B. Blocked pilot (`blocked_char`, role = -1) is denied by both `structureDocking.Dock` and `beyonce.CmdDock`
+    place_near_structure(blocked_char, 770_002);
     let _ = sys_handle
-        .add_target_lock(
-            ship_id,
-            TargetLock {
-                target_id: struct_id,
-                lock_time_ms: 1000.0,
-                remaining_lock_ms: 0.0,
-                locked: true,
-                max_range_m: None,
-            },
-        )
+        .spawn_ball(Ball {
+            id: 770_002,
+            type_id: 587,
+            position: DVec3::new(st_pos[0] + 1_500.0, st_pos[1], st_pos[2]),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
         .await;
+    let mut blocked_sess = SessionState::new(303);
+    blocked_sess.user_id = Some(3);
+    blocked_sess.character_id = Some(blocked_char);
+    blocked_sess.corporation_id = Some(98_000_002);
+    blocked_sess.solar_system_id = Some(30_000_142);
+    blocked_sess.ship_id = Some(770_002);
 
-    let act_rep = rpc(
+    let dock_err = rpc(&ctx, &mut blocked_sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect_err("blocked pilot must be denied by structureDocking.Dock");
+    assert_eq!(dock_err.code, "StructureDockingAccessDenied");
+
+    let cmd_dock_err = rpc(&ctx, &mut blocked_sess, "beyonce", "CmdDock", &[PyRep::Integer(struct_id), PyRep::Integer(770_002)])
+        .await
+        .expect_err("blocked pilot must be denied by beyonce.CmdDock");
+    assert_eq!(cmd_dock_err.code, "StructureDockingAccessDenied");
+
+    // 2C. Multi-ACL block precedence: even if a second ACL group allows `blocked_char`, the `-1` block in `group_id` wins!
+    let g2_rep = rpc(
         &ctx,
         &mut sess,
-        "dogmaIM",
-        "Activate",
+        "ownerGroupManager",
+        "Create",
+        &[PyRep::String("Beta Allow ACL".into()), PyRep::String("Secondary ACL".into())],
+    )
+    .await
+    .expect("Create group 2");
+    let group2_id = kv_entry(&g2_rep, "groupID").and_then(|v| v.as_i64()).or_else(|| g2_rep.as_i64()).unwrap();
+    rpc(
+        &ctx,
+        &mut sess,
+        "ownerGroupManager",
+        "UpdateMembershipTypes",
+        &[PyRep::Integer(group2_id), PyRep::List(vec![PyRep::Integer(blocked_char)]), PyRep::Integer(acl_rules::ACL_ROLE_MEMBER)],
+    )
+    .await
+    .expect("Allow blocked_char in group 2");
+    rpc(
+        &ctx,
+        &mut sess,
+        "structureProfiles",
+        "SaveProfileSettings",
         &[
-            PyRep::Integer(web_mod_id),
-            PyRep::String("decreaseTargetSpeed".into()),
-            PyRep::Integer(struct_id),
+            PyRep::Integer(prof_id),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group_id), PyRep::Real(0.0)]),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group2_id), PyRep::Real(0.0)]),
+            ]),
         ],
     )
     .await
-    .expect("dogmaIM.Activate webifier against Upwell structure via top-level router");
+    .expect("Attach both ACL groups to docking setting");
+    let still_blocked = rpc(&ctx, &mut blocked_sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect_err("block in group_id must override allow in group2_id");
+    assert_eq!(still_blocked.code, "StructureDockingAccessDenied");
+    assert_eq!(
+        rpc(&ctx, &mut blocked_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(struct_id)])]).await.unwrap(),
+        PyRep::List(vec![])
+    );
 
-    assert_eq!(kv_entry(&act_rep, "moduleID"), Some(&PyRep::Integer(web_mod_id)));
-    assert_eq!(kv_entry(&act_rep, "targetID"), Some(&PyRep::Integer(struct_id)));
-    assert_eq!(kv_entry(&act_rep, "immune"), Some(&PyRep::Bool(true)));
-    assert_eq!(kv_entry(&act_rep, "ewarAssistRecorded"), Some(&PyRep::Bool(false)));
-    assert_eq!(kv_entry(&act_rep, "damageDealt"), Some(&PyRep::Real(0.0)));
-
-    // 2. Test feat:structures.mobile-cyno-inhibitor
-    assert_eq!(acl_rules::TYPE_MOBILE_CYNO_INHIBITOR, 33476);
-    assert_eq!(acl_rules::GROUP_MOBILE_CYNO_INHIBITOR, 1249);
-    assert_eq!(acl_rules::MOBILE_CYNO_INHIBITOR_RANGE_M, 100_000.0);
-
-    let inhibitor_id = 100_007;
-    let inhibitor_pos = [10_000.0, 20_000.0, 30_000.0];
+    // 2D. Unaffiliated pilot not on any ACL is denied docking
+    let unaffiliated = 90_000_009;
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            inhibitor_id,
-            InventoryItemRecord {
-                item_id: inhibitor_id,
-                type_id: acl_rules::TYPE_MOBILE_CYNO_INHIBITOR,
-                owner_id: 1001,
-                location_id: sys_id as i64,
-                flag: InventoryFlag::None,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.item_positions.insert(inhibitor_id, inhibitor_pos);
+        let mut cu = snap.characters[&other_char].clone();
+        cu.character_id = unaffiliated;
+        cu.corporation_id = 98_000_099;
+        cu.name = "Unaffiliated Pilot".into();
+        snap.characters.insert(unaffiliated, cu);
     });
+    place_near_structure(unaffiliated, 770_003);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: 770_003,
+            type_id: 587,
+            position: DVec3::new(st_pos[0] + 1_500.0, st_pos[1], st_pos[2]),
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 2.5,
+            mass: 1_100_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let mut unaff_sess = SessionState::new(304);
+    unaff_sess.user_id = Some(9);
+    unaff_sess.character_id = Some(unaffiliated);
+    unaff_sess.corporation_id = Some(98_000_099);
+    unaff_sess.solar_system_id = Some(30_000_142);
+    unaff_sess.ship_id = Some(770_003);
+    assert_eq!(
+        rpc(&ctx, &mut unaff_sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)]).await.unwrap_err().code,
+        "StructureDockingAccessDenied"
+    );
+}
 
-    // Position within 100 km (e.g. 50 km distance) -> inhibited
-    let test_pos_close = DVec3::new(10_000.0 + 50_000.0, 20_000.0, 30_000.0);
-    ctx.db.with_snapshot(|snap| {
-        let is_inhibited = acl_rules::is_cyno_inhibited(&ctx, snap, sys_id, Some(test_pos_close));
-        assert_eq!(is_inhibited, true, "cyno must be inhibited within 100 km of active inhibitor");
-    });
+#[tokio::test]
+async fn test_structure_board_eject_and_defense_acl_control() {
+    // parity: feat:structures.board-structure
+    eve_testkit::attest(&["feat:structures.board-structure"]);
 
-    // Position beyond 100 km (e.g. 150 km distance) -> NOT inhibited
-    let test_pos_far = DVec3::new(10_000.0 + 150_000.0, 20_000.0, 30_000.0);
-    ctx.db.with_snapshot(|snap| {
-        let is_inhibited = acl_rules::is_cyno_inhibited(&ctx, snap, sys_id, Some(test_pos_far));
-        assert_eq!(is_inhibited, false, "cyno must NOT be inhibited beyond 100 km");
-    });
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
 
-    // Different solar system -> NOT inhibited
-    let other_sys = 30_000_143;
-    ctx.db.with_snapshot(|snap| {
-        let is_inhibited = acl_rules::is_cyno_inhibited(&ctx, snap, other_sys, Some(test_pos_close));
-        assert_eq!(is_inhibited, false, "cyno inhibitor in sys A must not affect sys B");
+    let char_id = 90_000_001;
+    let gunner_char = 90_000_002;
+    let mut sess = login_with_corp(&ctx, 401, char_id).await;
+    let original_ship = sess.ship_id.expect("ship_id");
+    let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().corporation_id);
+
+    let struct_id = 1_000_000_100_002;
+    let st_pos = [30_000_000.0, 0.0, 0.0];
+    create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_142, st_pos, life::STATE_SHIELD_VULNERABLE);
+
+    // 1. Negative test: BoardStructure while docked at Jita 4-4 (NOT docked inside struct_id) must fail!
+    let undocked_err = rpc(&ctx, &mut sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
+        .await
+        .expect_err("BoardStructure outside structure must fail");
+    assert_eq!(undocked_err.code, "NotDockedInStructure");
+
+    // Undock from NPC station and dock inside struct_id via structureDocking.Dock
+    rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock from NPC station");
+    ctx.advance_secs(12);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(original_ship, [st_pos[0] + 1_000.0, st_pos[1], st_pos[2]]);
     });
+    let sys_handle = ctx.systems.get_or_spawn(30_000_142);
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(b) = bp.balls.get_mut(&original_ship) {
+            b.position = DVec3::new(st_pos[0] + 1_000.0, st_pos[1], st_pos[2]);
+        }
+    }
+    rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("Dock inside Upwell structure");
+    assert_eq!(sess.structure_id, Some(struct_id));
+    sess.drain_notifications();
+
+    // 2. Positive test: BoardStructure while docked inside struct_id transitions shipID -> struct_id
+    let board_res = rpc(&ctx, &mut sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("BoardStructure while docked");
+    assert_eq!(kv_entry(&board_res, "boarded"), Some(&PyRep::Bool(true)));
+    assert_eq!(sess.ship_id, Some(struct_id));
+
+    let notifs = sess.drain_notifications();
+    assert!(notifs.iter().any(|(name, _)| name == "OnSessionChanged"));
+
+    let pilot_rep = rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("GetStructurePilot");
+    assert_eq!(pilot_rep, PyRep::Integer(char_id));
+
+    // 3. Configure defense ACL granting `gunner_char` structure weapon control (`setting_id = 3`), but NOT before testing unauthorized denial
+    let mut gunner_sess = login(&ctx, 402, "other", "other-secret", gunner_char).await;
+    ctx.advance_secs(12);
+    let gunner_ship = gunner_sess.ship_id.expect("gunner ship");
+    let acl_rep = rpc(&ctx, &mut sess, "ownerGroupManager", "Create", &[PyRep::String("Gunner ACL".into()), PyRep::String("Gunners".into())])
+        .await
+        .unwrap();
+    let acl_id = kv_entry(&acl_rep, "groupID").and_then(|v| v.as_i64()).or_else(|| acl_rep.as_i64()).unwrap();
+    rpc(&ctx, &mut sess, "ownerGroupManager", "UpdateMembershipTypes", &[PyRep::Integer(acl_id), PyRep::List(vec![PyRep::Integer(gunner_char)]), PyRep::Integer(acl_rules::ACL_ROLE_MEMBER)])
+        .await
+        .unwrap();
+    let prof_id = rpc(&ctx, &mut sess, "structureProfiles", "CreateProfile", &[PyRep::String("Combat Profile".into()), PyRep::String("Dock only first".into())])
+        .await
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    // Initially grant ONLY docking (`1`), NOT defense control (`3`)
+    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(acl_id), PyRep::Real(0.0)])])])
+        .await
+        .unwrap();
+    rpc(&ctx, &mut sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)])
+        .await
+        .unwrap();
+
+    rpc(&ctx, &mut gunner_sess, "stationSvc", "Undock", &[]).await.unwrap();
+    ctx.advance_secs(12);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.item_positions.insert(gunner_ship, [st_pos[0] + 1_200.0, st_pos[1], st_pos[2]]);
+    });
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Some(b) = bp.balls.get_mut(&gunner_ship) {
+            b.position = DVec3::new(st_pos[0] + 1_200.0, st_pos[1], st_pos[2]);
+        }
+    }
+    rpc(&ctx, &mut gunner_sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)]).await.unwrap();
+
+    // Without defense ACL or corp role, gunner_char cannot board even after char_id ejects
+    let eject_res = rpc(&ctx, &mut sess, "structureControl", "EjectFromStructure", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("EjectFromStructure");
+    assert_eq!(kv_entry(&eject_res, "boarded"), Some(&PyRep::Bool(false)));
+    assert_eq!(sess.ship_id, Some(original_ship));
+    assert!(sess.drain_notifications().iter().any(|(n, _)| n == "OnSessionChanged"));
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)]).await.unwrap(), PyRep::None);
+
+    let unauth_board = rpc(&ctx, &mut gunner_sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
+        .await
+        .expect_err("docked non-corp pilot without defense ACL must be rejected");
+    assert!(matches!(unauth_board.code.as_str(), "StructureOwnershipViolation" | "NotStructureMember" | "InsufficientCorpRoles" | "DefenseAccessDenied"));
+
+    // Grant defense control (`setting_id = 17` = setting_defense_can_control_structure) on `prof_id` -> gunner_char can now board, and single-controller lock blocks `char_id`
+    rpc(
+        &ctx,
+        &mut sess,
+        "structureProfiles",
+        "SaveProfileSettings",
+        &[
+            PyRep::Integer(prof_id),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(acl_id), PyRep::Real(0.0)]),
+                PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(acl_id), PyRep::Real(0.0)]),
+            ]),
+        ],
+    )
+    .await
+    .unwrap();
+
+    rpc(&ctx, &mut gunner_sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("ACL gunner must be able to board structure");
+    assert_eq!(gunner_sess.ship_id, Some(struct_id));
+
+    // Second pilot attempting to board while occupied fails with StructureAlreadyControlled
+    let occupied_err = rpc(&ctx, &mut sess, "structureControl", "BoardStructure", &[PyRep::Integer(struct_id)])
+        .await
+        .expect_err("second controller must fail while occupied");
+    assert_eq!(occupied_err.code, "StructureAlreadyControlled");
+
+    // Undocking while controlling structure automatically relinquishes structure control and launches gunner_ship
+    rpc(&ctx, &mut gunner_sess, "structureDocking", "Undock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("Undock while controlling structure");
+    assert_eq!(gunner_sess.ship_id, Some(gunner_ship));
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)]).await.unwrap(), PyRep::None);
 }

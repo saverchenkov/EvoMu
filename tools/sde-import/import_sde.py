@@ -265,7 +265,7 @@ def run_import(
         CREATE TABLE sde_type_materials (
             type_id INTEGER PRIMARY KEY,
             materials_json TEXT NOT NULL,
-            randomized_materials_json TEXT NOT NULL
+            randomized_materials_json TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE sde_blueprints (
             blueprint_type_id INTEGER PRIMARY KEY,
