@@ -489,7 +489,7 @@ pub fn register_mobile_deployable(
     let lifetime_secs = match group_id {
         GROUP_MOBILE_DEPOT => DEPOT_LIFETIME_SECS,
         GROUP_MOBILE_TRACTOR => MTU_LIFETIME_SECS,
-        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_LIFETIME_SECS,
+        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_ACTIVATION_DELAY_SECS.saturating_add(MMJU_LIFETIME_SECS),
         GROUP_MOBILE_CYNO_INHIBITOR => CYNO_INHIBITOR_LIFETIME_SECS,
         GROUP_MOBILE_CYNO_BEACON => {
             let active_dur = if type_id == TYPE_COVERT_MOBILE_CYNO_BEACON {

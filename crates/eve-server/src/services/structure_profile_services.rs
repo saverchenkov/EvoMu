@@ -152,13 +152,6 @@ pub fn apply_service_acls_to_profile(
     for (sid, rows) in encoded_service_acls {
         if let Some(min_bps) = rows.iter().map(|&(_, bps)| bps).min() {
             prof.service_settings.insert(sid, min_bps);
-            if sid == SETTING_MARKET_TAX || sid == 35_892 {
-                prof.service_settings.insert(1, min_bps);
-            } else if sid == SETTING_CLONINGBAY_TAX {
-                prof.service_settings.insert(2, min_bps);
-            } else if sid == SETTING_REPROCESSING_TAX || sid == 35_899 {
-                prof.service_settings.insert(3, min_bps);
-            }
         }
         prof.service_acl_rules.insert(sid, rows);
     }
@@ -312,30 +305,99 @@ fn candidate_settings_for_service_query(
     service_id: i64,
 ) -> (Vec<i64>, bool, &'static [i64]) {
     match service_id {
-        SERVICE_DOCKING | SERVICE_FITTING => (vec![SETTING_HOUSING_CAN_DOCK], false, &[1]),
-        SERVICE_OFFICES => (vec![SETTING_CORP_RENT_OFFICE], false, &[3]),
-        SERVICE_REPROCESSING | 35_899 => (vec![SETTING_REPROCESSING_TAX], false, &[3]),
-        SERVICE_MARKET | 35_892 => (vec![SETTING_MARKET_TAX], false, &[4]),
-        SERVICE_MEDICAL | SERVICE_JUMP_CLONE | 35_894 => (vec![SETTING_CLONINGBAY_TAX], false, &[23]),
-        SERVICE_REPAIR | 13 => (vec![13, 8], false, &[13, 8]),
-        SERVICE_MOONMINING | 45_009 => (vec![SETTING_DEFENSE_CAN_CONTROL_STRUCTURE, 14], false, &[14]),
-        SERVICE_JUMP_BRIDGE | 35_913 => (vec![SETTING_JUMP_BRIDGE_ACTIVATION, 35_841], false, &[34, 15]),
-        SERVICE_CYNO_BEACON => (vec![SETTING_CYNO_BEACON], false, &[35, 16]),
-        SERVICE_AUTOMOONMINING => (vec![SETTING_AUTOMOONMINING], false, &[36, 18]),
-        SERVICE_INDUSTRY => (vec![29, 30, 31, 32, 33, 28, 26, 27, 24], true, &[24, 29]),
-        SERVICE_MANUFACTURING => (vec![29, 30, 31, 24], true, &[29, 24]),
-        SERVICE_MANUFACTURING_BASIC | 35_878 => (vec![SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX], false, &[29, 24]),
-        SERVICE_MANUFACTURING_CAPITAL => (vec![SETTING_MANUFACTURING_CAPITAL_TAX, 29, 24], false, &[30, 29, 24]),
-        SERVICE_MANUFACTURING_SUPERCAPITAL => (vec![SETTING_MANUFACTURING_SUPERCAPITAL_TAX, 29, 24], false, &[31, 29, 24]),
-        SERVICE_LABORATORY => (vec![32, 33, 24], true, &[32, 33, 24]),
-        SERVICE_LABORATORY_RESEARCH_TIME | SERVICE_LABORATORY_RESEARCH_MATERIAL | SERVICE_LABORATORY_COPYING | 35_891 => {
-            (vec![SETTING_RESEARCH_TAX, SETTING_INDUSTRY_TAX], false, &[32, 24])
+        SERVICE_DOCKING | SERVICE_FITTING => (vec![SETTING_HOUSING_CAN_DOCK], false, &[SETTING_HOUSING_CAN_DOCK]),
+        SERVICE_OFFICES => (vec![SETTING_CORP_RENT_OFFICE], false, &[SETTING_CORP_RENT_OFFICE]),
+        SERVICE_REPROCESSING => (vec![SETTING_REPROCESSING_TAX], false, &[SETTING_REPROCESSING_TAX]),
+        SERVICE_MARKET => (vec![SETTING_MARKET_TAX], false, &[SETTING_MARKET_TAX]),
+        SERVICE_MEDICAL | SERVICE_JUMP_CLONE => (vec![SETTING_CLONINGBAY_TAX], false, &[SETTING_CLONINGBAY_TAX]),
+        SERVICE_REPAIR => (vec![SERVICE_REPAIR], false, &[SERVICE_REPAIR]),
+        SERVICE_MOONMINING => (vec![SERVICE_MOONMINING], false, &[SERVICE_MOONMINING]),
+        SERVICE_JUMP_BRIDGE => (vec![SETTING_JUMP_BRIDGE_ACTIVATION], false, &[SETTING_JUMP_BRIDGE_ACTIVATION]),
+        SERVICE_CYNO_BEACON => (vec![SETTING_CYNO_BEACON], false, &[SETTING_CYNO_BEACON]),
+        SERVICE_AUTOMOONMINING => (vec![SETTING_AUTOMOONMINING], false, &[SETTING_AUTOMOONMINING]),
+        SERVICE_INDUSTRY => (
+            vec![
+                SETTING_MANUFACTURING_TAX,
+                SETTING_MANUFACTURING_CAPITAL_TAX,
+                SETTING_MANUFACTURING_SUPERCAPITAL_TAX,
+                SETTING_RESEARCH_TAX,
+                SETTING_INVENTION_TAX,
+                SETTING_REACTION_COMPOSITE_TAX,
+                SETTING_REACTION_BIOCHEMICAL_TAX,
+                SETTING_REACTION_HYBRID_TAX,
+                SETTING_INDUSTRY_TAX,
+            ],
+            true,
+            &[SETTING_INDUSTRY_TAX, SETTING_MANUFACTURING_TAX],
+        ),
+        SERVICE_MANUFACTURING => (
+            vec![
+                SETTING_MANUFACTURING_TAX,
+                SETTING_MANUFACTURING_CAPITAL_TAX,
+                SETTING_MANUFACTURING_SUPERCAPITAL_TAX,
+                SETTING_INDUSTRY_TAX,
+            ],
+            true,
+            &[SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_MANUFACTURING_BASIC => (
+            vec![SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_MANUFACTURING_CAPITAL => (
+            vec![SETTING_MANUFACTURING_CAPITAL_TAX, SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_MANUFACTURING_CAPITAL_TAX, SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_MANUFACTURING_SUPERCAPITAL => (
+            vec![SETTING_MANUFACTURING_SUPERCAPITAL_TAX, SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_MANUFACTURING_SUPERCAPITAL_TAX, SETTING_MANUFACTURING_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_LABORATORY => (
+            vec![SETTING_RESEARCH_TAX, SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX],
+            true,
+            &[SETTING_RESEARCH_TAX, SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_LABORATORY_RESEARCH_TIME | SERVICE_LABORATORY_RESEARCH_MATERIAL | SERVICE_LABORATORY_COPYING => {
+            (vec![SETTING_RESEARCH_TAX, SETTING_INDUSTRY_TAX], false, &[SETTING_RESEARCH_TAX, SETTING_INDUSTRY_TAX])
         }
-        SERVICE_LABORATORY_INVENTION | 35_886 => (vec![SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX], false, &[33, 24]),
-        SERVICE_REACTIONS => (vec![28, 26, 27, 24], true, &[28, 26, 27, 24]),
-        SERVICE_REACTIONS_COMPOSITE | 45_537 => (vec![SETTING_REACTION_COMPOSITE_TAX, 24], false, &[28, 24]),
-        SERVICE_REACTIONS_BIOCHEMICAL | 45_538 => (vec![SETTING_REACTION_BIOCHEMICAL_TAX, 28, 24], false, &[26, 28, 24]),
-        SERVICE_REACTIONS_HYBRID | 45_539 => (vec![SETTING_REACTION_HYBRID_TAX, 28, 24], false, &[27, 28, 24]),
+        SERVICE_LABORATORY_INVENTION => (
+            vec![SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_INVENTION_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_REACTIONS => (
+            vec![
+                SETTING_REACTION_COMPOSITE_TAX,
+                SETTING_REACTION_BIOCHEMICAL_TAX,
+                SETTING_REACTION_HYBRID_TAX,
+                SETTING_INDUSTRY_TAX,
+            ],
+            true,
+            &[
+                SETTING_REACTION_COMPOSITE_TAX,
+                SETTING_REACTION_BIOCHEMICAL_TAX,
+                SETTING_REACTION_HYBRID_TAX,
+                SETTING_INDUSTRY_TAX,
+            ],
+        ),
+        SERVICE_REACTIONS_COMPOSITE => (
+            vec![SETTING_REACTION_COMPOSITE_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_REACTION_COMPOSITE_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_REACTIONS_BIOCHEMICAL => (
+            vec![SETTING_REACTION_BIOCHEMICAL_TAX, SETTING_REACTION_COMPOSITE_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_REACTION_BIOCHEMICAL_TAX, SETTING_REACTION_COMPOSITE_TAX, SETTING_INDUSTRY_TAX],
+        ),
+        SERVICE_REACTIONS_HYBRID => (
+            vec![SETTING_REACTION_HYBRID_TAX, SETTING_REACTION_COMPOSITE_TAX, SETTING_INDUSTRY_TAX],
+            false,
+            &[SETTING_REACTION_HYBRID_TAX, SETTING_REACTION_COMPOSITE_TAX, SETTING_INDUSTRY_TAX],
+        ),
         other => (vec![other], false, &[]),
     }
 }
@@ -584,7 +646,7 @@ pub fn check_upwell_market_access_and_rate(
         snap,
         structure_id,
         char_id,
-        &[SETTING_MARKET_TAX, 35_892, 1],
+        &[SETTING_MARKET_TAX],
         false,
         Some(now_unix),
         "StructureServiceAccessDenied",

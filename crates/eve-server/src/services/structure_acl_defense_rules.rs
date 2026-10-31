@@ -353,8 +353,12 @@ pub fn load_defense_settings(snap: &WorldStateSnapshot, structure_id: i64) -> St
 }
 
 pub fn save_defense_settings(snap: &mut WorldStateSnapshot, settings: &StructureDefenseSettings) {
-    let key = defense_blob_key(settings.structure_id);
-    if let Ok(json) = serde_json::to_string(settings) {
+    let mut sanitized = settings.clone();
+    if !sanitized.standing_threshold.is_finite() {
+        sanitized.standing_threshold = 0.0;
+    }
+    let key = defense_blob_key(sanitized.structure_id);
+    if let Ok(json) = serde_json::to_string(&sanitized) {
         snap.service_state_blobs.insert(key, json);
     }
 }

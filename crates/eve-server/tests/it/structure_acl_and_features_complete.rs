@@ -213,7 +213,7 @@ async fn test_structure_access_lists_and_docking_acl() {
     create_test_structure(&ctx, struct_id, 35832, corp_id, 30_000_142, [0.0, 0.0, 0.0], life::STATE_SHIELD_VULNERABLE);
 
     let prof_id = rpc(&ctx, &mut sess, "structureProfiles", "CreateProfile", &[PyRep::String("Docking ACL Profile".into()), PyRep::String("Test".into())]).await.expect("CreateProfile").as_i64().unwrap();
-    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_id), PyRep::Dict(vec![(PyRep::String("accessGroups".into()), PyRep::List(vec![PyRep::Integer(group_id)]))])]).await.expect("SaveProfileSettings");
+    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Integer(1)])])]).await.expect("SaveProfileSettings");
     rpc(&ctx, &mut sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)]).await.expect("ChangeProfiles");
 
     let mut other_sess = login(&ctx, 302, "other", "other-secret", other_char).await;
@@ -329,27 +329,15 @@ async fn test_structure_board_eject_and_defense_settings() {
     rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(struct_id)]), PyRep::Integer(prof_id)])
         .await
         .expect("ChangeProfiles");
-    rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "SaveProfileSettings",
-        &[
-            PyRep::Integer(prof_id),
-            PyRep::Dict(vec![(
-                PyRep::String("defenseSettings".into()),
-                PyRep::Dict(vec![
-                    (PyRep::String("autoDefenseEnabled".into()), PyRep::Bool(true)),
-                    (PyRep::String("autoTargetAttackers".into()), PyRep::Bool(true)),
-                    (PyRep::String("autoTargetWarTargets".into()), PyRep::Bool(true)),
-                    (PyRep::String("standingThreshold".into()), PyRep::Real(0.0)),
-                    (PyRep::String("targetBlockedAcl".into()), PyRep::Bool(true)),
-                ]),
-            )]),
-        ],
-    )
-    .await
-    .expect("SaveProfileSettings");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, struct_id);
+        ds.auto_defense_enabled = true;
+        ds.auto_target_attackers = true;
+        ds.auto_target_war_targets = true;
+        ds.standing_threshold = 0.0;
+        ds.target_blocked_acl = true;
+        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
+    });
 
     // Non-client defense RPCs must return UnimplementedRPC
     let expected_err = "UnimplementedRPC";

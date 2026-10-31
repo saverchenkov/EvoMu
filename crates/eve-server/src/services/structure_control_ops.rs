@@ -625,6 +625,11 @@ pub fn handle_release_control(
                 format!("Character {char_id} does not control structure {structure_id}"),
             ));
         }
+        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(
+            snap,
+            char_id,
+            ctx.now_unix(),
+        )?;
         let (sys_id, orig_ship_id) =
             disengage_structure_control_in_snap(Some(ctx), snap, structure_id, char_id);
         Ok((structure_id, sys_id, orig_ship_id))
@@ -674,6 +679,11 @@ pub fn handle_eject_from_structure(
                 format!("Character {char_id} is not boarding/controlling structure {structure_id}"),
             ));
         }
+        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(
+            snap,
+            char_id,
+            ctx.now_unix(),
+        )?;
         Ok(disengage_structure_control_in_snap(
             Some(ctx),
             snap,

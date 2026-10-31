@@ -214,7 +214,7 @@ pub(crate) fn is_structure_market_online(snap: &eve_db::WorldStateSnapshot, stru
 }
 
 pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> f64 {
-    let nid = -(1_000_000_000_000_i64.saturating_add(structure_id.abs()));
+    let nid = -(1_100_000_000_000_i64.saturating_add(structure_id.abs()));
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(map) = serde_json::from_str::<HashMap<u8, f64>>(&note.note) {
             if let Some(&owner_rate) = map.get(&0) {
@@ -234,9 +234,7 @@ pub(crate) fn resolve_structure_broker_rate(snap: &eve_db::WorldStateSnapshot, s
         .get(&structure_id)
         .and_then(|p| {
             p.service_settings
-                .get(&1)
-                .or_else(|| p.service_settings.get(&35_892))
-                .or_else(|| p.service_settings.get(&4))
+                .get(&crate::services::structure_profile_services::SETTING_MARKET_TAX)
         })
     {
         return 0.005 + (bps.max(0) as f64 / 10_000.0).clamp(0.0, 1.0);
@@ -272,7 +270,7 @@ pub(crate) fn structure_owner_broker_share(
     if broker_fee.0 <= 0 {
         return IskCents(0);
     }
-    let nid = -(1_000_000_000_000_i64.saturating_add(structure_id.abs()));
+    let nid = -(1_100_000_000_000_i64.saturating_add(structure_id.abs()));
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(map) = serde_json::from_str::<HashMap<u8, f64>>(&note.note) {
             if let Some(&owner_rate) = map.get(&0) {
@@ -292,7 +290,7 @@ pub(crate) fn structure_owner_broker_share(
     if let Some(&bps) = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap)
         .access_profiles
         .get(&structure_id)
-        .and_then(|p| p.service_settings.get(&1).or_else(|| p.service_settings.get(&35_892)))
+        .and_then(|p| p.service_settings.get(&crate::services::structure_profile_services::SETTING_MARKET_TAX))
     {
         if bps <= 0 {
             return IskCents(0);

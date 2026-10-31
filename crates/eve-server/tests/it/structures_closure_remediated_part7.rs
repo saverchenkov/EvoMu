@@ -349,9 +349,9 @@ async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revo
     let prof_id = rpc(&ctx, &mut owner_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Alliance Defense".into()), PyRep::String("Ally".into())]).await.unwrap().as_i64().unwrap();
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(prof_id),
-        PyRep::Dict(vec![
-            (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-            (PyRep::String("defenseGroupIDs".into()), PyRep::List(vec![PyRep::Integer(def_grp)])),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)]),
         ]),
     ]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(prof_id)]).await.unwrap();
@@ -376,10 +376,10 @@ async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revo
     rpc(&ctx, &mut gunner_sess, "structureControl", "BoardStructure", &[PyRep::Integer(st_id)]).await.expect("BoardStructure restored after removing corp block");
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(prof_id),
-        PyRep::Dict(vec![
-            (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-            (PyRep::String("defenseGroupIDs".into()), PyRep::List(vec![PyRep::Integer(def_grp)])),
-            (PyRep::String("blockedEntities".into()), PyRep::List(vec![PyRep::Integer(alliance_id)])),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(alliance_id), PyRep::Integer(-1)]),
+            PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)]),
         ]),
     ]).await.unwrap();
     assert_eq!(rpc(&ctx, &mut owner_sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(st_id)]).await.unwrap(), PyRep::None);
@@ -478,5 +478,8 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
     let ok_mmju = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(890_005_205)])
         .await
         .expect("Mobile Micro Jump Unit anchoring >= 50km from Upwell structure must succeed");
-    assert_eq!(kv_i64(&ok_mmju, "despawnUnix"), (now_before_mmju + MMJU_LIFETIME_SECS) as i64);
+    assert_eq!(
+        kv_i64(&ok_mmju, "despawnUnix"),
+        (now_before_mmju + eve_server::services::mobile_deployables::MMJU_ACTIVATION_DELAY_SECS + MMJU_LIFETIME_SECS) as i64
+    );
 }

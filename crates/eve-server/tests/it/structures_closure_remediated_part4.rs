@@ -205,10 +205,10 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
         "SaveProfileSettings",
         &[
             PyRep::Integer(prof_a),
-            PyRep::Dict(vec![
-                (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-                (PyRep::String("accessGroups".into()), PyRep::List(vec![PyRep::Integer(group_a)])),
-                (PyRep::String("services".into()), PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(0.015))])),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_a), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Real(0.015)]),
             ]),
         ],
     )
@@ -218,8 +218,8 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
         .await
         .expect("GetProfileSettings");
     let PyRep::Dict(sdict) = settings_rep else { panic!("expected dict from GetProfileSettings") };
-    assert!(sdict.iter().any(|(k, _)| k.as_i64() == Some(1)), "GetProfileSettings must include docking setting 1");
-    assert!(sdict.iter().any(|(k, _)| k.as_i64() == Some(2)), "GetProfileSettings must include market service setting 2");
+    assert!(sdict.iter().any(|(k, _)| k.as_i64() == Some(19)), "GetProfileSettings must include docking setting 19");
+    assert!(sdict.iter().any(|(k, _)| k.as_i64() == Some(4)), "GetProfileSettings must include market tax setting 4");
 
     // Partial SaveProfileSettings with V24 settingID 17 and raw character ID >= 90,000,001 preserves omitted settings.
     rpc(
@@ -247,8 +247,8 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
         s17_rows.iter().any(|r| r.dict_get("groupID").and_then(|v| v.as_i64()) == Some(ALLY_PILOT)),
         "Setting 17 must store raw character ID >= 90,000,001"
     );
-    assert!(sdict17.iter().any(|(k, _)| k.as_i64() == Some(1)), "Partial update must preserve setting 1");
-    assert!(sdict17.iter().any(|(k, _)| k.as_i64() == Some(2)), "Partial update must preserve setting 2");
+    assert!(sdict17.iter().any(|(k, _)| k.as_i64() == Some(19)), "Partial update must preserve setting 19");
+    assert!(sdict17.iter().any(|(k, _)| k.as_i64() == Some(4)), "Partial update must preserve setting 4");
     rpc(
         &ctx,
         &mut sess,
@@ -266,9 +266,9 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
         "SaveProfileSettings",
         &[
             PyRep::Integer(prof_b),
-            PyRep::Dict(vec![
-                (PyRep::String("corpOnly".into()), PyRep::Bool(true)),
-                (PyRep::String("services".into()), PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Real(0.04))])),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(0)]),
+                PyRep::Tuple(vec![PyRep::Integer(4), PyRep::Real(0.04)]),
             ]),
         ],
     )
@@ -607,9 +607,9 @@ async fn test_remediated_structure_control_release_and_flex_zero_arg_release() {
         "SaveProfileSettings",
         &[
             PyRep::Integer(def_prof),
-            PyRep::Dict(vec![
-                (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-                (PyRep::String("defenseGroupIDs".into()), PyRep::List(vec![PyRep::Integer(def_grp)])),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)]),
             ]),
         ],
     )

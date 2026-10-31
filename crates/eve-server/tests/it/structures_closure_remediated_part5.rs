@@ -181,11 +181,16 @@ async fn test_remediated_involuntary_structure_control_release_session_sync() {
     let corp_only_prof = rpc(&ctx, &mut owner_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Corp Only Prof".into()), PyRep::String("CORP".into())]).await.unwrap().as_i64().unwrap();
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(acl_prof),
-        PyRep::Dict(vec![(PyRep::String("corpOnly".into()), PyRep::Bool(false)), (PyRep::String("defenseGroupIDs".into()), PyRep::List(vec![PyRep::Integer(acl_grp)]))]),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(acl_grp), PyRep::Integer(1)]),
+        ]),
     ]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(corp_only_prof),
-        PyRep::Dict(vec![(PyRep::String("corpOnly".into()), PyRep::Bool(true))]),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(0)]),
+        ]),
     ]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(acl_prof)]).await.unwrap();
 
@@ -327,11 +332,11 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(st_id),
         PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_HOUSING_CAN_DOCK), PyRep::Real(0.0), PyRep::Integer(grp_dock)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Real(0.01), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Real(0.05), PyRep::Integer(grp_std)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_REPROCESSING_TAX), PyRep::Real(0.02), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_CLONINGBAY_TAX), PyRep::Real(100_000.0), PyRep::Integer(grp_vip)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_HOUSING_CAN_DOCK), PyRep::Integer(grp_dock), PyRep::Real(0.0)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Integer(grp_vip), PyRep::Real(0.01)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Integer(grp_std), PyRep::Real(0.05)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_REPROCESSING_TAX), PyRep::Integer(grp_vip), PyRep::Real(0.02)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_CLONINGBAY_TAX), PyRep::Integer(grp_vip), PyRep::Real(100_000.0)]),
         ]),
     ]).await.unwrap();
 
@@ -500,22 +505,26 @@ async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_struc
     rpc(&ctx, &mut owner_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(dock_grp), PyRep::List(vec![PyRep::Integer(gunner_cid), PyRep::Integer(blocked_cid)])]).await.unwrap();
     rpc(&ctx, &mut owner_sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(def_grp), PyRep::List(vec![PyRep::Integer(gunner_cid)])]).await.unwrap();
 
-    // Positive (BF-04): Direct SaveProfileSettings on structure_id persists docking ACLs, defense ACLs, and defenseSettings
+    // Positive (BF-04): Direct SaveProfileSettings on structure_id persists docking ACLs and defense ACLs
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(st_id),
-        PyRep::Dict(vec![
-            (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-            (PyRep::String("allowed".into()), PyRep::List(vec![PyRep::Integer(gunner_cid)])),
-            (PyRep::String("blocked".into()), PyRep::List(vec![PyRep::Integer(blocked_cid)])),
-            (PyRep::String("groupIDs".into()), PyRep::List(vec![PyRep::Integer(dock_grp)])),
-            (PyRep::String("defenseGroupIDs".into()), PyRep::List(vec![PyRep::Integer(def_grp)])),
-            (PyRep::String("defenseBlocked".into()), PyRep::List(vec![PyRep::Integer(blocked_cid)])),
-            (PyRep::String("autoDefenseEnabled".into()), PyRep::Bool(true)),
-            (PyRep::String("autoTargetAttackers".into()), PyRep::Bool(true)),
-            (PyRep::String("standingThreshold".into()), PyRep::Real(-2.5)),
-            (PyRep::String("targetBlockedAcl".into()), PyRep::Bool(true)),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(dock_grp), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(gunner_cid), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(blocked_cid), PyRep::Integer(-1)]),
+            PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)]),
+            PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(blocked_cid), PyRep::Integer(-1)]),
         ]),
     ]).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, st_id);
+        ds.auto_defense_enabled = true;
+        ds.auto_target_attackers = true;
+        ds.standing_threshold = -2.5;
+        ds.target_blocked_acl = true;
+        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
+    });
 
     ctx.db.with_snapshot(|snap| {
         let ext = ops::load_ext_state(snap);

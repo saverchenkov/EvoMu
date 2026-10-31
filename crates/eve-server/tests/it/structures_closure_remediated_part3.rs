@@ -251,10 +251,10 @@ async fn test_remediated_docking_acl_and_upwell_hull_matrix() {
         "SaveProfileSettings",
         &[
             PyRep::Integer(prof_id),
-            PyRep::Dict(vec![
-                (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-                (PyRep::String("accessGroups".into()), PyRep::List(vec![PyRep::Integer(group_id)])),
-                (PyRep::String("blocked".into()), PyRep::List(vec![PyRep::Integer(BLOCKED_PILOT)])),
+            PyRep::List(vec![
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Integer(1)]),
+                PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(BLOCKED_PILOT), PyRep::Integer(-1)]),
             ]),
         ],
     )

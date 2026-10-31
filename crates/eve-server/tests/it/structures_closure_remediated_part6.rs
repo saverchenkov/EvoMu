@@ -348,24 +348,24 @@ async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_t
     let prof_1 = rpc(&ctx, &mut owner_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Tiered Services".into()), PyRep::String("Tiered".into())]).await.unwrap().as_i64().unwrap();
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(prof_1),
-        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_HOUSING_CAN_DOCK), PyRep::Real(0.0), PyRep::Integer(grp_dock)])]),
+        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_HOUSING_CAN_DOCK), PyRep::Integer(grp_dock), PyRep::Integer(1)])]),
     ]).await.unwrap();
 
     // Save per-service ACLs — MUST NOT overwrite grp_dock!
     rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[
         PyRep::Integer(prof_1),
         PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Real(0.01), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Real(0.05), PyRep::Integer(grp_std)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_REPROCESSING_TAX), PyRep::Real(0.02), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_REPROCESSING_TAX), PyRep::Real(0.08), PyRep::Integer(grp_std)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_CLONINGBAY_TAX), PyRep::Real(100_000.0), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_CLONINGBAY_TAX), PyRep::Real(600_000.0), PyRep::Integer(grp_std)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MANUFACTURING_TAX), PyRep::Real(0.01), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MANUFACTURING_TAX), PyRep::Real(0.06), PyRep::Integer(grp_std)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SERVICE_REPAIR), PyRep::Real(0.02), PyRep::Integer(grp_vip)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SERVICE_REPAIR), PyRep::Real(0.10), PyRep::Integer(grp_std)]),
-            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_JUMP_BRIDGE_ACTIVATION), PyRep::Real(0.0), PyRep::Integer(grp_vip)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Integer(grp_vip), PyRep::Real(0.01)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MARKET_TAX), PyRep::Integer(grp_std), PyRep::Real(0.05)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_REPROCESSING_TAX), PyRep::Integer(grp_vip), PyRep::Real(0.02)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_REPROCESSING_TAX), PyRep::Integer(grp_std), PyRep::Real(0.08)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_CLONINGBAY_TAX), PyRep::Integer(grp_vip), PyRep::Real(100_000.0)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_CLONINGBAY_TAX), PyRep::Integer(grp_std), PyRep::Real(600_000.0)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MANUFACTURING_TAX), PyRep::Integer(grp_vip), PyRep::Real(0.01)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_MANUFACTURING_TAX), PyRep::Integer(grp_std), PyRep::Real(0.06)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SERVICE_REPAIR), PyRep::Integer(grp_vip), PyRep::Real(0.02)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SERVICE_REPAIR), PyRep::Integer(grp_std), PyRep::Real(0.10)]),
+            PyRep::Tuple(vec![PyRep::Integer(svc_acl::SETTING_JUMP_BRIDGE_ACTIVATION), PyRep::Integer(grp_vip), PyRep::Real(0.0)]),
         ]),
     ]).await.unwrap();
 

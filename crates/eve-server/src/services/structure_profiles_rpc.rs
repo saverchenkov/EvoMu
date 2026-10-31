@@ -300,13 +300,10 @@ fn handle_get_profile_settings(
                 ("value", PyRep::Integer(if prof.corp_only { 0 } else { 1 })),
             ]));
         }
-        if !prof.access_group_ids.is_empty() {
-            by_setting.insert(
-                crate::services::structure_profile_services::SETTING_HOUSING_CAN_DOCK,
-                docking_entries.clone(),
-            );
-        }
-        by_setting.insert(1, docking_entries);
+        by_setting.insert(
+            crate::services::structure_profile_services::SETTING_HOUSING_CAN_DOCK,
+            docking_entries,
+        );
         for (&gid, &flag) in &prof.general_settings {
             by_setting.entry(gid).or_default().push(PyRep::keyval([
                 ("groupID", PyRep::Integer(0)),
@@ -475,19 +472,7 @@ fn parse_setting_scalar(
 }
 
 fn split_3tuple_gid_and_val<'a>(a: &'a PyRep, b: &'a PyRep) -> (i64, &'a PyRep) {
-    if matches!(a, PyRep::Real(_) | PyRep::Bool(_)) && b.as_i64().is_some() {
-        (b.as_i64().unwrap_or(0), a)
-    } else if matches!(b, PyRep::Real(_) | PyRep::Bool(_)) && a.as_i64().is_some() {
-        (a.as_i64().unwrap_or(0), b)
-    } else if let (Some(ia), Some(ib)) = (a.as_i64(), b.as_i64()) {
-        if ib >= 80_000_000 && ia < 80_000_000 {
-            (ib, a)
-        } else {
-            (ia, b)
-        }
-    } else {
-        (a.as_i64().unwrap_or(0), b)
-    }
+    (a.as_i64().unwrap_or(0), b)
 }
 
 fn push_service_acl_row(
@@ -536,14 +521,14 @@ fn handle_save_profile_settings(
     let mut has_blocked = false;
     let mut has_allowed = false;
     let mut has_setting_17 = false;
-    let mut has_defense_groups = false;
+    let has_defense_groups = false;
     let mut has_defense_allowed = false;
     let mut has_defense_blocked = false;
-    let mut def_auto_enabled: Option<bool> = None;
-    let mut def_auto_attackers: Option<bool> = None;
-    let mut def_auto_war: Option<bool> = None;
-    let mut def_standing_thresh: Option<f64> = None;
-    let mut def_target_blocked: Option<bool> = None;
+    let def_auto_enabled: Option<bool> = None;
+    let def_auto_attackers: Option<bool> = None;
+    let def_auto_war: Option<bool> = None;
+    let def_standing_thresh: Option<f64> = None;
+    let def_target_blocked: Option<bool> = None;
     let payload = args.get(1).or_else(|| args.get(2));
     if let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload {
         for r in rows {
@@ -562,8 +547,9 @@ fn handle_save_profile_settings(
                             }
                         } else if sid == 1 || sid == svc_acl::SETTING_HOUSING_CAN_DOCK {
                             if gid > 0 {
-                                has_docking_groups = true;
-                                group_ids.push(gid);
+                                let is_blk = matches!(v2, PyRep::Bool(false))
+                                    || v2.as_i64().is_some_and(|x| x < 0);
+                                raw_docking_1_ids.push((gid, is_blk));
                             } else if let Some(b) = v2.as_bool() {
                                 corp_only = Some(!b);
                                 general_settings.push((1, b));
@@ -748,114 +734,6 @@ fn handle_save_profile_settings(
                     }
                 }
             }
-        }
-    }
-    let pairs: Vec<(String, PyRep)> = match payload {
-        Some(PyRep::Dict(d)) => d
-            .iter()
-            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v.clone())))
-            .collect(),
-        Some(PyRep::KeyVal(kv)) => kv.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        _ => Vec::new(),
-    };
-    let extract_ids = |rep: &PyRep| -> Vec<i64> {
-        match rep {
-            PyRep::List(xs) | PyRep::Tuple(xs) => xs.iter().filter_map(|x| x.as_i64()).collect(),
-            PyRep::Integer(id) => vec![*id],
-            _ => Vec::new(),
-        }
-    };
-    for (k, v) in pairs {
-        match k.as_str() {
-            "corpOnly" | "corp_only" => {
-                corp_only = Some(matches!(v, PyRep::Bool(true) | PyRep::Integer(1)))
-            }
-            "blocked" | "blockedEntities" => {
-                has_blocked = true;
-                blocked = extract_ids(&v);
-            }
-            "allowed" | "allowedEntities" => {
-                has_allowed = true;
-                allowed = extract_ids(&v);
-            }
-            "accessGroups" | "groupIDs" => {
-                has_docking_groups = true;
-                group_ids.extend(extract_ids(&v));
-            }
-            "defenseGroupIDs" | "defenseGroups" => {
-                has_defense_groups = true;
-                defense_group_ids.extend(extract_ids(&v));
-            }
-            "defenseAllowed" | "defenseAllowedCharacters" => {
-                has_defense_allowed = true;
-                defense_allowed.extend(extract_ids(&v));
-            }
-            "defenseBlocked" | "defenseBlockedCharacters" => {
-                has_defense_blocked = true;
-                defense_blocked.extend(extract_ids(&v));
-            }
-            "autoDefenseEnabled" => def_auto_enabled = v.as_bool(),
-            "autoTargetAttackers" => def_auto_attackers = v.as_bool(),
-            "autoTargetWarTargets" => def_auto_war = v.as_bool(),
-            "standingThreshold" => def_standing_thresh = v.as_f64(),
-            "targetBlockedAcl" => def_target_blocked = v.as_bool(),
-            "defenseSettings" => {
-                let d_entries: Vec<(String, PyRep)> = match v {
-                    PyRep::Dict(dd) => dd
-                        .iter()
-                        .filter_map(|(dk, dv)| dk.as_str().map(|s| (s.to_string(), dv.clone())))
-                        .collect(),
-                    PyRep::KeyVal(dkv) => dkv.iter().map(|(dk, dv)| (dk.clone(), dv.clone())).collect(),
-                    _ => Vec::new(),
-                };
-                for (dk, dv) in d_entries {
-                    match dk.as_str() {
-                        "autoDefenseEnabled" => def_auto_enabled = dv.as_bool(),
-                        "autoTargetAttackers" => def_auto_attackers = dv.as_bool(),
-                        "autoTargetWarTargets" => def_auto_war = dv.as_bool(),
-                        "standingThreshold" => def_standing_thresh = dv.as_f64(),
-                        "targetBlockedAcl" => def_target_blocked = dv.as_bool(),
-                        "defenseGroupIDs" | "defenseGroups" => {
-                            has_defense_groups = true;
-                            defense_group_ids.extend(extract_ids(&dv));
-                        }
-                        "defenseAllowed" | "defenseAllowedCharacters" => {
-                            has_defense_allowed = true;
-                            defense_allowed.extend(extract_ids(&dv));
-                        }
-                        "defenseBlocked" | "defenseBlockedCharacters" => {
-                            has_defense_blocked = true;
-                            defense_blocked.extend(extract_ids(&dv));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            "serviceSettings" | "services" => {
-                if let PyRep::Dict(sd) = v {
-                    for (sk, sv) in sd {
-                        if let Some(sid) = sk.as_i64() {
-                            let rate = match sv {
-                                PyRep::Real(r) => r,
-                                PyRep::Integer(i) => i as f64,
-                                _ => f64::NAN,
-                            };
-                            service_taxes.push((sid, rate));
-                        }
-                    }
-                }
-            }
-            "generalSettings" | "settings" => {
-                if let PyRep::Dict(gd) = v {
-                    for (gk, gv) in gd {
-                        if let Some(gid) = gk.as_i64() {
-                            general_settings
-                                .push((gid, matches!(gv, PyRep::Bool(true) | PyRep::Integer(1))));
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
     }
     let is_standalone_profile = ctx

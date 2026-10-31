@@ -452,11 +452,11 @@ async fn test_upwell_profiles_directory_fitting_and_types() {
     rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(GUEST)])]).await.expect("AddMembers");
     let profile_id = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Public Market Profile".into()), PyRep::String("Taxed market".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "profileID"))).unwrap();
     rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles");
-    let settings_payload = PyRep::Dict(vec![
-        (PyRep::String("corpOnly".into()), PyRep::Bool(false)),
-        (PyRep::String("accessGroups".into()), PyRep::List(vec![PyRep::Integer(group_id)])),
-        (PyRep::String("blocked".into()), PyRep::List(vec![PyRep::Integer(OUTSIDER)])),
-        (PyRep::String("services".into()), PyRep::Dict(vec![(PyRep::Integer(10), PyRep::Real(0.025))])),
+    let settings_payload = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(OUTSIDER), PyRep::Integer(-1)]),
+        PyRep::Tuple(vec![PyRep::Integer(23), PyRep::Real(0.025)]),
     ]);
     rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), settings_payload]).await.expect("SaveProfileSettings");
 

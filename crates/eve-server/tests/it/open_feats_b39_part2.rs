@@ -109,6 +109,9 @@ async fn test_b39_standup_point_defense_battery() {
         ctx.build_type_combat_state(TYPE_KEEPSTAR),
     ).await;
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().structure_id = Some(keepstar_id);
+    });
     sess.structure_id = Some(keepstar_id);
     ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
 
@@ -268,6 +271,9 @@ async fn test_b39_standup_guided_bomb_and_arcing_vorton() {
         ctx.build_type_combat_state(TYPE_KEEPSTAR),
     ).await;
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().structure_id = Some(keepstar_id);
+    });
     sess.structure_id = Some(keepstar_id);
     ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
 
@@ -423,6 +429,9 @@ async fn test_b39_standup_falloff_bomb_safety_timers_and_kills() {
         Ball { id: keepstar_id, type_id: TYPE_KEEPSTAR, position: st_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000_000_000.0, radius: 1_000.0, speed_fraction: 0.0, mode: MovementMode::Stop },
         ctx.build_type_combat_state(TYPE_KEEPSTAR),
     ).await;
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&gunner_id).unwrap().structure_id = Some(keepstar_id);
+    });
     sess.structure_id = Some(keepstar_id);
     ctx.dispatch_rpc(&mut sess, "structureControl", None, "BoardStructure", &[PyRep::Integer(keepstar_id)], &kw, None).await.expect("BoardStructure");
 
