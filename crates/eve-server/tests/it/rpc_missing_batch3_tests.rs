@@ -123,10 +123,10 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(proxy_traces.is_some(), "alert_proxy_traces must be persisted");
     assert!(proxy_traces.unwrap().contains("777888"));
 
-    // 3. rpc:localizationServer.UpdateLocalizationQAWrap (fail-closed UnimplementedRPC)
+    // 3. rpc:localizationServer.UpdateLocalizationQAWrap (persists overrides and returns Bool(true))
     let mut overrides = Vec::new();
     overrides.push((PyRep::Integer(99991), PyRep::String("Overridden QA String".into())));
-    let qa_wrap_err = ctx
+    let qa_wrap_res = ctx
         .dispatch_rpc(
             &mut sess1,
             "localizationServer",
@@ -137,8 +137,26 @@ async fn test_rpc_missing_batch3_part1() {
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(qa_wrap_err.code, "UnimplementedRPC");
+        .expect("UpdateLocalizationQAWrap overrides");
+    assert_eq!(qa_wrap_res, PyRep::Bool(true));
+
+    // Enable QA wrap for sess1 and verify GetAllTextChanges wraps localized strings
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Bool(true)], &kw, None).await.expect("UpdateLocalizationQAWrap(true)"),
+        PyRep::Bool(true)
+    );
+    let wrapped_changes = ctx.dispatch_rpc(&mut sess1, "localizationServer", None, "GetAllTextChanges", &[], &kw, None).await.expect("GetAllTextChanges wrapped");
+    assert_eq!(
+        match &wrapped_changes {
+            PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_i64() == Some(99991)).map(|(_, v)| v),
+            _ => None,
+        },
+        Some(&PyRep::String("[QA:99991] Overridden QA String".into()))
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Bool(false)], &kw, None).await.expect("UpdateLocalizationQAWrap(false)"),
+        PyRep::Bool(false)
+    );
 
     // 4. rpc:localizationServer.ReloadFSDPickle
     let reload_res = ctx
@@ -264,24 +282,36 @@ async fn test_rpc_missing_batch3_part1() {
     }
 
     // 9. rpc:loadService.StartLoad (1 arg: loadSpec)
+    let target_sys = sess1.solar_system_id.unwrap_or(30_000_142);
+    let elapsed_before = ctx.systems.get_system_sim_elapsed(target_sys);
     let start_load_res = ctx
         .dispatch_rpc(
             &mut sess1,
             "loadService",
             None,
             "StartLoad",
-            &[PyRep::String("load_profile_std".into())],
+            &[PyRep::Dict(vec![
+                (PyRep::String("profile".into()), PyRep::String("load_profile_std".into())),
+                (PyRep::String("ticks".into()), PyRep::Integer(4)),
+            ])],
             &kw,
             None,
         )
         .await
         .expect("loadService.StartLoad");
     assert_eq!(start_load_res, PyRep::None);
+    let elapsed_after = ctx.systems.get_system_sim_elapsed(target_sys);
+    assert!(
+        elapsed_after >= elapsed_before + 4.0,
+        "StartLoad must step target system (before={elapsed_before}, after={elapsed_after})"
+    );
     let load_blob = ctx.db.with_snapshot(|s| {
         s.service_state_blobs.get("load_service_state").cloned()
     });
     assert!(load_blob.is_some());
-    assert!(load_blob.unwrap().contains("\"active\":true"));
+    let load_blob_str = load_blob.unwrap();
+    assert!(load_blob_str.contains("\"active\":true"));
+    assert!(load_blob_str.contains("\"ticks_executed\":4"));
 
     // 10. rpc:loadService.StopLoad
     let stop_load_res = ctx

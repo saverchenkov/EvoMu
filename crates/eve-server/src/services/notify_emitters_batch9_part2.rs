@@ -583,7 +583,14 @@ pub fn handle_get_all_text_changes(
     _args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
+    let key_id = session.character_id.unwrap_or(session.session_id as i64);
     ctx.db.with_snapshot(|snap| {
+        let qa_wrap = snap
+            .service_state_blobs
+            .get("localization:qa_wrap_sessions")
+            .and_then(|s| serde_json::from_str::<BTreeMap<i64, bool>>(s).ok())
+            .and_then(|m| m.get(&key_id).copied())
+            .unwrap_or(false);
         let overrides: BTreeMap<i64, String> = snap
             .owner_notes
             .get(&LOCALIZATION_NOTE_ID)
@@ -595,20 +602,50 @@ pub fn handle_get_all_text_changes(
             Ok(PyRep::Dict(
                 overrides
                     .into_iter()
-                    .map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt)))
+                    .map(|(id, txt)| {
+                        let rendered = if qa_wrap {
+                            format!("[QA:{id}] {txt}")
+                        } else {
+                            txt
+                        };
+                        (PyRep::Integer(id), PyRep::String(rendered))
+                    })
                     .collect(),
             ))
         }
     })
 }
 
-/// Extracted `localizationServer.UpdateLocalizationQAWrap` handler (fail-closed until QA-wrap state exists).
+/// Extracted `localizationServer.UpdateLocalizationQAWrap` handler.
 pub fn handle_update_localization_qa_wrap(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     session: &SessionState,
-    _args: &[PyRep],
+    args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
+    let bool_arg = args.first().and_then(|a| {
+        a.as_bool().or_else(|| match a {
+            PyRep::Integer(0) => Some(false),
+            PyRep::Integer(1) => Some(true),
+            _ => None,
+        })
+    });
+    if let Some(enabled) = bool_arg {
+        let key_id = session.character_id.unwrap_or(session.session_id as i64);
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut map: BTreeMap<i64, bool> = snap
+                .service_state_blobs
+                .get("localization:qa_wrap_sessions")
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            map.insert(key_id, enabled);
+            if let Ok(json) = serde_json::to_string(&map) {
+                snap.service_state_blobs
+                    .insert("localization:qa_wrap_sessions".into(), json);
+            }
+        });
+        return Ok(PyRep::Bool(enabled));
+    }
     let qa_roles = eve_db::service_roles::ROLE_GMH
         | eve_db::service_roles::ROLE_GML
         | eve_machonet::service_roles::ROLE_PROGRAMMER
@@ -619,8 +656,34 @@ pub fn handle_update_localization_qa_wrap(
             "localizationServer.UpdateLocalizationQAWrap requires GM or Content/Programmer role",
         ));
     }
-    Err(err(
-        "UnimplementedRPC",
-        "localizationServer.UpdateLocalizationQAWrap is not yet implemented",
-    ))
+    let Some(PyRep::Dict(entries)) = args.first() else {
+        return Err(err(
+            "InvalidArgument",
+            "UpdateLocalizationQAWrap requires a boolean flag or dict of overrides",
+        ));
+    };
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let mut overrides: BTreeMap<i64, String> = snap
+            .owner_notes
+            .get(&LOCALIZATION_NOTE_ID)
+            .and_then(|n| serde_json::from_str(&n.note).ok())
+            .unwrap_or_default();
+        for (k, v) in entries {
+            if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
+                overrides.insert(msg_id, text.to_string());
+            }
+        }
+        snap.owner_notes.insert(
+            LOCALIZATION_NOTE_ID,
+            eve_db::OwnerNoteRecord {
+                note_id: LOCALIZATION_NOTE_ID,
+                character_id: 0,
+                item_id: 0,
+                label: "localization_overrides".into(),
+                note: serde_json::to_string(&overrides).unwrap_or_default(),
+                timestamp_unix: 0,
+            },
+        );
+        Ok(PyRep::Bool(true))
+    })
 }

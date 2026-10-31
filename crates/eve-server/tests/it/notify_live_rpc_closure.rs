@@ -247,6 +247,10 @@ async fn test_notify_live_raffle_multievent_energy_and_alliance() {
 
     // 1. AddTarget -> OnMultiEvent carrying ('OnTarget', 'add', ship_b, ...)
     rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_b)]).await.expect("AddTarget");
+    let sys_handle = ctx.systems.get_or_spawn(SYS_JITA);
+    for _ in 0..5 {
+        let _ = sys_handle.tick().await;
+    }
     let target_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let multi_args = find_notif(&target_notifs, "OnMultiEvent");
     let PyRep::List(events) = &multi_args[0] else {
@@ -304,14 +308,16 @@ async fn test_notify_live_raffle_multievent_energy_and_alliance() {
     let raffle_id = raffle_rep.dict_get("raffle_id").and_then(|v| v.as_i64()).expect("raffle_id");
     let create_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     let created_args = find_notif(&create_notifs, "OnRaffleCreatedServer");
-    assert_eq!(created_args[0].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
+    assert_eq!(created_args[0], PyRep::Integer(raffle_id));
+    assert_eq!(created_args[1].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
 
     rpc(&ctx, &mut sess_b, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(raffle_id), PyRep::Integer(8)])
         .await
         .expect("BuyRandomTickets");
     let buy_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
     let updated_args = find_notif(&buy_notifs_b, "OnRaffleUpdatedServer");
-    assert_eq!(updated_args[0].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
+    assert_eq!(updated_args[0], PyRep::Integer(raffle_id));
+    assert_eq!(updated_args[1].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
     let finished_args = find_notif(&buy_notifs_b, "OnRaffleFinishedServer");
     assert_eq!(finished_args[0], PyRep::Integer(raffle_id));
 }

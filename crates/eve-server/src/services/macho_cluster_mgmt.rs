@@ -32,6 +32,7 @@ pub struct LoadServiceState {
     pub runs_started: u64,
     pub total_requests: u64,
     pub systems_stepped: u64,
+    pub ticks_executed: u64,
     pub sde_types_sampled: u64,
     pub sde_solar_systems_sampled: u64,
     pub world_items_sampled: u64,
@@ -227,9 +228,36 @@ pub fn handle(
                 }));
             }
             let load_spec = args.first().cloned().unwrap_or(PyRep::None);
-            let target_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let mut target_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let mut ticks: u64 = 5;
+            if let Some(n) = load_spec.as_i64() {
+                ticks = (n.max(1) as u64).min(100);
+            } else if let PyRep::Dict(entries) = &load_spec {
+                for (k, v) in entries {
+                    match k.as_str() {
+                        Some("ticks") | Some("steps") | Some("iterations") => {
+                            if let Some(n) = v.as_i64() {
+                                ticks = (n.max(1) as u64).min(100);
+                            }
+                        }
+                        Some("solar_system_id") | Some("solarSystemID") => {
+                            if let Some(sys) = v.as_i64() {
+                                if sys > 0 {
+                                    target_sys = sys as u32;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut stepped_ticks: u64 = 0;
             if tokio::runtime::Handle::try_current().is_ok() {
-                let _ = ctx.systems.get_or_spawn(target_sys);
+                let sys_handle = ctx.systems.get_or_spawn(target_sys);
+                for _ in 0..ticks {
+                    sys_handle.try_step_manual(1.0);
+                    stepped_ticks += 1;
+                }
             }
             let sde_types_len = ctx.sde.types.len() as u64;
             let sde_systems_len = ctx.sde.solar_systems.len() as u64;
@@ -251,7 +279,8 @@ pub fn handle(
                 state.active = true;
                 state.runs_started += 1;
                 state.total_requests += 1;
-                state.systems_stepped += active_systems_len;
+                state.systems_stepped += stepped_ticks.max(1) * active_systems_len;
+                state.ticks_executed += stepped_ticks;
                 state.sde_types_sampled = sde_types_len;
                 state.sde_solar_systems_sampled = sde_systems_len;
                 state.world_items_sampled = items_len;
@@ -365,6 +394,7 @@ pub fn handle(
                     (PyRep::String("runs_started".into()), PyRep::Integer(state.runs_started as i64)),
                     (PyRep::String("total_requests".into()), PyRep::Integer(state.total_requests as i64)),
                     (PyRep::String("systems_stepped".into()), PyRep::Integer(state.systems_stepped as i64)),
+                    (PyRep::String("ticks_executed".into()), PyRep::Integer(state.ticks_executed as i64)),
                     (PyRep::String("sde_types_count".into()), PyRep::Integer(sde_types_len)),
                     (PyRep::String("sde_solar_systems_count".into()), PyRep::Integer(sde_systems_len)),
                     (PyRep::String("world_items_count".into()), PyRep::Integer(snap.items.len() as i64)),
