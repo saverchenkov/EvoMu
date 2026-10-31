@@ -886,6 +886,10 @@ pub fn save_orbital_settings(
         .values()
         .find(|c| c.planet_id == settings.planet_id || c.planet_id == planet_or_orbital_id)
         .map(|c| c.solar_system_id)
+        .or_else(|| {
+            let (tag_a, tag_b) = (format!("Orbital:{}", settings.planet_id), format!("Orbital:{planet_or_orbital_id}"));
+            snap.structures.values().find(|s| s.structure_id == planet_or_orbital_id || s.name == tag_a || s.name == tag_b).map(|s| s.solar_system_id)
+        })
         .unwrap_or(30_000_142);
     let standing_lvl = if settings.minimum_standing > 5.0 {
         Some("excellent".to_string())

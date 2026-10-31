@@ -110,23 +110,49 @@ pub fn dispatch_economy_industry_route(
                 }
                 by_id.insert(s.structure_id, obj);
             }
-            for job in snap.industry_jobs.values() {
-                if by_id.contains_key(&job.facility_id) {
+            for st in ctx.sde.stations.values() {
+                if by_id.contains_key(&st.station_id) {
                     continue;
                 }
-                if let Some(st) = ctx.sde.stations.get(&job.facility_id) {
-                    let mut obj = json!({
+                let has_industry_service = ctx
+                    .sde
+                    .station_operations
+                    .get(&st.operation_id)
+                    .map(|op| op.services.iter().any(|&sid| sid == 14 || sid == 15))
+                    .unwrap_or(false);
+                if !has_industry_service {
+                    continue;
+                }
+                by_id.insert(
+                    st.station_id,
+                    json!({
                         "facility_id": st.station_id,
                         "owner_id": st.owner_corporation_id,
                         "region_id": st.region_id as i64,
                         "solar_system_id": st.solar_system_id as i64,
                         "type_id": st.station_type_id as i64,
-                    });
-                    if st.reprocessing_stations_take > 0.0 {
-                        // DERIVED: NPC station industry tax rate uses SDE reprocessing_stations_take
-                        obj["tax"] = json!(st.reprocessing_stations_take);
-                    }
-                    by_id.insert(st.station_id, obj);
+                        // DERIVED: NPC station industry facility tax rate shared with InstallJob cost calculation
+                        "tax": crate::services::industry_pi::industry_facilities_bps::NPC_STATION_INDUSTRY_TAX_RATE,
+                    }),
+                );
+            }
+            for job in snap.industry_jobs.values() {
+                if by_id.contains_key(&job.facility_id) {
+                    continue;
+                }
+                if let Some(st) = ctx.sde.stations.get(&job.facility_id) {
+                    by_id.insert(
+                        st.station_id,
+                        json!({
+                            "facility_id": st.station_id,
+                            "owner_id": st.owner_corporation_id,
+                            "region_id": st.region_id as i64,
+                            "solar_system_id": st.solar_system_id as i64,
+                            "type_id": st.station_type_id as i64,
+                            // DERIVED: NPC station industry facility tax rate shared with InstallJob cost calculation
+                            "tax": crate::services::industry_pi::industry_facilities_bps::NPC_STATION_INDUSTRY_TAX_RATE,
+                        }),
+                    );
                 }
             }
             let facilities: Vec<Value> = by_id.into_values().collect();
@@ -245,28 +271,7 @@ pub fn dispatch_economy_industry_route(
                 jobs.sort_by_key(|j| j.job_id);
                 let out: Vec<Value> = jobs
                     .into_iter()
-                    .map(|j| {
-                        let start_ts = j.start_unix;
-                        let end_ts = start_ts + j.duration_seconds;
-                        // DERIVED: IndustryJobRecord stores facility_id as the job's station/blueprint/output location
-                        json!({
-                            "job_id": j.job_id,
-                            "installer_id": j.installer_id,
-                            "facility_id": j.facility_id,
-                            "station_id": j.facility_id,
-                            "activity_id": j.activity_id as i64,
-                            "blueprint_id": j.blueprint_item_id,
-                            "blueprint_type_id": j.blueprint_type_id as i64,
-                            "blueprint_location_id": j.facility_id,
-                            "output_location_id": j.facility_id,
-                            "runs": j.runs as i64,
-                            "product_type_id": j.product_type_id as i64,
-                            "status": map_job_status(&j.status),
-                            "duration": j.duration_seconds as i64,
-                            "start_date": format_iso8601_utc(start_ts),
-                            "end_date": format_iso8601_utc(end_ts),
-                        })
-                    })
+                    .map(|j| format_industry_job_json(snap, j, false))
                     .collect();
                 RouteExecutionResult::ok_json(json!(out), 300)
             }))
@@ -353,28 +358,7 @@ pub fn dispatch_economy_industry_route(
                 jobs.sort_by_key(|j| j.job_id);
                 let rows: Vec<Value> = jobs
                     .into_iter()
-                    .map(|j| {
-                        let start_ts = j.start_unix;
-                        let end_ts = start_ts + j.duration_seconds;
-                        // DERIVED: IndustryJobRecord stores facility_id as the job's location/blueprint/output location
-                        json!({
-                            "job_id": j.job_id,
-                            "installer_id": j.installer_id,
-                            "facility_id": j.facility_id,
-                            "location_id": j.facility_id,
-                            "activity_id": j.activity_id as i64,
-                            "blueprint_id": j.blueprint_item_id,
-                            "blueprint_type_id": j.blueprint_type_id as i64,
-                            "blueprint_location_id": j.facility_id,
-                            "output_location_id": j.facility_id,
-                            "runs": j.runs as i64,
-                            "product_type_id": j.product_type_id as i64,
-                            "status": map_job_status(&j.status),
-                            "duration": j.duration_seconds as i64,
-                            "start_date": format_iso8601_utc(start_ts),
-                            "end_date": format_iso8601_utc(end_ts),
-                        })
-                    })
+                    .map(|j| format_industry_job_json(snap, j, true))
                     .collect();
                 match paginate_slice(&rows, page, 1000) {
                     Ok((page_rows, total_pages)) => {
@@ -769,4 +753,78 @@ pub fn dispatch_economy_industry_route(
 
         _ => None,
     }
+}
+
+fn format_industry_job_json(
+    snap: &eve_db::WorldStateSnapshot,
+    j: &eve_db::IndustryJobRecord,
+    is_corp: bool,
+) -> Value {
+    let start_ts = j.start_unix;
+    let end_ts = start_ts + j.duration_seconds;
+    let meta = crate::services::industry_pi::load_job_cost_meta(snap, j.job_id);
+    let bp_loc = meta
+        .as_ref()
+        .map(|m| m.blueprint_location_id)
+        .filter(|&id| id > 0)
+        .or_else(|| snap.items.get(&j.blueprint_item_id).map(|it| it.location_id))
+        .unwrap_or(j.facility_id);
+    let out_loc = meta
+        .as_ref()
+        .map(|m| m.output_location_id)
+        .filter(|&id| id > 0)
+        .unwrap_or(j.facility_id);
+    let mut obj = json!({
+        "job_id": j.job_id,
+        "installer_id": j.installer_id,
+        "facility_id": j.facility_id,
+        "activity_id": j.activity_id as i64,
+        "blueprint_id": j.blueprint_item_id,
+        "blueprint_type_id": j.blueprint_type_id as i64,
+        "blueprint_location_id": bp_loc,
+        "output_location_id": out_loc,
+        "runs": j.runs as i64,
+        "product_type_id": j.product_type_id as i64,
+        "status": map_job_status(&j.status),
+        "duration": j.duration_seconds as i64,
+        "start_date": format_iso8601_utc(start_ts),
+        "end_date": format_iso8601_utc(end_ts),
+    });
+    if is_corp {
+        let loc_id = meta
+            .as_ref()
+            .map(|m| m.location_id)
+            .filter(|&id| id > 0)
+            .unwrap_or(j.facility_id);
+        obj["location_id"] = json!(loc_id);
+    } else {
+        obj["station_id"] = json!(j.facility_id);
+    }
+    if let Some(ref m) = meta {
+        if m.total_cost_isk > 0.0 {
+            obj["cost"] = json!(m.total_cost_isk);
+        }
+        if m.invented_runs > 0 {
+            obj["licensed_runs"] = json!(m.invented_runs);
+        } else if j.activity_id == 5 {
+            obj["licensed_runs"] = json!(j.runs as i64);
+        }
+        if m.inv_prob > 0.0 {
+            obj["probability"] = json!(m.inv_prob);
+        }
+        if let Some(p) = m.paused_at_unix {
+            obj["pause_date"] = json!(format_iso8601_utc(p));
+        }
+    }
+    if j.status.eq_ignore_ascii_case("delivered") {
+        let comp_ts = meta.as_ref().and_then(|m| m.completed_unix).unwrap_or(end_ts);
+        let comp_char = meta
+            .as_ref()
+            .and_then(|m| m.completed_character_id)
+            .unwrap_or(j.installer_id);
+        obj["completed_date"] = json!(format_iso8601_utc(comp_ts));
+        obj["completed_character_id"] = json!(comp_char);
+        obj["successful_runs"] = json!(j.runs as i64);
+    }
+    obj
 }

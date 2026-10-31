@@ -266,36 +266,75 @@ pub fn dispatch_economy_route(
         }
 
         ("GET", "/markets/prices") => Some(ctx.db.with_snapshot(|snap| {
-            let mut sum_count_by_type: HashMap<u32, (f64, usize)> = HashMap::new();
+            let mut hist_by_type: HashMap<u32, Vec<&eve_db::snapshot_ext::MarketHistoryDayRecord>> =
+                HashMap::new();
+            for ((_reg_id, tid), days) in &snap.market_history {
+                hist_by_type.entry(*tid).or_default().extend(days.iter());
+            }
+            let mut sell_sum_vol_by_type: HashMap<u32, (f64, i64)> = HashMap::new();
+            let mut buy_sum_vol_by_type: HashMap<u32, (f64, i64)> = HashMap::new();
             for ord in snap.market_orders.values() {
                 if ord.vol_remaining > 0 {
-                    let entry = sum_count_by_type.entry(ord.type_id).or_insert((0.0, 0));
-                    entry.0 += ord.price.to_wire_f64();
-                    entry.1 += 1;
+                    let map = if ord.is_bid {
+                        &mut buy_sum_vol_by_type
+                    } else {
+                        &mut sell_sum_vol_by_type
+                    };
+                    let entry = map.entry(ord.type_id).or_insert((0.0, 0));
+                    entry.0 += ord.price.to_wire_f64() * (ord.vol_remaining as f64);
+                    entry.1 += ord.vol_remaining as i64;
                 }
             }
-            let mut tids: Vec<u32> = sum_count_by_type.keys().copied().collect();
-            tids.sort_unstable();
-            let out: Vec<Value> = tids
+            let mut all_tids: std::collections::BTreeSet<u32> =
+                hist_by_type.keys().copied().collect();
+            all_tids.extend(sell_sum_vol_by_type.keys().copied());
+            all_tids.extend(buy_sum_vol_by_type.keys().copied());
+            let out: Vec<Value> = all_tids
                 .into_iter()
                 .filter_map(|tid| {
-                    let (sum, cnt) = sum_count_by_type.get(&tid).copied()?;
-                    if cnt == 0 {
+                    if let Some(days) = hist_by_type.get_mut(&tid) {
+                        if !days.is_empty() {
+                            days.sort_by(|a, b| a.date.cmp(&b.date));
+                            let recent_30 = &days[days.len().saturating_sub(30)..];
+                            let (sum_wv, sum_v) = recent_30.iter().fold((0.0, 0_i64), |(sw, sv), d| {
+                                let v = d.volume.max(0);
+                                (sw + d.average * (v as f64), sv + v)
+                            });
+                            let avg = if sum_v > 0 {
+                                sum_wv / (sum_v as f64)
+                            } else {
+                                recent_30.iter().map(|d| d.average).sum::<f64>()
+                                    / (recent_30.len() as f64)
+                            };
+                            // DERIVED: adjusted_price is approximated via a 28-day clamped EMA over daily market history
+                            // (falling back to SDE base_price / active-order volume-weighted average when history is absent)
+                            // rather than CCP's internal 28-day adjusted price formula.
+                            let recent_28 = &days[days.len().saturating_sub(28)..];
+                            let mut rolling_adj = recent_28[0].average;
+                            for d in &recent_28[1..] {
+                                let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
+                                rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
+                            }
+                            return Some(json!({
+                                "type_id": tid as i64,
+                                "average_price": avg,
+                                "adjusted_price": rolling_adj,
+                            }));
+                        }
+                    }
+                    let (sum_wv, sum_v) = sell_sum_vol_by_type
+                        .get(&tid)
+                        .or_else(|| buy_sum_vol_by_type.get(&tid))
+                        .copied()?;
+                    if sum_v <= 0 {
                         return None;
                     }
-                    let avg = sum / (cnt as f64);
-                    // DERIVED: adjusted_price uses SDE base_price when positive, falling back to active-order average_price
-                    let adj = ctx
-                        .sde
-                        .types
-                        .get(&tid)
-                        .map(|t| t.base_price)
-                        .filter(|&bp| bp > 0.0)
-                        .unwrap_or(avg);
+                    let avg = sum_wv / (sum_v as f64);
+                    // DERIVED: adjusted_price falls back to active-order volume-weighted average when daily history is absent
                     Some(json!({
                         "type_id": tid as i64,
                         "average_price": avg,
-                        "adjusted_price": adj,
+                        "adjusted_price": avg,
                     }))
                 })
                 .collect();
@@ -506,29 +545,33 @@ pub fn dispatch_economy_route(
                         format!("Structure {structure_id} not found"),
                     );
                 };
-                if !character_has_structure_acl_access(snap, caller_char_id, st)
-                    || !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                let market_online =
+                    crate::services::market_trading::is_structure_market_online(snap, structure_id)
+                        && crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(
+                            ctx,
+                            snap,
+                            structure_id,
+                        );
+                if !market_online {
+                    return RouteExecutionResult::error(
+                        403,
+                        format!(
+                            "Structure {structure_id} does not have an online Standup Market Hub service"
+                        ),
+                    );
+                }
+                let acl_ok = character_has_structure_acl_access(snap, caller_char_id, st)
+                    && crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access(
+                        ctx,
                         snap,
                         structure_id,
                         caller_char_id,
-                    )
-                {
+                    );
+                if !acl_ok {
                     return RouteExecutionResult::error(
                         403,
                         format!(
                             "Character {caller_char_id} lacks docking ACL access to structure {structure_id}"
-                        ),
-                    );
-                }
-                if !crate::services::station_structure::structure_upwell_ops::structure_allows_market_orders(
-                    ctx,
-                    snap,
-                    structure_id,
-                ) {
-                    return RouteExecutionResult::error(
-                        403,
-                        format!(
-                            "Structure {structure_id} does not have an online Standup Market Hub I"
                         ),
                     );
                 }
