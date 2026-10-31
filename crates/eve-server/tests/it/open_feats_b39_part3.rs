@@ -390,11 +390,38 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
         .expect_err("Non-fleet pilot cannot CloneJump into ship Clone Vat Bay");
     assert_eq!(left_fleet_err.code, "NotInHostShipFleet");
 
-    // Rejoin fleet -> `CloneJump` to Titan's active Clone Vat Bay spawns pilot in space in a Capsule (670) near Titan!
+    // Rejoin fleet, set non-trivial corp/alliance/sec-status on jumper, and verify live Ballpark position + cloak checks + SlimItemMeta!
+    let (mate_corp, mate_alliance) = (98_000_777_i64, 99_000_777_i64);
+    let moved_titan_pos = DVec3::new(7_500_000_000.0, 250_000.0, -100_000.0);
+    let _ = sys_handle.set_ball_position(s_titan, moved_titan_pos).await;
     ctx.db.with_mut_snapshot(|s| {
         s.fleets.get_mut(&889).unwrap().members.push(c_mate);
+        // Deliberately leave stale `[0, 0, 0]` in `item_positions` to prove live Ballpark coordinates are used!
+        s.item_positions.insert(s_titan, [0.0, 0.0, 0.0]);
+        let ch = s.characters.get_mut(&c_mate).unwrap();
+        ch.corporation_id = mate_corp;
+        ch.alliance_id = Some(mate_alliance);
+        ch.security_status = 2.75;
     });
     sess_mate.fleet_id = Some(889);
+    sess_mate.corporation_id = Some(mate_corp);
+
+    // Negative check: Cloaked host Titan must block `CloneJump`!
+    assert!(sys_handle.try_update_combat_state(s_titan, |cs| cs.is_cloaked = true));
+    let cloaked_jump_err = ctx
+        .dispatch_rpc(
+            &mut sess_mate,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(titan_clone_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Cloaked host Titan must reject CloneJump");
+    assert_eq!(cloaked_jump_err.code, "ShipCloaked");
+    assert!(sys_handle.try_update_combat_state(s_titan, |cs| cs.is_cloaked = false));
 
     ctx.dispatch_rpc(
         &mut sess_mate,
@@ -406,7 +433,7 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
         None,
     )
     .await
-    .expect("Fleet member CloneJumps to active Titan Clone Vat Bay");
+    .expect("Fleet member CloneJumps to active uncloaked Titan Clone Vat Bay");
 
     assert_eq!(sess_mate.solar_system_id, Some(sys_host));
     assert_eq!(sess_mate.station_id, None, "Ship clone jump places pilot in space, not docked");
@@ -415,9 +442,44 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
     let pod_type = ctx.db.with_snapshot(|s| s.items.get(&pod_id).map(|i| i.type_id));
     assert_eq!(pod_type, Some(670), "Jumper spawned in Capsule (type 670)");
     let (_, pod_ball) = sys_handle.get_ball_snapshot(pod_id).await.unwrap().expect("Capsule ball in space");
-    assert!((pod_ball.position - titan_pos).length() < 10_000.0, "Capsule spawned near host Titan");
+    assert!((pod_ball.position - moved_titan_pos).length() < 10_000.0, "Capsule spawned adjacent to live Titan Ball coordinates, not stale [0,0,0]");
+    let pod_meta = sys_handle.ballpark.read().unwrap().ball_slim_meta.get(&pod_id).cloned().expect("Capsule SlimItemMeta");
+    assert_eq!(pod_meta.corp_id, mate_corp, "SlimItemMeta populated with jumper corporation_id");
+    assert_eq!(pod_meta.alliance_id, mate_alliance, "SlimItemMeta populated with jumper alliance_id");
+    assert!((pod_meta.security_status - 2.75).abs() < 1e-6, "SlimItemMeta populated with jumper security_status");
 
-    // 4. Advance past Clone Vat Bay cycle duration (301s) + clear clone jump cooldown -> inactive Clone Vat Bay rejects both Offer and CloneJump!
+    // 4. Dock mate back in Jita, verify missing live Ballpark host ball rejects CloneJump even while DB CloneVatBayState is active, then verify cycle expiry!
+    let _ = sys_handle.remove_ball(pod_id).await;
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&c_mate).unwrap();
+        ch.solar_system_id = jita_sys;
+        ch.station_id = Some(jita_station);
+        ch.active_ship_id = jita_pod_id;
+        ch.last_clone_jump_unix = 0;
+    });
+    sess_mate.solar_system_id = Some(jita_sys);
+    sess_mate.station_id = Some(jita_station);
+    sess_mate.ship_id = Some(jita_pod_id);
+    ctx.advance_secs(15);
+
+    let (_, saved_rorq_ball) = sys_handle.get_ball_snapshot(s_rorq).await.unwrap().unwrap();
+    let saved_rorq_cs = sys_handle.get_combat_state(s_rorq).await.unwrap().unwrap();
+    let _ = sys_handle.remove_ball(s_rorq).await;
+    let missing_ball_err = ctx
+        .dispatch_rpc(
+            &mut sess_mate,
+            "jumpCloneSvc",
+            None,
+            "CloneJump",
+            &[PyRep::Integer(rorq_clone_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Missing live Ballpark host ship must block CloneJump");
+    assert_eq!(missing_ball_err.code, "NoActiveCloneVatBay");
+    let _ = sys_handle.spawn_ball_with_combat(saved_rorq_ball, saved_rorq_cs).await;
+
     ctx.advance_secs(305);
     sys_handle.step_manual(305.0).await.unwrap();
 
@@ -434,19 +496,6 @@ async fn test_b39_clone_vat_bay_titan_and_rorqual_install_and_jump() {
         .await
         .expect_err("Expired Clone Vat Bay cycle blocks clone installation");
     assert_eq!(expired_offer_err.code, "NoActiveCloneVatBay");
-
-    // Dock mate back in Jita in Capsule and clear jump cooldown to isolate NoActiveCloneVatBay on Rorqual
-    let _ = sys_handle.remove_ball(pod_id).await;
-    ctx.db.with_mut_snapshot(|s| {
-        let ch = s.characters.get_mut(&c_mate).unwrap();
-        ch.solar_system_id = jita_sys;
-        ch.station_id = Some(jita_station);
-        ch.active_ship_id = jita_pod_id;
-        ch.last_clone_jump_unix = 0;
-    });
-    sess_mate.solar_system_id = Some(jita_sys);
-    sess_mate.station_id = Some(jita_station);
-    sess_mate.ship_id = Some(jita_pod_id);
 
     let expired_jump_err = ctx
         .dispatch_rpc(

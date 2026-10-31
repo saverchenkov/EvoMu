@@ -169,6 +169,36 @@ pub fn handle_clone_jump(
             .unwrap_or(false)
     };
     let now_unix = ctx.now_unix();
+    let pre_ship_host: Option<(i64, u32)> = ctx.db.with_snapshot(|snap| {
+        let loc_id = snap
+            .jump_clones
+            .get(&char_id)?
+            .iter()
+            .find(|c| c.jump_clone_id == target_jc_id)?
+            .location_id;
+        let ship_it = snap.items.get(&loc_id)?;
+        if !ctx.sde.types.get(&ship_it.type_id).is_some_and(|t| matches!(t.group_id, 30 | 883)) {
+            return None;
+        }
+        let host_sys = snap
+            .characters
+            .get(&ship_it.owner_id)
+            .map(|c| c.solar_system_id)
+            .unwrap_or(0);
+        Some((loc_id, host_sys))
+    });
+    let live_host_ball_state: Option<(u32, [f64; 3], bool)> = pre_ship_host.and_then(|(ship_id, sys_id)| {
+        if sys_id == 0 {
+            return None;
+        }
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let b = bp.balls.get(&ship_id)?;
+        let cloaked = bp.combat_states.get(&ship_id).is_some_and(|cs| cs.is_cloaked)
+            || bp.ball_slim_meta.get(&ship_id).is_some_and(|m| m.is_cloaked);
+        let adj_x = b.position.x + b.radius.max(250.0) + 150.0;
+        Some((sys_id, [adj_x, b.position.y, b.position.z], cloaked))
+    });
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let sync_level = snap
@@ -345,8 +375,25 @@ pub fn handle_clone_jump(
                     message: format!("Host ship solar system {sys_id} not found in SDE"),
                 });
             };
-            let base_pos = snap.item_positions.get(&dest_loc_id).copied().unwrap_or([0.0, 0.0, 0.0]);
-            ship_clone_spawn_pos = Some([base_pos[0] + 250.0, base_pos[1], base_pos[2]]);
+            let has_active_cloak = snap.items.values().any(|i| {
+                i.location_id == dest_loc_id
+                    && matches!(i.flag as u16, 11..=34)
+                    && snap.module_active_states.contains(&i.item_id)
+                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
+            });
+            let Some((_, live_spawn_pos, live_cloaked)) = live_host_ball_state.filter(|(ls, _, _)| *ls == sys_id) else {
+                return Err(BridgeRpcError {
+                    code: "NoActiveCloneVatBay".into(),
+                    message: "Host Titan or Rorqual is not present in live space".into(),
+                });
+            };
+            if live_cloaked || has_active_cloak {
+                return Err(BridgeRpcError {
+                    code: "ShipCloaked".into(),
+                    message: "Cannot clone jump to a cloaked Titan or Rorqual".into(),
+                });
+            }
+            ship_clone_spawn_pos = Some(live_spawn_pos);
             (sys_id, sys.constellation_id, sys.region_id)
         } else {
             let Some((sys, dest_station)) = ctx.sde.solar_systems.values().find_map(|sys| {
@@ -641,6 +688,17 @@ pub fn handle_clone_jump(
             if let Some(spawn_pos) = ship_clone_spawn_pos {
                 session.station_id = None;
                 session.structure_id = None;
+                let (ch_corp_id, ch_alliance_id, ch_sec_status) = ctx.db.with_snapshot(|s| {
+                    if let Some(ch) = s.characters.get(&char_id) {
+                        let all_id = ch
+                            .alliance_id
+                            .or_else(|| s.corporations.get(&ch.corporation_id).and_then(|co| co.alliance_id))
+                            .unwrap_or(-1);
+                        (ch.corporation_id, all_id, ch.security_status)
+                    } else {
+                        (-1, -1, 0.0)
+                    }
+                });
                 let sys_handle = ctx.systems.get_or_spawn(dest_sys_id);
                 let cap_sde = ctx.sde.types.get(&670);
                 sys_handle.try_spawn_ball_with_meta(
@@ -662,9 +720,9 @@ pub fn handle_clone_jump(
                         category_id: 6,
                         owner_id: char_id,
                         char_id: Some(char_id),
-                        corp_id: -1,
-                        alliance_id: -1,
-                        security_status: 0.0,
+                        corp_id: ch_corp_id,
+                        alliance_id: ch_alliance_id,
+                        security_status: ch_sec_status,
                         is_cloaked: false,
                     },
                 );
@@ -793,6 +851,12 @@ pub async fn activate_clone_vat_bay(
         return Err(BridgeRpcError {
             code: "ShipCannotFitModule".into(),
             message: "Clone Vat Bay requires a Titan or Rorqual".into(),
+        });
+    }
+    if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+        return Err(BridgeRpcError {
+            code: "ShipCloaked".into(),
+            message: "Cannot activate Clone Vat Bay while cloaked".into(),
         });
     }
     let mod_type = ctx.sde.types.get(&mod_type_id).ok_or_else(|| BridgeRpcError {

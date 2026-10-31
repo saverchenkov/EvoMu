@@ -61,6 +61,44 @@ fn read_omni_damage(t: &eve_sde::InvType) -> DamageVector {
     }
 }
 
+fn standup_weapon_optimal_and_falloff(mod_type: &eve_sde::InvType) -> (f64, f64) {
+    let default_opt = match mod_type.group_id {
+        GROUP_STANDUP_POINT_DEFENSE_BATTERY => 2_500.0,
+        GROUP_STANDUP_ARCING_VORTON => 250_000.0,
+        _ => 0.0,
+    };
+    let default_falloff = match mod_type.group_id {
+        GROUP_STANDUP_ARCING_VORTON => 50_000.0,
+        _ => 0.0,
+    };
+    let optimal = mod_type
+        .default_attributes
+        .get(&54)
+        .or_else(|| mod_type.default_attributes.get(&99))
+        .copied()
+        .filter(|&v| v > 0.0)
+        .unwrap_or(default_opt);
+    let falloff = mod_type
+        .default_attributes
+        .get(&158)
+        .or_else(|| mod_type.default_attributes.get(&2044))
+        .copied()
+        .filter(|&v| v > 0.0)
+        .unwrap_or(default_falloff);
+    (optimal, falloff)
+}
+
+fn standup_falloff_multiplier(dist: f64, optimal: f64, falloff: f64) -> Option<f64> {
+    if dist <= optimal {
+        return Some(1.0);
+    }
+    if falloff <= 0.0 || dist > optimal + 2.0 * falloff {
+        return None;
+    }
+    let over = (dist - optimal) / falloff;
+    Some(0.5_f64.powf(over * over))
+}
+
 fn is_structure_ammo_bay(item: &InventoryItemRecord, st_corp_id: i64, mod_flag: InventoryFlag) -> bool {
     item.flag == mod_flag
         || (item.owner_id == st_corp_id
@@ -152,7 +190,7 @@ fn consume_structure_charge(
     })
 }
 
-fn resolve_victim_owner(ctx: &ServerContext, ball_id: i64) -> (Option<i64>, bool) {
+fn resolve_victim_owner(ctx: &ServerContext, sys_handle: &SystemHandle, ball_id: i64) -> (Option<i64>, bool) {
     if let Some(dc) = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&ball_id).map(|d| d.owner_char_id)) {
         return (Some(dc), true);
     }
@@ -170,12 +208,24 @@ fn resolve_victim_owner(ctx: &ServerContext, ball_id: i64) -> (Option<i64>, bool
                     .map(|i| i.owner_id)
                     .filter(|oid| snap.characters.contains_key(oid))
             })
+    }).or_else(|| {
+        let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        let meta = bp.ball_slim_meta.get(&ball_id)?;
+        meta.char_id.filter(|cid| ctx.db.with_snapshot(|s| s.characters.contains_key(cid)))
     });
-    (ch_opt, false)
+    let is_sub = sys_handle
+        .ballpark
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .ball_slim_meta
+        .get(&ball_id)
+        .is_some_and(|m| matches!(m.category_id, 18 | 87));
+    (ch_opt, is_sub)
 }
 
 fn is_hostile_to_structure(
     ctx: &ServerContext,
+    sys_handle: &SystemHandle,
     structure_id: i64,
     structure_corp_id: i64,
     gunner_char_id: i64,
@@ -200,7 +250,7 @@ fn is_hostile_to_structure(
 
     let now_unix = ctx.now_unix();
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
-    let (victim_char, _) = resolve_victim_owner(ctx, ball.id);
+    let (victim_char, _) = resolve_victim_owner(ctx, sys_handle, ball.id);
     let (st_alliance, gunner_fleet, target_corp, target_alliance, target_fleet) =
         ctx.db.with_snapshot(|snap| {
             let st_all = snap.corporations.get(&structure_corp_id).and_then(|c| c.alliance_id);
@@ -264,41 +314,81 @@ fn is_hostile_to_structure(
     sys_sec < 0.45
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_standup_hit(
     ctx: &ServerContext,
     sys_handle: &SystemHandle,
     structure_id: i64,
+    st_type_id: u32,
+    weapon_type_id: u32,
     gunner_char_id: i64,
     sys_id: u32,
     ball: &Ball,
     dmg: DamageVector,
+    neut_amt: f64,
     cycle_secs: f64,
     now_unix: u64,
 ) -> Option<(f64, bool)> {
     if sys_handle.get_combat_state(ball.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
         return None;
     }
-    let (applied, destroyed, _) =
-        crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
-            ctx, sys_handle, sys_id, gunner_char_id, ball.id, dmg, cycle_secs, now_unix,
-        )
-        .await
-        .ok()??;
-    if ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id)) {
-        crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, ball.id, dmg).await;
-    }
-    let (victim_char_opt, is_sub_unit) = resolve_victim_owner(ctx, ball.id);
+    let was_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&ball.id));
+    let (victim_char_opt, is_sub_unit) = resolve_victim_owner(ctx, sys_handle, ball.id);
     if let Some(vcid) = victim_char_opt.filter(|&v| v != gunner_char_id) {
         let cw_target = if is_sub_unit { vcid } else { ball.id };
-        let _ = crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+        if crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
             ctx,
             gunner_char_id,
             structure_id,
             sys_id,
             cw_target,
             ball.type_id == 670,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, gunner_char_id, vcid, now_unix);
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.get_or_create(gunner_char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
+        cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
+    }
+
+    let (applied, destroyed) = if dmg.total() > 0.0 {
+        let (app, dest, _) =
+            crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                ctx, sys_handle, sys_id, gunner_char_id, ball.id, dmg, cycle_secs, now_unix,
+            )
+            .await
+            .ok()??;
+        if was_fighter {
+            crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, ball.id, dmg).await;
+        }
+        crate::services::combat_crimewatch::record_killmail_assist_action(
+            ctx, ball.id, gunner_char_id, st_type_id, weapon_type_id, app, false, now_unix,
         );
-    } else if applied > 0.0 {
+        if let Some(vcid) = victim_char_opt.filter(|&v| v != gunner_char_id) {
+            crate::services::combat_crimewatch::record_killmail_assist_action(
+                ctx, vcid, gunner_char_id, st_type_id, weapon_type_id, app, false, now_unix,
+            );
+        }
+        if dest && !was_fighter {
+            crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                ctx, sys_id, gunner_char_id, ball.id, ball.type_id, ball.position, now_unix,
+            )
+            .await;
+        }
+        (app, dest)
+    } else {
+        (0.0, false)
+    };
+
+    if neut_amt > 0.0 && !destroyed {
+        if let Ok(Some(cs)) = sys_handle.get_combat_state(ball.id).await {
+            let _ = sys_handle.set_capacitor(ball.id, (cs.capacitor - neut_amt).max(0.0)).await;
+        }
+    }
+    if victim_char_opt.is_none() && (applied > 0.0 || neut_amt > 0.0) {
         crate::sp6_lifecycle::record_npc_aggression_timer(ctx, gunner_char_id, now_unix);
     }
     Some((applied, destroyed))
@@ -392,13 +482,17 @@ pub async fn step_guided_bombs_in_system(ctx: &ServerContext, sys_id: u32, dt: f
             let exp_radius = bomb_type.default_attributes.get(&654).copied().filter(|&r| r > 0.0).unwrap_or(400.0);
             let base_dmg = read_omni_damage(bomb_type);
             let neut_amt = bomb_type.default_attributes.get(&97).copied().unwrap_or(0.0);
+            let st_type_id = ctx
+                .db
+                .with_snapshot(|s| s.structures.get(&rec.structure_id).map(|st| st.type_id))
+                .unwrap_or(TYPE_KEEPSTAR);
             let all_balls = sys_handle.list_balls().await.unwrap_or_default();
 
             for b in &all_balls {
                 if (b.position - impact_pos).length() > aoe_radius {
                     continue;
                 }
-                if !is_hostile_to_structure(ctx, rec.structure_id, rec.structure_corp_id, rec.gunner_char_id, sys_id, b) {
+                if !is_hostile_to_structure(ctx, &sys_handle, rec.structure_id, rec.structure_corp_id, rec.gunner_char_id, sys_id, b) {
                     continue;
                 }
                 let sig = sys_handle
@@ -411,24 +505,22 @@ pub async fn step_guided_bombs_in_system(ctx: &ServerContext, sys_id: u32, dt: f
                     .or_else(|| ctx.sde.types.get(&b.type_id).and_then(|t| t.default_attributes.get(&552).copied()))
                     .unwrap_or_else(|| b.radius.max(35.0));
                 let scale = (sig / exp_radius).clamp(0.05, 1.0);
-                if base_dmg.total() > 0.0 {
+                if base_dmg.total() > 0.0 || neut_amt > 0.0 {
                     let _ = apply_standup_hit(
                         ctx,
                         &sys_handle,
                         rec.structure_id,
+                        st_type_id,
+                        rec.bomb_type_id,
                         rec.gunner_char_id,
                         sys_id,
                         b,
                         base_dmg.scaled(scale),
+                        neut_amt * scale,
                         12.0,
                         now_unix,
                     )
                     .await;
-                }
-                if neut_amt > 0.0 {
-                    if let Ok(Some(cs)) = sys_handle.get_combat_state(b.id).await {
-                        let _ = sys_handle.set_capacitor(b.id, (cs.capacitor - neut_amt * scale).max(0.0)).await;
-                    }
                 }
             }
         } else if rec.remaining_flight_s <= 0.0 {
@@ -571,13 +663,8 @@ pub async fn try_activate_standup_weapon(
             }
             let _ = sys_handle.set_capacitor(structure_id, (cur_cap - cap_need).max(0.0)).await;
 
-            let aoe_radius = mod_type
-                .default_attributes
-                .get(&99)
-                .or_else(|| mod_type.default_attributes.get(&54))
-                .copied()
-                .filter(|&r| r > 0.0)
-                .unwrap_or(2_500.0);
+            let (optimal_range, falloff_range) = standup_weapon_optimal_and_falloff(&mod_type);
+            let aoe_radius = optimal_range + 2.0 * falloff_range;
             let cycle_secs = mod_type
                 .default_attributes
                 .get(&73)
@@ -592,14 +679,26 @@ pub async fn try_activate_standup_weapon(
             let mut destroyed_count = 0_i64;
 
             for b in &all_balls {
-                if (b.position - attacker_ball.position).length() > aoe_radius {
+                let dist = (b.position - attacker_ball.position).length();
+                let Some(falloff_mult) = standup_falloff_multiplier(dist, optimal_range, falloff_range) else {
                     continue;
-                }
-                if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b) {
+                };
+                if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, b) {
                     continue;
                 }
                 if let Some((applied, destroyed)) = apply_standup_hit(
-                    ctx, sys_handle, structure_id, char_id, sys_id, b, pulse_dmg, cycle_secs as f64, now_unix,
+                    ctx,
+                    sys_handle,
+                    structure_id,
+                    st_type_id,
+                    mod_type.type_id,
+                    char_id,
+                    sys_id,
+                    b,
+                    pulse_dmg.scaled(falloff_mult),
+                    0.0,
+                    cycle_secs as f64,
+                    now_unix,
                 )
                 .await
                 {
@@ -656,7 +755,8 @@ pub async fn try_activate_standup_weapon(
 
             let bomb_vel = bomb_type.default_attributes.get(&37).copied().filter(|&v| v > 0.0).unwrap_or(2_500.0);
             let exp_delay_s = bomb_type.default_attributes.get(&281).copied().map(|ms| ms / 1000.0).filter(|&s| s > 0.0).unwrap_or(400.0);
-            let max_range = bomb_vel * exp_delay_s;
+            let launcher_cap = mod_type.default_attributes.get(&54).copied().filter(|&r| r > 0.0);
+            let max_range = launcher_cap.map_or(bomb_vel * exp_delay_s, |c| c.min(bomb_vel * exp_delay_s));
             let dist = (target_ball.position - attacker_ball.position).length();
             if dist > max_range {
                 return Some(Err(err(
@@ -664,7 +764,7 @@ pub async fn try_activate_standup_weapon(
                     format!("Target distance {:.0} m exceeds guided bomb maximum flight range {:.0} m", dist, max_range),
                 )));
             }
-            if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
+            if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
                 return Some(Err(err("CantDoInCurrentSafetyLevel", "Cannot launch Standup Guided Bomb at friendly or safety-protected target")));
             }
             let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
@@ -779,21 +879,19 @@ pub async fn try_activate_standup_weapon(
                 return Some(Err(err("TargetNotFound", format!("Target {tid} not in space"))));
             };
 
-            let max_range = ctx
-                .sde
-                .types
-                .get(&st_type_id)
-                .and_then(|t| t.default_attributes.get(&76).copied())
-                .filter(|&r| r > 0.0)
-                .unwrap_or(400_000.0);
+            let (optimal_range, falloff_range) = standup_weapon_optimal_and_falloff(&mod_type);
+            let max_range = optimal_range + 2.0 * falloff_range;
             let dist = (target_ball.position - attacker_ball.position).length();
-            if dist > max_range {
+            let Some(primary_falloff_mult) = standup_falloff_multiplier(dist, optimal_range, falloff_range) else {
                 return Some(Err(err(
                     "TargetOutOfRange",
-                    format!("Primary target distance {:.0} m exceeds Keepstar maximum range {:.0} m", dist, max_range),
+                    format!(
+                        "Primary target distance {:.0} m exceeds Standup Arcing Vorton Projector optimal+2*falloff range {:.0} m",
+                        dist, max_range
+                    ),
                 )));
-            }
-            if !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
+            };
+            if !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, &target_ball) {
                 return Some(Err(err("CantDoInCurrentSafetyLevel", "Cannot fire Standup Arcing Vorton Projector at friendly or safety-protected target")));
             }
             let (cur_cap, cap_need) = match check_and_prepare_structure_cap(ctx, sys_handle, structure_id, st_type_id, &mod_type).await {
@@ -829,13 +927,13 @@ pub async fn try_activate_standup_weapon(
                 .map(|&ms| (ms / 1000.0).ceil() as u64)
                 .filter(|&s| s > 0)
                 .unwrap_or(cycle_secs);
-            let base_dmg = read_omni_damage(&mod_type);
+            let base_dmg = read_omni_damage(&mod_type).scaled(primary_falloff_mult);
 
             let all_balls = sys_handle.list_balls().await.unwrap_or_default();
             let ball_map: std::collections::HashMap<i64, Ball> = all_balls.into_iter().map(|b| (b.id, b)).collect();
             let mut candidates: Vec<(i64, DVec3)> = Vec::new();
             for b in ball_map.values() {
-                if b.id == tid || !is_hostile_to_structure(ctx, structure_id, st_corp_id, char_id, sys_id, b) {
+                if b.id == tid || !is_hostile_to_structure(ctx, sys_handle, structure_id, st_corp_id, char_id, sys_id, b) {
                     continue;
                 }
                 if sys_handle.get_combat_state(b.id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
@@ -853,7 +951,18 @@ pub async fn try_activate_standup_weapon(
                 };
                 let hop_dmg = base_dmg.scaled(loss_per_hop.powi(hop_idx as i32));
                 if let Some((applied, _)) = apply_standup_hit(
-                    ctx, sys_handle, structure_id, char_id, sys_id, hb, hop_dmg, cycle_secs as f64, now_unix,
+                    ctx,
+                    sys_handle,
+                    structure_id,
+                    st_type_id,
+                    mod_type.type_id,
+                    char_id,
+                    sys_id,
+                    hb,
+                    hop_dmg,
+                    0.0,
+                    cycle_secs as f64,
+                    now_unix,
                 )
                 .await
                 {

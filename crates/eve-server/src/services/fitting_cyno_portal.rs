@@ -653,7 +653,7 @@ async fn relocate_caller(
 }
 
 /// Common caller validation for jump/bridge commands: in space, not in warp, not on cooldown.
-async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<(i64, i64, u32, Ball), BridgeRpcError> {
+async fn caller_in_space(ctx: &ServerContext, session: &SessionState, allow_bubble_host: bool) -> Result<(i64, i64, u32, Ball), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
@@ -664,36 +664,28 @@ async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<
         return Err(err("ShipDocked", "Cannot jump while docked"));
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let ball = handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| err("DestinyCommandFailed", e))?
-        .map(|(_, b)| b)
-        .ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
+    let ball = handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyCommandFailed", e))?
+        .map(|(_, b)| b).ok_or_else(|| err("ShipNotInSpace", "Active ship is not in space"))?;
     if matches!(ball.mode, MovementMode::Warp { .. }) {
         return Err(err("ShipInWarp", "Cannot jump while in warp"));
     }
     let now = ctx.now_unix();
-    let release_portal_mod = cyno_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .bridges
-        .get(&(ctx_key(ctx), char_id))
-        .and_then(|b| (b.bridger_ship_id == ship_id).then_some(b.portal_module_id));
+    let release_portal_mod = cyno_state().read().unwrap_or_else(|e| e.into_inner())
+        .bridges.get(&(ctx_key(ctx), char_id)).and_then(|b| (b.bridger_ship_id == ship_id).then_some(b.portal_module_id));
     if let Some(pmod_id) = release_portal_mod {
         let _ = handle.remove_module_cycle(ship_id, pmod_id).await;
     }
-    if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(err(
-            "WarpScrambled",
-            "Cannot jump or bridge while warp scrambled or inside a warp disruption bubble",
-        ));
+    let scrambled = if allow_bubble_host {
+        handle.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_warp_scrambled() || cs.warp_core_strength < 0)
+    } else {
+        handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+    };
+    if scrambled {
+        return Err(err("WarpScrambled", "Cannot jump or bridge while warp scrambled"));
     }
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "jump")?;
-    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
-        ctx, char_id, ship_id, sys_id, "jump_drive", now,
-    )?;
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(ctx, char_id, ship_id, sys_id, "jump_drive", now)?;
     let cd = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.jump_cooldown_until_unix).unwrap_or(0));
     if cd > now {
         return Err(err("JumpReactivationCooldown", format!("Jump activation cooldown active for {} s", cd - now)));
@@ -832,7 +824,7 @@ async fn jump_to_fleet_beacon(
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
     }
-    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, false).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Jump drives cannot operate in or into Zarzakh"));
     }
@@ -914,7 +906,7 @@ async fn bridge_to_fleet_beacon(
     if (31_000_000..32_000_000).contains(&target_sys) {
         return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
     }
-    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, true).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot operate in or into Zarzakh"));
     }
@@ -1050,7 +1042,7 @@ async fn group_jump_to_fleet_beacon(
     if target_sys != 0 && (!ctx.sde.solar_systems.contains_key(&target_sys) || Some(target_sys) == session.solar_system_id) {
         return Err(err("InvalidJumpDestination", format!("Invalid jump destination solar system {target_sys}")));
     }
-    let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, caller_ball) = caller_in_space(ctx, session, false).await?;
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Conduit jumps cannot operate in or into Zarzakh"));
     }
@@ -1202,7 +1194,7 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
     let bridge = bridge
         .filter(|b| b.bridger_ship_id == other_ship && b.expires_at_unix > now)
         .ok_or_else(|| err("NoActiveBridge", format!("Ship {other_ship} has no open jump portal")))?;
-    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session).await?;
+    let (char_id, ship_id, sys_id, ball) = caller_in_space(ctx, session, false).await?;
     if bridge.origin_system_id != sys_id {
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
     }

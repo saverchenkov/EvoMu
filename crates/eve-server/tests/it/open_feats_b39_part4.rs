@@ -596,4 +596,54 @@ async fn test_b39_covert_jump_portal_generator_all_hulls_and_fuel() {
         fuels_by_hull[3],
         fuels_by_hull[0]
     );
+
+    // Bubbled vs point-scrambled Black Ops host (`B39-REV-P0-01`):
+    // Inside a warp disruption bubble (`warp_scramble_strength == 0`), jumping self is blocked (`WarpScrambled`),
+    // whereas opening a Covert Jump Portal (`CmdBridgeToFleetModuleBeacon`) SUCCEEDS; targeted point-scramble blocks both!
+    ctx.advance_secs(65);
+    let cyno_rep2 = ctx.dispatch_rpc(&mut sess_cyno, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod)], &kw, None).await.expect("Re-light Covert Cyno");
+    let cov_beacon_id2 = kv_get(&cyno_rep2, "beaconID").and_then(|v| v.as_i64()).unwrap();
+    let sys_a_h = ctx.systems.get_or_spawn(sys_a);
+    assert!(sys_a_h.add_interdiction_sphere(101_000_977, bo_pos, 20_000.0).await.unwrap());
+    assert!(sys_a_h.is_ball_scrambled(s_bo).await.unwrap(), "Black Ops is inside warp disruption bubble");
+    let bubbled_jump_err = ctx
+        .dispatch_rpc(
+            &mut sess_bo,
+            "beyonce",
+            None,
+            "CmdJumpToFleetModuleBeacon",
+            &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Self-jumping out of warp disruption bubble must fail");
+    assert_eq!(bubbled_jump_err.code, "WarpScrambled");
+
+    ctx.dispatch_rpc(
+        &mut sess_bo,
+        "beyonce",
+        None,
+        "CmdBridgeToFleetModuleBeacon",
+        &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id2)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Non-point-scrambled Black Ops inside a warp disruption bubble opens Covert Jump Portal");
+
+    sys_a_h.set_warp_scramble_strength(s_bo, 2).await.unwrap();
+    let point_scram_err = ctx
+        .dispatch_rpc(
+            &mut sess_bo,
+            "beyonce",
+            None,
+            "CmdBridgeToFleetModuleBeacon",
+            &[PyRep::Integer(c_cyno), PyRep::Integer(sys_b as i64), PyRep::Integer(cov_beacon_id2)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Targeted warp scrambler must block Covert Jump Portal activation");
+    assert_eq!(point_scram_err.code, "WarpScrambled");
 }
