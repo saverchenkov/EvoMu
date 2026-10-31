@@ -1219,6 +1219,11 @@ impl ServerContext {
             NotificationTarget::SolarSystem(new_sys), "OnChannelJoined", "channelid",
             vec![PyRep::String(format!("solarsystemid2:{}", new_sys)), PyRep::String("Join".into()), PyRep::Integer(char_id)],
         );
+        if old_sys != Some(new_sys) {
+            crate::services::pve_incursion_lifecycle::emit_active_incursion_tale_data_for_system(
+                self, new_sys,
+            );
+        }
     }
 
     pub fn effect_id_for_module(&self, type_id: u32, effect_name: Option<&str>) -> Option<i64> {

@@ -254,29 +254,63 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
     let _ = ctx.systems.get_or_spawn(vg_site_sys).remove_ball(vg_boss_bid).await;
     let _ = drain_all(&ctx, &mut sess, PILOT_A);
 
-    // Negative: UpdateStateRequest in non-incursion system (SYS_JITA) emits zero OnTaleData
-    rpc(&ctx, &mut sess, "beyonce", "UpdateStateRequest", &[])
-        .await
-        .unwrap();
+    // Negative: jumping via stargate into a non-incursion system (Jita -> Perimeter) emits zero OnTaleData
+    let jita_gate_id = 50_001_248_i64;
+    let jita_gate = &ctx.sde.jumps[&jita_gate_id];
+    let gate_rad = ctx
+        .sde
+        .types
+        .get(&16)
+        .map(|t| t.radius)
+        .unwrap_or(14_051.0);
+    let bid_jita = ctx
+        .bind_object(&mut sess, "beyonce", i64::from(SYS_JITA))
+        .expect("bind beyonce in Jita");
+    ctx.systems
+        .get_or_spawn(SYS_JITA)
+        .set_ball_position(
+            700_410,
+            jita_gate.position + DVec3::new(gate_rad + 500.0, 0.0, 0.0),
+        )
+        .await;
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(bid_jita),
+        "CmdStargateJump",
+        &[PyRep::Integer(jita_gate_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("CmdStargateJump Jita -> Perimeter");
     assert!(!has_notif(
         &drain_all(&ctx, &mut sess, PILOT_A),
         "OnTaleData"
     ));
 
-    // Positive: pilot enters incursion staging system and calls beyonce.UpdateStateRequest -> OnTaleData
+    // Positive: jumping via stargate into an incursion-affected solar system emits OnTaleData
+    let (inc_gate_id, from_sys, inc_gate_pos) = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.to_solar_system_id == staging_sys)
+        .map(|j| (j.stargate_id, j.from_solar_system_id, j.position))
+        .expect("stargate leading into incursion staging system");
     let _ = ctx
         .db
-        .set_character_solar_system(PILOT_A, staging_sys, &ctx.sde);
-    sess.solar_system_id = Some(staging_sys);
+        .set_character_solar_system(PILOT_A, from_sys, &ctx.sde);
+    sess.solar_system_id = Some(from_sys);
     ctx.sync_session(&mut sess);
     let _ = ctx
         .systems
-        .get_or_spawn(staging_sys)
+        .get_or_spawn(from_sys)
         .spawn_ball_with_combat(
             Ball {
                 id: 700_410,
                 type_id: 587,
-                position: DVec3::new(1000.0, 0.0, 0.0),
+                position: inc_gate_pos + DVec3::new(gate_rad + 500.0, 0.0, 0.0),
                 velocity: DVec3::ZERO,
                 max_velocity: 300.0,
                 inertia: 0.5,
@@ -288,6 +322,39 @@ async fn batch10_tales_storms_and_cosmic_anomalies() {
             Default::default(),
         )
         .await;
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    let bid_from = ctx
+        .bind_object(&mut sess, "beyonce", i64::from(from_sys))
+        .expect("bind beyonce in from_sys");
+    ctx.advance_secs(15);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(bid_from),
+        "CmdStargateJump",
+        &[PyRep::Integer(inc_gate_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("CmdStargateJump into incursion staging_sys");
+    let jump_td_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    let jump_td_args = find_notif(&jump_td_notifs, "OnTaleData");
+    assert_eq!(jump_td_args.len(), 2);
+    assert_eq!(jump_td_args[0], PyRep::Integer(i64::from(staging_sys)));
+    match &jump_td_args[1] {
+        PyRep::Dict(entries) => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, PyRep::Integer(tale_id));
+            assert_eq!(
+                entries[0].1.dict_get("taleID").and_then(|v| v.as_i64()),
+                Some(tale_id)
+            );
+        }
+        other => panic!("expected Dict of active tales on jump, got {other:?}"),
+    }
+
+    // Also verify beyonce.UpdateStateRequest in incursion staging system emits OnTaleData
     rpc(&ctx, &mut sess, "beyonce", "UpdateStateRequest", &[])
         .await
         .unwrap();
