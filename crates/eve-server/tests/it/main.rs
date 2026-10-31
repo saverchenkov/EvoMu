@@ -414,3 +414,5 @@ mod wormhole_statics_lifecycle_closure;
 mod wormhole_special_systems_closure;
 mod pochven_wormholes_travel_closure;
 mod wormhole_pve_escalations_closure;
+mod journey_t6_part1;
+mod journey_t6_part2;
