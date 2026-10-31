@@ -138,6 +138,16 @@ async fn handle_cmd_warp_to_stuff(
         "warp",
         ctx.now_unix(),
     )?;
+    if crate::services::encounter_surveillance_system::is_ship_in_ess_intrusion_bubble(
+        ctx, sys_id, ship_id,
+    )
+    .await
+    {
+        return Err(BridgeRpcError {
+            code: "WarpDisruptedByEssBubble".into(),
+            message: "Cannot initiate warp inside the 75 km ESS intrusion bubble".into(),
+        });
+    }
     let (is_stuff_call, stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (

@@ -1001,3 +1001,12 @@ pub async fn try_activate_standup_weapon(
         _ => None,
     }
 }
+
+pub fn set_structure_active_gunner(ctx: &ServerContext, structure_id: i64, char_id: i64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.active_pilot_by_structure.insert(structure_id, char_id);
+        save_ext_state(snap, &ext);
+    });
+}
+

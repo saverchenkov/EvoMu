@@ -147,6 +147,7 @@ pub fn prime_cache_result(
         return Ok(PyRep::None);
     }
 
+    let _ = step_ess_main_bank_autopayout(ctx, sys_id, ctx.now_unix());
     let rep = ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.system_states.get(&sys_id) else {
             return PyRep::None;
@@ -572,4 +573,166 @@ pub async fn handle_ess_link(
         ("suspectFlagged", PyRep::Bool(true)),
         ("suspectTimerUntilUnix", PyRep::Integer(suspect_until as i64)),
     ]))
+}
+
+pub const ESS_INTRUSION_BUBBLE_RADIUS_M: f64 = 75_000.0;
+pub const ESS_MAIN_BANK_AUTOPAYOUT_SECS: u64 = 9_900;
+
+/// Returns `true` if `ship_id` in `sys_id` is within the 75 km ESS intrusion bubble
+/// (`feat:pve.ess-grid-warp-mwd-restrictions`).
+pub async fn is_ship_in_ess_intrusion_bubble(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_id: i64,
+) -> bool {
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let Some((_, ship_ball)) = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        return false;
+    };
+    let balls = sys_handle.list_balls().await.unwrap_or_default();
+    let Some(ess) = balls
+        .into_iter()
+        .find(|b| b.type_id == 32882 || b.type_id == 56002 || b.id == 820_000_000 + sys_id as i64)
+    else {
+        return false;
+    };
+    ship_ball.position.distance(ess.position) <= ESS_INTRUSION_BUBBLE_RADIUS_M
+}
+
+/// Rejects MWD, MJD, Cloaking Device, and Cynosural Field activation inside the 75 km ESS
+/// intrusion bubble (`feat:pve.ess-grid-warp-mwd-restrictions`).
+pub async fn check_ess_module_activation_allowed(
+    ctx: &ServerContext,
+    sys_id: u32,
+    ship_id: i64,
+    module_type_id: u32,
+) -> Result<(), BridgeRpcError> {
+    let Some(t) = ctx.sde.types.get(&module_type_id) else {
+        return Ok(());
+    };
+    let is_mwd = t.group_id == 46 && t.name.to_ascii_lowercase().contains("microwarpdrive");
+    let is_mjd = t.group_id == 1189;
+    let is_cloak = t.group_id == 330;
+    let is_cyno = t.group_id == 658;
+    if !(is_mwd || is_mjd || is_cloak || is_cyno) {
+        return Ok(());
+    }
+    if is_ship_in_ess_intrusion_bubble(ctx, sys_id, ship_id).await {
+        return Err(BridgeRpcError {
+            code: "ModuleBlockedInEssBubble".into(),
+            message: format!(
+                "{} cannot be activated inside the 75 km ESS intrusion bubble",
+                t.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Records a character's ratting bounty contribution to the system's ESS Main Bank cycle
+/// (`feat:pve.ess-main-bank-autopayout`).
+pub fn record_ess_main_bank_contribution(
+    snap: &mut eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    char_id: i64,
+    ess_main_cents: i64,
+    now_unix: u64,
+) {
+    if ess_main_cents <= 0 {
+        return;
+    }
+    snap.sov_runtime
+        .ess_main_bank_next_payout_unix
+        .entry(sys_id)
+        .or_insert_with(|| now_unix.saturating_add(ESS_MAIN_BANK_AUTOPAYOUT_SECS));
+    *snap
+        .sov_runtime
+        .ess_main_bank_contributors
+        .entry(sys_id)
+        .or_default()
+        .entry(char_id)
+        .or_insert(0) += ess_main_cents;
+}
+
+/// Distributes the ESS Main Bank every 2h45m (`9,900` s) proportionally to ratting contributors
+/// when no active Main Bank hack is in progress (`feat:pve.ess-main-bank-autopayout`).
+pub fn step_ess_main_bank_autopayout(
+    ctx: &ServerContext,
+    sys_id: u32,
+    now_unix: u64,
+) -> Vec<(i64, i64)> {
+    ctx.db.with_mut_snapshot(|snap| {
+        if snap
+            .system_states
+            .get(&sys_id)
+            .and_then(|s| s.ess_linked_character_id)
+            .is_some()
+        {
+            return Vec::new();
+        }
+        let next_payout = snap
+            .sov_runtime
+            .ess_main_bank_next_payout_unix
+            .get(&sys_id)
+            .copied()
+            .unwrap_or(0);
+        if next_payout == 0 || now_unix < next_payout {
+            return Vec::new();
+        }
+        let bank_cents = snap
+            .system_states
+            .get(&sys_id)
+            .map(|s| s.ess_main_bank.0)
+            .unwrap_or(0);
+        snap.sov_runtime
+            .ess_main_bank_next_payout_unix
+            .insert(sys_id, now_unix.saturating_add(ESS_MAIN_BANK_AUTOPAYOUT_SECS));
+        if bank_cents <= 0 {
+            return Vec::new();
+        }
+        let contributors = snap
+            .sov_runtime
+            .ess_main_bank_contributors
+            .remove(&sys_id)
+            .unwrap_or_default();
+        let total_contrib: i64 = contributors.values().copied().sum();
+        if total_contrib <= 0 {
+            return Vec::new();
+        }
+        if let Some(st) = snap.system_states.get_mut(&sys_id) {
+            st.ess_main_bank = IskCents(0);
+        }
+        let mut payouts = Vec::new();
+        let mut distributed = 0i64;
+        let mut sorted: Vec<(i64, i64)> = contributors.into_iter().collect();
+        sorted.sort_by_key(|(cid, _)| *cid);
+        let len = sorted.len();
+        for (idx, (cid, contrib)) in sorted.into_iter().enumerate() {
+            let share = if idx + 1 == len {
+                bank_cents.saturating_sub(distributed)
+            } else {
+                ((bank_cents as i128 * contrib as i128) / total_contrib as i128) as i64
+            };
+            if share <= 0 {
+                continue;
+            }
+            distributed = distributed.saturating_add(share);
+            let entry_id = { snap.next_entity_id += 1; snap.next_entity_id };
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                let delta = IskCents(share);
+                ch.balance = ch.balance.checked_add(delta).unwrap_or(ch.balance);
+                let new_bal = ch.balance;
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id,
+                    character_id: cid,
+                    entry_type: "BountyPrizes".into(),
+                    amount: delta,
+                    balance_after: new_bal,
+                    reason: format!("ESS Main Bank Auto-Payout (system {sys_id})"),
+                });
+            }
+            payouts.push((cid, share));
+        }
+        payouts
+    })
 }

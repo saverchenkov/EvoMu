@@ -464,6 +464,13 @@ pub fn flush_npc_bounty_tick(
                     .checked_add(reserve_cents)
                     .unwrap_or(st.ess_reserve_bank);
             }
+            crate::services::encounter_surveillance_system::record_ess_main_bank_contribution(
+                snap,
+                solar_system_id,
+                char_id,
+                main_cents.0,
+                ctx.now_unix(),
+            );
         }
         let bal_after = snap
             .characters

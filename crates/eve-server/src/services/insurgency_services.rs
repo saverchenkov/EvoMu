@@ -508,6 +508,7 @@ pub fn spawn_ice_heist(ctx: &ServerContext, sys_id: u32) -> i64 {
             pirate_tankers_saved: 0,
             empire_tankers_saved: 0,
             completed: false,
+            respawn_at_unix: 0,
         });
         id
     })
@@ -1334,6 +1335,7 @@ pub async fn handle(
                             ("pirateTankersSaved", PyRep::Integer(i64::from(h.pirate_tankers_saved))),
                             ("empireTankersSaved", PyRep::Integer(i64::from(h.empire_tankers_saved))),
                             ("completed", PyRep::Bool(h.completed)),
+                            ("respawnAtUnix", PyRep::Integer(h.respawn_at_unix as i64)),
                         ])
                     })
                     .collect::<Vec<PyRep>>()

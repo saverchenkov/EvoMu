@@ -495,6 +495,12 @@ pub struct PersistedSovState {
     /// Active Sovereignty Hub Threat Detection anomaly NPC entity IDs (`ball_id`) persisted across restarts.
     #[serde(default)]
     pub sov_upgrade_combat_npcs: BTreeSet<i64>,
+    /// ESS Main Bank 2h45m auto-payout next timestamp (`solar_system_id -> next_payout_unix`).
+    #[serde(default)]
+    pub ess_main_bank_next_payout_unix: HashMap<u32, u64>,
+    /// ESS Main Bank current-cycle ratting bounty contributors (`solar_system_id -> (char_id -> cents)`).
+    #[serde(default)]
+    pub ess_main_bank_contributors: HashMap<u32, HashMap<i64, i64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,6 +537,8 @@ pub struct PersistedIceHeistRecord {
     pub pirate_tankers_saved: u32,
     pub empire_tankers_saved: u32,
     pub completed: bool,
+    #[serde(default)]
+    pub respawn_at_unix: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
