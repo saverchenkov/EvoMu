@@ -454,6 +454,9 @@ impl PublicGatewayRouter {
 
         // 8. Batch 2 Quasar handlers
         crate::services::quasar_b2_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+
+        // 9. Batch 29 Quasar Domain & Space/Tag/Tale/Dungeon Services
+        crate::services::quasar_b29_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
