@@ -1155,7 +1155,21 @@ pub async fn handle_weapons(
                     false,
                     now_unix,
                 );
+                crate::services::notify_emitters_b36::emit_combat_message(
+                    ctx,
+                    vcid,
+                    "AttackedBy",
+                    ship_id,
+                    applied_dmg,
+                );
             }
+            crate::services::notify_emitters_b36::emit_combat_message(
+                ctx,
+                char_id,
+                "AttackHit",
+                target_ball_id,
+                applied_dmg,
+            );
 
             // CrimeWatch timers & low-sec/high-sec aggression (`feat:crimewatch.lowsec-suspect-vs-criminal`, `feat:crimewatch.pod-timer`, `feat:crimewatch.npc-timers`)
             if let Some((victim_char_id, _)) = player_target_info {

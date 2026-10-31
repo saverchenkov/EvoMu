@@ -852,6 +852,9 @@ pub fn handle_contacts(
                 }
             }
             sync_char_contacts_to_db(ctx, char_id);
+            if blocked_count > 0 {
+                crate::services::notify_emitters_b36::emit_flagged_lists_change(ctx, char_id);
+            }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // `OnBlockContacts` is scattered by the client itself (AddressBookSvc.BlockOwner).
             Some(Ok(PyRep::keyval([
@@ -894,6 +897,9 @@ pub fn handle_contacts(
             // ContactsForm.OnUnblockContact(contactID) only reloads the contacts tab.
             for &oid in &unblocked_ids {
                 ctx.notify(NotificationTarget::Character(char_id), "OnUnblockContact", "charid", vec![PyRep::Integer(oid)]);
+            }
+            if !unblocked_ids.is_empty() {
+                crate::services::notify_emitters_b36::emit_flagged_lists_change(ctx, char_id);
             }
             Some(Ok(PyRep::keyval([
                 ("unblockedCount", PyRep::Integer(unblocked_ids.len() as i64)),

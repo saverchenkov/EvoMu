@@ -361,7 +361,18 @@ fn deposit_plex_inner(
 
 fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (entity_id, user_id, tx_id, rem_plex, qty) = deposit_plex_inner(ctx, session, char_id, args)?;
+    let (entity_id, user_id, tx_id, rem_plex, qty) = match deposit_plex_inner(ctx, session, char_id, args) {
+        Ok(v) => v,
+        Err(e) => {
+            let reference = args
+                .get(1)
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
+                .unwrap_or(0);
+            super::notify_emitters_b36::emit_plex_deposit_failed(ctx, char_id, &e.code, reference);
+            return Err(e);
+        }
+    };
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnPlexDeposited",
@@ -565,7 +576,23 @@ fn withdraw_plex(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (rep, final_item_id, user_id, tx_id, rem_plex, qty) =
-        withdraw_plex_inner(ctx, session, char_id, args, kwargs)?;
+        match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
+            Ok(v) => v,
+            Err(e) => {
+                let reference = args
+                    .get(1)
+                    .and_then(|a| a.as_i64())
+                    .or_else(|| args.first().and_then(|a| a.as_i64()))
+                    .unwrap_or(0);
+                super::notify_emitters_b36::emit_plex_withdraw_failed(
+                    ctx,
+                    char_id,
+                    &e.code,
+                    reference,
+                );
+                return Err(e);
+            }
+        };
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnPlexItemAddedToInventory",

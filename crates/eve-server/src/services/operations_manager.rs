@@ -929,6 +929,17 @@ pub fn handle(
                 return Some(Ok(PyRep::Bool(true)));
             }
 
+            if super::notify_emitters_b36::handle_conversation_and_widget_events(
+                ctx,
+                char_id,
+                &event_name,
+                args,
+                amount,
+                extra_data,
+            ) {
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
             if event_name == "set_active_category_id" || event_name == "activate_category" {
                 let cat_id = extra_data
                     .and_then(|ed| match ed {
@@ -1116,6 +1127,8 @@ pub fn handle(
                         PyRep::Integer(tid),
                     ],
                 );
+                super::notify_emitters_b36::emit_progression_task_completed(ctx, char_id, tid);
+                super::notify_emitters_b36::emit_progression_advanced(ctx, char_id, op_id, tid);
                 Some(Ok(PyRep::Bool(true)))
             } else if !args.is_empty() || !kwargs.is_empty() {
                 Some(Ok(PyRep::Bool(false)))
