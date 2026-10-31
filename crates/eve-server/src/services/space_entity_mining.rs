@@ -938,7 +938,7 @@ pub async fn handle(
                         });
                     }
                     let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
-                    if active_ship_id == Some(item_id) {
+                    if active_ship_id == Some(item_id) || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
                         return Err(BridgeRpcError { code: "CannotReprocessActiveShip".into(), message: format!("Item {item_id} is your currently active ship and cannot be reprocessed") });
                     }
                     let Some(inv_type) = ctx.sde.types.get(&item.type_id) else {

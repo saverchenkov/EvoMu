@@ -447,7 +447,11 @@ pub fn execute_death_pipeline_sync_inner(
         snap.items.remove(&victim_ship_id);
         snap.item_positions.remove(&victim_ship_id);
 
-        let cap_id = if !is_pod {
+        let victim_controlling_structure = snap
+            .characters
+            .get(&victim_char_id)
+            .is_some_and(|v| snap.structures.contains_key(&v.active_ship_id));
+        let cap_id = if !is_pod && !victim_controlling_structure {
             if let Some(esc_id) = escape_frigate_id {
                 if let Some(esc_item) = snap.items.get_mut(&esc_id) {
                     esc_item.location_id = sys_id as i64;
@@ -697,6 +701,11 @@ pub fn execute_death_pipeline_sync_inner(
     }
 
     if is_pod {
+        let _ = crate::services::structure_control_ops::release_all_structure_control_for_character(
+            ctx,
+            None,
+            victim_char_id,
+        );
         crate::services::notify_emitters_batch6::emit_pod_death(ctx, victim_char_id);
         crate::services::notify_emitters_batch6::emit_player_pod_death(ctx, victim_char_id);
         crate::services::notify_emitters_batch6::emit_pod_killed(ctx, victim_char_id, victim_ship_id);

@@ -272,6 +272,9 @@ async fn test_structure_board_eject_and_defense_settings() {
             ch.station_id = None;
             ch.solar_system_id = 30_000_144;
         }
+        if let Some(sh) = snap.items.get_mut(&original_ship) {
+            sh.location_id = struct_id;
+        }
     });
 
     // 1. Test feat:structures.board-structure

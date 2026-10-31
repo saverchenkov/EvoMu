@@ -202,6 +202,7 @@ async fn engage_structure_control(
         if let Err(e) = verify_control_acl_or_role(snap, &ext, &st, char_id) {
             return Ok((released, Some(e)));
         }
+        let already_ctrl = ext.active_pilot_by_structure.get(&structure_id) == Some(&char_id);
         if let Some(&pilot) = ext.active_pilot_by_structure.get(&structure_id) {
             if pilot != char_id {
                 return Err(err(
@@ -215,8 +216,12 @@ async fn engage_structure_control(
             .ship_id
             .or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id))
             .unwrap_or(0);
-        if prev > 0 && prev != structure_id {
-            ext.previous_ship_by_structure.insert(structure_id, prev);
+        if prev > 0 && prev != structure_id && !snap.structures.contains_key(&prev) {
+            if already_ctrl {
+                ext.previous_ship_by_structure.entry(structure_id).or_insert(prev);
+            } else {
+                ext.previous_ship_by_structure.insert(structure_id, prev);
+            }
         }
         save_ext_state(snap, &ext);
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -236,49 +241,187 @@ async fn engage_structure_control(
     Ok(sys_id)
 }
 
-fn resolve_pilot_fallback_ship(
+fn precheck_saved_in_space_ball(ctx: &ServerContext, explicit_structure_id: Option<i64>, char_id: i64) -> Option<bool> {
+    let query = ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        let sid = explicit_structure_id.or_else(|| {
+            ext.active_pilot_by_structure.iter().find_map(|(&s, &p)| (p == char_id).then_some(s))
+        })?;
+        if snap.characters.get(&char_id).is_none_or(|c| c.structure_id == Some(sid) || c.station_id.is_some()) {
+            return None;
+        }
+        let sys_id = snap.structures.get(&sid).map(|s| s.solar_system_id).unwrap_or(0);
+        let saved_prev = ext.previous_ship_by_structure.get(&sid).copied().unwrap_or(0);
+        (sys_id > 0 && saved_prev > 0).then_some((sys_id, saved_prev))
+    });
+    query.map(|(sys_id, saved_prev)| ctx.systems.get_or_spawn(sys_id).get_ball_position_sync(saved_prev).is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_valid_pilot_fallback_ship(
+    ctx: Option<&ServerContext>,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    sys_id: u32,
+    char_id: i64,
+    is_docked: bool,
+    in_space_ball_alive: Option<bool>,
+    item: &eve_db::InventoryItemRecord,
+) -> bool {
+    item.owner_id == char_id
+        && item.singleton
+        && item.item_id != structure_id
+        && !snap.structures.contains_key(&item.item_id)
+        && !snap.is_item_locked_in_contract_or_job(item.item_id)
+        && !matches!(item.flag, eve_db::InventoryFlag::Locked | eve_db::InventoryFlag::Deliveries)
+        && ctx.map_or(true, |c| c.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6))
+        && if is_docked {
+            item.location_id == structure_id && item.flag == eve_db::InventoryFlag::Hangar
+        } else {
+            sys_id > 0 && item.location_id == i64::from(sys_id) && in_space_ball_alive.unwrap_or(true)
+        }
+}
+
+fn find_valid_pilot_fallback_ship(
     ctx: Option<&ServerContext>,
     snap: &WorldStateSnapshot,
     ext: &ops::StructureExtendedState,
     structure_id: i64,
     char_id: i64,
-) -> i64 {
-    let saved_prev = ext
-        .previous_ship_by_structure
+    in_space_ball_alive: Option<bool>,
+) -> Option<i64> {
+    let sys_id = snap.structures.get(&structure_id).map(|s| s.solar_system_id).unwrap_or(0);
+    let is_docked = snap.characters.get(&char_id).is_none_or(|c| c.structure_id == Some(structure_id) || c.station_id.is_some());
+    let saved_prev = ext.previous_ship_by_structure.get(&structure_id).copied().unwrap_or(0);
+    if saved_prev > 0
+        && snap.items.get(&saved_prev).is_some_and(|it| {
+            is_valid_pilot_fallback_ship(ctx, snap, structure_id, sys_id, char_id, is_docked, in_space_ball_alive, it)
+        })
+    {
+        return Some(saved_prev);
+    }
+    if !is_docked {
+        return None;
+    }
+    snap.items
+        .values()
+        .filter(|it| is_valid_pilot_fallback_ship(ctx, snap, structure_id, sys_id, char_id, true, None, it))
+        .min_by_key(|it| (it.type_id == 670, it.item_id))
+        .map(|it| it.item_id)
+}
+
+fn provision_pilot_capsule_in_snap(snap: &mut WorldStateSnapshot, structure_id: i64, char_id: i64) -> i64 {
+    let (sys_id, st_pos) = snap
+        .structures
         .get(&structure_id)
-        .copied()
-        .unwrap_or(0);
-    if saved_prev > 0 && snap.items.contains_key(&saved_prev) {
-        saved_prev
-    } else {
-        snap.items
+        .map(|s| (s.solar_system_id, DVec3::from_array(s.position)))
+        .unwrap_or((0, DVec3::ZERO));
+    let is_docked = snap.characters.get(&char_id).is_none_or(|c| c.structure_id == Some(structure_id) || c.station_id.is_some());
+    if is_docked {
+        if let Some(cid) = snap
+            .items
             .values()
-            .find(|i| {
+            .filter(|i| {
                 i.owner_id == char_id
+                    && i.type_id == 670
+                    && i.singleton
                     && i.location_id == structure_id
-                    && i.item_id != structure_id
-                    && ctx.map_or(i.singleton, |c| {
-                        c.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
-                    })
+                    && i.flag == eve_db::InventoryFlag::Hangar
+                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
             })
+            .min_by_key(|i| i.item_id)
             .map(|i| i.item_id)
-            .unwrap_or(saved_prev)
+        {
+            return cid;
+        }
+    }
+    snap.next_entity_id += 1;
+    let cid = snap.next_entity_id;
+    let (location_id, flag) = if is_docked {
+        (structure_id, eve_db::InventoryFlag::Hangar)
+    } else {
+        let pod_pos = st_pos + DVec3::new(150.0, 0.0, 0.0);
+        snap.item_positions.insert(cid, pod_pos.to_array());
+        (i64::from(sys_id), eve_db::InventoryFlag::None)
+    };
+    snap.items.insert(
+        cid,
+        eve_db::InventoryItemRecord {
+            item_id: cid, type_id: 670, owner_id: char_id, location_id, flag,
+            quantity: 1, singleton: true, version: 1, ..Default::default()
+        },
+    );
+    cid
+}
+
+fn ensure_in_space_capsule_ball_spawned(ctx: &ServerContext, sys_id: u32, char_id: i64, ship_id: i64) {
+    if sys_id == 0 || ship_id <= 0 {
+        return;
+    }
+    let pod_info = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id)?;
+        let it = snap.items.get(&ship_id)?;
+        if ch.station_id.is_some() || ch.structure_id.is_some() || it.type_id != 670 || it.location_id != i64::from(sys_id) {
+            return None;
+        }
+        let pos = snap.item_positions.get(&ship_id).copied().map(DVec3::from_array).unwrap_or(DVec3::ZERO);
+        let all_id = ch
+            .alliance_id
+            .or_else(|| snap.corporations.get(&ch.corporation_id).and_then(|co| co.alliance_id))
+            .unwrap_or(-1);
+        Some((pos, ch.corporation_id, all_id, ch.security_status))
+    });
+    let Some((pos, corp_id, alliance_id, sec_status)) = pod_info else {
+        return;
+    };
+    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, 670);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    if sys_handle.get_ball_position_sync(ship_id).is_none() {
+        let cap_sde = ctx.sde.types.get(&670);
+        sys_handle.try_spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: ship_id, type_id: 670, position: pos, velocity: DVec3::ZERO,
+                max_velocity: cap_sde.and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(335.0),
+                inertia: cap_sde.and_then(|t| t.default_attributes.get(&70).copied()).unwrap_or(0.25),
+                mass: cap_sde.map(|t| t.mass.max(1_000.0)).unwrap_or(16_000.0),
+                radius: cap_sde.map(|t| t.radius.max(15.0)).unwrap_or(15.0),
+                speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+            },
+            combat_state,
+            eve_destiny::SlimItemMeta {
+                group_id: cap_sde.map(|t| t.group_id).unwrap_or(29), category_id: 6, owner_id: char_id,
+                char_id: Some(char_id), corp_id, alliance_id, security_status: sec_status, is_cloaked: false,
+            },
+        );
+    }
+}
+
+fn sync_released_ship_on_session(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    char_id: i64,
+    structure_id: i64,
+    restored_ship: i64,
+) {
+    let old_ship = session.ship_id;
+    if restored_ship > 0 {
+        session.ship_id = Some(restored_ship);
+        emit_ship_session_change(ctx, session, char_id, old_ship, Some(restored_ship));
+    } else if session.ship_id == Some(structure_id) {
+        session.ship_id = None;
+        emit_ship_session_change(ctx, session, char_id, old_ship, None);
     }
 }
 
 /// Temporarily restores `ch.active_ship_id` to the pilot's docked ship before `undock_character`
 /// runs without releasing structure control yet, so a failed undock preserves structure control.
-pub fn prepare_ship_for_undock_while_controlling(
-    ctx: &ServerContext,
-    structure_id: i64,
-    char_id: i64,
-) -> Option<i64> {
+pub fn prepare_ship_for_undock_while_controlling(ctx: &ServerContext, structure_id: i64, char_id: i64) -> Option<i64> {
     ctx.db.with_mut_snapshot(|snap| {
         let ext = load_ext_state(snap);
         if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
             return None;
         }
-        let fallback_ship = resolve_pilot_fallback_ship(Some(ctx), snap, &ext, structure_id, char_id);
+        let fallback_ship = find_valid_pilot_fallback_ship(Some(ctx), snap, &ext, structure_id, char_id, None).unwrap_or(0);
         if fallback_ship > 0 {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
@@ -292,14 +435,9 @@ pub fn prepare_ship_for_undock_while_controlling(
 
 /// Restores `ch.active_ship_id = structure_id` if `undock_character` failed after
 /// `prepare_ship_for_undock_while_controlling`.
-pub fn rollback_ship_after_failed_undock(
-    ctx: &ServerContext,
-    structure_id: i64,
-    char_id: i64,
-) {
+pub fn rollback_ship_after_failed_undock(ctx: &ServerContext, structure_id: i64, char_id: i64) {
     ctx.db.with_mut_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        if ext.active_pilot_by_structure.get(&structure_id) == Some(&char_id) {
+        if load_ext_state(snap).active_pilot_by_structure.get(&structure_id) == Some(&char_id) {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.active_ship_id = structure_id;
             }
@@ -312,19 +450,29 @@ fn disengage_structure_control_in_snap(
     snap: &mut WorldStateSnapshot,
     structure_id: i64,
     char_id: i64,
+    in_space_ball_alive: Option<bool>,
 ) -> (u32, i64) {
-    let sys_id = snap
-        .structures
-        .get(&structure_id)
-        .map(|s| s.solar_system_id)
-        .unwrap_or(0);
+    let sys_id = snap.structures.get(&structure_id).map(|s| s.solar_system_id).unwrap_or(0);
     let mut ext = load_ext_state(snap);
-    let fallback_ship = resolve_pilot_fallback_ship(ctx, snap, &ext, structure_id, char_id);
+    let existing_active = snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&sid| {
+        sid > 0
+            && sid != structure_id
+            && !snap.structures.contains_key(&sid)
+            && snap.items.get(&sid).is_some_and(|i| {
+                i.owner_id == char_id
+                    && i.singleton
+                    && !snap.is_item_locked_in_contract_or_job(sid)
+                    && !matches!(i.flag, eve_db::InventoryFlag::Locked | eve_db::InventoryFlag::Deliveries)
+            })
+    });
+    let fallback_ship = existing_active
+        .or_else(|| find_valid_pilot_fallback_ship(ctx, snap, &ext, structure_id, char_id, in_space_ball_alive))
+        .unwrap_or_else(|| provision_pilot_capsule_in_snap(snap, structure_id, char_id));
     ext.active_pilot_by_structure.remove(&structure_id);
     ext.previous_ship_by_structure.remove(&structure_id);
     save_ext_state(snap, &ext);
     let restored = if let Some(ch) = snap.characters.get_mut(&char_id) {
-        if ch.active_ship_id == structure_id || ch.active_ship_id <= 0 {
+        if existing_active.is_none() {
             ch.active_ship_id = fallback_ship;
         }
         ch.active_ship_id
@@ -341,35 +489,32 @@ pub fn release_all_structure_control_for_character(
     mut session: Option<&mut SessionState>,
     char_id: i64,
 ) -> Vec<(i64, u32, i64)> {
+    let controlled_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        load_ext_state(snap).active_pilot_by_structure.iter().filter_map(|(&sid, &pid)| (pid == char_id).then_some(sid)).collect()
+    });
+    let ball_checks: std::collections::HashMap<i64, Option<bool>> = controlled_ids
+        .into_iter()
+        .map(|sid| (sid, precheck_saved_in_space_ball(ctx, Some(sid), char_id)))
+        .collect();
     let released: Vec<(i64, u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        let controlled: Vec<i64> = ext
+        let controlled: Vec<i64> = load_ext_state(snap)
             .active_pilot_by_structure
             .iter()
             .filter_map(|(&sid, &pid)| (pid == char_id).then_some(sid))
             .collect();
-        let mut out = Vec::with_capacity(controlled.len());
-        for structure_id in controlled {
-            let (sys_id, restored_ship) = disengage_structure_control_in_snap(
-                Some(ctx),
-                snap,
-                structure_id,
-                char_id,
-            );
-            out.push((structure_id, sys_id, restored_ship));
-        }
-        out
+        controlled
+            .into_iter()
+            .map(|sid| {
+                let (sys_id, restored) =
+                    disengage_structure_control_in_snap(Some(ctx), snap, sid, char_id, ball_checks.get(&sid).copied().flatten());
+                (sid, sys_id, restored)
+            })
+            .collect()
     });
-    for &(structure_id, _, restored_ship) in &released {
+    for &(structure_id, sys_id, restored_ship) in &released {
+        ensure_in_space_capsule_ball_spawned(ctx, sys_id, char_id, restored_ship);
         if let Some(sess) = session.as_deref_mut() {
-            let old_ship = sess.ship_id;
-            if restored_ship > 0 {
-                sess.ship_id = Some(restored_ship);
-                emit_ship_session_change(ctx, sess, char_id, old_ship, Some(restored_ship));
-            } else if sess.ship_id == Some(structure_id) {
-                sess.ship_id = None;
-                emit_ship_session_change(ctx, sess, char_id, old_ship, None);
-            }
+            sync_released_ship_on_session(ctx, sess, char_id, structure_id, restored_ship);
         }
     }
     released
@@ -377,28 +522,16 @@ pub fn release_all_structure_control_for_character(
 
 /// Scans `ext.active_pilot_by_structure` in `snap` and releases any pilot whose corporation
 /// membership, corp defense/control role, or structure defense ACL no longer permits control.
-/// Returns `(structure_id, pilot_id, solar_system_id, restored_ship_id)` tuples for released pilots.
-pub fn release_unauthorized_structure_controllers_in_snap(
-    snap: &mut WorldStateSnapshot,
-) -> Vec<(i64, i64, u32, i64)> {
-    let ext = load_ext_state(snap);
-    let pairs: Vec<(i64, i64)> = ext
-        .active_pilot_by_structure
-        .iter()
-        .map(|(&sid, &pid)| (sid, pid))
-        .collect();
+pub fn release_unauthorized_structure_controllers_in_snap(snap: &mut WorldStateSnapshot) -> Vec<(i64, i64, u32, i64)> {
+    let pairs: Vec<(i64, i64)> = load_ext_state(snap).active_pilot_by_structure.iter().map(|(&sid, &pid)| (sid, pid)).collect();
     let mut released = Vec::new();
     for (structure_id, pilot_id) in pairs {
         let authorized = match snap.structures.get(&structure_id) {
-            Some(st) if st.state != "Destroyed" => {
-                let cur_ext = load_ext_state(snap);
-                verify_control_acl_or_role(snap, &cur_ext, st, pilot_id).is_ok()
-            }
+            Some(st) if st.state != "Destroyed" => verify_control_acl_or_role(snap, &load_ext_state(snap), st, pilot_id).is_ok(),
             _ => false,
         };
         if !authorized {
-            let (sys_id, restored_ship) =
-                disengage_structure_control_in_snap(None, snap, structure_id, pilot_id);
+            let (sys_id, restored_ship) = disengage_structure_control_in_snap(None, snap, structure_id, pilot_id, None);
             released.push((structure_id, pilot_id, sys_id, restored_ship));
         }
     }
@@ -410,30 +543,21 @@ pub fn release_unauthorized_structure_controllers_in_snap(
 pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionState) {
     if let Some(cid) = session.character_id {
         if let Some((new_corp, new_ally, new_role)) =
-            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
-                s.forced_session_corp_sync.remove(&cid)
-            })
+            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| s.forced_session_corp_sync.remove(&cid))
         {
             session.corporation_id = Some(new_corp);
             session.alliance_id = new_ally;
             session.corp_role = new_role;
         }
         apply_forced_session_ship_sync(ctx, session);
-        if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id, stale_struct)) =
-            ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&cid).map(|c| {
-                    (
-                        c.active_ship_id,
-                        c.station_id,
-                        c.structure_id,
-                        c.solar_system_id,
-                        c.constellation_id,
-                        c.region_id,
-                        session.ship_id.is_some_and(|sid| snap.structures.contains_key(&sid)),
-                    )
-                })
+        if let Some((act_ship, st_id, str_id, sys_id, const_id, reg_id, stale_struct)) = ctx.db.with_snapshot(|snap| {
+            snap.characters.get(&cid).map(|c| {
+                (
+                    c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id, c.constellation_id, c.region_id,
+                    session.ship_id.is_some_and(|sid| snap.structures.contains_key(&sid)),
+                )
             })
-        {
+        }) {
             session.solar_system_id = Some(sys_id);
             if const_id != 0 {
                 session.constellation_id = Some(const_id);
@@ -457,9 +581,7 @@ pub(crate) fn sync_character_session(ctx: &ServerContext, session: &mut SessionS
 pub(crate) fn apply_forced_session_ship_sync(ctx: &ServerContext, session: &mut SessionState) {
     if let Some(cid) = session.character_id {
         if let Some((old_structure_id, new_ship_opt)) =
-            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
-                s.forced_session_ship_sync.remove(&cid)
-            })
+            crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| s.forced_session_ship_sync.remove(&cid))
         {
             if new_ship_opt.is_some() || session.ship_id == Some(old_structure_id) {
                 session.ship_id = new_ship_opt;
@@ -469,37 +591,22 @@ pub(crate) fn apply_forced_session_ship_sync(ctx: &ServerContext, session: &mut 
 }
 
 /// Emits `OnSessionChanged` (`shipid`) and `OnStructureTargetRemoved` notifications to pilots
-/// whose structure control was revoked asynchronously, and queues `forced_session_ship_sync`
-/// so their live `SessionState.ship_id` updates immediately.
-pub fn notify_released_structure_controllers(
-    ctx: &ServerContext,
-    released: &[(i64, i64, u32, i64)],
-) {
-    for &(structure_id, pilot_id, _, restored_ship) in released {
+/// whose structure control was revoked asynchronously, and queues `forced_session_ship_sync`.
+pub fn notify_released_structure_controllers(ctx: &ServerContext, released: &[(i64, i64, u32, i64)]) {
+    for &(structure_id, pilot_id, sys_id, restored_ship) in released {
+        ensure_in_space_capsule_ball_spawned(ctx, sys_id, pilot_id, restored_ship);
         let new_ship_opt = (restored_ship > 0).then_some(restored_ship);
         crate::services::fleet_social::fleet_social_persistence::with_social_state(ctx, |s| {
-            s.forced_session_ship_sync
-                .insert(pilot_id, (structure_id, new_ship_opt));
+            s.forced_session_ship_sync.insert(pilot_id, (structure_id, new_ship_opt));
         });
         let new_py = new_ship_opt.map(PyRep::Integer).unwrap_or(PyRep::None);
-        let sess_rep = PyRep::keyval([
-            ("charid", PyRep::Integer(pilot_id)),
-            ("shipid", new_py.clone()),
-        ]);
+        let sess_rep = PyRep::keyval([("charid", PyRep::Integer(pilot_id)), ("shipid", new_py.clone())]);
         let change_args = vec![
             PyRep::Bool(false),
             sess_rep,
-            PyRep::Dict(vec![(
-                PyRep::String("shipid".into()),
-                PyRep::Tuple(vec![PyRep::Integer(structure_id), new_py]),
-            )]),
+            PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::Integer(structure_id), new_py]))]),
         ];
-        ctx.notify(
-            NotificationTarget::Character(pilot_id),
-            "OnSessionChanged",
-            "charid",
-            change_args,
-        );
+        ctx.notify(NotificationTarget::Character(pilot_id), "OnSessionChanged", "charid", change_args);
         ctx.notify(
             NotificationTarget::Character(pilot_id),
             "OnStructureTargetRemoved",
@@ -510,55 +617,28 @@ pub fn notify_released_structure_controllers(
 }
 
 /// Releases any structure controllers in `ctx.db` who are no longer authorized and notifies them.
-pub fn release_unauthorized_structure_controllers(
-    ctx: &ServerContext,
-) -> Vec<(i64, i64, u32, i64)> {
+pub fn release_unauthorized_structure_controllers(ctx: &ServerContext) -> Vec<(i64, i64, u32, i64)> {
     let released = ctx.db.with_mut_snapshot(release_unauthorized_structure_controllers_in_snap);
     notify_released_structure_controllers(ctx, &released);
     released
 }
 
 /// Releases structure control if `char_id` is currently controlling `structure_id` when undocking.
-pub fn release_structure_control_on_undock(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    structure_id: i64,
-    char_id: i64,
-) {
+pub fn release_structure_control_on_undock(ctx: &ServerContext, session: &mut SessionState, structure_id: i64, char_id: i64) {
     let released = ctx.db.with_mut_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
+        if load_ext_state(snap).active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
             return None;
         }
-        Some(disengage_structure_control_in_snap(
-            Some(ctx),
-            snap,
-            structure_id,
-            char_id,
-        ))
+        Some(disengage_structure_control_in_snap(Some(ctx), snap, structure_id, char_id, None))
     });
-    if let Some((sys_id, restored_ship)) = released {
-        let old_ship = session.ship_id;
-        if restored_ship > 0 {
-            session.ship_id = Some(restored_ship);
-            emit_ship_session_change(ctx, session, char_id, old_ship, Some(restored_ship));
-        } else if session.ship_id == Some(structure_id) {
-            session.ship_id = None;
-            emit_ship_session_change(ctx, session, char_id, old_ship, None);
-        }
-        let _ = sys_id;
+    if let Some((_, restored_ship)) = released {
+        sync_released_ship_on_session(ctx, session, char_id, structure_id, restored_ship);
     }
 }
 
-pub async fn handle_take_control(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+pub async fn handle_take_control(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "TakeControl requires structureID"))?;
+    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "TakeControl requires structureID"))?;
     let _ = engage_structure_control(ctx, session, structure_id, char_id, false).await?;
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(structure_id)),
@@ -567,15 +647,9 @@ pub async fn handle_take_control(
     ]))
 }
 
-pub async fn handle_board_structure(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+pub async fn handle_board_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "BoardStructure requires structureID"))?;
+    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "BoardStructure requires structureID"))?;
     let _ = engage_structure_control(ctx, session, structure_id, char_id, true).await?;
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(structure_id)),
@@ -584,65 +658,31 @@ pub async fn handle_board_structure(
     ]))
 }
 
-pub fn handle_release_control(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+pub fn handle_release_control(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let explicit_or_docked_id = arg_i64(args, 0).or(session.structure_id);
     let session_ship = session.ship_id;
     let target_id = arg_i64(args, 1).unwrap_or(0);
+    let in_space_ball_alive = precheck_saved_in_space_ball(ctx, explicit_or_docked_id, char_id);
     let (structure_id, sys_id, orig_ship_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let structure_id = explicit_or_docked_id
             .or_else(|| session_ship.filter(|sid| snap.structures.contains_key(sid)))
-            .or_else(|| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| c.active_ship_id)
-                    .filter(|sid| snap.structures.contains_key(sid))
-            })
-            .or_else(|| {
-                ext.active_pilot_by_structure
-                    .iter()
-                    .find_map(|(&sid, &pid)| (pid == char_id).then_some(sid))
-            })
+            .or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|sid| snap.structures.contains_key(sid)))
+            .or_else(|| ext.active_pilot_by_structure.iter().find_map(|(&sid, &pid)| (pid == char_id).then_some(sid)))
             .ok_or_else(|| err("MissingStructureId", "ReleaseControl requires structureID"))?;
-        if snap
-            .structures
-            .get(&structure_id)
-            .is_some_and(|s| s.state == "Destroyed")
-        {
-            return Err(err(
-                "StructureDestroyed",
-                format!("Structure {structure_id} has been destroyed"),
-            ));
+        if snap.structures.get(&structure_id).is_some_and(|s| s.state == "Destroyed") {
+            return Err(err("StructureDestroyed", format!("Structure {structure_id} has been destroyed")));
         }
         if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
-            return Err(err(
-                "NotControllingStructure",
-                format!("Character {char_id} does not control structure {structure_id}"),
-            ));
+            return Err(err("NotControllingStructure", format!("Character {char_id} does not control structure {structure_id}")));
         }
-        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(
-            snap,
-            char_id,
-            ctx.now_unix(),
-        )?;
-        let (sys_id, orig_ship_id) =
-            disengage_structure_control_in_snap(Some(ctx), snap, structure_id, char_id);
+        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())?;
+        let (sys_id, orig_ship_id) = disengage_structure_control_in_snap(Some(ctx), snap, structure_id, char_id, in_space_ball_alive);
         Ok((structure_id, sys_id, orig_ship_id))
     })?;
-    let old_ship = session.ship_id;
-    if orig_ship_id > 0 {
-        session.ship_id = Some(orig_ship_id);
-        emit_ship_session_change(ctx, session, char_id, old_ship, Some(orig_ship_id));
-    } else if session.ship_id == Some(structure_id) {
-        session.ship_id = None;
-        emit_ship_session_change(ctx, session, char_id, old_ship, None);
-    }
-    let _ = sys_id;
+    ensure_in_space_capsule_ball_spawned(ctx, sys_id, char_id, orig_ship_id);
+    sync_released_ship_on_session(ctx, session, char_id, structure_id, orig_ship_id);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnStructureTargetRemoved",
@@ -652,54 +692,22 @@ pub fn handle_release_control(
     Ok(PyRep::None)
 }
 
-pub fn handle_eject_from_structure(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
+pub fn handle_eject_from_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let structure_id = arg_i64(args, 0)
-        .or(session.structure_id)
-        .ok_or_else(|| err("MissingStructureId", "EjectFromStructure requires structureID"))?;
+    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "EjectFromStructure requires structureID"))?;
+    let in_space_ball_alive = precheck_saved_in_space_ball(ctx, Some(structure_id), char_id);
     let (sys_id, orig_ship_id) = ctx.db.try_with_mut_snapshot(|snap| {
-        if snap
-            .structures
-            .get(&structure_id)
-            .is_some_and(|s| s.state == "Destroyed")
-        {
-            return Err(err(
-                "StructureDestroyed",
-                format!("Structure {structure_id} has been destroyed"),
-            ));
+        if snap.structures.get(&structure_id).is_some_and(|s| s.state == "Destroyed") {
+            return Err(err("StructureDestroyed", format!("Structure {structure_id} has been destroyed")));
         }
-        let ext = load_ext_state(snap);
-        if ext.active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
-            return Err(err(
-                "NotControllingStructure",
-                format!("Character {char_id} is not boarding/controlling structure {structure_id}"),
-            ));
+        if load_ext_state(snap).active_pilot_by_structure.get(&structure_id) != Some(&char_id) {
+            return Err(err("NotControllingStructure", format!("Character {char_id} is not boarding/controlling structure {structure_id}")));
         }
-        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(
-            snap,
-            char_id,
-            ctx.now_unix(),
-        )?;
-        Ok(disengage_structure_control_in_snap(
-            Some(ctx),
-            snap,
-            structure_id,
-            char_id,
-        ))
+        crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())?;
+        Ok(disengage_structure_control_in_snap(Some(ctx), snap, structure_id, char_id, in_space_ball_alive))
     })?;
-    let old_ship = session.ship_id;
-    if orig_ship_id > 0 {
-        session.ship_id = Some(orig_ship_id);
-        emit_ship_session_change(ctx, session, char_id, old_ship, Some(orig_ship_id));
-    } else if session.ship_id == Some(structure_id) {
-        session.ship_id = None;
-        emit_ship_session_change(ctx, session, char_id, old_ship, None);
-    }
-    let _ = sys_id;
+    ensure_in_space_capsule_ball_spawned(ctx, sys_id, char_id, orig_ship_id);
+    sync_released_ship_on_session(ctx, session, char_id, structure_id, orig_ship_id);
     Ok(PyRep::keyval([
         ("structureID", PyRep::Integer(structure_id)),
         ("pilotID", PyRep::None),

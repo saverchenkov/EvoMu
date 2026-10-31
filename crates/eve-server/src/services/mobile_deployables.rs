@@ -1333,52 +1333,26 @@ pub async fn handle_activate_micro_jump_unit(
     if eval_mass >= MMJU_MAX_SHIP_MASS_KG {
         return Err(BridgeRpcError {
             code: "ShipTooHeavy".into(),
-            message: format!(
-                "Ship mass {:.0} kg exceeds Mobile Micro Jump Unit limit of {:.0} kg",
-                eval_mass, MMJU_MAX_SHIP_MASS_KG
-            ),
+            message: format!("Ship mass {:.0} kg exceeds Mobile Micro Jump Unit limit of {:.0} kg", eval_mass, MMJU_MAX_SHIP_MASS_KG),
         });
     }
     if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
-        return Err(BridgeRpcError {
-            code: "ShipInWarp".into(),
-            message: "Cannot activate Mobile Micro Jump Unit while warping".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipInWarp".into(), message: "Cannot activate Mobile Micro Jump Unit while warping".into() });
     }
     let ship_cs = sys_handle.get_combat_state(ship_id).await.ok().flatten();
     if ship_cs.as_ref().is_some_and(|cs| cs.is_cloaked) {
-        return Err(BridgeRpcError {
-            code: "ShipCloaked".into(),
-            message: "Cannot activate Mobile Micro Jump Unit while cloaked".into(),
-        });
+        return Err(BridgeRpcError { code: "ShipCloaked".into(), message: "Cannot activate Mobile Micro Jump Unit while cloaked".into() });
     }
-    if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
-        || ship_cs.as_ref().is_some_and(|cs| cs.is_mwd_mjd_disabled)
-    {
-        return Err(BridgeRpcError {
-            code: "WarpScrambled".into(),
-            message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into(),
-        });
+    if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) || ship_cs.as_ref().is_some_and(|cs| cs.is_mwd_mjd_disabled) {
+        return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into() });
     }
-    let already_spooling = read_deployable_state(ctx)
-        .mmju_spools
-        .iter()
-        .any(|sp| sp.ship_id == ship_id && sp.spool_complete_unix > now_unix);
-    if already_spooling {
-        return Err(BridgeRpcError {
-            code: "MicroJumpAlreadySpooling".into(),
-            message: "Ship is already spooling a Mobile Micro Jump Unit".into(),
-        });
+    if read_deployable_state(ctx).mmju_spools.iter().any(|sp| sp.ship_id == ship_id && sp.spool_complete_unix > now_unix) {
+        return Err(BridgeRpcError { code: "MicroJumpAlreadySpooling".into(), message: "Ship is already spooling a Mobile Micro Jump Unit".into() });
     }
 
     let spool_complete_unix = now_unix.saturating_add(MMJU_SPOOL_TIME_SECS as u64);
     write_deployable_state(ctx, |st| {
-        st.mmju_spools.push(MmjuSpoolEntry {
-            ship_id,
-            mju_id,
-            solar_system_id: sys_id,
-            spool_complete_unix,
-        });
+        st.mmju_spools.push(MmjuSpoolEntry { ship_id, mju_id, solar_system_id: sys_id, spool_complete_unix });
     });
 
     Ok(eve_proto::PyRep::keyval([

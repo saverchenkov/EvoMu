@@ -653,7 +653,7 @@ pub(crate) async fn ship_scoop_and_store(
             let caller_corp = session.corporation_id.unwrap_or(0);
             return ctx.db.try_with_mut_snapshot(|snap| {
                 if target_ship_id == host_ship_id { return Err(err("UserError", "CannotStoreSelf")); }
-                if Some(target_ship_id) == session.ship_id || snap.characters.values().any(|c| c.active_ship_id == target_ship_id) {
+                if Some(target_ship_id) == session.ship_id || snap.is_structure_controller_saved_ship(target_ship_id) || snap.characters.values().any(|c| c.active_ship_id == target_ship_id) {
                     return Err(err("UserError", "CannotStoreActiveShip"));
                 }
                 let Some(target) = snap.items.get(&target_ship_id) else {
@@ -952,7 +952,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if target.location_id != sys_id as i64 {
                     return Err(err("ObjectNotInSpace", format!("Target ship {target_ship_id} is not in space")));
                 }
-                if snap.characters.values().any(|c| c.active_ship_id == target_ship_id) {
+                if snap.is_structure_controller_saved_ship(target_ship_id) || snap.characters.values().any(|c| c.active_ship_id == target_ship_id) {
                     return Err(err("ShipPiloted", "Cannot store a piloted ship"));
                 }
                 if target.type_id == 670 {

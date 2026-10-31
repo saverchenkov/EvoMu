@@ -1186,7 +1186,7 @@ pub async fn handle(
                     if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
                         return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
                     }
-                    if Some(iid) == session.ship_id || Some(iid) == active_ship_id {
+                    if Some(iid) == session.ship_id || Some(iid) == active_ship_id || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, iid) {
                         return Err(BridgeRpcError { code: "CannotDeliverActiveShip".into(), message: "Cannot deliver the currently active ship".into() });
                     }
                     let flag_u16 = item.flag as u16;

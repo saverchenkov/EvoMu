@@ -978,6 +978,24 @@ impl WorldStateSnapshot {
         in_contract || in_job
     }
 
+    /// Returns `true` if `item_id` is saved in `StructureExtendedState.previous_ship_by_structure`
+    /// (`item_custom_names[-7_700_001]`) for a structure currently controlled in `active_pilot_by_structure`.
+    pub fn is_structure_controller_saved_ship(&self, item_id: i64) -> bool {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(default)]
+        struct CtrlShips { active_pilot_by_structure: std::collections::HashMap<i64, i64>, previous_ship_by_structure: std::collections::HashMap<i64, i64> }
+        item_id > 0 && self.item_custom_names.get(&-7_700_001)
+            .and_then(|raw| serde_json::from_str::<CtrlShips>(raw).ok())
+            .is_some_and(|st| st.previous_ship_by_structure.iter().any(|(sid, &sh)| sh == item_id && st.active_pilot_by_structure.contains_key(sid)))
+    }
+
+    /// Returns `true` if `item_id` is `char_id`'s `active_ship_id`, matches `session_ship_id`, or is saved in `previous_ship_by_structure`.
+    pub fn is_character_boarded_or_saved_ship(&self, char_id: i64, session_ship_id: Option<i64>, item_id: i64) -> bool {
+        item_id > 0 && (session_ship_id == Some(item_id)
+            || self.characters.get(&char_id).is_some_and(|c| c.active_ship_id == item_id)
+            || self.is_structure_controller_saved_ship(item_id))
+    }
+
     /// Verifies that `ship_id` exists, is owned by `char_id`, and is physically co-located with the character
     /// (in `station_or_struct_id` when docked, or in `ch.solar_system_id` when in space).
     pub fn is_ship_colocated_with_character(
@@ -1017,7 +1035,7 @@ impl WorldStateSnapshot {
         if item.flag == InventoryFlag::Locked {
             return false;
         }
-        if Some(item.item_id) == active_ship_id {
+        if self.is_character_boarded_or_saved_ship(char_id, active_ship_id, item.item_id) {
             return false;
         }
         let at_dock_hangar = station_or_struct_id.is_some()

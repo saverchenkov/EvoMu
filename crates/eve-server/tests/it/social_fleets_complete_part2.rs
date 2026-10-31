@@ -32,94 +32,49 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     // Seed Jita's test wormhole signature explicitly (production templates seed K-space wormholes probabilistically)
     ctx.db.with_mut_snapshot(|snap| {
         let now_u = ctx.now_unix();
-        snap.cosmic_signatures.insert(
-            30_000_142,
-            vec![eve_db::CosmicSignatureRecord {
-                signature_id: "JMM-142".into(),
-                solar_system_id: 30_000_142,
-                sig_group: "Wormhole".into(),
-                type_name: "Unstable Wormhole (K162)".into(),
-                position: [12.0 * 149_597_870_700.0, 2.5 * 149_597_870_700.0, -4.0 * 149_597_870_700.0],
-                signal_strength: 0.25,
-                wormhole_type_id: Some(26_272),
-                destination_system_id: Some(31_000_005),
-                created_unix: now_u,
-                lifetime_seconds: 86_400,
-                max_mass_kg: 2_000_000_000.0,
-                remaining_mass_kg: 2_000_000_000.0,
-                max_jump_mass_kg: 375_000_000.0,
-                collapsed: false,
-            }],
-        );
+        snap.cosmic_signatures.insert(30_000_142, vec![eve_db::CosmicSignatureRecord {
+            signature_id: "JMM-142".into(), solar_system_id: 30_000_142, sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole (K162)".into(),
+            position: [12.0 * 149_597_870_700.0, 2.5 * 149_597_870_700.0, -4.0 * 149_597_870_700.0],
+            signal_strength: 0.25, wormhole_type_id: Some(26_272), destination_system_id: Some(31_000_005),
+            created_unix: now_u, lifetime_seconds: 86_400, max_mass_kg: 2_000_000_000.0,
+            remaining_mass_kg: 2_000_000_000.0, max_jump_mass_kg: 375_000_000.0, collapsed: false,
+        }]);
     });
-
-    // Initialize system cosmic signatures and wormhole balls via real V24 scanMgr.GetSystemScanMgr
     let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.expect("GetSystemScanMgr");
-
     let (wh_sig_id, wh_pos) = ctx.db.with_snapshot(|snap| {
         let sig = snap.cosmic_signatures[&30_000_142].iter().find(|s| s.sig_group == "Wormhole").unwrap();
         (sig.signature_id.clone(), sig.position)
     });
-
-    // Resolve wormhole item ID in Jita Ballpark (group_id = 988)
     let jita_sys = ctx.systems.get_or_spawn(30_000_142);
     let wh_item_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(30_000_142, &wh_sig_id);
     let (_, wh_ball) = jita_sys.get_ball_snapshot(wh_item_id).await.unwrap().expect("Wormhole ball must be spawned in Jita Ballpark");
     assert_eq!(wh_ball.type_id, 26272);
 
-    // Position pilot's Rifter (600_000_001) within 2,500m of the wormhole ball
     let ship_ball = Ball {
-        id: 600_000_001,
-        type_id: 587,
-        position: DVec3::new(wh_pos[0] + 500.0, wh_pos[1], wh_pos[2]),
-        velocity: DVec3::ZERO,
-        max_velocity: 350.0,
-        inertia: 2.5,
-        mass: 1_200_000.0,
-        radius: 50.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
+        id: 600_000_001, type_id: 587, position: DVec3::new(wh_pos[0] + 500.0, wh_pos[1], wh_pos[2]),
+        velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.5, mass: 1_200_000.0, radius: 50.0,
+        speed_fraction: 0.0, mode: MovementMode::Stop,
     };
     let _ = jita_sys.spawn_ball(ship_ball.clone()).await;
-    sess.ship_id = Some(600_000_001);
-    sess.solar_system_id = Some(30_000_142);
-    sess.station_id = None;
-    sess.structure_id = None;
-    ctx.db.try_with_mut_snapshot(|snap| {
+    (sess.ship_id, sess.solar_system_id, sess.station_id, sess.structure_id) = (Some(600_000_001), Some(30_000_142), None, None);
+    ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&90_000_001).unwrap();
-        ch.active_ship_id = 600_000_001;
-        ch.station_id = None;
-        ch.structure_id = None;
-        ch.solar_system_id = 30_000_142;
-        Ok::<(), std::convert::Infallible>(())
-    }).unwrap();
+        (ch.active_ship_id, ch.station_id, ch.structure_id, ch.solar_system_id) = (600_000_001, None, None, 30_000_142);
+    });
     ctx.advance_secs(12);
 
-    // 1a. Range check: ship > 2,500m from wormhole is rejected with OutsideWormholeJumpRange
     let _ = jita_sys.spawn_ball(Ball { position: DVec3::new(wh_pos[0] + 10_000.0, wh_pos[1], wh_pos[2]), ..ship_ball.clone() }).await;
-    let oor_err = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect_err("Ship outside 2,500m wormhole range must be rejected");
-    assert_eq!(oor_err.code, "OutsideWormholeJumpRange");
-
-    // 1b. Max jump mass enforcement: ship exceeding max_jump_mass_kg (375,000,000 kg) is rejected
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect_err("OOR").code, "OutsideWormholeJumpRange");
     let _ = jita_sys.spawn_ball(Ball { mass: 1_500_000_000.0, ..ship_ball.clone() }).await;
-    let heavy_err = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect_err("Ship exceeding max_jump_mass_kg must be rejected");
-    assert_eq!(heavy_err.code, "ShipTooHeavyForWormhole");
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect_err("heavy").code, "ShipTooHeavyForWormhole");
 
-    // 2. Jump Wormhole with active propulsion mass addition (1,200,000 + 500,000 = 1,700,000 kg) -> transits to Thera (31000005)
     let _ = jita_sys.spawn_ball(Ball { mass: 1_700_000.0, ..ship_ball.clone() }).await;
     let jump_rep = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect("WormholeJump to Thera");
     let PyRep::KeyVal(jkv) = &jump_rep else { panic!("Expected KeyVal from WormholeJump") };
-    assert_eq!(sess.solar_system_id, Some(31_000_005));
-    assert_eq!(jkv["isThera"], PyRep::Bool(true));
-    assert_eq!(jkv["wormholeClass"], PyRep::Integer(12));
-    assert_eq!(jkv["massStage"], PyRep::String("Stable".into()));
-    assert_eq!(jkv["wormholeSize"], PyRep::Real(1.0));
-    assert_eq!(jkv["lifetimeStage"], PyRep::String("Healthy".into()));
-    assert_eq!(jkv["wormholeAge"], PyRep::Integer(1));
-    assert!(
-        (jkv["remainingMassKg"].as_f64().unwrap() - (2_000_000_000.0 - 1_700_000.0)).abs() < 1.0,
-        "WormholeJump must subtract jumping ship mass (including propulsion mass addition) from remaining_mass_kg"
-    );
+    assert_eq!((sess.solar_system_id, &jkv["isThera"], &jkv["wormholeClass"]), (Some(31_000_005), &PyRep::Bool(true), &PyRep::Integer(12)));
+    assert_eq!((&jkv["massStage"], &jkv["wormholeSize"], &jkv["lifetimeStage"], &jkv["wormholeAge"]), (&PyRep::String("Stable".into()), &PyRep::Real(1.0), &PyRep::String("Healthy".into()), &PyRep::Integer(1)));
+    assert!((jkv["remainingMassKg"].as_f64().unwrap() - (2_000_000_000.0 - 1_700_000.0)).abs() < 1.0);
 
     // 3. Thera & Shattered W-space rules (`feat:navigation.wormhole-thera`)
     let _ = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(31_000_005)], &kw, None).await.expect("seed Thera sigs");

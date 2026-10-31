@@ -770,7 +770,7 @@ pub(crate) async fn handle_ships_and_services(
 
                 // 1. Validate all normal items before any mutations
                 for &item_id in &normal_ids {
-                    if item_id == active_ship_id {
+                    if item_id == active_ship_id || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
                         return Err(BridgeRpcError {
                             code: "CannotRepackageActiveShip".into(),
                             message: "Cannot repackage your currently active ship".into(),

@@ -327,6 +327,12 @@ impl WorldRepository {
                         station_id,
                     });
                 }
+                if !ship.singleton
+                    || matches!(ship.flag, InventoryFlag::Locked | InventoryFlag::Deliveries)
+                    || guard.is_item_locked_in_contract_or_job(active_ship_id)
+                {
+                    return Err(DbError::ItemLocked(active_ship_id));
+                }
             }
 
             let ch = guard.characters.get_mut(&character_id).unwrap();

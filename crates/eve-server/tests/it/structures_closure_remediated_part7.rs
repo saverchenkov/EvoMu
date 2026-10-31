@@ -483,3 +483,153 @@ async fn test_bf05_mobile_cyno_inhibitor_upwell_50km_clearance_and_space_bans() 
         (now_before_mmju + eve_server::services::mobile_deployables::MMJU_ACTIVATION_DELAY_SECS + MMJU_LIFETIME_SECS) as i64
     );
 }
+
+#[tokio::test]
+async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallback() {
+    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureDeliveries.Deliver, rpc:contractProxy.CreateContract, rpc:repackagingSvc.RepackageItems
+    eve_testkit::attest(&[
+        "feat:structures.board-structure",
+        "rpc:structureControl.TakeControl",
+        "rpc:structureControl.ReleaseControl",
+        "rpc:structureDeliveries.Deliver",
+        "rpc:contractProxy.CreateContract",
+        "rpc:repackagingSvc.RepackageItems",
+    ]);
+
+    let ctx = new_ctx();
+    let corp_id = 98_906_001;
+    let st_id = 1_000_890_006_100;
+    let flex_id = 1_000_890_006_200;
+    let pilot_ship = 890_006_001;
+    let spare_ship = 890_006_002;
+    let flex_ship = 890_006_003;
+    let hostile_ship = 890_006_004;
+    let flex_pos = DVec3::new(3.0e10, 3.0e10, 0.0);
+    let flex_ship_pos = flex_pos + DVec3::new(1_000.0, 0.0, 0.0);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        ensure_account(snap, 60);
+        ensure_account(snap, 61);
+        snap.corporations.insert(corp_id, CorporationRecord {
+            corporation_id: corp_id, name: "Control Guard Corp".into(), ticker: "CGD".into(), ceo_id: OWNER,
+            alliance_id: None, tax_rate: 0.05,
+            members: HashSet::from([OWNER]),
+            member_roles: HashMap::from([(OWNER, eve_db::corp_roles::ROLE_DIRECTOR)]),
+            master_wallet: IskCents::from_isk(500_000_000), ..Default::default()
+        });
+        let base_ch = snap.characters.get(&OWNER).cloned().unwrap();
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            ch.user_id = 60;
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = RANCER;
+            ch.station_id = None;
+            ch.structure_id = Some(st_id);
+            ch.active_ship_id = pilot_ship;
+            ch.balance = IskCents::from_isk(500_000_000);
+        }
+        snap.characters.insert(ALLY_GUNNER, eve_db::CharacterRecord {
+            character_id: ALLY_GUNNER, user_id: 61, name: "Recipient".into(), corporation_id: 1_000_009,
+            solar_system_id: RANCER, station_id: None, structure_id: Some(st_id), active_ship_id: hostile_ship,
+            ..base_ch
+        });
+        snap.structures.insert(st_id, UpwellStructureRecord {
+            structure_id: st_id, type_id: 35832, owner_corp_id: corp_id, solar_system_id: RANCER,
+            name: "Guard Astrahus".into(), position: [1.0e9, 0.0, 0.0], state: life::STATE_SHIELD_VULNERABLE.into(),
+            quantum_core_installed: true, fuel_blocks: 2_000, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0,
+            hull_hp: 1_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        snap.structures.insert(flex_id, UpwellStructureRecord {
+            structure_id: flex_id, type_id: 35841, owner_corp_id: corp_id, solar_system_id: RANCER,
+            name: "Guard Ansiblex".into(), position: flex_pos.to_array(), state: life::STATE_SHIELD_VULNERABLE.into(),
+            quantum_core_installed: false, fuel_blocks: 2_000, shield_hp: 500_000.0, armor_hp: 500_000.0,
+            hull_hp: 500_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        for (iid, loc) in [(pilot_ship, st_id), (spare_ship, st_id), (flex_ship, i64::from(RANCER)), (hostile_ship, i64::from(RANCER))] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: 587, owner_id: if iid == hostile_ship { ALLY_GUNNER } else { OWNER },
+                location_id: loc, flag: if loc == st_id { InventoryFlag::Hangar } else { InventoryFlag::None },
+                quantity: 1, singleton: true, version: 1, ..Default::default()
+            });
+        }
+    });
+
+    let mut sess = SessionState::new(9601);
+    sess.user_id = Some(60);
+    sess.character_id = Some(OWNER);
+    sess.corporation_id = Some(corp_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    sess.solar_system_id = Some(RANCER);
+    sess.structure_id = Some(st_id);
+    sess.ship_id = Some(pilot_ship);
+
+    // 1. Docked TakeControl protects saved ship against Deliver, CreateContract, RepackageItems, TrashItems, MultiAdd, and Board.
+    rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("TakeControl");
+    assert_eq!(sess.ship_id, Some(st_id));
+
+    assert_eq!(
+        rpc(&ctx, &mut sess, "structureDeliveries", "Deliver", &[PyRep::Integer(st_id), PyRep::Integer(pilot_ship), PyRep::Integer(ALLY_GUNNER)]).await.unwrap_err().code,
+        "CannotDeliverActiveShip"
+    );
+    let contract_args = [
+        PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440), PyRep::Integer(1),
+        PyRep::Integer(st_id), PyRep::Integer(st_id), PyRep::Real(1_000_000.0), PyRep::Real(0.0), PyRep::Real(0.0),
+        PyRep::String("Saved Ship Bypass".into()), PyRep::String(String::new()),
+        PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(pilot_ship), PyRep::Integer(1)])]),
+    ];
+    assert_eq!(rpc(&ctx, &mut sess, "contractProxy", "CreateContract", &contract_args).await.unwrap_err().code, "CannotContractActiveShip");
+    assert_eq!(rpc(&ctx, &mut sess, "repackagingSvc", "RepackageItems", &[PyRep::List(vec![PyRep::Integer(pilot_ship)])]).await.unwrap_err().code, "CannotRepackageActiveShip");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "TrashItems", &[PyRep::List(vec![PyRep::Integer(pilot_ship)])]).await.unwrap_err().code, "DeleteFailed");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(pilot_ship)]), PyRep::Integer(st_id), PyRep::Integer(116)]).await.unwrap_err().code, "CannotMoveActiveShip");
+    assert_eq!(rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(spare_ship)]).await.unwrap_err().code, "ControllingStructure");
+
+    rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.expect("ReleaseControl");
+    assert_eq!(sess.ship_id, Some(pilot_ship));
+
+    // 2. Defense-in-depth: if saved_prev is foreign-owned and no other ship exists in hangar, ReleaseControl provisions an owned Capsule (670).
+    rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("TakeControl 2");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&spare_ship);
+        snap.items.get_mut(&pilot_ship).unwrap().owner_id = ALLY_GUNNER;
+    });
+    rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.expect("ReleaseControl tampered");
+    let docked_pod_id = sess.ship_id.expect("docked capsule");
+    assert_ne!(docked_pod_id, pilot_ship);
+    ctx.db.with_snapshot(|snap| {
+        let pod = snap.items.get(&docked_pod_id).expect("docked capsule record");
+        assert_eq!((pod.type_id, pod.owner_id, pod.location_id, pod.flag, pod.singleton), (670, OWNER, st_id, InventoryFlag::Hangar, true));
+        assert_eq!(snap.characters.get(&OWNER).unwrap().active_ship_id, docked_pod_id);
+    });
+
+    // 3. FLEX in-space TakeControl + parked ship destroyed via execute_death_pipeline -> ReleaseControl spawns/boards a live Capsule in space!
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&OWNER).unwrap();
+        ch.structure_id = None;
+        ch.active_ship_id = flex_ship;
+    });
+    sess.structure_id = None;
+    sess.ship_id = Some(flex_ship);
+    eve_server::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(&ctx, RANCER, flex_id).await;
+    spawn_ship_ball(&ctx, RANCER, flex_ship, flex_ship_pos).await;
+
+    rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(flex_id)]).await.expect("FLEX TakeControl");
+    assert_eq!(sess.ship_id, Some(flex_id));
+
+    eve_server::combat::death_pipeline::execute_death_pipeline(&ctx, RANCER, OWNER, flex_ship, ALLY_GUNNER, flex_ship_pos, 42)
+        .await
+        .expect("destroy parked FLEX controller ship");
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(flex_id)]).await.unwrap(), PyRep::Integer(OWNER));
+
+    rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[]).await.expect("0-arg FLEX ReleaseControl after ship loss");
+    let space_pod_id = sess.ship_id.expect("in-space capsule");
+    assert_ne!(space_pod_id, flex_ship);
+    assert_ne!(space_pod_id, flex_id);
+    ctx.db.with_snapshot(|snap| {
+        let pod = snap.items.get(&space_pod_id).expect("in-space capsule item");
+        assert_eq!((pod.type_id, pod.owner_id, pod.location_id, pod.singleton), (670, OWNER, i64::from(RANCER), true));
+        assert_eq!(snap.characters.get(&OWNER).unwrap().active_ship_id, space_pod_id);
+    });
+    assert!(
+        ctx.systems.get_or_spawn(RANCER).get_ball_position_sync(space_pod_id).is_some(),
+        "Newly provisioned FLEX fallback Capsule must have a live Ballpark ball in space"
+    );
+}

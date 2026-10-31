@@ -638,7 +638,7 @@ pub async fn handle(
                     .get(&char_id)
                     .map(|c| (c.corporation_id, c.solar_system_id as i64, c.station_id.or(c.structure_id).unwrap_or(0), c.active_ship_id))
                     .unwrap_or((0, 0, 0, 0));
-                if item_id == new_loc || (active_ship_id > 0 && item_id == active_ship_id && snap.items.contains_key(&new_loc)) {
+                if item_id == new_loc || snap.is_structure_controller_saved_ship(item_id) || (active_ship_id > 0 && item_id == active_ship_id && (snap.items.contains_key(&new_loc) || (116..=122).contains(&flag_u16))) {
                     return Err(BridgeRpcError { code: "CannotMoveActiveShip".into(), message: format!("Cannot move item {item_id} into {new_loc}") });
                 }
                 if flag == InventoryFlag::Locked || moving.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {

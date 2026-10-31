@@ -394,7 +394,7 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
                 || snap.corp_role_assignments.get(&(owner_id, char_id)).is_some_and(|a| (a.roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0);
             if !has_dir { return Err(err("InsufficientCorpRoles", "Moving corporate assets to safety requires Director or CEO role")); }
         }
-        let all_active_ships: HashSet<i64> = snap.characters.values().map(|c| c.active_ship_id).filter(|&id| id > 0).chain(session.ship_id.into_iter().filter(|&id| id > 0)).collect();
+        let ext_active = load_ext_state(snap); let all_active_ships: HashSet<i64> = snap.characters.values().map(|c| c.active_ship_id).filter(|&id| id > 0).chain(session.ship_id.into_iter().filter(|&id| id > 0)).chain(ext_active.previous_ship_by_structure.iter().filter(|(sid, _)| ext_active.active_pilot_by_structure.contains_key(sid)).map(|(_, &sh)| sh).filter(|&id| id > 0)).collect();
         let has_locked_descendant = |root_id: i64| -> bool {
             let mut visited = vec![root_id];
             let mut front = vec![root_id];

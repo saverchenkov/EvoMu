@@ -477,6 +477,7 @@ pub fn handle(
                             || item.location_id != tr.station_id
                             || item.flag != InventoryFlag::Hangar
                             || Some(item_id) == active_ship_id
+                            || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id)
                             || snap.is_item_locked_in_contract_or_job(item_id)
                             || has_contents
                         {
@@ -584,6 +585,7 @@ pub fn handle(
                                     || it.flag != InventoryFlag::Hangar
                                     || it.quantity < q
                                     || Some(iid) == active_ship_a
+                                    || snap.is_character_boarded_or_saved_ship(tr.char_a, None, iid)
                                     || snap.is_item_locked_in_contract_or_job(iid)
                                     || has_contents
                                 {
@@ -606,6 +608,7 @@ pub fn handle(
                                     || it.flag != InventoryFlag::Hangar
                                     || it.quantity < q
                                     || Some(iid) == active_ship_b
+                                    || snap.is_character_boarded_or_saved_ship(tr.char_b, None, iid)
                                     || snap.is_item_locked_in_contract_or_job(iid)
                                     || has_contents
                                 {

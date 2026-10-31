@@ -42,8 +42,11 @@ impl WorldRepository {
                 .ok_or(DbError::CharacterNotFound(character_id))?
                 .clone();
 
-            // Reject self-containment, moving the currently boarded ship, and Locked flag manipulation
-            if item_id == new_location_id || item_id == ch.active_ship_id {
+            // Reject self-containment, moving the currently boarded/saved ship, and Locked flag manipulation
+            if item_id == new_location_id
+                || item_id == ch.active_ship_id
+                || guard.is_structure_controller_saved_ship(item_id)
+            {
                 return Err(DbError::InvalidDestinationLocation {
                     character_id,
                     location_id: new_location_id,
@@ -150,7 +153,7 @@ impl WorldRepository {
                 .characters
                 .get(&character_id)
                 .ok_or(DbError::CharacterNotFound(character_id))?;
-            if item_id == ch.active_ship_id {
+            if item_id == ch.active_ship_id || guard.is_structure_controller_saved_ship(item_id) {
                 return Err(DbError::ValidationError(
                     "Cannot repackage your currently active ship".into(),
                 ));
@@ -365,7 +368,7 @@ impl WorldRepository {
                 .characters
                 .get(&character_id)
                 .ok_or(DbError::CharacterNotFound(character_id))?;
-            if item_id == ch.active_ship_id {
+            if item_id == ch.active_ship_id || guard.is_structure_controller_saved_ship(item_id) {
                 return Err(DbError::ValidationError(
                     "Cannot delete your currently active ship".into(),
                 ));

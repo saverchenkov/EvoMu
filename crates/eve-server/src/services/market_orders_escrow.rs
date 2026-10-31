@@ -239,12 +239,13 @@ pub fn handle_orders_escrow(
                             message: "Order total cost overflows 64-bit ISK cents".into(),
                         })?;
                     let is_sellable_item = |snap_ref: &eve_db::WorldStateSnapshot, i: &InventoryItemRecord| {
-                        snap_ref.is_item_consumable_by(i, char_id, Some(station_id), None)
-                            || (use_corp
-                                && i.owner_id == caller_corp_id
-                                && i.location_id == station_id
-                                && i.flag != InventoryFlag::Locked
-                                && !snap_ref.is_item_locked_in_contract_or_job(i.item_id))
+                        !snap_ref.is_structure_controller_saved_ship(i.item_id)
+                            && (snap_ref.is_item_consumable_by(i, char_id, Some(station_id), session.ship_id)
+                                || (use_corp
+                                    && i.owner_id == caller_corp_id
+                                    && i.location_id == station_id
+                                    && i.flag != InventoryFlag::Locked
+                                    && !snap_ref.is_item_locked_in_contract_or_job(i.item_id)))
                     };
                     let is_courier_item = |iid: i64| snap.item_custom_names.get(&iid).map_or(false, |s| s.starts_with("courier_cargo:"));
 

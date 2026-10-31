@@ -346,6 +346,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if session.ship_id.is_some_and(|sid| snap.structures.contains_key(&sid)) {
+                    return Err(BridgeRpcError { code: "ControllingStructure".into(), message: "Release structure control before boarding another ship".into() });
+                }
                 let Some(ship) = snap.items.get(&target_ship_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "ShipNotFound".into(),
@@ -1068,7 +1071,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     if item.owner_id != char_id {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Item {item_id} is not owned by character {char_id}") });
                     }
-                    if item_id == active_ship_id {
+                    if item_id == active_ship_id || snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
                         return Err(BridgeRpcError { code: "DeleteFailed".into(), message: format!("Cannot trash active ship {item_id}") });
                     }
                     if (30_000_000..=50_000_000).contains(&item.location_id)

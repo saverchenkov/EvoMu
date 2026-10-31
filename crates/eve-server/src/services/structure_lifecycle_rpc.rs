@@ -1220,6 +1220,9 @@ pub(crate) fn handle_structure_deliver(ctx: &ServerContext, session: &mut Sessio
         return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
     }
     ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, item_id) {
+            return Err(err("CannotDeliverActiveShip", "Cannot deliver your active boarded ship"));
+        }
         if !snap.characters.contains_key(&recipient_id) {
             return Err(err("RecipientNotFound", format!("Recipient character {recipient_id} not found")));
         }

@@ -357,9 +357,7 @@ pub fn handle(
                 let id = snap.next_entity_id;
                 let mut escrowed_items = Vec::new();
                 for iid in item_ids_req {
-                    if Some(iid) == active_ship
-                        || snap.characters.get(&char_id).map(|c| c.active_ship_id == iid).unwrap_or(false)
-                    {
+                    if snap.is_character_boarded_or_saved_ship(char_id, active_ship, iid) {
                         return Err(rpc_err(
                             "CannotContractActiveShip",
                             "Cannot escrow the currently boarded active ship into a contract",

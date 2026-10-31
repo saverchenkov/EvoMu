@@ -383,7 +383,9 @@ pub(crate) async fn handle_multi_add(
                 .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.active_ship_id))
         })
         .unwrap_or(0);
-    if item_ids.contains(&active_ship_id) {
+    if item_ids.contains(&active_ship_id)
+        || ctx.db.with_snapshot(|snap| item_ids.iter().any(|&id| snap.is_character_boarded_or_saved_ship(char_id, session.ship_id, id)))
+    {
         return Err(BridgeRpcError {
             code: "CannotMoveActiveShip".into(),
             message: "Cannot move active ship".into(),
@@ -487,9 +489,10 @@ pub(crate) async fn handle_multi_add(
                 });
             }
             if item_id == new_loc
+                || snap.is_structure_controller_saved_ship(item_id)
                 || (ch.active_ship_id > 0
                     && item_id == ch.active_ship_id
-                    && snap.items.contains_key(&new_loc))
+                    && (snap.items.contains_key(&new_loc) || (116..=122).contains(&flag_u16)))
             {
                 return Err(BridgeRpcError {
                     code: "CannotMoveActiveShip".into(),
