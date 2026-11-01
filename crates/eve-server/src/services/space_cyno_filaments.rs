@@ -1325,7 +1325,7 @@ pub fn active_scan_inhibitor_positions(
             b.type_id == 33_589
                 && dep_state.deployables.get(&b.id).is_some_and(|rec| {
                     rec.solar_system_id == sys_id
-                        && rec.group_id == crate::services::mobile_deployables::GROUP_MOBILE_SCAN_INHIBITOR
+                        && rec.group_id == crate::services::mobile_deployables_ext::GROUP_MOBILE_SCAN_INHIBITOR
                         && !rec.is_unanchored
                         && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
                         && now_unix < rec.expires_at_unix

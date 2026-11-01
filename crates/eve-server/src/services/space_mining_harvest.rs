@@ -1026,7 +1026,7 @@ pub fn step_mobile_siphons_in_actor(
         .filter(|b| {
             sde.types
                 .get(&b.type_id)
-                .is_some_and(|t| t.group_id == crate::services::mobile_deployables::GROUP_MOBILE_SIPHON)
+                .is_some_and(|t| t.group_id == crate::services::mobile_deployables_ext::GROUP_MOBILE_SIPHON)
         })
         .map(|b| (b.id, b.type_id, b.position))
         .collect();
@@ -1053,7 +1053,7 @@ pub fn step_mobile_siphons_in_actor(
                 continue;
             };
             if rec.solar_system_id != solar_system_id
-                || rec.group_id != crate::services::mobile_deployables::GROUP_MOBILE_SIPHON
+                || rec.group_id != crate::services::mobile_deployables_ext::GROUP_MOBILE_SIPHON
                 || rec.is_unanchored
             {
                 continue;
