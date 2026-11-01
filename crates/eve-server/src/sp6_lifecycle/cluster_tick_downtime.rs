@@ -204,7 +204,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
                 corp_id: npc_corp_id,
                 alliance_id: -1,
                 security_status: -5.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         );
         with_mut_combat_runtime(ctx, |rt| {

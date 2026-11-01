@@ -400,27 +400,14 @@ async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
     let get_reinf = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetStructureReinforceDefault", &[], &kw, None).await.expect("GetStructureReinforceDefault");
     assert_eq!(get_reinf, PyRep::Integer(18));
 
-    // 8. Introspection methods (Unbind, SetSessionCheck, clear_memoized, columns, header, itervalues)
+    // 8. Introspection methods (Unbind, plus client_local SetSessionCheck, clear_memoized, columns, header, itervalues -> UnimplementedRPC)
     let unb = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "Unbind", &[], &kw, None).await.expect("Unbind");
     assert_eq!(unb, PyRep::None);
 
-    let sc = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "SetSessionCheck", &[], &kw, None).await.expect("SetSessionCheck");
-    assert_eq!(sc, PyRep::None);
-
-    let cm = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "clear_memoized", &[], &kw, None).await.expect("clear_memoized");
-    assert_eq!(cm, PyRep::None);
-
-    let cols = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "columns", &[], &kw, None).await.expect("columns");
-    let PyRep::List(c_list) = cols else { panic!("expected List") };
-    assert!(!c_list.is_empty());
-
-    let hdr = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "header", &[], &kw, None).await.expect("header");
-    let PyRep::Tuple(h_list) = hdr else { panic!("expected Tuple") };
-    assert!(!h_list.is_empty());
-
-    let itv = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "itervalues", &[], &kw, None).await.expect("itervalues");
-    let PyRep::List(it_list) = itv else { panic!("expected List") };
-    assert!(it_list.is_empty());
+    for meth in ["SetSessionCheck", "clear_memoized", "columns", "header", "itervalues"] {
+        let err = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, meth, &[], &kw, None).await.expect_err(meth);
+        assert_eq!(err.code, eve_server::router::ERR_UNIMPLEMENTED);
+    }
 
     // 9. ResignFromCEO
     let resign = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "ResignFromCEO", &[PyRep::Integer(P1)], &kw, None).await.expect("ResignFromCEO");

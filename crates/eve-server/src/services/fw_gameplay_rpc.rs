@@ -7,7 +7,7 @@ use crate::services::fw_gameplay::{
     apply_fw_or_insurgency_structure_damage, militia_lp_corp_id, TYPE_ACCELERATION_GATE,
 };
 use crate::services::fw_services::{
-    award_fw_kill_lp, donate_solar_system_lp, is_opposing_militia,
+    award_fw_kill_lp_split, donate_solar_system_lp,
     set_facwar_bunker_vulnerable, update_system_advantage, HQ_SYSTEM_AMO, HQ_SYSTEM_INTAKI,
     HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON,
 };
@@ -40,7 +40,40 @@ pub fn get_war_hq_services(sys_id: u32) -> Option<(&'static str, Vec<&'static st
     }
 }
 
-/// Credits FW PvP kill LP, VP, and leaderboard kills when an enlisted pilot destroys an opposing militia pilot's ship.
+/// Credits FW PvP kill LP and leaderboard kills when opposing-militia pilots destroy a player ship (`feat:fw.fw-lp`).
+/// Uses net loss (`hull - insurance + fit + cargo`), splits equally across involved militia attackers,
+/// pays `0 LP` for empty Capsules (`670`), and never pushes solar system contested VP.
+pub fn on_player_ship_destroyed_in_combat_detailed(
+    ctx: &ServerContext,
+    sys_id: u32,
+    killer_char_id: i64,
+    victim_char_id: i64,
+    victim_ship_type_id: u32,
+    net_loss_isk: f64,
+    killmail_id: i64,
+) {
+    if killer_char_id <= 0 || killer_char_id == victim_char_id {
+        return;
+    }
+    let mut attackers: Vec<i64> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.detailed_killmails
+            .get(&killmail_id)
+            .map(|dkm| dkm.attackers.iter().map(|a| a.character_id).collect())
+            .unwrap_or_default()
+    });
+    if !attackers.contains(&killer_char_id) {
+        attackers.push(killer_char_id);
+    }
+    let _ = award_fw_kill_lp_split(
+        ctx,
+        &attackers,
+        victim_char_id,
+        sys_id,
+        victim_ship_type_id,
+        net_loss_isk,
+    );
+}
+
 pub fn on_player_ship_destroyed_in_combat(
     ctx: &ServerContext,
     sys_id: u32,
@@ -48,30 +81,25 @@ pub fn on_player_ship_destroyed_in_combat(
     victim_char_id: i64,
     victim_ship_type_id: u32,
 ) {
-    if killer_char_id <= 0 || killer_char_id == victim_char_id {
-        return;
-    }
-    let is_enemy_militia_kill = ctx.db.with_snapshot(|snap| {
-        if !snap.fw_system_occupations.contains_key(&sys_id) {
-            return false;
-        }
-        let k_fac = snap.characters.get(&killer_char_id).and_then(|c| c.war_faction_id);
-        let v_fac = snap.characters.get(&victim_char_id).and_then(|c| c.war_faction_id);
-        match (k_fac, v_fac) {
-            (Some(kf), Some(vf)) => is_opposing_militia(kf, vf),
-            _ => false,
-        }
-    });
-    if is_enemy_militia_kill {
-        let hull_val = ctx
-            .sde
+    let hull_isk = if victim_ship_type_id == 670 {
+        0.0
+    } else {
+        ctx.sde
             .types
             .get(&victim_ship_type_id)
             .map(|t| t.base_price)
-            .unwrap_or(10_000_000.0)
-            .max(1_000_000.0);
-        let _ = award_fw_kill_lp(ctx, killer_char_id, sys_id, hull_val);
-    }
+            .filter(|&p| p > 0.0)
+            .unwrap_or(1_000_000.0)
+    };
+    on_player_ship_destroyed_in_combat_detailed(
+        ctx,
+        sys_id,
+        killer_char_id,
+        victim_char_id,
+        victim_ship_type_id,
+        hull_isk,
+        0,
+    );
 }
 
 /// Invoked from `combat_weapons_spool.rs` when a non-player ball is destroyed in space.
@@ -82,12 +110,31 @@ pub async fn on_space_entity_destroyed(
     target_ball_id: i64,
     _target_type_id: u32,
 ) {
-    let Some(killer) = killer_char_id else {
+    if target_ball_id > 500_000_000 {
+        let complex_gid = target_ball_id - 500_000_000;
+        ctx.db.with_mut_snapshot(|s| {
+            if s.fw_runtime.fw_complexes.contains_key(&complex_gid) {
+                s.fw_runtime.complex_guards_cleared.insert(complex_gid, true);
+            }
+        });
+    }
+    let Some(kid) = killer_char_id else {
         return;
     };
-    let is_supply = ctx
-        .db
-        .with_snapshot(|s| s.fw_runtime.supply_sites.contains_key(&target_ball_id));
+    let (is_supply, killer) = ctx.db.with_snapshot(|s| {
+        let resolved_cid = s
+            .characters
+            .get(&kid)
+            .map(|c| c.character_id)
+            .or_else(|| {
+                s.characters
+                    .values()
+                    .find(|c| c.active_ship_id == kid)
+                    .map(|c| c.character_id)
+            })
+            .unwrap_or(kid);
+        (s.fw_runtime.supply_sites.contains_key(&target_ball_id), resolved_cid)
+    });
     if is_supply {
         let _ = apply_fw_or_insurgency_structure_damage(ctx, killer, target_ball_id, 1.0e9).await;
     }

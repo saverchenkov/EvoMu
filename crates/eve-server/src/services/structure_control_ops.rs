@@ -390,7 +390,7 @@ fn ensure_in_space_capsule_ball_spawned(ctx: &ServerContext, sys_id: u32, char_i
             combat_state,
             eve_destiny::SlimItemMeta {
                 group_id: cap_sde.map(|t| t.group_id).unwrap_or(29), category_id: 6, owner_id: char_id,
-                char_id: Some(char_id), corp_id, alliance_id, security_status: sec_status, is_cloaked: false,
+                char_id: Some(char_id), corp_id, alliance_id, security_status: sec_status, is_cloaked: false, ..Default::default()
             },
         );
     }

@@ -824,7 +824,7 @@ pub async fn handle_character_logoff_or_disconnect(
                     corp_id,
                     alliance_id,
                     security_status: sec_status,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             )
             .await;
@@ -1035,7 +1035,7 @@ pub fn reconnect_character_in_space_sync(
             corp_id,
             alliance_id,
             security_status: sec_status,
-            is_cloaked: false,
+            is_cloaked: false, ..Default::default()
         },
     );
 

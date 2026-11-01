@@ -40,7 +40,7 @@ fn pilot_meta(char_id: i64, corp_id: i64) -> SlimItemMeta {
         corp_id,
         alliance_id: -1,
         security_status: 0.0,
-        is_cloaked: false,
+        is_cloaked: false, ..Default::default()
     }
 }
 

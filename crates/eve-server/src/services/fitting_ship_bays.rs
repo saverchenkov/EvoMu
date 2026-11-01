@@ -437,7 +437,7 @@ pub(crate) async fn ship_jettison(
         eve_destiny::SlimItemMeta {
             group_id: 12, category_id: 2, owner_id: char_id, char_id: None,
             corp_id: session.corporation_id.unwrap_or(-1), alliance_id: session.alliance_id.unwrap_or(-1),
-            security_status: 0.0, is_cloaked: false,
+            security_status: 0.0, is_cloaked: false, ..Default::default()
         },
     ).await;
     Ok(PyRep::Tuple(vec![
@@ -621,7 +621,7 @@ pub(crate) async fn ship_drop(
                     corp_id: session.corporation_id.unwrap_or(-1),
                     alliance_id: session.alliance_id.unwrap_or(-1),
                     security_status: 0.0,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             )
             .await;
@@ -913,7 +913,7 @@ pub(crate) async fn ship_scoop_and_store(
                 eve_destiny::SlimItemMeta {
                     group_id: 29, category_id: 6, owner_id: char_id, char_id: Some(char_id),
                     corp_id: session.corporation_id.unwrap_or(-1), alliance_id: session.alliance_id.unwrap_or(-1),
-                    security_status: 0.0, is_cloaked: false,
+                    security_status: 0.0, is_cloaked: false, ..Default::default()
                 },
             ).await;
             session.ship_id = Some(capsule_id);

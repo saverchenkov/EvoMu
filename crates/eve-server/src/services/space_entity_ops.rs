@@ -129,7 +129,7 @@ pub async fn handle(
                                     corp_id: 0,
                                     alliance_id: 0,
                                     security_status: 0.0,
-                                    is_cloaked: false,
+                                    is_cloaked: false, ..Default::default()
                                 },
                             )
                             .await;

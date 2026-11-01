@@ -61,7 +61,7 @@ pub fn populate_system_celestials(
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         );
     }
@@ -98,7 +98,7 @@ pub fn populate_system_celestials(
                     corp_id: -1,
                     alliance_id: -1,
                     security_status: 0.0,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             );
         }
@@ -137,7 +137,7 @@ pub fn populate_system_celestials(
                         corp_id: owner_id,
                         alliance_id: -1,
                         security_status: 0.0,
-                        is_cloaked: false,
+                        is_cloaked: false, ..Default::default()
                     },
                 );
             }
@@ -228,7 +228,7 @@ pub fn populate_asteroid_belt_entities(
                         corp_id: -1,
                         alliance_id: -1,
                         security_status: 0.0,
-                        is_cloaked: false,
+                        is_cloaked: false, ..Default::default()
                     },
                 );
                 ballpark.add_ball(ball);
@@ -263,6 +263,7 @@ pub(super) fn ensure_default_slim_meta(
             alliance_id: -1,
             security_status: 0.0,
             is_cloaked: false,
+            ..Default::default()
         },
     );
 }
@@ -319,7 +320,7 @@ pub(super) fn restore_asteroid_from_template(
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         );
         ballpark.add_ball(orig_ball.clone());

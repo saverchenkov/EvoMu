@@ -750,7 +750,7 @@ pub fn handle_clone_jump(
                         corp_id: ch_corp_id,
                         alliance_id: ch_alliance_id,
                         security_status: ch_sec_status,
-                        is_cloaked: false,
+                        is_cloaked: false, ..Default::default()
                     },
                 );
             } else if dest_loc_id >= 1_000_000_000_000 {

@@ -79,7 +79,7 @@ async fn spawn_ship_ball(ctx: &ServerContext, sys_id: u32, ship_id: i64, type_id
     };
     let meta = SlimItemMeta {
         group_id: 26, category_id: 6, owner_id, char_id: Some(owner_id),
-        corp_id: 1000009, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+        corp_id: 1000009, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
     };
     let _ = sys_h.spawn_ball_with_meta(b, cs, meta).await;
 }

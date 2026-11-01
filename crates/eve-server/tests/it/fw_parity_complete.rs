@@ -126,16 +126,22 @@ async fn test_fw_warzones_victory_points_and_system_capture() {
     };
     assert!(threshold > 0, "Threshold must be positive");
 
-    // Killing an enemy awards LP and adds 20 VP to the system
+    // Killing an enemy awards status-scaled LP and does NOT push solar system contested VP
     let kill_lp = fw_services::award_fw_kill_lp(&ctx, char_id, sys_id, 100_000_000.0);
     assert!(kill_lp > 0, "Kill in warzone awards LP");
-
     let vp_after_kill = ctx
         .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
         .await
         .expect("GetLocalVictoryPointState after kill");
-    assert_eq!(vp_after_kill.dict_get("victoryPoints"), Some(&PyRep::Integer(20)));
-    let c_kill = match vp_after_kill.dict_get("contestedPercentage") {
+    assert_eq!(vp_after_kill.dict_get("victoryPoints"), Some(&PyRep::Integer(0)));
+
+    let _ = fw_services::add_victory_points(&ctx, sys_id, 20);
+    let vp_after_plex_tick = ctx
+        .dispatch_rpc(&mut sess, "fwVictoryPointMgr", None, "GetLocalVictoryPointState", &[], &kw, None)
+        .await
+        .expect("GetLocalVictoryPointState after +20 VP");
+    assert_eq!(vp_after_plex_tick.dict_get("victoryPoints"), Some(&PyRep::Integer(20)));
+    let c_kill = match vp_after_plex_tick.dict_get("contestedPercentage") {
         Some(PyRep::Real(v)) => *v,
         other => panic!("Expected Real contested %, got {other:?}"),
     };

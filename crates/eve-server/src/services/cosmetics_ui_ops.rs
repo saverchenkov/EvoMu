@@ -362,8 +362,8 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             if !is_licensed {
                 return Err(err("SkinNotLicensed", format!("Character {char_id} has not activated a license for SKIN '{design_name}' ({target_skin_id})")));
             }
-            let prev = snap.applied_ship_skins.insert(active_ship, target_skin_id);
-            Ok((active_ship, target_skin_id, prev, expired))
+            let prev = snap.applied_ship_skins.insert(active_ship, resolved_skin_id);
+            Ok((active_ship, resolved_skin_id, prev, expired))
         });
         return match res {
             Ok((active_ship, skin_id, prev_skin, expired)) => {

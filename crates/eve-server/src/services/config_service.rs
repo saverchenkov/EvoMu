@@ -941,24 +941,6 @@ pub fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("notificationMgr", "iterkeys") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let keys = ctx
-                .notification_records
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .filter(|n| n.receiver_id == char_id && !n.deleted)
-                .map(|n| PyRep::Integer(n.notification_id))
-                .collect();
-            Some(Ok(PyRep::List(keys)))
-        }
-
-
-
         _ => None,
     }
 }

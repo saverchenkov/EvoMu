@@ -445,12 +445,13 @@ pub fn spawn_battlefield_site(ctx: &ServerContext, sys_id: u32, faction_id: i64,
 }
 
 /// Scales FW LP reward based on solar system frontline status (`feat:fw.fw-lp`).
-/// Frontline pays 100% (1.0x), Command Operation pays 75% (0.75x), Rearguard pays 50% (0.50x).
+/// Per EVE Uprising: Frontline grants +50% LP (1.5x), Command Operations pays 100% base (1.0x),
+/// and Rearguard applies -99% LP (0.01x).
 pub fn calculate_fw_lp_reward(base_lp: i64, status: i64) -> i64 {
     let mult = match status {
-        STATUS_FRONTLINE => 1.0,
-        STATUS_COMMAND => 0.75,
-        STATUS_REARGUARD => 0.50,
+        STATUS_FRONTLINE => 1.5,
+        STATUS_COMMAND => 1.0,
+        STATUS_REARGUARD => 0.01,
         _ => 1.0,
     };
     ((base_lp as f64) * mult).round() as i64
@@ -560,31 +561,54 @@ pub fn record_fw_stat_event_in_snap(
     rec.victory_points.total = vt;
 }
 
+/// Computes raw FW PvP kill LP before frontline status scaling (`3.25 * net_isk / 10_000`, clamped `0..=50_000`).
+pub fn compute_fw_kill_base_lp(net_loss_isk: f64) -> i64 {
+    (3.25 * net_loss_isk.max(0.0) / 10_000.0)
+        .clamp(0.0, 50_000.0)
+        .round() as i64
+}
+
+/// Resolves a character's effective militia faction (direct enlistment, character record, or corporation militia).
+pub fn effective_char_militia_in_snap(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> Option<i64> {
+    snap.fw_runtime
+        .direct_enlisted_chars
+        .get(&char_id)
+        .copied()
+        .or_else(|| snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
+        .or_else(|| {
+            let cid = snap.characters.get(&char_id).map(|c| c.corporation_id)?;
+            snap.fw_runtime.corp_war_factions.get(&cid).copied()
+        })
+        .filter(|&f| f > 0)
+}
+
 /// Awards FW LP for an enemy kill in a warzone solar system, scaled by system status (`feat:fw.fw-lp`).
+/// Per EVE FW rules, kill LP uses `3.25 * (hull - insurance + fit + cargo) / 10_000` (floored at 0,
+/// capped at 50,000 before suppression bonuses) and does NOT advance solar system contested VP.
 pub fn award_fw_kill_lp(
     ctx: &ServerContext,
     killer_char_id: i64,
     sys_id: u32,
-    victim_ship_value_isk: f64,
+    victim_net_value_isk: f64,
 ) -> i64 {
     let (status, killer_fac_opt) = ctx.db.with_snapshot(|snap| {
         (
             compute_system_frontline_status(ctx, snap, sys_id),
-            snap.characters.get(&killer_char_id).and_then(|c| c.war_faction_id),
+            effective_char_militia_in_snap(snap, killer_char_id),
         )
     });
-    let base_lp = (victim_ship_value_isk * 0.0001).clamp(100.0, 50_000.0) as i64;
+    let base_lp = compute_fw_kill_base_lp(victim_net_value_isk);
+    let status_lp = calculate_fw_lp_reward(base_lp, status).clamp(0, 50_000);
     let supp_lp_mult = killer_fac_opt
         .map(|fid| crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, fid))
         .unwrap_or(1.0);
-    let final_lp = ((calculate_fw_lp_reward(base_lp, status) as f64) * supp_lp_mult).round() as i64;
+    let final_lp = ((status_lp as f64) * supp_lp_mult).round() as i64;
 
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut fid_opt = None;
-        if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-            fid_opt = ch.war_faction_id;
-            if let Some(fid) = fid_opt {
+        let fid_opt = effective_char_militia_in_snap(snap, killer_char_id);
+        if let (Some(fid), Some(ch)) = (fid_opt, snap.characters.get_mut(&killer_char_id)) {
+            if final_lp > 0 {
                 let militia_corp = ctx
                     .sde
                     .factions
@@ -595,12 +619,81 @@ pub fn award_fw_kill_lp(
                 *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
             }
         }
-        record_fw_stat_event_in_snap(snap, now_u, killer_char_id, fid_opt, 1, 20);
+        if victim_net_value_isk > 0.0 {
+            record_fw_stat_event_in_snap(snap, now_u, killer_char_id, fid_opt, 1, 0);
+        }
     });
 
-    add_victory_points(ctx, sys_id, 20);
-
     final_lp
+}
+
+/// Splits FW PvP kill LP equally across all opposing-militia attackers on a warzone killmail (`feat:fw.fw-lp`).
+/// Empty Capsules (`type_id == 670`) and zero-net-loss hulls pay `0 LP`, and PvP kills never push system VP.
+pub fn award_fw_kill_lp_split(
+    ctx: &ServerContext,
+    attacker_char_ids: &[i64],
+    victim_char_id: i64,
+    sys_id: u32,
+    victim_ship_type_id: u32,
+    net_loss_isk: f64,
+) -> i64 {
+    if victim_ship_type_id == 670 {
+        return 0;
+    }
+    let (status, eligible) = ctx.db.with_snapshot(|snap| {
+        if !snap.fw_system_occupations.contains_key(&sys_id) {
+            return (STATUS_COMMAND, Vec::new());
+        }
+        let Some(v_fac) = effective_char_militia_in_snap(snap, victim_char_id) else {
+            return (STATUS_COMMAND, Vec::new());
+        };
+        let mut seen = Vec::new();
+        for &aid in attacker_char_ids {
+            if aid > 0 && aid != victim_char_id && !seen.iter().any(|&(id, _)| id == aid) {
+                if let Some(a_fac) = effective_char_militia_in_snap(snap, aid) {
+                    if is_opposing_militia(a_fac, v_fac) {
+                        seen.push((aid, a_fac));
+                    }
+                }
+            }
+        }
+        (compute_system_frontline_status(ctx, snap, sys_id), seen)
+    });
+    if eligible.is_empty() {
+        return 0;
+    }
+    let base_lp = compute_fw_kill_base_lp(net_loss_isk);
+    let status_lp = calculate_fw_lp_reward(base_lp, status).clamp(0, 50_000);
+    let count = eligible.len() as f64;
+    let now_u = ctx.now_unix();
+    let mut total_paid = 0i64;
+    let shares: Vec<(i64, i64, i64)> = eligible
+        .into_iter()
+        .map(|(aid, afac)| {
+            let supp = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, afac);
+            let share = (((status_lp as f64) * supp) / count).round() as i64;
+            (aid, afac, share)
+        })
+        .collect();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (aid, afac, share) in shares {
+            if share > 0 {
+                if let Some(ch) = snap.characters.get_mut(&aid) {
+                    let militia_corp = ctx
+                        .sde
+                        .factions
+                        .get(&(afac as u32))
+                        .and_then(|f| f.militia_corporation_id)
+                        .map(|c| c as i64)
+                        .unwrap_or(afac);
+                    *ch.loyalty_points.entry(militia_corp).or_insert(0) += share;
+                    total_paid += share;
+                }
+            }
+            record_fw_stat_event_in_snap(snap, now_u, aid, Some(afac), 1, 0);
+        }
+    });
+    total_paid
 }
 
 pub async fn handle(

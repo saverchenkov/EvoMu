@@ -84,8 +84,8 @@ async fn test_alliances_lifecycle_governance_contacts_bulletins_and_rankings() {
     sess_nondir.alliance_id = Some(aid);
     sess_nondir.corp_role = 0;
 
-    // Bind allianceRegistry for sess1
-    assert_eq!(call(&ctx, &mut sess1, "allianceRegistry", "Bind", vec![PyRep::Integer(aid)]).await.expect("Bind allianceRegistry"), PyRep::None);
+    // Bind allianceRegistry for sess1 (client_local -> UnimplementedRPC)
+    assert_eq!(call(&ctx, &mut sess1, "allianceRegistry", "Bind", vec![PyRep::Integer(aid)]).await.expect_err("Bind allianceRegistry").code, "UnimplementedRPC");
 
     // apply-alliance: application -> executor accepts -> joins after 24h.
     let applied = call(&ctx, &mut sess2, "corpRegistry", "ApplyToJoinAlliance", vec![PyRep::Integer(aid), PyRep::String("Requesting membership".into())]).await.unwrap();

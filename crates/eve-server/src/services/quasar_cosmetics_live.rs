@@ -1097,8 +1097,10 @@ pub fn activate_ship_emblem_license(
     ]))
 }
 
-/// Broadcasts MachoNet `OnSlimItemChange` (arity 2), `DestinyEvent::OnSlimItemChange`, and
-/// `OnShipCosmeticsChanged` when a pilot applies or clears a hull SKIN.
+/// Broadcasts MachoNet `OnSlimItemChange` (arity 2), `DestinyEvent::OnSlimItemChange`,
+/// `OnShipCosmeticChanged` (arity 3), and `OnShipCosmeticsChanged` (arity 2) when a pilot
+/// applies or clears a hull SKIN.
+// parity: feat:cosmetics.skin-apply
 pub async fn broadcast_ship_skin_cosmetic_change(
     ctx: &crate::router::ServerContext,
     char_id: i64,
@@ -1107,17 +1109,24 @@ pub async fn broadcast_ship_skin_cosmetic_change(
     prev_skin: Option<u32>,
     new_skin: Option<u32>,
 ) {
-    let resolve = |raw: Option<u32>| -> PyRep {
-        match raw {
-            Some(s) => {
-                let sid = ctx.sde.skin_licenses.get(&s).map(|l| l.skin_id).unwrap_or(s);
-                PyRep::Integer(i64::from(sid))
-            }
-            None => PyRep::None,
-        }
+    let resolve_ids = |raw: Option<u32>| -> (Option<u32>, Option<u32>) {
+        let Some(s) = raw else {
+            return (None, None);
+        };
+        let sid = ctx.sde.skin_licenses.get(&s).map(|l| l.skin_id).unwrap_or(s);
+        let mat_set = ctx
+            .sde
+            .skins
+            .get(&sid)
+            .and_then(|sk| ctx.sde.skin_materials.get(&sk.skin_material_id))
+            .and_then(|m| m.material_set_id);
+        (Some(sid), mat_set)
     };
-    let new_skin_rep = resolve(new_skin);
-    let prev_skin_rep = resolve(prev_skin);
+    let (prev_sid, prev_mat) = resolve_ids(prev_skin);
+    let (new_sid, new_mat) = resolve_ids(new_skin);
+    let to_rep = |opt: Option<u32>| opt.map(|v| PyRep::Integer(i64::from(v))).unwrap_or(PyRep::None);
+    let new_skin_rep = to_rep(new_sid);
+    let prev_skin_rep = to_rep(prev_sid);
     let spatial = ctx.db.with_snapshot(|s| {
         let ch = s.characters.get(&char_id)?;
         let in_space = ch.active_ship_id == ship_id && ch.station_id.is_none() && ch.structure_id.is_none();
@@ -1134,7 +1143,7 @@ pub async fn broadcast_ship_skin_cosmetic_change(
             vec![PyRep::Integer(ship_id), cosmetic_dict],
         );
         let group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(25);
-        let build_slim = |skin_rep: PyRep| {
+        let build_slim = |skin_rep: PyRep, mat_rep: PyRep| {
             PyRep::keyval([
                 ("itemID", PyRep::Integer(ship_id)),
                 ("typeID", PyRep::Integer(i64::from(ship_type_id))),
@@ -1146,13 +1155,17 @@ pub async fn broadcast_ship_skin_cosmetic_change(
                 ("allianceID", alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("securityStatus", PyRep::Real(sec_status)),
                 ("skinID", skin_rep),
+                ("skinMaterialSetID", mat_rep),
             ])
         };
         ctx.notify(
             NotificationTarget::SolarSystem(sys_id),
             "OnSlimItemChange",
             "solarsystemid",
-            vec![build_slim(prev_skin_rep), build_slim(new_skin_rep)],
+            vec![
+                build_slim(prev_skin_rep, to_rep(prev_mat)),
+                build_slim(new_skin_rep, to_rep(new_mat)),
+            ],
         );
         let handle = ctx.systems.get_or_spawn(sys_id);
         let is_cloaked = handle
@@ -1173,6 +1186,8 @@ pub async fn broadcast_ship_skin_cosmetic_change(
                     alliance_id: alliance_id.unwrap_or(0),
                     security_status: sec_status,
                     is_cloaked,
+                    skin_id: new_sid,
+                    skin_material_set_id: new_mat,
                 },
             )
             .await;

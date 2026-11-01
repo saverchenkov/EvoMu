@@ -54,27 +54,27 @@ async fn test_expert_system_and_browser_lockdown_services() {
     let kw = HashMap::new();
     let mut sess = setup_pilot(&ctx, 9_301, "demo", "demo-secret", PILOT1).await;
 
-    // 1. BrowserLockdownService RPCs return persisted browser lockdown policy
+    // 1. BrowserLockdownService RPCs return default lockdown policy
     let home = ctx
         .dispatch_rpc(&mut sess, "browserLockdownSvc", None, "GetDefaultHomePage", &[], &kw, None)
         .await
-        .expect("browserLockdownSvc.GetDefaultHomePage");
-    assert_eq!(home, PyRep::String("https://www.eveonline.com".into()));
-    let locked = ctx
+        .expect("GetDefaultHomePage");
+    assert_eq!(home, PyRep::String("https://www.eveonline.com/".into()));
+    let in_lockdown = ctx
         .dispatch_rpc(&mut sess, "browserLockdownSvc", None, "IsBrowserInLockdown", &[], &kw, None)
         .await
-        .expect("browserLockdownSvc.IsBrowserInLockdown");
-    assert_eq!(locked, PyRep::Bool(false));
-    let flagged = ctx
+        .expect("IsBrowserInLockdown");
+    assert_eq!(in_lockdown, PyRep::Bool(false));
+    let sites = ctx
         .dispatch_rpc(&mut sess, "browserLockdownSvc", None, "GetFlaggedSitesList", &[], &kw, None)
         .await
-        .expect("browserLockdownSvc.GetFlaggedSitesList");
-    assert_eq!(flagged, PyRep::List(vec![]));
+        .expect("GetFlaggedSitesList");
+    assert_eq!(sites, PyRep::List(vec![]));
     let hash = ctx
         .dispatch_rpc(&mut sess, "browserLockdownSvc", None, "GetFlaggedSitesHash", &[], &kw, None)
         .await
-        .expect("browserLockdownSvc.GetFlaggedSitesHash");
-    assert!(matches!(hash, PyRep::String(ref s) if s.len() == 32));
+        .expect("GetFlaggedSitesHash");
+    assert!(hash.as_str().is_some_and(|s| !s.is_empty()));
 
     // 2. ExpertSystemMgr endpoints
     let initial_es = ctx

@@ -852,7 +852,7 @@ pub async fn try_activate_standup_weapon(
                     corp_id: st_corp_id,
                     alliance_id: st_alliance,
                     security_status: 0.0,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             ).await;
 

@@ -267,18 +267,18 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
         .expect("GetCohortsForUser");
     assert!(matches!(user_cohorts, PyRep::List(ref l) if !l.is_empty()));
 
-    // 10. SetSessionCheck & clear_memoized
+    // 10. SetSessionCheck & clear_memoized (client_local -> UnimplementedRPC)
     let sc = ctx
         .dispatch_rpc(&mut sess, "charMgr", None, "SetSessionCheck", &[], &kw, None)
         .await
-        .expect("SetSessionCheck");
-    assert_eq!(sc, PyRep::Bool(true));
+        .expect_err("SetSessionCheck");
+    assert_eq!(sc.code, eve_server::router::ERR_UNIMPLEMENTED);
 
     let cm = ctx
         .dispatch_rpc(&mut sess, "charMgr", None, "clear_memoized", &[], &kw, None)
         .await
-        .expect("clear_memoized");
-    assert_eq!(cm, PyRep::Bool(true));
+        .expect_err("clear_memoized");
+    assert_eq!(cm.code, eve_server::router::ERR_UNIMPLEMENTED);
 
     // 11. GetPaperdollState
     let pd = ctx

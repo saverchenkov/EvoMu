@@ -136,7 +136,7 @@ async fn test_skin_licences_activation_listing_and_timed_expiry() {
 
     // Wear the timed SKIN, then let it expire.
     rpc(&ctx, &mut sess, "shipCosmeticsMgr", "ApplySkinToShip", &[PyRep::Integer(i64::from(ship_type)), PyRep::Integer(i64::from(timed_lic))]).await.expect("apply timed");
-    ctx.db.with_snapshot(|snap| assert_eq!(snap.applied_ship_skins.get(&ship_id), Some(&timed_lic)));
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.applied_ship_skins.get(&ship_id), Some(&timed.skin_id)));
     ctx.advance_virtual_clock(u64::from(timed.duration.unsigned_abs()) * 86_400 - 60);
     let before_end = skin_rows(&rpc(&ctx, &mut sess, "shipCosmeticsMgr", "GetLicencedSkins", &[]).await.expect("before end"));
     assert_eq!(before_end.len(), 2, "timed licence still valid one minute before its end date");

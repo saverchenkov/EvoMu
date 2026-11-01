@@ -329,14 +329,15 @@ fn take_offer(
         }
 
         if is_fw_militia_corp {
+            let corp_fac = snap.fw_runtime.corp_war_factions.get(&ch.corporation_id).copied().unwrap_or(0);
             let char_fac = snap
                 .fw_runtime
                 .direct_enlisted_chars
                 .get(&char_id)
                 .copied()
                 .or(ch.war_faction_id)
-                .or_else(|| snap.fw_runtime.corp_war_factions.get(&ch.corporation_id).copied())
-                .unwrap_or(0);
+                .filter(|&f| f > 0)
+                .unwrap_or(corp_fac);
             let expected_fac = match offer.corp_id {
                 1_000_179 => 500_003, // Amarr
                 1_000_180 => 500_001, // Caldari
@@ -346,12 +347,48 @@ fn take_offer(
                 1_000_138 | 1_000_436 => 500_011, // Angel Cartel / Malakim Zealots
                 _ => 0,
             };
-            let standing = ch.standings.get(&offer.corp_id).copied().unwrap_or(0.0);
-            if char_fac != expected_fac && standing < 0.0 {
+            if (char_fac > 0 && crate::services::fw_services::is_opposing_militia(char_fac, expected_fac))
+                || (is_corp_take && corp_fac > 0 && crate::services::fw_services::is_opposing_militia(corp_fac, expected_fac))
+            {
                 return Err(BridgeRpcError {
                     code: "InsufficientStanding".into(),
-                    message: format!("Character must be enlisted in militia {expected_fac} or have non-negative standing (have {standing:.2})"),
+                    message: format!(
+                        "Opposing militia ({char_fac}) cannot redeem offers from militia corporation {} ({expected_fac})",
+                        offer.corp_id
+                    ),
                 });
+            }
+            if char_fac != expected_fac {
+                let corp_eff = ch
+                    .standings
+                    .get(&offer.corp_id)
+                    .copied()
+                    .map(|r| {
+                        crate::services::agents_missions::agents_standings_arcs::compute_effective_standing_breakdown(
+                            ctx, snap, char_id, offer.corp_id, r, true,
+                        )
+                        .0
+                    })
+                    .unwrap_or(0.0);
+                let fac_eff = ch
+                    .standings
+                    .get(&expected_fac)
+                    .copied()
+                    .map(|r| {
+                        crate::services::agents_missions::agents_standings_arcs::compute_effective_standing_breakdown(
+                            ctx, snap, char_id, expected_fac, r, true,
+                        )
+                        .0
+                    })
+                    .unwrap_or(0.0);
+                if corp_eff.min(fac_eff) < 0.0 {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientStanding".into(),
+                        message: format!(
+                            "Character must be enlisted in militia {expected_fac} or have non-negative effective corporation/faction standing (corp={corp_eff:.2}, faction={fac_eff:.2})"
+                        ),
+                    });
+                }
             }
         }
 

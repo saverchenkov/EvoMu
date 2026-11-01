@@ -450,8 +450,8 @@ async fn test_structure_settings_parity() {
     .expect("CharacterHasService non-operational");
     assert_eq!(non_op_has, PyRep::Bool(false));
 
-    // 6. Test clear_memoized cache invalidation notification
-    let clear_res = rpc(
+    // 6. Test clear_memoized (client_local -> UnimplementedRPC)
+    let clear_err = rpc(
         &ctx,
         &mut sess,
         "structureSettings",
@@ -459,8 +459,8 @@ async fn test_structure_settings_parity() {
         &[],
     )
     .await
-    .expect("structureSettings.clear_memoized");
-    assert_eq!(clear_res, PyRep::None);
+    .expect_err("structureSettings.clear_memoized");
+    assert_eq!(clear_err.code, eve_server::router::ERR_UNIMPLEMENTED);
 }
 
 #[tokio::test]
@@ -476,17 +476,11 @@ async fn test_dogma_im_parity() {
     assert_eq!(st_info.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(SYS_JITA))));
     assert_eq!(st_info.dict_get("stationTypeID"), Some(&PyRep::Integer(52678)));
 
-    // 1. dogmaIM.SetSessionCheck on authenticated session
-    let sc_ok = rpc(&ctx, &mut sess, "dogmaIM", "SetSessionCheck", &[])
+    // 1. dogmaIM.SetSessionCheck (client_local -> UnimplementedRPC)
+    let sc_err = rpc(&ctx, &mut sess, "dogmaIM", "SetSessionCheck", &[])
         .await
-        .expect("dogmaIM.SetSessionCheck authenticated");
-    assert_eq!(sc_ok, PyRep::Bool(true));
-
-    let mut unauth_sess = SessionState::new(302);
-    let sc_err = rpc(&ctx, &mut unauth_sess, "dogmaIM", "SetSessionCheck", &[])
-        .await
-        .expect_err("dogmaIM.SetSessionCheck unauthenticated must fail");
-    assert_eq!(sc_err.code, "Unauthorized");
+        .expect_err("dogmaIM.SetSessionCheck authenticated");
+    assert_eq!(sc_err.code, "UnimplementedRPC");
 
     // 2. dogmaIM.GetRequiredSkillLevels
     // Query by ship typeID 587 (Rifter)

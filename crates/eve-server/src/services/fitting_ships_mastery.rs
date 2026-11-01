@@ -190,7 +190,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                                 corp_id: session.corporation_id.unwrap_or(-1),
                                 alliance_id: session.alliance_id.unwrap_or(-1),
                                 security_status: 0.0,
-                                is_cloaked: false,
+                                is_cloaked: false, ..Default::default()
                             },
                         )
                         .await;
@@ -629,7 +629,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         corp_id: session.corporation_id.unwrap_or(-1),
                         alliance_id: session.alliance_id.unwrap_or(-1),
                         security_status: 0.0,
-                        is_cloaked: false,
+                        is_cloaked: false, ..Default::default()
                     },
                 )
                 .await;
@@ -1284,15 +1284,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 "SAFE_LOGOFF_ABORT_GENERIC",
             ),
         ),
-
-        ("ship", "SetSessionCheck") | ("ship", "clear_memoized") | ("dogmaIM", "SetSessionCheck") => {
-            // const-ok: session check confirmation
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::Bool(true)))
-        }
 
         _ => None,
     }

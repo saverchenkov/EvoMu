@@ -613,7 +613,7 @@ fn emit_structure_left_space_and_spawn_drops(ctx: &ServerContext, snap: &WorldSt
                         owner_id: it.owner_id, char_id: None, corp_id: st.owner_corp_id, alliance_id,
                         group_id: ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(186),
                         category_id: ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(65),
-                        security_status: 0.0, is_cloaked: false,
+                        security_status: 0.0, is_cloaked: false, ..Default::default()
                     },
                 );
             }

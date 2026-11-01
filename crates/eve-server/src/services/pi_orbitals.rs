@@ -815,7 +815,7 @@ pub fn handle_pi_orbitals(
                                 corp_id: -1,
                                 alliance_id: -1,
                                 security_status: 0.0,
-                                is_cloaked: false,
+                                is_cloaked: false, ..Default::default()
                             },
                         );
                     }

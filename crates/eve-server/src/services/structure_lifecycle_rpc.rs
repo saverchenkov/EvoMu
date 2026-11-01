@@ -714,7 +714,7 @@ pub async fn ensure_structure_ball_in_space(ctx: &ServerContext, sys_id: u32, st
         group_id: st_type.map(|t| t.group_id).unwrap_or(1657),
         category_id: life::CATEGORY_STRUCTURE,
         security_status: 0.0,
-        is_cloaked: false,
+        is_cloaked: false, ..Default::default()
     };
     let _ = sys.spawn_ball_with_meta(ball, cs, meta).await;
 }

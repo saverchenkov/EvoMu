@@ -567,7 +567,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         rpc(&ctx, &mut sess_a, "warsInfoMgr", "AcceptSurrender", &[PyRep::Integer(neg_id)]).await;
 
         rpc(&ctx, &mut sess_a, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(fw_services::FACTION_MINMATAR)]).await;
-        fw_services::add_victory_points(&ctx, fw_sys, 1_480);
+        fw_services::add_victory_points(&ctx, fw_sys, 1_500);
         fw_services::update_system_advantage(&ctx, fw_sys, 0.25, 0.10);
         fw_services::award_fw_kill_lp(&ctx, PILOT, fw_sys, 100_000_000.0);
         fw_services::spawn_battlefield_site(&ctx, fw_sys, fw_services::FACTION_MINMATAR, "Amo Siege");
@@ -644,7 +644,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         assert!(esi_fw_sys.to_string().contains(&fw_sys.to_string()) && esi_fw_sys.to_string().contains("1500"));
         let esi_fw_char = esi_get(&ctx2, "/characters/{character_id}/fw/stats", &[("character_id", PILOT)]);
         assert_eq!(esi_fw_char["kills"]["total"], 1);
-        assert_eq!(esi_fw_char["victory_points"]["total"], 20);
+        assert_eq!(esi_fw_char["victory_points"]["total"], 0);
         let esi_sov_camps = esi_get(&ctx2, "/sovereignty/campaigns", &[]);
         assert!(esi_sov_camps.to_string().contains(&hub_id.to_string()) && esi_sov_camps.to_string().contains("0.6"));
 

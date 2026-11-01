@@ -92,6 +92,7 @@ async fn seed_ship_in_space(
                 alliance_id: -1,
                 security_status: 0.0,
                 is_cloaked: false,
+                ..Default::default()
             },
         )
         .await;

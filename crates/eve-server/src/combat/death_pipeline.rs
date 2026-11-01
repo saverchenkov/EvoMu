@@ -831,7 +831,7 @@ pub fn execute_death_pipeline_sync_inner(
             corp_id: -1,
             alliance_id: -1,
             security_status: 0.0,
-            is_cloaked: false,
+            is_cloaked: false, ..Default::default()
         },
     );
     if let Some(cid) = ejected_cap_id {
@@ -867,7 +867,7 @@ pub fn execute_death_pipeline_sync_inner(
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         );
     }
@@ -898,12 +898,19 @@ pub fn execute_death_pipeline_sync_inner(
         sys_id,
         total_damage,
     );
-    crate::services::fw_gameplay::on_player_ship_destroyed_in_combat(
+    let fw_net_isk = if is_pod {
+        0.0
+    } else {
+        (total_value_isk - calculated_insurance_payout).max(0.0)
+    };
+    crate::services::fw_gameplay::on_player_ship_destroyed_in_combat_detailed(
         ctx,
         sys_id,
         attacker_char_id,
         victim_char_id,
         victim_ship_type_id,
+        fw_net_isk,
+        killmail_id,
     );
 
     Ok(DeathPipelineResult {

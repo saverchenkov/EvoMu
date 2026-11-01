@@ -542,21 +542,7 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([("deleted", PyRep::Bool(true))])))
         }
 
-        ("allianceRegistry", "Bind") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let object_id = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
-            match ctx.bind_object(session, "allianceRegistry", object_id) {
-                Ok(_) => Some(Ok(PyRep::None)),
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("allianceRegistry", "SetSessionCheck") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            Some(Ok(PyRep::None))
-        }
-
-        ("allianceRegistry", "allianceID" | "shortName" | "description" | "url" | "executorCorpID" | "creatorCorpID" | "creatorCharID" | "dictatorial" | "allowWar") => {
+        ("allianceRegistry", "allianceID" | "shortName" | "executorCorpID" | "creatorCorpID" | "creatorCharID" | "allowWar") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = args.first().and_then(|a| a.as_i64()).or_else(|| bound_obj_id.filter(|&id| id > 0)).or(session.alliance_id).unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
@@ -569,18 +555,12 @@ pub async fn handle(
             let Some((aid_val, short_name, exec_id, creator_corp_id, creator_char_id)) = info else {
                 return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
             };
-            let (desc, url, _, _, dictatorial) = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements, m.dictatorial)).unwrap_or_default()
-            });
             let rep = match method {
                 "allianceID" => PyRep::Integer(aid_val),
                 "shortName" => PyRep::String(short_name),
-                "description" => PyRep::String(desc),
-                "url" => PyRep::String(url),
                 "executorCorpID" => PyRep::Integer(exec_id),
                 "creatorCorpID" => PyRep::Integer(creator_corp_id),
                 "creatorCharID" => PyRep::Integer(creator_char_id),
-                "dictatorial" => PyRep::Bool(dictatorial),
                 "allowWar" => PyRep::Bool(true),
                 _ => PyRep::None,
             };
@@ -714,6 +694,12 @@ pub async fn handle(
             });
             if !member_corps.contains(&corp_id) || !member_corps.contains(&target_corp_id) {
                 return Some(Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Both corporations must be members of the alliance".into() }));
+            }
+            if read_alliance_war_state(ctx, |st| st.alliances.get(&aid).is_some_and(|m| m.dictatorial)) {
+                return Some(Err(BridgeRpcError {
+                    code: "AllianceIsDictatorial".into(),
+                    message: format!("Alliance {aid} is dictatorial; executor support votes are disabled"),
+                }));
             }
             let new_exec = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();

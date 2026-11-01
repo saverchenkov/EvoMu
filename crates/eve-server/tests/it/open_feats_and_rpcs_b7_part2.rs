@@ -167,10 +167,10 @@ async fn test_cosmetics_skin_apply_in_space_broadcast_and_persistence() {
     );
     assert_eq!(
         apply_rep.dict_get("skinID"),
-        Some(&PyRep::Integer(i64::from(license_type_id)))
+        Some(&PyRep::Integer(i64::from(resolved_skin_id)))
     );
 
-    // Observer PILOT_2 in the same solar system receives slim item update + cosmetic change
+    // Observer PILOT_2 already in the solar system receives slim item update + cosmetic change
     let observer_notifs = ctx.drain_notifications_for_char(PILOT_2);
     let slim_notif = observer_notifs
         .iter()
@@ -192,13 +192,92 @@ async fn test_cosmetics_skin_apply_in_space_broadcast_and_persistence() {
         "observer PILOT_2 must receive OnShipCosmeticsChanged"
     );
 
-    // Verify applied SKIN persists across SQLite restart
+    // Late-arriving grid observer syncing Ballpark state via beyonce.UpdateStateRequest sees skinID in SetState slims
+    let late_observer_cid = 90_000_003i64;
+    let late_ship_id = 100_999_003i64;
+    let mut sess_late = crate::sovereignty_equinox_gameplay_closure::register_online_pilot(
+        &ctx,
+        39_903,
+        "demo3",
+        "demo3-secret",
+        late_observer_cid,
+        98_000_093,
+        None,
+        JITA_SYS,
+        late_ship_id,
+        587,
+        DVec3::new(10_500.0, 0.0, 0.0),
+        0,
+    )
+    .await;
+    let _ = ctx.drain_notifications_for_char(late_observer_cid);
+    let beyonce_oid = ctx
+        .bind_object(&mut sess_late, "beyonce", i64::from(JITA_SYS))
+        .expect("bind beyonce");
+    ctx.dispatch_rpc(
+        &mut sess_late,
+        "beyonce",
+        Some(beyonce_oid),
+        "UpdateStateRequest",
+        &[],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("beyonce.UpdateStateRequest for late-arriving grid observer");
+    let (_, _, late_set_state_rep) = sys_h
+        .drain_observer_updates(late_ship_id)
+        .await
+        .expect("drain SetState for late observer");
+    let late_destiny_dbg = format!("{late_set_state_rep:?}");
+    assert!(
+        late_destiny_dbg.contains("\"SetState\"")
+            && late_destiny_dbg.contains(&format!(
+                "(String(\"skinID\"), Integer({resolved_skin_id}))"
+            )),
+        "late-arriving observer SetState slim item must include skinID={resolved_skin_id}, got: {late_destiny_dbg}"
+    );
+
+    // Re-spawning the skinned ship on grid emits AddBalls2 with skinID in DoDestinyUpdate
+    let _ = sys_h.remove_ball(active_ship_id).await;
+    let _ = sys_h.drain_observer_updates(late_ship_id).await;
+    let _ = sys_h
+        .spawn_ball_with_meta(
+            crate::sovereignty_equinox_gameplay_closure::make_ball(
+                active_ship_id,
+                587,
+                DVec3::new(10_000.0, 0.0, 0.0),
+            ),
+            ctx.build_ship_combat_state(PILOT_1, active_ship_id, 587),
+            ctx.build_ship_slim_meta(PILOT_1, 587),
+        )
+        .await;
+    let (_, _, addballs2_rep) = sys_h
+        .drain_observer_updates(late_ship_id)
+        .await
+        .expect("drain AddBalls2 for late observer");
+    let addballs2_dbg = format!("{addballs2_rep:?}");
+    assert!(
+        addballs2_dbg.contains("\"AddBalls2\"")
+            && addballs2_dbg.contains(&format!(
+                "(String(\"skinID\"), Integer({resolved_skin_id}))"
+            )),
+        "AddBalls2 slim item must include skinID={resolved_skin_id}, got: {addballs2_dbg}"
+    );
+
+    // Verify canonical SDE skin_id persists across SQLite restart AND populates build_ship_slim_meta
     let ctx_re =
         crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "b7_skin_apply");
     let persisted_skin = ctx_re
         .db
         .with_snapshot(|s| s.applied_ship_skins.get(&active_ship_id).copied());
-    assert_eq!(persisted_skin, Some(license_type_id));
+    assert_eq!(persisted_skin, Some(resolved_skin_id));
+    let reloaded_meta = ctx_re.build_ship_slim_meta(PILOT_1, 587);
+    assert_eq!(
+        reloaded_meta.skin_id,
+        Some(resolved_skin_id),
+        "build_ship_slim_meta after SQLite reload must populate canonical skin_id"
+    );
 }
 
 #[tokio::test]
@@ -256,7 +335,7 @@ async fn test_structure_directory_accessible_services_and_acl() {
         .expect("owner_corp");
     sess1.corporation_id = Some(owner_corp);
 
-    // Deploy an operational Raitaru (35825) with online Cloning (35894 -> 2) & Manufacturing (35878 -> 4) services
+    // Deploy an operational Raitaru (35825) with online Cloning (35894 -> 10) & Manufacturing (35878 -> 22) services
     let structure_id = 1_045_000_777_001i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -312,7 +391,7 @@ async fn test_structure_directory_accessible_services_and_acl() {
         &sess1,
         structure_id,
         Some(false),
-        &[(2, 0.01), (4, 0.02)],
+        &[(10, 0.01), (22, 0.02)],
         &[],
         &[p3_char],
         &[PILOT_2],
@@ -333,8 +412,8 @@ async fn test_structure_directory_accessible_services_and_acl() {
         let Some(PyRep::Dict(svcs)) = entry.dict_get("services") else {
             panic!("expected services Dict on structure directory entry");
         };
-        assert!(svcs.contains(&(PyRep::Integer(2), PyRep::Integer(1))));
-        assert!(svcs.contains(&(PyRep::Integer(4), PyRep::Integer(1))));
+        assert!(svcs.contains(&(PyRep::Integer(10), PyRep::Integer(1))));
+        assert!(svcs.contains(&(PyRep::Integer(22), PyRep::Integer(1))));
     }
 
     // Blocked pilot PILOT_3 does not see structure in GetStructures and is denied GetStructureInfo

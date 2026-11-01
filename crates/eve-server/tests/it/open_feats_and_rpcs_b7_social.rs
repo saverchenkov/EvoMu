@@ -54,90 +54,12 @@ async fn setup_pilot(ctx: &ServerContext, char_id: i64) -> SessionState {
 }
 
 #[tokio::test]
-async fn test_notification_mgr_iterkeys_and_persistence() {
-    // parity: rpc:notificationMgr.iterkeys
-    let ctx = ServerContext::new();
-    let mut unauth_sess = SessionState::new(999);
-    assert!(
-        rpc(&ctx, &mut unauth_sess, "notificationMgr", "iterkeys", &[])
-            .await
-            .is_err(),
-        "unauthenticated notificationMgr.iterkeys must fail"
-    );
-
-    let mut sess2 = setup_pilot(&ctx, PILOT_2).await;
-
-    let n1 = ctx.create_character_notification(PILOT_1, PILOT_2, 14, 9, "contact: added");
-    let n2 = ctx.create_character_notification(PILOT_1, PILOT_2, 2, 5, "war: declared");
-
-    let keys_rep = rpc(&ctx, &mut sess2, "notificationMgr", "iterkeys", &[])
-        .await
-        .expect("notificationMgr.iterkeys");
-    let PyRep::List(keys) = keys_rep else {
-        panic!("expected List from notificationMgr.iterkeys, got {keys_rep:?}");
-    };
-    let initial_ids: Vec<i64> = keys.iter().filter_map(|k| k.as_i64()).collect();
-    assert!(initial_ids.contains(&n1.notification_id));
-    assert!(initial_ids.contains(&n2.notification_id));
-    let first_id = n1.notification_id;
-    let second_id = n2.notification_id;
-
-    // Delete the first notification and verify iterkeys reflects the mutation
-    rpc(
-        &ctx,
-        &mut sess2,
-        "notificationMgr",
-        "DeleteNotifications",
-        &[PyRep::List(vec![PyRep::Integer(first_id)])],
-    )
-    .await
-    .expect("DeleteNotifications");
-
-    let keys_after = rpc(&ctx, &mut sess2, "notificationMgr", "iterkeys", &[])
-        .await
-        .expect("notificationMgr.iterkeys after delete");
-    let PyRep::List(keys_after_list) = keys_after else {
-        panic!("expected List after delete");
-    };
-    let remaining_ids: Vec<i64> = keys_after_list.iter().filter_map(|k| k.as_i64()).collect();
-    assert!(!remaining_ids.contains(&first_id));
-    assert!(remaining_ids.contains(&second_id));
-
-    // Reload from SQLite and verify iterkeys persists
-    let ctx_reloaded =
-        crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "b7_notif_iterkeys");
-    let mut sess2_re = setup_pilot(&ctx_reloaded, PILOT_2).await;
-    let keys_re = rpc(&ctx_reloaded, &mut sess2_re, "notificationMgr", "iterkeys", &[])
-        .await
-        .expect("notificationMgr.iterkeys after reload");
-    let PyRep::List(keys_re_list) = keys_re else {
-        panic!("expected List after reload");
-    };
-    let reloaded_ids: Vec<i64> = keys_re_list.iter().filter_map(|k| k.as_i64()).collect();
-    assert!(!reloaded_ids.contains(&first_id));
-    assert!(reloaded_ids.contains(&second_id));
-}
-
-#[tokio::test]
-async fn test_alliance_registry_description_url_dictatorial_and_persistence() {
-    // parity: rpc:allianceRegistry.description
-    // parity: rpc:allianceRegistry.dictatorial
-    // parity: rpc:allianceRegistry.url
+async fn test_alliance_dictatorial_declare_executor_support_and_persistence() {
     const EXPECTED_MISSING_ERR: &str = "AllianceNotFound";
     let ctx = ServerContext::new();
     let mut unauth_sess = SessionState::new(995);
     assert!(
-        rpc(&ctx, &mut unauth_sess, "allianceRegistry", "description", &[])
-            .await
-            .is_err()
-    );
-    assert!(
-        rpc(&ctx, &mut unauth_sess, "allianceRegistry", "dictatorial", &[])
-            .await
-            .is_err()
-    );
-    assert!(
-        rpc(&ctx, &mut unauth_sess, "allianceRegistry", "url", &[])
+        rpc(&ctx, &mut unauth_sess, "allianceRegistry", "GetAlliance", &[])
             .await
             .is_err()
     );
@@ -145,19 +67,10 @@ async fn test_alliance_registry_description_url_dictatorial_and_persistence() {
     let mut sess = setup_pilot(&ctx, PILOT_1).await;
 
     // Negative case: non-existent ID raises AllianceNotFound
-    for err in [
-        rpc(&ctx, &mut sess, "allianceRegistry", "description", &[PyRep::Integer(999_999_999)])
-            .await
-            .unwrap_err(),
-        rpc(&ctx, &mut sess, "allianceRegistry", "dictatorial", &[PyRep::Integer(999_999_999)])
-            .await
-            .unwrap_err(),
-        rpc(&ctx, &mut sess, "allianceRegistry", "url", &[PyRep::Integer(999_999_999)])
-            .await
-            .unwrap_err(),
-    ] {
-        assert_eq!(err.code, EXPECTED_MISSING_ERR);
-    }
+    let err = rpc(&ctx, &mut sess, "allianceRegistry", "GetAlliance", &[PyRep::Integer(999_999_999)])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, EXPECTED_MISSING_ERR);
 
     // Create a player corp and an alliance
     let corp_rep = rpc(
@@ -210,18 +123,16 @@ async fn test_alliance_registry_description_url_dictatorial_and_persistence() {
         .expect("ally_id");
     sess.alliance_id = Some(ally_id);
 
-    assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "allianceRegistry",
-            "dictatorial",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("initial dictatorial"),
-        PyRep::Bool(false)
-    );
+    let init_info = rpc(
+        &ctx,
+        &mut sess,
+        "allianceRegistry",
+        "GetAlliance",
+        &[PyRep::Integer(ally_id)],
+    )
+    .await
+    .expect("initial GetAlliance");
+    assert_eq!(init_info.dict_get("dictatorial"), Some(&PyRep::Bool(false)));
 
     // Mutate alliance description, url, allowWar, and dictatorial=true via UpdateAlliance
     rpc(
@@ -239,107 +150,88 @@ async fn test_alliance_registry_description_url_dictatorial_and_persistence() {
     .await
     .expect("UpdateAlliance");
 
+    // Add a second member corporation and verify DeclareExecutorSupport is blocked while dictatorial=true
+    let mut sess_member = setup_pilot(&ctx, 90_000_002).await;
+    let corp2_rep = rpc(
+        &ctx,
+        &mut sess_member,
+        "corpRegistry",
+        "AddCorporation",
+        &[
+            PyRep::String("Batch7 Wing".into()),
+            PyRep::String("B7WG".into()),
+            PyRep::String("Second member corp".into()),
+            PyRep::Real(0.05),
+        ],
+    )
+    .await
+    .expect("AddCorporation 2");
+    let corp2_id = corp2_rep
+        .dict_get("corporationID")
+        .and_then(|v| v.as_i64())
+        .or_else(|| corp2_rep.as_i64())
+        .expect("corp2_id");
+    sess_member.corporation_id = Some(corp2_id);
+    sess_member.alliance_id = Some(ally_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c2) = snap.corporations.get_mut(&corp2_id) {
+            c2.alliance_id = Some(ally_id);
+        }
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.alliance_id = Some(ally_id);
+        }
+        if let Some(al) = snap.alliances.get_mut(&ally_id) {
+            al.member_corp_ids.insert(corp2_id);
+        }
+    });
+
+    let vote_err = rpc(
+        &ctx,
+        &mut sess_member,
+        "allianceRegistry",
+        "DeclareExecutorSupport",
+        &[PyRep::Integer(corp2_id)],
+    )
+    .await
+    .expect_err("DeclareExecutorSupport must fail in a dictatorial alliance");
+    assert_eq!(vote_err.code, "AllianceIsDictatorial");
     assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "allianceRegistry",
-            "description",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("allianceRegistry.description"),
-        PyRep::String("Updated Coalition Charter".into())
-    );
-    assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "allianceRegistry",
-            "url",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("allianceRegistry.url"),
-        PyRep::String("https://coalition.example".into())
-    );
-    assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "allianceRegistry",
-            "dictatorial",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("allianceRegistry.dictatorial"),
-        PyRep::Bool(true)
+        ctx.db.with_snapshot(|s| s.alliances[&ally_id].executor_corp_id),
+        corp_id,
+        "executorCorpID must remain unchanged when alliance is dictatorial"
     );
 
-    // Reload from SQLite and verify alliance description, url, and dictatorial=true persist
+    // Reload from SQLite and verify alliance description, url, and dictatorial=true persist via GetAlliance
     let ctx_reloaded =
         crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "b7_alliance_attrs");
     let mut sess_re = setup_pilot(&ctx_reloaded, PILOT_1).await;
+    let info_re = rpc(
+        &ctx_reloaded,
+        &mut sess_re,
+        "allianceRegistry",
+        "GetAlliance",
+        &[PyRep::Integer(ally_id)],
+    )
+    .await
+    .expect("GetAlliance after reload");
     assert_eq!(
-        rpc(
-            &ctx_reloaded,
-            &mut sess_re,
-            "allianceRegistry",
-            "description",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("description after reload"),
-        PyRep::String("Updated Coalition Charter".into())
+        info_re.dict_get("description"),
+        Some(&PyRep::String("Updated Coalition Charter".into()))
     );
     assert_eq!(
-        rpc(
-            &ctx_reloaded,
-            &mut sess_re,
-            "allianceRegistry",
-            "url",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("url after reload"),
-        PyRep::String("https://coalition.example".into())
+        info_re.dict_get("url"),
+        Some(&PyRep::String("https://coalition.example".into()))
     );
-    assert_eq!(
-        rpc(
-            &ctx_reloaded,
-            &mut sess_re,
-            "allianceRegistry",
-            "dictatorial",
-            &[PyRep::Integer(ally_id)],
-        )
-        .await
-        .expect("dictatorial after reload"),
-        PyRep::Bool(true)
-    );
+    assert_eq!(info_re.dict_get("dictatorial"), Some(&PyRep::Bool(true)));
 }
 
 #[tokio::test]
-async fn test_war_and_corp_registry_bind_and_state_accessors() {
+async fn test_war_registry_bind_and_unbind() {
     // parity: rpc:warRegistry.Bind
     // parity: rpc:warRegistry.Unbind
-    // parity: rpc:warStatisticMgr.Bind
-    // parity: rpc:corpRegistry.columns
-    // parity: rpc:corpRegistry.header
-    // parity: rpc:corpRegistry.itervalues
-    // parity: rpc:corpmgr.deleted
-    // parity: rpc:corpmgr.description
     let ctx = ServerContext::new();
     let mut unauth_sess = SessionState::new(998);
-    for (svc, meth) in [
-        ("warRegistry", "Bind"),
-        ("warRegistry", "Unbind"),
-        ("warStatisticMgr", "Bind"),
-        ("corpRegistry", "columns"),
-        ("corpRegistry", "header"),
-        ("corpRegistry", "itervalues"),
-        ("corpmgr", "deleted"),
-        ("corpmgr", "description"),
-    ] {
+    for (svc, meth) in [("warRegistry", "Bind"), ("warRegistry", "Unbind")] {
         assert!(
             rpc(&ctx, &mut unauth_sess, svc, meth, &[]).await.is_err(),
             "unauthenticated {svc}.{meth} must fail"
@@ -391,131 +283,4 @@ async fn test_war_and_corp_registry_bind_and_state_accessors() {
         .read()
         .unwrap()
         .contains_key(&(war_bound_id as u64)));
-
-    let stat_target = sess.corporation_id.unwrap_or(1_000_001);
-    let stat_bind = rpc(
-        &ctx,
-        &mut sess,
-        "warStatisticMgr",
-        "Bind",
-        &[PyRep::Integer(stat_target)],
-    )
-    .await
-    .expect("warStatisticMgr.Bind");
-    let stat_bound_id = stat_bind.as_i64().expect("warStatisticMgr bound_id") as u64;
-    assert!(stat_bound_id > 0);
-    assert!(ctx.bound_objects.read().unwrap().contains_key(&stat_bound_id));
-
-    // Create a player corp and verify corpRegistry + corpmgr state accessors
-    let corp_rep = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "AddCorporation",
-        &[
-            PyRep::String("Batch7 Logistics".into()),
-            PyRep::String("B7LG".into()),
-            PyRep::String("State-backed corp description".into()),
-            PyRep::Real(0.10),
-        ],
-    )
-    .await
-    .expect("AddCorporation");
-    let corp_id = corp_rep
-        .dict_get("corporationID")
-        .and_then(|v| v.as_i64())
-        .or_else(|| corp_rep.as_i64())
-        .expect("corp_id");
-
-    assert_eq!(
-        rpc(&ctx, &mut sess, "corpRegistry", "columns", &[])
-            .await
-            .expect("corpRegistry.columns"),
-        PyRep::List(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ])
-    );
-    assert_eq!(
-        rpc(&ctx, &mut sess, "corpRegistry", "header", &[])
-            .await
-            .expect("corpRegistry.header"),
-        PyRep::Tuple(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ])
-    );
-
-    let itervals = rpc(&ctx, &mut sess, "corpRegistry", "itervalues", &[])
-        .await
-        .expect("corpRegistry.itervalues");
-    let PyRep::List(corp_rows) = itervals else {
-        panic!("expected List from corpRegistry.itervalues");
-    };
-    let expected_tuple = PyRep::Tuple(vec![
-        PyRep::Integer(corp_id),
-        PyRep::String("Batch7 Logistics".into()),
-        PyRep::String("B7LG".into()),
-    ]);
-    assert!(
-        corp_rows.contains(&expected_tuple),
-        "corpRegistry.itervalues must include created corp"
-    );
-
-    assert_eq!(
-        rpc(&ctx, &mut sess, "corpmgr", "deleted", &[PyRep::Integer(corp_id)])
-            .await
-            .expect("corpmgr.deleted active"),
-        PyRep::Bool(false)
-    );
-    assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "corpmgr",
-            "deleted",
-            &[PyRep::Integer(999_999_999)],
-        )
-        .await
-        .expect("corpmgr.deleted missing"),
-        PyRep::Bool(true)
-    );
-    assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess,
-            "corpmgr",
-            "description",
-            &[PyRep::Integer(corp_id)],
-        )
-        .await
-        .expect("corpmgr.description"),
-        PyRep::String("State-backed corp description".into())
-    );
-
-    // Reload from SQLite and verify persistence of corpRegistry.itervalues and corpmgr.description
-    let ctx_reloaded =
-        crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "b7_corp_war_attrs");
-    let mut sess_re = setup_pilot(&ctx_reloaded, PILOT_1).await;
-    let itervals_re = rpc(&ctx_reloaded, &mut sess_re, "corpRegistry", "itervalues", &[])
-        .await
-        .expect("corpRegistry.itervalues after reload");
-    let PyRep::List(re_rows) = itervals_re else {
-        panic!("expected List after reload");
-    };
-    assert!(re_rows.contains(&expected_tuple));
-    assert_eq!(
-        rpc(
-            &ctx_reloaded,
-            &mut sess_re,
-            "corpmgr",
-            "description",
-            &[PyRep::Integer(corp_id)],
-        )
-        .await
-        .expect("corpmgr.description after reload"),
-        PyRep::String("State-backed corp description".into())
-    );
 }
