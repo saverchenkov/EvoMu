@@ -51,41 +51,87 @@ async fn test_ui_star_map_data_and_map_stats() {
 
     let ctx = ServerContext::new();
     let mut s = select_pilot(&ctx, 9101, "demo", "demo-secret", P1).await;
+    let jita: u32 = 30_000_142;
+
+    // Seed a Pharolux Cyno Beacon (type_id 35840) in Jita
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            77_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 77_000_001,
+                type_id: 35840,
+                solar_system_id: jita,
+                owner_corp_id: 98_000_001,
+                name: "Jita Cyno Beacon".into(),
+                state: "Online".into(),
+                ..Default::default()
+            },
+        );
+    });
 
     let beacons = rpc(&ctx, &mut s, "map", "GetBeaconCount", &[])
         .await
         .expect("GetBeaconCount");
-    assert!(matches!(beacons, PyRep::Dict(_)));
+    let PyRep::Dict(beacon_entries) = beacons else {
+        panic!("expected Dict from GetBeaconCount");
+    };
+    let jita_beacons = beacon_entries
+        .iter()
+        .find(|(k, _)| *k == PyRep::Integer(i64::from(jita)))
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        jita_beacons,
+        Some(PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(1)])),
+        "GetBeaconCount must report seeded Pharolux Cyno Beacon in Jita"
+    );
 
     let incursions = rpc(&ctx, &mut s, "map", "GetIncursionGlobalReport", &[])
         .await
         .expect("GetIncursionGlobalReport");
-    assert!(matches!(incursions, PyRep::List(_)));
+    let PyRep::List(inc_list) = incursions else {
+        panic!("expected List from GetIncursionGlobalReport");
+    };
+    assert!(!inc_list.is_empty(), "GetIncursionGlobalReport must return active incursions");
 
     let inc_systems = rpc(&ctx, &mut s, "map", "GetSystemsInIncursions", &[])
         .await
         .expect("GetSystemsInIncursions");
-    assert!(matches!(inc_systems, PyRep::List(_)));
+    let PyRep::List(inc_sys_list) = inc_systems else {
+        panic!("expected List from GetSystemsInIncursions");
+    };
+    assert!(!inc_sys_list.is_empty(), "GetSystemsInIncursions must return incursion systems");
 
     let fw_zone = rpc(&ctx, &mut s, "map", "GetFacWarZoneInfo", &[PyRep::Integer(500_001)])
         .await
         .expect("GetFacWarZoneInfo");
-    assert!(!matches!(fw_zone, PyRep::None));
+    assert!(
+        format!("{fw_zone:?}").contains("solarSystemIds"),
+        "GetFacWarZoneInfo must return KeyVal with solarSystemIds"
+    );
 
     let edencom_fort = rpc(&ctx, &mut s, "map", "GetEdencomFortressSystems", &[])
         .await
         .expect("GetEdencomFortressSystems");
-    assert!(matches!(edencom_fort, PyRep::List(_)));
+    let PyRep::List(ef_list) = edencom_fort else {
+        panic!("expected List from GetEdencomFortressSystems");
+    };
+    assert!(!ef_list.is_empty(), "GetEdencomFortressSystems must be non-empty");
 
     let edencom_minor = rpc(&ctx, &mut s, "map", "GetEdencomMinorVictorySystems", &[])
         .await
         .expect("GetEdencomMinorVictorySystems");
-    assert!(matches!(edencom_minor, PyRep::List(_)));
+    let PyRep::List(em_list) = edencom_minor else {
+        panic!("expected List from GetEdencomMinorVictorySystems");
+    };
+    assert!(!em_list.is_empty(), "GetEdencomMinorVictorySystems must be non-empty");
 
     let trig_minor = rpc(&ctx, &mut s, "map", "GetTriglavianMinorVictorySystems", &[])
         .await
         .expect("GetTriglavianMinorVictorySystems");
-    assert!(matches!(trig_minor, PyRep::List(_)));
+    let PyRep::List(tm_list) = trig_minor else {
+        panic!("expected List from GetTriglavianMinorVictorySystems");
+    };
+    assert!(!tm_list.is_empty(), "GetTriglavianMinorVictorySystems must be non-empty");
 
     let deadspace_complex = rpc(&ctx, &mut s, "map", "GetDeadspaceComplexMap", &[])
         .await
@@ -97,29 +143,52 @@ async fn test_ui_star_map_data_and_map_stats() {
         .expect("GetDeadspaceAgentsMap");
     assert!(matches!(deadspace_agents, PyRep::ObjectEx { .. }));
 
-    // Record jump count via map_service::record_system_jump and verify map.GetHistory(3) & map.GetHistory(1)
-    let jita: u32 = 30_000_142;
+    // Record jump events via map_service::record_system_jump and kill events, then verify map.GetHistory(1/2/3)
     eve_server::services::map_service::record_system_jump(&ctx, jita);
     eve_server::services::map_service::record_system_jump(&ctx, jita);
-
-    let recorded_jumps: i64 = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("map:system_jumps")
-            .and_then(|raw| serde_json::from_str::<HashMap<u32, i64>>(raw).ok())
-            .and_then(|m| m.get(&jita).copied())
-            .unwrap_or(0)
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.record_system_kill(jita, 1, 2, 0, now_u);
     });
-    assert_eq!(recorded_jumps, 2, "record_system_jump must persist per-system jump count");
 
-    let hist_jumps = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(3)])
-        .await
-        .expect("GetHistory(3)");
-    assert!(matches!(hist_jumps, PyRep::ObjectEx { .. }));
+    let find_sys_row = |rep: PyRep, sys_id: u32| -> (i64, i64, i64) {
+        let PyRep::ObjectEx { list, .. } = rep else {
+            panic!("expected ObjectEx CRowset from GetHistory");
+        };
+        list.into_iter()
+            .find_map(|r| match r {
+                PyRep::DBRow { columns, .. } => {
+                    let sid = columns.iter().find_map(|(k, v)| (k == "solarSystemID").then(|| v.as_i64()).flatten())?;
+                    if sid != i64::from(sys_id) {
+                        return None;
+                    }
+                    let v1 = columns.iter().find_map(|(k, v)| (k == "value1").then(|| v.as_i64()).flatten()).unwrap_or(0);
+                    let v2 = columns.iter().find_map(|(k, v)| (k == "value2").then(|| v.as_i64()).flatten()).unwrap_or(0);
+                    let v3 = columns.iter().find_map(|(k, v)| (k == "value3").then(|| v.as_i64()).flatten()).unwrap_or(0);
+                    Some((v1, v2, v3))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing row for solarSystemID {sys_id}"))
+    };
 
-    let hist_kills = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(1)])
+    // stat_type 1 => jumps
+    let hist_jumps = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(1)])
         .await
         .expect("GetHistory(1)");
-    assert!(matches!(hist_kills, PyRep::ObjectEx { .. }));
+    assert_eq!(find_sys_row(hist_jumps, jita), (2, 0, 0), "GetHistory(1) must return 2 jumps");
+
+    // stat_type 2 => kills (ship_kills + npc_kills, npc_kills, pod_kills)
+    let hist_kills = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(2)])
+        .await
+        .expect("GetHistory(2)");
+    assert_eq!(find_sys_row(hist_kills, jita), (3, 2, 0), "GetHistory(2) must return (3, 2, 0) kills");
+
+    // stat_type 3 => pilots in space (0 while docked)
+    let hist_pilots = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(3)])
+        .await
+        .expect("GetHistory(3)");
+    assert_eq!(find_sys_row(hist_pilots, jita), (0, 0, 0), "GetHistory(3) must return 0 pilots in space");
 }
 
 #[tokio::test]
@@ -133,34 +202,69 @@ async fn test_ui_neocom_badges_info_panels_and_photo_mode() {
 
     let ctx = ServerContext::new();
     let mut s = select_pilot(&ctx, 9102, "demo", "demo-secret", P1).await;
+    let now_u = ctx.now_unix();
 
-    // Neocom badges: unread mail, unread notifications, skill queue & free SP
+    // Seed 1 unread mail and 1 unread notification for P1
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mails.push(eve_db::MailRecord {
+            message_id: 880_001,
+            sender_id: P2,
+            recipient_id: P1,
+            subject: "Neocom Badge Test".into(),
+            body: "Unread mail body".into(),
+        });
+        snap.mail_assigned_labels.insert((P1, 880_001), vec![1]);
+        snap.mail_timestamps.insert(880_001, now_u);
+    });
+    ctx.notification_records
+        .write()
+        .unwrap()
+        .push(eve_server::router::NotificationRecord {
+            notification_id: 990_101,
+            type_id: 101,
+            sender_id: 1_000_125,
+            receiver_id: P1,
+            processed: false,
+            group_id: 12,
+            created: now_u as i64,
+            data: "planetID: 40009082\n".into(),
+            deleted: false,
+            interacted: false,
+        });
+
+    // Neocom badges: unread mail count = 1, unread notifications count = 1, skill queue & free SP
     let mail_headers = rpc(&ctx, &mut s, "mailMgr", "GetMailHeaders", &[])
         .await
         .expect("GetMailHeaders");
-    assert!(!matches!(mail_headers, PyRep::None));
+    let PyRep::Rowset { rows: mail_rows, .. } = mail_headers else {
+        panic!("expected Rowset from GetMailHeaders");
+    };
+    assert_eq!(mail_rows.len(), 1, "GetMailHeaders must return 1 seeded unread mail");
 
-    let notifs = rpc(
-        &ctx,
-        &mut s,
-        "notificationMgr",
-        "GetUnprocessed",
-        &[],
-    )
-    .await
-    .expect("GetUnprocessed");
-    assert!(!matches!(notifs, PyRep::None));
+    let notifs = rpc(&ctx, &mut s, "notificationMgr", "GetUnprocessed", &[])
+        .await
+        .expect("GetUnprocessed");
+    let PyRep::ObjectEx { list: notif_rows, .. } = notifs else {
+        panic!("expected ObjectEx CRowset from GetUnprocessed");
+    };
+    assert_eq!(notif_rows.len(), 1, "GetUnprocessed must return 1 seeded unread notification");
 
     let skill_q = rpc(&ctx, &mut s, "skillMgr2", "GetSkillQueueAndFreePoints", &[])
         .await
         .expect("GetSkillQueueAndFreePoints");
-    assert!(matches!(skill_q, PyRep::Tuple(_) | PyRep::List(_) | PyRep::Dict(_)));
+    let PyRep::Tuple(sq_parts) = skill_q else {
+        panic!("expected Tuple from GetSkillQueueAndFreePoints");
+    };
+    assert_eq!(sq_parts.len(), 2, "GetSkillQueueAndFreePoints must return (queue, freePoints)");
 
-    // Info panels: mission tracker, incursion, FW, sov
+    // Info panels: mission tracker & sov
     let journal = rpc(&ctx, &mut s, "agentMgr", "GetMyJournalDetails", &[])
         .await
         .expect("GetMyJournalDetails");
-    assert!(matches!(journal, PyRep::Tuple(_) | PyRep::List(_) | PyRep::Dict(_)));
+    let PyRep::Tuple(j_parts) = journal else {
+        panic!("expected Tuple from GetMyJournalDetails");
+    };
+    assert_eq!(j_parts.len(), 2, "GetMyJournalDetails must return (missions, offers)");
 
     let sov_info = rpc(
         &ctx,
@@ -171,9 +275,9 @@ async fn test_ui_neocom_badges_info_panels_and_photo_mode() {
     )
     .await
     .expect("GetSovStructuresInfoForSolarSystem");
-    let _ = sov_info;
+    assert!(matches!(sov_info, PyRep::List(_)), "GetSovStructuresInfoForSolarSystem must return List");
 
-    // Photo mode: station / scene state queries succeed with zero server errors
+    // Photo mode: station / scene state queries succeed with concrete stationID
     let station_id = s.station_id.unwrap_or(60_003_760);
     assert_eq!(station_id, 60_003_760);
     let station_info = rpc(
@@ -185,7 +289,10 @@ async fn test_ui_neocom_badges_info_panels_and_photo_mode() {
     )
     .await
     .expect("GetStation");
-    assert!(!matches!(station_info, PyRep::None));
+    assert!(
+        format!("{station_info:?}").contains("60003760"),
+        "GetStation must return station 60003760 details"
+    );
 }
 
 #[tokio::test]
@@ -226,10 +333,53 @@ async fn test_removed_medical_clone_grades_and_session_changes() {
         .expect("GetCashBalance after");
     assert_eq!(isk_before, isk_after, "Medical clone home station change must be free");
 
-    // Session attribute changes propagate to SessionState
-    assert_eq!(s.character_id, Some(P1));
-    assert!(s.solar_system_id.is_some());
-    assert!(s.corporation_id.is_some());
+    // Trigger real session changes (Undock -> Dock) and verify OnSessionChanged payload keys & old/new values
+    let extract_station_change = |notifs: &[eve_server::router::PendingMachoNotification]| -> Option<(PyRep, PyRep)> {
+        notifs
+            .iter()
+            .filter(|n| n.event == "OnSessionChanged")
+            .find_map(|n| {
+                assert_eq!(n.args.len(), 3, "OnSessionChanged must have 3 args");
+                let PyRep::Dict(changes) = &n.args[2] else {
+                    return None;
+                };
+                changes.iter().find_map(|(k, v)| {
+                    if *k == PyRep::String("stationid".into()) {
+                        if let PyRep::Tuple(pair) = v {
+                            if pair.len() == 2 {
+                                return Some((pair[0].clone(), pair[1].clone()));
+                            }
+                        }
+                    }
+                    None
+                })
+            })
+    };
+
+    let _ = ctx.drain_notifications_for_char(P1);
+    rpc(&ctx, &mut s, "ship", "Undock", &[])
+        .await
+        .expect("Undock");
+    assert_eq!(s.station_id, None);
+    let undock_notifs = ctx.drain_notifications_for_char(P1);
+    assert_eq!(
+        extract_station_change(&undock_notifs),
+        Some((PyRep::Integer(target_station), PyRep::None)),
+        "Undock must emit OnSessionChanged with stationid: (60003760, None)"
+    );
+
+    ctx.advance_secs(12);
+    let _ = ctx.drain_notifications_for_char(P1);
+    rpc(&ctx, &mut s, "beyonce", "CmdDock", &[PyRep::Integer(target_station)])
+        .await
+        .expect("CmdDock");
+    assert_eq!(s.station_id, Some(target_station));
+    let dock_notifs = ctx.drain_notifications_for_char(P1);
+    assert_eq!(
+        extract_station_change(&dock_notifs),
+        Some((PyRep::None, PyRep::Integer(target_station))),
+        "CmdDock must emit OnSessionChanged with stationid: (None, 60003760)"
+    );
 }
 
 #[tokio::test]
@@ -322,9 +472,18 @@ async fn test_admin_gm_tournament_lifecycle() {
     )
     .await
     .expect("GetTeamMembers 0");
-    if let PyRep::List(members) = team0 {
-        assert_eq!(members.len(), 2);
-    }
+    let PyRep::List(teams) = team0 else {
+        panic!("expected List from GetTeamMembers, got {team0:?}");
+    };
+    assert_eq!(teams.len(), 2, "GetTeamMembers must return [red_list, blue_list]");
+    let PyRep::List(red_members) = &teams[0] else {
+        panic!("expected List for red team");
+    };
+    let PyRep::List(blue_members) = &teams[1] else {
+        panic!("expected List for blue team");
+    };
+    assert_eq!(red_members.len(), 1, "red team must have 1 player (P1)");
+    assert_eq!(blue_members.len(), 1, "blue team must have 1 player (P2)");
 
     rpc(
         &ctx,

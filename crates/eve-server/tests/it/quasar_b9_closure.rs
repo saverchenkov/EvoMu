@@ -8,7 +8,7 @@ use crate::quasar_campaign_endpoints_remediated::{
 };
 use eve_machonet::SessionState;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field, EvePublicNotice, WireMessage};
-use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_campaign_handlers::{campaign_uuid, objective_uuid, track_uuid};
 use tokio::sync::mpsc::Receiver;
@@ -277,4 +277,59 @@ async fn test_b9_objective_commands_definitions_and_track_admin() {
     let bad = quasar(&ctx, &mut sess, "eve.campaign.track.api.ChangeStateCommanded", Vec::new()).await;
     assert_eq!(bad.status_code, STATUS_BAD_REQUEST);
     let _ = campaign_uuid(42);
+}
+
+fn non_gm_session(sid: u64, char_id: i64) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(2);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(98_000_001);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER;
+    sess
+}
+
+#[tokio::test]
+async fn test_b9_commanded_requires_gm_and_terminal_transitions_rejected() {
+    let ctx = ServerContext::new();
+    let mut gm = session(89_104, 90_100_004);
+    let mut player = non_gm_session(89_105, 90_100_005);
+    let extra = &ctx.quasar_gateway.progression.extra;
+    let t0 = ctx.now_unix();
+
+    let (camp, objs, trks) = mining_campaign(43, t0, t0 + 3_600, 500);
+    let cid = camp.id;
+    let oid = objs[0].id;
+    let tid = trks[0].id;
+    extra.register_campaign(camp, objs, trks).expect("register");
+
+    let cid_req = id_payload(campaign_uuid(cid));
+    let oid_req = id_payload(objective_uuid(oid));
+    let tid_req = id_payload(track_uuid(tid));
+
+    // Non-GM player must be rejected with STATUS_FORBIDDEN on all *Commanded handlers
+    for (cmd, payload) in [
+        ("eve.campaign.api.StartCommanded", cid_req.clone()),
+        ("eve.campaign.api.CompleteCommanded", cid_req.clone()),
+        ("eve.campaign.api.ExpireCommanded", cid_req.clone()),
+        ("eve.campaign.api.ChangeStateCommanded", cid_req.clone()),
+        ("eve.campaign.objective.api.CompleteCommanded", oid_req.clone()),
+        ("eve.campaign.objective.api.ChangeStateCommanded", oid_req.clone()),
+        ("eve.campaign.track.api.ProcessTickContributionCommanded", tid_req.clone()),
+        ("eve.campaign.track.api.ChangeStateCommanded", tid_req.clone()),
+    ] {
+        let resp = quasar(&ctx, &mut player, cmd, payload).await;
+        assert_eq!(resp.status_code, STATUS_FORBIDDEN, "expected FORBIDDEN for non-GM on {cmd}");
+    }
+
+    // DisableRequest updates persisted objective state to DISABLED (6), and subsequent transitions fail
+    ok(&ctx, &mut gm, "eve.campaign.objective.api.admin.DisableRequest", oid_req.clone()).await;
+    assert_eq!(extra.campaign_objectives.read().unwrap().get(&oid).unwrap().state, 6);
+    let err_obj = quasar(&ctx, &mut gm, "eve.campaign.objective.api.admin.StartRequest", oid_req).await;
+    assert_eq!(err_obj.status_code, STATUS_BAD_REQUEST);
+
+    // Completing campaign transitions to terminal state; subsequent StartCommanded is rejected
+    cmd_ok(&ctx, &mut gm, "eve.campaign.api.CompleteCommanded", cid_req.clone()).await;
+    let err_camp = quasar(&ctx, &mut gm, "eve.campaign.api.StartCommanded", cid_req).await;
+    assert_eq!(err_camp.status_code, STATUS_BAD_REQUEST);
 }

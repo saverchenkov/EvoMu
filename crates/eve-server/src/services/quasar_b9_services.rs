@@ -34,6 +34,31 @@ const CAMPAIGN_STATE_CANCELLED: u32 = 4;
 const CAMPAIGN_STATE_FAILED: u32 = 5;
 const CAMPAIGN_STATE_ARCHIVED: u32 = 6;
 
+const OBJECTIVE_STATE_CANCELLED: u32 = 4;
+const OBJECTIVE_STATE_FAILED: u32 = 5;
+const OBJECTIVE_STATE_DISABLED: u32 = 6;
+
+fn is_campaign_terminal(state: u32) -> bool {
+    matches!(
+        state,
+        CAMPAIGN_STATE_COMPLETED
+            | CAMPAIGN_STATE_EXPIRED
+            | CAMPAIGN_STATE_CANCELLED
+            | CAMPAIGN_STATE_FAILED
+            | CAMPAIGN_STATE_ARCHIVED
+    )
+}
+
+fn is_objective_terminal(state: u32) -> bool {
+    matches!(
+        state,
+        OBJECTIVE_STATE_COMPLETED
+            | OBJECTIVE_STATE_CANCELLED
+            | OBJECTIVE_STATE_FAILED
+            | OBJECTIVE_STATE_DISABLED
+    )
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -122,6 +147,7 @@ fn encode_semver(field: u32, major: u32, minor: u32, patch: u32, out: &mut Vec<u
 fn encode_campaign_def_id(field: u32, name: &str, out: &mut Vec<u8>) {
     let mut def_id = Vec::new();
     encode_string_field(1, name, &mut def_id);
+    // DERIVED: default definition semver 1.0.0 when no version table is present
     encode_semver(2, 1, 0, 0, &mut def_id);
     encode_bytes_field(field, &def_id, out);
 }
@@ -447,9 +473,10 @@ fn register_campaign_admin_handlers(router: &PublicGatewayRouter, extra: Arc<Pro
                 let rec = CampaignRecord {
                     id: cid,
                     name: def_name,
-                    description: "Scheduled campaign".into(),
-                    namespace: "live".into(),
+                    description: "DERIVED: Scheduled campaign".into(),
+                    namespace: "DERIVED:live".into(),
                     scheduled_start_unix: start_time,
+                    // DERIVED: default 24-hour campaign window when definition omits expiry
                     scheduled_expiry_unix: start_time.saturating_add(86_400),
                     state: 0,
                     transition_unix: now,
@@ -509,6 +536,12 @@ fn register_campaign_admin_handlers(router: &PublicGatewayRouter, extra: Arc<Pro
                 let rec = camps
                     .get_mut(&cid)
                     .ok_or((STATUS_NOT_FOUND, format!("campaign {cid} not found")))?;
+                if is_campaign_terminal(rec.state) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("campaign {cid} is in terminal state {}", rec.state),
+                    ));
+                }
                 rec.state = CAMPAIGN_STATE_CANCELLED;
                 rec.transition_unix = now;
                 rec.clone()
@@ -533,6 +566,12 @@ fn register_campaign_admin_handlers(router: &PublicGatewayRouter, extra: Arc<Pro
                 let rec = camps
                     .get_mut(&cid)
                     .ok_or((STATUS_NOT_FOUND, format!("campaign {cid} not found")))?;
+                if is_campaign_terminal(rec.state) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("campaign {cid} is in terminal state {}", rec.state),
+                    ));
+                }
                 let ev = if rec.state == 0 {
                     rec.state = CAMPAIGN_STATE_ACTIVE;
                     "eve.campaign.api.Started"
@@ -569,6 +608,12 @@ fn register_campaign_admin_handlers(router: &PublicGatewayRouter, extra: Arc<Pro
                     let rec = camps
                         .get_mut(&cid)
                         .ok_or((STATUS_NOT_FOUND, format!("campaign {cid} not found")))?;
+                    if is_campaign_terminal(rec.state) {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("campaign {cid} is in terminal state {}", rec.state),
+                        ));
+                    }
                     rec.state = next_state;
                     rec.transition_unix = now;
                     rec.clone()
@@ -636,7 +681,8 @@ fn register_campaign_command_handlers(router: &PublicGatewayRouter, extra: Arc<P
         let ex = Arc::clone(&extra);
         router.register_handler(
             cmd_name,
-            Arc::new(move |_ctx, _any, msg| {
+            Arc::new(move |ctx, _any, msg| {
+                crate::quasar_gateway::require_admin_role(ctx)?;
                 let cid = extract_campaign_id(dyn_field(msg, 1))
                     .ok_or((STATUS_BAD_REQUEST, "missing campaign identifier".into()))?;
                 let now = now_unix();
@@ -646,6 +692,12 @@ fn register_campaign_command_handlers(router: &PublicGatewayRouter, extra: Arc<P
                     let rec = camps
                         .get_mut(&cid)
                         .ok_or((STATUS_NOT_FOUND, format!("campaign {cid} not found")))?;
+                    if is_campaign_terminal(rec.state) {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("campaign {cid} is in terminal state {}", rec.state),
+                        ));
+                    }
                     if let Some(st) = target_state.or(explicit_state) {
                         rec.state = st;
                     }
@@ -680,6 +732,7 @@ fn register_campaign_definition_handlers(router: &PublicGatewayRouter, extra: Ar
         "eve.campaign.definition.api.GetAllVersionsRequest",
         Arc::new(move |_ctx, _any, _msg| {
             let mut out = Vec::new();
+            // DERIVED: default schema versions when no version table is present
             encode_semver(1, 1, 0, 0, &mut out);
             encode_semver(1, 1, 1, 0, &mut out);
             Ok(any("eve.campaign.definition.api.GetAllVersionsResponse", out))
@@ -844,6 +897,7 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
                     id: oid,
                     campaign_id: cid,
                     name: obj_name,
+                    // DERIVED: default target progress when definition omits target
                     target_progress: 100,
                     current_progress: 0,
                     state: 0,
@@ -942,6 +996,12 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
                     let rec = objs
                         .get_mut(&oid)
                         .ok_or((STATUS_NOT_FOUND, format!("objective {oid} not found")))?;
+                    if is_objective_terminal(rec.state) {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("objective {oid} is in terminal state {}", rec.state),
+                        ));
+                    }
                     rec.state = next_state;
                     rec.transition_unix = now;
                     rec.clone()
@@ -963,11 +1023,40 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
     router.register_handler(
         "eve.campaign.objective.api.admin.DisableRequest",
         Arc::new(move |_ctx, _any, msg| {
-            let cid = extract_campaign_id(dyn_field(msg, 1))
-                .ok_or((STATUS_BAD_REQUEST, "missing campaign identifier".into()))?;
+            let target_id = extract_campaign_id(dyn_field(msg, 1))
+                .ok_or((STATUS_BAD_REQUEST, "missing objective or campaign identifier".into()))?;
             let now = now_unix();
+            let disabled_uuid = {
+                let mut objs = ex.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(rec) = objs.get_mut(&target_id) {
+                    if is_objective_terminal(rec.state) {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("objective {target_id} is in terminal state {}", rec.state),
+                        ));
+                    }
+                    rec.state = OBJECTIVE_STATE_DISABLED;
+                    rec.transition_unix = now;
+                    objective_uuid(target_id)
+                } else {
+                    let camps = ex.campaigns.read().unwrap_or_else(|e| e.into_inner());
+                    if !camps.contains_key(&target_id) {
+                        return Err((
+                            STATUS_NOT_FOUND,
+                            format!("objective or campaign {target_id} not found"),
+                        ));
+                    }
+                    for rec in objs.values_mut() {
+                        if rec.campaign_id == target_id && !is_objective_terminal(rec.state) {
+                            rec.state = OBJECTIVE_STATE_DISABLED;
+                            rec.transition_unix = now;
+                        }
+                    }
+                    campaign_uuid(target_id)
+                }
+            };
             let mut disabled_payload = Vec::new();
-            encode_id_field(1, campaign_uuid(cid), &mut disabled_payload);
+            encode_id_field(1, disabled_uuid, &mut disabled_payload);
             let mut notices = PendingNotices::new();
             notices.push((
                 NoticeScope::Broadcast,
@@ -987,7 +1076,8 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
         let ex = Arc::clone(&extra);
         router.register_handler(
             cmd_name,
-            Arc::new(move |_ctx, _any, msg| {
+            Arc::new(move |ctx, _any, msg| {
+                crate::quasar_gateway::require_admin_role(ctx)?;
                 let oid = extract_campaign_id(dyn_field(msg, 1))
                     .ok_or((STATUS_BAD_REQUEST, "missing objective identifier".into()))?;
                 let explicit = extract_nested_varint(dyn_field(msg, 2), 1).map(|v| v as u32);
@@ -997,6 +1087,12 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
                     let rec = objs
                         .get_mut(&oid)
                         .ok_or((STATUS_NOT_FOUND, format!("objective {oid} not found")))?;
+                    if is_objective_terminal(rec.state) {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("objective {oid} is in terminal state {}", rec.state),
+                        ));
+                    }
                     if let Some(st) = target_state.or(explicit) {
                         rec.state = st;
                     }
@@ -1067,7 +1163,8 @@ fn register_track_handlers(router: &PublicGatewayRouter, extra: Arc<ProgressionE
     let ex = Arc::clone(&extra);
     router.register_handler(
         "eve.campaign.track.api.ProcessTickContributionCommanded",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let tid = extract_campaign_id(dyn_field(msg, 1))
                 .ok_or((STATUS_BAD_REQUEST, "missing track identifier".into()))?;
             let tick_key = extract_string_field(msg, 2).unwrap_or_default();
@@ -1096,7 +1193,8 @@ fn register_track_handlers(router: &PublicGatewayRouter, extra: Arc<ProgressionE
     let ex = Arc::clone(&extra);
     router.register_handler(
         "eve.campaign.track.api.ChangeStateCommanded",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let tid = extract_campaign_id(dyn_field(msg, 1))
                 .ok_or((STATUS_BAD_REQUEST, "missing track identifier".into()))?;
             let next_state = extract_nested_varint(dyn_field(msg, 2), 1)

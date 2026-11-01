@@ -44,17 +44,9 @@ pub fn record_system_jump(ctx: &ServerContext, solar_system_id: u32) {
     if solar_system_id == 0 {
         return;
     }
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
-        let mut jumps: HashMap<u32, i64> = snap
-            .service_state_blobs
-            .get("map:system_jumps")
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or_default();
-        *jumps.entry(solar_system_id).or_insert(0) += 1;
-        if let Ok(json) = serde_json::to_string(&jumps) {
-            snap.service_state_blobs
-                .insert("map:system_jumps".to_string(), json);
-        }
+        snap.record_system_jump(solar_system_id, 0, now_unix);
     });
 }
 
@@ -395,13 +387,8 @@ pub fn handle(
                 ("value3", DbColumnType::I4),
             ]);
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
-                let mut jump_counts: HashMap<u32, i64> = snap
-                    .service_state_blobs
-                    .get("map:system_jumps")
-                    .and_then(|raw| serde_json::from_str(raw).ok())
-                    .unwrap_or_default();
+                let mut jump_counts: HashMap<u32, i64> = HashMap::new();
                 let mut sys_ids: std::collections::BTreeSet<u32> = snap.system_states.keys().copied().collect();
-                sys_ids.extend(jump_counts.keys().copied());
                 let mut kill_totals: HashMap<u32, (i64, i64, i64)> = HashMap::new();
                 let mut active_pilots: HashMap<u32, std::collections::HashSet<i64>> = HashMap::new();
                 for ch in snap.characters.values() {
@@ -472,7 +459,7 @@ pub fn handle(
                         let (v1, v2, v3) = match stat_type {
                             1 => (jumps, 0, 0),
                             2 => (ship_kills + npc_kills, npc_kills, pod_kills),
-                            3 => (jumps.max(pilots), 0, 0),
+                            3 => (pilots, 0, 0),
                             4 => (pod_kills, 0, pod_kills),
                             5 => (npc_kills, npc_kills, 0),
                             _ => (jumps, 0, 0),
