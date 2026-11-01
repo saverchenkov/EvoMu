@@ -123,8 +123,6 @@ async fn test_load_service_start_stop_and_stats() {
 
 #[tokio::test]
 async fn test_session_mgr_remove_and_end_all_sessions() {
-    // parity: rpc:sessionMgr.RemoveSessionsFromServer
-    // parity: rpc:sessionMgr.EndAllGameSessions
     let ctx = new_ctx();
     let mut gm_sess = setup_pilot(&ctx, PILOT_1, ROLE_ADMIN).await;
     ctx.db.with_mut_snapshot(|snap| {
@@ -168,8 +166,6 @@ async fn test_session_mgr_remove_and_end_all_sessions() {
 #[tokio::test]
 async fn test_raffle_qa_seed_db2_callproc_and_debug_exec() {
     // parity: rpc:raffleMgr.QA_SeedRaffles
-    // parity: rpc:DB2.CallProc
-    // parity: rpc:debug.Exec
     let ctx = new_ctx();
     let mut gm_sess = setup_pilot(&ctx, PILOT_1, ROLE_ADMIN | ROLE_GMH).await;
 
@@ -198,7 +194,7 @@ async fn test_raffle_qa_seed_db2_callproc_and_debug_exec() {
     .expect("DB2.CallProc");
     assert_eq!(polaris, PyRep::Integer(1));
 
-    let exec_res = rpc(
+    let exec_err = rpc(
         &ctx,
         &mut gm_sess,
         "debug",
@@ -206,15 +202,12 @@ async fn test_raffle_qa_seed_db2_callproc_and_debug_exec() {
         &[PyRep::String("status_check".into())],
     )
     .await
-    .expect("debug.Exec");
-    assert_ne!(exec_res, PyRep::None);
+    .expect_err("debug.Exec fail-closed");
+    assert_eq!(exec_err.code, "UnimplementedRPC");
 }
 
 #[tokio::test]
 async fn test_localization_server_and_user_svc_session_created() {
-    // parity: rpc:localizationServer.UpdateLocalizationQAWrap
-    // parity: rpc:localizationServer.ReloadFSDPickle
-    // parity: rpc:userSvc.ProcessEVESessionCreated
     let ctx = new_ctx();
     let mut gm_sess = setup_pilot(&ctx, PILOT_1, ROLE_GMH | ROLE_CONTENT).await;
 
@@ -268,10 +261,6 @@ async fn test_localization_server_and_user_svc_session_created() {
 
 #[tokio::test]
 async fn test_ui_neocom_badges_map_stats_and_agency() {
-    // parity: feat:ui.neocom-badges
-    // parity: feat:ui.map-stats
-    // parity: feat:ui.star-map-data
-    // parity: feat:ui.agency
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, PILOT_1, 0).await;
     sess.solar_system_id = Some(JITA_SYSTEM);

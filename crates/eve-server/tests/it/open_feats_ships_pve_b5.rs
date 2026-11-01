@@ -336,8 +336,6 @@ async fn test_blockade_runner_cargo_scan_immunity_and_frigate_escape_bay() {
 async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
     // parity: feat:ships.cynosural-beacon-spawning
     // parity: feat:ships.covert-cyno-beacon
-    // parity: feat:ships.jump-drive-fatigue-accumulation
-    // parity: feat:ships.titan-jump-portal-bridge
     let ctx = new_ctx();
     let mut s1 = setup_pilot(&ctx, PILOT_1).await;
     let mut s2 = setup_pilot(&ctx, PILOT_2).await;
@@ -488,7 +486,6 @@ async fn test_rnd_research_agents_datacore_purchase_and_storyline_counter() {
     // parity: feat:pve.research-agent-access-requirements
     // parity: feat:pve.research-agent-rp-formula
     // parity: feat:pve.datacore-purchase
-    // parity: feat:pve.storyline-offer-counter
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, PILOT_1).await;
     sess.station_id = Some(RND_STATION_ID);
@@ -561,6 +558,15 @@ async fn test_rnd_research_agents_datacore_purchase_and_storyline_counter() {
         kv_get(&start_res, "researchStarted"),
         Some(&PyRep::Bool(true))
     );
+    let points_per_day = match kv_get(&start_res, "pointsPerDay") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("expected pointsPerDay Real, got {other:?}"),
+    };
+    assert!(points_per_day > 0.0, "pointsPerDay must be positive");
+
+    let isk_before = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0));
 
     // Advance clock by 6 days to accumulate RP via the real RP formula, then redeem 1 datacore (action 14)
     ctx.advance_secs(86_400 * 6);
@@ -577,14 +583,34 @@ async fn test_rnd_research_agents_datacore_purchase_and_storyline_counter() {
     )
     .await
     .expect("BuyDatacores");
-    assert!(kv_get(&buy_res, "datacoreItemID").is_some());
-
-    // Storyline offer counter: 15 completed missions -> 16th triggers storyline
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.mission_tally.insert(PILOT_1, 15);
-    });
-    let tally = ctx
+    let dc_item_id = match kv_get(&buy_res, "datacoreItemID") {
+        Some(PyRep::Integer(id)) => *id,
+        other => panic!("expected datacoreItemID Integer, got {other:?}"),
+    };
+    let dc_type_id = match kv_get(&buy_res, "datacoreTypeID") {
+        Some(PyRep::Integer(tid)) => *tid as u32,
+        other => panic!("expected datacoreTypeID Integer, got {other:?}"),
+    };
+    assert!(dc_type_id > 0);
+    assert_eq!(kv_get(&buy_res, "quantity"), Some(&PyRep::Integer(1)));
+    let rem_rp = match kv_get(&buy_res, "remainingResearchPoints") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("expected remainingResearchPoints Real, got {other:?}"),
+    };
+    let expected_rp = points_per_day * 6.0 - 100.0;
+    assert!(
+        (rem_rp - expected_rp).abs() < 1e-6,
+        "expected remaining RP {expected_rp}, got {rem_rp}"
+    );
+    let isk_after = ctx
         .db
-        .with_snapshot(|snap| snap.mission_tally.get(&PILOT_1).copied());
-    assert_eq!(tally, Some(15));
+        .with_snapshot(|snap| snap.characters.get(&PILOT_1).map(|c| c.balance.0).unwrap_or(0));
+    assert_eq!(isk_before - isk_after, 1_000_000, "10,000 ISK fee must be debited");
+    ctx.db.with_snapshot(|snap| {
+        let item = snap.items.get(&dc_item_id).expect("datacore item in inventory");
+        assert_eq!(item.type_id, dc_type_id);
+        assert_eq!(item.quantity, 1);
+        assert_eq!(item.owner_id, PILOT_1);
+        assert_eq!(item.location_id, RND_STATION_ID);
+    });
 }
