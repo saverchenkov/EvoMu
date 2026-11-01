@@ -593,58 +593,18 @@ pub fn handle(
                 }
                 _ => {
                     return Some(Err(BridgeRpcError {
-                        code: "UserError".into(),
-                        message: "InvalidProcedure".into(),
+                        code: "UnimplementedRPC".into(),
+                        message: format!("DB2.CallProc: unknown procedure {proc_name}"),
                     }));
                 }
             };
             Some(Ok(result))
         }
 
-        ("debug", "Exec") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let admin_or_prog =
-                eve_db::service_roles::ROLE_ADMIN | eve_machonet::service_roles::ROLE_PROGRAMMER;
-            if !session.has_gm_role() && (session.role & admin_or_prog) == 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: "NotAuthorized".into(),
-                }));
-            }
-            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("");
-            let pos_args: Vec<String> = args.iter().skip(1).take(4).map(|a| format!("{a:?}")).collect();
-            let kw_map: Vec<(String, String)> = kwargs
-                .iter()
-                .map(|(k, v)| (k.clone(), format!("{v:?}")))
-                .collect();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut log: Vec<serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("debug_exec_log")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                if log.len() >= 256 {
-                    log.drain(0..log.len().saturating_sub(255));
-                }
-                log.push(serde_json::json!({
-                    "command": cmd,
-                    "pos_args": pos_args,
-                    "kwargs": kw_map,
-                    "user_id": session.user_id,
-                    "timestamp_unix": ctx.now_unix(),
-                }));
-                if let Ok(json) = serde_json::to_string(&log) {
-                    snap.service_state_blobs.insert("debug_exec_log".into(), json);
-                }
-            });
-            Some(Ok(PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::Integer(0),
-                PyRep::String("ok".into()),
-                PyRep::String(format!("executed: {cmd}")),
-            ])])))
-        }
+        ("debug", "Exec") => Some(Err(BridgeRpcError {
+            code: "UnimplementedRPC".into(),
+            message: "debug.Exec is not yet implemented".into(),
+        })),
 
         _ => None,
     }

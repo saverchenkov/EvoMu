@@ -74,7 +74,7 @@ pub struct PlanetResourceConfig {
     pub workforce: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QuasarB2State {
     pub ship_unlock_pending: BTreeMap<u64, Vec<u64>>,
     pub ship_unlock_claimed: BTreeMap<u64, Vec<u64>>,
@@ -88,77 +88,6 @@ pub struct QuasarB2State {
     pub adm_levels: BTreeMap<u64, u64>,
     pub star_resource_configs: Vec<StarResourceConfig>,
     pub planet_resource_configs: Vec<PlanetResourceConfig>,
-}
-
-impl Default for QuasarB2State {
-    fn default() -> Self {
-        let mut structures = BTreeMap::new();
-        structures.insert(
-            1_030_000_000_001,
-            StructureRecord {
-                structure_id: 1_030_000_000_001,
-                type_id: 35832, // Astrahus
-                solar_system_id: 30_000_142,
-                corporation_id: 98_000_001,
-                name: "Jita Trade Citadel".to_string(),
-            },
-        );
-
-        let mut star_power_production = BTreeMap::new();
-        star_power_production.insert(40_009_041, 4_250);
-
-        let mut stargate_locks = BTreeMap::new();
-        stargate_locks.insert(
-            format!("{}:{}", 2_112_000_001u64, 30_000_142u64),
-            StargateLockRecord {
-                character_id: 2_112_000_001,
-                solar_system_id: 30_000_142,
-                gate_id: 50_001_248,
-                expiry_unix: 1_800_000_000,
-            },
-        );
-
-        let mut sov_claims = BTreeMap::new();
-        sov_claims.insert(
-            30_002_537,
-            SovClaimRecord {
-                solar_system_id: 30_002_537,
-                alliance_id: 99_000_001,
-                corporation_id: 98_000_001,
-                hub_id: 1_040_000_000_001,
-                claimed_at_unix: 1_700_000_000,
-                is_capital: true,
-                military_index: 5,
-                industrial_index: 4,
-                strategic_index: 5,
-            },
-        );
-
-        let mut adm_levels = BTreeMap::new();
-        adm_levels.insert(30_002_537, 60); // 6.0x ADM
-
-        Self {
-            ship_unlock_pending: BTreeMap::new(),
-            ship_unlock_claimed: BTreeMap::new(),
-            starter_caster_blocked: BTreeSet::new(),
-            structures,
-            star_power_production,
-            space_tags: BTreeMap::new(),
-            stargate_locks,
-            restricted_systems: vec![30_000_142, 30_100_001],
-            sov_claims,
-            adm_levels,
-            star_resource_configs: vec![StarResourceConfig {
-                star_id: 40_009_041,
-                power: 4_250,
-            }],
-            planet_resource_configs: vec![PlanetResourceConfig {
-                planet_id: 40_009_042,
-                power: 1_200,
-                workforce: 8_500,
-            }],
-        }
-    }
 }
 
 pub fn load_state(db: &WorldRepository) -> QuasarB2State {
@@ -310,11 +239,8 @@ pub fn register_handlers(
     let db_sc1 = Arc::clone(&db);
     router.register_handler(
         "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
-        Arc::new(move |ctx, _any, msg| {
-            let mut cid = extract_u64(msg, 1);
-            if cid == 0 {
-                cid = active_char_id(ctx)?;
-            }
+        Arc::new(move |ctx, _any, _msg| {
+            let cid = active_char_id(ctx)?;
             let st = load_state(&db_sc1);
             let can_jump = !st.starter_caster_blocked.contains(&cid);
             let mut out = Vec::new();
@@ -327,11 +253,8 @@ pub fn register_handlers(
     let db_ss1 = Arc::clone(&db);
     router.register_handler(
         "eve.starterspace.api.CanJumpShipCasterRequest",
-        Arc::new(move |ctx, _any, msg| {
-            let mut cid = extract_u64(msg, 1);
-            if cid == 0 {
-                cid = active_char_id(ctx)?;
-            }
+        Arc::new(move |ctx, _any, _msg| {
+            let cid = active_char_id(ctx)?;
             let st = load_state(&db_ss1);
             let has_lock = st.stargate_locks.values().any(|l| l.character_id == cid);
             let can_jump = !st.starter_caster_blocked.contains(&cid) && !has_lock;
@@ -466,11 +389,11 @@ pub fn register_handlers(
     let db_gl1 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.GetRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let cid = extract_u64(msg, 1);
+        Arc::new(move |ctx, _any, msg| {
+            let cid = active_char_id(ctx)?;
             let sys_id = extract_u64(msg, 2);
-            if cid == 0 || sys_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing character or solarsystem".to_string()));
+            if sys_id == 0 {
+                return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
             }
             let st = load_state(&db_gl1);
             let lock = st
@@ -500,12 +423,12 @@ pub fn register_handlers(
     let db_gl3 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.ValidateJumpRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let cid = extract_u64(msg, 1);
+        Arc::new(move |ctx, _any, msg| {
+            let cid = active_char_id(ctx)?;
             let sys_id = extract_u64(msg, 2);
             let gate_id = extract_u64(msg, 3);
-            if cid == 0 || sys_id == 0 || gate_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing character, solarsystem, or gate".to_string()));
+            if sys_id == 0 || gate_id == 0 {
+                return Err((STATUS_BAD_REQUEST, "Missing solarsystem or gate".to_string()));
             }
             let st = load_state(&db_gl3);
             let mut out = Vec::new();
@@ -528,7 +451,8 @@ pub fn register_handlers(
     let db_gl4 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.DeleteCommanded",
-        Arc::new(move |_ctx, _any, msg| {
+        Arc::new(move |ctx, _any, msg| {
+            require_admin_role(ctx)?;
             let cid = extract_u64(msg, 2);
             let sys_id = extract_u64(msg, 3);
             if cid == 0 || sys_id == 0 {

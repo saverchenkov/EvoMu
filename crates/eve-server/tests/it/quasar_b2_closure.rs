@@ -10,9 +10,62 @@ use eve_server::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b2_services::{load_state, save_state};
+use eve_server::services::quasar_b2_services::{
+    load_state, save_state, PlanetResourceConfig, QuasarB2State, SovClaimRecord,
+    StarResourceConfig, StargateLockRecord, StructureRecord,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+fn seed_quasar_b2_fixtures(ctx: &ServerContext) {
+    let mut state = QuasarB2State::default();
+    state.structures.insert(
+        1_030_000_000_001,
+        StructureRecord {
+            structure_id: 1_030_000_000_001,
+            type_id: 35832, // Astrahus
+            solar_system_id: 30_000_142,
+            corporation_id: 98_000_001,
+            name: "Jita Trade Citadel".to_string(),
+        },
+    );
+    state.star_power_production.insert(40_009_041, 4_250);
+    state.stargate_locks.insert(
+        format!("{}:{}", 2_112_000_001u64, 30_000_142u64),
+        StargateLockRecord {
+            character_id: 2_112_000_001,
+            solar_system_id: 30_000_142,
+            gate_id: 50_001_248,
+            expiry_unix: 1_800_000_000,
+        },
+    );
+    state.restricted_systems = vec![30_000_142, 30_100_001];
+    state.sov_claims.insert(
+        30_002_537,
+        SovClaimRecord {
+            solar_system_id: 30_002_537,
+            alliance_id: 99_000_001,
+            corporation_id: 98_000_001,
+            hub_id: 1_040_000_000_001,
+            claimed_at_unix: 1_700_000_000,
+            is_capital: true,
+            military_index: 5,
+            industrial_index: 4,
+            strategic_index: 5,
+        },
+    );
+    state.adm_levels.insert(30_002_537, 60);
+    state.star_resource_configs = vec![StarResourceConfig {
+        star_id: 40_009_041,
+        power: 4_250,
+    }];
+    state.planet_resource_configs = vec![PlanetResourceConfig {
+        planet_id: 40_009_042,
+        power: 1_200,
+        workforce: 8_500,
+    }];
+    save_state(&ctx.db, &state);
+}
 
 static CORR_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +216,7 @@ fn first_bytes(fields: &[(u32, RawField)], field_num: u32) -> Option<&[u8]> {
 async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     // parity: quasar:eveProto/generated/eve_public/ship/unlock/requests_pb2.pyj, quasar:eveProto/generated/eve/ship/api/requests_pb2.pyj, quasar:eveProto/generated/eve/starterspace/api/requests_pb2.pyj
     let ctx = ServerContext::new();
+    seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(1, 1001, 2_112_000_001, 98_000_001);
 
     // 1. GetPendingNotificationsRequest returns initial pending ship types [587, 597]
@@ -249,6 +303,7 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
 async fn test_quasar_b2_structure_star_resources_and_space_tags() {
     // parity: quasar:eveProto/generated/eve/structure/api/requests_pb2.pyj, quasar:eveProto/generated/eve/star/resources/api/requests_pb2.pyj, quasar:eveProto/generated/eve/space/tag/api/admin/requests_pb2.pyj
     let ctx = ServerContext::new();
+    seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(2, 1002, 2_112_000_002, 98_000_001);
 
     // 1. eve.structure.api.GetRequest
@@ -336,6 +391,7 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
 async fn test_quasar_b2_stargate_locks_and_delete_command() {
     // parity: quasar:eveProto/generated/eve/stargate/lock/api/requests_pb2.pyj, quasar:eveProto/generated/eve/stargate/lock/api/commands_pb2.pyj
     let ctx = ServerContext::new();
+    seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(3, 1003, 2_112_000_001, 98_000_001);
 
     // 1. GetRestrictedSystemsRequest
@@ -380,10 +436,22 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
         Some(0)
     );
 
-    // 4. DeleteCommanded removes the lock, after which ValidateJumpRequest allows jump (1)
+    // 4. DeleteCommanded requires admin role, then removes the lock, after which ValidateJumpRequest allows jump (1)
     let mut del_req = Vec::new();
     encode_id_field(2, 2_112_000_001, &mut del_req);
     encode_id_field(3, 30_000_142, &mut del_req);
+
+    let mut non_admin = make_session(33, 1033, 2_112_000_001, 98_000_001);
+    non_admin.role = 0;
+    let unauth_del = quasar_rpc(
+        &ctx,
+        &mut non_admin,
+        "eve.stargate.lock.api.DeleteCommanded",
+        del_req.clone(),
+    )
+    .await;
+    assert_eq!(unauth_del.status_code, 403);
+
     let del_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -410,6 +478,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
 async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
     // parity: quasar:eveProto/generated/eve/sovereignty/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/activitydefensemodifier/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/resource/planet/api/requests_pb2.pyj
     let ctx = ServerContext::new();
+    seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(4, 1004, 2_112_000_004, 98_000_001);
 
     // 1. GetClaimRequest (claimed system 30_002_537 vs unclaimed 30_000_142)
