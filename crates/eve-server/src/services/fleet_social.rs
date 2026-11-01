@@ -342,9 +342,6 @@ fn handle_office_manager(
                         "corpid",
                         vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)],
                     );
-                    crate::services::notify_emitters_b5::emit_office_rental_changed(
-                        ctx, corp_id, office_id,
-                    );
                     Some(Ok(PyRep::keyval([
                         ("officeFolderID", PyRep::Integer(office_id)),
                         ("stationID", PyRep::Integer(st_id)),

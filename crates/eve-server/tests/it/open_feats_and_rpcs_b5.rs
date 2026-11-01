@@ -72,8 +72,6 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_load_service_start_stop_and_stats() {
-    // parity: rpc:loadService.StartLoad
-    // parity: rpc:loadService.StopLoad
     // parity: rpc:loadService.GetTotalStats
     let ctx = new_ctx();
     let mut player_sess = setup_pilot(&ctx, PILOT_1, 0).await;

@@ -322,7 +322,6 @@ pub async fn handle(
                     }));
                 }
             };
-            crate::services::notify_emitters_b5::emit_undocking_started(ctx, char_id, station_id);
             crate::services::space_navigation_advanced::deactivate_ship_modules_on_leave_space(
                 ctx,
                 char_id,
@@ -542,7 +541,6 @@ pub async fn handle(
             let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, ch.solar_system_id).await;
             // Entering space: send the pilot the SKIN states and structure paintworks around them.
             crate::services::quasar_cosmetics_live::publish_arrival_cosmetics(&ctx.quasar_gateway, &ctx.db, &ctx.sde, char_id, ctx.now_unix());
-            crate::services::notify_emitters_b5::emit_undocking_completed(ctx, char_id, ship.item_id);
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
                 ("shipID", PyRep::Integer(ship.item_id)),

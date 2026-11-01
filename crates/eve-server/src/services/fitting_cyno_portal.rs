@@ -592,19 +592,23 @@ async fn light_cyno(
             ));
         }
     }
-    let raw_base = type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY);
-    let role_mult = if ship_type.effect_ids.contains(&3526) {
-        (1.0 + type_attr(ctx, ship_type, 1296) / 100.0).max(0.0)
+    let fuel_qty = if is_covert {
+        0
     } else {
-        1.0
+        let raw_base = type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY);
+        let role_mult = if ship_type.effect_ids.contains(&3526) {
+            (1.0 + type_attr(ctx, ship_type, 1296) / 100.0).max(0.0)
+        } else {
+            1.0
+        };
+        let cft_mult = 1.0 - 0.10 * (cft_lvl.min(5) as f64);
+        let min_floor = if type_attr(ctx, mod_type, ATTR_IS_INDUSTRIAL_CYNO) > 0.0 {
+            400.0
+        } else {
+            1.0
+        };
+        (raw_base * role_mult * cft_mult).max(min_floor).ceil() as i64
     };
-    let cft_mult = 1.0 - 0.10 * (cft_lvl.min(5) as f64);
-    let min_floor = if type_attr(ctx, mod_type, ATTR_IS_INDUSTRIAL_CYNO) > 0.0 {
-        400.0
-    } else {
-        1.0
-    };
-    let fuel_qty = (raw_base * role_mult * cft_mult).max(min_floor).ceil() as i64;
     let duration_s = duration_ms / 1000.0;
     sys.add_module_cycle(self_immobilizing_cycle(
         ship_id,
@@ -615,11 +619,13 @@ async fn light_cyno(
     ))
     .await
     .map_err(|e| err("ModuleActivationFailed", e))?;
-    if let Err(e) = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
-        format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
-    }) {
-        let _ = sys.remove_module_cycle(ship_id, module_id).await;
-        return Err(e);
+    if fuel_qty > 0 {
+        if let Err(e) = consume_or_err(ctx, ship_id, fuel_type, fuel_qty, |have| {
+            format!("Requires {fuel_qty} x type {fuel_type}, ship holds {have}")
+        }) {
+            let _ = sys.remove_module_cycle(ship_id, module_id).await;
+            return Err(e);
+        }
     }
 
     let ship_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);

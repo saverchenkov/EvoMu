@@ -396,6 +396,16 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
     .await
     .expect("Activate covert cyno");
     assert!(kv_get(&cyno_res, "beaconTypeID").is_some());
+    let ozone_after_covert = ctx.db.with_snapshot(|s| {
+        s.items
+            .get(&210_005)
+            .map(|it| it.quantity)
+            .unwrap_or(0)
+    });
+    assert_eq!(
+        ozone_after_covert, 500,
+        "Covert Cyno must consume 0 Liquid Ozone in V24.01"
+    );
 
     // Verify jump fatigue accumulation
     let (cd_min, fat_min) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 4.5, 0.0);

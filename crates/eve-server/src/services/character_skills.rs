@@ -470,7 +470,6 @@ pub fn handle(
                         snap.paused_skill_queues.insert(char_id);
                     });
                     let _ = ctx.notify_skill_queue_paused_server(char_id);
-                    crate::services::notify_emitters_b5::emit_skill_queue_paused(ctx, char_id);
                     return Some(Ok(PyRep::List(vec![])));
                 } else {
                     return Some(Err(BridgeRpcError {
@@ -678,7 +677,6 @@ pub fn handle(
                 Ok((tid, lvl, esp, dur)) => {
                     let _ =
                         ctx.notify_new_skill_queue_saved(char_id, skill_queue_rowset(ctx, char_id));
-                    crate::services::notify_emitters_b5::emit_skill_queue_changed(ctx, char_id);
                     Some(Ok(PyRep::keyval([
                         ("typeID", PyRep::Integer(tid as i64)),
                         ("targetLevel", PyRep::Integer(lvl as i64)),

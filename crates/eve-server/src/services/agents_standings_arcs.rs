@@ -532,15 +532,6 @@ pub fn notify_standing_changes(
         "character",
         vec![PyRep::List(mods)],
     );
-    for &(from_id, new_val, delta) in changes {
-        crate::services::notify_emitters_b5::emit_npc_standing_change(
-            ctx,
-            char_id,
-            from_id,
-            new_val,
-            new_val - delta,
-        );
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

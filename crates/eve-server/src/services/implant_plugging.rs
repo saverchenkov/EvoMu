@@ -437,7 +437,6 @@ pub fn inject_implant(
         "charid",
         vec![],
     );
-    crate::services::notify_emitters_b5::emit_implants_changed(ctx, char_id);
     Ok(PyRep::None)
 }
 
@@ -512,7 +511,6 @@ pub fn destroy_implant(
         "charid",
         vec![],
     );
-    crate::services::notify_emitters_b5::emit_implants_changed(ctx, char_id);
     Ok(PyRep::None)
 }
 
@@ -774,7 +772,6 @@ pub fn use_booster(
         "charid",
         vec![],
     );
-    crate::services::notify_emitters_b5::emit_booster_updated(ctx, char_id);
     let side_effect_reps: Vec<PyRep> = rolled_eids
         .into_iter()
         .map(|eid| PyRep::Integer(eid as i64))
