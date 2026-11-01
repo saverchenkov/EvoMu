@@ -373,3 +373,49 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
         4.0 / expected_total_slots
     );
 }
+
+#[tokio::test]
+async fn test_nanite_repair_and_overload_cross_module_lockout() {
+    let ctx = build_ctx();
+    let (char_id, ship_id, mod_a, mod_b) = (94_081, 84_081, 75_801, 75_802);
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 24_690, 30_000_142, false);
+    let sys = ctx.systems.get_or_spawn(30_000_142);
+    sys.set_capacitor(ship_id, 10_000.0).await.unwrap();
+    give_item(&ctx, mod_a, 12_058, char_id, ship_id, InventoryFlag::MedSlot0, 1);
+    give_item(&ctx, mod_b, 3_530, char_id, ship_id, InventoryFlag::LoSlot0, 1);
+    give_item(&ctx, 75_803, 28668, char_id, ship_id, InventoryFlag::Cargo, 50);
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(char_id).or_default().insert(28164, eve_db::TrainedSkillRecord { type_id: 28164, level: 5, skill_points: 256_000.0 });
+        s.items.get_mut(&mod_a).unwrap().dynamic_attributes.insert(3, 10.0);
+    });
+    rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", vec![PyRep::Integer(ship_id), PyRep::Integer(mod_a)]).await.unwrap();
+    rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", vec![PyRep::Integer(ship_id), PyRep::Integer(mod_b)]).await.unwrap();
+    // Direction 1: Active nanite repair on mod_a blocks overloading mod_b
+    rpc(&ctx, &mut sess, "dogmaIM", "RepairModule", vec![PyRep::Integer(mod_a)]).await.unwrap();
+    let err1 = rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(mod_b)]).await.unwrap_err();
+    assert_eq!(err1.code, "CannotOverheatWhileRepairing");
+    for _ in 0..30 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    // Direction 2: Active overloaded cycle on mod_b blocks initiating nanite repair on mod_a
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.get_mut(&mod_a).unwrap().dynamic_attributes.insert(3, 10.0);
+    });
+    rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(mod_b)]).await.unwrap();
+    let err2 = rpc(&ctx, &mut sess, "dogmaIM", "RepairModule", vec![PyRep::Integer(mod_a)]).await.unwrap_err();
+    assert_eq!(err2.code, "CannotRepairWhileOverloaded");
+}
+
+#[tokio::test]
+async fn test_interdiction_probe_excess_return_full_cargo_rejected() {
+    let ctx = build_ctx();
+    let (char_id, ship_id, launcher_id) = (94_082, 84_082, 75_811);
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 22_456, 30_004_608, false);
+    give_item(&ctx, launcher_id, 22_782, char_id, ship_id, InventoryFlag::HiSlot0, 1);
+    give_item(&ctx, 75_812, 22_778, char_id, ship_id, InventoryFlag::HiSlot0, 4);
+    give_item(&ctx, 75_813, 34, char_id, ship_id, InventoryFlag::Cargo, 100_000);
+    ctx.invalidate_ship_fitting(ship_id);
+    rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", vec![PyRep::Integer(ship_id), PyRep::Integer(launcher_id)]).await.unwrap();
+    let err = rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)]).await.unwrap_err();
+    assert_eq!(err.code, "NotEnoughCargoSpace");
+}

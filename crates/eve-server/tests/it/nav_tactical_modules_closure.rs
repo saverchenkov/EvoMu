@@ -668,3 +668,17 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
         assert!((decloaked_ball.max_velocity - base_vel).abs() < 1e-3);
     }
 }
+
+#[test]
+fn test_realistic_player_ship_stargate_and_station_collision_separation() {
+    let mut bp = eve_destiny::Ballpark::new(1);
+    let (gate_id, station_id, ship_id) = (50_000_001, 60_000_001, 100_000_042);
+    bp.add_ball(Ball { id: gate_id, type_id: 16, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1e12, radius: 2_000.0, speed_fraction: 0.0, mode: MovementMode::Stop });
+    bp.add_ball(Ball { id: station_id, type_id: 1529, position: DVec3::new(50_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1e12, radius: 5_000.0, speed_fraction: 0.0, mode: MovementMode::Stop });
+    bp.add_ball(Ball { id: ship_id, type_id: 587, position: DVec3::new(1_500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop });
+    bp.step(1.0);
+    assert!(bp.balls[&ship_id].position.x >= 2_049.9, "Ship must separate from stargate even at v_rel == 0: {:?}", bp.balls[&ship_id].position);
+    bp.balls.get_mut(&ship_id).unwrap().position = DVec3::new(45_500.0, 0.0, 0.0);
+    bp.step(1.0);
+    assert!(bp.balls[&ship_id].position.x <= 44_950.1, "Ship must separate from NPC station even at v_rel == 0: {:?}", bp.balls[&ship_id].position);
+}

@@ -373,19 +373,23 @@ impl Ballpark {
                         if v_rel < 0.0 {
                             if let Some(ba) = self.balls.get_mut(&id_a) {
                                 ba.velocity -= normal * ((1.0 + restitution) * v_rel);
-                                ba.position += normal * overlap;
                             }
                             bumped_dynamic_ids.insert(id_a);
                             collision_events.push((id_a, id_b));
+                        }
+                        if let Some(ba) = self.balls.get_mut(&id_a) {
+                            ba.position += normal * overlap;
                         }
                     } else if is_static_a && !is_static_b {
                         if v_rel < 0.0 {
                             if let Some(bb) = self.balls.get_mut(&id_b) {
                                 bb.velocity += normal * ((1.0 + restitution) * v_rel);
-                                bb.position -= normal * overlap;
                             }
                             bumped_dynamic_ids.insert(id_b);
                             collision_events.push((id_a, id_b));
+                        }
+                        if let Some(bb) = self.balls.get_mut(&id_b) {
+                            bb.position -= normal * overlap;
                         }
                     }
 

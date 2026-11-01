@@ -388,6 +388,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: format!("Module {module_id} is already undergoing nanite repair"),
                 }));
             }
+            if sys.has_active_overloaded_cycle_sync(ship_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotRepairWhileOverloaded".into(),
+                    message: "UserError: Cannot initiate Nanite Repair Paste repair while another module on the ship is overloaded".into(),
+                }));
+            }
 
             let mod_check = ctx.db.with_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {

@@ -912,9 +912,9 @@ impl WarpBubble {
             return Some(origin);
         }
 
-        // Stop bubble (within 150 km exit corridor in front of destination): t0 >= dist - 150_000.0 and t0 <= dist
-        // Drag bubble (behind destination inline, within 500 km = 500,000 m): t0 > dist and (t0 - dist) <= 500_000.0
-        if t0 > 0.0 && t0 >= dist - 150_000.0 && (t0 - dist) <= 500_000.0 {
+        // Stop/catch bubble (within 500 km in front of destination) or drag bubble (within 500 km behind destination):
+        // Check segment overlap of bubble chord [t0, t1] with [max(0, dist - 500_000.0), dist + 500_000.0].
+        if t0 > 0.0 && t1 >= (dist - 500_000.0).max(0.0) && t0 <= dist + 500_000.0 {
             Some(origin + dir_norm * t0)
         } else {
             None

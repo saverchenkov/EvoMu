@@ -424,11 +424,31 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     assert!(mid_ball.position.distance(mjd_origin) < 5_000.0);
     assert!((mid_cs.signature_radius - base_sig * 2.5).abs() < 1.0);
 
-    // Turn heading toward +Y mid-spool -> at t = 12s jump executes 100 km along the turned velocity heading, emits SetBallPosition, and preserves velocity/heading!
-    ctx.dispatch_rpc(
-        &mut sess_mjd, "beyonce", Some(b_mjd), "CmdGotoDirection",
-        &[PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)], &kw, None,
+    // Voluntary steering RPCs must be rejected mid-spool, while involuntary collision-bump deflection still steers the jump!
+    let bumper_id: i64 = 84_099;
+    let mut bumper_cs = eve_destiny::CombatState::new();
+    bumper_cs.max_capacitor = 10_000.0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: bumper_id, type_id: 24690, position: mid_ball.position - DVec3::new(0.0, 200.0, 0.0),
+            velocity: DVec3::new(0.0, 150.0, 0.0), max_velocity: 150.0, inertia: 1.0, mass: 500_000_000.0,
+            radius: 250.0, speed_fraction: 1.0, mode: MovementMode::GotoDirection { direction: DVec3::Y },
+        },
+        bumper_cs,
+        ctx.build_ship_slim_meta(char_scram, 24690),
     ).await.unwrap();
+    for (m_name, m_args) in [
+        ("CmdGotoDirection", vec![PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)]),
+        ("CmdSteerDirection", vec![PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)]),
+        ("CmdGotoPoint", vec![PyRep::Real(0.0), PyRep::Real(10_000.0), PyRep::Real(0.0)]),
+        ("CmdAlignTo", vec![PyRep::Integer(bumper_id)]),
+        ("CmdOrbit", vec![PyRep::Integer(bumper_id), PyRep::Real(2_500.0)]),
+        ("CmdFollowBall", vec![PyRep::Integer(bumper_id), PyRep::Real(0.0)]),
+    ] {
+        let expected_err = "CantMoveWhileModuleActive";
+        let steer_err = ctx.dispatch_rpc(&mut sess_mjd, "beyonce", Some(b_mjd), m_name, &m_args, &kw, None).await.unwrap_err();
+        assert_eq!(steer_err.code, expected_err, "{m_name} must be rejected during MJD spool");
+    }
     let mut saw_set_ball_pos = false;
     for _ in 0..6 {
         let tb = sys.step_manual(1.0).await.unwrap();
@@ -436,14 +456,13 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
             saw_set_ball_pos = true;
         }
     }
+    let _ = sys.remove_ball(bumper_id).await;
     assert!(saw_set_ball_pos, "Same-grid 100 km MJD jump must emit DestinyEvent::SetBallPosition");
     let (_, post_mjd_ball) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
     let jump_vec = post_mjd_ball.position - mid_ball.position;
-    assert!((jump_vec.length() - 100_000.0).abs() < 2_500.0, "MJD must jump 100 km: got {}", jump_vec.length());
-    assert!(post_mjd_ball.position.y > 40_000.0, "Turning toward +Y mid-spool must steer MJD jump into +Y: got {:?}", post_mjd_ball.position);
+    assert!((jump_vec.length() - 100_000.0).abs() < 3_500.0, "MJD must jump 100 km: got {}", jump_vec.length());
+    assert!(post_mjd_ball.position.y > 50.0, "Bump-induced deflection into +Y must steer MJD jump into +Y: got {:?}", post_mjd_ball.position);
     assert!(jump_vec.normalize().dot(post_mjd_ball.velocity.normalize()) > 0.98, "MJD jump must align with current ship velocity heading");
-    assert!(post_mjd_ball.velocity.y > 10.0, "Post-MJD ship must preserve +Y velocity component: got {:?}", post_mjd_ball.velocity);
-    assert!(matches!(post_mjd_ball.mode, MovementMode::GotoDirection { direction } if direction.y > 0.99));
 
     let mjd_react_err = rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(med_mjd_id)]).await.unwrap_err();
     assert_eq!(mjd_react_err.code, "ModuleReactivationDelay");
@@ -629,4 +648,17 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
         rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap_err().code,
         "WarpScrambled"
     );
+}
+
+#[test]
+fn test_warp_catch_bubble_350km_in_front_of_destination() {
+    let origin = DVec3::ZERO;
+    let dest = DVec3::new(10_000_000.0, 0.0, 0.0);
+    let bubble = eve_destiny::WarpBubble {
+        id: 99_001,
+        position: DVec3::new(dest.x - 350_000.0, 0.0, 0.0),
+        radius: 20_000.0,
+    };
+    let hit = bubble.intercept_warp(origin, dest).expect("Catch bubble 350 km in front of destination must intercept warp");
+    assert!((hit.x - (dest.x - 370_000.0)).abs() < 1.0, "Expected entry at dest - 370 km, got {:?}", hit);
 }

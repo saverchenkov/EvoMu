@@ -576,6 +576,11 @@ pub(crate) async fn handle_module_cycles(
                     eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
                 ) || in_db_active
                     || in_actor_cycle;
+                if let Err(e) = crate::services::fitting_cycles_overheat::check_nanite_repair_overheat_lockout(
+                    &sys, ship_id, module_id, method, m.state,
+                ) {
+                    return Some(Err(e));
+                }
                 if method == "Overload"
                     && (already_active
                         || (target_id_opt.is_none()

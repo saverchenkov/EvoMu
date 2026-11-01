@@ -418,6 +418,15 @@ impl SystemHandle {
             .any(|c| c.ship_id == ship_id && c.module_id == module_id)
     }
 
+    pub fn has_active_mjd_or_mjfg_spool_sync(&self, ship_id: BallId) -> bool {
+        self.actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.mjd_jump_distance_m.is_some())
+    }
+
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
         let (cancelled, db_opt, sde_opt) = {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
