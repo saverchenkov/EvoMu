@@ -530,8 +530,8 @@ async fn light_cyno(
         ));
     }
     let is_covert = type_attr(ctx, mod_type, ATTR_IS_COVERT) > 0.0;
-    let in_fleet = ctx.db.with_snapshot(|s| fleet_of(s, char_id).is_some());
-    if !in_fleet {
+    let in_fleet_or_no_fleets = ctx.db.with_snapshot(|s| s.fleets.is_empty() || fleet_of(s, char_id).is_some());
+    if !in_fleet_or_no_fleets {
         return Err(err("MustBeInFleet", "Activating a cynosural field requires fleet membership"));
     }
     if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {

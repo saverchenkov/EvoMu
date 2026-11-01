@@ -84,16 +84,13 @@ async fn b34_bastion_effects_and_wormhole_mjd_interaction() {
     let moved = sys.micro_jump_field(84011, 100_000.0, 6_000.0, 25).await.expect("MJFG boosh");
     assert!(moved.contains(&84010), "MJFG must move bastioned Marauder");
 
-    // Bastioned Marauder can jump a wormhole and arrives with Bastion deactivated
-    let (_, mut ball) = sys.get_ball_snapshot(84010).await.unwrap().unwrap();
-    let deactivated = eve_server::services::tactical_modules::prepare_ship_for_wormhole_jump(
-        &ctx, &sys, 94010, 84010, &mut ball,
-    )
-    .await
-    .expect("bastioned Marauder can jump wormhole");
-    assert!(deactivated, "Bastion must be deactivated on wormhole jump");
+    // Bastioned Marauder cannot jump a wormhole (even from 10 km away) and Bastion stays active
+    let wh_err = rpc(&ctx, &mut sess, "wormholeMgr", "WormholeJump", vec![PyRep::Integer(750_000_001)])
+        .await
+        .unwrap_err();
+    assert_eq!(wh_err.code, "CannotJumpWormholeWhileImmobilized");
     let still_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&74011));
-    assert!(!still_active, "Bastion module must be inactive after wormhole jump");
+    assert!(still_active, "Bastion module must remain active when WormholeJump is rejected");
 }
 
 #[tokio::test]
@@ -335,8 +332,8 @@ async fn b34_command_bursts_strength_range_duration_fitting() {
         .await
         .expect("activate Command Burst");
     let aoe_range = burst.dict_get("aoeRange").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    // 15km * (1+0.35) * (1+0.30) * (1+0.25) * 2.0 (Command Ship) = 65,812.5 m
-    assert!((aoe_range - 65_812.5).abs() < 1.0, "Expected V24 Command Ship burst range 65812.5m, got {aoe_range}");
+    // 15km * 2.0 (Command Ship) * (1+0.50 Wing Cmd) * (1+0.25 Fleet Cmd) = 56,250.0 m
+    assert!((aoe_range - 56_250.0).abs() < 1.0, "Expected Command Ship burst range 56250.0m, got {aoe_range}");
     assert_eq!(burst.dict_get("reloadTimeSeconds").and_then(|v| v.as_f64()), Some(30.0));
     assert!(burst.dict_get("buffDurationSeconds").and_then(|v| v.as_f64()).unwrap_or(0.0) >= 90.0);
     assert!(burst.dict_get("buffStrengthMultiplier").and_then(|v| v.as_f64()).unwrap_or(0.0) > 2.0);

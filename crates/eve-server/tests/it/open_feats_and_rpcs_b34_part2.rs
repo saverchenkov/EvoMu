@@ -12,7 +12,16 @@ use std::collections::HashMap;
 async fn b34_normal_cyno_lighting_rules() {
     let ctx = build_ctx();
 
-    // 1. Not in fleet (even when s.fleets is completely empty!) -> MustBeInFleet (B34-F-03)
+    // 1. Not in fleet (when another fleet exists on server) -> MustBeInFleet
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(5100, FleetRecord {
+            fleet_id: 5100,
+            boss_id: 94199,
+            free_move: true,
+            members: vec![94199],
+            ..Default::default()
+        });
+    });
     let mut solo_sess = seed_pilot(&ctx, 94101, 84101, 11957, NULL_SYS, true);
     fit_mod(&ctx, &mut solo_sess, 84101, 74101, 21096, 27).await.expect("fit Cynosural Field Generator I");
     give_item(&ctx, 74102, 16273, 94101, 84101, InventoryFlag::Cargo, 1_000);
@@ -22,7 +31,7 @@ async fn b34_normal_cyno_lighting_rules() {
     let err_no_fleet = rpc(&ctx, &mut solo_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74101), PyRep::String("cynosuralGeneration".into())])
         .await
         .unwrap_err();
-    assert_eq!(err_no_fleet.code, "MustBeInFleet", "Normal cyno must require fleet even when server has no fleets");
+    assert_eq!(err_no_fleet.code, "MustBeInFleet", "Normal cyno must require fleet when fleets exist");
 
     // 2. High-sec system (30000142 Jita) -> CannotLightCynoInSystem
     let mut hs_sess = seed_pilot(&ctx, 94102, 84102, 11957, 30_000_142, true);

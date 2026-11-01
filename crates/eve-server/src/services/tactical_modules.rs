@@ -620,45 +620,31 @@ pub async fn activate_auto_targeting_system(
     ]))
 }
 
-/// Validates wormhole jump eligibility for `ship_id` and deactivates `Bastion Module I` (`33400`) on jump.
+/// Validates wormhole jump eligibility for `ship_id` (blocking Bastion and other immobilizing modules).
 pub async fn prepare_ship_for_wormhole_jump(
     ctx: &ServerContext,
-    old_handle: &SystemHandle,
+    _old_handle: &SystemHandle,
     _char_id: i64,
     ship_id: i64,
     _current_ball: &mut Ball,
 ) -> Result<bool, BridgeRpcError> {
     check_ship_navigation_lock(ctx, ship_id, "jump wormhole")?;
 
-    let (blocking_mod, bastion_mod_ids) = ctx.db.with_snapshot(|snap| {
+    let blocking_mod = ctx.db.with_snapshot(|snap| {
         let mut blocking = None;
-        let mut bastions = Vec::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && snap.module_active_states.contains(&item.item_id) {
-                if item.type_id == 33400 {
-                    bastions.push(item.item_id);
-                } else if matches!(item.type_id, 20280 | 4292 | 27951 | 4294 | 28583 | 42890 | 58945 | 58950 | 62590 | 62591 | 34593 | 34595) {
+                if matches!(item.type_id, 33400 | 20280 | 4292 | 27951 | 4294 | 28583 | 42890 | 58945 | 58950 | 62590 | 62591 | 34593 | 34595) {
                     blocking = Some(item.type_id);
                     break;
                 }
             }
         }
-        (blocking, bastions)
+        blocking
     });
 
     if let Some(block_tid) = blocking_mod {
         return Err(BridgeRpcError { code: "CannotJumpWormholeWhileImmobilized".into(), message: format!("Cannot jump wormhole while immobilizing module (type {block_tid}) is active") });
-    }
-    if !bastion_mod_ids.is_empty() {
-        ctx.db.with_mut_snapshot(|snap| { for mid in &bastion_mod_ids { snap.module_active_states.remove(mid); } });
-        for mid in &bastion_mod_ids { let _ = old_handle.remove_module_cycle(ship_id, *mid).await; }
-        if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
-            cs.is_mwd_mjd_disabled = false;
-            cs.disallow_assistance = false;
-            let _ = old_handle.set_combat_state(ship_id, cs).await;
-        }
-        ctx.invalidate_ship_fitting(ship_id);
-        return Ok(true);
     }
     Ok(false)
 }
@@ -1254,7 +1240,6 @@ pub async fn activate_command_burst(
         return Err(BridgeRpcError { code: "SkillMissing".into(), message: format!("Tech II Command Burst {} requires Specialist skill {specialist_skill_id}", mod_type.name) });
     }
 
-    let leadership_lvl = skills.get(&3348).copied().unwrap_or(0).min(5);
     let wing_cmd_lvl = skills.get(&11574).or_else(|| skills.get(&11572)).copied().unwrap_or(0).min(5);
     let fleet_cmd_lvl = skills.get(&24764).or_else(|| skills.get(&3354)).copied().unwrap_or(0).min(5);
     let ind_cmd_lvl = skills.get(&29637).copied().unwrap_or(0).min(5) as f64;
@@ -1271,7 +1256,7 @@ pub async fn activate_command_burst(
     let ind_core_range_bonus = match active_ind_core_tid {
         Some(62590) => 0.45, Some(62591) => 0.60, Some(58945) => 0.75, Some(58950) => 1.00, Some(28583) => 2.00, Some(42890) => 2.50, _ => 0.0,
     };
-    let aoe_range = 15_000.0 * (1.0 + 0.07 * (leadership_lvl as f64)) * (1.0 + 0.06 * (wing_cmd_lvl as f64)) * (1.0 + 0.05 * (fleet_cmd_lvl as f64)) * ship_range_mult * (1.0 + ind_core_range_bonus);
+    let aoe_range = 15_000.0 * ship_range_mult * (1.0 + 0.10 * (wing_cmd_lvl as f64)) * (1.0 + 0.05 * (fleet_cmd_lvl as f64)) * (1.0 + ind_core_range_bonus);
     let cycle_duration_s = 15.0 * (1.0 + 0.10 * (command_lvl as f64));
 
     let mod_strength_bonus = if is_t2_module { 0.25 } else { 0.0 };

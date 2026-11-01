@@ -439,6 +439,7 @@ async fn test_b35_08_jump_arrival_placement() {
     let cyno2_char = 952_503;
     let cyno2_ship = 962_503;
     let mut cyno2_sess = seed_pilot(&ctx, cyno2_char, cyno2_ship, 11957, DEST_NULL_SYS, false);
+    ctx.db.with_mut_snapshot(|s| { if let Some(fl) = s.fleets.values_mut().next() { fl.members.push(cyno2_char); } });
     spawn_ship_in_space(&ctx, cyno2_char, cyno2_ship, 11957, DEST_NULL_SYS, DVec3::new(200_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 972_504, 21096, cyno2_char, cyno2_ship, InventoryFlag::HiSlot0, 1);
     give_item(&ctx, 972_505, 16273, cyno2_char, cyno2_ship, InventoryFlag::Cargo, 2_000);
