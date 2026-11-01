@@ -193,8 +193,8 @@ async fn test_ui_star_map_data_and_map_stats() {
 
 #[tokio::test]
 async fn test_ui_neocom_badges_info_panels_and_photo_mode() {
-    // parity: feat:ui.neocom-badges, feat:ui.photo-mode
-    eve_testkit::attest(&["feat:ui.neocom-badges", "feat:ui.photo-mode"]);
+    // parity: feat:ui.neocom-badges
+    eve_testkit::attest(&["feat:ui.neocom-badges"]);
 
     let ctx = ServerContext::new();
     let mut s = select_pilot(&ctx, 9102, "demo", "demo-secret", P1).await;

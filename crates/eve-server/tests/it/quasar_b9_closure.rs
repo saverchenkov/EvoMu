@@ -322,14 +322,43 @@ async fn test_b9_commanded_requires_gm_and_terminal_transitions_rejected() {
         assert_eq!(resp.status_code, STATUS_FORBIDDEN, "expected FORBIDDEN for non-GM on {cmd}");
     }
 
-    // DisableRequest updates persisted objective state to DISABLED (6), and subsequent transitions fail
+    // DisableRequest updates persisted objective state to DISABLED (6), and subsequent transitions/progress fail
     ok(&ctx, &mut gm, "eve.campaign.objective.api.admin.DisableRequest", oid_req.clone()).await;
     assert_eq!(extra.campaign_objectives.read().unwrap().get(&oid).unwrap().state, 6);
-    let err_obj = quasar(&ctx, &mut gm, "eve.campaign.objective.api.admin.StartRequest", oid_req).await;
+    let err_obj = quasar(&ctx, &mut gm, "eve.campaign.objective.api.admin.StartRequest", oid_req.clone()).await;
     assert_eq!(err_obj.status_code, STATUS_BAD_REQUEST);
+    let err_prog_term = quasar(&ctx, &mut gm, "eve.campaign.objective.api.admin.ProgressRequest", oid_req).await;
+    assert_eq!(err_prog_term.status_code, STATUS_BAD_REQUEST);
 
-    // Completing campaign transitions to terminal state; subsequent StartCommanded is rejected
+    // Completing campaign transitions to terminal state; subsequent StartCommanded, UpdateScheduleRequest, UpdateDefinitionRequest are rejected
     cmd_ok(&ctx, &mut gm, "eve.campaign.api.CompleteCommanded", cid_req.clone()).await;
-    let err_camp = quasar(&ctx, &mut gm, "eve.campaign.api.StartCommanded", cid_req).await;
+    let err_camp = quasar(&ctx, &mut gm, "eve.campaign.api.StartCommanded", cid_req.clone()).await;
     assert_eq!(err_camp.status_code, STATUS_BAD_REQUEST);
+    let err_sched = quasar(&ctx, &mut gm, "eve.campaign.api.admin.UpdateScheduleRequest", cid_req.clone()).await;
+    assert_eq!(err_sched.status_code, STATUS_BAD_REQUEST);
+    let err_def = quasar(&ctx, &mut gm, "eve.campaign.api.admin.UpdateDefinitionRequest", cid_req).await;
+    assert_eq!(err_def.status_code, STATUS_BAD_REQUEST);
+
+    // Overflowing delta (> i64::MAX) and invalid target states in ChangeStateCommanded are rejected
+    let (camp2, objs2, trks2) = mining_campaign(44, t0, t0 + 3_600, 500);
+    let cid2 = camp2.id;
+    let oid2 = objs2[0].id;
+    let tid2 = trks2[0].id;
+    extra.register_campaign(camp2, objs2, trks2).expect("register 2");
+
+    let mut overflow_prog = id_payload(objective_uuid(oid2));
+    encode_varint_field(3, u64::MAX, &mut overflow_prog);
+    let err_overflow = quasar(&ctx, &mut gm, "eve.campaign.objective.api.admin.ProgressRequest", overflow_prog).await;
+    assert_eq!(err_overflow.status_code, STATUS_BAD_REQUEST);
+
+    for (cmd, id_bytes) in [
+        ("eve.campaign.api.ChangeStateCommanded", id_payload(campaign_uuid(cid2))),
+        ("eve.campaign.objective.api.ChangeStateCommanded", id_payload(objective_uuid(oid2))),
+        ("eve.campaign.track.api.ChangeStateCommanded", id_payload(track_uuid(tid2))),
+    ] {
+        let mut bad_state_req = id_bytes;
+        encode_varint_field(2, 999, &mut bad_state_req);
+        let resp = quasar(&ctx, &mut gm, cmd, bad_state_req).await;
+        assert_eq!(resp.status_code, STATUS_BAD_REQUEST, "expected BAD_REQUEST for invalid state 999 on {cmd}");
+    }
 }

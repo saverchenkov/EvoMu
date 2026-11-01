@@ -14,7 +14,7 @@ use super::quasar_campaign_state::{
     CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord, PendingNotices,
     CAMPAIGN_STATE_ACTIVE, CAMPAIGN_STATE_COMPLETED, CAMPAIGN_STATE_EXPIRED,
     MAX_ACTIVE_OBJECTIVES_PER_PARTICIPANT, OBJECTIVE_STATE_ACTIVE, OBJECTIVE_STATE_COMPLETED,
-    TRACK_STATE_STARTED,
+    OBJECTIVE_STATE_EXPIRED, TRACK_STATE_STARTED, TRACK_STATE_STOPPED, TRACK_STATE_TARGET_REACHED,
 };
 use super::quasar_progression::ProgressionManagers;
 use super::quasar_progression_extra::ProgressionExtraManager;
@@ -53,9 +53,41 @@ fn is_objective_terminal(state: u32) -> bool {
     matches!(
         state,
         OBJECTIVE_STATE_COMPLETED
+            | OBJECTIVE_STATE_EXPIRED
             | OBJECTIVE_STATE_CANCELLED
             | OBJECTIVE_STATE_FAILED
             | OBJECTIVE_STATE_DISABLED
+    )
+}
+
+fn is_valid_campaign_state(state: u32) -> bool {
+    matches!(
+        state,
+        0 | CAMPAIGN_STATE_ACTIVE
+            | CAMPAIGN_STATE_COMPLETED
+            | CAMPAIGN_STATE_EXPIRED
+            | CAMPAIGN_STATE_CANCELLED
+            | CAMPAIGN_STATE_FAILED
+            | CAMPAIGN_STATE_ARCHIVED
+    )
+}
+
+fn is_valid_objective_state(state: u32) -> bool {
+    matches!(
+        state,
+        0 | OBJECTIVE_STATE_ACTIVE
+            | OBJECTIVE_STATE_COMPLETED
+            | OBJECTIVE_STATE_EXPIRED
+            | OBJECTIVE_STATE_CANCELLED
+            | OBJECTIVE_STATE_FAILED
+            | OBJECTIVE_STATE_DISABLED
+    )
+}
+
+fn is_valid_track_state(state: u32) -> bool {
+    matches!(
+        state,
+        0 | TRACK_STATE_STARTED | TRACK_STATE_TARGET_REACHED | TRACK_STATE_STOPPED
     )
 }
 
@@ -127,6 +159,11 @@ fn extract_nested_varint(val: Option<&DynamicValue>, field_num: u32) -> Option<u
         }
         _ => None,
     }
+}
+
+fn extract_state_varint(val: Option<&DynamicValue>) -> Option<u64> {
+    val.and_then(dynamic_val_to_u64)
+        .or_else(|| extract_nested_varint(val, 1))
 }
 
 fn extract_character_id(val: Option<&DynamicValue>, fallback: u32) -> u32 {
@@ -512,6 +549,12 @@ fn register_campaign_admin_handlers(router: &PublicGatewayRouter, extra: Arc<Pro
                 let rec = camps
                     .get_mut(&cid)
                     .ok_or((STATUS_NOT_FOUND, format!("campaign {cid} not found")))?;
+                if is_campaign_terminal(rec.state) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("campaign {cid} is in terminal state {}", rec.state),
+                    ));
+                }
                 rec.scheduled_start_unix = new_start;
                 rec.transition_unix = now;
                 rec.clone()
@@ -639,6 +682,12 @@ fn register_campaign_admin_handlers(router: &PublicGatewayRouter, extra: Arc<Pro
                 let rec = camps
                     .get_mut(&cid)
                     .ok_or((STATUS_NOT_FOUND, format!("campaign {cid} not found")))?;
+                if is_campaign_terminal(rec.state) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("campaign {cid} is in terminal state {}", rec.state),
+                    ));
+                }
                 rec.etag = rec.etag.saturating_add(1);
                 rec.transition_unix = now;
                 rec.clone()
@@ -686,7 +735,17 @@ fn register_campaign_command_handlers(router: &PublicGatewayRouter, extra: Arc<P
                 let cid = extract_campaign_id(dyn_field(msg, 1))
                     .ok_or((STATUS_BAD_REQUEST, "missing campaign identifier".into()))?;
                 let now = now_unix();
-                let explicit_state = extract_nested_varint(dyn_field(msg, 2), 1).map(|v| v as u32);
+                let explicit_state = match extract_state_varint(dyn_field(msg, 2)) {
+                    Some(v) => {
+                        let st = u32::try_from(v)
+                            .map_err(|_| (STATUS_BAD_REQUEST, format!("invalid campaign state {v}")))?;
+                        if !is_valid_campaign_state(st) {
+                            return Err((STATUS_BAD_REQUEST, format!("invalid campaign state {st}")));
+                        }
+                        Some(st)
+                    }
+                    None => None,
+                };
                 let camp = {
                     let mut camps = ex.campaigns.write().unwrap_or_else(|e| e.into_inner());
                     let rec = camps
@@ -925,7 +984,9 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
             let oid = extract_campaign_id(dyn_field(msg, 1))
                 .ok_or((STATUS_BAD_REQUEST, "missing objective identifier".into()))?;
             let char_id = extract_character_id(dyn_field(msg, 2), ctx.effective_character_id().unwrap_or(1));
-            let delta = extract_u64_field(msg, 3).unwrap_or(0) as i64;
+            let raw_delta = extract_u64_field(msg, 3).unwrap_or(0);
+            let delta = i64::try_from(raw_delta)
+                .map_err(|_| (STATUS_BAD_REQUEST, format!("delta {raw_delta} exceeds i64::MAX")))?;
             let now = now_unix();
 
             let (obj, completed_now, new_part_prog) = {
@@ -933,6 +994,12 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
                 let rec = objs
                     .get_mut(&oid)
                     .ok_or((STATUS_NOT_FOUND, format!("objective {oid} not found")))?;
+                if is_objective_terminal(rec.state) {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        format!("objective {oid} is in terminal state {}", rec.state),
+                    ));
+                }
                 rec.current_progress = rec.current_progress.saturating_add(delta);
                 let entry = rec.contributors.entry(char_id).or_insert((0, 0));
                 entry.0 = entry.0.saturating_add(delta);
@@ -1080,7 +1147,17 @@ fn register_objective_handlers(router: &PublicGatewayRouter, extra: Arc<Progress
                 crate::quasar_gateway::require_admin_role(ctx)?;
                 let oid = extract_campaign_id(dyn_field(msg, 1))
                     .ok_or((STATUS_BAD_REQUEST, "missing objective identifier".into()))?;
-                let explicit = extract_nested_varint(dyn_field(msg, 2), 1).map(|v| v as u32);
+                let explicit = match extract_state_varint(dyn_field(msg, 2)) {
+                    Some(v) => {
+                        let st = u32::try_from(v)
+                            .map_err(|_| (STATUS_BAD_REQUEST, format!("invalid objective state {v}")))?;
+                        if !is_valid_objective_state(st) {
+                            return Err((STATUS_BAD_REQUEST, format!("invalid objective state {st}")));
+                        }
+                        Some(st)
+                    }
+                    None => None,
+                };
                 let now = now_unix();
                 let obj = {
                     let mut objs = ex.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
@@ -1197,9 +1274,17 @@ fn register_track_handlers(router: &PublicGatewayRouter, extra: Arc<ProgressionE
             crate::quasar_gateway::require_admin_role(ctx)?;
             let tid = extract_campaign_id(dyn_field(msg, 1))
                 .ok_or((STATUS_BAD_REQUEST, "missing track identifier".into()))?;
-            let next_state = extract_nested_varint(dyn_field(msg, 2), 1)
-                .map(|v| v as u32)
-                .unwrap_or(TRACK_STATE_STARTED);
+            let next_state = match extract_state_varint(dyn_field(msg, 2)) {
+                Some(v) => {
+                    let st = u32::try_from(v)
+                        .map_err(|_| (STATUS_BAD_REQUEST, format!("invalid track state {v}")))?;
+                    if !is_valid_track_state(st) {
+                        return Err((STATUS_BAD_REQUEST, format!("invalid track state {st}")));
+                    }
+                    st
+                }
+                None => TRACK_STATE_STARTED,
+            };
             {
                 let mut trks = ex.campaign_tracks.write().unwrap_or_else(|e| e.into_inner());
                 let rec = trks
