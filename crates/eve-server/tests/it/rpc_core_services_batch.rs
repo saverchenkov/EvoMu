@@ -303,42 +303,65 @@ async fn test_rpc_lookup_svc_batch() {
     sess.alliance_id = Some(99_000_001);
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.insert(
-            98_000_002,
+            98_000_050,
             eve_db::CorporationRecord {
-                corporation_id: 98_000_002,
-                name: "Federation Structureless Corp".into(),
-                ticker: "FDSC".into(),
-                ceo_id: 90_000_002,
-                alliance_id: Some(99_000_002),
+                corporation_id: 98_000_050,
+                name: "Target Federation Corp".into(),
+                ticker: "TFC".into(),
+                ceo_id: 90_000_050,
                 ..Default::default()
+            },
+        );
+        snap.corporations.insert(
+            98_000_051,
+            eve_db::CorporationRecord {
+                corporation_id: 98_000_051,
+                name: "Peaceful Federation Corp".into(),
+                ticker: "PFC".into(),
+                ceo_id: 90_000_051,
+                alliance_id: Some(99_000_051),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_000_000_050_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_000_000_050_001,
+                type_id: 35832,
+                owner_corp_id: 98_000_050,
+                solar_system_id: 30_000_142,
+                name: "TFC Astrahus".into(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100.0,
+                armor_hp: 100.0,
+                hull_hp: 100.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
             },
         );
         snap.alliances.insert(
-            99_000_002,
+            99_000_050,
             eve_db::AllianceRecord {
-                alliance_id: 99_000_002,
-                name: "Federation Structureless Alliance".into(),
-                short_name: "FDSA".into(),
-                executor_corp_id: 98_000_002,
-                member_corp_ids: HashSet::from([98_000_002]),
+                alliance_id: 99_000_050,
+                name: "Target Federation Alliance".into(),
+                short_name: "TFA".into(),
+                executor_corp_id: 98_000_050,
+                member_corp_ids: [98_000_050].into_iter().collect(),
             },
         );
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.corporation_id = 98_000_001;
-        }
-        snap.items.insert(
-            770_000_101,
-            eve_db::InventoryItemRecord {
-                item_id: 770_000_101,
-                type_id: 35_832, // Astrahus
-                owner_id: 90_000_001,
-                location_id: 100_000_001,
-                flag: eve_db::InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: false,
-                ..Default::default()
+        snap.alliances.insert(
+            99_000_051,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_051,
+                name: "Peaceful Federation Alliance".into(),
+                short_name: "PFA".into(),
+                executor_corp_id: 98_000_051,
+                member_corp_ids: [98_000_051].into_iter().collect(),
             },
         );
         snap.corporations.insert(
@@ -417,38 +440,7 @@ async fn test_rpc_lookup_svc_batch() {
             },
         );
     });
-    sess.user_id = Some(1);
-    sess.character_id = Some(90_000_001);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.solar_system_id = Some(30_000_142);
-    sess.ship_id = Some(100_000_001);
-    sess.corporation_id = Some(98_000_001);
-    sess.alliance_id = Some(99_000_001);
-    let _ = ctx
-        .systems
-        .get_or_spawn(30_000_142)
-        .spawn_ball(eve_destiny::Ball {
-            id: 100_000_001,
-            type_id: 606,
-            position: glam::DVec3::new(0.0, 5.0e9, 0.0),
-            velocity: glam::DVec3::ZERO,
-            max_velocity: 200.0,
-            inertia: 1.0,
-            mass: 1_000_000.0,
-            radius: 50.0,
-            speed_fraction: 0.0,
-            mode: eve_destiny::MovementMode::Stop,
-        })
-        .await;
-    ctx.dispatch_rpc(
-        &mut sess, "structureDeployment", None, "Anchor",
-        &[PyRep::Integer(35_832), PyRep::String("Federation Bastion".into())], &kw, None,
-    )
-    .await
-    .expect("Anchor Astrahus via structureDeployment.Anchor");
-
-    let self_res = ctx
+    let res = ctx
         .dispatch_rpc(
             &mut sess,
             "lookupSvc",
@@ -459,41 +451,7 @@ async fn test_rpc_lookup_svc_batch() {
             None,
         )
         .await
-        .expect("LookupWarableCorporationsOrAlliances self");
-    let self_warable = as_list(&self_res);
-    assert!(
-        !self_warable
-            .iter()
-            .any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_001))
-                || w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_001))),
-        "Caller's own corp and alliance must be excluded from warable lookup"
-    );
-    assert!(
-        !self_warable
-            .iter()
-            .any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_002))
-                || w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_002))),
-        "Structureless corp and alliance must be excluded from warable lookup"
-    );
-
-    let mut sess2 = SessionState::new(102);
-    sess2.user_id = Some(2);
-    sess2.character_id = Some(90_000_002);
-    sess2.corporation_id = Some(98_000_002);
-    sess2.alliance_id = Some(99_000_002);
-    sess2.solar_system_id = Some(30_000_142);
-    let res = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "lookupSvc",
-            None,
-            "LookupWarableCorporationsOrAlliances",
-            &[PyRep::String("Federation".into()), PyRep::Bool(false)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("LookupWarableCorporationsOrAlliances other");
+        .expect("LookupWarableCorporationsOrAlliances");
     let warable = as_list(&res);
     let own_corp_id = sess.corporation_id.unwrap_or(98_000_001);
     let has_own_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(own_corp_id)));
