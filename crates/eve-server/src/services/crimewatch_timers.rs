@@ -609,18 +609,35 @@ pub async fn handle_crimewatch(
                 let new_caller_bal = caller_mut.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to pay kill right activation fee".into() })?;
                 caller_mut.balance = new_caller_bal;
                 if let Some(owner_mut) = snap.characters.get_mut(&kr.owner_id) { owner_mut.balance = new_owner_bal; }
+                snap.append_journal(
+                    char_id,
+                    "KillRightFee",
+                    IskCents(-fee.0),
+                    new_caller_bal,
+                    format!("Purchased activation of kill right {kr_id} against {}", kr.target_id),
+                );
+                snap.append_journal(
+                    kr.owner_id,
+                    "KillRightFee",
+                    fee,
+                    new_owner_bal,
+                    format!("Kill right {kr_id} purchased and activated by {char_id}"),
+                );
                 if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) { kr_mut.is_active_suspect = true; }
-                Ok((fee.to_wire_f64(), kr.owner_id, kr.target_id))
+                Ok((fee.to_wire_f64(), kr.owner_id, kr.target_id, new_caller_bal.to_wire_f64(), new_owner_bal.to_wire_f64()))
             });
             match res {
-                Ok((fee_paid, owner_id, target_id)) => {
+                Ok((fee_paid, owner_id, target_id, caller_bal, owner_bal)) => {
                     let now_unix = ctx.now_unix();
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
                         .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(char_id), PyRep::Real(caller_bal)]);
+                    ctx.notify(NotificationTarget::Character(owner_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(owner_id), PyRep::Real(owner_bal)]);
                     emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
                     ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightForYouSold", "charid", vec![PyRep::Integer(kr_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
+                    ctx.notify(NotificationTarget::Character(target_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("feePaidISK", PyRep::Real(fee_paid)),

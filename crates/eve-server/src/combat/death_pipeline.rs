@@ -142,7 +142,7 @@ pub fn execute_death_pipeline_sync_inner(
         ctx,
         |st| st.insurance_contracts.remove(&victim_ship_id),
     );
-    let (calculated_insurance_payout, ins_owner_id, ins_is_corp) = if is_pod || is_criminal {
+    let (calculated_insurance_payout, ins_owner_id, ins_is_corp) = if is_pod || is_criminal || is_self_destruct {
         (0.0, victim_char_id, false)
     } else if let Some(c) = rt_contract {
         if c.end_unix > now_unix {
@@ -617,15 +617,49 @@ pub fn execute_death_pipeline_sync_inner(
                     rt.has_limited_engagement_with(victim_char_id, attacker_char_id, now_unix)
                 });
                 if !is_legal {
-                    let is_pod = victim_ship_type_id == 670;
-                    let old_sec = ctx.db.with_snapshot(|s| s.characters.get(&attacker_char_id).map(|c| c.security_status).unwrap_or(0.0));
-                    let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, is_pod, sys_sec);
-                    let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
-                    ctx.db.with_mut_snapshot(|s| {
-                        if let Some(ch) = s.characters.get_mut(&attacker_char_id) {
-                            ch.security_status = new_sec;
+                    let is_pod_kill = matches!(victim_ship_type_id, 670 | 33_328);
+                    let corr_stage5 = sys_sec < 0.45
+                        && crate::services::insurgency_services::insurgency_system_corruption_stage(
+                            ctx, sys_id,
+                        ) >= 5;
+                    if !(is_pod_kill && corr_stage5) {
+                        crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                            ctx,
+                            attacker_char_id,
+                            sys_id,
+                            sys_sec,
+                            is_pod_kill,
+                            now_unix,
+                        );
+                        // Grant 30-day Kill Right on illegal Highsec ship/pod kills and Lowsec capsule kills
+                        if sys_sec >= 0.45 || is_pod_kill {
+                            let has_kr = ctx.db.with_snapshot(|snap| {
+                                snap.kill_rights.values().any(|kr| {
+                                    kr.owner_id == victim_char_id
+                                        && kr.target_id == attacker_char_id
+                                        && !kr.is_active_suspect
+                                        && snap
+                                            .combat_crimewatch_state
+                                            .kill_right_expires_unix
+                                            .get(&kr.kill_right_id)
+                                            .is_some_and(|&exp| exp > now_unix)
+                                })
+                            });
+                            if !has_kr {
+                                let kr_id = ctx.db.with_mut_snapshot(|snap| {
+                                    snap.next_entity_id += 1;
+                                    snap.next_entity_id
+                                });
+                                crate::services::combat_crimewatch::create_kill_right(
+                                    ctx,
+                                    kr_id,
+                                    victim_char_id,
+                                    attacker_char_id,
+                                    0.0,
+                                );
+                            }
                         }
-                    });
+                    }
                 }
             }
         }

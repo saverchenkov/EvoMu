@@ -614,23 +614,67 @@ impl CrimeWatchDirector {
             )
             .await;
 
-            // 3. Grant 30-day private Kill Right (0 fee until made public) to victim (not granted for remote criminal assistance)
-            let kill_right_id = if victim_char_id > 0 {
-                ctx.db.with_mut_snapshot(|snap| {
-                    snap.next_entity_id += 1;
-                    let kr_id = snap.next_entity_id;
-                    snap.kill_rights.insert(
+            // 3. Record sec-status loss/transaction (if not already recorded) and grant 30-day private Kill Right (0 fee until made public)
+            let now_unix = ctx.now_unix();
+            let sys_sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            let already_logged_sec =
+                crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.sec_status_transactions
+                        .get(&criminal_char_id)
+                        .is_some_and(|txs| {
+                            txs.iter().any(|t| {
+                                t.solar_system_id == sys_id
+                                    && now_unix.saturating_sub(t.timestamp_unix) <= 30
+                            })
+                        })
+                });
+            if !already_logged_sec && sys_sec > 0.0 {
+                crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                    ctx,
+                    criminal_char_id,
+                    sys_id,
+                    sys_sec,
+                    false,
+                    now_unix,
+                );
+            }
+            let kill_right_id = if victim_char_id > 0 && victim_char_id != criminal_char_id {
+                let existing_kr = ctx.db.with_snapshot(|snap| {
+                    snap.kill_rights
+                        .values()
+                        .find(|kr| {
+                            kr.owner_id == victim_char_id
+                                && kr.target_id == criminal_char_id
+                                && !kr.is_active_suspect
+                                && snap
+                                    .combat_crimewatch_state
+                                    .kill_right_expires_unix
+                                    .get(&kr.kill_right_id)
+                                    .is_some_and(|&exp| exp > now_unix)
+                        })
+                        .map(|kr| kr.kill_right_id)
+                });
+                if let Some(existing_id) = existing_kr {
+                    existing_id
+                } else {
+                    let kr_id = ctx.db.with_mut_snapshot(|snap| {
+                        snap.next_entity_id += 1;
+                        snap.next_entity_id
+                    });
+                    crate::services::combat_crimewatch::create_kill_right(
+                        ctx,
                         kr_id,
-                        KillRightRecord {
-                            kill_right_id: kr_id,
-                            owner_id: victim_char_id,
-                            target_id: criminal_char_id,
-                            activation_fee: IskCents(0),
-                            is_active_suspect: false,
-                        },
+                        victim_char_id,
+                        criminal_char_id,
+                        0.0,
                     );
                     kr_id
-                })
+                }
             } else {
                 0
             };
@@ -678,4 +722,66 @@ pub struct ConcordExecutionReport {
     pub ecm_jammed: bool,
     pub locks_cleared: usize,
     pub death_result: Result<DeathPipelineResult, String>,
+}
+
+pub fn credit_specialized_npc_bounty_and_sec_status(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+    effective_bounty: f64,
+) {
+    if effective_bounty <= 0.0 || killer_char_id <= 0 {
+        return;
+    }
+    let now_unix = ctx.now_unix();
+    let credited = crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        let is_new = rt.bounty_credited_balls.insert(npc_ball_id);
+        if is_new {
+            *rt.pending_bounty_ticks
+                .entry((solar_system_id, killer_char_id))
+                .or_insert(0.0) += effective_bounty;
+            rt.bounty_tick_next_flush_unix
+                .entry((solar_system_id, killer_char_id))
+                .or_insert_with(|| now_unix.saturating_add(1_200));
+        }
+        is_new
+    });
+    if !credited {
+        return;
+    }
+    let old_sec = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&killer_char_id)
+            .map(|c| c.security_status)
+            .unwrap_or(0.0)
+    });
+    if old_sec < 5.0 {
+        let supp_mult =
+            crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(
+                ctx,
+                solar_system_id,
+            );
+        let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, effective_bounty)
+            * supp_mult;
+        let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+                ch.security_status = new_sec;
+            }
+        });
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            rt.sec_status_transactions
+                .entry(killer_char_id)
+                .or_default()
+                .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                    timestamp_unix: now_unix,
+                    old_sec,
+                    new_sec,
+                    delta: new_sec - old_sec,
+                    reason: "NPC Pirate Bounty".into(),
+                    solar_system_id,
+                });
+        });
+    }
 }

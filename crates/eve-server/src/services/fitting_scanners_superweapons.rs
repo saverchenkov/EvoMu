@@ -784,6 +784,9 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError::user_error("CantDoThatWhileDocked")));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),

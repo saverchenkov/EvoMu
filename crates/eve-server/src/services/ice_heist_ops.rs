@@ -2,22 +2,24 @@
 //!
 //! - Spawns only in systems at corruption stage `3..=4`, with a 4-hour (`14_400`s) respawn
 //!   cooldown persisted in `db` across downtime.
-//! - Spawns web-immune tanker NPCs (`is_web_immune = true`, SDE `79909`) at the refinery and
-//!   Upwell Security Thunderchild guards (SDE `79986`).
+//! - Materializes web-immune tanker NPCs (`is_web_immune = true`, SDE `79909`) and Upwell
+//!   Security Thunderchild guards (SDE `79986`) both from `spawn_ice_heist_checked` and from
+//!   live `add_system_corruption` progression on the 1 Hz system tick.
 //! - Escorting tankers within `15,000` m steers them into the escorting side's scoring zone,
 //!   incrementing `pirate_tankers_saved` / `empire_tankers_saved`; the first side to `10` tankers
 //!   wins `150,000` LP for aligned militia pilots in system.
-//! - Pirates within `25,000` m of the Upwell Thunderchild guards are destroyed.
+//! - Upwell Thunderchild guards engage pirate-enlisted non-capsule ships within `25,000` m using
+//!   SDE weapon damage (`apply_damage_structure_or_ball`) rather than instant ball deletion.
 
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
 use crate::services::insurgency_services::{
-    read_insurgency_runtime, with_insurgency_runtime, FACTION_ANGEL_CARTEL, FACTION_GURISTAS,
+    FACTION_ANGEL_CARTEL, FACTION_GURISTAS, read_insurgency_runtime, with_insurgency_runtime,
 };
 use crate::services::pve_incursion_sites::make_site_npc_ball;
 use eve_db::PersistedIceHeistRecord as IceHeistRecord;
-use eve_destiny::{CombatState, DVec3};
+use eve_destiny::{CombatState, DVec3, DamageVector};
 use eve_proto::{BridgeRpcError, PyRep};
 
 pub const ICE_HEIST_RESPAWN_COOLDOWN_SECS: u64 = 14_400; // 4 hours
@@ -55,6 +57,74 @@ fn is_winning_side_faction(war_faction_id: Option<i64>, pirate_side: bool) -> bo
 
 fn respawn_key(sys_id: u32) -> String {
     format!("ice_heist_respawn_until:{sys_id}")
+}
+
+fn thunderchild_guard_dps_vector(ctx: &ServerContext) -> DamageVector {
+    if let Some(t) = ctx.sde.types.get(&THUNDERCHILD_GUARD_TYPE_ID) {
+        let mult = t
+            .default_attributes
+            .get(&64)
+            .copied()
+            .filter(|&m| m > 0.0)
+            .unwrap_or(1.5);
+        let em = t.default_attributes.get(&114).copied().unwrap_or(0.0) * mult;
+        let ex = t.default_attributes.get(&116).copied().unwrap_or(0.0) * mult;
+        let ki = t.default_attributes.get(&117).copied().unwrap_or(0.0) * mult;
+        let th = t.default_attributes.get(&118).copied().unwrap_or(0.0) * mult;
+        if em + ex + ki + th > 0.0 {
+            return DamageVector::new(em, th, ki, ex);
+        }
+    }
+    DamageVector::new(570.0, 0.0, 570.0, 0.0)
+}
+
+/// Ensures the active Ice Heist tanker (`79909`) and Upwell Security Thunderchild guard (`79986`)
+/// balls exist in `sys_id` without resetting already-spawned balls.
+pub async fn ensure_ice_heist_balls_spawned(
+    ctx: &ServerContext,
+    sys_id: u32,
+    instance_id: i64,
+) -> bool {
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let existing = sys.list_balls().await.unwrap_or_default();
+    let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
+    let guard_id = 1_896_000_000 + instance_id * 10 + 2;
+    let mut spawned_any = false;
+
+    if !existing.iter().any(|b| b.id == tanker_id) {
+        let mut tanker_cs = CombatState::default();
+        tanker_cs.shield_hp = 25_000.0;
+        tanker_cs.max_shield_hp = 25_000.0;
+        tanker_cs.armor_hp = 25_000.0;
+        tanker_cs.max_armor_hp = 25_000.0;
+        tanker_cs.structure_hp = 30_000.0;
+        tanker_cs.max_structure_hp = 30_000.0;
+        tanker_cs.warp_core_strength = 100;
+        tanker_cs.is_web_immune = true;
+        let mut tanker_ball =
+            make_site_npc_ball(tanker_id, ICE_TANKER_TYPE_ID, ICE_HEIST_REFINERY_POS);
+        tanker_ball.max_velocity = 2_500.0;
+        tanker_ball.inertia = 0.25;
+        tanker_ball.mass = 1_000_000.0;
+        tanker_ball.speed_fraction = 0.0;
+        let _ = sys.spawn_ball_with_combat(tanker_ball, tanker_cs).await;
+        spawned_any = true;
+    }
+
+    if !existing.iter().any(|b| b.id == guard_id) {
+        let _ = sys
+            .spawn_ball_with_combat(
+                make_site_npc_ball(
+                    guard_id,
+                    THUNDERCHILD_GUARD_TYPE_ID,
+                    ICE_HEIST_REFINERY_POS + DVec3::new(0.0, 0.0, 40_000.0),
+                ),
+                ctx.build_type_combat_state(THUNDERCHILD_GUARD_TYPE_ID),
+            )
+            .await;
+        spawned_any = true;
+    }
+    spawned_any
 }
 
 /// Spawns an Ice Refinery Heist instance if corruption is 3–4 and the 4h respawn cooldown has elapsed.
@@ -95,13 +165,13 @@ pub async fn spawn_ice_heist_checked(
         });
     }
 
-    let (instance_id, newly_created) = with_insurgency_runtime(ctx, |rt| {
+    let instance_id = with_insurgency_runtime(ctx, |rt| {
         if let Some(existing) = rt
             .ice_heist_instances
             .iter()
             .find(|h| h.solar_system_id == sys_id && !h.completed)
         {
-            return (existing.instance_id, false);
+            return existing.instance_id;
         }
         let id = (rt.ice_heist_instances.len() as i64) + 800_001;
         rt.ice_heist_instances.push(IceHeistRecord {
@@ -111,44 +181,10 @@ pub async fn spawn_ice_heist_checked(
             empire_tankers_saved: 0,
             completed: false,
         });
-        (id, true)
+        id
     });
 
-    if !newly_created {
-        return Ok(instance_id);
-    }
-
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let tanker_id = 1_896_000_000 + instance_id * 10 + 1;
-    let guard_id = 1_896_000_000 + instance_id * 10 + 2;
-
-    let mut tanker_cs = CombatState::default();
-    tanker_cs.shield_hp = 25_000.0;
-    tanker_cs.max_shield_hp = 25_000.0;
-    tanker_cs.armor_hp = 25_000.0;
-    tanker_cs.max_armor_hp = 25_000.0;
-    tanker_cs.structure_hp = 30_000.0;
-    tanker_cs.max_structure_hp = 30_000.0;
-    tanker_cs.warp_core_strength = 100;
-    tanker_cs.is_web_immune = true;
-    let mut tanker_ball = make_site_npc_ball(tanker_id, ICE_TANKER_TYPE_ID, ICE_HEIST_REFINERY_POS);
-    tanker_ball.max_velocity = 2_500.0;
-    tanker_ball.inertia = 0.25;
-    tanker_ball.mass = 1_000_000.0;
-    tanker_ball.speed_fraction = 0.0;
-    let _ = sys.spawn_ball_with_combat(tanker_ball, tanker_cs).await;
-
-    let _ = sys
-        .spawn_ball_with_combat(
-            make_site_npc_ball(
-                guard_id,
-                THUNDERCHILD_GUARD_TYPE_ID,
-                ICE_HEIST_REFINERY_POS + DVec3::new(0.0, 0.0, 40_000.0),
-            ),
-            ctx.build_type_combat_state(THUNDERCHILD_GUARD_TYPE_ID),
-        )
-        .await;
-
+    ensure_ice_heist_balls_spawned(ctx, sys_id, instance_id).await;
     Ok(instance_id)
 }
 
@@ -206,7 +242,9 @@ pub async fn escort_ice_heist_tanker(
         let _ = sys.remove_ball(guard_id).await;
     } else {
         let _ = sys.set_ball_position(tanker_id, ICE_HEIST_REFINERY_POS).await;
-        let _ = sys.set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop).await;
+        let _ = sys
+            .set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop)
+            .await;
     }
 
     let all_balls = sys.list_balls().await.unwrap_or_default();
@@ -228,6 +266,7 @@ pub async fn escort_ice_heist_tanker(
                 .filter(|c| {
                     c.solar_system_id == sys_id
                         && c.station_id.is_none()
+                        && c.structure_id.is_none()
                         && c.active_ship_id > 0
                         && on_grid_ship_ids.contains(&c.active_ship_id)
                         && is_winning_side_faction(c.war_faction_id, pirate_side)
@@ -256,24 +295,23 @@ pub async fn escort_ice_heist_tanker(
 }
 
 /// Drives Pirate Insurgency Ice Refinery Heist spawns, tanker escort movement/scoring,
-/// and Upwell Thunderchild guard pirate interception on the 1 Hz system tick.
+/// and Upwell Thunderchild guard weapon engagement on the 1 Hz system tick.
 pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
-    let has_active = read_insurgency_runtime(ctx, |rt| {
-        rt.ice_heist_instances
-            .iter()
-            .any(|h| h.solar_system_id == sys_id && !h.completed)
-    });
-    if !has_active {
-        let _ = spawn_ice_heist_checked(ctx, sys_id).await;
-    }
-
-    let Some(instance_id) = read_insurgency_runtime(ctx, |rt| {
+    let active_instance_opt = read_insurgency_runtime(ctx, |rt| {
         rt.ice_heist_instances
             .iter()
             .find(|h| h.solar_system_id == sys_id && !h.completed)
             .map(|h| h.instance_id)
-    }) else {
-        return;
+    });
+    let instance_id = match active_instance_opt {
+        Some(id) => {
+            ensure_ice_heist_balls_spawned(ctx, sys_id, id).await;
+            id
+        }
+        None => match spawn_ice_heist_checked(ctx, sys_id).await {
+            Ok(id) => id,
+            Err(_) => return,
+        },
     };
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -284,28 +322,63 @@ pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
 
     if let Some(guard_ball) = all_balls.iter().find(|b| b.id == guard_id) {
         let guard_pos = guard_ball.position;
+        let guard_dps = thunderchild_guard_dps_vector(ctx);
         for b in &all_balls {
-            if b.id == guard_id || (b.position - guard_pos).length() > THUNDERCHILD_GUARD_RANGE_M {
+            if b.id == guard_id
+                || b.id == tanker_id
+                || (b.position - guard_pos).length() > THUNDERCHILD_GUARD_RANGE_M
+            {
+                continue;
+            }
+            let is_non_capsule_ship = ctx
+                .sde
+                .types
+                .get(&b.type_id)
+                .is_some_and(|t| t.category_id == 6 && t.group_id != 29)
+                && !matches!(b.type_id, 670 | 33_328);
+            if !is_non_capsule_ship {
                 continue;
             }
             let is_pirate_ship = ctx.db.with_snapshot(|snap| {
                 snap.characters
                     .values()
-                    .find(|c| c.active_ship_id == b.id && c.station_id.is_none())
+                    .find(|c| {
+                        c.active_ship_id == b.id
+                            && c.station_id.is_none()
+                            && c.structure_id.is_none()
+                    })
                     .and_then(|c| c.war_faction_id)
                     .is_some_and(|wf| wf == FACTION_ANGEL_CARTEL || wf == FACTION_GURISTAS)
             });
             if is_pirate_ship {
-                crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
-                    ctx,
-                    sys_id,
-                    0,
-                    b.id,
-                    b.type_id,
-                    b.position,
-                    now_unix,
-                )
-                .await;
+                let (_, destroyed) =
+                    crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+                        ctx,
+                        &sys,
+                        sys_id,
+                        0,
+                        b.id,
+                        guard_dps,
+                        1.0,
+                        now_unix,
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(a, d, _)| (a, d))
+                    .unwrap_or((0.0, false));
+                if destroyed {
+                    crate::services::combat_crimewatch::combat_missiles_aoe::handle_destroyed_ball_from_missile_or_aoe(
+                        ctx,
+                        sys_id,
+                        0,
+                        b.id,
+                        b.type_id,
+                        b.position,
+                        now_unix,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -328,7 +401,11 @@ pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
                     if let Some(wf) = snap
                         .characters
                         .values()
-                        .find(|c| c.active_ship_id == b.id && c.station_id.is_none())
+                        .find(|c| {
+                            c.active_ship_id == b.id
+                                && c.station_id.is_none()
+                                && c.structure_id.is_none()
+                        })
                         .and_then(|c| c.war_faction_id)
                     {
                         if matches!(wf, FACTION_ANGEL_CARTEL | FACTION_GURISTAS) {
@@ -347,7 +424,9 @@ pub async fn step_ice_heist_system(ctx: &ServerContext, sys_id: u32) {
                 };
                 let _ = sys.goto_point(tanker_id, dest).await;
             } else {
-                let _ = sys.set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop).await;
+                let _ = sys
+                    .set_movement_mode(tanker_id, eve_destiny::MovementMode::Stop)
+                    .await;
             }
         }
     }

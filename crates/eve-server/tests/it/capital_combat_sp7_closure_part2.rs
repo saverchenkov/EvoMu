@@ -216,13 +216,13 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
         assert!(!rows.is_empty(), "GetSecurityStatusTransactions must contain at least one transaction");
     }
 
-    // Verify victim earned a kill right on aggressor
-    let kr_id = ctx.db.with_snapshot(|s| {
-        s.kill_rights
-            .values()
-            .find(|kr| kr.owner_id == victim_id && kr.target_id == aggressor_id)
-            .map(|kr| kr.kill_right_id)
+    // Verify victim earned a 30-day expiring kill right on aggressor
+    let (kr_id, kr_exp) = ctx.db.with_snapshot(|s| {
+        let kr = s.kill_rights.values().find(|kr| kr.owner_id == victim_id && kr.target_id == aggressor_id)?;
+        let exp = s.combat_crimewatch_state.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
+        Some((kr.kill_right_id, exp))
     }).expect("Victim must earn a kill right on criminal aggressor");
+    assert!(kr_exp >= ctx.now_unix() + 30 * 86_400 - 120, "Kill right must carry a 30-day expiration timestamp");
 
     // Victim lists kill right for sale, cancels it, re-lists it, and third party buys/activates it
     let mut vic_sess = make_sess(victim_id, vic_pod_id, highsec_sys, None);
@@ -279,8 +279,13 @@ async fn test_crimewatch_sec_status_loss_transactions_and_kill_rights() {
     )
     .await
     .expect("BuyKillRight");
-    let is_active = ctx.db.with_snapshot(|s| s.kill_rights.get(&kr_id).map(|kr| kr.is_active_suspect));
+    let (is_active, has_buyer_j, has_seller_j) = ctx.db.with_snapshot(|s| (
+        s.kill_rights.get(&kr_id).map(|kr| kr.is_active_suspect),
+        s.wallet_journal.iter().any(|j| j.character_id == buyer_id && j.entry_type == "KillRightFee" && j.amount.0 < 0),
+        s.wallet_journal.iter().any(|j| j.character_id == victim_id && j.entry_type == "KillRightFee" && j.amount.0 > 0),
+    ));
     assert_eq!(is_active, Some(true), "BuyKillRight must activate suspect flag on target");
+    assert!(has_buyer_j && has_seller_j, "BuyKillRight must append KillRightFee wallet journal entries for buyer and seller");
 }
 
 #[tokio::test]
@@ -425,8 +430,12 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
         ctx.now_unix(),
     )
     .await;
-    let sec_clamped_low = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0));
+    let (sec_clamped_low, low_pod_kr) = ctx.db.with_snapshot(|s| (
+        s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
+        s.kill_rights.values().any(|kr| kr.owner_id == pod_victim_char && kr.target_id == char_id),
+    ));
     assert_eq!(sec_clamped_low, -10.0, "Illegal capsule kill below -8.0 must clamp character security_status at -10.0");
+    assert!(low_pod_kr, "Illegal Lowsec capsule kill must grant a 30-day Kill Right to the podded victim");
 }
 
 #[tokio::test]
@@ -648,21 +657,25 @@ async fn test_capital_construction_restrictions_and_insurance_contract_lifecycle
     });
     assert!(has_mail, "Insurance payout must send an EVE-mail");
 
-    // CONCORD criminal death voids active insurance contract (0.0 payout)
+    // CONCORD criminal death, self-destruct, and repackaging all void active insurance contracts (0.0 payout)
     let ship_id_2 = 104_000_304i64;
     seed_ship_in_space(&ctx, char_id, ship_id_2, 587, highsec_sys, DVec3::ZERO).await;
-    let _ = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "insuranceSvc",
-            None,
-            "InsureShip",
-            &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)],
-            &HashMap::new(),
-            None,
-        )
-        .await
-        .expect("InsureShip ship 2");
-    let void_payout = eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true);
-    assert_eq!(void_payout, 0.0, "CONCORD criminal death must void insurance payout");
+    let _ = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id_2), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip ship 2");
+    assert_eq!(eve_server::services::combat_crimewatch::process_ship_insurance_payout(&ctx, char_id, ship_id_2, 587, true), 0.0);
+
+    let ship_sd = 104_000_305i64;
+    seed_ship_in_space(&ctx, char_id, ship_sd, 587, highsec_sys, DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_sd), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip self-destruct");
+    let sd_res = eve_server::combat::death_pipeline::execute_death_pipeline_sync_inner(&ctx, highsec_sys, char_id, ship_sd, char_id, DVec3::ZERO, 7, true).expect("Self-destruct death");
+    assert_eq!(sd_res.insurance_payout_isk, 0.0, "Self-destruct must void ship insurance payout");
+
+    let ship_rep = 104_000_306i64;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&char_id) { ch.station_id = Some(jita_station); ch.active_ship_id = ship_id; }
+        s.items.insert(ship_rep, InventoryItemRecord { item_id: ship_rep, type_id: 587, owner_id: char_id, location_id: jita_station, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
+    });
+    let mut rep_sess = make_sess(char_id, ship_id, highsec_sys, Some(jita_station));
+    let _ = ctx.dispatch_rpc(&mut rep_sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_rep), PyRep::Real(cost_isk), PyRep::Bool(false), PyRep::Bool(true)], &HashMap::new(), None).await.expect("InsureShip repackage");
+    let _ = ctx.dispatch_rpc(&mut rep_sess, "repackagingSvc", None, "RepackageItems", &[PyRep::List(vec![PyRep::Integer(ship_rep)])], &HashMap::new(), None).await.expect("RepackageItems");
+    assert!(!eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| rt.insurance_contracts.contains_key(&ship_rep)), "RepackageItems must void active ship insurance contract");
 }

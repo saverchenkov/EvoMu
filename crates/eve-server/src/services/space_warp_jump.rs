@@ -395,13 +395,22 @@ async fn handle_cmd_warp_to_stuff(
             }
         }
     }
-    if let Some(dest_pos) = resolved_pos {
+    if let Some(dest_pos) = resolved_pos.filter(|_| stuff_type != "bookmark") {
         crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
             ctx,
             sys_id,
             dest_pos,
             (target_id > 0).then_some(target_id),
         )?;
+    } else if target_id > 0 && stuff_type != "bookmark" {
+        if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
+            crate::services::pve_dungeon_runtime_rpc::check_warp_target_blocked_by_gated_dungeon_room(
+                ctx,
+                sys_id,
+                tb.position,
+                Some(target_id),
+            )?;
+        }
     }
     let Some(anchor_pos) = resolved_pos else {
         return Err(BridgeRpcError {

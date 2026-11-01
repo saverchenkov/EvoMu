@@ -890,6 +890,7 @@ pub(crate) async fn handle_ships_and_services(
                     }
                     for &item_id in &normal_ids {
                         ctx.invalidate_ship_fitting(item_id);
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, item_id);
                     }
                     let total_count = normal_ids.len() + broken_wraps.len();
                     let (first_wrap, first_cid, first_extracted) = broken_wraps.into_iter().next()

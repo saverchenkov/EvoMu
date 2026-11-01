@@ -1000,52 +1000,13 @@ pub async fn destroy_specialized_npc_with_hint(
         .await;
     }
 
-    if effective_bounty > 0.0 && killer_char_id > 0 {
-        let now_unix = ctx.now_unix();
-        let credited = with_mut_combat_runtime(ctx, |rt| {
-            let is_new = rt.bounty_credited_balls.insert(npc_ball_id);
-            if is_new {
-                *rt.pending_bounty_ticks
-                    .entry((solar_system_id, killer_char_id))
-                    .or_insert(0.0) += effective_bounty;
-                rt.bounty_tick_next_flush_unix
-                    .entry((solar_system_id, killer_char_id))
-                    .or_insert_with(|| now_unix.saturating_add(1_200));
-            }
-            is_new
-        });
-        if credited {
-            let old_sec = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&killer_char_id)
-                    .map(|c| c.security_status)
-                    .unwrap_or(0.0)
-            });
-            if old_sec < 5.0 {
-                let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, solar_system_id);
-                let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, effective_bounty) * supp_mult;
-                let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
-                ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                        ch.security_status = new_sec;
-                    }
-                });
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.sec_status_transactions
-                        .entry(killer_char_id)
-                        .or_default()
-                        .push(crate::services::combat_crimewatch::SecStatusTransaction {
-                            timestamp_unix: now_unix,
-                            old_sec,
-                            new_sec,
-                            delta: new_sec - old_sec,
-                            reason: "NPC Pirate Bounty".into(),
-                            solar_system_id,
-                        });
-                });
-            }
-        }
-    }
+    crate::combat::crimewatch::credit_specialized_npc_bounty_and_sec_status(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+        effective_bounty,
+    );
 
     let wreck_type_id = if archetype == "Sleeper" {
         30495 // Sleeper Large Intermediate Wreck (`attr 901 = -15.0`)

@@ -733,6 +733,11 @@ pub fn handle(
             });
             match res {
                 Ok(tr) => {
+                    if tr.completed {
+                        for &(iid, _) in tr.items_a.iter().chain(tr.items_b.iter()) {
+                            let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, iid);
+                        }
+                    }
                     for party in [tr.char_a, tr.char_b] {
                         match method {
                             "Abort" => {

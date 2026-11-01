@@ -431,6 +431,10 @@ pub fn handle(
 
             match res {
                 Ok((cid, exp_unix, broker_fee_isk, deposit_isk, max_slots)) => {
+                    let escrowed_ids = ctx.db.with_snapshot(|s| s.contracts.get(&cid).map(|c| c.item_ids.clone()).unwrap_or_default());
+                    for iid in escrowed_ids {
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, iid);
+                    }
                     notify_contract(ctx, char_id, "OnContractCreated", cid);
                     if assignee_id > 0 { notify_contract(ctx, assignee_id, "OnContractAssigned", cid); }
                     Some(Ok(PyRep::keyval([

@@ -1216,6 +1216,16 @@ pub async fn check_deadspace_mwd_disallowed(
         .map(|(_, b)| b.position)
         .unwrap_or(DVec3::ZERO);
     if is_ship_in_mwd_disallowed_dungeon_pocket(ctx, sys_id, ship_pos) {
+        let has_explicit_room_flag = with_dungeon_runtime_store(ctx, |st| {
+            st.instances.values().any(|i| {
+                i.solar_system_id == sys_id
+                    && i.current_room_index > 0
+                    && i.rooms.get(i.current_room_index - 1).is_some_and(|r| r.disallow_mwd == Some(true))
+            })
+        });
+        if !has_explicit_room_flag {
+            return crate::services::pve_dungeon_runtime::check_deadspace_mwd_allowed(ctx, sys_id, ship_pos.to_array());
+        }
         return Err(BridgeRpcError {
             code: "MicroWarpdriveDisallowedInDeadspace".into(),
             message: "Microwarpdrive activation is disallowed in this deadspace pocket".into(),

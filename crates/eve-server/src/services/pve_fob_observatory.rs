@@ -5,6 +5,9 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+use crate::services::pve_dungeon_runtime::{
+    with_dungeon_runtime_store, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
+};
 use crate::services::pve_incursion_sites::make_site_npc_ball;
 use eve_db::{
     InventoryFlag, InventoryItemRecord as InventoryItem, IskCents, UpwellStructureRecord,
@@ -13,6 +16,8 @@ use eve_db::{
 use eve_destiny::{CombatState, DVec3, MovementMode as BallMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub const FACTION_GURISTAS: i64 = 500_010;
 pub const FACTION_BLOOD_RAIDER: i64 = 500_012;
@@ -23,10 +28,84 @@ pub const FOB_GURISTAS_TYPE_ID: u32 = 46_363; // Guristas Pirates Stronghold
 pub const FOB_BLOOD_RAIDER_TYPE_ID: u32 = 46_364; // Blood Raiders Stronghold
 pub const WORLD_ARK_BOSS_TYPE_ID: u32 = 52_361; // World Ark (Xordazh-class)
 pub const OBSERVATORY_MAX_PAYOUT_PILOTS: usize = 15;
+pub const OBSERVATORY_BASE_PILOT_ISK: i64 = 100_000_000;
+pub const OBSERVATORY_BASE_PILOT_LP: i64 = 10_000;
 pub const OBSERVATORY_COLLECTIVE_ISK: f64 = 1_500_000_000.0;
 pub const OBSERVATORY_COLLECTIVE_LP: i64 = 150_000;
+pub const FOB_MAX_FULL_PAYOUT_PILOTS: usize = 10;
+pub const FOB_BASE_PILOT_BOUNTY_ISK: i64 = 30_000_000;
 pub const FOB_COLLECTIVE_BOUNTY_ISK: f64 = 300_000_000.0;
-pub const OBSERVATORY_SITE_POS: DVec3 = DVec3::new(-300_000.0, 0.0, 300_000.0);
+pub const MAX_ACTIVE_POCHVEN_OBSERVATORIES: usize = 3;
+pub const MAX_ACTIVE_PIRATE_FOBS: usize = 3;
+pub const GATE_ACTIVATION_RANGE_M: f64 = 2_500.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservatorySiteState {
+    pub site_id: i64,
+    pub solar_system_id: u32,
+    pub site_pos: [f64; 3],
+    pub gate_pos: [f64; 3],
+    pub gate_id: i64,
+    pub world_ark_id: i64,
+    pub defense_wave_ids: Vec<i64>,
+    pub dungeon_instance_id: i64,
+    #[serde(default)]
+    pub pocket_entrants: BTreeSet<i64>,
+    pub created_unix: u64,
+}
+
+fn is_capital_or_disallowed_observatory_hull(ctx: &ServerContext, ship_type_id: u32) -> bool {
+    if matches!(ship_type_id, 0 | 670 | 33_328) {
+        return true;
+    }
+    let Some(t) = ctx.sde.types.get(&ship_type_id) else {
+        return true;
+    };
+    if t.category_id != 6 {
+        return true;
+    }
+    matches!(
+        t.group_id,
+        29 | 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594
+    )
+}
+
+fn sample_celestial_offset_pos(ctx: &ServerContext, sys_id: u32, base_dist_m: f64) -> DVec3 {
+    let u1 = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.37);
+    let u2 = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.61);
+    let angle = u1 * std::f64::consts::TAU + ((sys_id % 97) as f64) * 0.13;
+    let radial = base_dist_m + u2 * 120_000.0;
+    let y = (u2 - 0.5) * 40_000.0;
+    DVec3::new(radial * angle.cos(), y, radial * angle.sin())
+}
+
+pub fn get_observatory_site_state(ctx: &ServerContext, sys_id: u32) -> Option<ObservatorySiteState> {
+    let site_id = 1_899_000_000 + i64::from(sys_id);
+    ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get(&format!("observatory_site:{site_id}"))
+            .and_then(|raw| serde_json::from_str::<ObservatorySiteState>(raw).ok())
+    })
+}
+
+pub fn record_fob_combat_participant(ctx: &ServerContext, fob_id: i64, attacker_char_id: i64) {
+    if attacker_char_id <= 0 {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let key = format!("fob_combatants:{fob_id}");
+        let mut set: BTreeSet<i64> = snap
+            .service_state_blobs
+            .get(&key)
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if set.insert(attacker_char_id) {
+            if let Ok(json) = serde_json::to_string(&set) {
+                snap.service_state_blobs.insert(key, json);
+            }
+        }
+    });
+}
 
 /// Spawns a Blood Raider (`500012`) or Guristas (`500010`) Forward Operating Base in a high/low-sec system
 /// and launches an initial raiding fleet.
@@ -61,7 +140,8 @@ pub async fn spawn_pirate_fob(
     } else {
         FOB_GURISTAS_TYPE_ID
     };
-    let fob_pos = [200_000.0, 0.0, -200_000.0];
+    let fob_vec = sample_celestial_offset_pos(ctx, sys_id, 450_000.0);
+    let fob_pos = [fob_vec.x, fob_vec.y, fob_vec.z];
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(
@@ -93,12 +173,15 @@ pub async fn spawn_pirate_fob(
             format!("fob_faction:{fob_id}"),
             pirate_faction_id.to_string(),
         );
+        snap.service_state_blobs
+            .remove(&format!("fob_combatants:{fob_id}"));
+        snap.service_state_blobs
+            .remove(&format!("fob_defense_triggered:{fob_id}"));
     });
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    let mut fob_ball = make_site_npc_ball(fob_id, fob_type_id, DVec3::from_array(fob_pos));
+    let mut fob_ball = make_site_npc_ball(fob_id, fob_type_id, fob_vec);
     fob_ball.radius = 2_500.0;
-    fob_ball.mass = 500_000_000.0;
     fob_ball.max_velocity = 0.0;
     fob_ball.mode = BallMode::Rigid;
     let mut fob_cs = CombatState::default();
@@ -110,13 +193,12 @@ pub async fn spawn_pirate_fob(
     fob_cs.max_structure_hp = 500_000.0;
     let _ = sys.spawn_ball_with_combat(fob_ball, fob_cs).await;
 
-    // Launch 3 raiding fleet NPCs in the system (SDE Blood Raider / Guristas cruisers)
     let raider_type_id = if pirate_faction_id == FACTION_BLOOD_RAIDER {
         24_000 // Corpatis Bishop
     } else {
-        16_980 // Pithum Killer
+        16_980 // Pithum Silencer
     };
-    let mut raiding_ids = Vec::new();
+    let mut raiding_ids = Vec::with_capacity(3);
     for idx in 1..=3_i64 {
         let raider_id = fob_id + idx;
         let _ = sys
@@ -124,7 +206,7 @@ pub async fn spawn_pirate_fob(
                 make_site_npc_ball(
                     raider_id,
                     raider_type_id,
-                    DVec3::from_array(fob_pos) + DVec3::new((idx as f64) * 5_000.0, 0.0, 0.0),
+                    fob_vec + DVec3::new((idx as f64) * 3_000.0, 0.0, 0.0),
                 ),
                 ctx.build_type_combat_state(raider_type_id),
             )
@@ -177,10 +259,10 @@ pub async fn trigger_fob_defense_response(
                     .map(|t| t.group_id)
                     .unwrap_or(25);
                 match group_id {
-                    30 | 485 | 547 | 659 | 883 => 4, // Capital / Supercapital
-                    27 | 898 | 900 => 3,             // Battleship / Marauder / Black Ops
-                    26 | 358 | 419 | 832 | 906 => 2, // Cruiser / BC / Logistics / HAC
-                    _ => 1,                          // Frigate / Destroyer
+                    30 | 485 | 547 | 659 | 883 => 4,
+                    27 | 898 | 900 => 3,
+                    26 | 358 | 419 | 832 | 906 => 2,
+                    _ => 1,
                 }
             })
             .sum()
@@ -220,13 +302,15 @@ pub async fn trigger_fob_defense_response(
     ]))
 }
 
-/// Destroys a Pirate FOB, drops structure loot container in space, and pays collective bounties.
+/// Destroys a Pirate FOB, drops structure loot container in space, and pays per-pilot bounties
+/// strictly to on-grid combat participants (`30M` ISK per pilot up to 10 pilots; diluted above 10).
 pub async fn destroy_pirate_fob_and_payout(
     ctx: &ServerContext,
     fob_id: i64,
-    attacker_char_ids: &[i64],
+    on_grid_char_ids: &[i64],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (sys_id, fob_pos, pirate_faction_id) = ctx.db.with_mut_snapshot(|snap| {
+    let now_unix = ctx.now_unix_secs();
+    let (sys_id, fob_pos, pirate_faction_id, combatants) = ctx.db.try_with_mut_snapshot(|snap| {
         let st = snap
             .structures
             .get_mut(&fob_id)
@@ -242,11 +326,19 @@ pub async fn destroy_pirate_fob_and_payout(
         }
         st.state = "Destroyed".into();
         st.hull_hp = 0.0;
-        Ok((
-            st.solar_system_id,
-            DVec3::from_array(st.position),
-            st.owner_corp_id,
-        ))
+        let s_id = st.solar_system_id;
+        let f_pos = DVec3::from_array(st.position);
+        let fac_id = st.owner_corp_id;
+        let combatants: BTreeSet<i64> = snap
+            .service_state_blobs
+            .remove(&format!("fob_combatants:{fob_id}"))
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        snap.service_state_blobs.insert(
+            format!("fob_respawn_until:{s_id}"),
+            now_unix.saturating_add(86_400).to_string(),
+        );
+        Ok((s_id, f_pos, fac_id, combatants))
     })?;
 
     let sys = ctx.systems.get_or_spawn(sys_id);
@@ -258,11 +350,19 @@ pub async fn destroy_pirate_fob_and_payout(
     cont_ball.mode = BallMode::Rigid;
     let _ = sys.spawn_ball(cont_ball).await;
 
-    let per_pilot_bounty: i64 = if attacker_char_ids.is_empty() {
+    let eligible_attackers: Vec<i64> = on_grid_char_ids
+        .iter()
+        .copied()
+        .filter(|cid| combatants.contains(cid))
+        .collect();
+    let per_pilot_bounty: i64 = if eligible_attackers.is_empty() {
         0
+    } else if eligible_attackers.len() <= FOB_MAX_FULL_PAYOUT_PILOTS {
+        FOB_BASE_PILOT_BOUNTY_ISK
     } else {
-        (FOB_COLLECTIVE_BOUNTY_ISK as i64) / (attacker_char_ids.len() as i64)
+        (FOB_COLLECTIVE_BOUNTY_ISK as i64) / (eligible_attackers.len() as i64)
     };
+    let total_bounty_paid = (per_pilot_bounty * (eligible_attackers.len() as i64)) as f64;
     let faction_loot_type_id = if pirate_faction_id == FACTION_BLOOD_RAIDER {
         13_791 // Dark Blood Dual Heavy Pulse Laser
     } else {
@@ -284,7 +384,7 @@ pub async fn destroy_pirate_fob_and_payout(
                 ..Default::default()
             },
         );
-        for &cid in attacker_char_ids {
+        for &cid in &eligible_attackers {
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.balance = ch
                     .balance
@@ -308,11 +408,12 @@ pub async fn destroy_pirate_fob_and_payout(
         ("fobID", PyRep::Integer(fob_id)),
         ("lootContainerID", PyRep::Integer(loot_container_id)),
         ("bountyPerPilot", PyRep::Integer(per_pilot_bounty)),
-        ("totalBountyPaid", PyRep::Real(FOB_COLLECTIVE_BOUNTY_ISK)),
+        ("totalBountyPaid", PyRep::Real(total_bounty_paid)),
     ]))
 }
 
-/// Spawns a Pochven Observatory Flashpoint site with Triglavian defense waves and Xordazh World Ark boss.
+/// Spawns a Pochven Observatory Flashpoint site, enforcing the region-wide cap of 3 active sites
+/// and registering a gated deadspace pocket so direct warps to the World Ark are blocked.
 pub async fn spawn_observatory_flashpoint(
     ctx: &ServerContext,
     sys_id: u32,
@@ -333,17 +434,34 @@ pub async fn spawn_observatory_flashpoint(
     }
 
     let site_id = 1_899_000_000 + i64::from(sys_id);
-    let site_pos = OBSERVATORY_SITE_POS;
+    let active_in_pochven = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .keys()
+            .filter(|k| k.starts_with("observatory_site:"))
+            .count()
+    });
+    if active_in_pochven >= MAX_ACTIVE_POCHVEN_OBSERVATORIES
+        && get_observatory_site_state(ctx, sys_id).is_none()
+    {
+        return Err(BridgeRpcError {
+            code: "ObservatoryRegionCapReached".into(),
+            message: format!(
+                "Pochven already has {active_in_pochven} active Observatory Flashpoints (max {MAX_ACTIVE_POCHVEN_OBSERVATORIES})"
+            ),
+        });
+    }
+
+    let site_vec = sample_celestial_offset_pos(ctx, sys_id, 600_000.0);
+    let gate_vec = site_vec + DVec3::new(-250_000.0, 0.0, 0.0);
     let gate_id = site_id + 2;
-    let gate_pos = site_pos + DVec3::new(-50_000.0, 0.0, 0.0);
+    let world_ark_id = site_id + 1;
     let sys = ctx.systems.get_or_spawn(sys_id);
 
-    let mut gate_ball = make_site_npc_ball(gate_id, 17_831, gate_pos);
+    let mut gate_ball = make_site_npc_ball(gate_id, 17_831, gate_vec);
     gate_ball.max_velocity = 0.0;
     gate_ball.mode = BallMode::Rigid;
     let _ = sys.spawn_ball(gate_ball).await;
 
-    let world_ark_id = site_id + 1;
     let mut boss_cs = CombatState::default();
     boss_cs.shield_hp = 200_000.0;
     boss_cs.max_shield_hp = 200_000.0;
@@ -353,34 +471,126 @@ pub async fn spawn_observatory_flashpoint(
     boss_cs.max_structure_hp = 200_000.0;
     let _ = sys
         .spawn_ball_with_combat(
-            make_site_npc_ball(world_ark_id, WORLD_ARK_BOSS_TYPE_ID, site_pos),
+            make_site_npc_ball(world_ark_id, WORLD_ARK_BOSS_TYPE_ID, site_vec),
             boss_cs,
         )
         .await;
 
     let wave_types = [52_338_u32, 52_184_u32, 52_187_u32];
     let mut defense_wave_ids = Vec::with_capacity(wave_types.len());
+    let mut room_objects = vec![DungeonRuntimeObject {
+        ball_id: world_ark_id,
+        type_id: WORLD_ARK_BOSS_TYPE_ID,
+        name: "World Ark (Xordazh-class)".into(),
+        position: [site_vec.x, site_vec.y, site_vec.z],
+        radius: 5_000.0,
+        is_container: false,
+        loot_items: Vec::new(),
+        spawned: true,
+    }];
     for (idx, &wtid) in wave_types.iter().enumerate() {
         let wid = site_id + 10 + (idx as i64);
+        let wpos = site_vec + DVec3::new(((idx as f64) + 1.0) * 4_000.0, 1_500.0, 0.0);
         let _ = sys
             .spawn_ball_with_combat(
-                make_site_npc_ball(
-                    wid,
-                    wtid,
-                    site_pos + DVec3::new(((idx as f64) + 1.0) * 4_000.0, 1_500.0, 0.0),
-                ),
+                make_site_npc_ball(wid, wtid, wpos),
                 ctx.build_type_combat_state(wtid),
             )
             .await;
         defense_wave_ids.push(wid);
+        room_objects.push(DungeonRuntimeObject {
+            ball_id: wid,
+            type_id: wtid,
+            name: "Triglavian Flashpoint Defender".into(),
+            position: [wpos.x, wpos.y, wpos.z],
+            radius: 300.0,
+            is_container: false,
+            loot_items: Vec::new(),
+            spawned: true,
+        });
     }
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            format!("observatory_site:{site_id}"),
-            sys_id.to_string(),
+    let now_unix = ctx.now_unix_secs();
+    let gate_dest = site_vec + DVec3::new(0.0, 0.0, -5_000.0);
+    let dungeon_instance_id = with_dungeon_runtime_store(ctx, |store| {
+        let inst_id = store.next_instance_id;
+        store.next_instance_id += 1;
+        store.instances.insert(
+            inst_id,
+            DungeonRuntimeInstance {
+                instance_id: inst_id,
+                dungeon_id: 52_361,
+                dungeon_name: "Observatory Flashpoint".into(),
+                category: "Flashpoint".into(),
+                archetype: "Triglavian".into(),
+                solar_system_id: sys_id,
+                owner_char_id: 0,
+                base_position: [gate_vec.x, gate_vec.y, gate_vec.z],
+                disallow_mwd: false,
+                entry_gate_ball_id: None,
+                entry_gate_pos: None,
+                entry_gate_locked: false,
+                current_room_index: 0,
+                rooms: vec![
+                    DungeonRuntimeRoom {
+                        room_index: 0,
+                        room_id: 1,
+                        room_name: "Observatory Perimeter Gate".into(),
+                        position: [gate_vec.x, gate_vec.y, gate_vec.z],
+                        gate_destination_pos: [gate_dest.x, gate_dest.y, gate_dest.z],
+                        gated: false,
+                        disallow_mwd: Some(false),
+                        gate_ball_id: Some(gate_id),
+                        gate_locked: false,
+                        objects: Vec::new(),
+                        npc_groups: Vec::new(),
+                        triggers: Vec::new(),
+                        spawned: true,
+                        cleared: false,
+                    },
+                    DungeonRuntimeRoom {
+                        room_index: 1,
+                        room_id: 2,
+                        room_name: "World Ark Interior Pocket".into(),
+                        position: [site_vec.x, site_vec.y, site_vec.z],
+                        gate_destination_pos: [gate_dest.x, gate_dest.y, gate_dest.z],
+                        gated: true,
+                        disallow_mwd: Some(false),
+                        gate_ball_id: None,
+                        gate_locked: false,
+                        objects: room_objects,
+                        npc_groups: Vec::new(),
+                        triggers: Vec::new(),
+                        spawned: true,
+                        cleared: false,
+                    },
+                ],
+                completed: false,
+                despawned: false,
+                created_unix: now_unix,
+            },
         );
+        inst_id
     });
+
+    let obs_state = ObservatorySiteState {
+        site_id,
+        solar_system_id: sys_id,
+        site_pos: [site_vec.x, site_vec.y, site_vec.z],
+        gate_pos: [gate_vec.x, gate_vec.y, gate_vec.z],
+        gate_id,
+        world_ark_id,
+        defense_wave_ids: defense_wave_ids.clone(),
+        dungeon_instance_id,
+        pocket_entrants: BTreeSet::new(),
+        created_unix: now_unix,
+    };
+    if let Ok(raw) = serde_json::to_string(&obs_state) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert(format!("observatory_site:{site_id}"), raw);
+        });
+    }
 
     Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),
@@ -394,67 +604,81 @@ pub async fn spawn_observatory_flashpoint(
     ]))
 }
 
-/// Validates fleet composition (>= 3 pilots) and standing access (>= 0.0) for Observatory Flashpoint.
+/// Validates fleet composition (>= 3 on-grid subcapital pilots) and standing access (>= 0.0) for Observatory Flashpoint.
 pub fn validate_observatory_access(
     ctx: &ServerContext,
     char_id: i64,
-    fleet_member_ids: &[i64],
+    on_grid_fleet_member_ids: &[i64],
 ) -> Result<(), BridgeRpcError> {
-    if fleet_member_ids.len() < 3 {
+    if on_grid_fleet_member_ids.len() < 3 {
         return Err(BridgeRpcError {
             code: "InsufficientFleetComposition".into(),
-            message: "Observatory Flashpoint requires a fleet of at least 3 pilots".into(),
+            message: "Observatory Flashpoint requires at least 3 on-grid subcapital fleet members".into(),
         });
     }
-    let trig_standing = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .and_then(|c| c.standings.get(&FACTION_TRIGLAVIAN).copied())
-            .unwrap_or(0.0)
+    let min_standing = ctx.db.with_snapshot(|snap| {
+        on_grid_fleet_member_ids
+            .iter()
+            .chain(std::iter::once(&char_id))
+            .map(|cid| {
+                snap.characters
+                    .get(cid)
+                    .and_then(|c| c.standings.get(&FACTION_TRIGLAVIAN).copied())
+                    .unwrap_or(0.0)
+            })
+            .fold(f64::INFINITY, f64::min)
     });
-    if trig_standing < 0.0 {
+    if min_standing < 0.0 {
         return Err(BridgeRpcError {
             code: "StandingAccessDenied".into(),
-            message: format!("Triglavian standing {trig_standing:.2} is below required 0.0"),
+            message: format!("Triglavian standing {min_standing:.2} is below required 0.0"),
         });
     }
     Ok(())
 }
 
-/// Completes an Observatory Flashpoint site and pays collective ISK and DED LP to up to 15 on-grid fleet members.
+/// Completes an Observatory Flashpoint site and pays per-pilot ISK (`100M`) and DED LP (`10,000`)
+/// to up to 15 eligible pocket fleet members (`>= 3` required; no solo 1.5B ISK or bystander payouts).
 pub fn complete_observatory_flashpoint(
     ctx: &ServerContext,
     site_id: i64,
     fleet_member_ids: &[i64],
 ) -> Result<PyRep, BridgeRpcError> {
+    if fleet_member_ids.len() < 3 {
+        return Err(BridgeRpcError {
+            code: "InsufficientFleetComposition".into(),
+            message: "Observatory Flashpoint payout requires at least 3 participating pocket fleet members".into(),
+        });
+    }
     let eligible: Vec<i64> = fleet_member_ids
         .iter()
         .copied()
         .take(OBSERVATORY_MAX_PAYOUT_PILOTS)
         .collect();
-    if eligible.is_empty() {
-        return Err(BridgeRpcError {
-            code: "NoEligiblePilots".into(),
-            message: "No eligible fleet members for Observatory Flashpoint payout".into(),
-        });
-    }
 
-    let isk_each = (OBSERVATORY_COLLECTIVE_ISK as i64) / (eligible.len() as i64);
-    let lp_each = OBSERVATORY_COLLECTIVE_LP / (eligible.len() as i64);
+    let isk_each = OBSERVATORY_BASE_PILOT_ISK;
+    let lp_each = OBSERVATORY_BASE_PILOT_LP;
+    let now_unix = ctx.now_unix_secs();
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if snap
+    let obs_state = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(raw) = snap
             .service_state_blobs
             .remove(&format!("observatory_site:{site_id}"))
-            .is_none()
-        {
+        else {
             return Err(BridgeRpcError {
                 code: "ObservatorySiteNotFound".into(),
                 message: format!("Observatory Flashpoint site {site_id} does not exist"),
             });
-        }
-        snap.service_state_blobs
-            .insert(format!("observatory_completed:{site_id}"), "1".into());
+        };
+        let parsed: ObservatorySiteState =
+            serde_json::from_str(&raw).map_err(|e| BridgeRpcError {
+                code: "ObservatoryStateCorrupt".into(),
+                message: e.to_string(),
+            })?;
+        snap.service_state_blobs.insert(
+            format!("observatory_respawn_until:{}", parsed.solar_system_id),
+            now_unix.saturating_add(14_400).to_string(),
+        );
         for &cid in &eligible {
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.balance = ch
@@ -474,8 +698,12 @@ pub fn complete_observatory_flashpoint(
                 *ch.loyalty_points.entry(CORP_DED).or_insert(0) += lp_each;
             }
         }
-        Ok(())
+        Ok(parsed)
     })?;
+
+    with_dungeon_runtime_store(ctx, |store| {
+        store.instances.remove(&obs_state.dungeon_instance_id);
+    });
 
     Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),
@@ -485,7 +713,8 @@ pub fn complete_observatory_flashpoint(
     ]))
 }
 
-/// Validates fleet composition (>= 3) and Triglavian standing (>= 0.0) when activating an Observatory acceleration gate.
+/// Enforces undocked state, `<= 2,500m` gate proximity, subcapital/battleship hull restriction,
+/// on-grid fleet composition (`>= 3`), and Triglavian standing (`>= 0.0`) on `keeper.ActivateAccelerationGate`.
 pub async fn try_activate_observatory_gate(
     ctx: &ServerContext,
     session: &SessionState,
@@ -496,33 +725,128 @@ pub async fn try_activate_observatory_gate(
     if gate_id != site_id + 2 {
         return None;
     }
-    let has_site = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .contains_key(&format!("observatory_site:{site_id}"))
-    });
-    if !has_site {
-        return None;
-    }
+    let obs_state = get_observatory_site_state(ctx, sys_id)?;
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let fleet_member_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        if let Some(fleet) = snap.fleets.values().find(|f| f.members.contains(&char_id)) {
-            fleet.members.clone()
-        } else {
-            vec![char_id]
-        }
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Some(Err(BridgeRpcError {
+            code: "CantDoThatWhileDocked".into(),
+            message: "Cannot activate an acceleration gate while docked".into(),
+        }));
+    }
+    if session.solar_system_id != Some(sys_id) {
+        return Some(Err(BridgeRpcError {
+            code: "NotInSolarSystem".into(),
+            message: "Ship is not in the Observatory solar system".into(),
+        }));
+    }
+    let Some(ship_id) = session.ship_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Activating an acceleration gate requires an active ship".into(),
+        }));
+    };
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let all_balls = sys.list_balls().await.unwrap_or_default();
+    let Some(ship_ball) = all_balls.iter().find(|b| b.id == ship_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship ball is not in space".into(),
+        }));
+    };
+    let Some(gate_ball) = all_balls.iter().find(|b| b.id == gate_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "GateNotInSpace".into(),
+            message: "Observatory acceleration gate is not in space".into(),
+        }));
+    };
+    let dist_to_gate = ship_ball.position.distance(gate_ball.position);
+    if dist_to_gate > GATE_ACTIVATION_RANGE_M {
+        return Some(Err(BridgeRpcError {
+            code: "OutsideOperationalRange".into(),
+            message: format!(
+                "Ship is {dist_to_gate:.1}m from Observatory gate (must be <= {GATE_ACTIVATION_RANGE_M:.0}m)"
+            ),
+        }));
+    }
+
+    let (char_docked, ship_type_id) = ctx.db.with_snapshot(|snap| {
+        let docked = snap
+            .characters
+            .get(&char_id)
+            .is_none_or(|c| c.station_id.is_some() || c.structure_id.is_some());
+        let stid = snap
+            .items
+            .get(&ship_id)
+            .map(|i| i.type_id)
+            .unwrap_or(ship_ball.type_id);
+        (docked, stid)
     });
-    if let Err(e) = validate_observatory_access(ctx, char_id, &fleet_member_ids) {
+    if char_docked {
+        return Some(Err(BridgeRpcError {
+            code: "CantDoThatWhileDocked".into(),
+            message: "Cannot activate an acceleration gate while docked".into(),
+        }));
+    }
+    if is_capital_or_disallowed_observatory_hull(ctx, ship_type_id) {
+        return Some(Err(BridgeRpcError {
+            code: "ShipClassRestricted".into(),
+            message: "Observatory Flashpoint acceleration gate restricts entry to subcapital hulls (up to Battleship)".into(),
+        }));
+    }
+
+    let site_pos = DVec3::from_array(obs_state.site_pos);
+    let gate_pos = DVec3::from_array(obs_state.gate_pos);
+    let on_site_ships: BTreeSet<i64> = all_balls
+        .iter()
+        .filter(|b| {
+            !is_capital_or_disallowed_observatory_hull(ctx, b.type_id)
+                && (b.position.distance(gate_pos) <= 250_000.0
+                    || b.position.distance(site_pos) <= 150_000.0)
+        })
+        .map(|b| b.id)
+        .collect();
+
+    let on_grid_fleet_members: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        let Some(fleet) = snap.fleets.values().find(|f| f.members.contains(&char_id)) else {
+            return vec![char_id];
+        };
+        fleet
+            .members
+            .iter()
+            .copied()
+            .filter(|cid| {
+                snap.characters.get(cid).is_some_and(|c| {
+                    c.solar_system_id == sys_id
+                        && c.station_id.is_none()
+                        && c.structure_id.is_none()
+                        && c.active_ship_id > 0
+                        && on_site_ships.contains(&c.active_ship_id)
+                })
+            })
+            .collect()
+    });
+
+    if let Err(e) = validate_observatory_access(ctx, char_id, &on_grid_fleet_members) {
         return Some(Err(e));
     }
-    if let Some(ship_id) = session.ship_id {
-        let sys = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys
-            .set_ball_position(ship_id, OBSERVATORY_SITE_POS + DVec3::new(0.0, 0.0, -5_000.0))
-            .await;
+
+    let dest = site_pos + DVec3::new(0.0, 0.0, -5_000.0);
+    let _ = sys.set_ball_position(ship_id, dest).await;
+    let _ = sys.set_movement_mode(ship_id, BallMode::Stop).await;
+
+    let mut updated = obs_state;
+    updated.pocket_entrants.insert(char_id);
+    if let Ok(raw) = serde_json::to_string(&updated) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert(format!("observatory_site:{site_id}"), raw);
+        });
     }
+
     Some(Ok(PyRep::keyval([
         ("siteID", PyRep::Integer(site_id)),
         ("accessGranted", PyRep::Bool(true)),
@@ -531,53 +855,94 @@ pub async fn try_activate_observatory_gate(
 
 /// Completes the Observatory Flashpoint when the World Ark boss (`52361`) is killed in the NPC death pipeline.
 pub async fn on_world_ark_boss_killed(ctx: &ServerContext, sys_id: u32, killer_char_id: i64) {
-    let site_id = 1_899_000_000 + i64::from(sys_id);
+    if killer_char_id <= 0 {
+        return;
+    }
+    let Some(obs_state) = get_observatory_site_state(ctx, sys_id) else {
+        return;
+    };
+    let site_pos = DVec3::from_array(obs_state.site_pos);
     let sys = ctx.systems.get_or_spawn(sys_id);
     let all_balls = sys.list_balls().await.unwrap_or_default();
-    let on_grid_ship_ids: std::collections::HashSet<i64> = all_balls
+    let pocket_ship_ids: BTreeSet<i64> = all_balls
         .iter()
-        .filter(|b| b.position.distance(OBSERVATORY_SITE_POS) <= 250_000.0)
+        .filter(|b| {
+            !is_capital_or_disallowed_observatory_hull(ctx, b.type_id)
+                && b.position.distance(site_pos) <= 150_000.0
+        })
         .map(|b| b.id)
         .collect();
+
+    let mut combat_attackers: BTreeSet<i64> =
+        crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.aggression_assist_log
+                .get(&obs_state.world_ark_id)
+                .map(|list| list.iter().map(|a| a.attacker_char_id).collect())
+                .unwrap_or_default()
+        });
+    combat_attackers.insert(killer_char_id);
+
     let fleet_member_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
-        let is_on_site = |cid: &i64| {
-            snap.characters.get(cid).is_some_and(|c| {
-                c.solar_system_id == sys_id
-                    && c.station_id.is_none()
-                    && c.active_ship_id > 0
-                    && on_grid_ship_ids.contains(&c.active_ship_id)
-            })
-        };
-        if let Some(fleet) = snap
+        let Some(fleet) = snap
             .fleets
             .values()
             .find(|f| f.members.contains(&killer_char_id))
-        {
-            fleet
-                .members
-                .iter()
-                .copied()
-                .filter(is_on_site)
-                .collect()
-        } else {
-            let mut ids: Vec<i64> = snap
-                .characters
-                .keys()
-                .copied()
-                .filter(is_on_site)
-                .collect();
-            ids.sort_unstable();
-            ids
+        else {
+            return Vec::new();
+        };
+        if !fleet.members.iter().any(|m| combat_attackers.contains(m)) {
+            return Vec::new();
         }
+        fleet
+            .members
+            .iter()
+            .copied()
+            .filter(|cid| {
+                obs_state.pocket_entrants.contains(cid)
+                    && snap.characters.get(cid).is_some_and(|c| {
+                        c.solar_system_id == sys_id
+                            && c.station_id.is_none()
+                            && c.structure_id.is_none()
+                            && c.active_ship_id > 0
+                            && pocket_ship_ids.contains(&c.active_ship_id)
+                    })
+            })
+            .collect()
     });
-    if !fleet_member_ids.is_empty() {
-        let _ = complete_observatory_flashpoint(ctx, site_id, &fleet_member_ids);
+
+    if fleet_member_ids.len() >= 3 {
+        if complete_observatory_flashpoint(ctx, obs_state.site_id, &fleet_member_ids).is_ok() {
+            let _ = sys.remove_ball(obs_state.gate_id).await;
+            for wid in obs_state.defense_wave_ids {
+                let _ = sys.remove_ball(wid).await;
+            }
+        }
     }
 }
 
-/// Drives Pirate FOB and Pochven Observatory Flashpoint spawns from the living-world cluster tick.
+/// Drives Pirate FOB and Pochven Observatory Flashpoint spawns from the living-world cluster tick,
+/// enforcing region/cluster active caps (`<= 3` Pochven Observatories, `<= 3` Pirate FOBs) and respawn cooldowns.
 pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
-    let active_handles = ctx.systems.active_system_handles();
+    let now_unix = ctx.now_unix_secs();
+    let (mut active_fobs, mut active_obs) = ctx.db.with_snapshot(|snap| {
+        let fobs = snap
+            .structures
+            .values()
+            .filter(|s| {
+                s.state != "Destroyed"
+                    && matches!(s.type_id, FOB_GURISTAS_TYPE_ID | FOB_BLOOD_RAIDER_TYPE_ID)
+            })
+            .count();
+        let obs = snap
+            .service_state_blobs
+            .keys()
+            .filter(|k| k.starts_with("observatory_site:"))
+            .count();
+        (fobs, obs)
+    });
+
+    let mut active_handles = ctx.systems.active_system_handles();
+    active_handles.sort_unstable_by_key(|(sid, _)| *sid);
     for &(sys_id, _) in &active_handles {
         let has_piloted_ship = ctx.db.with_snapshot(|s| {
             s.characters.values().any(|c| {
@@ -593,34 +958,126 @@ pub async fn step_living_world_fob_and_observatory_spawns(ctx: &ServerContext) {
         let Some(sys_info) = ctx.sde.solar_systems.get(&sys_id) else {
             continue;
         };
-        if sys_info.security_status > 0.0 && sys_info.security_status < 0.8 {
-            let sys_has_fob = ctx.db.with_snapshot(|snap| {
-                snap.structures.values().any(|s| {
+        if active_fobs < MAX_ACTIVE_PIRATE_FOBS
+            && sys_info.security_status > 0.0
+            && sys_info.security_status < 0.8
+        {
+            let can_spawn_fob = ctx.db.with_snapshot(|snap| {
+                let has_fob = snap.structures.values().any(|s| {
                     s.solar_system_id == sys_id
+                        && s.state != "Destroyed"
                         && matches!(s.type_id, FOB_GURISTAS_TYPE_ID | FOB_BLOOD_RAIDER_TYPE_ID)
-                })
+                });
+                let on_cd = snap
+                    .service_state_blobs
+                    .get(&format!("fob_respawn_until:{sys_id}"))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .is_some_and(|until| now_unix < until);
+                !has_fob && !on_cd
             });
-            if !sys_has_fob {
+            if can_spawn_fob {
                 let faction = if sys_id % 2 == 1 {
                     FACTION_BLOOD_RAIDER
                 } else {
                     FACTION_GURISTAS
                 };
-                let _ = spawn_pirate_fob(ctx, sys_id, faction).await;
+                if spawn_pirate_fob(ctx, sys_id, faction).await.is_ok() {
+                    active_fobs += 1;
+                }
             }
         }
-        if sys_info.region_id == POCHVEN_REGION_ID {
+        if active_obs < MAX_ACTIVE_POCHVEN_OBSERVATORIES
+            && sys_info.region_id == POCHVEN_REGION_ID
+        {
             let site_id = 1_899_000_000 + i64::from(sys_id);
-            let obs_exists_or_done = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .contains_key(&format!("observatory_site:{site_id}"))
-                    || snap
-                        .service_state_blobs
-                        .contains_key(&format!("observatory_completed:{site_id}"))
+            let can_spawn_obs = ctx.db.with_snapshot(|snap| {
+                let exists = snap
+                    .service_state_blobs
+                    .contains_key(&format!("observatory_site:{site_id}"));
+                let on_cd = snap
+                    .service_state_blobs
+                    .get(&format!("observatory_respawn_until:{sys_id}"))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .is_some_and(|until| now_unix < until);
+                !exists && !on_cd
             });
-            if !obs_exists_or_done {
-                let _ = spawn_observatory_flashpoint(ctx, sys_id).await;
+            if can_spawn_obs && spawn_observatory_flashpoint(ctx, sys_id).await.is_ok() {
+                active_obs += 1;
             }
         }
     }
+}
+
+pub async fn apply_live_combat_damage_to_pirate_fob(
+    ctx: &ServerContext,
+    sys_id: u32,
+    sys_handle: &crate::system_actor::SystemHandle,
+    attacker_char_id: i64,
+    target_ball_id: i64,
+    total_dmg: f64,
+) -> (f64, bool, f64, f64, f64, bool) {
+    if total_dmg > 0.0 && attacker_char_id > 0 {
+        record_fob_combat_participant(ctx, target_ball_id, attacker_char_id);
+    }
+    let all_balls = sys_handle.list_balls().await.unwrap_or_default();
+    let (should_trigger_def, dest, s_r, a_r, h_r, attacker_ships, attacker_chars) =
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut trig = false;
+            if let Some(st) = snap.structures.get_mut(&target_ball_id) {
+                let fob_pos = eve_destiny::DVec3::from_array(st.position);
+                let on_grid_ids: std::collections::HashSet<i64> = all_balls
+                    .iter()
+                    .filter(|b| b.position.distance(fob_pos) <= 250_000.0)
+                    .map(|b| b.id)
+                    .collect();
+                let mut rem = total_dmg;
+                if st.shield_hp > 0.0 {
+                    let take = rem.min(st.shield_hp);
+                    st.shield_hp -= take;
+                    rem -= take;
+                }
+                if rem > 0.0 && st.armor_hp > 0.0 {
+                    let take = rem.min(st.armor_hp);
+                    st.armor_hp -= take;
+                    rem -= take;
+                }
+                if rem > 0.0 && st.hull_hp > 0.0 {
+                    let take = rem.min(st.hull_hp);
+                    st.hull_hp -= take;
+                }
+                let def_key = format!("fob_defense_triggered:{target_ball_id}");
+                if !snap.service_state_blobs.contains_key(&def_key) {
+                    snap.service_state_blobs.insert(def_key, "1".into());
+                    trig = true;
+                }
+                let dest = st.hull_hp <= 0.0;
+                let s_r = (st.shield_hp / 500_000.0).clamp(0.0, 1.0);
+                let a_r = (st.armor_hp / 500_000.0).clamp(0.0, 1.0);
+                let h_r = (st.hull_hp / 500_000.0).clamp(0.0, 1.0);
+                let mut on_grid_pilots: Vec<(i64, i64)> = snap
+                    .characters
+                    .values()
+                    .filter(|c| {
+                        c.solar_system_id == sys_id
+                            && c.station_id.is_none()
+                            && c.active_ship_id > 0
+                            && on_grid_ids.contains(&c.active_ship_id)
+                    })
+                    .map(|c| (c.character_id, c.active_ship_id))
+                    .collect();
+                on_grid_pilots.sort_unstable_by_key(|(cid, _)| *cid);
+                let ships: Vec<i64> = on_grid_pilots.iter().map(|(_, sid)| *sid).collect();
+                let chars: Vec<i64> = on_grid_pilots.iter().map(|(cid, _)| *cid).collect();
+                (trig, dest, s_r, a_r, h_r, ships, chars)
+            } else {
+                (false, true, 0.0, 0.0, 0.0, Vec::new(), Vec::new())
+            }
+        });
+    if should_trigger_def {
+        let _ = trigger_fob_defense_response(ctx, target_ball_id, &attacker_ships).await;
+    }
+    if dest {
+        let _ = destroy_pirate_fob_and_payout(ctx, target_ball_id, &attacker_chars).await;
+    }
+    (total_dmg, dest, s_r, a_r, h_r, dest)
 }

@@ -507,76 +507,17 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 | crate::services::pve_fob_observatory::FOB_BLOOD_RAIDER_TYPE_ID
         )
     ) {
-        let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-        let (should_trigger_def, dest, s_r, a_r, h_r, attacker_ships, attacker_chars) = ctx.db.with_mut_snapshot(|snap| {
-            let mut trig = false;
-            if let Some(st) = snap.structures.get_mut(&target_ball_id) {
-                let fob_pos = eve_destiny::DVec3::from_array(st.position);
-                let on_grid_ids: std::collections::HashSet<i64> = all_balls
-                    .iter()
-                    .filter(|b| b.position.distance(fob_pos) <= 250_000.0)
-                    .map(|b| b.id)
-                    .collect();
-                let mut rem = dmg.total();
-                if st.shield_hp > 0.0 {
-                    let take = rem.min(st.shield_hp);
-                    st.shield_hp -= take;
-                    rem -= take;
-                }
-                if rem > 0.0 && st.armor_hp > 0.0 {
-                    let take = rem.min(st.armor_hp);
-                    st.armor_hp -= take;
-                    rem -= take;
-                }
-                if rem > 0.0 && st.hull_hp > 0.0 {
-                    let take = rem.min(st.hull_hp);
-                    st.hull_hp -= take;
-                }
-                let def_key = format!("fob_defense_triggered:{target_ball_id}");
-                if !snap.service_state_blobs.contains_key(&def_key) {
-                    snap.service_state_blobs.insert(def_key, "1".into());
-                    trig = true;
-                }
-                let dest = st.hull_hp <= 0.0;
-                let s_r = (st.shield_hp / 500_000.0).clamp(0.0, 1.0);
-                let a_r = (st.armor_hp / 500_000.0).clamp(0.0, 1.0);
-                let h_r = (st.hull_hp / 500_000.0).clamp(0.0, 1.0);
-                let mut on_grid_pilots: Vec<(i64, i64)> = snap
-                    .characters
-                    .values()
-                    .filter(|c| {
-                        c.solar_system_id == sys_id
-                            && c.station_id.is_none()
-                            && c.active_ship_id > 0
-                            && on_grid_ids.contains(&c.active_ship_id)
-                    })
-                    .map(|c| (c.character_id, c.active_ship_id))
-                    .collect();
-                on_grid_pilots.sort_unstable_by_key(|(cid, _)| *cid);
-                let ships: Vec<i64> = on_grid_pilots.iter().map(|(_, sid)| *sid).collect();
-                let chars: Vec<i64> = on_grid_pilots.iter().map(|(cid, _)| *cid).collect();
-                (trig, dest, s_r, a_r, h_r, ships, chars)
-            } else {
-                (false, true, 0.0, 0.0, 0.0, Vec::new(), Vec::new())
-            }
-        });
-        if should_trigger_def {
-            let _ = crate::services::pve_fob_observatory::trigger_fob_defense_response(
+        return Ok(Some(
+            crate::services::pve_fob_observatory::apply_live_combat_damage_to_pirate_fob(
                 ctx,
+                sys_id,
+                &sys_handle,
+                attacker_char_id,
                 target_ball_id,
-                &attacker_ships,
+                dmg.total(),
             )
-            .await;
-        }
-        if dest {
-            let _ = crate::services::pve_fob_observatory::destroy_pirate_fob_and_payout(
-                ctx,
-                target_ball_id,
-                &attacker_chars,
-            )
-            .await;
-        }
-        return Ok(Some((dmg.total(), dest, s_r, a_r, h_r, dest)));
+            .await,
+        ));
     }
     if is_fw_site
         || matches!(

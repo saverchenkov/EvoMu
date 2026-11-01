@@ -146,6 +146,7 @@ pub mod quasar_sov_skyhook;
 pub mod quasar_sov_workforce;
 pub mod quasar_space_domain;
 pub mod doomsday_aoe_ops;
+pub mod doomsday_aoe_tick;
 pub mod ice_heist_ops;
 pub mod pve_fob_observatory;
 pub mod quasar_space_services;

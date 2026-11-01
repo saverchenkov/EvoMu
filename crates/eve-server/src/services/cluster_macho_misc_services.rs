@@ -166,6 +166,10 @@ struct PersistedClusterMiscState {
     offered_load_slots: HashMap<i64, OfferedLoadSlot>,
     #[serde(default)]
     char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
+    #[serde(default)]
+    target_cooldowns: HashMap<i64, u64>,
+    #[serde(default)]
+    target_charges: HashMap<i64, u32>,
 }
 
 #[derive(Default)]
@@ -178,6 +182,7 @@ pub struct ClusterMiscRuntimeState {
     pub system_population_caps: HashMap<u32, usize>,
     pub char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
     pub target_cooldowns: HashMap<i64, u64>,
+    pub target_charges: HashMap<i64, u32>,
 }
 
 /// DERIVED: Canonical Empire Landing Pads (Shipcaster Beacons) in Faction Warfare warzones.
@@ -427,6 +432,7 @@ impl ClusterMiscRuntimeState {
             system_population_caps: HashMap::new(),
             char_energy: HashMap::new(),
             target_cooldowns: HashMap::new(),
+            target_charges: HashMap::new(),
         };
         let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
             snap.service_state_blobs
@@ -446,6 +452,8 @@ impl ClusterMiscRuntimeState {
             }
             st.offered_load_slots = p.offered_load_slots;
             st.char_energy = p.char_energy;
+            st.target_cooldowns = p.target_cooldowns;
+            st.target_charges = p.target_charges;
         }
         st
     }
@@ -472,6 +480,8 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
         starter_launchers: st.starter_launchers.clone(),
         offered_load_slots: st.offered_load_slots.clone(),
         char_energy: st.char_energy.clone(),
+        target_cooldowns: st.target_cooldowns.clone(),
+        target_charges: st.target_charges.clone(),
     });
     if let Ok(json) = serde_json::to_string(&p) {
         let _ = ctx.db.try_with_mut_snapshot(|snap| {
@@ -722,7 +732,7 @@ pub fn check_and_apply_shipcaster_target_cooldown(
     cooldown_secs: u64,
 ) -> Result<(), BridgeRpcError> {
     let now = ctx.now_unix();
-    with_misc_state(ctx, |st| {
+    let res = with_misc_state(ctx, |st| {
         if let Some(&expires) = st.target_cooldowns.get(&pad_id) {
             if now < expires {
                 return Err(BridgeRpcError {
@@ -730,10 +740,23 @@ pub fn check_and_apply_shipcaster_target_cooldown(
                     message: format!("Shipcaster destination pad {pad_id} is on cooldown for {} more seconds", expires - now),
                 });
             }
+            st.target_charges.insert(pad_id, 1);
         }
+        let charges = st.target_charges.entry(pad_id).or_insert(1);
+        if *charges == 0 {
+            return Err(BridgeRpcError {
+                code: "ShipcasterTargetNoCharges".into(),
+                message: format!("Shipcaster destination pad {pad_id} has 0 remaining charges"),
+            });
+        }
+        *charges -= 1;
         st.target_cooldowns.insert(pad_id, now + cooldown_secs);
         Ok(())
-    })
+    });
+    if res.is_ok() {
+        persist_misc_state(ctx);
+    }
+    res
 }
 
 pub fn is_zarzakh_horizon_siege_active(ctx: &ServerContext) -> bool {

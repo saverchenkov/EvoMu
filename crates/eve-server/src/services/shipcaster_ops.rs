@@ -501,16 +501,49 @@ pub async fn handle(
                 )));
             }
 
-            // Per-target charge and cooldown (`feat:navigation.deathless-shipcaster-fob`)
+            // Per-target charge, cooldown, and SDE stargate insurgency warzone connectivity (`feat:navigation.deathless-shipcaster-fob`)
             if matches!(pad.faction_id, 500010 | 500011) {
-                let on_cooldown = crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+                let now_u = ctx.now_unix();
+                let campaign_systems: Vec<u32> = crate::services::insurgency_services::read_insurgency_runtime(ctx, |rt| {
+                    rt.campaigns
+                        .values()
+                        .filter(|c| c.pirate_faction_id == i64::from(pad.faction_id) && c.winddown_end_unix > now_u)
+                        .flat_map(|c| c.systems.iter().copied())
+                        .collect()
+                });
+                if !campaign_systems.is_empty() {
+                    let is_stargate_connected = campaign_systems.contains(&to_system_id)
+                        || ctx.sde.jumps.values().any(|j| {
+                            j.from_solar_system_id == to_system_id && campaign_systems.contains(&j.to_solar_system_id)
+                        });
+                    if !is_stargate_connected {
+                        return Some(Err(rpc_err(
+                            "InsurgencyWarzoneNotConnected",
+                            format!("Destination system {to_system_id} is not connected via SDE stargate topology to active pirate insurgency systems"),
+                        )));
+                    }
+                }
+                let (on_cooldown, out_of_charges) = crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
                     let now = ctx.now_unix();
-                    st.target_cooldowns.get(&pad.item_id).copied().unwrap_or(0) > now
+                    let cd_exp = st.target_cooldowns.get(&pad.item_id).copied().unwrap_or(0);
+                    let cd_active = cd_exp > now;
+                    let charges = if !cd_active && cd_exp > 0 {
+                        1
+                    } else {
+                        st.target_charges.get(&pad.item_id).copied().unwrap_or(1)
+                    };
+                    (cd_active, charges == 0)
                 });
                 if on_cooldown {
                     return Some(Err(rpc_err(
                         "ShipcasterTargetOnCooldown",
                         format!("Shipcaster target {} is currently on cooldown", pad.item_id),
+                    )));
+                }
+                if out_of_charges {
+                    return Some(Err(rpc_err(
+                        "ShipcasterTargetNoCharges",
+                        format!("Shipcaster target {} has no remaining charges", pad.item_id),
                     )));
                 }
             }

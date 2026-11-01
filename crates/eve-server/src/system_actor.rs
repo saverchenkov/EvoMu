@@ -1071,6 +1071,7 @@ impl SystemRegistry {
                                     );
                                     crate::services::doomsday_aoe_ops::step_bosonic_doomsday_in_ballpark(
                                         &mut ballpark,
+                                        base_scramble_strengths,
                                         sde_opt.as_ref(),
                                         db_opt.as_ref(),
                                         solar_system_id,

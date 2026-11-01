@@ -7,11 +7,10 @@
 
 use crate::common::*;
 use eve_db::{InventoryFlag, InventoryItemRecord, PersistedInsurgencyCampaign};
-use eve_destiny::MovementMode;
+use eve_destiny::{MovementMode, WarpPhase};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{with_mut_combat_runtime, SafetyLevel};
 use eve_server::services::pve_dungeon_runtime::{
     with_dungeon_runtime_store, DungeonRuntimeInstance, DungeonRuntimeObject, DungeonRuntimeRoom,
 };
@@ -108,8 +107,15 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
 
     let ctx = ServerContext::new();
     pin_clock(&ctx);
-    let highsec_sys = 30_000_142; // Jita (0.95)
-    let sys_id = 30_002_537; // Amamake (0.44 low-sec)
+    let highsec_sys = 30_000_142; // Jita (0.95 highsec)
+    let lowsec_sys = 30_002_537; // Amamake (0.44 lowsec)
+    let nullsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status < 0.0 && s.solar_system_id < 31_000_000 && s.region_id != 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("SDE must contain a K-space nullsec system");
     let char_id = 90_001;
     let titan_id = 88_100_001;
     let dd_mod_id = 88_100_002; // 40633 Bosonic Field Generator (doomsdayConeDOT)
@@ -118,127 +124,114 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     let helium_id = 88_100_005;
     let stront_id = 88_100_006;
 
+    let slash_vec = |mid: i64, x: f64, y: f64, z: f64| {
+        vec![PyRep::Integer(mid), PyRep::Real(x), PyRep::Real(y), PyRep::Real(z)]
+    };
+
     // 1. Negative: non-Titan hull refused
-    seed_ship_in_space(&ctx, char_id, titan_id, 587, sys_id, DVec3::ZERO).await;
+    seed_ship_in_space(&ctx, char_id, titan_id, 587, nullsec_sys, DVec3::ZERO).await;
     ctx.db.with_mut_snapshot(|snap| {
         for (mid, tid, flg) in [
             (dd_mod_id, 40_633, InventoryFlag::HiSlot0),
             (gtfo_mod_id, 40_634, InventoryFlag::HiSlot1),
             (reaper_mod_id, 40_632, InventoryFlag::HiSlot2),
         ] {
-            snap.items.insert(
-                mid,
-                InventoryItemRecord {
-                    item_id: mid,
-                    type_id: tid,
-                    owner_id: char_id,
-                    location_id: titan_id,
-                    flag: flg,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
+            snap.items.insert(mid, InventoryItemRecord {
+                item_id: mid, type_id: tid, owner_id: char_id, location_id: titan_id,
+                flag: flg, quantity: 1, singleton: true, ..Default::default()
+            });
             snap.module_online_states.insert(mid, true);
         }
     });
-    let mut sess = make_sess(char_id, titan_id, sys_id, None);
-    let err = call_svc(
-        &ctx,
-        &mut sess,
-        "superWeaponMgr",
-        "ActivateSlashModule",
-        vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-    )
-    .await
-    .unwrap_err();
+    let mut sess = make_sess(char_id, titan_id, nullsec_sys, None);
+    let err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
     assert_eq!(err.code, "ShipCannotActivateSuperweapon");
 
-    // 2. Negative: high-sec empire space refused (`disallowInEmpireSpace`), Green safety refused, missing fuel refused
-    seed_ship_in_space(&ctx, char_id, titan_id, 11_567, highsec_sys, DVec3::ZERO).await;
-    let mut hs_sess = make_sess(char_id, titan_id, highsec_sys, None);
-    let hs_err = call_svc(
-        &ctx,
-        &mut hs_sess,
-        "superWeaponMgr",
-        "ActivateSlashModule",
-        vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(hs_err.code, "CannotActivateInEmpireSpace");
+    // 2. Negative: BOTH Highsec (0.95) AND Lowsec (0.44) Empire space refused (`disallowInEmpireSpace`)
+    for emp_sys in [highsec_sys, lowsec_sys] {
+        seed_ship_in_space(&ctx, char_id, titan_id, 11_567, emp_sys, DVec3::ZERO).await;
+        let mut emp_sess = make_sess(char_id, titan_id, emp_sys, None);
+        let emp_err = call_svc(&ctx, &mut emp_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+        assert_eq!(emp_err.code, "CannotActivateInEmpireSpace");
+    }
 
-    seed_ship_in_space(&ctx, char_id, titan_id, 11_567, sys_id, DVec3::ZERO).await;
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Green);
-    });
-    let safety_err = call_svc(
-        &ctx,
-        &mut sess,
-        "superWeaponMgr",
-        "ActivateSlashModule",
-        vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-    )
-    .await
-    .unwrap_err();
-    assert!(safety_err.message.contains("CantDoInCurrentSafetyLevel") || safety_err.code.contains("CantDoInCurrentSafetyLevel"));
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.safety_levels.insert(char_id, SafetyLevel::Red);
-    });
+    // 3. Negative: docked, cloaked, warping, and missing-fuel checks in Nullsec
+    seed_ship_in_space(&ctx, char_id, titan_id, 11_567, nullsec_sys, DVec3::ZERO).await;
+    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = Some(60_003_760); } });
+    let mut docked_sess = make_sess(char_id, titan_id, nullsec_sys, Some(60_003_760));
+    let docked_err = call_svc(&ctx, &mut docked_sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    assert_eq!(docked_err.code, "CantDoThatWhileDocked");
+    ctx.db.with_mut_snapshot(|s| { if let Some(c) = s.characters.get_mut(&char_id) { c.station_id = None; } });
 
-    let err_fuel = call_svc(
-        &ctx,
-        &mut sess,
-        "superWeaponMgr",
-        "ActivateSlashModule",
-        vec![PyRep::Integer(dd_mod_id), PyRep::Real(1.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-    )
-    .await
-    .unwrap_err();
+    let sys = ctx.systems.get_or_spawn(nullsec_sys);
+    let mut t_cs = sys.get_combat_state(titan_id).await.unwrap().unwrap();
+    t_cs.is_cloaked = true;
+    let _ = sys.set_combat_state(titan_id, t_cs.clone()).await;
+    let cloak_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    assert_eq!(cloak_err.code, "CantActivateWhileCloaked");
+    t_cs.is_cloaked = false;
+    let _ = sys.set_combat_state(titan_id, t_cs).await;
+
+    let _ = sys.set_movement_mode(titan_id, MovementMode::Warp {
+        origin: DVec3::ZERO, destination: DVec3::new(1.0e7, 0.0, 0.0), warp_speed_au_s: 1.5,
+        total_distance: 1.0e7, phase: WarpPhase::Accelerating, elapsed_warp_time: 0.0,
+    }).await;
+    let warp_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
+    assert_eq!(warp_err.code, "CantActivateInWarp");
+    let _ = sys.set_movement_mode(titan_id, MovementMode::Stop).await;
+
+    let err_fuel = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", slash_vec(dd_mod_id, 1.0, 0.0, 0.0)).await.unwrap_err();
     assert_eq!(err_fuel.code, "InsufficientFuel");
 
-    // 3. Seed SDE Strontium Clathrates (16275) & Helium Isotopes (16274), plus targets (including tethered & Upwell structure)
+    // 4. Seed SDE Strontium Clathrates (16275) & Helium Isotopes (16274) + targets
     ctx.db.with_mut_snapshot(|snap| {
-        for (fid, tid, qty) in [(stront_id, 16_275, 10_000), (helium_id, 16_274, 100_000)] {
-            snap.items.insert(
-                fid,
-                InventoryItemRecord {
-                    item_id: fid,
-                    type_id: tid,
-                    owner_id: char_id,
-                    location_id: titan_id,
-                    flag: InventoryFlag::Cargo,
-                    quantity: qty,
-                    ..Default::default()
-                },
-            );
+        for (fid, tid, qty) in [(stront_id, 16_275, 10_000), (helium_id, 16_274, 150_000)] {
+            snap.items.insert(fid, InventoryItemRecord {
+                item_id: fid, type_id: tid, owner_id: char_id, location_id: titan_id,
+                flag: InventoryFlag::Cargo, quantity: qty, ..Default::default()
+            });
         }
     });
 
-    let cone_hit_id = 88_100_010;
+    let neut_ship_id = 88_100_009;
+    let cone_frig_id = 88_100_010;
+    let cone_cap_id = 88_100_017;
     let cone_miss_id = 88_100_011;
     let cone_tethered_id = 88_100_014;
     let gtfo_hit_id = 88_100_012;
+    let gtfo_cap_id = 88_100_018;
     let gtfo_tethered_id = 88_100_015;
     let gtfo_struct_id = 88_100_016;
     let reaper_hit_id = 88_100_013;
-    seed_ship_in_space(&ctx, 90_002, cone_hit_id, 587, sys_id, DVec3::new(20_000.0, 0.0, 0.0)).await;
-    seed_ship_in_space(&ctx, 90_003, cone_miss_id, 587, sys_id, DVec3::new(0.0, 20_000.0, 0.0)).await;
-    seed_ship_in_space(&ctx, 90_006, cone_tethered_id, 587, sys_id, DVec3::new(15_000.0, 0.0, 0.0)).await;
-    seed_ship_in_space(&ctx, 90_004, gtfo_hit_id, 587, sys_id, DVec3::new(-40_000.0, 0.0, 0.0)).await;
-    seed_ship_in_space(&ctx, 90_007, gtfo_tethered_id, 587, sys_id, DVec3::new(-38_000.0, 0.0, 0.0)).await;
-    seed_ship_in_space(&ctx, 90_005, reaper_hit_id, 587, sys_id, DVec3::new(0.0, -20_000.0, 10_000.0)).await;
 
-    let sys = ctx.systems.get_or_spawn(sys_id);
+    seed_ship_in_space(&ctx, 90_011, neut_ship_id, 638, nullsec_sys, DVec3::new(0.0, 8_000.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_002, cone_frig_id, 587, nullsec_sys, DVec3::new(20_000.0, 0.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_012, cone_cap_id, 19_720, nullsec_sys, DVec3::new(22_000.0, 0.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_003, cone_miss_id, 587, nullsec_sys, DVec3::new(0.0, 20_000.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_006, cone_tethered_id, 587, nullsec_sys, DVec3::new(15_000.0, 0.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_004, gtfo_hit_id, 587, nullsec_sys, DVec3::new(-40_000.0, 0.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_013, gtfo_cap_id, 19_720, nullsec_sys, DVec3::new(-39_000.0, 0.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_007, gtfo_tethered_id, 587, nullsec_sys, DVec3::new(-38_000.0, 0.0, 0.0)).await;
+    seed_ship_in_space(&ctx, 90_005, reaper_hit_id, 638, nullsec_sys, DVec3::new(0.0, -20_000.0, 18_000.0)).await;
+
+    for tid in [cone_frig_id, cone_cap_id] {
+        let mut cs = sys.get_combat_state(tid).await.unwrap().unwrap();
+        cs.shield_hp = 500_000.0;
+        cs.max_shield_hp = 500_000.0;
+        cs.shield_resonance = [1.0, 1.0, 1.0, 1.0];
+        let _ = sys.set_combat_state(tid, cs).await;
+    }
     for tid in [cone_tethered_id, gtfo_tethered_id] {
         let mut cs = sys.get_combat_state(tid).await.unwrap().unwrap();
         cs.is_tethered = true;
         let _ = sys.set_combat_state(tid, cs).await;
     }
-    let _ = sys.spawn_ball(make_site_npc_ball(gtfo_struct_id, 35_832, DVec3::new(-37_000.0, 0.0, 0.0))).await;
+    let mut struct_ball = make_site_npc_ball(gtfo_struct_id, 35_832, DVec3::new(-37_000.0, 0.0, 0.0));
+    struct_ball.max_velocity = 0.0;
+    let _ = sys.spawn_ball(struct_ball).await;
 
-    // 4. Activate Bosonic Field Generator (Cone, 30km SDE maxRange)
-    let pre_hit_cs = sys.get_combat_state(cone_hit_id).await.unwrap().unwrap();
+    // 5. Activate Bosonic Field Generator -> 10km 35k GJ neut pulse, 10s warmup (0 dmg at t=0), then sig-scaled DoT
+    assert!(sys.get_combat_state(neut_ship_id).await.unwrap().unwrap().capacitor > 0.0);
     let pre_tether_cs = sys.get_combat_state(cone_tethered_id).await.unwrap().unwrap();
     let cone_res = call_svc(
         &ctx,
@@ -251,12 +244,10 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     .unwrap();
     let cone_kv = py_keyval_to_map(&cone_res);
     assert_eq!(cone_kv.get("mode").and_then(|v| v.as_str()), Some("Cone"));
+    assert_eq!(cone_kv.get("status").and_then(|v| v.as_str()), Some("WarmingUp"));
     assert_eq!(cone_kv.get("fuelConsumed").and_then(|v| v.as_i64()), Some(2_000));
-    let hit_ids: Vec<i64> = match cone_kv.get("hitTargetIDs") {
-        Some(PyRep::List(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
-        _ => Vec::new(),
-    };
-    assert!(hit_ids.contains(&cone_hit_id) && !hit_ids.contains(&cone_miss_id));
+    assert_eq!(sys.get_combat_state(neut_ship_id).await.unwrap().unwrap().capacitor, 0.0, "10km superweapon neut pulse must drain nearby ship capacitor");
+    assert_eq!(sys.get_combat_state(cone_frig_id).await.unwrap().unwrap().shield_hp, 500_000.0, "No Bosonic damage before 10s warmup");
 
     let refire_err = call_svc(
         &ctx,
@@ -268,65 +259,57 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     .await
     .unwrap_err();
     assert_eq!(refire_err.code, "ModuleInReactivationDelay");
-
-    let (_, titan_ball) = sys.get_ball_snapshot(titan_id).await.unwrap().unwrap();
-    assert_eq!(titan_ball.max_velocity, 0.0);
+    assert_eq!(sys.get_ball_snapshot(titan_id).await.unwrap().unwrap().1.max_velocity, 0.0);
     assert!(sys.get_combat_state(titan_id).await.unwrap().unwrap().disallow_assistance);
-    assert_eq!(sys.get_combat_state(cone_hit_id).await.unwrap().unwrap().shield_hp, pre_hit_cs.shield_hp);
 
-    // Advance 10s -> warmup completes and Bosonic tick damages cone_hit_id while respecting tether on cone_tethered_id
     ctx.advance_secs(10);
     let _ = sys.tick().await;
-    assert!(sys.get_combat_state(cone_hit_id).await.unwrap().is_none_or(|c| c.shield_hp < pre_hit_cs.shield_hp));
-    assert_eq!(
-        sys.get_combat_state(cone_tethered_id).await.unwrap().unwrap().shield_hp,
-        pre_tether_cs.shield_hp,
-        "Bosonic AoE tick must respect tether invulnerability"
-    );
+    let frig_dmg = 500_000.0 - sys.get_combat_state(cone_frig_id).await.unwrap().unwrap().shield_hp;
+    let cap_dmg = 500_000.0 - sys.get_combat_state(cone_cap_id).await.unwrap().unwrap().shield_hp;
+    assert!(frig_dmg > 0.0 && cap_dmg > frig_dmg * 5.0, "Bosonic damage must scale with target signatureRadius (cap={cap_dmg}, frig={frig_dmg})");
+    assert_eq!(sys.get_combat_state(cone_tethered_id).await.unwrap().unwrap().shield_hp, pre_tether_cs.shield_hp);
+    ctx.advance_secs(20);
+    let _ = sys.tick().await;
 
-    // 5. Negative GTFO out-of-range & NaN checks, then GTFO teleport within 10km SDE sphere (skipping tethered & structure)
-    let oor_err = call_svc(
-        &ctx,
-        &mut sess,
-        "superWeaponMgr",
-        "ActivateSinglePointTargetedModule",
-        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(900_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-    )
-    .await
-    .unwrap_err();
+    // 6. GTFO: range/NaN checks, 15s spool delay, subcapital-only filter (Dreadnought/tethered/structure excluded), and 60s warp suppression
+    let oor_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, 900_000.0, 0.0, 0.0)).await.unwrap_err();
     assert_eq!(oor_err.code, "TargetOutOfRange");
+    let nan_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, f64::NAN, 0.0, 0.0)).await.unwrap_err();
+    assert_eq!(nan_err.code, "InvalidTargetPoint");
+    let gtfo_res = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSinglePointTargetedModule", slash_vec(gtfo_mod_id, -35_000.0, 0.0, 0.0)).await.unwrap();
+    let gtfo_kv = py_keyval_to_map(&gtfo_res);
+    assert_eq!(gtfo_kv.get("status").and_then(|v| v.as_str()), Some("WarmingUp"));
+    assert!(sys.get_ball_snapshot(gtfo_hit_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-40_000.0, 0.0, 0.0)) < 1.0);
 
-    let nan_err = call_svc(
+    ctx.advance_secs(15);
+    let _ = sys.tick().await;
+    assert!(sys.get_ball_snapshot(gtfo_hit_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-40_000.0, 0.0, 0.0)) > 500_000.0);
+    assert!(sys.get_combat_state(gtfo_hit_id).await.unwrap().unwrap().warp_scramble_strength >= 25, "GTFO must apply 60s warp suppression");
+    assert!(sys.get_ball_snapshot(gtfo_cap_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-39_000.0, 0.0, 0.0)) < 1.0, "Capital ships must not be teleported by GTFO");
+    assert!(sys.get_ball_snapshot(gtfo_tethered_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-38_000.0, 0.0, 0.0)) < 1.0);
+    assert!(sys.get_ball_snapshot(gtfo_struct_id).await.unwrap().unwrap().1.position.distance(DVec3::new(-37_000.0, 0.0, 0.0)) < 1.0);
+
+    ctx.advance_secs(61);
+    let _ = sys.tick().await;
+    assert_eq!(sys.get_combat_state(gtfo_hit_id).await.unwrap().unwrap().warp_scramble_strength, 0, "GTFO warp suppression must expire after 60s");
+
+    // 7. Reaper (40632): >100km arc cap rejected, then 10s warmup + 10s progressive sweep
+    let arc_err = call_svc(
         &ctx,
         &mut sess,
         "superWeaponMgr",
-        "ActivateSinglePointTargetedModule",
-        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)],
+        "ActivateSlashModule",
+        vec![
+            PyRep::Integer(reaper_mod_id),
+            PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(-60_000.0),
+            PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(60_000.0),
+        ],
     )
     .await
     .unwrap_err();
-    assert_eq!(nan_err.code, "InvalidTargetPoint");
+    assert_eq!(arc_err.code, "SweepArcTooLong");
 
-    let gtfo_res = call_svc(
-        &ctx,
-        &mut sess,
-        "superWeaponMgr",
-        "ActivateSinglePointTargetedModule",
-        vec![PyRep::Integer(gtfo_mod_id), PyRep::Real(-35_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
-    )
-    .await
-    .unwrap();
-    let gtfo_kv = py_keyval_to_map(&gtfo_res);
-    let tp_ids: Vec<i64> = match gtfo_kv.get("teleportedShipIDs") {
-        Some(PyRep::List(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
-        _ => Vec::new(),
-    };
-    assert!(tp_ids.contains(&gtfo_hit_id), "Eligible player ship inside 10km GTFO sphere must teleport");
-    assert!(!tp_ids.contains(&gtfo_tethered_id) && !tp_ids.contains(&gtfo_struct_id), "Tethered ships and structures must not teleport");
-    let (_, tp_ball) = sys.get_ball_snapshot(gtfo_hit_id).await.unwrap().unwrap();
-    assert!(tp_ball.position.distance(DVec3::new(-40_000.0, 0.0, 0.0)) > 500_000.0);
-
-    // 6. Activate Reaper ('Divine Harvest' Electromagnetic Reaper 40632, consumes 50,000 Helium Isotopes)
+    let pre_reaper_hp = sys.get_combat_state(reaper_hit_id).await.unwrap().unwrap().shield_hp;
     let reaper_res = call_svc(
         &ctx,
         &mut sess,
@@ -342,19 +325,25 @@ async fn test_doomsday_bosonic_cone_and_gtfo_reaper() {
     .unwrap();
     let reaper_kv = py_keyval_to_map(&reaper_res);
     assert_eq!(reaper_kv.get("fuelConsumed").and_then(|v| v.as_i64()), Some(50_000));
-    let reaper_hits: Vec<i64> = match reaper_kv.get("hitTargetIDs") {
-        Some(PyRep::List(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
-        _ => Vec::new(),
-    };
-    assert!(reaper_hits.contains(&reaper_hit_id));
+    assert_eq!(sys.get_combat_state(reaper_hit_id).await.unwrap().unwrap().shield_hp, pre_reaper_hp, "Reaper must not deal instant damage before warmup");
 
-    // Advance past 30s immobilize window -> Titan mobility & assistance restored
-    ctx.advance_secs(30);
+    ctx.advance_secs(12);
+    let _ = sys.tick().await;
+    assert_eq!(
+        sys.get_combat_state(reaper_hit_id).await.unwrap().unwrap().shield_hp,
+        pre_reaper_hp,
+        "Target near end of Reaper arc (z=18km) must not be hit during early sweep ticks (z=0..6km)"
+    );
+    ctx.advance_secs(8);
+    let _ = sys.tick().await;
+    assert!(sys.get_combat_state(reaper_hit_id).await.unwrap().is_none_or(|c| c.shield_hp < pre_reaper_hp));
+
+    ctx.advance_secs(10);
     let _ = sys.tick().await;
     assert!(sys.get_ball_snapshot(titan_id).await.unwrap().unwrap().1.max_velocity > 0.0);
     assert!(!sys.get_combat_state(titan_id).await.unwrap().unwrap().disallow_assistance);
 
-    // 7. Negative abuse checks: offline module & unfitted cargo module refused
+    // 8. Negative abuse checks: offline module & unfitted cargo module refused
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(reaper_mod_id, false); });
     let offline_err = call_svc(&ctx, &mut sess, "superWeaponMgr", "ActivateSlashModule", vec![PyRep::Integer(reaper_mod_id), PyRep::Real(0.0), PyRep::Real(-20_000.0), PyRep::Real(0.0)]).await.unwrap_err();
     assert_eq!(offline_err.code, "ModuleNotOnline");
@@ -382,11 +371,27 @@ async fn test_insurgency_ice_heist_lifecycle() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.war_faction_id = Some(500_001); // Caldari State Protectorate
         }
+        snap.insurgency_runtime.campaigns.insert(
+            1,
+            PersistedInsurgencyCampaign {
+                campaign_id: 1,
+                pirate_faction_id: 500_010,
+                target_faction_id: 500_001,
+                fob_solar_system_id: sys_id,
+                systems: vec![sys_id],
+                created_at_unix: 0,
+                forecasting_end_unix: 0,
+                active_end_unix: 100_000,
+                winddown_end_unix: 200_000,
+                corruption_points: HashMap::from([(sys_id, 0)]),
+                suppression_points: HashMap::new(),
+            },
+        );
     });
     let mut sess = make_sess(char_id, ship_id, sys_id, None);
     sess.role = 1 << 29; // ROLE_QA without ROLE_GM_MASK
 
-    // 0. Negative: subrole ROLE_QA without ROLE_GM_MASK is refused on slash.SlashCmd with InsufficientRole + GM audit
+    // 0. Negative: subrole ROLE_QA without ROLE_GM_MASK is refused on slash.SlashCmd with InsufficientRole
     let slash_err = call_svc(&ctx, &mut sess, "slash", "SlashCmd", vec![PyRep::String("/heal".into())])
         .await
         .unwrap_err();
@@ -403,26 +408,8 @@ async fn test_insurgency_ice_heist_lifecycle() {
     };
     assert!(pre_list.is_empty(), "Ice Heist must not spawn below corruption stage 3");
 
-    // 2. Seed corruption stage 3 (600 pts) and spawn via live 1 Hz system tick
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.insurgency_runtime.campaigns.insert(
-            1,
-            PersistedInsurgencyCampaign {
-                campaign_id: 1,
-                pirate_faction_id: 500_010,
-                target_faction_id: 500_001,
-                fob_solar_system_id: sys_id,
-                systems: vec![sys_id],
-                created_at_unix: 0,
-                forecasting_end_unix: 0,
-                active_end_unix: 100_000,
-                winddown_end_unix: 200_000,
-                corruption_points: HashMap::from([(sys_id, 600)]),
-                suppression_points: HashMap::new(),
-            },
-        );
-    });
-
+    // 2. Advance corruption to stage 3 (600 pts) via live `add_system_corruption` and verify 1 Hz tick materializes balls
+    eve_server::services::insurgency_services::add_system_corruption(&ctx, 1, sys_id, 600);
     let _ = sys.tick().await;
     let PyRep::List(active_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
         .await
@@ -434,24 +421,37 @@ async fn test_insurgency_ice_heist_lifecycle() {
     let inst_id = active_list[0].dict_get("instanceID").and_then(|v| v.as_i64()).unwrap();
 
     let tanker_id = 1_896_000_000 + inst_id * 10 + 1;
-    let tanker_cs = sys.get_combat_state(tanker_id).await.unwrap().unwrap();
+    let guard_id = 1_896_000_000 + inst_id * 10 + 2;
+    let tanker_cs = sys.get_combat_state(tanker_id).await.unwrap().expect("Tanker ball must materialize in space");
     assert!(tanker_cs.warp_core_strength >= 100 && tanker_cs.is_web_immune);
+    assert!(sys.get_ball_snapshot(guard_id).await.unwrap().is_some(), "Thunderchild guard (79986) must materialize in space");
 
-    // Spawn a pirate ship within 25km of Upwell Security Thunderchild guard (150_000, 0, 190_000)
+    // Spawn a pirate cruiser (621) and pirate capsule (670) within 25km of Thunderchild guard (150_000, 0, 190_000)
     let pirate_char_id = 90_002;
     let pirate_ship_id = 88_200_002;
-    seed_ship_in_space(&ctx, pirate_char_id, pirate_ship_id, 587, sys_id, DVec3::new(150_000.0, 0.0, 195_000.0)).await;
+    let pod_char_id = 90_014;
+    let pirate_pod_id = 88_200_014;
+    seed_ship_in_space(&ctx, pirate_char_id, pirate_ship_id, 621, sys_id, DVec3::new(150_000.0, 0.0, 195_000.0)).await;
+    seed_ship_in_space(&ctx, pod_char_id, pirate_pod_id, 670, sys_id, DVec3::new(150_000.0, 0.0, 196_000.0)).await;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&pirate_char_id) {
-            ch.war_faction_id = Some(500_010);
+        for pid in [pirate_char_id, pod_char_id] {
+            if let Some(ch) = snap.characters.get_mut(&pid) {
+                ch.war_faction_id = Some(500_010);
+            }
         }
     });
+    let pre_pirate_hp = sys.get_combat_state(pirate_ship_id).await.unwrap().unwrap().shield_hp;
 
-    // 3. Escort all 10 tankers strictly via live 1 Hz ballpark physics (no teleporting)
+    // 3. Verify 1 tick deals weapon damage (NOT instant 1-tick deletion), then 80 ticks destroy pirate cruiser while sparing capsule
+    let _ = sys.tick().await;
+    let after_one_cs = sys.get_combat_state(pirate_ship_id).await.unwrap().expect("Thunderchild guard must apply weapon DPS, not 1-tick instant deletion");
+    assert!(after_one_cs.shield_hp < pre_pirate_hp);
+
     for _ in 0..80 {
         let _ = sys.tick().await;
     }
-    assert!(sys.get_ball_snapshot(pirate_ship_id).await.unwrap().is_none(), "Thunderchild guard must destroy nearby pirate");
+    assert!(sys.get_ball_snapshot(pirate_ship_id).await.unwrap().is_none(), "Thunderchild guard weapon DPS must destroy nearby pirate ship");
+    assert!(sys.get_ball_snapshot(pirate_pod_id).await.unwrap().is_some(), "Thunderchild guard must not execute capsules (670)");
 
     let PyRep::List(post_list) = call_svc(&ctx, &mut sess, "dungeonInstanceCacheMgr", "GetPirateInsurgencyIceHeistInstances", vec![])
         .await

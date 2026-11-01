@@ -558,7 +558,12 @@ pub async fn activate_auto_targeting_system(
         if dist > max_range {
             continue;
         }
-        let is_eligible_hostile = if b.id >= 900_000_000 {
+        let is_eligible_hostile = if ctx
+            .sde
+            .types
+            .get(&b.type_id)
+            .is_some_and(|t| t.category_id == 11)
+        {
             true
         } else if is_player_ship_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
             let owner = ctx.db.with_snapshot(|s| s.items.get(&b.id).map(|i| i.owner_id).unwrap_or(0));
@@ -1028,7 +1033,7 @@ pub async fn handle_entosis_link_activation(
         let sg = snap.items.get(&ship_id).and_then(|s| ctx.sde.types.get(&s.type_id)).map(|t| t.group_id).unwrap_or(0);
         let ch = snap.characters.get(&char_id);
         let side = ch.and_then(|c| c.alliance_id).or_else(|| ch.map(|c| c.corporation_id)).unwrap_or(char_id);
-        let sys_id = ch.map(|c| c.solar_system_id).unwrap_or(30000142);
+        let sys_id = ch.map(|c| c.solar_system_id).unwrap_or(0);
         let adm_val = snap.system_states.get(&sys_id).map(|st| crate::services::sov_services::calculate_adm(st.military_index, st.industrial_index, st.strategic_index)).unwrap_or(1.0);
         let vuln_item = snap.items.get(&target_id).and_then(|i| i.dynamic_attributes.get(&2110).copied()).unwrap_or(1.0) > 0.0;
         let vuln_struct = snap.structures.get(&target_id).map(|s| !matches!(s.state.as_str(), "ShieldReinforced" | "ArmorReinforced" | "Invulnerable")).unwrap_or(true);
