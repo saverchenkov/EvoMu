@@ -1197,13 +1197,14 @@ async fn handle_dock(
         .map(|(_, b)| b.radius)
         .unwrap_or(0.0);
     let dist = ball.position.distance(target_pos);
-    if dist > target_radius + 2_500.0 {
+    let max_dock_dist = target_radius + ball.radius + 2_500.0;
+    if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),
             message: format!(
                 "Ship is {:.1} m from docking target (must be <= {:.1} m)",
                 dist,
-                target_radius + 2_500.0
+                max_dock_dist
             ),
         });
     }

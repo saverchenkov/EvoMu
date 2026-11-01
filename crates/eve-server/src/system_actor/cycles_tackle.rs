@@ -518,7 +518,36 @@ pub(crate) fn handle_update_module_overload(
         if c.ship_id != ship_id || c.module_id != module_id {
             continue;
         }
-        if c.is_overloaded != is_overloaded {
+        // Per EVE Overheating rules (`Overheating.md`), toggling overload on an already-active
+        // module takes effect at the next cycle boundary rather than mid-cycle.
+        c.pending_overloaded = if c.is_overloaded == is_overloaded {
+            None
+        } else {
+            Some(is_overloaded)
+        };
+        updated = true;
+    }
+    if updated {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            db_opt,
+            deactivation_hook,
+        );
+    }
+    updated
+}
+
+pub(crate) fn apply_overload_transition_to_cycle(
+    c: &mut ActiveModuleCycle,
+    is_overloaded: bool,
+    ballpark: &mut Ballpark,
+    sde_opt: &Option<Arc<SdeRegistry>>,
+) {
+    let ship_id = c.ship_id;
+    if c.is_overloaded != is_overloaded {
             let mt_opt = sde_opt.as_ref().and_then(|sde| sde.types.get(&c.module_type_id));
             let has_cat5 = match (sde_opt.as_ref(), mt_opt) {
                 (Some(sde), Some(mt)) => mt
@@ -648,19 +677,6 @@ pub(crate) fn handle_update_module_overload(
             }
         }
         c.is_overloaded = is_overloaded;
-        updated = true;
-    }
-    if updated {
-        reconcile_tackle_and_bubbles(
-            ballpark,
-            active_module_cycles,
-            base_scramble_strengths,
-            base_core_strengths,
-            db_opt,
-            deactivation_hook,
-        );
-    }
-    updated
 }
 
 pub(super) fn apply_destiny_event_in_actor(

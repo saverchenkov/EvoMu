@@ -892,6 +892,14 @@ pub(crate) fn step_cycles_and_capacitor(
                 if stop_cycle {
                     finished_indices.push(idx);
                 } else {
+                    if let Some(next_ovl) = cycle.pending_overloaded.take() {
+                        crate::system_actor::cycles_tackle::apply_overload_transition_to_cycle(
+                            cycle,
+                            next_ovl,
+                            ballpark,
+                            sde_opt,
+                        );
+                    }
                     if matches!(mod_grp, 72 | 80 | 353 | 650) {
                         if let Some(cid) = cycle.owner_char_id {
                             pending_cycle_actions.push(PendingCycleAction::RepeatCycleStart {

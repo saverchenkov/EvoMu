@@ -217,10 +217,6 @@ pub fn resolve_warp_landing_point(
         .into_iter()
         .find(|c| c.celestial_id == target_id)
     {
-        if matches!(cel.group_id, 7 | 8) {
-            let standoff = cel.radius.max(0.0) + 2_500.0;
-            return anchor_pos - dir * standoff;
-        }
         if cel.group_id == 6 {
             let standoff = cel.radius.max(0.0) + 100_000.0;
             return anchor_pos - dir * standoff;

@@ -411,7 +411,7 @@ pub async fn handle(
                             .get(&st.station_type_id)
                             .map(|t| t.radius)
                             .unwrap_or(30_000.0);
-                        let offset = (st_radius * 0.015 + ship_type.radius).clamp(500.0, 2_000.0);
+                        let offset = st_radius + ship_type.radius + 500.0;
                         (st.position + dir * offset, dir)
                     })
                     .unwrap_or_else(|| (DVec3::new(100_000.0, 0.0, 0.0), DVec3::X))

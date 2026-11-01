@@ -147,6 +147,7 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     // 1e. SDE Overload bonuses: AB (+50% speed), Warp Scrambler II (+20% range at 10km), Armor Repairer (+10% rep / -15% dur), Weapon (-15% ROF)
     rpc(&ctx, &mut sess_a, "dogmaIM", "Activate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     let (_, ab_norm) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
+    rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(ab_id)]).await.unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(ab_id)]).await.unwrap();
     let (_, ab_ovl) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     assert!(ab_ovl.max_velocity > ab_norm.max_velocity * 1.15, "Overloaded AB must boost max_velocity: {} vs {}", ab_ovl.max_velocity, ab_norm.max_velocity);
@@ -171,7 +172,8 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     let gun_ovl = fit_eval.build_effective_module_state(mod_0, 3_170, true, &ctx.sde);
     assert!((gun_ovl.get_attribute(64, &ctx.sde) - gun_norm.get_attribute(64, &ctx.sde) * 1.15).abs() < 1e-3);
 
-    // Mid-cycle UpdateModuleOverload on active Medium Armor Repairer II (`3530`): +10% armor repair (`1230`) & -15% duration (`1206`)
+    // Mid-cycle UpdateModuleOverload on active Medium Armor Repairer II (`3530`):
+    // Per EVE Overheating rules (`Overheating.md`), toggling overload mid-cycle takes effect on the NEXT cycle.
     let mut rep_cs = sys.get_combat_state(ship_a).await.unwrap().unwrap();
     rep_cs.max_armor_hp = 50_000.0;
     rep_cs.armor_hp = 1_000.0;
@@ -180,16 +182,28 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
         PyRep::Integer(rep_id), PyRep::String("armorRepair".into()), PyRep::None, PyRep::Integer(1),
     ]).await.unwrap();
     rpc(&ctx, &mut sess_a, "dogmaIM", "Overload", vec![PyRep::Integer(rep_id)]).await.unwrap();
-    // Base duration is 12.0s; overloaded (-15%) is 10.2s -> after 11s (10.2s < 11s < 12.0s), 1 overloaded cycle (+10% amount) has already completed!
+    // Base duration is 12.0s; after 11s, the in-progress cycle must NOT have finished early.
     for _ in 0..11 {
         sys.set_capacitor(ship_a, 10_000.0).await.unwrap();
         sys.step_manual(1.0).await.unwrap();
     }
-    let armor_after_mid_ovl = sys.get_combat_state(ship_a).await.unwrap().unwrap().armor_hp;
-    let expected_armor = 1_000.0 + rep_norm.get_attribute(84, &ctx.sde) * 1.10;
+    let base_rep = rep_norm.get_attribute(84, &ctx.sde);
+    let armor_at_11s = sys.get_combat_state(ship_a).await.unwrap().unwrap().armor_hp;
     assert!(
-        (armor_after_mid_ovl - expected_armor).abs() < 1.0,
-        "Mid-cycle Overload on Armor Repairer II must apply +10% amount (attr 1230) and -15% duration (attr 1206, 10.2s): got {armor_after_mid_ovl} vs {expected_armor}"
+        (armor_at_11s - (1_000.0 + base_rep)).abs() < 1.0,
+        "Mid-cycle Overload must complete in-progress cycle at base repair ({}): got {armor_at_11s}",
+        1_000.0 + base_rep
+    );
+    // After +11s (22s total), the next cycle completes at overloaded duration and +10% armor repair!
+    for _ in 0..11 {
+        sys.set_capacitor(ship_a, 10_000.0).await.unwrap();
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let armor_after_next_ovl = sys.get_combat_state(ship_a).await.unwrap().unwrap().armor_hp;
+    let expected_armor = 1_000.0 + base_rep + base_rep * 1.10;
+    assert!(
+        (armor_after_next_ovl - expected_armor).abs() < 1.0,
+        "Next cycle after mid-cycle Overload must apply +10% amount (attr 1230) and -15% duration (attr 1206, 10.2s): got {armor_after_next_ovl} vs {expected_armor}"
     );
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(rep_id)]).await.unwrap();
 }
@@ -339,4 +353,23 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", vec![PyRep::Integer(mod_0)]).await.unwrap();
     let d0_sparse = attr_from_item_info(&rpc(&ctx, &mut sess_a, "dogmaIM", "ItemGetInfo", vec![PyRep::Integer(mod_0)]).await.unwrap(), 3);
     assert!(d0_sparse < d0_l5, "Offlining slots (lower Online/Total Slots) must reduce probabilistic heat hits: {d0_sparse} < {d0_l5}");
+
+    // Analytical check of R-HEAT-03: total_slots includes rig slots (attr 1137), so 4 online hi+mid+low on a hull with rig slots
+    // has slot_ratio = 4.0 / (hi + mid + low + rig).
+    let thermo_eval = eve_server::services::tactical_module_mechanics::evaluate_ship_thermodynamics(
+        ship_a,
+        &Some(ctx.sde.clone()),
+        &Some(ctx.db.clone()),
+    );
+    let sh_t = &ctx.sde.types[&ctx.db.with_snapshot(|s| s.items[&ship_a].type_id)];
+    let expected_total_slots = sh_t.default_attributes.get(&14).copied().unwrap_or(0.0)
+        + sh_t.default_attributes.get(&13).copied().unwrap_or(0.0)
+        + sh_t.default_attributes.get(&12).copied().unwrap_or(0.0)
+        + sh_t.default_attributes.get(&1137).copied().unwrap_or(0.0);
+    assert!(
+        (thermo_eval.slot_ratio - 4.0 / expected_total_slots).abs() < 1e-6,
+        "slot_ratio must include rig slots (attr 1137) in denominator: got {} vs {}",
+        thermo_eval.slot_ratio,
+        4.0 / expected_total_slots
+    );
 }

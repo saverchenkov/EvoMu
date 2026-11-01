@@ -266,9 +266,10 @@ impl Ballpark {
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                // Star (`group 6`), Planet (`group 7`), Moon (`group 8`), and Asteroid Belt (`group 9`)
-                // are large celestial spheres/markers that must not eject nearby anomalies, wormholes, or command nodes.
-                if matches!(group_a, 6 | 7 | 8 | 9) || matches!(group_b, 6 | 7 | 8 | 9) {
+                // Star (`group 6`), Planet (`group 7`), Moon (`group 8`), Asteroid Belt (`group 9`),
+                // and Abyssal Spatial Hazard Clouds (`group 1971`) are large celestial spheres/volumetric clouds
+                // that must not eject nearby anomalies, wormholes, command nodes, or ships flying inside clouds.
+                if matches!(group_a, 6 | 7 | 8 | 9 | 1971) || matches!(group_b, 6 | 7 | 8 | 9 | 1971) {
                     continue;
                 }
                 let is_station_or_struct_b =
@@ -372,25 +373,25 @@ impl Ballpark {
                         if v_rel < 0.0 {
                             if let Some(ba) = self.balls.get_mut(&id_a) {
                                 ba.velocity -= normal * ((1.0 + restitution) * v_rel);
+                                ba.position += normal * overlap;
                             }
+                            bumped_dynamic_ids.insert(id_a);
+                            collision_events.push((id_a, id_b));
                         }
-                        if let Some(ba) = self.balls.get_mut(&id_a) {
-                            ba.position += normal * overlap;
-                        }
-                        bumped_dynamic_ids.insert(id_a);
                     } else if is_static_a && !is_static_b {
                         if v_rel < 0.0 {
                             if let Some(bb) = self.balls.get_mut(&id_b) {
                                 bb.velocity += normal * ((1.0 + restitution) * v_rel);
+                                bb.position -= normal * overlap;
                             }
+                            bumped_dynamic_ids.insert(id_b);
+                            collision_events.push((id_a, id_b));
                         }
-                        if let Some(bb) = self.balls.get_mut(&id_b) {
-                            bb.position -= normal * overlap;
-                        }
-                        bumped_dynamic_ids.insert(id_b);
                     }
 
-                    collision_events.push((id_a, id_b));
+                    if !is_static_a && !is_static_b {
+                        collision_events.push((id_a, id_b));
+                    }
                 }
             }
         }

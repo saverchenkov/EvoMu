@@ -102,6 +102,7 @@ pub struct ActiveModuleCycle {
     pub crystal_volatility_chance: f64,
     pub crystal_volatility_damage: f64,
     pub is_overloaded: bool,
+    pub pending_overloaded: Option<bool>,
     pub rack_idx: usize,
     pub heat_damage_per_cycle: f64,
     pub reactivation_delay_s: f64,

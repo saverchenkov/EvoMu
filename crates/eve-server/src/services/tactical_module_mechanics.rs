@@ -757,14 +757,14 @@ pub(crate) fn refund_paste_to_cargo_capped_in_snap(
 /// Canonical ship rack heat Dogma attribute IDs: `[heatHi (1175), heatMed (1176), heatLow (1177)]`.
 pub const RACK_HEAT_ATTR_IDS: [u16; 3] = [1175, 1176, 1177];
 
-struct EvaluatedShipThermodynamics {
-    heat_gen_mult: f64,
-    diss_rates: [f64; 3],
-    att_bases: [f64; 3],
-    slot_ratio: f64,
+pub struct EvaluatedShipThermodynamics {
+    pub heat_gen_mult: f64,
+    pub diss_rates: [f64; 3],
+    pub att_bases: [f64; 3],
+    pub slot_ratio: f64,
 }
 
-fn evaluate_ship_thermodynamics(
+pub fn evaluate_ship_thermodynamics(
     ship_id: BallId,
     sde_opt: &Option<Arc<SdeRegistry>>,
     db_opt: &Option<Arc<WorldRepository>>,
@@ -824,7 +824,8 @@ fn evaluate_ship_thermodynamics(
         ];
         let total_slots = (fit.ship.get_attribute(14, sde).max(0.0)
             + fit.ship.get_attribute(13, sde).max(0.0)
-            + fit.ship.get_attribute(12, sde).max(0.0))
+            + fit.ship.get_attribute(12, sde).max(0.0)
+            + fit.ship.get_attribute(1137, sde).max(0.0))
         .max(1.0);
         let slot_ratio = ((online_hi_mid_low as f64) / total_slots).clamp(0.0, 1.0);
         EvaluatedShipThermodynamics {

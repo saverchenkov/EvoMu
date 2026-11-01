@@ -1057,6 +1057,7 @@ pub(crate) async fn handle_module_cycles(
                 elapsed_s: 0.0,
                 cap_need_per_cycle: cap_need,
                 speed_boost_factor,
+                pending_overloaded: None,
                 original_max_velocity: None,
                 linked_turrets: linked_turrets.clone(),
                 ammo_type_id: active_burst_charge_tid,
