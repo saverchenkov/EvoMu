@@ -757,8 +757,6 @@ pub async fn validate_single_item_can_be_opened(
     }
     if grp == 1246 {
         crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, item_id);
-    } else if grp == 1247 {
-        crate::services::mobile_deployables_ext::sync_siphon_unit(ctx, item_id);
     }
     crate::services::character_skill_ops::verify_in_space_container_proximity(ctx, char_id, location_id, item_id).await?;
     let st = read_container_ship_state(ctx);

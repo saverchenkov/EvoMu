@@ -1071,8 +1071,10 @@ fn step_siphons_in_db(
                     .values()
                     .filter(|i| {
                         target_locs.contains(&i.location_id)
+                            && snap.items.get(&i.location_id).is_some_and(|pos| i.owner_id == pos.owner_id)
                             && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::None)
                             && i.quantity > 0
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
                             && sde.types.get(&i.type_id).is_some_and(|t| match kind {
                                 0 => matches!(t.group_id, 427 | 1884 | 1920..=1923),
                                 1 => matches!(t.group_id, 428 | 429),
