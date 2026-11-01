@@ -417,7 +417,7 @@ async fn test_search_and_paperdoll_apparel_e2e() {
 
     ctx.db.with_snapshot(|snap| {
         let it = snap.items.get(&apparel_item_id).expect("apparel item");
-        assert_eq!(it.flag, InventoryFlag::Pilot, "worn apparel must move to Pilot flag");
+        assert_eq!(it.flag, InventoryFlag::Wardrobe, "worn apparel must move to Wardrobe flag");
     });
 
     let doll_data = ctx
@@ -528,12 +528,12 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
         .sde
         .agents
         .values()
-        .find(|a| a.level == 1 && a.division_id == 24 && a.station_id.unwrap_or(0) > 0)
+        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 24 && a.station_id.unwrap_or(0) > 0)
         .or_else(|| {
             ctx.sde
                 .agents
                 .values()
-                .find(|a| a.level == 1 && a.station_id.unwrap_or(0) > 0)
+                .find(|a| a.level == 1 && a.agent_type_id == 2 && a.station_id.unwrap_or(0) > 0)
         })
         .map(|a| a.agent_id)
         .expect("level 1 station agent in SDE");

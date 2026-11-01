@@ -345,7 +345,7 @@ async fn test_lookup_warable_and_sov_structures_e2e() {
         )
         .await
         .expect("GetSovStructuresInfoForSolarSystem");
-    let Some(PyRep::List(sov_structs)) = sov_res.dict_get("structures") else {
+    let PyRep::List(sov_structs) = sov_res else {
         panic!("Expected structures list");
     };
     assert_eq!(sov_structs.len(), 1, "Only Sovereignty Hub (32458) must be returned, not Astrahus");
