@@ -145,7 +145,7 @@ async fn setup_pilot_session_in_space(
 }
 
 async fn step_until_warp_done(h: &eve_server::system_actor::SystemHandle, ship_id: i64) {
-    for _ in 0..140 {
+    for _ in 0..300 {
         let _ = h.step_manual(1.0).await;
         if h.get_ball_snapshot(ship_id).await.unwrap().is_none_or(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
             break;

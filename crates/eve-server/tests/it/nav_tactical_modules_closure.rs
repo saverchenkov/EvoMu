@@ -391,69 +391,58 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     let ship_a: i64 = 84_011;
     let char_b: i64 = 94_012;
     let ship_b: i64 = 84_012;
-    let mut sess_a = seed_pilot(&ctx, char_a, ship_a, 640, jita_sys, false);
+    let char_obs: i64 = 94_013;
+    let ship_obs: i64 = 84_013;
+    let mut sess_a = seed_pilot(&ctx, char_a, ship_a, 587, jita_sys, false);
     let _sess_b = seed_pilot(&ctx, char_b, ship_b, 640, jita_sys, false);
+    let _sess_obs = seed_pilot(&ctx, char_obs, ship_obs, 587, jita_sys, false);
     let sys = ctx.systems.get_or_spawn(jita_sys);
 
-    // 1. Ship-to-ship collision bumping & align timer reset (`feat:navigation.collision-bumping`)
+    // 1. Ship-to-ship collision bumping (SDE hull masses, closed-form impulse, observer updates, & align reset)
     let bump_origin = DVec3::new(80_000_000_000.0, 0.0, 0.0);
-    let mut cs_a = ctx.build_ship_combat_state(char_a, ship_a, 640);
-    cs_a.undock_invulnerable_remaining_ticks = 0;
-    let mut cs_b = ctx.build_ship_combat_state(char_b, ship_b, 640);
-    cs_b.undock_invulnerable_remaining_ticks = 0;
-    sys.spawn_ball_with_meta(
-        Ball {
-            id: ship_a,
-            type_id: 640,
-            position: bump_origin,
-            velocity: DVec3::new(800.0, 0.0, 0.0),
-            max_velocity: 800.0,
-            inertia: 0.5,
-            mass: 100_000_000.0,
-            radius: 300.0,
-            speed_fraction: 1.0,
-            mode: MovementMode::GotoDirection { direction: DVec3::X },
-        },
-        cs_a,
-        ctx.build_ship_slim_meta(char_a, 640),
-    )
-    .await
-    .unwrap();
+    let ship_b_pos = bump_origin + DVec3::new(150.0, 0.0, 0.0);
+    spawn_in_space(&ctx, char_a, ship_a, 587, jita_sys, bump_origin).await;
+    spawn_in_space(&ctx, char_b, ship_b, 640, jita_sys, ship_b_pos).await;
+    spawn_in_space(&ctx, char_obs, ship_obs, 587, jita_sys, bump_origin + DVec3::new(0.0, 2_000.0, 0.0)).await;
+    for _ in 0..30 {
+        let _ = sys.step_manual(1.0).await.unwrap();
+    }
+    let _ = sys.get_set_state(ship_obs).await.unwrap();
+    let _ = sys.drain_observer_updates(ship_obs).await.unwrap();
+
+    sys.set_movement_mode(ship_a, MovementMode::GotoDirection { direction: DVec3::X }).await.unwrap();
+    sys.set_speed_fraction(ship_a, 1.0).await.unwrap();
     let mut align_b = MovementMode::new_warp(
-        bump_origin + DVec3::new(900.0, 0.0, 0.0),
+        ship_b_pos,
         bump_origin + DVec3::new(50_000_000.0, 0.0, 0.0),
         3.0,
     );
     if let MovementMode::Warp { ref mut elapsed_warp_time, .. } = align_b {
         *elapsed_warp_time = 6.0;
     }
-    sys.spawn_ball_with_meta(
-        Ball {
-            id: ship_b,
-            type_id: 640,
-            position: bump_origin + DVec3::new(900.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 200.0,
-            inertia: 2.0,
-            mass: 10_000_000.0,
-            radius: 300.0,
-            speed_fraction: 0.0,
-            mode: align_b,
-        },
-        cs_b,
-        ctx.build_ship_slim_meta(char_b, 640),
-    )
-    .await
-    .unwrap();
+    sys.set_movement_mode(ship_b, align_b).await.unwrap();
+    sys.set_speed_fraction(ship_b, 1.0).await.unwrap();
+    let (_, pre_a) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
+    let (_, pre_b) = sys.get_ball_snapshot(ship_b).await.unwrap().unwrap();
+    assert_ne!(pre_a.mass, pre_b.mass, "Two different SDE hulls must have distinct masses");
 
     let tick_b = sys.step_manual(1.0).await.unwrap();
     let (_, post_a) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let (_, post_b) = sys.get_ball_snapshot(ship_b).await.unwrap().unwrap();
     assert!(post_a.position.distance(post_b.position) >= post_a.radius + post_b.radius - 1e-3);
-    assert!(post_b.velocity.x > 100.0);
+    let tau_a = (pre_a.inertia * pre_a.mass / 1_000_000.0).max(0.01);
+    let tau_b = (pre_b.inertia * pre_b.mass / 1_000_000.0).max(0.01);
+    let v_a_pre = pre_a.max_velocity + (pre_a.velocity.x - pre_a.max_velocity) * (-1.0 / tau_a).exp();
+    let v_b_pre = pre_b.max_velocity * (1.0 - (-1.0 / tau_b).exp());
+    let impulse = 1.8 * (v_a_pre - v_b_pre) / ((1.0 / pre_a.mass) + (1.0 / pre_b.mass));
+    assert!((post_a.velocity.x - (v_a_pre - impulse / pre_a.mass)).abs() < 1e-3);
+    assert!((post_b.velocity.x - (v_b_pre + impulse / pre_b.mass)).abs() < 1e-3);
+    let obs_evs = tick_b.observer_events.get(&ship_obs).cloned().unwrap_or_default();
     assert!(
         tick_b.events.iter().any(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_b))
             && tick_b.events.iter().any(|e| matches!(e, DestinyEvent::SetBallVelocity { ball_id, .. } if *ball_id == ship_b))
+            && obs_evs.iter().any(|e| matches!(e, DestinyEvent::SetBallPosition { ball_id, .. } if *ball_id == ship_b))
+            && obs_evs.iter().any(|e| matches!(e, DestinyEvent::SetBallVelocity { ball_id, .. } if *ball_id == ship_b))
     );
     if let MovementMode::Warp { phase, elapsed_warp_time, .. } = post_b.mode {
         assert_eq!(phase, WarpPhase::Aligning);

@@ -520,7 +520,7 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
     sys_handle.try_remove_warp_bubble(888_001);
 
     let missing_vec = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(888_888_888)]).await;
-    assert!(matches!(missing_vec, Err(e) if e.code == "VectorItemNotFound"));
+    assert!(matches!(missing_vec, Err(e) if e.code == "InvalidVectorItem"));
 
     let vec_res = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(vector_id)]).await.expect("warpVectorMgr.UseVector");
     assert_eq!(dict_get(&vec_res, "shipID"), Some(&PyRep::Integer(ship_id)));

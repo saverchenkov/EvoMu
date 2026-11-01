@@ -422,7 +422,13 @@ fn pick_drifter_roam_destination(
     if !celestials.is_empty() {
         for offset in 0..celestials.len() {
             let idx = ((hop_index as usize) + offset) % celestials.len();
-            let candidate = celestials[idx].position + DVec3::new(35_000.0, 15_000.0, -20_000.0);
+            let dir = (celestials[idx].position - cur_pos).normalize_or_zero();
+            let standoff = if matches!(celestials[idx].group_id, 6 | 7 | 8) {
+                celestials[idx].radius.max(0.0) + 35_000.0
+            } else {
+                35_000.0
+            };
+            let candidate = celestials[idx].position - dir * standoff + DVec3::new(0.0, 15_000.0, -20_000.0);
             if candidate.distance(cur_pos) >= 1_000_000.0 {
                 return candidate;
             }
