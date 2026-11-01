@@ -205,14 +205,21 @@ pub fn emit_signal_tracker_full_state_for_system(
                             && (a.lifetime_seconds == 0
                                 || now_unix < a.created_unix.saturating_add(a.lifetime_seconds))
                     })
-                    .map(|a| {
+                    .enumerate()
+                    .map(|(idx, a)| {
                         (
                             PyRep::String(a.anomaly_id.clone()),
                             PyRep::keyval([
+                                ("instanceID", PyRep::Integer((idx + 1) as i64)),
+                                ("siteID", PyRep::String(a.anomaly_id.clone())),
                                 ("targetID", PyRep::String(a.anomaly_id.clone())),
+                                ("dungeonID", PyRep::None),
                                 ("dungeonName", PyRep::String(a.name.clone())),
+                                ("dungeonNameID", PyRep::None),
                                 ("anomalyType", PyRep::String(a.anomaly_type.clone())),
                                 ("archetypeID", PyRep::None),
+                                ("difficulty", PyRep::None),
+                                ("factionID", PyRep::None),
                                 ("scanStrength", PyRep::Real(a.signal_strength)),
                                 (
                                     "position",

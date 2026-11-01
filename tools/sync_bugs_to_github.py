@@ -521,7 +521,7 @@ def ensure_github_labels(repo: str, labels: List[str], ensured_cache: Set[str]) 
         ensured_cache.add(label)
 
 
-def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Optional[int]:
+def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Optional[Tuple[int, str]]:
     """Queries GitHub CLI to check if an issue for this stack_hash already exists."""
     if dry_run or not check_gh_installed():
         return None
@@ -541,7 +541,7 @@ def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Op
             res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
             issues = json.loads(res.stdout.strip() or "[]")
             if issues:
-                return issues[0]["number"]
+                return int(issues[0]["number"]), str(issues[0].get("state", "OPEN")).upper()
         except Exception as e:
             print(f"[warn] Failed to query gh for {term}: {e}", file=sys.stderr)
     return None
@@ -554,19 +554,36 @@ def create_or_update_issue(
     ensured_labels: Set[str],
     dry_run: bool = False,
 ) -> Optional[int]:
-    """Creates a new issue or comments on an existing one."""
+    """Creates a new issue or comments on an existing one (reopening if closed)."""
     stack_hash = bundle.get("stack_hash", 0)
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
     title, labels = build_issue_title_and_labels(bundle)
 
-    existing_number = find_existing_issue(repo, stack_hash, dry_run=dry_run)
+    existing = find_existing_issue(repo, stack_hash, dry_run=dry_run)
 
-    if existing_number:
-        print(f"[*] Found existing issue #{existing_number} for hash 0x{unsigned_hash:016x}")
+    if existing:
+        existing_number, existing_state = existing
+        print(f"[*] Found existing issue #{existing_number} (state={existing_state}) for hash 0x{unsigned_hash:016x}")
         comment_body = format_occurrence_comment(bundle, occurrences)
         if dry_run:
+            if existing_state == "CLOSED":
+                print(f"[dry-run] Would reopen closed issue #{existing_number}")
             print(f"[dry-run] Would post comment to #{existing_number}:\n{comment_body[:300]}...\n")
             return existing_number
+
+        if existing_state == "CLOSED":
+            try:
+                subprocess.run(
+                    ["gh", "issue", "reopen", str(existing_number), "--repo", repo],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+                print(f"[+] Reopened closed issue #{existing_number} due to new occurrence")
+            except subprocess.CalledProcessError as e:
+                print(f"[warn] Failed to reopen issue #{existing_number}: {e.stderr}", file=sys.stderr)
 
         cmd = [
             "gh", "issue", "comment",
