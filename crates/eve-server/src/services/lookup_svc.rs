@@ -418,6 +418,8 @@ pub fn handle(
 
         ("lookupSvc", "LookupWarableCorporationsOrAlliances") => {
             let (query, exact) = parse_search_args(args);
+            let caller_corp_id = session.corporation_id;
+            let caller_alliance_id = session.alliance_id;
             let mut results = Vec::new();
 
             ctx.db.with_snapshot(|snap| {
