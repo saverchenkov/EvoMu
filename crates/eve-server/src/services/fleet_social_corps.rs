@@ -378,6 +378,9 @@ pub(super) fn handle_corps(
         | ("corpmgr", "corporationID")
         | ("corpmgr", "deleted")
         | ("corpmgr", "description") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
             let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id, false, c.description.clone()))

@@ -542,12 +542,23 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([("deleted", PyRep::Bool(true))])))
         }
 
-        ("allianceRegistry", "Bind") | ("allianceRegistry", "SetSessionCheck") => {
+        ("allianceRegistry", "Bind") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let object_id = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
+            match ctx.bind_object(session, "allianceRegistry", object_id) {
+                Ok(_) => Some(Ok(PyRep::None)),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("allianceRegistry", "SetSessionCheck") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             Some(Ok(PyRep::None))
         }
 
         ("allianceRegistry", "allianceID" | "shortName" | "description" | "url" | "executorCorpID" | "creatorCorpID" | "creatorCharID" | "dictatorial" | "allowWar") => {
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let aid = args.first().and_then(|a| a.as_i64()).or_else(|| bound_obj_id.filter(|&id| id > 0)).or(session.alliance_id).unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
                 let a = snap.alliances.get(&aid)?;
                 let meta = snap.alliance_lifecycle_meta.get(&aid);
@@ -558,8 +569,8 @@ pub async fn handle(
             let Some((aid_val, short_name, exec_id, creator_corp_id, creator_char_id)) = info else {
                 return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
             };
-            let (desc, url, _, _) = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements)).unwrap_or_default()
+            let (desc, url, _, _, dictatorial) = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements, m.dictatorial)).unwrap_or_default()
             });
             let rep = match method {
                 "allianceID" => PyRep::Integer(aid_val),
@@ -569,7 +580,7 @@ pub async fn handle(
                 "executorCorpID" => PyRep::Integer(exec_id),
                 "creatorCorpID" => PyRep::Integer(creator_corp_id),
                 "creatorCharID" => PyRep::Integer(creator_char_id),
-                "dictatorial" => PyRep::Bool(false),
+                "dictatorial" => PyRep::Bool(dictatorial),
                 "allowWar" => PyRep::Bool(true),
                 _ => PyRep::None,
             };
@@ -578,7 +589,7 @@ pub async fn handle(
 
         ("allianceRegistry", "GetAlliance") | ("allianceRegistry", "GetAlliancePublicInfo") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
+            let aid = args.first().and_then(|a| a.as_i64()).or_else(|| bound_obj_id.filter(|&id| id > 0)).or(session.alliance_id).unwrap_or(0);
             let _ = sync_alliance_timers(ctx, aid);
             let info = ctx.db.with_snapshot(|snap| {
                 let a = snap.alliances.get(&aid)?;
@@ -591,8 +602,8 @@ pub async fn handle(
             let Some((id, name, short, exec, cnt, creator_corp, creator_char, start_date)) = info else {
                 return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
             };
-            let (desc, url, logo, emblem) = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements)).unwrap_or_default()
+            let (desc, url, logo, emblem, dictatorial) = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements, m.dictatorial)).unwrap_or_default()
             });
             Some(Ok(PyRep::keyval([
                 ("allianceID", PyRep::Integer(id)), ("allianceName", PyRep::String(name)), ("shortName", PyRep::String(short)),
@@ -600,7 +611,7 @@ pub async fn handle(
                 ("startDate", PyRep::Integer(start_date)), ("memberCount", PyRep::Integer(cnt)), ("description", PyRep::String(desc)),
                 ("url", PyRep::String(url)), ("shape1", PyRep::Integer(logo.0)), ("shape2", PyRep::Integer(logo.1)),
                 ("shape3", PyRep::Integer(logo.2)), ("color", PyRep::Integer(logo.3)), ("emblemEntitlements", PyRep::Bool(emblem)),
-                ("dictatorial", PyRep::Bool(false)), ("allowWar", PyRep::Bool(true)),
+                ("dictatorial", PyRep::Bool(dictatorial)), ("allowWar", PyRep::Bool(true)),
             ])))
         }
 
@@ -1110,11 +1121,16 @@ pub async fn handle(
             let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
             let description = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let (old_desc, old_url) = with_alliance_war_state(ctx, |st| {
+            let dict_opt = args.get(3).and_then(|a| a.as_bool()).or_else(|| _kwargs.get("dictatorial").and_then(|a| a.as_bool()));
+            let (old_desc, old_url, dictatorial) = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
+                if let Some(d) = dict_opt {
+                    meta.dictatorial = d;
+                }
                 (
                     std::mem::replace(&mut meta.description, description.clone()),
                     std::mem::replace(&mut meta.url, url.clone()),
+                    meta.dictatorial,
                 )
             });
             let change = PyRep::Dict(vec![
@@ -1125,7 +1141,7 @@ pub async fn handle(
             if let Some(allow_war) = args.get(2).and_then(|a| a.as_bool()) {
                 crate::services::notify_emitters_batch3::emit_allow_war_updated_for_alliance(ctx, aid, allow_war);
             }
-            Some(Ok(PyRep::keyval([("allianceID", PyRep::Integer(aid)), ("description", PyRep::String(description)), ("url", PyRep::String(url))])))
+            Some(Ok(PyRep::keyval([("allianceID", PyRep::Integer(aid)), ("description", PyRep::String(description)), ("url", PyRep::String(url)), ("dictatorial", PyRep::Bool(dictatorial))])))
         }
 
         // =====================================================================

@@ -914,26 +914,33 @@ pub fn handle(
             Some(Ok(PyRep::None))
         }
 
-        "SetSessionCheck" => match ServerContext::require_character(session) {
+        "SetSessionCheck" | "clear_memoized" => match ServerContext::require_character(session) {
             Ok(_) => Some(Ok(PyRep::None)),
             Err(e) => Some(Err(e)),
         },
 
-        "clear_memoized" => Some(Ok(PyRep::None)),
+        "columns" => match ServerContext::require_character(session) {
+            Ok(_) => Some(Ok(PyRep::List(vec![
+                PyRep::String("corporationID".into()),
+                PyRep::String("corporationName".into()),
+                PyRep::String("ticker".into()),
+            ]))),
+            Err(e) => Some(Err(e)),
+        },
 
-        "columns" => Some(Ok(PyRep::List(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ]))),
-
-        "header" => Some(Ok(PyRep::Tuple(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ]))),
+        "header" => match ServerContext::require_character(session) {
+            Ok(_) => Some(Ok(PyRep::Tuple(vec![
+                PyRep::String("corporationID".into()),
+                PyRep::String("corporationName".into()),
+                PyRep::String("ticker".into()),
+            ]))),
+            Err(e) => Some(Err(e)),
+        },
 
         "itervalues" => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
             let mut corps: Vec<(i64, String, String)> = ctx.db.with_snapshot(|snap| {
                 snap.corporations
                     .values()

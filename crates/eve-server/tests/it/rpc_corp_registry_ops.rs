@@ -165,7 +165,14 @@ async fn test_corp_registry_monikers_introspection_and_actions() {
     let iter_res = rpc(&ctx, &mut sess, "corpRegistry", "itervalues", &[])
         .await
         .expect("itervalues");
-    assert_eq!(iter_res, PyRep::List(Vec::new()));
+    assert_eq!(
+        iter_res,
+        PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Integer(98_000_001),
+            PyRep::String("Demo Corporation".into()),
+            PyRep::String("DEMO".into()),
+        ])])
+    );
 
     // 8. clear_memoized
     let clr_res = rpc(&ctx, &mut sess, "corpRegistry", "clear_memoized", &[])

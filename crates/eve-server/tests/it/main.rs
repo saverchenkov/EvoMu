@@ -485,5 +485,5 @@ mod open_feats_batch6_closure;
 mod open_feats_batch6_part2_closure;
 mod esi_b6_closure;
 mod open_feats_and_rpcs_b7;
+mod open_feats_and_rpcs_b7_part2;
 mod open_feats_and_rpcs_b7_social;
-mod plan_b7_closure;
