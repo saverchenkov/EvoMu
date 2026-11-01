@@ -787,6 +787,9 @@ pub fn credit_specialized_npc_bounty_and_sec_status(
                     delta: new_sec - old_sec,
                     reason: "NPC Pirate Bounty".into(),
                     solar_system_id,
+                    event_type_id: 14, // logConst.eventSecStatusKill
+                    other_owner_id: None,
+                    other_type_id: None,
                 });
         });
     }

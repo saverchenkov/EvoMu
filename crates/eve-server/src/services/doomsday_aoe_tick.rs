@@ -222,6 +222,7 @@ pub(crate) fn apply_doomsday_capsuleer_crimewatch(
     crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
         ctx,
         attacker_char_id,
+        vcid,
         sys_id,
         sys_sec,
         is_pod,

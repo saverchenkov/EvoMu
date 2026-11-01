@@ -1266,8 +1266,10 @@ pub fn credit_ballpark_npc_bounty_with_ess_split(
         let bounty_cents = IskCents::from_f64_isk(raw_bounty_isk);
         if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
             ch.balance = ch.balance.checked_add(bounty_cents).unwrap_or(ch.balance);
-            let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
-            ch.security_status = (ch.security_status + gain).min(5.0);
+            if ch.security_status < 5.0 {
+                let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
+                ch.security_status = (ch.security_status + gain).min(5.0);
+            }
         }
         let bal_after = snap
             .characters
@@ -1313,8 +1315,10 @@ pub fn credit_ballpark_npc_bounty_with_ess_split(
 
     if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
         ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
-        let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
-        ch.security_status = (ch.security_status + gain).min(5.0);
+        if ch.security_status < 5.0 {
+            let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
+            ch.security_status = (ch.security_status + gain).min(5.0);
+        }
     }
     if is_player_corp && tax_cents.raw_cents() > 0 {
         if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
