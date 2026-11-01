@@ -529,7 +529,7 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     ).await.expect("Warp to planet at 0m");
     let (_, w_planet) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let MovementMode::Warp { destination: dest_planet, .. } = w_planet.mode else { panic!("Expected Warp"); };
-    assert!(dest_planet.distance(planet.position) < 10.0);
+    assert!((dest_planet.distance(planet.position) - (planet.radius + 2_500.0)).abs() < 10.0);
 
     sys.set_movement_mode(ship_a, MovementMode::Stop).await.unwrap();
     ctx.dispatch_rpc(
@@ -538,11 +538,11 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     ).await.expect("Warp to planet at 50km");
     let (_, w_planet_50) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let MovementMode::Warp { destination: dest_planet_50, .. } = w_planet_50.mode else { panic!("Expected Warp"); };
-    assert!((dest_planet_50.distance(planet.position) - 50_000.0).abs() < 10.0);
+    assert!((dest_planet_50.distance(planet.position) - (planet.radius + 2_500.0 + 50_000.0)).abs() < 10.0);
 
-    // 180 km from planet anchor with minRange=50 km -> effective warp distance 130 km < 150 km -> WarpDistanceTooShort!
+    // 180 km from planet warp-in point with minRange=50 km -> effective warp distance 130 km < 150 km -> WarpDistanceTooShort!
     sys.spawn_ball(Ball {
-        id: ship_a, type_id: 640, position: planet.position - DVec3::new(180_000.0, 0.0, 0.0),
+        id: ship_a, type_id: 640, position: planet.position - DVec3::new(planet.radius + 2_500.0 + 180_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 0.1, mass: 1_000_000.0, radius: 100.0,
         speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await.unwrap();
