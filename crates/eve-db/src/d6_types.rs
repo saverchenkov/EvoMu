@@ -149,6 +149,8 @@ pub struct PersistedAllianceMeta {
     #[serde(default)]
     pub emblem_entitlements: bool,
     #[serde(default)]
+    pub dictatorial: bool,
+    #[serde(default)]
     pub executor_votes: HashMap<i64, i64>,
     #[serde(default)]
     pub contacts: HashMap<i64, (f64, u64)>,

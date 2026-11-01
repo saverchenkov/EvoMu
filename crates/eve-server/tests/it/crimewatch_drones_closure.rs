@@ -69,7 +69,7 @@ pub(crate) async fn spawn_pilot(
     let _ = sys_h.spawn_ball_with_meta(
         Ball { id: ship_id, type_id: ship_type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 320.0, inertia: 2.0, mass: 1_200_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
         ctx.build_type_combat_state(ship_type_id),
-        SlimItemMeta { group_id: grp, category_id: 6, owner_id: char_id, char_id: Some(char_id), corp_id, alliance_id: -1, security_status: 2.0, is_cloaked: false },
+        SlimItemMeta { group_id: grp, category_id: 6, owner_id: char_id, char_id: Some(char_id), corp_id, alliance_id: -1, security_status: 2.0, is_cloaked: false , ..Default::default()},
     ).await;
     let mut sess = SessionState::new(10_000 + sid);
     sess.user_id = Some(sid);

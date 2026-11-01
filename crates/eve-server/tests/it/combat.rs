@@ -119,18 +119,18 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
         .expect("GetDirtTimestamp");
     assert_eq!(get_dirt.as_i64(), Some(dirt_ft));
 
-    // 2. SetSessionCheck & clear_memoized
+    // 2. SetSessionCheck & clear_memoized (client_local -> UnimplementedRPC)
     let sc = ctx
         .dispatch_rpc(&mut sess, "ship", None, "SetSessionCheck", &[], &kw, None)
         .await
-        .expect("SetSessionCheck");
-    assert_eq!(sc, PyRep::Bool(true));
+        .expect_err("SetSessionCheck");
+    assert_eq!(sc.code, eve_server::router::ERR_UNIMPLEMENTED);
 
     let cm = ctx
         .dispatch_rpc(&mut sess, "ship", None, "clear_memoized", &[], &kw, None)
         .await
-        .expect("clear_memoized");
-    assert_eq!(cm, PyRep::Bool(true));
+        .expect_err("clear_memoized");
+    assert_eq!(cm.code, eve_server::router::ERR_UNIMPLEMENTED);
 
     // 3. SafeLogoff while docked returns failed conditions list (`SAFE_LOGOFF_DOCKED`)
     let sl_docked = ctx
@@ -287,7 +287,7 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
                 corp_id: sess.corporation_id.unwrap_or(-1),
                 alliance_id: sess.alliance_id.unwrap_or(-1),
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         )
         .await;
@@ -349,7 +349,7 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         )
         .await;

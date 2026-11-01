@@ -129,49 +129,13 @@ async fn test_corp_registry_monikers_introspection_and_actions() {
     assert_eq!(unbind_lower, PyRep::None);
     assert!(!ctx.bound_objects.read().unwrap().contains_key(&bound2_id));
 
-    // 4. SetSessionCheck
-    let check_res = rpc(&ctx, &mut sess, "corpRegistry", "SetSessionCheck", &[])
-        .await
-        .expect("SetSessionCheck");
-    assert_eq!(check_res, PyRep::None);
-
-    // 5. columns
-    let cols_res = rpc(&ctx, &mut sess, "corpRegistry", "columns", &[])
-        .await
-        .expect("columns");
-    assert_eq!(
-        cols_res,
-        PyRep::List(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ])
-    );
-
-    // 6. header
-    let hdr_res = rpc(&ctx, &mut sess, "corpRegistry", "header", &[])
-        .await
-        .expect("header");
-    assert_eq!(
-        hdr_res,
-        PyRep::Tuple(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ])
-    );
-
-    // 7. itervalues
-    let iter_res = rpc(&ctx, &mut sess, "corpRegistry", "itervalues", &[])
-        .await
-        .expect("itervalues");
-    assert_eq!(iter_res, PyRep::List(Vec::new()));
-
-    // 8. clear_memoized
-    let clr_res = rpc(&ctx, &mut sess, "corpRegistry", "clear_memoized", &[])
-        .await
-        .expect("clear_memoized");
-    assert_eq!(clr_res, PyRep::None);
+    // 4-8. SetSessionCheck, columns, header, itervalues, clear_memoized (client_local -> UnimplementedRPC)
+    for meth in ["SetSessionCheck", "columns", "header", "itervalues", "clear_memoized"] {
+        let err = rpc(&ctx, &mut sess, "corpRegistry", meth, &[])
+            .await
+            .expect_err(meth);
+        assert_eq!(err.code, eve_server::router::ERR_UNIMPLEMENTED);
+    }
 }
 
 #[tokio::test]

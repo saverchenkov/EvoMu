@@ -64,6 +64,7 @@ impl Ballpark {
             alliance_id: -1,
             security_status: 0.0,
             is_cloaked: false,
+            ..Default::default()
         };
         self.add_static_ball_with_meta(ball, meta)
     }

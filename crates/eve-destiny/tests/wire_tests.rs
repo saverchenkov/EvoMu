@@ -67,7 +67,7 @@ fn test_binary_add_balls_roundtrip_all_13_modes() {
         corp_id: 1_000_125,
         alliance_id: 99_000_001,
         security_status: 2.5,
-        is_cloaked: false,
+        is_cloaked: false, ..Default::default()
     };
     encode_single_ball_with_meta(&mut single_buf, &balls[2], 42, Some(&meta));
     assert_eq!(i64::from_le_bytes(single_buf[47..55].try_into().unwrap()), 99_000_001);
@@ -158,7 +158,7 @@ fn test_do_destiny_update_and_set_state_marshal_roundtrip() {
             corp_id: 1_000_125,
             alliance_id: 99_000_001,
             security_status: 1.75,
-            is_cloaked: false,
+            is_cloaked: false, ..Default::default()
         },
     );
 

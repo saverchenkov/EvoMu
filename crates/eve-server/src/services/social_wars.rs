@@ -471,11 +471,6 @@ pub(super) fn handle_wars(
             Some(Ok(PyRep::None))
         }
 
-        ("warRegistry", "SetSessionCheck") => {
-            // const-ok: session check registration returns None
-            Some(Ok(PyRep::None))
-        }
-
         ("warRegistry", "timeDeclared") => {
             let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
                 ctx.db.with_snapshot(|snap| {

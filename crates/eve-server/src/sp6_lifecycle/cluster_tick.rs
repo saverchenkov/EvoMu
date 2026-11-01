@@ -86,7 +86,7 @@ pub fn populate_persisted_space_objects(
                         corp_id: st.owner_corp_id,
                         alliance_id: -1,
                         security_status: 0.0,
-                        is_cloaked: false,
+                        is_cloaked: false, ..Default::default()
                     },
                 );
                 ballpark.add_ball(Ball {
@@ -266,7 +266,7 @@ pub fn populate_persisted_space_objects(
                     corp_id: -1,
                     alliance_id: -1,
                     security_status: 0.0,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             );
             ballpark.add_ball(Ball {
@@ -367,7 +367,7 @@ pub fn populate_persisted_space_objects(
                     corp_id,
                     alliance_id,
                     security_status: sec_status,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             );
             ballpark.add_ball(Ball {

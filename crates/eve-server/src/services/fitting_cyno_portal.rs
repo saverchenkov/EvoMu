@@ -628,7 +628,7 @@ async fn light_cyno(
         corp_id: ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0)),
         alliance_id: ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.alliance_id).unwrap_or(0)),
         security_status: 0.0,
-        is_cloaked: false,
+        is_cloaked: false, ..Default::default()
     };
     let _ = sys
         .spawn_ball_with_meta(

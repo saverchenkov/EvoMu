@@ -935,7 +935,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                         corp_id: -1,
                         alliance_id: -1,
                         security_status: 0.0,
-                        is_cloaked: false,
+                        is_cloaked: false, ..Default::default()
                     },
                 );
             }
@@ -1065,7 +1065,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         );
     }

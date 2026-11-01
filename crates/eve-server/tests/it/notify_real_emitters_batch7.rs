@@ -573,7 +573,7 @@ async fn notify_batch7_mining_probes_scanners_and_space() {
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         )
         .await;

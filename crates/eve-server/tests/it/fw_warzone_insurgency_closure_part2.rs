@@ -312,20 +312,20 @@ async fn test_fw_ihub_siege_tiers_war_hqs_leaderboards_missions_and_corp_enlistm
     assert_eq!(find_stat("factions", "killsLW", "factionID", 500_004), 3);
     assert_eq!(find_stat("factions", "killsTotal", "factionID", 500_004), 6);
 
-    // Verify rolling window progression for victory points: yesterday (20) < lastWeek (60) < total (120)
-    assert_eq!(find_stat("characters", "vpY", "characterID", gal_cid), 20);
-    assert_eq!(find_stat("characters", "vpLW", "characterID", gal_cid), 60);
-    assert_eq!(find_stat("characters", "vpTotal", "characterID", gal_cid), 120);
+    // Verify rolling window progression for victory points: yesterday (0, PvP kills award LP not VP) < lastWeek (40) < total (100)
+    assert_eq!(find_stat("characters", "vpY", "characterID", gal_cid), 0);
+    assert_eq!(find_stat("characters", "vpLW", "characterID", gal_cid), 40);
+    assert_eq!(find_stat("characters", "vpTotal", "characterID", gal_cid), 100);
     assert!(find_stat("characters", "vpY", "characterID", gal_cid) < find_stat("characters", "vpLW", "characterID", gal_cid));
     assert!(find_stat("characters", "vpLW", "characterID", gal_cid) < find_stat("characters", "vpTotal", "characterID", gal_cid));
 
-    assert_eq!(find_stat("corporations", "vpY", "corporationID", gal_corp), 20);
-    assert_eq!(find_stat("corporations", "vpLW", "corporationID", gal_corp), 60);
-    assert_eq!(find_stat("corporations", "vpTotal", "corporationID", gal_corp), 120);
+    assert_eq!(find_stat("corporations", "vpY", "corporationID", gal_corp), 0);
+    assert_eq!(find_stat("corporations", "vpLW", "corporationID", gal_corp), 40);
+    assert_eq!(find_stat("corporations", "vpTotal", "corporationID", gal_corp), 100);
 
-    assert_eq!(find_stat("factions", "vpY", "factionID", 500_004), 20);
-    assert_eq!(find_stat("factions", "vpLW", "factionID", 500_004), 60);
-    assert_eq!(find_stat("factions", "vpTotal", "factionID", 500_004), 120);
+    assert_eq!(find_stat("factions", "vpY", "factionID", 500_004), 0);
+    assert_eq!(find_stat("factions", "vpLW", "factionID", 500_004), 40);
+    assert_eq!(find_stat("factions", "vpTotal", "factionID", 500_004), 100);
 
     // Verify bounded log: events older than 7 days were folded and pruned from active stat_events
     ctx.db.with_snapshot(|snap| {

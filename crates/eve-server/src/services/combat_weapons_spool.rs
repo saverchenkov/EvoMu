@@ -286,6 +286,8 @@ pub async fn handle_ship_or_npc_destruction(
     let mut dropped_entries = Vec::new();
     let mut destroyed_entries = Vec::new();
     let mut escape_frigate_id: Option<i64> = None;
+    let mut fw_ship_and_fit_isk = 0.0;
+    let mut fw_ins_payout_isk = 0.0;
     ctx.db.with_mut_snapshot(|snap| {
         if !is_pod_target && !is_abyssal_npc_or_cache {
             snap.next_entity_id += 1;
@@ -418,9 +420,12 @@ pub async fn handle_ship_or_npc_destruction(
         let drop_threshold = if ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070) { 0.60 } else { 0.50 };
         let hull_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(if is_pod_target { 1_000.0 } else { 250_000.0 });
         let mut items_isk = 0.0;
+        let mut fw_items_isk = 0.0;
 
         for item in contained {
-            let unit_isk = ctx.sde.types.get(&item.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(100.0);
+            let sde_isk = ctx.sde.types.get(&item.type_id).map(|t| t.base_price.max(0.0)).unwrap_or(0.0);
+            fw_items_isk += sde_isk * (item.quantity.max(1) as f64);
+            let unit_isk = if sde_isk > 0.0 { sde_isk } else { 100.0 };
             items_isk += unit_isk * (item.quantity.max(1) as f64);
             let is_rig_or_sub = matches!(item.flag as i64, 89 | 92..=94 | 125..=132);
             let roll = (((now_unix ^ (target_ball_id as u64)).wrapping_add((item.item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 32) as f64 / 4_294_967_296.0;
@@ -456,6 +461,9 @@ pub async fn handle_ship_or_npc_destruction(
             }
         }
 
+        if !is_pod_target {
+            fw_ship_and_fit_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price.max(0.0)).unwrap_or(0.0) + fw_items_isk;
+        }
         if is_pod_target {
             let mut imp_tids = active_implants.clone();
             let char_imp_items: Vec<(i64, u32)> = snap
@@ -515,7 +523,7 @@ pub async fn handle_ship_or_npc_destruction(
                 ctx.build_type_combat_state(wreck_type_id),
                 eve_destiny::SlimItemMeta {
                     group_id: 186, category_id: 2, owner_id: wreck_owner_id, char_id: None,
-                    corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+                    corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
                 },
             )
             .await;
@@ -541,7 +549,7 @@ pub async fn handle_ship_or_npc_destruction(
                     ctx.build_type_combat_state(25),
                     eve_destiny::SlimItemMeta {
                         group_id: corpse_grp, category_id: corpse_cat, owner_id: victim_id, char_id: None,
-                        corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+                        corp_id: -1, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
                     },
                 )
                 .await;
@@ -596,7 +604,7 @@ pub async fn handle_ship_or_npc_destruction(
         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
             st.disconnected_ships.remove(&vcid);
         });
-        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
+        fw_ins_payout_isk = crate::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
         let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, target_ball.type_id);
         crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
             ctx,
@@ -695,7 +703,7 @@ pub async fn handle_ship_or_npc_destruction(
                     corp_id: -1,
                     alliance_id: -1,
                     security_status: 0.0,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             )
             .await;
@@ -706,13 +714,6 @@ pub async fn handle_ship_or_npc_destruction(
             sys_id,
             0,
             "ship_loss",
-        );
-        crate::services::fw_gameplay::on_player_ship_destroyed_in_combat(
-            ctx,
-            sys_id,
-            attacker_char_id,
-            vcid,
-            target_ball.type_id,
         );
     } else {
         if (32_000_000..33_000_000).contains(&sys_id) {
@@ -913,6 +914,12 @@ pub async fn handle_ship_or_npc_destruction(
             },
         );
     });
+    if let Some(vcid) = victim_char_opt {
+        crate::services::fw_gameplay::on_player_ship_destroyed_in_combat_detailed(
+            ctx, sys_id, attacker_char_id, vcid, target_ball.type_id,
+            (fw_ship_and_fit_isk - fw_ins_payout_isk).max(0.0), generated_kill_id,
+        );
+    }
 
     (generated_kill_id, generated_wreck_id, generated_corpse_id, generated_km_hash)
 }

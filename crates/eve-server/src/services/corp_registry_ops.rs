@@ -914,27 +914,6 @@ pub fn handle(
             Some(Ok(PyRep::None))
         }
 
-        "SetSessionCheck" => match ServerContext::require_character(session) {
-            Ok(_) => Some(Ok(PyRep::None)),
-            Err(e) => Some(Err(e)),
-        },
-
-        "clear_memoized" => Some(Ok(PyRep::None)),
-
-        "columns" => Some(Ok(PyRep::List(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ]))),
-
-        "header" => Some(Ok(PyRep::Tuple(vec![
-            PyRep::String("corporationID".into()),
-            PyRep::String("corporationName".into()),
-            PyRep::String("ticker".into()),
-        ]))),
-
-        "itervalues" => Some(Ok(PyRep::List(Vec::new()))),
-
         _ => None,
     }
 }

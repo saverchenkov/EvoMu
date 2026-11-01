@@ -605,6 +605,8 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ("allianceID", alliance_rep),
         ("securityStatus", PyRep::Real(meta.security_status)),
         ("radius", PyRep::Real(ball.radius)),
+        ("skinID", meta.skin_id.map(|s| PyRep::Integer(i64::from(s))).unwrap_or(PyRep::None)),
+        ("skinMaterialSetID", meta.skin_material_set_id.map(|m| PyRep::Integer(i64::from(m))).unwrap_or(PyRep::None)),
     ];
     if meta.group_id == 10 {
         // DERIVED: V24.01 `evegraphics/controllers/clientControllerRegistry.py:75` (`StargateSetup`)

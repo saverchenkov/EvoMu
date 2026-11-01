@@ -740,17 +740,29 @@ impl ServerContext {
             .get(&type_id)
             .map(|t| (t.group_id, t.category_id))
             .unwrap_or((25, 6));
-        let (corp_id, alliance_id, security_status) = self
-            .db
-            .get_character(char_id)
-            .map(|ch| {
-                (
-                    ch.corporation_id,
-                    ch.alliance_id.unwrap_or(0),
-                    ch.security_status,
-                )
-            })
-            .unwrap_or((1_000_009, 0, 0.0));
+        let (corp_id, alliance_id, security_status, raw_skin) = self.db.with_snapshot(|snap| {
+            let Some(ch) = snap.characters.get(&char_id) else {
+                return (1_000_009, 0, 0.0, None);
+            };
+            let skin = snap.applied_ship_skins.get(&ch.active_ship_id).copied();
+            (
+                ch.corporation_id,
+                ch.alliance_id.unwrap_or(0),
+                ch.security_status,
+                skin,
+            )
+        });
+        let skin_id = raw_skin.map(|raw| {
+            self.sde
+                .skin_licenses
+                .get(&raw)
+                .map(|l| l.skin_id)
+                .unwrap_or(raw)
+        });
+        let skin_material_set_id = skin_id
+            .and_then(|sid| self.sde.skins.get(&sid))
+            .and_then(|sk| self.sde.skin_materials.get(&sk.skin_material_id))
+            .and_then(|m| m.material_set_id);
         eve_destiny::SlimItemMeta {
             group_id,
             category_id,
@@ -760,6 +772,8 @@ impl ServerContext {
             alliance_id,
             security_status,
             is_cloaked: false,
+            skin_id,
+            skin_material_set_id,
         }
     }
 

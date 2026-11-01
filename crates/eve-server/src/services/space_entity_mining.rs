@@ -836,16 +836,6 @@ pub async fn handle(
             Some(handle_mine(ctx, session, bound_entry, args).await)
         }
 
-        // parity: plan:S-7
-        ("reprocessingSvc", "SetSessionCheck") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let ok = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::Bool(ok)))
-        }
-
         // parity: plan:S-1
         ("reprocessingSvc", "Reprocess") => {
             let (_, char_id) = match ServerContext::require_character(session) {

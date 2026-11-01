@@ -760,6 +760,10 @@ pub struct SlimItemMeta {
     pub alliance_id: i64,
     pub security_status: f64,
     pub is_cloaked: bool,
+    #[serde(default)]
+    pub skin_id: Option<u32>,
+    #[serde(default)]
+    pub skin_material_set_id: Option<u32>,
 }
 
 impl Default for SlimItemMeta {
@@ -773,6 +777,8 @@ impl Default for SlimItemMeta {
             alliance_id: -1,
             security_status: 0.0,
             is_cloaked: false,
+            skin_id: None,
+            skin_material_set_id: None,
         }
     }
 }

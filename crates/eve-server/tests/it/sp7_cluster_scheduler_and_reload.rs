@@ -82,7 +82,7 @@ async fn test_sp7_unobserved_system_simulation_and_background_cluster_tick() {
             tank_cs,
             SlimItemMeta {
                 group_id: 26, category_id: 6, owner_id: 90_000_001, char_id: Some(90_000_001),
-                corp_id: 1_000_009, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+                corp_id: 1_000_009, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
             },
         )
         .await

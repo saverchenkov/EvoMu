@@ -446,7 +446,7 @@ async fn bastion_effects_and_wormhole_mjd_interactions() {
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             },
         )
         .await;

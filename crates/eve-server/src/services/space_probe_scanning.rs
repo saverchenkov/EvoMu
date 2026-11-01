@@ -354,7 +354,7 @@ pub async fn activate_scan_probe_launcher(
                     corp_id: session.corporation_id.unwrap_or(-1),
                     alliance_id: session.alliance_id.unwrap_or(-1),
                     security_status: 0.0,
-                    is_cloaked: false,
+                    is_cloaked: false, ..Default::default()
                 },
             )
             .await;

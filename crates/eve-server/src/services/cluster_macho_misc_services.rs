@@ -688,7 +688,7 @@ pub fn populate_shipcaster_balls_from_db(
         if l.solar_system_id == solar_system_id {
             ballpark.add_static_ball_with_meta(
                 eve_destiny::Ball { id: l.item_id, type_id: l.type_id, position: l.position, velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 20_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                eve_destiny::SlimItemMeta { group_id: 4549, category_id: 65, owner_id: l.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false }
+                eve_destiny::SlimItemMeta { group_id: 4549, category_id: 65, owner_id: l.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
             );
         }
     }
@@ -696,7 +696,7 @@ pub fn populate_shipcaster_balls_from_db(
         if sl.solar_system_id == solar_system_id {
             ballpark.add_static_ball_with_meta(
                 eve_destiny::Ball { id: sl.item_id, type_id: sl.type_id, position: sl.position, velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 20_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                eve_destiny::SlimItemMeta { group_id: 4549, category_id: 65, owner_id: sl.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false }
+                eve_destiny::SlimItemMeta { group_id: 4549, category_id: 65, owner_id: sl.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
             );
         }
     }
@@ -705,7 +705,7 @@ pub fn populate_shipcaster_balls_from_db(
             let group_id = if matches!(p.type_id, 78260 | 79172) { 4644 } else { 4547 };
             ballpark.add_static_ball_with_meta(
                 eve_destiny::Ball { id: p.item_id, type_id: p.type_id, position: p.position, velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 0.0, mass: 1.0e10, radius: 20_000.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Rigid },
-                eve_destiny::SlimItemMeta { group_id, category_id: 65, owner_id: p.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false }
+                eve_destiny::SlimItemMeta { group_id, category_id: 65, owner_id: p.faction_id as i64, char_id: None, corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false , ..Default::default()}
             );
         }
     }

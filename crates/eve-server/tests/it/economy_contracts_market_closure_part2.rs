@@ -347,7 +347,7 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
                 corp_id,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false,
+                is_cloaked: false, ..Default::default()
             };
             let _ = sys_h.spawn_ball_with_meta(b, cs, meta).await;
         }

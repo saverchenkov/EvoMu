@@ -943,13 +943,6 @@ fn handle_char_mgr(
             });
             Some(Ok(PyRep::List(cohorts)))
         }
-        "SetSessionCheck" | "clear_memoized" => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::Bool(true)))
-        }
         _ => None,
     }
 }

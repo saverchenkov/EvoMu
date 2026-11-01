@@ -15,3 +15,6 @@ mod tests;
 
 pub use cache_notifications::*;
 pub use context::*;
+
+/// Canonical MachoNet error code returned for unimplemented RPC methods.
+pub const ERR_UNIMPLEMENTED: &str = "UnimplementedRPC";

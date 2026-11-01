@@ -185,11 +185,12 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
                 snap.fw_runtime.complex_guards_cleared.insert(id, false);
                 snap.fw_runtime.complex_seconds_elapsed.insert(id, 0);
                 snap.fw_runtime.complex_last_step_unix.insert(id, now);
-                let guard_id = id + 500_000_000;
-                let ppos = pocket_pos_for_complex(id);
-                balls_to_spawn.push((guard_id, 37_453, [ppos.x + 500.0, ppos.y, ppos.z], 25.0));
                 id
             };
+            if !snap.fw_runtime.complex_guards_cleared.get(&gid).copied().unwrap_or(false) {
+                let ppos = pocket_pos_for_complex(gid);
+                balls_to_spawn.push((gid + 500_000_000, 37_453, [ppos.x + 500.0, ppos.y, ppos.z], 25.0));
+            }
             let pos = snap
                 .item_positions
                 .get(&gid)
@@ -327,20 +328,32 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for (bid, tid, pos, radius) in balls_to_spawn {
         if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
-            let _ = sys_handle
-                .spawn_ball(Ball {
-                    id: bid,
-                    type_id: tid,
-                    position: DVec3::from_array(pos),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 0.0,
-                    inertia: 0.0,
-                    mass: 5.0e7,
-                    radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Rigid,
-                })
-                .await;
+            let ball = Ball {
+                id: bid,
+                type_id: tid,
+                position: DVec3::from_array(pos),
+                velocity: DVec3::ZERO,
+                max_velocity: if tid == 37_453 { 350.0 } else { 0.0 },
+                inertia: if tid == 37_453 { 1.0 } else { 0.0 },
+                mass: if tid == 37_453 { 1.2e6 } else { 5.0e7 },
+                radius,
+                speed_fraction: 0.0,
+                mode: if tid == 37_453 { MovementMode::Stop } else { MovementMode::Rigid },
+            };
+            if tid == 37_453 {
+                let mut cs = ctx.build_type_combat_state(tid);
+                if cs.max_structure_hp <= 0.0 {
+                    cs.max_shield_hp = 350.0;
+                    cs.shield_hp = 350.0;
+                    cs.max_armor_hp = 350.0;
+                    cs.armor_hp = 350.0;
+                    cs.max_structure_hp = 400.0;
+                    cs.structure_hp = 400.0;
+                }
+                let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
+            } else {
+                let _ = sys_handle.spawn_ball(ball).await;
+            }
         }
     }
 }
@@ -836,16 +849,6 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let pocket = pocket_pos_for_complex(gid);
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let guard_id = gid + 500_000_000;
-        let guard_alive = sys_handle.get_ball_snapshot(guard_id).await.ok().flatten().is_some();
-        let guard_cleared = ctx.db.with_snapshot(|s| {
-            s.fw_runtime.complex_guards_cleared.get(&gid).copied().unwrap_or(false)
-        }) || !guard_alive;
-        if !guard_cleared {
-            continue;
-        }
-        ctx.db.with_mut_snapshot(|s| {
-            s.fw_runtime.complex_guards_cleared.insert(gid, true);
-        });
         let mut present: Vec<(i64, i64)> = Vec::new();
         for (cid, shid) in occupants {
             let cloaked = sys_handle
@@ -875,6 +878,18 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         if present.iter().any(|&(_, f)| f != first_fac) {
             // Contested by opposing militia ships inside the capture pocket -> timer paused!
             continue;
+        }
+        if first_fac != occ_fac {
+            let guard_alive = sys_handle.get_ball_snapshot(guard_id).await.ok().flatten().is_some();
+            let guard_cleared = ctx.db.with_snapshot(|s| {
+                s.fw_runtime.complex_guards_cleared.get(&gid).copied().unwrap_or(false)
+            }) || !guard_alive;
+            if !guard_cleared {
+                continue;
+            }
+            ctx.db.with_mut_snapshot(|s| {
+                s.fw_runtime.complex_guards_cleared.insert(gid, true);
+            });
         }
         let (occ_adv, attacker_adv) = ctx
             .db
@@ -923,17 +938,39 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         if done_now {
             let _ = sys_handle.remove_ball(gid).await;
             let _ = sys_handle.remove_ball(guard_id).await;
-            // DERIVED (synthetic): baseline complex LP rewards by tier, split across capturing pilots.
+            // EVE Uprising NVY-1 / Open base LP rewards by complex tier, split across capturing pilots (`feat:fw.fw-lp`).
             let base_lp = match tier.as_str() {
-                "Novice" => 10_000,
+                "Novice" | "Scout" => 10_000,
                 "Small" => 15_000,
-                "Medium" => 22_500,
+                "Medium" => 20_000,
                 "Large" | "Open" => 30_000,
                 _ => 15_000,
             };
             let (status, _, _, _) = get_system_frontline_rules(ctx, sys_id);
+            let (is_contested_or_vulnerable, is_vulnerable_or_lost) = ctx.db.with_snapshot(|s| {
+                s.fw_system_occupations
+                    .get(&sys_id)
+                    .map(|o| {
+                        (
+                            o.victory_points > 0,
+                            o.victory_points >= o.victory_points_threshold,
+                        )
+                    })
+                    .unwrap_or((false, false))
+            });
             let supp_lp_mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, first_fac);
-            let total_lp = ((calculate_fw_lp_reward(base_lp, status) as f64) * supp_lp_mult).round() as i64;
+            let offensive_lp = (calculate_fw_lp_reward(base_lp, status) as f64) * supp_lp_mult;
+            let total_lp = if first_fac == occ_fac {
+                if is_contested_or_vulnerable {
+                    offensive_lp.round() as i64
+                } else {
+                    0
+                }
+            } else if is_vulnerable_or_lost {
+                0
+            } else {
+                offensive_lp.round() as i64
+            };
             let per_pilot_lp = total_lp / (present.len().max(1) as i64);
             let lp_corp = militia_lp_corp_id(&ctx.sde, first_fac);
             let net_adv = (my_adv - their_adv).max(0.0);
