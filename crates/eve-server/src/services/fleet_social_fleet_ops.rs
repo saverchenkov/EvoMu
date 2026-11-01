@@ -549,8 +549,17 @@ pub(super) async fn handle_fleet_ops(
                 DVec3::new(150_000_000.0, 0.0, 0.0)
             };
 
+            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+                ctx, sys_id, dest_pos, dest_pos,
+            )
+            .await
+            {
+                return Some(Err(e));
+            }
+
             let mut warped_members = Vec::new();
             let mut landing_positions = Vec::new();
+            let mut ess_bubble_blocked = false;
             for (idx, (member_char_id, ship_id)) in eligible_ship_ids.into_iter().enumerate() {
                 if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
                     if ball.max_velocity <= 0.0 {
@@ -562,6 +571,15 @@ pub(super) async fn handle_fleet_ops(
                         continue;
                     }
                     if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                        continue;
+                    }
+                    if crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+                        ctx, sys_id, ship_id, "warp",
+                    )
+                    .await
+                    .is_err()
+                    {
+                        ess_bubble_blocked = true;
                         continue;
                     }
                     if let Some(c_pos) = caller_pos {
@@ -583,6 +601,15 @@ pub(super) async fn handle_fleet_ops(
                             _ => DVec3::ZERO,
                         };
                         let landing = dest_pos - dir * min_range + offset;
+                        if crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+                            ctx, sys_id, dest_pos, landing,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            ess_bubble_blocked = true;
+                            continue;
+                        }
                         let warp_mode = MovementMode::new_warp(ball.position, landing, 3.0);
                         if sys.set_movement_mode(ship_id, warp_mode).await.is_ok() {
                             warped_members.push(PyRep::Integer(member_char_id));
@@ -595,6 +622,12 @@ pub(super) async fn handle_fleet_ops(
                         }
                     }
                 }
+            }
+            if warped_members.is_empty() && ess_bubble_blocked {
+                return Some(Err(BridgeRpcError {
+                    code: "EssIntrusionBubbleWarpBlocked".into(),
+                    message: "Cannot fleet warp out from inside the 75 km ESS warp disruption bubble".into(),
+                }));
             }
 
             for &opt_out_cid in &skipped_opt_out_members {

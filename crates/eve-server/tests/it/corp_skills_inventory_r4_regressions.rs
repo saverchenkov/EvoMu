@@ -626,7 +626,7 @@ async fn r4_177_178_179_182_184_185_186_187_skills_corp_ammo_agents_and_killcoun
     if let Some((&rnd_agent_id, rnd_agent)) = ctx.sde.agents.iter().find(|(_, a)| a.agent_type_id == 4) {
         let rnd_sys = rnd_agent.solar_system_id.unwrap_or(sys_id);
         let rnd_sta = rnd_agent.station_id.or(Some(station_id));
-        let skill_tid = 11442_u32; // Hydromagnetic Physics
+        let skill_tid = rnd_agent.research_skills.first().copied().unwrap_or(11442);
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&ceo_id) {
                 ch.solar_system_id = rnd_sys;

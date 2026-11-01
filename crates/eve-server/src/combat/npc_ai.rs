@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord, WalletJournalEntry};
+use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -884,30 +884,17 @@ impl NpcSpawnManager {
         }
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
-            let bounty_cents = IskCents::from_f64_isk(bounty);
-
-            // Credit dynamic bounty to killer's wallet and increase security status (feat:crimewatch.sec-status-gain)
-            if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                ch.balance = ch.balance.checked_add(bounty_cents).unwrap_or(ch.balance);
-                let gain = compute_sec_status_gain(ch.security_status, entity.bounty_isk) * supp_mult;
-                ch.security_status = (ch.security_status + gain).min(5.0);
-            }
-
-            // Wallet journal entry
-            snap.next_entity_id += 1;
-            let jid = snap.next_entity_id;
-            snap.wallet_journal.push(WalletJournalEntry {
-                entry_id: jid,
-                character_id: killer_char_id,
-                entry_type: "bounty_payout".to_string(),
-                amount: bounty_cents,
-                balance_after: snap
-                    .characters
-                    .get(&killer_char_id)
-                    .map(|c| c.balance)
-                    .unwrap_or(bounty_cents),
-                reason: format!("NPC bounty award for destruction of {}", entity.type_id),
-            });
+            crate::services::pve_open_feats_b36::credit_ballpark_npc_bounty_with_ess_split(
+                &ctx.sde,
+                snap,
+                sys_id,
+                killer_char_id,
+                bounty,
+                entity.bounty_isk,
+                supp_mult,
+                entity.type_id,
+                now_unix,
+            );
 
             // Persist Killmail with dynamic bounty value (NOT flat 100k)
             snap.next_entity_id += 1;

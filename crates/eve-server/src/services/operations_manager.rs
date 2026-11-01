@@ -1116,8 +1116,6 @@ pub fn handle(
                         PyRep::Integer(tid),
                     ],
                 );
-                super::notify_emitters_b36::emit_progression_task_completed(ctx, char_id, tid);
-                super::notify_emitters_b36::emit_progression_advanced(ctx, char_id, op_id, tid);
                 Some(Ok(PyRep::Bool(true)))
             } else if !args.is_empty() || !kwargs.is_empty() {
                 Some(Ok(PyRep::Bool(false)))

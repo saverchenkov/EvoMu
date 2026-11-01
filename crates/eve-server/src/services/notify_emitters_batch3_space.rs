@@ -383,6 +383,19 @@ pub fn emit_dungeon_progression_notifications(
         "charid",
         vec![PyRep::Integer(dungeon_id), values_dict],
     );
+    let room_objective_id = room_id * 10 + i64::from(current_wave.max(1));
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnProgressionRoomJoined",
+        "charid",
+        vec![
+            PyRep::Integer(dungeon_id),
+            PyRep::Integer(room_objective_id),
+            PyRep::List(Vec::new()),
+            PyRep::List(Vec::new()),
+            PyRep::Integer(room_id),
+        ],
+    );
 
     let row = build_util_row(
         &[

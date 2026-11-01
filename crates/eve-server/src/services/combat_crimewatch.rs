@@ -772,7 +772,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
             hull_ratio,
         );
     }
-    if let Some(vic_id) = victim_char_opt.filter(|&v| v != attacker_char_id) {
+    if let Some(vic_id) = resolved_victim.filter(|&v| v != attacker_char_id) {
         super::notify_emitters_b36::emit_combat_message(
             ctx,
             vic_id,

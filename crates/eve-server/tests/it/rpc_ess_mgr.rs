@@ -323,9 +323,15 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
         Some(PyRep::Real(v)) => *v,
         other => panic!("expected Real stolenISK, got {:?}", other),
     };
+    let expected_first = eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+        eve_db::IskCents::from_f64_isk(35_000_000.0).0,
+        15,
+        15,
+    ) as f64
+        / 100.0;
     assert!(
-        (stolen_reserve - 2_333_333.33).abs() < 0.01,
-        "stolen_reserve: {stolen_reserve}"
+        (stolen_reserve - expected_first).abs() < 0.02,
+        "stolen_reserve: {stolen_reserve} vs expected {expected_first}"
     );
     assert_eq!(res_complete.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
 
@@ -368,8 +374,8 @@ async fn test_ess_mgr_telemetry_links_and_thefts() {
         other => panic!("expected Real stolenISK in entry, got {:?}", other),
     };
     assert!(
-        (entry_stolen - 2_333_333.33).abs() < 0.01,
-        "entry_stolen: {entry_stolen}"
+        (entry_stolen - expected_first).abs() < 0.02,
+        "entry_stolen: {entry_stolen} vs expected {expected_first}"
     );
 
     // 5. Complete Main Bank robbery to test GetMainBankTheftsForClientSolarSystem
@@ -587,6 +593,25 @@ async fn test_ess_mgr_unlinks_unlock_and_cache() {
         );
     });
 
+    // While the 15-minute unlock window from step 3 is still active, duplicate RequestUnlockReserveBank is rejected without consuming key45_item_id
+    let dup_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "essMgr",
+            None,
+            "RequestUnlockReserveBank",
+            &[PyRep::Integer(key45_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Duplicate RequestUnlockReserveBank during active unlock window must fail");
+    assert_eq!(dup_err.code, "EssReserveBankAlreadyUnlocked");
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&key45_item_id)));
+
+    // Advance past the 15-minute window so the 45-minute Reserve Security Key can unlock cleanly
+    ctx.db.clock().advance_secs(901);
+
     let unlock_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -627,17 +652,15 @@ async fn test_ess_mgr_unlinks_unlock_and_cache() {
         "Reserve bank must be marked unlocked for 45 minutes"
     );
 
-    // Error path: RequestUnlockReserveBank without key returns MissingEssReserveSecurityKey
+    // Duplicate unlock while 45m window is open returns EssReserveBankAlreadyUnlocked; after expiry returns MissingEssReserveSecurityKey
+    let dup_err = ctx
+        .dispatch_rpc(&mut sess, "essMgr", None, "RequestUnlockReserveBank", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(dup_err.code, "EssReserveBankAlreadyUnlocked");
+    ctx.advance_secs(45 * 60 + 60);
     let no_key_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "essMgr",
-            None,
-            "RequestUnlockReserveBank",
-            &[],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "essMgr", None, "RequestUnlockReserveBank", &[], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(no_key_err.code, "MissingEssReserveSecurityKey");

@@ -1,4 +1,5 @@
-//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 5: ESS Main Bank autopayout & SQLite-durable Reserve Bank key tiers).
+//! Integration tests for Batch 36 open `feat:pve.*` parity rows (part 5: ESS Main Bank autopayout,
+//! 1 Hz ballpark NPC ESS pooling, & SQLite-durable server-tick Reserve Bank key tiers).
 
 #![forbid(unsafe_code)]
 
@@ -48,6 +49,25 @@ fn make_item(
     }
 }
 
+fn count_char_event(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
+    let all = ctx.drain_notifications_for_char(char_id);
+    let mut matched = Vec::new();
+    let mut keep = Vec::new();
+    for n in all {
+        if n.event == event {
+            matched.push(n.args);
+        } else {
+            keep.push(n);
+        }
+    }
+    if !keep.is_empty() {
+        if let Ok(mut guard) = ctx.pending_notifications.write() {
+            guard.entry(char_id).or_default().extend(keep);
+        }
+    }
+    matched
+}
+
 #[tokio::test]
 async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     // parity: feat:pve.ess-main-bank-autopayout, feat:pve.ess-reserve-bank-key-tiers
@@ -63,14 +83,24 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         .sde
         .solar_systems
         .values()
-        .find(|s| s.security_status <= -0.1 && s.solar_system_id < 31_000_000)
+        .find(|s| {
+            s.security_status <= -0.1
+                && s.solar_system_id < 31_000_000
+                && ctx
+                    .sde
+                    .celestials_in_system(s.solar_system_id)
+                    .iter()
+                    .any(|c| c.group_id == 9)
+        })
         .map(|s| s.solar_system_id)
         .unwrap_or(30_004_759);
 
     let pilot_a = 100_001_i64;
     let pilot_b = 100_002_i64;
+    let pilot_c = 100_003_i64;
     let ship_a = 965_001_i64;
     let ship_b = 965_002_i64;
+    let ship_c = 965_003_i64;
     let wep_a = 965_015_i64;
     let ammo_a = 965_016_i64;
     let wep_b = 965_017_i64;
@@ -78,22 +108,17 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let base = snap.characters.values().next().cloned().expect("base char");
-        let mut ca = base.clone();
-        ca.character_id = pilot_a;
-        ca.user_id = 1;
-        ca.solar_system_id = sys_id;
-        ca.station_id = None;
-        ca.active_ship_id = ship_a;
-        ca.balance = IskCents(0);
-        let mut cb = base;
-        cb.character_id = pilot_b;
-        cb.user_id = 2;
-        cb.solar_system_id = sys_id;
-        cb.station_id = None;
-        cb.active_ship_id = ship_b;
-        cb.balance = IskCents(0);
-        snap.characters.insert(pilot_a, ca);
-        snap.characters.insert(pilot_b, cb);
+        for (pid, uid, sid) in [(pilot_a, 1_u64, ship_a), (pilot_b, 2, ship_b), (pilot_c, 3, ship_c)] {
+            let mut ch = base.clone();
+            ch.character_id = pid;
+            ch.user_id = uid;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.active_ship_id = sid;
+            ch.balance = IskCents(0);
+            snap.characters.insert(pid, ch);
+            snap.items.insert(sid, make_item(sid, 639, pid, i64::from(sys_id), InventoryFlag::None, 1, true));
+        }
 
         let st = snap.system_states.entry(sys_id).or_default();
         st.solar_system_id = sys_id;
@@ -102,8 +127,6 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         st.ess_main_bank = IskCents(0);
         st.ess_reserve_bank = IskCents(0);
 
-        snap.items.insert(ship_a, make_item(ship_a, 639, pilot_a, i64::from(sys_id), InventoryFlag::None, 1, true));
-        snap.items.insert(ship_b, make_item(ship_b, 639, pilot_b, i64::from(sys_id), InventoryFlag::None, 1, true));
         snap.items.insert(wep_a, make_item(wep_a, 2961, pilot_a, ship_a, InventoryFlag::HiSlot0, 1, true));
         snap.items.insert(ammo_a, make_item(ammo_a, 21894, pilot_a, ship_a, InventoryFlag::HiSlot0, 5_000, false));
         snap.items.insert(wep_b, make_item(wep_b, 2961, pilot_b, ship_b, InventoryFlag::HiSlot0, 1, true));
@@ -167,7 +190,11 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     let ess_pos = sys_h.get_ball_snapshot(ess_id).await.unwrap().unwrap().1.position;
     let rat_spot = DVec3::new(-5.0e9, 0.0, 0.0);
 
-    for (sid, pos) in [(ship_a, ess_pos + DVec3::new(1_500.0, 0.0, 0.0)), (ship_b, rat_spot)] {
+    for (sid, pos) in [
+        (ship_a, ess_pos + DVec3::new(1_500.0, 0.0, 0.0)),
+        (ship_b, rat_spot),
+        (ship_c, rat_spot + DVec3::new(50_000.0, 0.0, 0.0)),
+    ] {
         let _ = sys_h
             .spawn_ball_with_combat(
                 Ball {
@@ -187,7 +214,33 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
             .await;
     }
 
-    // 1. ESS Main Bank 2h45m autopayout via live NPC bounty combat (2:1 ratio) + active-link deferral
+    // 1a (`F-04` regression): 1 Hz `NpcSpawnManager::handle_npc_destroyed` in null-sec splits bounties into
+    // `ess_main_bank` + `ess_reserve_bank` and records `pilot_c` in `ess_main_bank_contributors`!
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let first_belt_rat = *ctx.npc_spawns.read().unwrap()[&sys_id].entities.keys().next().unwrap();
+    let belt_rat_bounty = ctx
+        .npc_spawns
+        .write()
+        .unwrap()
+        .get_mut(&sys_id)
+        .unwrap()
+        .handle_npc_destroyed(&ctx, sys_id, first_belt_rat, pilot_c, ctx.now_unix())
+        .expect("1 Hz handle_npc_destroyed in null-sec");
+    assert!(belt_rat_bounty > 0.0);
+    let (c_bal_direct, main_from_1hz, res_from_1hz, c_contrib) = ctx.db.with_snapshot(|s| {
+        let st = &s.system_states[&sys_id];
+        (
+            s.characters[&pilot_c].balance.0,
+            st.ess_main_bank.0,
+            st.ess_reserve_bank.0,
+            st.ess_main_bank_contributors.get(&pilot_c).copied().unwrap_or(0),
+        )
+    });
+    assert!(main_from_1hz > 0 && res_from_1hz > 0, "1 Hz null-sec NPC kill must pool into ESS Main & Reserve Banks");
+    assert_eq!(c_contrib, main_from_1hz, "1 Hz null-sec NPC kill must record contributor share in ess_main_bank_contributors");
+    assert!(c_bal_direct > 0 && (c_bal_direct as f64 / 100.0) < belt_rat_bounty * 1.35);
+
+    // 1b. ESS Main Bank 2h45m autopayout via live NPC bounty combat (pilot_a 2 kills : pilot_b 1 kill) + active-link deferral
     let bounty_npc_tid = ctx
         .sde
         .types
@@ -257,14 +310,15 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     ctx.db.clock().advance_secs(1_200);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
-    let (main_pooled, bal_a_pre, bal_b_pre) = ctx.db.with_snapshot(|s| {
+    let (main_pooled, bal_a_pre, bal_b_pre, bal_c_pre) = ctx.db.with_snapshot(|s| {
         (
             s.system_states[&sys_id].ess_main_bank.0,
             s.characters[&pilot_a].balance.0,
             s.characters[&pilot_b].balance.0,
+            s.characters[&pilot_c].balance.0,
         )
     });
-    assert!(main_pooled > 0);
+    assert!(main_pooled > main_from_1hz);
     let _ = sys_h.set_ball_position(ship_a, ess_pos + DVec3::new(500.0, 0.0, 0.0)).await;
 
     ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_id)], &kw, None)
@@ -283,21 +337,24 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         .expect("RequestMainBankUnlink");
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
-    let (main_after, gain_a, gain_b, has_j_a, has_j_b) = ctx.db.with_snapshot(|s| {
+    let (main_after, gain_a, gain_b, gain_c, has_j_a, has_j_b, has_j_c) = ctx.db.with_snapshot(|s| {
         (
             s.system_states[&sys_id].ess_main_bank.0,
             s.characters[&pilot_a].balance.0 - bal_a_pre,
             s.characters[&pilot_b].balance.0 - bal_b_pre,
+            s.characters[&pilot_c].balance.0 - bal_c_pre,
             s.wallet_journal.iter().any(|j| j.character_id == pilot_a && j.entry_type == "ESSMainBankPayout"),
             s.wallet_journal.iter().any(|j| j.character_id == pilot_b && j.entry_type == "ESSMainBankPayout"),
+            s.wallet_journal.iter().any(|j| j.character_id == pilot_c && j.entry_type == "ESSMainBankPayout"),
         )
     });
     assert_eq!(main_after, 0);
-    assert_eq!(gain_a + gain_b, main_pooled);
+    assert_eq!(gain_a + gain_b + gain_c, main_pooled);
     assert!((gain_a - 2 * gain_b).abs() * 1_000 <= gain_a);
-    assert!(has_j_a && has_j_b);
+    assert!((gain_c - main_from_1hz).abs() <= 2);
+    assert!(has_j_a && has_j_b && has_j_c);
 
-    // 2. ESS Reserve Bank key tiers (15m vs 45m quadrant keys), single OnReserveBankUnlock delivery, and SQLite restart durability!
+    // 2. ESS Reserve Bank key tiers, duplicate-unlock guard, SQLite durability, & server-tick progressive streaming (`F-03`)!
     ctx.db.with_mut_snapshot(|snap| {
         snap.system_states.get_mut(&sys_id).unwrap().ess_reserve_bank = IskCents(4_500_000);
         snap.item_positions.insert(ship_a, (ess_pos + DVec3::new(500.0, 0.0, 0.0)).to_array());
@@ -316,22 +373,23 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
 
     let keys_15m = [57714_u32, 57716, 57717, 57720];
     let keys_45m = [57715_u32, 57719, 57718, 57721];
-    let (mut wrong_quad_15m, mut matched_15m) = (false, false);
+    let (mut wrong_quad_15m, mut matched_15m_tid) = (false, 0_u32);
     for (idx, &tid) in keys_15m.iter().enumerate() {
         let iid = 965_610 + idx as i64;
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(iid, make_item(iid, tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
         });
+        if matched_15m_tid > 0 {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&iid);
+            });
+            continue;
+        }
         match ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(iid)], &kw, None).await {
             Ok(rep) => {
                 assert_eq!(kv_map(&rep)["durationMinutes"].as_i64(), Some(15));
                 assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&iid)));
-                let char_notifs: Vec<Vec<PyRep>> = ctx
-                    .drain_notifications_for_char(pilot_a)
-                    .into_iter()
-                    .filter(|n| n.event == "OnReserveBankUnlock")
-                    .map(|n| n.args)
-                    .collect();
+                let char_notifs = count_char_event(&ctx, pilot_a, "OnReserveBankUnlock");
                 let sess_notifs: Vec<Vec<PyRep>> = sess_a
                     .drain_notifications()
                     .into_iter()
@@ -339,13 +397,9 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
                     .map(|(_, a)| a)
                     .collect();
                 assert_eq!(char_notifs.len(), 1);
-                assert_eq!(
-                    sess_notifs.len(),
-                    1,
-                    "OnReserveBankUnlock must be delivered once to session (no duplicate push)"
-                );
+                assert_eq!(sess_notifs.len(), 1);
                 assert!(sess_notifs[0][0].dict_get("regionID").is_some());
-                matched_15m = true;
+                matched_15m_tid = tid;
             }
             Err(e) => {
                 assert_eq!(e.code, "EssReserveKeyWrongQuadrant");
@@ -356,13 +410,64 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
             }
         }
     }
-    assert!(wrong_quad_15m && matched_15m);
+    if !wrong_quad_15m {
+        let wrong_tid = keys_15m.iter().copied().find(|&t| t != matched_15m_tid).unwrap();
+        let wrong_iid = 965_619_i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(wrong_iid, make_item(wrong_iid, wrong_tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
+        });
+        // While already unlocked, duplicate RequestUnlockReserveBank rejects BEFORE consuming any key!
+        assert_eq!(
+            ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(wrong_iid)], &kw, None)
+                .await
+                .unwrap_err()
+                .code,
+            "EssReserveBankAlreadyUnlocked"
+        );
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&wrong_iid);
+        });
+    }
+    assert!(matched_15m_tid > 0);
 
-    // SQLite restart durability (`B36-F06`): reopen SQLite into a fresh ServerContext (empty CombatRuntimeState)
-    // and verify Reserve Bank unlock window + pulses survive and allow AttemptLinkToReserveBank with zero keys in cargo!
+    // Duplicate `RequestUnlockReserveBank` while unlocked is rejected without consuming a second valid key (`F-03`)!
+    let spare_key_iid = 965_650_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(spare_key_iid, make_item(spare_key_iid, matched_15m_tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
+    });
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(spare_key_iid)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "EssReserveBankAlreadyUnlocked"
+    );
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&spare_key_iid)), "Duplicate unlock attempt must NOT consume spare key");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&spare_key_iid);
+    });
+
+    // SQLite restart durability (`B36-F06`): reopen SQLite into a fresh ServerContext and stream pulses from server ticks!
     let saved_now = ctx.now_unix();
     let ctx2 = Arc::new(crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "b36_ess_reserve_unlock"));
     ctx2.set_clock(Arc::new(VirtualServerClock::with_fixed_base(saved_now)));
+    crate::common::login_pilot(&ctx2, &mut sess_a, "demo", "demo-secret").await;
+    ctx2.dispatch_rpc(
+        &mut sess_a,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(pilot_a)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID pilot_a on reopened ctx2");
+    let _ = ctx2.drain_notifications_for_char(pilot_a);
+    let _ = sess_a.drain_notifications();
+    sess_a.character_id = Some(pilot_a);
+    sess_a.solar_system_id = Some(sys_id);
+    sess_a.ship_id = Some(ship_a);
 
     let ess_info_re = kv_map(
         &ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "GetDataForClientSolarSystem", &[], &kw, None)
@@ -400,7 +505,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     let bal_before_r15 = ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0);
     ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
         .await
-        .expect("AttemptLinkToReserveBank succeeds after SQLite restart without consuming another key");
+        .expect("AttemptLinkToReserveBank initiates link after SQLite restart without consuming another key");
     {
         let now_u = ctx2.now_unix();
         let cw = ctx2.crimewatch.read().unwrap();
@@ -408,36 +513,86 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         assert!(st.suspect_flag_until_unix >= now_u + 900);
         assert!(st.weapon_timer_until_unix >= now_u + 60);
     }
-    for _ in 0..6 {
-        let _ = sys_h2.step_manual(1.0).await;
-    }
-    ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
-        .await
-        .unwrap();
-    assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15, 300_000);
-    assert!(ctx2.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == pilot_a && j.entry_type == "ESSReserveBankPayout")));
+
+    // Duplicate unlock while actively linked is ALSO rejected without resetting `reserve_linked_character_id` (`F-03`)!
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.items.insert(spare_key_iid, make_item(spare_key_iid, matched_15m_tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
+    });
+    assert_eq!(
+        ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(spare_key_iid)], &kw, None)
+            .await
+            .unwrap_err()
+            .code,
+        "EssReserveBankAlreadyUnlocked"
+    );
     assert_eq!(
         ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "IsClientLinkedToReserveBank", &[], &kw, None).await.unwrap(),
         PyRep::Bool(true)
     );
+    ctx2.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&spare_key_iid);
+    });
+    let _ = count_char_event(&ctx2, pilot_a, "OnReserveBankPlayerLinkDisconnected");
+
+    // Stream Pulse 1 & Pulse 2 purely from `tick_background_cluster` (NO manual `AttemptLinkToReserveBank` polling!)
+    ctx2.db.clock().advance_secs(60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
+    let pulse1 = ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15;
+    assert!(pulse1 > 0, "Server tick must stream Reserve Bank pulse 1 automatically");
+    assert!(ctx2.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == pilot_a && j.entry_type == "ESSReserveBankPayout")));
+    assert!(
+        count_char_event(&ctx2, pilot_a, "OnReserveBankPlayerLinkDisconnected").is_empty(),
+        "Intermediate pulse 1 must NOT emit OnReserveBankPlayerLinkDisconnected"
+    );
     assert_eq!(
-        ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
-            .await
-            .unwrap_err()
-            .code,
-        "EssReservePulseCooldown"
+        ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "IsClientLinkedToReserveBank", &[], &kw, None).await.unwrap(),
+        PyRep::Bool(true)
     );
 
-    ctx2.db.clock().advance_secs(61);
-    let pulse2_rep = kv_map(
-        &ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
-            .await
-            .expect("Second Reserve Bank pulse on persistent link"),
+    ctx2.db.clock().advance_secs(60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
+    let pulse2 = (ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15) - pulse1;
+    assert!(pulse2 > pulse1, "Reserve Bank payouts must progressively spool up (pulse2={pulse2} > pulse1={pulse1})");
+    assert!(
+        count_char_event(&ctx2, pilot_a, "OnReserveBankPlayerLinkDisconnected").is_empty(),
+        "Intermediate pulse 2 must NOT emit OnReserveBankPlayerLinkDisconnected"
     );
-    assert_eq!(pulse2_rep.get("linkStartedOnly"), Some(&PyRep::Bool(false)));
-    assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15, 600_000);
 
-    // 45m Reserve Security Key tier -> 100,000 IskCents per pulse (4_500_000 / 45)
+    // Moving beyond 2,500 m severs the Reserve Bank link on the next server tick and emits exactly 1 disconnect (`reason == 1`)!
+    let _ = sys_h2.set_ball_position(ship_a, ess_pos2 + DVec3::new(3_200.0, 0.0, 0.0)).await;
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
+    let range_disc = count_char_event(&ctx2, pilot_a, "OnReserveBankPlayerLinkDisconnected");
+    assert_eq!(range_disc.len(), 1, "Range break must emit exactly 1 OnReserveBankPlayerLinkDisconnected");
+    assert_eq!(range_disc[0][0].dict_get("reason"), Some(&PyRep::Integer(1)));
+    assert_eq!(
+        ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "IsClientLinkedToReserveBank", &[], &kw, None).await.unwrap(),
+        PyRep::Bool(false)
+    );
+
+    // Move back within 2,500 m, re-link during remaining window, and stream remaining 13 pulses via `tick_background_cluster`!
+    let _ = sys_h2.set_ball_position(ship_a, ess_pos2 + DVec3::new(500.0, 0.0, 0.0)).await;
+    ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None)
+        .await
+        .expect("Re-link during remaining 15m Reserve Bank window");
+    let mut per_pulse = vec![pulse1, pulse2];
+    for step in 0..13 {
+        let before = ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0);
+        ctx2.db.clock().advance_secs(60);
+        eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
+        let gained = ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - before;
+        per_pulse.push(gained);
+        if step < 12 {
+            assert!(count_char_event(&ctx2, pilot_a, "OnReserveBankPlayerLinkDisconnected").is_empty());
+        }
+    }
+    assert!(per_pulse[11] > per_pulse[0] && per_pulse[11] > per_pulse[14], "Reserve Bank curve must spool up to peak and drop down");
+    assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r15, 4_500_000);
+    assert_eq!(ctx2.db.with_snapshot(|s| s.system_states[&sys_id].ess_reserve_bank.0), 0);
+    let final_disc = count_char_event(&ctx2, pilot_a, "OnReserveBankPlayerLinkDisconnected");
+    assert_eq!(final_disc.len(), 1, "Terminal pulse 15 must emit exactly 1 OnReserveBankPlayerLinkDisconnected");
+    assert_eq!(final_disc[0][0].dict_get("reason"), Some(&PyRep::Integer(0)));
+
+    // 45m Reserve Security Key tier unlocks cleanly once prior 15m window has terminated, and streams progressive pulse 1!
     ctx2.db.with_mut_snapshot(|snap| {
         snap.system_states.get_mut(&sys_id).unwrap().ess_reserve_bank = IskCents(4_500_000);
     });
@@ -447,18 +602,27 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         ctx2.db.with_mut_snapshot(|snap| {
             snap.items.insert(iid, make_item(iid, tid, pilot_a, ship_a, InventoryFlag::Cargo, 1, false));
         });
+        if matched_45m {
+            ctx2.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&iid);
+            });
+            continue;
+        }
         if let Ok(rep) = ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "RequestUnlockReserveBank", &[PyRep::Integer(iid)], &kw, None).await {
             assert_eq!(kv_map(&rep)["durationMinutes"].as_i64(), Some(45));
             matched_45m = true;
+        } else {
+            ctx2.db.with_mut_snapshot(|snap| {
+                snap.items.remove(&iid);
+            });
         }
     }
     assert!(matched_45m);
 
     let bal_before_r45 = ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0);
     ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
-    for _ in 0..6 {
-        let _ = sys_h2.step_manual(1.0).await;
-    }
-    ctx2.dispatch_rpc(&mut sess_a, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_id)], &kw, None).await.unwrap();
-    assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r45, 100_000);
+    ctx2.db.clock().advance_secs(60);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx2).await;
+    let expected_45_p1 = eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(4_500_000, 45, 45);
+    assert_eq!(ctx2.db.with_snapshot(|s| s.characters[&pilot_a].balance.0) - bal_before_r45, expected_45_p1);
 }

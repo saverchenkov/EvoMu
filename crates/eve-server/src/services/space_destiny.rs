@@ -21,6 +21,8 @@ pub struct EssReservePulseState {
     #[serde(default)]
     pub reserve_link_started_tick: Option<u64>,
     #[serde(default)]
+    pub link_started_unix: Option<u64>,
+    #[serde(default)]
     pub unlocked_until_unix: u64,
 }
 
@@ -460,7 +462,7 @@ pub async fn handle(
                     (PyRep::String("reserveBankLastPulseInitiated".into()), last_ft),
                     (PyRep::String("reserveBankPulsesRemaining".into()), PyRep::Integer(rem_pulses as i64)),
                     (PyRep::String("reserveBankPulsesTotal".into()), PyRep::Integer(pulse_st.pulses_total as i64)),
-                    (PyRep::String("reserveBankActiveLinks".into()), PyRep::Integer(0)),
+                    (PyRep::String("reserveBankActiveLinks".into()), PyRep::Integer(i64::from(pulse_st.reserve_linked_character_id.is_some()))),
                 ])
             });
             Some(Ok(rep))
@@ -552,6 +554,7 @@ pub async fn handle(
                     if was_reserve_linked {
                         pulse_st.reserve_linked_character_id = None;
                         pulse_st.reserve_link_started_tick = None;
+                        pulse_st.link_started_unix = None;
                         set_ess_reserve_pulses_in_blobs(
                             &mut snap.service_state_blobs,
                             sys_id,
@@ -578,6 +581,11 @@ pub async fn handle(
                 }
                 false
             });
+            if is_reserve && unlinked {
+                super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(
+                    ctx, char_id, sys_id, 0,
+                );
+            }
             Some(Ok(PyRep::Bool(unlinked)))
         }
 
@@ -643,8 +651,14 @@ pub async fn handle(
                 }));
             }
             let now_unix = ctx.now_unix();
+            let rt_until = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
+            });
             let key_item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                crate::services::pve_open_feats_b36::ensure_ess_reserve_bank_not_already_unlocked(
+                    snap, sys_id, now_unix, rt_until,
+                )?;
                 let (key_item_id, key_type_id, duration_mins) =
                     crate::services::encounter_surveillance_system::select_ess_reserve_key_in_cargo(
                         &ctx.sde, snap.items.values(), char_id, ship_id, sys_id, key_item_id_arg,
@@ -665,6 +679,7 @@ pub async fn handle(
                     last_pulse_sec: None,
                     reserve_linked_character_id: None,
                     reserve_link_started_tick: None,
+                    link_started_unix: None,
                     unlocked_until_unix: unlock_until,
                 };
                 set_ess_reserve_pulses(snap, sys_id, &pulse_st);

@@ -145,6 +145,8 @@ pub async fn try_activate_dungeon_runtime_gate(
         let inst = store.instances.get_mut(&instance_id)?;
         inst.current_room_index = target_room_idx + 1;
         let room = inst.rooms.get(target_room_idx)?;
+        let room_obj_id = room.room_id * 10 + 1;
+        inst.active_objective_id = room_obj_id;
         Some((
             inst.dungeon_id,
             inst.category.clone(),
@@ -155,6 +157,8 @@ pub async fn try_activate_dungeon_runtime_gate(
             inst.rooms.len(),
             inst.created_unix,
             room.disallow_mwd.unwrap_or(inst.disallow_mwd),
+            room_obj_id,
+            inst.last_completed_task_id,
         ))
     });
     let Some((
@@ -167,6 +171,8 @@ pub async fn try_activate_dungeon_runtime_gate(
         total_rooms,
         created_unix,
         room_disallow_mwd,
+        room_obj_id,
+        last_completed_task_id,
     )) = room_info
     else {
         return Some(Err(BridgeRpcError::user_error("DungeonRoomNotFound")));
@@ -196,6 +202,16 @@ pub async fn try_activate_dungeon_runtime_gate(
         false,
         expiry_ft,
     );
+    if target_room_idx > 0 {
+        if let Some(last_tid) = last_completed_task_id {
+            crate::services::notify_emitters_b36::emit_progression_advanced(
+                ctx,
+                char_id,
+                room_obj_id,
+                last_tid,
+            );
+        }
+    }
 
     Some(Ok(PyRep::keyval([
         ("success", PyRep::Bool(true)),
@@ -763,6 +779,17 @@ fn instance_to_pyrep(inst: &DungeonRuntimeInstance) -> PyRep {
                 .unwrap_or(PyRep::None),
         ),
         ("currentRoomIndex", PyRep::Integer(inst.current_room_index as i64)),
+        ("activeObjectiveID", PyRep::Integer(inst.active_objective_id)),
+        (
+            "lastCompletedTaskID",
+            inst.last_completed_task_id
+                .map(PyRep::Integer)
+                .unwrap_or(PyRep::None),
+        ),
+        (
+            "completedTaskIDs",
+            PyRep::List(inst.completed_task_ids.iter().copied().map(PyRep::Integer).collect()),
+        ),
         ("completed", PyRep::Bool(inst.completed)),
         ("despawned", PyRep::Bool(inst.despawned)),
         ("rooms", PyRep::List(rooms_py)),
@@ -813,6 +840,7 @@ pub async fn spawn_sde_dungeon_runtime_instance(
         has_entry_gate,
     );
     let now = ctx.now_unix();
+    let init_obj_id = rooms.first().map(|r| r.room_id * 10 + 1).unwrap_or(0);
     let inst_id = with_dungeon_runtime_store(ctx, |store| {
         let id = store.next_instance_id;
         store.next_instance_id += 1;
@@ -836,6 +864,9 @@ pub async fn spawn_sde_dungeon_runtime_instance(
                 rooms,
                 completed: false,
                 despawned: false,
+                active_objective_id: init_obj_id,
+                last_completed_task_id: None,
+                completed_task_ids: Vec::new(),
                 created_unix: now,
             },
         );
@@ -908,6 +939,7 @@ pub async fn spawn_dungeon_instance(
         kwargs.get("rooms").or_else(|| args.get(1)),
     );
     let now = ctx.now_unix();
+    let init_obj_id = rooms.first().map(|r| r.room_id * 10 + 1).unwrap_or(0);
     let inst_id = with_dungeon_runtime_store(ctx, |store| {
         let id = store.next_instance_id;
         store.next_instance_id += 1;
@@ -935,6 +967,9 @@ pub async fn spawn_dungeon_instance(
                 rooms,
                 completed: false,
                 despawned: false,
+                active_objective_id: init_obj_id,
+                last_completed_task_id: None,
+                completed_task_ids: Vec::new(),
                 created_unix: now,
             },
         );
@@ -1027,7 +1062,7 @@ pub async fn on_dungeon_approach(
                             && dist3(ship_pos, obj_pos) <= effective_radius.max(5_000.0);
                         if within_radius || explicit_target_close {
                             trig.fired = true;
-                            room_actions.push(trig.action.clone());
+                            room_actions.push((trig.trigger_id, trig.action.clone()));
                         }
                     }
                 }
@@ -1094,7 +1129,7 @@ pub async fn on_dungeon_item_looted(
                         let room_has_cont = room.objects.iter().any(|o| o.ball_id == container_ball_id);
                         if cont_ok && tid_ok && (resolved_cont.is_some() || room_has_cont) {
                             trig.fired = true;
-                            room_actions.push(trig.action.clone());
+                            room_actions.push((trig.trigger_id, trig.action.clone()));
                         }
                     }
                 }
@@ -1110,29 +1145,51 @@ pub async fn on_dungeon_item_looted(
     }
 }
 
-#[allow(clippy::too_many_arguments, unused_variables)]
+pub fn record_dungeon_progression_events(
+    inst: &mut DungeonRuntimeInstance,
+    events: &[(i64, i64)],
+) {
+    for &(task_id, next_obj_id) in events {
+        if !inst.completed_task_ids.contains(&task_id) {
+            inst.completed_task_ids.push(task_id);
+        }
+        inst.last_completed_task_id = Some(task_id);
+        inst.active_objective_id = next_obj_id;
+    }
+}
+
 pub fn dispatch_dungeon_notify_actions(
-    _db: &eve_db::WorldRepository,
-    _pending_notifications: Option<
+    db: &eve_db::WorldRepository,
+    pending_notifications: Option<
         &std::sync::RwLock<
             HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
         >,
     >,
-    _notify_tx: Option<
+    notify_tx: Option<
         &tokio::sync::broadcast::Sender<(
             i64,
             crate::router::cache_notifications::PendingMachoNotification,
         )>,
     >,
-    _char_id: i64,
-    _dungeon_id: i64,
-    _obj_ball_ids: &[i64],
-    actions: Vec<DungeonTriggerAction>,
+    char_id: i64,
+    progression_events: &[(i64, i64)],
 ) {
-    for act in actions {
-        match act {
-            _ => {}
-        }
+    for &(task_id, objective_id) in progression_events {
+        crate::services::notify_emitters_b36::emit_progression_task_completed_with_db(
+            db,
+            pending_notifications,
+            notify_tx,
+            char_id,
+            task_id,
+        );
+        crate::services::notify_emitters_b36::emit_progression_advanced_with_db(
+            db,
+            pending_notifications,
+            notify_tx,
+            char_id,
+            objective_id,
+            task_id,
+        );
     }
 }
 

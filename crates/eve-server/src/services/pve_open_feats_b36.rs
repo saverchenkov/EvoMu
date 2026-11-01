@@ -984,3 +984,372 @@ pub fn tick_ess_main_bank_autopayout(ctx: &ServerContext, now_unix: u64) -> usiz
     }
     paid_events.len()
 }
+
+/// Rejects `essMgr.RequestUnlockReserveBank` while an unlock window or active Reserve Bank link is open.
+pub fn ensure_ess_reserve_bank_not_already_unlocked(
+    snap: &WorldStateSnapshot,
+    sys_id: SolarSystemId,
+    now_unix: u64,
+    rt_until: u64,
+) -> Result<(), BridgeRpcError> {
+    let pulse_st = super::space_destiny::get_ess_reserve_pulses(snap, sys_id);
+    let eff_until = pulse_st.unlocked_until_unix.max(rt_until);
+    if pulse_st.reserve_linked_character_id.is_some()
+        || (eff_until > now_unix && pulse_st.pulses_remaining > 0)
+        || (rt_until > now_unix && pulse_st.unlocked_until_unix == 0)
+    {
+        return Err(BridgeRpcError {
+            code: "EssReserveBankAlreadyUnlocked".into(),
+            message: "ESS Reserve Bank is already unlocked or has an active link".into(),
+        });
+    }
+    Ok(())
+}
+
+// DERIVED: EVE Uni Wiki (`Encounter_Surveillance_System.wiki`) states Reserve Bank ISK is
+// "paid out over time at a rate that spools up and then drops down" without publishing exact
+// per-minute curve weights. Weight `w(i, N)` ramps linearly from `100` at pulse `1` up to `300`
+// at `peak = (4 * N) / 5` (80% through the window) and tapers down to `150` at pulse `N`.
+// Telescoping ratio `available * w(k, N) / sum_{j=k..=N} w(j, N)` spools up (`pulse_2 > pulse_1`),
+// drops down after peak, and conserves 100% of remaining integer `IskCents` on pulse `N`.
+pub fn ess_reserve_pulse_weight(pulse_idx_1based: u32, pulses_total: u32) -> u64 {
+    let n = pulses_total.max(1) as u64;
+    let i = pulse_idx_1based.clamp(1, pulses_total.max(1)) as u64;
+    let peak = ((4 * n) / 5).max(1);
+    if i <= peak {
+        if peak <= 1 {
+            300
+        } else {
+            100 + (200 * (i - 1)) / (peak - 1)
+        }
+    } else {
+        let tail_len = (n - peak).max(1);
+        300 - (150 * (i - peak)) / tail_len
+    }
+}
+
+pub fn compute_ess_reserve_pulse_payout_cents(
+    available_cents: i64,
+    pulses_total: u32,
+    pulses_remaining: u32,
+) -> i64 {
+    if available_cents <= 0 || pulses_remaining == 0 {
+        return 0;
+    }
+    let total = pulses_total.max(pulses_remaining).max(1);
+    let current_idx = total.saturating_sub(pulses_remaining).saturating_add(1);
+    let cur_w = ess_reserve_pulse_weight(current_idx, total) as i128;
+    let rem_sum: i128 = (current_idx..=total)
+        .map(|idx| ess_reserve_pulse_weight(idx, total) as i128)
+        .sum();
+    if rem_sum <= 0 {
+        return available_cents;
+    }
+    let raw = ((available_cents as i128) * cur_w) / rem_sum;
+    (raw as i64).clamp(1, available_cents)
+}
+
+/// Streams 60-second ESS Reserve Bank pulses from `tick_background_cluster` while verifying
+/// active `<= 2,500 m` ship proximity to the ESS beacon and emitting `OnReserveBankPlayerLinkDisconnected`
+/// strictly upon link termination (`feat:pve.ess-reserve-bank-key-tiers`).
+pub async fn tick_ess_reserve_bank_links(ctx: &ServerContext, now_unix: u64) -> usize {
+    let active_systems: Vec<(SolarSystemId, CharacterId)> = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .iter()
+            .filter_map(|(k, v)| {
+                let sid_str = k.strip_prefix("ess_reserve_pulses:")?;
+                let sid: SolarSystemId = sid_str.parse().ok()?;
+                let st: super::space_destiny::EssReservePulseState = serde_json::from_str(v).ok()?;
+                st.reserve_linked_character_id.map(|cid| (sid, cid))
+            })
+            .collect()
+    });
+    let mut processed = 0usize;
+    for (sys_id, char_id) in active_systems {
+        let ship_id_opt = ctx.db.with_snapshot(|snap| {
+            let ch = snap.characters.get(&char_id)?;
+            if ch.solar_system_id != sys_id || ch.station_id.is_some() || ch.structure_id.is_some() || ch.active_ship_id <= 0 {
+                return None;
+            }
+            Some(ch.active_ship_id)
+        });
+        let mut range_ok = false;
+        if let Some(ship_id) = ship_id_opt {
+            let sys_h = ctx.systems.get_or_spawn(sys_id);
+            if let Some((_, ship_ball)) = sys_h.get_ball_snapshot(ship_id).await.ok().flatten() {
+                if !matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+                    let balls = sys_h.list_balls().await.unwrap_or_default();
+                    if let Some(ess) = balls.into_iter().find(|b| {
+                        b.type_id == ESS_BEACON_TYPE_ID || b.type_id == 56002 || b.id == ESS_BEACON_ID_BASE + sys_id as i64
+                    }) {
+                        range_ok = ship_ball.position.distance(ess.position) <= 2_500.0;
+                    }
+                }
+            }
+        }
+        if !range_ok {
+            let severed = ctx.db.with_mut_snapshot(|snap| {
+                let mut pulse_st = super::space_destiny::get_ess_reserve_pulses(snap, sys_id);
+                if pulse_st.reserve_linked_character_id != Some(char_id) {
+                    return false;
+                }
+                pulse_st.reserve_linked_character_id = None;
+                pulse_st.reserve_link_started_tick = None;
+                pulse_st.link_started_unix = None;
+                super::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
+                if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                    if st.ess_linked_character_id == Some(char_id) {
+                        st.ess_linked_character_id = None;
+                        st.ess_link_started_tick = None;
+                    }
+                }
+                true
+            });
+            if severed {
+                super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 1);
+            }
+            continue;
+        }
+
+        let rt_until = super::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
+        });
+        let (pulse_payouts, bal_wire, post_banks, terminated, clear_rt_unlock) =
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut pulse_st = super::space_destiny::get_ess_reserve_pulses(snap, sys_id);
+                if pulse_st.reserve_linked_character_id != Some(char_id) {
+                    return (Vec::new(), None, None, false, false);
+                }
+                let eff_until = pulse_st.unlocked_until_unix.max(rt_until);
+                let link_start = pulse_st.link_started_unix.unwrap_or(now_unix);
+                let mut anchor = pulse_st
+                    .last_pulse_sec
+                    .map(|l| l.max(link_start))
+                    .unwrap_or(link_start);
+                let cap_now = if eff_until > 0 { now_unix.min(eff_until) } else { now_unix };
+                let due_count = ((cap_now.saturating_sub(anchor)) / 60)
+                    .min(u64::from(pulse_st.pulses_remaining))
+                    .min(45) as u32;
+                let mut payouts = Vec::new();
+                let mut last_bal_wire = None;
+                for _ in 0..due_count {
+                    let avail = snap
+                        .system_states
+                        .get(&sys_id)
+                        .map(|s| s.ess_reserve_bank.0)
+                        .unwrap_or(0);
+                    if avail <= 0 || pulse_st.pulses_remaining == 0 {
+                        break;
+                    }
+                    let p = compute_ess_reserve_pulse_payout_cents(
+                        avail,
+                        pulse_st.pulses_total,
+                        pulse_st.pulses_remaining,
+                    );
+                    if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                        st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
+                    }
+                    pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
+                    anchor = anchor.saturating_add(60);
+                    pulse_st.last_pulse_sec = Some(anchor);
+                    if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.balance = ch.balance.checked_add(IskCents(p)).unwrap_or(ch.balance);
+                        let bal_after = ch.balance;
+                        last_bal_wire = Some(bal_after.to_wire_f64());
+                        snap.append_journal(
+                            char_id,
+                            "ESSReserveBankPayout",
+                            IskCents(p),
+                            bal_after,
+                            format!("ESS Reserve Bank pulse payout in system {sys_id}"),
+                        );
+                    }
+                    payouts.push((IskCents(p).to_wire_f64(), anchor));
+                }
+                let rem_bank = snap
+                    .system_states
+                    .get(&sys_id)
+                    .map(|s| s.ess_reserve_bank.0)
+                    .unwrap_or(0);
+                let window_expired = eff_until > 0 && now_unix >= eff_until;
+                let term = pulse_st.pulses_remaining == 0 || rem_bank <= 0 || window_expired;
+                let mut clear_rt = false;
+                if term {
+                    pulse_st.reserve_linked_character_id = None;
+                    pulse_st.reserve_link_started_tick = None;
+                    pulse_st.link_started_unix = None;
+                    if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                        if st.ess_linked_character_id == Some(char_id) {
+                            st.ess_linked_character_id = None;
+                            st.ess_link_started_tick = None;
+                        }
+                    }
+                    if pulse_st.pulses_remaining == 0 || window_expired {
+                        pulse_st.unlocked_until_unix = 0;
+                        clear_rt = true;
+                    }
+                }
+                super::space_destiny::set_ess_reserve_pulses(snap, sys_id, &pulse_st);
+                let banks = snap
+                    .system_states
+                    .get(&sys_id)
+                    .map(|s| (s.ess_main_bank.to_wire_f64(), s.ess_reserve_bank.to_wire_f64()));
+                (payouts, last_bal_wire, banks, term, clear_rt)
+            });
+
+        if clear_rt_unlock {
+            super::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.ess_reserve_unlocked_until.remove(&sys_id);
+            });
+        }
+        if !pulse_payouts.is_empty() {
+            processed += pulse_payouts.len();
+            let suspect_until = now_unix.saturating_add(900);
+            let weapon_until = now_unix.saturating_add(60);
+            {
+                let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                let st = cw.get_or_create(char_id);
+                st.suspect_flag_until_unix = st.suspect_flag_until_unix.max(suspect_until);
+                st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(suspect_until);
+                st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(weapon_until);
+            }
+            super::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
+            if let Some(bal_f64) = bal_wire {
+                ctx.notify_account_change(char_id, "cash", char_id, bal_f64);
+            }
+            super::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                let list = rt.ess_reserve_bank_thefts.entry(sys_id).or_default();
+                for &(amt, ts) in &pulse_payouts {
+                    list.push((char_id, amt, ts));
+                }
+            });
+            if let Some((post_main, post_reserve)) = post_banks {
+                let ess_data = PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("mainBank", PyRep::Real(post_main)),
+                    ("reserveBank", PyRep::Real(post_reserve)),
+                ]);
+                super::notify_emitters_batch6::emit_system_ess_data_changed(
+                    ctx,
+                    sys_id as i64,
+                    ess_data,
+                );
+            }
+        }
+        if terminated {
+            super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
+        }
+    }
+    processed
+}
+
+/// Applies the canonical K-space null-sec DBS & ESS Main/Reserve Bank bounty split for 1 Hz
+/// `NpcSpawnManager` ballpark NPC kills while preserving direct full-bounty payout in non-nullsec space.
+pub fn credit_ballpark_npc_bounty_with_ess_split(
+    sde: &SdeRegistry,
+    snap: &mut WorldStateSnapshot,
+    sys_id: SolarSystemId,
+    killer_char_id: CharacterId,
+    raw_bounty_isk: f64,
+    base_entity_bounty_isk: f64,
+    supp_mult: f64,
+    npc_type_id: TypeId,
+    now_unix: u64,
+) {
+    let sys_sec = sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.5);
+    let is_kspace_nullsec = sys_sec <= 0.0 && sys_id < 31_000_000;
+    if !is_kspace_nullsec {
+        let bounty_cents = IskCents::from_f64_isk(raw_bounty_isk);
+        if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+            ch.balance = ch.balance.checked_add(bounty_cents).unwrap_or(ch.balance);
+            let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
+            ch.security_status = (ch.security_status + gain).min(5.0);
+        }
+        let bal_after = snap
+            .characters
+            .get(&killer_char_id)
+            .map(|c| c.balance)
+            .unwrap_or(bounty_cents);
+        snap.append_journal(
+            killer_char_id,
+            "bounty_payout",
+            bounty_cents,
+            bal_after,
+            format!("NPC bounty award for destruction of {npc_type_id}"),
+        );
+        return;
+    }
+
+    let dbs_mult = snap
+        .system_states
+        .get(&sys_id)
+        .map(|st| st.dbs_multiplier)
+        .unwrap_or(1.35);
+    let char_corp_id = snap
+        .characters
+        .get(&killer_char_id)
+        .map(|c| c.corporation_id)
+        .unwrap_or(0);
+    let (is_player_corp, resolved_tax_rate) = match snap.corporations.get(&char_corp_id) {
+        Some(c) => (true, c.tax_rate.clamp(0.0, 1.0)),
+        None => (false, 0.11),
+    };
+    let modified_gross = raw_bounty_isk * dbs_mult;
+    let effective_tax_rate = if !is_player_corp && modified_gross < 100_000.0 {
+        0.0
+    } else {
+        resolved_tax_rate
+    };
+    let (pilot_isk, tax_isk, main_ess, reserve_ess) =
+        crate::formulas::compute_dbs_and_ess_bounty_split(raw_bounty_isk, dbs_mult, effective_tax_rate);
+    let pilot_cents = IskCents::from_f64_isk(pilot_isk);
+    let tax_cents = IskCents::from_f64_isk(tax_isk);
+    let main_cents = IskCents::from_f64_isk(main_ess);
+    let reserve_cents = IskCents::from_f64_isk(reserve_ess);
+
+    if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
+        ch.balance = ch.balance.checked_add(pilot_cents).unwrap_or(ch.balance);
+        let gain = crate::combat::compute_sec_status_gain(ch.security_status, base_entity_bounty_isk) * supp_mult;
+        ch.security_status = (ch.security_status + gain).min(5.0);
+    }
+    if is_player_corp && tax_cents.raw_cents() > 0 {
+        if let Some(corp) = snap.corporations.get_mut(&char_corp_id) {
+            corp.ensure_wallet_divisions();
+            corp.master_wallet = corp.master_wallet.checked_add(tax_cents).unwrap_or(corp.master_wallet);
+            if let Some(d0) = corp.wallet_divisions.first_mut() {
+                d0.balance = d0.balance.checked_add(tax_cents).unwrap_or(d0.balance);
+            }
+        }
+    }
+    let st = snap.system_states.entry(sys_id).or_default();
+    st.solar_system_id = sys_id;
+    st.ess_main_bank = st.ess_main_bank.checked_add(main_cents).unwrap_or(st.ess_main_bank);
+    record_ess_main_bank_contribution(st, killer_char_id, main_cents.0, now_unix);
+    st.ess_reserve_bank = st.ess_reserve_bank.checked_add(reserve_cents).unwrap_or(st.ess_reserve_bank);
+
+    let bal_after = snap
+        .characters
+        .get(&killer_char_id)
+        .map(|c| c.balance)
+        .unwrap_or(pilot_cents);
+    snap.append_journal(
+        killer_char_id,
+        "bounty_prizes",
+        pilot_cents,
+        bal_after,
+        format!("NPC bounty award for destruction of {npc_type_id} in system {sys_id} (DBS {dbs_mult:.2}x)"),
+    );
+    if tax_cents.raw_cents() > 0 {
+        snap.append_journal(
+            killer_char_id,
+            "bounty_prize_corporation_tax",
+            IskCents::from_raw_cents(-tax_cents.raw_cents()),
+            bal_after,
+            format!("Corporation tax ({:.0}%) on NPC bounty in {sys_id}", effective_tax_rate * 100.0),
+        );
+    }
+}

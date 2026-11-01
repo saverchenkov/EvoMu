@@ -324,7 +324,7 @@ pub async fn handle_ess_link(
         rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0)
     });
 
-    let (payout, link_started_only, unlocked_until_new, clear_unlock, new_bal_f64) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (payout, link_started_only, unlocked_until_new, clear_unlock, new_bal_f64, reserve_terminated) = ctx.db.try_with_mut_snapshot(|snap| {
         let is_reserve = method == "AttemptLinkToReserveBank";
         let mut unlocked_until_new: Option<u64> = None;
         let mut clear_unlock = false;
@@ -381,7 +381,7 @@ pub async fn handle_ess_link(
                         message: "All ESS Reserve Bank pulses for this key have been exhausted".into(),
                     });
                 }
-                if pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
+                if already_linked && pulse_st.last_pulse_sec.is_some_and(|last| now_unix < last.saturating_add(60)) {
                     return Err(BridgeRpcError {
                         code: "EssReservePulseCooldown".into(),
                         message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
@@ -434,6 +434,7 @@ pub async fn handle_ess_link(
             if is_reserve {
                 pulse_st.reserve_linked_character_id = Some(char_id);
                 pulse_st.reserve_link_started_tick = Some(current_tick);
+                pulse_st.link_started_unix = Some(now_unix);
                 crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
                     &mut snap.service_state_blobs,
                     sys_id,
@@ -447,6 +448,7 @@ pub async fn handle_ess_link(
                 if pulse_st.reserve_linked_character_id == Some(char_id) {
                     pulse_st.reserve_linked_character_id = None;
                     pulse_st.reserve_link_started_tick = None;
+                    pulse_st.link_started_unix = None;
                     crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(
                         &mut snap.service_state_blobs,
                         sys_id,
@@ -456,7 +458,7 @@ pub async fn handle_ess_link(
                 st.ess_linked_character_id = Some(char_id);
                 st.ess_link_started_tick = Some(current_tick);
             }
-            return Ok((0.0, true, unlocked_until_new, false, None));
+            return Ok((0.0, true, unlocked_until_new, false, None, false));
         }
         let start_tick = if is_reserve {
             pulse_st.reserve_link_started_tick.unwrap_or(current_tick)
@@ -472,6 +474,7 @@ pub async fn handle_ess_link(
                 ),
             });
         }
+        let mut reserve_terminated = false;
         let bank = if is_reserve {
             if pulse_st.pulses_remaining == 0 {
                 return Err(BridgeRpcError {
@@ -485,14 +488,19 @@ pub async fn handle_ess_link(
                     message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
                 });
             }
-            let rem = pulse_st.pulses_remaining.max(1) as i64;
-            let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
+            let p = st
+                .ess_reserve_bank
+                .0
+                .checked_div(pulse_st.pulses_remaining as i64)
+                .unwrap_or(st.ess_reserve_bank.0);
             st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
             pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
             pulse_st.last_pulse_sec = Some(now_unix);
             if pulse_st.pulses_remaining == 0 || st.ess_reserve_bank.0 <= 0 {
+                reserve_terminated = true;
                 pulse_st.reserve_linked_character_id = None;
                 pulse_st.reserve_link_started_tick = None;
+                pulse_st.link_started_unix = None;
                 if st.ess_linked_character_id == Some(char_id) {
                     st.ess_linked_character_id = None;
                     st.ess_link_started_tick = None;
@@ -536,7 +544,7 @@ pub async fn handle_ess_link(
             };
             snap.append_journal(char_id, entry_type, bank, bal_after, desc);
         }
-        Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock, bal_wire))
+        Ok((bank.to_wire_f64(), false, unlocked_until_new, clear_unlock, bal_wire, reserve_terminated))
     })?;
 
     if let Some(until) = unlocked_until_new {
@@ -591,7 +599,7 @@ pub async fn handle_ess_link(
             super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, link_id);
             super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", link_id);
         } else {
-            // V24 `dynamicresources.common.ess.const.UNLINKED_MANUAL = 0` (`unlink_reason_description(0) -> None`, normal completion disconnect)
+            let _ = reserve_terminated;
             super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
         let (post_main, post_reserve) = ctx.db.with_snapshot(|snap| {

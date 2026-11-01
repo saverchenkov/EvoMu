@@ -1167,7 +1167,7 @@ pub async fn handle(
                                 let elapsed_days = (now.saturating_sub(re.started_unix) as f64) / 86_400.0;
                                 re.initial_points += re.points_per_day * elapsed_days + re.points_per_day;
                                 let sk_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&re.research_type_id)).map_or(1, |s| s.level);
-                                re.points_per_day = crate::services::pve_open_feats_b36::compute_rnd_rp_per_day(ctx, snap, char_id, m_agent_id, ag_lvl, sk_lvl);
+                                re.points_per_day = re.points_per_day.max(crate::services::pve_open_feats_b36::compute_rnd_rp_per_day(ctx, snap, char_id, m_agent_id, ag_lvl, sk_lvl));
                                 re.started_unix = now;
                             }
                             save_rnd_research_entries(snap, char_id, &research);

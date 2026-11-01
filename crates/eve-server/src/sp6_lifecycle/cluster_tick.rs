@@ -1220,6 +1220,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
     crate::services::combat_npc_encounters::tick_overdue_npc_bounty_payouts(ctx, now_unix);
     let _ = crate::services::pve_open_feats_b36::tick_ess_main_bank_autopayout(ctx, now_unix);
+    let _ = crate::services::pve_open_feats_b36::tick_ess_reserve_bank_links(ctx, now_unix).await;
 
     let due_bounty_ticks: Vec<(u32, i64)> = with_mut_combat_runtime(ctx, |rt| {
         let mut due = Vec::new();

@@ -384,4 +384,123 @@ async fn test_b36_ess_grid_warp_and_module_restrictions() {
         .await
         .expect("Afterburner allowed inside 75 km ESS bubble");
     let _ = ctx.dispatch_rpc(&mut sess_a, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ab_id), PyRep::String("moduleBonusAfterburner".into())], &kw, None).await;
+
+    // 3. `F-04` regression: FleetWarp / WarpFleet enforces the 75 km ESS bubble for destinations and fleet members!
+    let pilot_b = 100_002_i64;
+    let ship_b = 960_040_i64; // Rifter Frigate (587) outside ESS bubble at 400 km
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut cb = snap.characters[&pilot_a].clone();
+        cb.character_id = pilot_b;
+        cb.user_id = 2;
+        cb.active_ship_id = ship_b;
+        snap.characters.insert(pilot_b, cb);
+        snap.items.insert(ship_b, make_item(ship_b, 587, pilot_b, i64::from(sys_id), InventoryFlag::None, 1, true));
+    });
+    let _ = sys_h
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_b,
+                type_id: 587,
+                position: ess_pos + DVec3::new(400_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 1.0,
+                mass: 1_100_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(587),
+        )
+        .await;
+    let mut sess_b = SessionState::new(3699);
+    crate::common::login_pilot(&ctx, &mut sess_b, "other", "other-secret").await;
+    ctx.dispatch_rpc(&mut sess_b, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(pilot_b)], &kw, None)
+        .await
+        .expect("SelectCharacterID pilot_b");
+    ctx.db.clock().advance_secs(15);
+    sess_b.solar_system_id = Some(sys_id);
+    sess_b.station_id = None;
+    sess_b.ship_id = Some(ship_b);
+
+    let cf = ctx
+        .dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "CreateFleet", &[], &kw, None)
+        .await
+        .expect("CreateFleet");
+    let fid = cf.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap_or_else(|| sess_a.fleet_id.unwrap());
+    ctx.dispatch_rpc(&mut sess_a, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(pilot_b), PyRep::None, PyRep::None, PyRep::Integer(4)], &kw, None)
+        .await
+        .expect("Invite pilot_b");
+    let fb_b = ctx.bind_object(&mut sess_b, "fleetObjectHandler", fid).unwrap();
+    ctx.dispatch_rpc(&mut sess_b, "fleetObjectHandler", Some(fb_b), "AcceptInvite", &[PyRep::Integer(fid)], &kw, None)
+        .await
+        .expect("AcceptInvite pilot_b");
+
+    // (a) FleetWarp onto the ESS beacon / ESS grid is rejected with EssIntrusionBubbleWarpBlocked (never warps Frigate ship_b onto ESS grid!)
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess_a,
+            "fleetObjectHandler",
+            None,
+            "FleetWarp",
+            &[PyRep::Integer(ess_id), PyRep::Real(0.0)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "EssIntrusionBubbleWarpBlocked"
+    );
+    assert!(!matches!(
+        sys_h.get_ball_snapshot(ship_b).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
+
+    // (b) When ALL fleet ships are inside the 75 km ESS bubble, FleetWarp out to stargate fails with EssIntrusionBubbleWarpBlocked!
+    let _ = sys_h.set_ball_position(ship_b, ess_pos + DVec3::new(2_000.0, 0.0, 0.0)).await;
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess_a,
+            "fleetObjectHandler",
+            None,
+            "FleetWarp",
+            &[PyRep::Integer(stargate_id), PyRep::Real(0.0)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "EssIntrusionBubbleWarpBlocked"
+    );
+    assert!(!matches!(
+        sys_h.get_ball_snapshot(ship_a).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
+
+    // (c) Mixed fleet: FC ship_a inside 75 km ESS bubble + squadmate ship_b outside (400 km) ->
+    // FleetWarp to exterior stargate skips ESS-bubbled ship_a and warps ONLY unbubbled ship_b!
+    let _ = sys_h.set_ball_position(ship_b, ess_pos + DVec3::new(400_000.0, 0.0, 0.0)).await;
+    let fw_mixed = ctx
+        .dispatch_rpc(
+            &mut sess_a,
+            "fleetObjectHandler",
+            None,
+            "FleetWarp",
+            &[PyRep::Integer(stargate_id), PyRep::Real(0.0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Mixed FleetWarp skips ESS-bubbled ship_a and warps exterior ship_b");
+    assert_eq!(fw_mixed.dict_get("warpCount"), Some(&PyRep::Integer(1)));
+    assert!(!matches!(
+        sys_h.get_ball_snapshot(ship_a).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
+    assert!(matches!(
+        sys_h.get_ball_snapshot(ship_b).await.unwrap().unwrap().1.mode,
+        MovementMode::Warp { .. }
+    ));
 }
