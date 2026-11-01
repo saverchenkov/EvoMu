@@ -300,6 +300,7 @@ async fn test_b35_05_industrial_cyno_rules() {
         give_item(&ctx, mid, 52694, cid, sid, InventoryFlag::HiSlot0, 1);
         give_item(&ctx, mid + 1, 16273, cid, sid, InventoryFlag::Cargo, 2_000);
         ctx.invalidate_ship_fitting(sid);
+        put_in_fleet(&ctx, 880_002, cid, &[(cid, true)]);
         let res = ctx.dispatch_rpc(&mut s, "dogmaIM", None, "Activate", &[PyRep::Integer(mid), PyRep::String("cynosuralGeneration".into()), PyRep::Integer(0), PyRep::Integer(1)], &kw, None).await.expect("Activate Industrial Cyno");
         assert_eq!(res.dict_get("consumptionQuantity"), Some(&PyRep::Integer(expected_lo)), "Hull {hull_tid} CFT {cft_lvl} LO mismatch");
     }
@@ -314,6 +315,7 @@ async fn test_b35_05_industrial_cyno_rules() {
     give_item(&ctx, 972_101, 52694, ven_char, ven_ship, InventoryFlag::HiSlot0, 1);
     give_item(&ctx, 972_102, 16273, ven_char, ven_ship, InventoryFlag::Cargo, 1_000);
     let ven_beyonce = ctx.bind_object(&mut ven_sess, "beyonce", DEST_NULL_SYS as i64).unwrap();
+    put_in_fleet(&ctx, 880_001, ven_char, &[(ven_char, true)]);
     let cyno_res = ctx.dispatch_rpc(&mut ven_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(972_101), PyRep::String("cynosuralGeneration".into()), PyRep::Integer(0), PyRep::Integer(1)], &kw, None).await.expect("Venture CFT V industrial cyno");
     assert_eq!(cyno_res.dict_get("consumptionQuantity"), Some(&PyRep::Integer(400)), "Venture + CFT V must respect 400 LO minimum floor");
     let beacon_id = cyno_res.dict_get("beaconID").and_then(|v| v.as_i64()).unwrap();

@@ -257,12 +257,12 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     spawn_ship_in_space(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, DVec3::new(10_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 970_209, 21096, cyno_char, cyno_ship, InventoryFlag::HiSlot0, 1);
     give_item(&ctx, 970_210, 16273, cyno_char, cyno_ship, InventoryFlag::Cargo, 2_000);
+    put_in_fleet(&ctx, 880_101, titan_char, &[(titan_char, true), (v_200_char, true), (cyno_char, true)]);
     let cyno_res = ctx
         .dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(970_209), PyRep::String("cynosuralGeneration".into()), PyRep::Integer(0), PyRep::Integer(1)], &kw, None)
         .await
         .expect("Light cyno");
     let beacon_id = cyno_res.dict_get("beaconID").and_then(|v| v.as_i64()).unwrap();
-    put_in_fleet(&ctx, 880_101, titan_char, &[(titan_char, true), (v_200_char, true), (cyno_char, true)]);
 
     let cs_200_init = sys.get_combat_state(v_200km).await.unwrap().unwrap();
     let cs_350_init = sys.get_combat_state(v_350km).await.unwrap().unwrap();

@@ -10,8 +10,8 @@ use crate::quasar_gateway::{
     STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_daily_goals::{
-    encode_goal_attributes, encode_goal_earnings, encode_goal_identifier, extract_uuid,
-    CharacterDailyGoal, DailyGoalManager,
+    daily_goal_day_bucket, encode_goal_attributes, encode_goal_earnings, encode_goal_identifier,
+    extract_uuid, CharacterDailyGoal, DailyGoalManager,
 };
 use crate::services::quasar_social_chat::ctx_queue_notice;
 use eve_db::{IskCents, WorldRepository};
@@ -19,11 +19,10 @@ use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue,
     GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const LP_OPS_BLOB_KEY: &str = "b34_lp_assetholding_ops";
-const CORP_LP_BLOB_KEY: &str = "b34_corp_loyalty_points";
 
 // ============================================================================
 // Wire Encoding & Decoding Helpers
@@ -208,7 +207,7 @@ struct ParsedLpOperation {
     op_uuid: [u8; 16],
     owner: LpWalletOwner,
     issuer_corp_id: u32,
-    amount: u64,
+    amount: i64,
     context_bytes: Vec<u8>,
 }
 
@@ -245,14 +244,18 @@ fn parse_lp_operation_request(
         return Err((STATUS_BAD_REQUEST, "Missing issuer corporation".into()));
     }
 
-    let amount = if let Some(DynamicValue::Message(curr)) = op_attr.get(2) {
+    let raw_amount = if let Some(DynamicValue::Message(curr)) = op_attr.get(2) {
         extract_u64_field(curr, 1).unwrap_or(0)
     } else {
         0
     };
-    if amount == 0 {
+    if raw_amount == 0 {
         return Err((STATUS_BAD_REQUEST, "LP operation amount must be > 0".into()));
     }
+    let amount = i64::try_from(raw_amount)
+        .ok()
+        .filter(|&v| v > 0)
+        .ok_or_else(|| (STATUS_BAD_REQUEST, "LP amount out of range".into()))?;
 
     let context_bytes = match dyn_msg.get(3) {
         Some(DynamicValue::Bytes(b)) => b.clone(),
@@ -291,7 +294,7 @@ fn encode_lp_op_attributes(op: &ParsedLpOperation, out: &mut Vec<u8>) {
     encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
     encode_bytes_field(1, &w_bytes, out);
     let mut curr_bytes = Vec::new();
-    encode_varint_field(1, op.amount, &mut curr_bytes);
+    encode_varint_field(1, op.amount as u64, &mut curr_bytes);
     encode_bytes_field(2, &curr_bytes, out);
 }
 
@@ -490,15 +493,12 @@ pub fn register_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing character Identifier".into()));
             };
             let now_unix = ctx.now_unix();
+            let day_bucket = daily_goal_day_bucket(now_unix);
             let templates = mgr.get_templates();
-            let mut new_goals = Vec::new();
-            for (idx, tpl) in templates.iter().take(4).enumerate() {
-                let mut uuid = [0u8; 16];
-                uuid[0..8].copy_from_slice(&now_unix.to_be_bytes());
-                uuid[8..12].copy_from_slice(&cid.to_be_bytes());
-                uuid[12..16].copy_from_slice(&(idx as u32 + 1).to_be_bytes());
-                new_goals.push(CharacterDailyGoal {
-                    uuid,
+            let new_goals: Vec<CharacterDailyGoal> = templates
+                .iter()
+                .map(|tpl| CharacterDailyGoal {
+                    uuid: tpl.uuid,
                     template: tpl.clone(),
                     current_progress: 0,
                     completed: false,
@@ -506,9 +506,10 @@ pub fn register_handlers(
                     completed_at_unix: None,
                     claimed_at_unix: None,
                     paid_completion: false,
-                    day_bucket: now_unix / 86_400,
-                });
-            }
+                    day_bucket,
+                    expired: false,
+                })
+                .collect();
             {
                 let mut map = mgr.character_goals.write().unwrap_or_else(|e| e.into_inner());
                 map.insert(cid, new_goals.clone());
@@ -584,9 +585,10 @@ pub fn register_handlers(
                 let list = map.get_mut(&target_cid).ok_or_else(|| {
                     (STATUS_NOT_FOUND, "Character daily goals not found".into())
                 })?;
-                let g = list.iter_mut().find(|g| g.uuid == goal_uuid).ok_or_else(|| {
-                    (STATUS_NOT_FOUND, "Daily goal not found".into())
-                })?;
+                let g = list
+                    .iter_mut()
+                    .find(|g| g.uuid == goal_uuid && !g.expired)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Daily goal not found".into()))?;
                 let prev = g.current_progress;
                 let was_completed = g.completed;
                 g.current_progress = g
@@ -647,9 +649,12 @@ pub fn register_handlers(
             let removed = {
                 let mut map = mgr.character_goals.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(list) = map.get_mut(&target_cid) {
-                    let before = list.len();
-                    list.retain(|g| g.uuid != goal_uuid);
-                    list.len() < before
+                    if let Some(g) = list.iter_mut().find(|g| g.uuid == goal_uuid && !g.expired) {
+                        g.expired = true;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -729,91 +734,95 @@ pub fn register_handlers(
             let hex = op_uuid_hex(&op.op_uuid);
             let now_unix = ctx.now_unix();
 
-            let new_balance: u64 = db_dep
-                .try_with_mut_snapshot(|snap| -> Result<u64, (u32, String)> {
+            let (new_balance, already_done): (u64, bool) = db_dep
+                .try_with_mut_snapshot(|snap| -> Result<(u64, bool), (u32, String)> {
                     let mut ops: HashSet<String> = snap
                         .service_state_blobs
                         .get(LP_OPS_BLOB_KEY)
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default();
-                    let already_done = !ops.insert(format!("dep:{hex}"));
-                    if let Ok(json) = serde_json::to_string(&ops) {
-                        snap.service_state_blobs.insert(LP_OPS_BLOB_KEY.into(), json);
-                    }
+                    let already_done = ops.contains(&format!("dep:{hex}"));
 
-                    match op.owner {
+                    let bal = match op.owner {
                         LpWalletOwner::Character(cid) => {
                             let ch = snap.characters.get_mut(&i64::from(cid)).ok_or_else(|| {
                                 (STATUS_NOT_FOUND, format!("character {cid} not found"))
                             })?;
                             let entry = ch.loyalty_points.entry(i64::from(op.issuer_corp_id)).or_insert(0);
                             if !already_done {
-                                *entry = entry.saturating_add(op.amount as i64);
+                                *entry = entry
+                                    .checked_add(op.amount)
+                                    .ok_or_else(|| (STATUS_BAD_REQUEST, "LP balance overflow".into()))?;
                             }
-                            Ok((*entry).max(0) as u64)
+                            (*entry).max(0) as u64
                         }
                         LpWalletOwner::Corporation(corp_id) => {
-                            let mut corp_lp: HashMap<String, u64> = snap
-                                .service_state_blobs
-                                .get(CORP_LP_BLOB_KEY)
-                                .and_then(|s| serde_json::from_str(s).ok())
-                                .unwrap_or_default();
-                            let key = format!("{corp_id}:{}", op.issuer_corp_id);
-                            let entry = corp_lp.entry(key).or_insert(0);
+                            let entry = snap
+                                .corp_lp_balances
+                                .entry((i64::from(corp_id), i64::from(op.issuer_corp_id)))
+                                .or_insert(0);
                             if !already_done {
-                                *entry = entry.saturating_add(op.amount);
+                                *entry = entry
+                                    .checked_add(op.amount)
+                                    .ok_or_else(|| (STATUS_BAD_REQUEST, "LP balance overflow".into()))?;
                             }
-                            let bal = *entry;
-                            if let Ok(json) = serde_json::to_string(&corp_lp) {
-                                snap.service_state_blobs.insert(CORP_LP_BLOB_KEY.into(), json);
-                            }
-                            Ok(bal)
+                            (*entry).max(0) as u64
+                        }
+                    };
+
+                    if !already_done {
+                        ops.insert(format!("dep:{hex}"));
+                        if let Ok(json) = serde_json::to_string(&ops) {
+                            snap.service_state_blobs.insert(LP_OPS_BLOB_KEY.into(), json);
                         }
                     }
+                    Ok((bal, already_done))
                 })?;
 
-            let scope = match op.owner {
-                LpWalletOwner::Character(cid) => NoticeScope::Character(cid),
-                LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
-            };
+            if !already_done {
+                let scope = match op.owner {
+                    LpWalletOwner::Character(cid) => NoticeScope::Character(cid),
+                    LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
+                };
 
-            let mut added_bytes = Vec::new();
-            let mut w_bytes = Vec::new();
-            encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
-            encode_bytes_field(1, &w_bytes, &mut added_bytes);
-            encode_varint_field(2, op.amount, &mut added_bytes);
-            encode_varint_field(3, new_balance, &mut added_bytes);
-            encode_varint_field(4, 0, &mut added_bytes);
-            ctx_queue_notice(
-                scope.clone(),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.wallet.api.BalanceAdded"),
-                    value: added_bytes,
-                },
-                now_unix,
-            );
+                let mut added_bytes = Vec::new();
+                let mut w_bytes = Vec::new();
+                encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
+                encode_bytes_field(1, &w_bytes, &mut added_bytes);
+                encode_varint_field(2, op.amount as u64, &mut added_bytes);
+                encode_varint_field(3, new_balance, &mut added_bytes);
+                encode_varint_field(4, 0, &mut added_bytes);
+                ctx_queue_notice(
+                    scope.clone(),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.wallet.api.BalanceAdded"),
+                        value: added_bytes,
+                    },
+                    now_unix,
+                );
 
-            ctx_queue_notice(
-                scope.clone(),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Deposited"
-                    ),
-                    value: encode_lp_op_event(&op),
-                },
-                now_unix,
-            );
+                ctx_queue_notice(
+                    scope.clone(),
+                    GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Deposited"
+                        ),
+                        value: encode_lp_op_event(&op),
+                    },
+                    now_unix,
+                );
 
-            ctx_queue_notice(
-                scope,
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Ended"
-                    ),
-                    value: encode_lp_op_ended(&op.op_uuid),
-                },
-                now_unix,
-            );
+                ctx_queue_notice(
+                    scope,
+                    GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Ended"
+                        ),
+                        value: encode_lp_op_ended(&op.op_uuid),
+                    },
+                    now_unix,
+                );
+            }
 
             Ok(GoogleAny {
                 type_url: format!(
@@ -834,8 +843,8 @@ pub fn register_handlers(
             let hex = op_uuid_hex(&op.op_uuid);
             let now_unix = ctx.now_unix();
 
-            let new_balance: u64 = db_wd
-                .try_with_mut_snapshot(|snap| -> Result<u64, (u32, String)> {
+            let (new_balance, already_done): (u64, bool) = db_wd
+                .try_with_mut_snapshot(|snap| -> Result<(u64, bool), (u32, String)> {
                     let mut ops: HashSet<String> = snap
                         .service_state_blobs
                         .get(LP_OPS_BLOB_KEY)
@@ -850,38 +859,41 @@ pub fn register_handlers(
                             })?;
                             let entry = ch.loyalty_points.entry(i64::from(op.issuer_corp_id)).or_insert(0);
                             if !already_done {
-                                if (*entry).max(0) < op.amount as i64 {
+                                if (*entry).max(0) < op.amount {
                                     return Err((
                                         STATUS_PRECONDITION_FAILED,
                                         "Insufficient loyalty points balance".into(),
                                     ));
                                 }
-                                *entry -= op.amount as i64;
+                                *entry = entry.checked_sub(op.amount).ok_or_else(|| {
+                                    (
+                                        STATUS_PRECONDITION_FAILED,
+                                        "Insufficient loyalty points balance".into(),
+                                    )
+                                })?;
                             }
                             (*entry).max(0) as u64
                         }
                         LpWalletOwner::Corporation(corp_id) => {
-                            let mut corp_lp: HashMap<String, u64> = snap
-                                .service_state_blobs
-                                .get(CORP_LP_BLOB_KEY)
-                                .and_then(|s| serde_json::from_str(s).ok())
-                                .unwrap_or_default();
-                            let key = format!("{corp_id}:{}", op.issuer_corp_id);
-                            let entry = corp_lp.entry(key).or_insert(0);
+                            let entry = snap
+                                .corp_lp_balances
+                                .entry((i64::from(corp_id), i64::from(op.issuer_corp_id)))
+                                .or_insert(0);
                             if !already_done {
-                                if *entry < op.amount {
+                                if (*entry).max(0) < op.amount {
                                     return Err((
                                         STATUS_PRECONDITION_FAILED,
                                         "Insufficient corporation loyalty points balance".into(),
                                     ));
                                 }
-                                *entry -= op.amount;
+                                *entry = entry.checked_sub(op.amount).ok_or_else(|| {
+                                    (
+                                        STATUS_PRECONDITION_FAILED,
+                                        "Insufficient corporation loyalty points balance".into(),
+                                    )
+                                })?;
                             }
-                            let bal = *entry;
-                            if let Ok(json) = serde_json::to_string(&corp_lp) {
-                                snap.service_state_blobs.insert(CORP_LP_BLOB_KEY.into(), json);
-                            }
-                            bal
+                            (*entry).max(0) as u64
                         }
                     };
 
@@ -891,50 +903,52 @@ pub fn register_handlers(
                             snap.service_state_blobs.insert(LP_OPS_BLOB_KEY.into(), json);
                         }
                     }
-                    Ok(bal)
+                    Ok((bal, already_done))
                 })?;
 
-            let scope = match op.owner {
-                LpWalletOwner::Character(cid) => NoticeScope::Character(cid),
-                LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
-            };
+            if !already_done {
+                let scope = match op.owner {
+                    LpWalletOwner::Character(cid) => NoticeScope::Character(cid),
+                    LpWalletOwner::Corporation(corp_id) => NoticeScope::Corporation(corp_id),
+                };
 
-            let mut rem_bytes = Vec::new();
-            let mut w_bytes = Vec::new();
-            encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
-            encode_bytes_field(1, &w_bytes, &mut rem_bytes);
-            encode_varint_field(2, op.amount, &mut rem_bytes);
-            encode_varint_field(3, new_balance, &mut rem_bytes);
-            ctx_queue_notice(
-                scope.clone(),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.wallet.api.BalanceRemoved"),
-                    value: rem_bytes,
-                },
-                now_unix,
-            );
+                let mut rem_bytes = Vec::new();
+                let mut w_bytes = Vec::new();
+                encode_lp_wallet_id(op.owner, op.issuer_corp_id, &mut w_bytes);
+                encode_bytes_field(1, &w_bytes, &mut rem_bytes);
+                encode_varint_field(2, op.amount as u64, &mut rem_bytes);
+                encode_varint_field(3, new_balance, &mut rem_bytes);
+                ctx_queue_notice(
+                    scope.clone(),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.wallet.api.BalanceRemoved"),
+                        value: rem_bytes,
+                    },
+                    now_unix,
+                );
 
-            ctx_queue_notice(
-                scope.clone(),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Withdrawn"
-                    ),
-                    value: encode_lp_op_event(&op),
-                },
-                now_unix,
-            );
+                ctx_queue_notice(
+                    scope.clone(),
+                    GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Withdrawn"
+                        ),
+                        value: encode_lp_op_event(&op),
+                    },
+                    now_unix,
+                );
 
-            ctx_queue_notice(
-                scope,
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Ended"
-                    ),
-                    value: encode_lp_op_ended(&op.op_uuid),
-                },
-                now_unix,
-            );
+                ctx_queue_notice(
+                    scope,
+                    GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve.loyaltypoints.assetholding.operation.api.Ended"
+                        ),
+                        value: encode_lp_op_ended(&op.op_uuid),
+                    },
+                    now_unix,
+                );
+            }
 
             Ok(GoogleAny {
                 type_url: format!(

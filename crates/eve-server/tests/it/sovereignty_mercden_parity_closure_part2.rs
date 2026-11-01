@@ -146,6 +146,9 @@ async fn test_sov_cyno_jammer_upgrade_and_hub_hacking_parity() {
 
     let jam_on = rpc_call(&ctx, &mut s_dir, "beyonce", "GetCynoJammerState", &[]).await.expect("GetCynoJammerState");
     assert_eq!(jam_on.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: PILOT, members: vec![PILOT], ..Default::default() });
+    });
     let cyno_err = rpc_call(&ctx, &mut s_dir, "dogmaIM", "Activate", &[PyRep::Integer(984_020), PyRep::String("cynosuralGeneration".into())])
         .await.unwrap_err();
     assert_eq!(cyno_err.code, "CynoJammed");

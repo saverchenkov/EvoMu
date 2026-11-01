@@ -158,9 +158,44 @@ async fn test_space_cyno_and_inventory_vault_containers() {
         .expect("GetCynoJammerState with beacon");
     assert_eq!(dict_get(&beacon_state, "isJammed"), Some(&PyRep::Bool(false)));
 
-    // Deploy Tenebrex Cyno Jammer (37534) -> flex jammer actively jams system cynos
+    // Deploy Tenebrex Cyno Jammer (37534) + Sov Hub with Cynosural Suppression -> flex jammer actively jams system cynos
+    let hub_structure_id = 920_002;
     let jammer_structure_id = 920_003;
     ctx.db.with_mut_snapshot(|s| {
+        s.structures.insert(
+            hub_structure_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: hub_structure_id,
+                type_id: 32458, // Sovereignty Hub
+                owner_corp_id: 1_000_170,
+                solar_system_id: SYS_JITA,
+                name: "Test Sov Hub".into(),
+                position: [1_000.0, 1_000.0, 1_000.0],
+                state: "Online".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        s.sov_runtime.sov_hubs.insert(
+            hub_structure_id,
+            eve_db::PersistedSovHubData {
+                hub_id: hub_structure_id,
+                upgrades: vec![eve_db::PersistedHubUpgrade {
+                    type_id: 81_619, // Cynosural Suppression
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        s.sov_runtime.tenebrex_spool_ready_unix.insert(jammer_structure_id, 0);
         s.structures.insert(
             jammer_structure_id,
             eve_db::UpwellStructureRecord {
@@ -190,7 +225,9 @@ async fn test_space_cyno_and_inventory_vault_containers() {
     // Clean up structures
     ctx.db.with_mut_snapshot(|s| {
         s.structures.remove(&beacon_structure_id);
+        s.structures.remove(&hub_structure_id);
         s.structures.remove(&jammer_structure_id);
+        s.sov_runtime.sov_hubs.remove(&hub_structure_id);
     });
 
     // 3. rpc:invbroker.WithdrawPlexFromVault: credit vault with 500 PLEX

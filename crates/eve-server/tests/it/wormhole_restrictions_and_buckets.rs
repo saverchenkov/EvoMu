@@ -99,6 +99,7 @@ async fn test_wormhole_restrictions_and_buckets() {
             },
         );
         snap.skills.entry(char_id).or_default().insert(21_603, eve_db::TrainedSkillRecord { type_id: 21_603, level: 5, skill_points: 256_000.0 });
+        snap.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: char_id, members: vec![char_id], ..Default::default() });
     });
     sess.solar_system_id = Some(31_000_005);
     sess.ship_id = Some(ship_id);

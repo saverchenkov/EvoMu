@@ -129,6 +129,8 @@ pub struct CharacterDailyGoal {
     pub claimed_at_unix: Option<u64>,
     #[serde(default)]
     pub day_bucket: u64,
+    #[serde(default)]
+    pub expired: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -155,14 +157,18 @@ impl Default for DailyGoalManager {
     }
 }
 
+/// Daily goals reset at 11:00 UTC downtime (39_600s offset from 00:00 UTC).
+pub fn daily_goal_day_bucket(now_unix: u64) -> u64 {
+    now_unix.saturating_sub(39_600) / 86_400
+}
+
 fn ensure_character_daily_goals_with_templates(
     goals: &mut Vec<CharacterDailyGoal>,
     templates: &[DailyGoalTemplate],
     now_unix: u64,
 ) -> bool {
     let mut changed = false;
-    // Daily goals reset at 11:00 UTC downtime (39_600s offset from 00:00 UTC).
-    let day_bucket = now_unix.saturating_sub(39_600) / 86_400;
+    let day_bucket = daily_goal_day_bucket(now_unix);
     for tpl in templates {
         if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
             existing.template = tpl.clone();
@@ -173,6 +179,7 @@ fn ensure_character_daily_goals_with_templates(
                 existing.paid_completion = false;
                 existing.completed_at_unix = None;
                 existing.claimed_at_unix = None;
+                existing.expired = false;
                 existing.day_bucket = day_bucket;
                 changed = true;
             } else if existing.day_bucket == 0 && day_bucket > 0 {
@@ -190,6 +197,7 @@ fn ensure_character_daily_goals_with_templates(
                 completed_at_unix: None,
                 claimed_at_unix: None,
                 day_bucket,
+                expired: false,
             });
             changed = true;
         }
@@ -410,7 +418,8 @@ impl DailyGoalManager {
             let is_new_char = !map.contains_key(&character_id);
             let goals = map.entry(character_id).or_default();
             let mutated = self.ensure_character_goals(goals, effective_now);
-            (goals.clone(), is_new_char || mutated)
+            let active = goals.iter().filter(|g| !g.expired).cloned().collect();
+            (active, is_new_char || mutated)
         };
         if changed {
             self.save_to_db();
@@ -433,7 +442,7 @@ impl DailyGoalManager {
         self.ensure_character_goals(goals, now_unix);
 
         for g in goals.iter_mut() {
-            if &g.uuid == goal_uuid {
+            if &g.uuid == goal_uuid && !g.expired {
                 let prev_completed = g.completed;
                 g.current_progress = g.current_progress.saturating_add(progress_delta);
                 if g.current_progress >= g.template.target && !g.completed {
@@ -539,7 +548,7 @@ impl DailyGoalManager {
                 .unwrap_or_else(|e| e.into_inner());
             let goals = map.entry(character_id).or_default();
             self.ensure_character_goals(goals, now_unix);
-            let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid) else {
+            let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid && !g.expired) else {
                 return Err((STATUS_NOT_FOUND, "Daily goal not found".into()));
             };
             if g.completed {
@@ -667,7 +676,7 @@ impl DailyGoalManager {
             self.ensure_character_goals(goals, now_unix);
 
             for g in goals.iter_mut() {
-                if g.template.category == category && !g.completed {
+                if g.template.category == category && !g.completed && !g.expired {
                     let prev = g.completed;
                     g.current_progress = g.current_progress.saturating_add(delta);
                     if g.current_progress >= g.template.target {

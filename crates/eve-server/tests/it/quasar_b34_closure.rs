@@ -256,7 +256,7 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
             .collect(),
         _ => Vec::new(),
     };
-    assert!(uuids.len() >= 2, "Expected at least 2 daily goals");
+    assert_eq!(uuids.len(), 5, "Expected exact 5 canonical daily goals");
     let g1 = uuids[0];
     let g2 = uuids[1];
 
@@ -317,6 +317,10 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
 
     let gone_rsp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.GetRequest", make_uuid_req(g2)).await;
     assert_eq!(gone_rsp.status_code, STATUS_NOT_FOUND);
+    let after_exp_rsp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.GetAllRequest", Vec::new()).await;
+    let after_exp_dyn = reg.decode_dynamic("eve.dailygoal.api.GetAllResponse", &after_exp_rsp.payload.unwrap().value).unwrap();
+    let Some(DynamicValue::Repeated(rem_items)) = after_exp_dyn.get(1) else { panic!("expected repeated goals"); };
+    assert_eq!(rem_items.len(), 4, "Expired standard template goal must not be resurrected");
 }
 
 // ============================================================================
@@ -346,6 +350,12 @@ async fn test_b34_loyalty_points_wallet_assetholding_closure() {
 
     let dep_uuid = [0x11u8; 16];
     let dep_req = make_lp_op_req(dep_uuid, Some(cid), None, issuer_corp, 2_500);
+
+    // Out-of-range u64 amounts (1u64 << 63, u64::MAX) must be rejected with STATUS_BAD_REQUEST (B34-P1-01)
+    for bad_amt in [1u64 << 63, u64::MAX] {
+        let bad_req = make_lp_op_req([0x10u8; 16], Some(cid), None, issuer_corp, bad_amt);
+        assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.loyaltypoints.assetholding.operation.api.DepositRequest", bad_req).await.status_code, STATUS_BAD_REQUEST);
+    }
 
     // Non-GM session must be rejected with STATUS_FORBIDDEN (B34-P0-01)
     let forb_dep = quasar_rpc(
@@ -377,6 +387,7 @@ async fn test_b34_loyalty_points_wallet_assetholding_closure() {
     assert_eq!(dep_dup.status_code, STATUS_OK);
 
     let notices = drain_notices(&mut rx);
+    assert_eq!(notices.len(), 3, "Duplicate op_uuid must suppress duplicate notices (B34-P1-01)");
     let bal_added = notices
         .iter()
         .find(|n| n.normalized_type_name() == "eve.loyaltypoints.wallet.api.BalanceAdded")
@@ -436,6 +447,17 @@ async fn test_b34_loyalty_points_wallet_assetholding_closure() {
     assert!(wd_notices
         .iter()
         .any(|n| n.normalized_type_name() == "eve.loyaltypoints.assetholding.operation.api.Ended"));
+
+    // Corporation Quasar LP deposit & withdrawal round-trip through LPSvc.GetAllMyCorporationWalletLPBalances (B34-P1-02)
+    let corp_id: u32 = 98_000_001;
+    sess.corporation_id = Some(i64::from(corp_id));
+    sess.corp_role = u64::MAX;
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.loyaltypoints.assetholding.operation.api.DepositRequest", make_lp_op_req([0x44u8; 16], None, Some(corp_id), issuer_corp, 4_000)).await.status_code, STATUS_OK);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest", make_lp_op_req([0x55u8; 16], None, Some(corp_id), issuer_corp, 1_500)).await.status_code, STATUS_OK);
+    let corp_lp_rep = ctx.dispatch_rpc(&mut sess, "LPSvc", None, "GetAllMyCorporationWalletLPBalances", &[eve_proto::PyRep::Integer(i64::from(corp_id))], &std::collections::HashMap::new(), None).await.expect("GetAllMyCorporationWalletLPBalances");
+    let eve_proto::PyRep::List(entries) = corp_lp_rep else { panic!("expected List"); };
+    let lp_val = entries.iter().find_map(|e| e.dict_get("loyaltyPoints").and_then(|v| v.as_i64()));
+    assert_eq!(lp_val, Some(2_500));
 }
 
 // ============================================================================

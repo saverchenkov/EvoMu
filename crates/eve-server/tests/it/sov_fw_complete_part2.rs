@@ -252,6 +252,9 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
         .await
         .expect("GetCynoJammerState with Cynosural Suppression upgrade + Tenebrex online");
     assert_eq!(jammer_state_fueled.dict_get("isJammed"), Some(&PyRep::Bool(true)));
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: PILOT, members: vec![PILOT], ..Default::default() });
+    });
     assert_eq!(
         sov_call(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(990_200), PyRep::String("cynosuralGeneration".into())])
             .await

@@ -537,6 +537,7 @@ async fn test_remediated_mobile_cyno_inhibitor_lifecycle_and_activation() {
         sk.insert(11584, eve_db::TrainedSkillRecord { type_id: 11584, level: 5, skill_points: 256_000.0 });
         sk.insert(21603, eve_db::TrainedSkillRecord { type_id: 21603, level: 5, skill_points: 256_000.0 });
         sk.insert(21611, eve_db::TrainedSkillRecord { type_id: 21611, level: 5, skill_points: 256_000.0 });
+        snap.fleets.insert(5001, eve_db::FleetRecord { fleet_id: 5001, boss_id: OWNER, members: vec![OWNER], ..Default::default() });
     });
     ctx.invalidate_ship_fitting(falcon_id);
 
