@@ -288,7 +288,7 @@ async fn test_journey_corporation() {
         }
     });
     // Negative RentOffice checks: remote station, nonexistent station, insufficient role
-    let err_remote = call_rpc(&ctx, &mut sess1, "corpStationMgr", "RentOffice", &[PyRep::Integer(60_003_761)])
+    let err_remote = call_rpc(&ctx, &mut sess1, "officeManager", "RentOffice", &[PyRep::Integer(60_003_761)])
         .await
         .expect_err("remote station must fail");
     assert_eq!(err_remote.code, "NotDockedAtStation");
@@ -299,7 +299,7 @@ async fn test_journey_corporation() {
             ch.station_id = Some(999_999_999);
         }
     });
-    let err_missing = call_rpc(&ctx, &mut sess1, "corpStationMgr", "RentOffice", &[PyRep::Integer(999_999_999)])
+    let err_missing = call_rpc(&ctx, &mut sess1, "officeManager", "RentOffice", &[PyRep::Integer(999_999_999)])
         .await
         .expect_err("nonexistent station must fail");
     assert_eq!(err_missing.code, "StationNotFound");
@@ -309,13 +309,13 @@ async fn test_journey_corporation() {
             ch.station_id = orig_station;
         }
     });
-    let err_role = call_rpc(&ctx, &mut sess2, "corpStationMgr", "RentOffice", &[PyRep::Integer(60_003_760)])
+    let err_role = call_rpc(&ctx, &mut sess2, "officeManager", "RentOffice", &[PyRep::Integer(60_003_760)])
         .await
         .expect_err("member without RentOffice role must fail");
     assert_eq!(err_role.code, "CorpRoleDenied");
 
     let corp_wallet_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1));
-    call_rpc(&ctx, &mut sess1, "corpStationMgr", "RentOffice", &[PyRep::Integer(60_003_760)])
+    call_rpc(&ctx, &mut sess1, "officeManager", "RentOffice", &[PyRep::Integer(60_003_760)])
         .await
         .expect("RentOffice");
     ctx.db.with_snapshot(|s| {

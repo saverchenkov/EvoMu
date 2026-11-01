@@ -531,7 +531,7 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if matches!(service, "officeManager" | "corpStationMgr") {
+    if service == "officeManager" {
         if let Some(res) = handle_office_manager(ctx, session, method, args) {
             return Some(res);
         }

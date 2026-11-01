@@ -181,11 +181,11 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
         "Alliance with no structure-owning corp must not be warable"
     );
     assert!(
-        items.iter().any(|w| {
+        !items.iter().any(|w| {
             dict_get(w, "ownerID") == Some(&PyRep::Integer(98_000_111))
                 && dict_get(w, "groupID") == Some(&PyRep::Integer(2))
         }),
-        "Structure-owning corp must be warable"
+        "Alliance-member corp must not be warable directly"
     );
     assert!(
         items.iter().any(|w| {
