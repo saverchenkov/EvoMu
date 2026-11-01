@@ -530,6 +530,9 @@ pub async fn spawn_observatory_flashpoint(
                 entry_gate_ball_id: None,
                 entry_gate_pos: None,
                 entry_gate_locked: false,
+                active_objective_id: 0,
+                completed_task_ids: Vec::new(),
+                last_completed_task_id: None,
                 current_room_index: 0,
                 rooms: vec![
                     DungeonRuntimeRoom {

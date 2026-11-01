@@ -488,11 +488,11 @@ pub async fn handle_ess_link(
                     message: "ESS Reserve Bank pulse is on 60s cooldown".into(),
                 });
             }
-            let p = st
-                .ess_reserve_bank
-                .0
-                .checked_div(pulse_st.pulses_remaining as i64)
-                .unwrap_or(st.ess_reserve_bank.0);
+            let p = crate::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+                st.ess_reserve_bank.0,
+                pulse_st.pulses_total,
+                pulse_st.pulses_remaining,
+            );
             st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
             pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
             pulse_st.last_pulse_sec = Some(now_unix);
@@ -598,8 +598,7 @@ pub async fn handle_ess_link(
         if method != "AttemptLinkToReserveBank" {
             super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, link_id);
             super::notify_emitters_batch6::emit_main_bank_player_link_disconnected(ctx, char_id, sys_id, "Completed", link_id);
-        } else {
-            let _ = reserve_terminated;
+        } else if reserve_terminated {
             super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
         let (post_main, post_reserve) = ctx.db.with_snapshot(|snap| {

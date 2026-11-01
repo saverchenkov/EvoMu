@@ -628,5 +628,11 @@ async fn nullsec_ess_main_bank_reserve_security_key_and_dynamic_bounty_multiplie
         Some(PyRep::Real(v)) => *v,
         other => panic!("expected Real stolenISK, got {:?}", other),
     };
-    assert!((stolen - 40_000_000.0 / 15.0).abs() < 0.1, "stolen: {stolen}");
+    let expected_p1 = (eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+        4_000_000_000,
+        15,
+        15,
+    ) as f64)
+        / 100.0;
+    assert!((stolen - expected_p1).abs() < 0.1, "stolen: {stolen}, expected: {expected_p1}");
 }

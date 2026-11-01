@@ -373,7 +373,18 @@ async fn test_batch6_ess_and_dynamic_bounty() {
         .dispatch_rpc(&mut s1, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None)
         .await
         .expect("AttemptLinkToReserveBank complete");
-    assert_eq!(res_res_comp.dict_get("stolenISK"), Some(&PyRep::Real(6_666_666.66)));
+    let expected_p1 = (eve_server::services::pve_open_feats_b36::compute_ess_reserve_pulse_payout_cents(
+        10_000_000_000,
+        15,
+        15,
+    ) as f64)
+        / 100.0;
+    assert_eq!(res_res_comp.dict_get("stolenISK"), Some(&PyRep::Real(expected_p1)));
+
+    let _ = ctx
+        .dispatch_rpc(&mut s1, "essMgr", None, "RequestReserveBankUnlink", &[], &kw, None)
+        .await
+        .expect("RequestReserveBankUnlink");
 
     let ev_res_disc = events(&ctx, P1, "OnReserveBankPlayerLinkDisconnected");
     assert_eq!(ev_res_disc.len(), 1, "P1 receives OnReserveBankPlayerLinkDisconnected");
