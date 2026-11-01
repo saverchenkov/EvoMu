@@ -81,11 +81,6 @@ fn grant_skills(ctx: &ServerContext, char_id: i64, skills: &[(u32, u8)]) {
 
 #[tokio::test]
 async fn test_b42_abyssal_cache_and_spatial_clouds() {
-    // parity: feat:abyssal.bioadaptive-cache-rewards, feat:abyssal.spatial-hazard-clouds
-    eve_testkit::attest(&[
-        "feat:abyssal.bioadaptive-cache-rewards",
-        "feat:abyssal.spatial-hazard-clouds",
-    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -169,10 +164,6 @@ async fn test_b42_abyssal_cache_and_spatial_clouds() {
 }
 #[tokio::test]
 async fn test_b42_mining_foreman_burst_and_mutadaptive_rar() {
-    // parity: feat:mining.foreman-burst-charges
-    eve_testkit::attest(&[
-        "feat:mining.foreman-burst-charges",
-    ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let kw = HashMap::new();
@@ -316,10 +307,9 @@ async fn test_b42_overheat_rack_heat_and_damage_propagation() {
 }
 #[tokio::test]
 async fn test_b42_stasis_grappler_and_mjd_spool() {
-    // parity: feat:modules.stasis-grappler-mechanics, feat:navigation.micro-jump-drive-spool
+    // parity: feat:modules.stasis-grappler-mechanics
     eve_testkit::attest(&[
         "feat:modules.stasis-grappler-mechanics",
-        "feat:navigation.micro-jump-drive-spool",
     ]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);

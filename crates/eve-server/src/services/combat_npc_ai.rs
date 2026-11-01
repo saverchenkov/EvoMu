@@ -1003,19 +1003,6 @@ pub async fn destroy_specialized_npc_with_hint(
         crate::services::pve_fob_observatory::on_world_ark_boss_killed(ctx, solar_system_id, killer_char_id).await;
     }
 
-    if effective_bounty > 0.0 && killer_char_id > 0 {
-        with_mut_combat_ephemeral(ctx, |rt| {
-            if rt.bounty_credited_balls.insert(npc_ball_id) {
-                *rt.pending_bounty_ticks
-                    .entry((solar_system_id, killer_char_id))
-                    .or_insert(0.0) += effective_bounty;
-                rt.bounty_tick_next_flush_unix
-                    .entry((solar_system_id, killer_char_id))
-                    .or_insert_with(|| ctx.now_unix().saturating_add(1_200));
-            }
-        });
-    }
-
     crate::combat::crimewatch::credit_specialized_npc_bounty_and_sec_status(
         ctx,
         solar_system_id,
