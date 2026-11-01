@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 fn seed_quasar_b2_fixtures(ctx: &ServerContext) {
     let mut state = QuasarB2State::default();
+    state
+        .ship_unlock_pending
+        .insert(2_112_000_001, vec![587, 597]);
     state.structures.insert(
         1_030_000_000_001,
         StructureRecord {
@@ -36,7 +39,7 @@ fn seed_quasar_b2_fixtures(ctx: &ServerContext) {
             character_id: 2_112_000_001,
             solar_system_id: 30_000_142,
             gate_id: 50_001_248,
-            expiry_unix: 1_800_000_000,
+            expiry_unix: ctx.now_unix() + 3_600,
         },
     );
     state.restricted_systems = vec![30_000_142, 30_100_001];
@@ -246,6 +249,14 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     )
     .await;
     assert_eq!(claim_rsp.status_code, STATUS_OK);
+    assert_eq!(
+        load_state(&ctx.db)
+            .ship_unlock_claimed
+            .get(&2_112_000_001)
+            .cloned()
+            .unwrap_or_default(),
+        vec![587]
+    );
 
     // Claiming 587 again returns NOT_FOUND
     let claim_again = quasar_rpc(
@@ -340,11 +351,10 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
         Some(4_250)
     );
 
-    // 3. eve.space.tag.admin.api.ApplyRequest & RemoveRequest
-    let mut loc_constellation = Vec::new();
-    encode_id_field(2, 30_000_142, &mut loc_constellation);
+    // 3. eve.space.tag.admin.api.ApplyRequest & RemoveRequest (handled by quasar_space_domain)
+    let jita = ctx.sde.solar_systems.get(&30_000_142).expect("Jita in SDE");
     let mut loc_id = Vec::new();
-    encode_bytes_field(2, &loc_constellation, &mut loc_id);
+    encode_id_field(1, jita.region_id as u64, &mut loc_id);
 
     let mut tag_id = Vec::new();
     encode_string_field(1, "incursion_active", &mut tag_id);
@@ -362,12 +372,19 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
         apply_req,
     )
     .await;
-    assert_eq!(apply_rsp.status_code, STATUS_OK);
-    assert!(load_state(&ctx.db)
-        .space_tags
-        .get(&30_000_142)
-        .unwrap()
-        .contains_key("incursion_active"));
+    assert_eq!(apply_rsp.status_code, STATUS_OK, "{apply_rsp:?}");
+    let mut get_locs_req = Vec::new();
+    encode_bytes_field(1, &tag_id, &mut get_locs_req);
+    let get_locs_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.space.tag.api.GetLocationsRequest",
+        get_locs_req.clone(),
+    )
+    .await;
+    assert_eq!(get_locs_rsp.status_code, STATUS_OK);
+    let locs_bytes = get_locs_rsp.payload.unwrap().value;
+    assert!(locs_bytes.windows(loc_id.len()).any(|w| w == loc_id.as_slice()));
 
     let mut remove_req = Vec::new();
     encode_bytes_field(2, &loc_id, &mut remove_req);
@@ -380,11 +397,16 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
     )
     .await;
     assert_eq!(remove_rsp.status_code, STATUS_OK);
-    assert!(!load_state(&ctx.db)
-        .space_tags
-        .get(&30_000_142)
-        .unwrap()
-        .contains_key("incursion_active"));
+    let get_locs_after = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.space.tag.api.GetLocationsRequest",
+        get_locs_req,
+    )
+    .await;
+    assert_eq!(get_locs_after.status_code, STATUS_OK);
+    let locs_after_bytes = get_locs_after.payload.unwrap().value;
+    assert!(!locs_after_bytes.windows(loc_id.len()).any(|w| w == loc_id.as_slice()));
 }
 
 #[tokio::test]
@@ -465,11 +487,34 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
         &ctx,
         &mut sess,
         "eve.stargate.lock.api.ValidateJumpRequest",
-        val_req,
+        val_req.clone(),
     )
     .await;
     assert_eq!(
         first_varint(&parse_raw_proto(&val_after.payload.unwrap().value), 1),
+        Some(1)
+    );
+
+    // 5. Expired stargate lock is treated as inactive by GetRequest and ValidateJumpRequest
+    seed_quasar_b2_fixtures(&ctx);
+    ctx.advance_time_seconds(3_601);
+    let expired_get = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.stargate.lock.api.GetRequest",
+        get_req,
+    )
+    .await;
+    assert_eq!(expired_get.status_code, STATUS_NOT_FOUND);
+    let expired_val = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.stargate.lock.api.ValidateJumpRequest",
+        val_req,
+    )
+    .await;
+    assert_eq!(
+        first_varint(&parse_raw_proto(&expired_val.payload.unwrap().value), 1),
         Some(1)
     );
 }

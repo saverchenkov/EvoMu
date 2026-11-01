@@ -544,20 +544,99 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
     assert!((cd_ind - 2.0).abs() < 1e-6, "Industrial -90% on 10 LY -> 1 effective LY -> 2 min cooldown");
     assert!((fat_ind - 20.0).abs() < 1e-6, "Industrial -90% on 10 LY -> 20 min fatigue");
 
-    // 30m cooldown cap & jumpTimers.GetTimers RPC round trip
-    let (raw_cd, capped_fat) =
+    // 30m cooldown cap directly in compute_jump_fatigue_and_cooldown_minutes
+    let (capped_cd, capped_fat) =
         eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(300.0, 35.0, 0.0);
-    let capped_cd = raw_cd.min(30.0);
     assert!((capped_cd - 30.0).abs() < 1e-6, "Jump activation cooldown must be capped at 30 min");
     assert!((capped_fat - 300.0).abs() < 1e-6, "Jump fatigue must be capped at 300 min");
 
-    let now = ctx.now_unix();
+    // End-to-end jump via structureCynoBeaconMgr.CmdJumpToStructureBeacon + jumpTimers.GetTimers + clock advancement
+    let jump_beacon_id = 1_040_000_007_801_i64;
+    let jump_fuel_item_id = 990_007_801_i64;
+    let jump_dest_sys_id = 30_000_204_u32; // Ohkunen (low-sec, 4.80 LY from Jita)
+    let (jump_ship_id, char_corp_id) = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| (c.active_ship_id, c.corporation_id))
+            .unwrap_or((100_000_001, 98_000_001))
+    });
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.jump_cooldown_until_unix = now + (capped_cd * 60.0) as u64;
-            ch.jump_fatigue_until_unix = now + (capped_fat * 60.0) as u64;
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.jump_cooldown_until_unix = 0;
+            ch.jump_fatigue_until_unix = 0;
+            ch.jump_fatigue_minutes = 0.0;
         }
+        snap.structures.insert(
+            jump_beacon_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: jump_beacon_id,
+                type_id: 35840, // Pharolux Cyno Beacon
+                owner_corp_id: char_corp_id,
+                solar_system_id: jump_dest_sys_id,
+                name: "Ohkunen Pharolux Cyno Beacon".to_string(),
+                position: [15_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 50,
+                shield_hp: 50_000.0,
+                armor_hp: 50_000.0,
+                hull_hp: 50_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.items.insert(
+            jump_fuel_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: jump_fuel_item_id,
+                type_id: 16274, // Helium Isotopes
+                owner_id: char_id,
+                location_id: jump_ship_id,
+                flag: eve_db::InventoryFlag::SpecializedFuelBay,
+                quantity: 5_000,
+                singleton: false,
+                ..Default::default()
+            },
+        );
     });
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    jita_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: jump_ship_id,
+            type_id: 23757, // Archon carrier
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 85.0,
+            inertia: 0.04,
+            mass: 1_230_000_000.0,
+            radius: 1_600.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .expect("spawn capital ship in Jita for beacon jump");
+    sess.ship_id = Some(jump_ship_id);
+    sess.solar_system_id = Some(30_000_142);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "structureCynoBeaconMgr",
+        None,
+        "CmdJumpToStructureBeacon",
+        &[
+            PyRep::Integer(jump_dest_sys_id as i64),
+            PyRep::Integer(jump_beacon_id),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdJumpToStructureBeacon must compute and record jump fatigue & cooldown");
 
     let timers = ctx
         .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], &kw, None)
@@ -572,13 +651,8 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
     assert!(act_ticks > upd_ticks, "Active cooldown must be in the future");
     assert!(fat_ticks > act_ticks, "Active fatigue must exceed cooldown");
 
-    // Real-time decay: once jump_fatigue_until_unix is in the past, fatigue decays to 0
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.jump_fatigue_until_unix = now.saturating_sub(60);
-            ch.jump_cooldown_until_unix = now.saturating_sub(60);
-        }
-    });
+    // Advance clock past fatigue expiry and verify decay via GetTimers
+    ctx.advance_time_seconds(7_200);
     let timers_decayed = ctx
         .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], &kw, None)
         .await
@@ -587,7 +661,8 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
         panic!("GetTimers must return KeyVal");
     };
     let dec_fat = dec_entries.get("jumpFatigue").and_then(PyRep::as_i64).unwrap_or(0);
-    assert!(dec_fat < fat_ticks, "Expired fatigue must decay below active fatigue");
+    let now_filetime = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
+    assert!(dec_fat < now_filetime, "Expired fatigue must be in the past after clock advancement");
 
     // 2. Thera (31_000_005) NPC stations in SDE
     let thera_stations: Vec<_> = ctx

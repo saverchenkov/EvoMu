@@ -825,7 +825,7 @@ async fn handle_cmd_jump_to_structure_beacon(
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) =
-        nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly * plan.fatigue_multiplier);
+        nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly);
     let (dest_const_id, dest_reg_id) = ctx
         .sde
         .solar_systems
@@ -1254,7 +1254,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     nav::check_jump_activation(ctx, char_id)?;
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     let dist_ly = plan.distance_ly;
-    let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly * plan.fatigue_multiplier);
+    let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly);
     let (dest_const_id, dest_reg_id) = ctx.sde.solar_systems.get(&target_sys_id).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
 
     ctx.db.with_mut_snapshot(|snap| {

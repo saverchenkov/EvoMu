@@ -84,6 +84,7 @@ fn repeated(msg: &DynamicQuasarMessage, field: u32) -> Vec<&DynamicQuasarMessage
                 _ => None,
             })
             .collect(),
+        Some(DynamicValue::Message(m)) => vec![m.as_ref()],
         _ => Vec::new(),
     }
 }

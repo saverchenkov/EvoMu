@@ -161,17 +161,6 @@ fn extract_u64(msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
     }
 }
 
-fn extract_tag_name(msg: &DynamicQuasarMessage, field_num: u32) -> Option<String> {
-    match msg.get(field_num) {
-        Some(DynamicValue::Message(sub)) => match sub.get(1) {
-            Some(DynamicValue::String(s)) if !s.is_empty() => Some(s.clone()),
-            _ => None,
-        },
-        Some(DynamicValue::String(s)) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    }
-}
-
 fn active_char_id(ctx: &AuthoritativeContext) -> Result<u64, (u32, String)> {
     ctx.active_character
         .as_ref()
@@ -191,13 +180,12 @@ pub fn register_handlers(
         "eve_public.ship.unlock.GetPendingNotificationsRequest",
         Arc::new(move |ctx, _any, _msg| {
             let cid = active_char_id(ctx)?;
-            let mut st = load_state(&db_su1);
+            let st = load_state(&db_su1);
             let pending = st
                 .ship_unlock_pending
-                .entry(cid)
-                .or_insert_with(|| vec![587, 597])
-                .clone();
-            save_state(&db_su1, &st);
+                .get(&cid)
+                .cloned()
+                .unwrap_or_default();
             let mut out = Vec::new();
             for ship_type_id in pending {
                 encode_id_msg(1, ship_type_id, &mut out);
@@ -219,8 +207,8 @@ pub fn register_handlers(
             let mut st = load_state(&db_su2);
             let pending = st
                 .ship_unlock_pending
-                .entry(cid)
-                .or_insert_with(|| vec![587, 597]);
+                .get_mut(&cid)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Ship unlock reward not pending".to_string()))?;
             let pos = pending
                 .iter()
                 .position(|&id| id == ship_type_id)
@@ -310,81 +298,6 @@ pub fn register_handlers(
         }),
     );
 
-    // 6. eve.space.tag.admin.api.ApplyRequest & RemoveRequest
-    let db_tag1 = Arc::clone(&db);
-    router.register_handler(
-        "eve.space.tag.admin.api.ApplyRequest",
-        Arc::new(move |ctx, _any, msg| {
-            require_admin_role(ctx)?;
-            let location_id = extract_u64(msg, 2);
-            if location_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing location identifier".to_string()));
-            }
-            let mut tag_names = Vec::new();
-            if let Some(DynamicValue::Repeated(items)) = msg.get(3) {
-                for item in items {
-                    if let DynamicValue::Message(spec) = item {
-                        if let Some(name) = extract_tag_name(spec, 1) {
-                            tag_names.push(name);
-                        }
-                    }
-                }
-            } else if let Some(DynamicValue::Message(spec)) = msg.get(3) {
-                if let Some(name) = extract_tag_name(spec, 1) {
-                    tag_names.push(name);
-                }
-            }
-            if tag_names.is_empty() {
-                return Err((STATUS_BAD_REQUEST, "No space tags specified".to_string()));
-            }
-            let mut st = load_state(&db_tag1);
-            let entry = st.space_tags.entry(location_id).or_default();
-            for name in tag_names {
-                entry.insert(name, None);
-            }
-            save_state(&db_tag1, &st);
-            Ok(any("eve.space.tag.admin.api.ApplyResponse", Vec::new()))
-        }),
-    );
-
-    let db_tag2 = Arc::clone(&db);
-    router.register_handler(
-        "eve.space.tag.admin.api.RemoveRequest",
-        Arc::new(move |ctx, _any, msg| {
-            require_admin_role(ctx)?;
-            let location_id = extract_u64(msg, 2);
-            if location_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing location identifier".to_string()));
-            }
-            let mut tag_names = Vec::new();
-            if let Some(DynamicValue::Repeated(items)) = msg.get(3) {
-                for item in items {
-                    if let DynamicValue::Message(id_msg) = item {
-                        if let Some(DynamicValue::String(s)) = id_msg.get(1) {
-                            if !s.is_empty() {
-                                tag_names.push(s.clone());
-                            }
-                        }
-                    }
-                }
-            } else if let Some(DynamicValue::Message(id_msg)) = msg.get(3) {
-                if let Some(DynamicValue::String(s)) = id_msg.get(1) {
-                    if !s.is_empty() {
-                        tag_names.push(s.clone());
-                    }
-                }
-            }
-            let mut st = load_state(&db_tag2);
-            if let Some(entry) = st.space_tags.get_mut(&location_id) {
-                for name in tag_names {
-                    entry.remove(&name);
-                }
-            }
-            save_state(&db_tag2, &st);
-            Ok(any("eve.space.tag.admin.api.RemoveResponse", Vec::new()))
-        }),
-    );
-
     // 7. eve.stargate.lock.api.GetRequest, GetRestrictedSystemsRequest, ValidateJumpRequest
     let db_gl1 = Arc::clone(&db);
     router.register_handler(
@@ -396,9 +309,11 @@ pub fn register_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
             }
             let st = load_state(&db_gl1);
+            let now = ctx.now_unix();
             let lock = st
                 .stargate_locks
                 .get(&format!("{cid}:{sys_id}"))
+                .filter(|l| l.expiry_unix > now)
                 .ok_or_else(|| (STATUS_NOT_FOUND, "No active stargate lock".to_string()))?;
             let mut out = Vec::new();
             encode_id_msg(1, lock.gate_id, &mut out);
@@ -431,8 +346,13 @@ pub fn register_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem or gate".to_string()));
             }
             let st = load_state(&db_gl3);
+            let now = ctx.now_unix();
             let mut out = Vec::new();
-            if let Some(lock) = st.stargate_locks.get(&format!("{cid}:{sys_id}")) {
+            if let Some(lock) = st
+                .stargate_locks
+                .get(&format!("{cid}:{sys_id}"))
+                .filter(|l| l.expiry_unix > now)
+            {
                 if lock.gate_id != gate_id {
                     encode_varint_field(1, 0, &mut out);
                     let mut lock_buf = Vec::new();

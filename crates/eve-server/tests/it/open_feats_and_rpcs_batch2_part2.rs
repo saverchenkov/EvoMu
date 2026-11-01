@@ -55,7 +55,7 @@ fn keyval_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_milestones_seasons_and_cache_setting_e2e() {
-    // parity: feat:ui.milestone-logon, rpc:milestoneMgr.ProcessCharacterLogon, feat:pve.seasons-challenges, rpc:seasonManager.fill_up_and_return_challenges_for_character, rpc:cache.Setting
+    // parity: rpc:milestoneMgr.ProcessCharacterLogon, feat:pve.seasons-challenges, rpc:seasonManager.fill_up_and_return_challenges_for_character, rpc:cache.Setting
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();

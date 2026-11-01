@@ -192,7 +192,7 @@ pub fn compute_jump_fatigue_and_cooldown_minutes(
 ) -> (f64, f64) {
     let ship_fatigue_multiplier = (1.0 - fatigue_reduction_bonus.clamp(0.0, 0.95)).max(0.05);
     let effective_ly = distance_ly * ship_fatigue_multiplier;
-    let cooldown_min = (1.0 + effective_ly).max(current_fatigue_min / 10.0);
+    let cooldown_min = (1.0 + effective_ly).max(current_fatigue_min / 10.0).min(30.0);
     let new_fatigue_min = (current_fatigue_min.max(10.0) * (1.0 + effective_ly)).min(300.0);
     (cooldown_min, new_fatigue_min)
 }

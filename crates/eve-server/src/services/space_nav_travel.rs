@@ -423,7 +423,7 @@ pub fn plan_jump_drive(
     let per_ly = type_attr(ctx, ship_type_id, "jumpDriveConsumptionAmount").unwrap_or(0.0);
     let conservation = 1.0 - 0.10 * skill_level(ctx, char_id, "Jump Fuel Conservation");
     let fuel_units = (per_ly * distance_ly * conservation).ceil() as i32;
-    let fatigue_multiplier = type_attr(ctx, ship_type_id, "jumpFatigueMultiplier").unwrap_or(1.0);
+    let fatigue_multiplier = 1.0 - ship_fatigue_reduction_bonus(ctx, ship_type_id);
     Ok(JumpDrivePlan {
         distance_ly,
         fuel_type_id,
@@ -477,6 +477,22 @@ pub(crate) fn consume_jump_fuel(
     })
 }
 
+/// Returns the hull's jump fatigue reduction bonus (`0.75` for Black Ops / covert, `0.90` for
+/// industrial / JF / Rorqual / capsule / shuttle, or `1.0 - jumpFatigueMultiplier` from SDE).
+pub(crate) fn ship_fatigue_reduction_bonus(ctx: &ServerContext, ship_type_id: u32) -> f64 {
+    if let Some(mult) = type_attr(ctx, ship_type_id, "jumpFatigueMultiplier") {
+        if mult > 0.0 && mult <= 1.0 {
+            return (1.0 - mult).clamp(0.0, 0.95);
+        }
+    }
+    let group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
+    match group_id {
+        898 | 830 | 833 | 834 => 0.75,
+        902 | 883 | 28 | 380 | 1202 | 513 | 29 | 31 => 0.90,
+        _ => 0.0,
+    }
+}
+
 /// Current decayed jump fatigue (minutes) for `char_id` at `now`.
 pub(crate) fn current_fatigue_min(ctx: &ServerContext, char_id: i64, now: u64) -> f64 {
     ctx.db.with_snapshot(|snap| {
@@ -493,10 +509,19 @@ pub(crate) fn current_fatigue_min(ctx: &ServerContext, char_id: i64, now: u64) -
 /// Applies jump fatigue and the Jump Activation cooldown for a jump of `effective_ly`
 /// (`feat:navigation.jump-fatigue`, `notify:OnJumpTimersUpdated`, EVE wiki `Jump_drives.md:215-233`);
 /// returns `(cooldown_min, fatigue_min)`.
-pub(crate) fn apply_jump_fatigue(ctx: &ServerContext, char_id: i64, effective_ly: f64) -> (f64, f64) {
+pub(crate) fn apply_jump_fatigue(ctx: &ServerContext, char_id: i64, distance_ly: f64) -> (f64, f64) {
     let now = ctx.now_unix();
     let before = current_fatigue_min(ctx, char_id, now);
-    let (cd, fat) = crate::formulas::compute_jump_fatigue_and_cooldown_minutes(before, effective_ly, 0.0);
+    let ship_type_id = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&char_id)
+            .map(|c| c.active_ship_id)
+            .and_then(|sid| snap.items.get(&sid))
+            .map(|i| i.type_id)
+            .unwrap_or(0)
+    });
+    let bonus = ship_fatigue_reduction_bonus(ctx, ship_type_id);
+    let (cd, fat) = crate::formulas::compute_jump_fatigue_and_cooldown_minutes(before, distance_ly, bonus);
     let cd = cd.min(JUMP_ACTIVATION_CAP_MIN);
     let cd_until = now + (cd * 60.0).round() as u64;
     let fat_until = now + (fat * 60.0).round() as u64;
