@@ -897,7 +897,9 @@ impl WorldRepository {
             }
             true
         }) {
-            record_last_wal_error(&persist_err);
+            if !record_last_wal_error(&persist_err) {
+                panic!("WAL persistence failed outside dispatch_rpc: {persist_err}");
+            }
         }
         out.expect("with_mut_snapshot closure must run")
     }
@@ -954,17 +956,19 @@ impl WorldRepository {
     }
 }
 
-static WAL_ERROR_HOOK: std::sync::OnceLock<std::sync::Arc<dyn Fn(&str) + Send + Sync>> =
+static WAL_ERROR_HOOK: std::sync::OnceLock<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>> =
     std::sync::OnceLock::new();
 
-pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
+pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>) {
     let _ = WAL_ERROR_HOOK.set(hook);
 }
 
-pub fn record_last_wal_error(err: &str) {
+pub fn record_last_wal_error(err: &str) -> bool {
     tracing::error!("WAL/SQLite persistence error (snapshot rolled back): {err}");
     if let Some(hook) = WAL_ERROR_HOOK.get() {
-        hook(err);
+        hook(err)
+    } else {
+        false
     }
 }
 

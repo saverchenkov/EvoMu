@@ -20,10 +20,12 @@ pub fn ensure_wal_error_hook_installed() {
     });
 }
 
-pub fn record_dispatch_wal_error(err: &str) {
-    let _ = DISPATCH_WAL_ERROR.try_with(|slot| {
-        *slot.borrow_mut() = Some(err.to_string());
-    });
+pub fn record_dispatch_wal_error(err: &str) -> bool {
+    DISPATCH_WAL_ERROR
+        .try_with(|slot| {
+            *slot.borrow_mut() = Some(err.to_string());
+        })
+        .is_ok()
 }
 
 pub fn take_dispatch_wal_error() -> Option<String> {
@@ -142,8 +144,6 @@ impl ServerContext {
         }
         if wal_failed {
             crate::services::fleet_social::hydrate_social_state_from_db(self);
-        }
-        if res.is_err() {
             if let Some(cid) = session.character_id {
                 if let Ok(mut q) = self.pending_notifications.write() {
                     if let Some(v) = q.get_mut(&cid) {

@@ -621,7 +621,15 @@ pub fn dispatch_character_mail_routes(
                             .char_contacts
                             .get(&rid)
                             .and_then(|list| list.iter().find(|c| c.contact_id == char_id))
-                            .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
+                            .is_some_and(|c| !c.is_blocked && c.standing > -10.0)
+                            || ctx
+                                .esi_state
+                                .char_contacts
+                                .read()
+                                .ok()
+                                .and_then(|map| map.get(&rid).cloned())
+                                .and_then(|list| list.into_iter().find(|c| c.contact_id == char_id))
+                                .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
                         if !same_corp && !is_exempt_contact {
                             let cspa = snap
                                 .character_cspa_charges
