@@ -338,10 +338,31 @@ pub(crate) async fn prepare_ewar_and_capital_module(
 
                 // Micro Jump Drive / Field Generator (`group_id == 1189 | 1533 | 4769`)
                 if is_mjd {
-                    if m.type_id == 83485 && !matches!(ship_group_id, 547 | 4594) {
-                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Capital Micro Jump Field Generator can only be activated on Carriers (547) or Lancer Dreadnoughts (4594)".into() }));
-                    } else if m.type_id == 83465 && !matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
-                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Capital Micro Jump Drive can only be activated on capital ships".into() }));
+                    let mut allowed_groups = Vec::new();
+                    let mut allowed_types = Vec::new();
+                    for (aid, &val) in &mod_type.default_attributes {
+                        if val <= 0.0 {
+                            continue;
+                        }
+                        if let Some(name) = ctx.sde.attributes.get(aid).map(|a| a.name.as_str()) {
+                            if name.starts_with("canFitShipGroup") {
+                                allowed_groups.push(val as u32);
+                            } else if name.starts_with("canFitShipType") {
+                                allowed_types.push(val as u32);
+                            }
+                        }
+                    }
+                    if (!allowed_groups.is_empty() || !allowed_types.is_empty())
+                        && !allowed_groups.contains(&ship_group_id)
+                        && !allowed_types.contains(&fit.ship.type_id)
+                    {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidShipGroup".into(),
+                            message: format!(
+                                "{} cannot be activated on ship group {}",
+                                mod_type.name, ship_group_id
+                            ),
+                        }));
                     }
                     let jump_dist = [2066u16, 2064u16]
                         .into_iter()

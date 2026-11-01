@@ -506,6 +506,7 @@ async fn test_cyno_jammer_blocks_non_covert_cynos_and_reports_state() {
     let ctx = new_ctx();
     let (_, b, _) = pick_systems(&ctx);
     let mut s1 = pilot(&ctx, C1, 9501).await;
+    make_fleet(&ctx, 9_500_001, &[C1]);
     board(&ctx, &mut s1, C1, 950_001, FALCON, b, DVec3::ZERO).await;
     fit(&ctx, C1, 950_001, 950_002, CYNO, InventoryFlag::HiSlot0);
     fit(&ctx, C1, 950_001, 950_003, COVERT_CYNO, InventoryFlag::HiSlot1);
@@ -515,7 +516,9 @@ async fn test_cyno_jammer_blocks_non_covert_cynos_and_reports_state() {
     assert_eq!(state, PyRep::None);
 
     // Online, fuelled Tenebrex Cyno Jammer (its Standup Cynosural System Jammer service module
-    // carries cynoJammerActivationDelay and canFitShipType1 = Tenebrex in the SDE).
+    // carries cynoJammerActivationDelay and canFitShipType1 = Tenebrex in the SDE),
+    // backed by an online Sovereignty Hub with Cynosural Suppression upgrade and completed spool.
+    let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|s| {
         s.structures.insert(
             950_100,
@@ -537,6 +540,39 @@ async fn test_cyno_jammer_blocks_non_covert_cynos_and_reports_state() {
                 last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
+        s.structures.insert(
+            950_101,
+            eve_db::UpwellStructureRecord {
+                structure_id: 950_101,
+                type_id: eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: 1_000_001,
+                solar_system_id: b,
+                name: "Sov Hub".into(),
+                position: [10_000.0, 0.0, 0.0],
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 1_000,
+                shield_hp: 1.0,
+                armor_hp: 1.0,
+                hull_hp: 1.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
+            },
+        );
+        s.sov_runtime.sov_hubs.insert(
+            950_101,
+            eve_db::PersistedSovHubData {
+                hub_id: 950_101,
+                upgrades: vec![eve_db::PersistedHubUpgrade {
+                    type_id: eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        s.sov_runtime.tenebrex_spool_ready_unix.insert(950_100, now_u);
     });
     let state = call(&ctx, &mut s1, "beyonce", "GetCynoJammerState", vec![]).await.expect("state");
     assert_eq!(state.as_i64(), Some(ctx.now_blueos_filetime_ticks()));

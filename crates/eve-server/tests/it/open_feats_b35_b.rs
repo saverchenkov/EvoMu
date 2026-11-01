@@ -23,6 +23,7 @@ async fn test_b35_06_jump_portal_bridge_rules() {
     // Light Normal Cyno (21096), Covert Cyno (28646), and Industrial Cyno (52694) in DEST_NULL_SYS
     let cyno_char = 952_301;
     let cyno_ship = 962_301;
+    put_in_fleet(&ctx, 880_001, cyno_char, &[(cyno_char, true), (952_311, true), (952_312, true)]);
     let mut cyno_sess = seed_pilot(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, false);
     spawn_ship_in_space(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, DVec3::new(10_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 972_301, 21096, cyno_char, cyno_ship, InventoryFlag::HiSlot0, 1);
@@ -207,6 +208,7 @@ async fn test_b35_07_conduit_jump() {
     // Normal cyno (for Carrier / Command Carrier / Rorqual / Blops) in DEST_NULL_SYS
     let cyno_char = 952_401;
     let cyno_ship = 962_401;
+    put_in_fleet(&ctx, 880_003, cyno_char, &[(cyno_char, true)]);
     let mut cyno_sess = seed_pilot(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, false);
     spawn_ship_in_space(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, DVec3::new(10_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 972_401, 21096, cyno_char, cyno_ship, InventoryFlag::HiSlot0, 1);
@@ -366,6 +368,7 @@ async fn test_b35_08_jump_arrival_placement() {
     // Cyno ship in DEST_NULL_SYS
     let cyno_char = 952_501;
     let cyno_ship = 962_501;
+    put_in_fleet(&ctx, 880_005, cyno_char, &[(cyno_char, true)]);
     let mut cyno_sess = seed_pilot(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, false);
     let cyno_pos = DVec3::new(100_000.0, 0.0, 0.0);
     spawn_ship_in_space(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, cyno_pos).await;
@@ -505,6 +508,7 @@ async fn test_b35_09_jump_drive_range_fuel() {
 
     let cyno_char = 953_001;
     let cyno_ship = 963_001;
+    put_in_fleet(&ctx, 880_010, cyno_char, &[(cyno_char, true)]);
     let mut cyno_sess = seed_pilot(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, false);
     spawn_ship_in_space(&ctx, cyno_char, cyno_ship, 11957, DEST_NULL_SYS, DVec3::new(10_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 973_001, 21096, cyno_char, cyno_ship, InventoryFlag::HiSlot0, 1);

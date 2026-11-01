@@ -68,6 +68,7 @@ async fn test_quasar_accounting_loyalty_contracts() {
     sess.character_id = Some(90_000_001);
     sess.corporation_id = Some(1_000_009);
     sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
 
     // Seed wallet journal entry
     ctx.db.with_mut_snapshot(|snap| {
@@ -101,15 +102,33 @@ async fn test_quasar_accounting_loyalty_contracts() {
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
 
-    // 3. Loyalty Points Wallet assetholding operations (Withdraw & Deposit)
+    // 3. Loyalty Points Wallet assetholding operations (Deposit & Withdraw)
     let mut lp_payload = Vec::new();
-    encode_uuid_field(1, b"lp-op-1001", &mut lp_payload);
-    let req = make_request("eve.loyaltypoints.assetholding.operation.api.WithdrawRequest", lp_payload.clone(), b"lp-01");
+    let lp_uuid = [0x42u8; 16];
+    encode_uuid_field(1, &lp_uuid, &mut lp_payload);
+    let mut wallet_bytes = Vec::new();
+    encode_id_field(1, 90_000_001, &mut wallet_bytes);
+    encode_id_field(3, 1_000_009, &mut wallet_bytes);
+    let mut curr_bytes = Vec::new();
+    curr_bytes.push(0x08);
+    curr_bytes.push(100);
+    let mut attr_bytes = Vec::new();
+    attr_bytes.push(0x0a);
+    attr_bytes.push(wallet_bytes.len() as u8);
+    attr_bytes.extend_from_slice(&wallet_bytes);
+    attr_bytes.push(0x12);
+    attr_bytes.push(curr_bytes.len() as u8);
+    attr_bytes.extend_from_slice(&curr_bytes);
+    lp_payload.push(0x12);
+    lp_payload.push(attr_bytes.len() as u8);
+    lp_payload.extend_from_slice(&attr_bytes);
+
+    let req = make_request("eve.loyaltypoints.assetholding.operation.api.DepositRequest", lp_payload.clone(), b"lp-01");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
 
-    let req = make_request("eve.loyaltypoints.assetholding.operation.api.DepositRequest", lp_payload, b"lp-02");
+    let req = make_request("eve.loyaltypoints.assetholding.operation.api.WithdrawRequest", lp_payload, b"lp-02");
     let rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(req.encode_proto())], &empty_kw, None).await.expect("rpc");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK, "Status: {}, message: {}", rsp.status_code, rsp.status_message);
@@ -133,6 +152,7 @@ async fn test_quasar_industry_planetary_moon_asteroidbelt() {
     sess.character_id = Some(90_000_001);
     sess.corporation_id = Some(1_000_009);
     sess.corp_role = eve_db::corp_roles::ROLE_ACCOUNTANT;
+    sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
 
     // 1. Industry (jobs, facilities, cost indices)
     let mut char_payload = Vec::new();

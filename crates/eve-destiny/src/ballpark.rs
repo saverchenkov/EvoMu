@@ -15,6 +15,38 @@ fn default_constellation_id() -> u32 {
     20_000_020
 }
 
+fn is_capital_ship_ball(ship_type_id: u32, ship_group_id: u32) -> bool {
+    static CACHE: std::sync::OnceLock<(
+        std::collections::HashSet<u32>,
+        std::collections::HashMap<u32, u32>,
+    )> = std::sync::OnceLock::new();
+    let (cap_groups, type_to_group) = CACHE.get_or_init(|| {
+        let mut cap_groups = std::collections::HashSet::from([
+            30, 485, 513, 547, 659, 883, 902, 1538, 4594, 5120,
+        ]);
+        let mut type_to_group = std::collections::HashMap::new();
+        if let Ok(sde) = eve_sde::SdeRegistry::open(eve_sde::SdeRegistry::default_db_path()) {
+            for (&tid, ty) in &sde.types {
+                if ty.category_id == 6 {
+                    type_to_group.insert(tid, ty.group_id);
+                    let rig_size = ty.default_attributes.get(&1547).copied().unwrap_or(0.0);
+                    let is_cap_size = ty.default_attributes.get(&1785).copied().unwrap_or(0.0);
+                    if rig_size >= 4.0 || is_cap_size > 0.0 {
+                        cap_groups.insert(ty.group_id);
+                    }
+                }
+            }
+        }
+        (cap_groups, type_to_group)
+    });
+    let grp = if ship_group_id != 0 {
+        ship_group_id
+    } else {
+        type_to_group.get(&ship_type_id).copied().unwrap_or(0)
+    };
+    cap_groups.contains(&grp)
+}
+
 impl Ballpark {
     pub fn new(solar_system_id: u32) -> Self {
         Self::with_bubble_radius(solar_system_id, BUBBLE_RADIUS_METERS)
@@ -659,11 +691,7 @@ impl Ballpark {
         }
         let ship_type_id = self.balls[&ball_id].type_id;
         let ship_group_id = self.ball_group_ids.get(&ball_id).copied().unwrap_or(0);
-        let is_capital = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594)
-            || matches!(
-                ship_type_id,
-                19720 | 19722 | 19724 | 19726 | 23757 | 23911 | 23915 | 24483
-            );
+        let is_capital = is_capital_ship_ball(ship_type_id, ship_group_id);
         let eff_dist = if is_capital && (distance_meters - 100_000.0).abs() < 1.0 {
             250_000.0
         } else {
@@ -749,7 +777,7 @@ impl Ballpark {
                 if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657 | 1971 | 1980 | 1981) {
                     return None;
                 }
-                let is_cap = matches!(grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
+                let is_cap = is_capital_ship_ball(b.type_id, grp);
                 if is_cap && max_jumped_capitals == 0 {
                     return None;
                 }

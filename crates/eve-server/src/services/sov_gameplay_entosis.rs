@@ -986,13 +986,7 @@ pub fn is_tenebrex_jammer_active_in_snap(
         .find(|s| s.solar_system_id == solar_system_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
         .map(|s| s.structure_id)
     else {
-        return snap.structures.values().any(|st| {
-            st.solar_system_id == solar_system_id
-                && st.type_id == TYPE_TENEBREX_CYNO_JAMMER
-                && st.fuel_blocks > 0
-                && matches!(st.state.as_str(), "ShieldVulnerable" | "Online")
-                && !snap.sov_runtime.tenebrex_spool_ready_unix.contains_key(&st.structure_id)
-        });
+        return false;
     };
     if snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u) {
         return false;
