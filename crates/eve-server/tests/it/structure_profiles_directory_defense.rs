@@ -523,12 +523,16 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
     seed_operational_structure(&ctx, low_st, 35833, corp_id, lowsec_sys, [0.0, 0.0, 0.0]);
     seed_operational_structure(&ctx, high_st, 35833, corp_id, highsec_sys, [0.0, 0.0, 0.0]);
 
-    // Fit online Standup Multirole Missile Launcher I (35922) to both Fortizars so auto-defense deals real volley damage
+    // Fit online Standup Multirole Missile Launcher I (35922) + Standup Mjolnir Cruise Missile (37847) to both Fortizars
     ctx.db.with_mut_snapshot(|snap| {
-        for (mod_id, sid) in [(910_001, low_st), (910_002, high_st)] {
+        for (mod_id, charge_id, sid) in [(910_001, 910_011, low_st), (910_002, 910_012, high_st)] {
             snap.items.insert(mod_id, InventoryItemRecord {
                 item_id: mod_id, type_id: 35922, owner_id: corp_id, location_id: sid,
                 flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, version: 1, ..Default::default()
+            });
+            snap.items.insert(charge_id, InventoryItemRecord {
+                item_id: charge_id, type_id: 37847, owner_id: corp_id, location_id: sid,
+                flag: InventoryFlag::HiSlot0, quantity: 100, singleton: false, version: 1, ..Default::default()
             });
             snap.module_online_states.insert(mod_id, true);
         }
@@ -582,6 +586,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
 
     // 2. War target, negative-standing pilot, and blocked-ACL pilot entering low-sec grid ARE auto-locked and damaged!
     for (idx, (cid, ship_id)) in [(war_char, 920_002), (neg_standing_char, 920_003), (blocked_char, 920_004)].into_iter().enumerate() {
+        ctx.advance_secs(15);
         let _s = spawn_and_enter_grid(&ctx, 530 + idx as u64, cid, ship_id, lowsec_sys, DVec3::new(18_000.0, idx as f64 * 2_000.0, 0.0)).await;
         let cs = low_sys_h.get_combat_state(ship_id).await.unwrap().unwrap();
         assert!(cs.shield_hp < cs.max_shield_hp, "Hostile/red/blocked pilot {cid} in low-sec must take auto-defense volley damage");
@@ -591,6 +596,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
     }
 
     // 3. Neutral pilot enters grid unharmed until firing on the structure -> live combat retaliation!
+    ctx.advance_secs(15);
     let mut att_sess = spawn_and_enter_grid(&ctx, 540, attacker_char, 920_005, lowsec_sys, DVec3::new(12_000.0, 0.0, 0.0)).await;
     let pre_cs = low_sys_h.get_combat_state(920_005).await.unwrap().unwrap();
     assert!((pre_cs.shield_hp - pre_cs.max_shield_hp).abs() < 1e-6, "Neutral pilot is unharmed before attacking");
@@ -608,6 +614,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
     ctx.invalidate_ship_fitting(920_005);
     eve_server::services::station_structure::structure_lifecycle_rpc::ensure_structure_ball_in_space(&ctx, lowsec_sys, low_st).await;
     low_sys_h.add_target_lock(920_005, TargetLock { target_id: low_st, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(50_000.0) }).await.unwrap();
+    ctx.advance_secs(15);
     rpc(&ctx, &mut att_sess, "dogmaIM", "Activate", &[PyRep::Integer(920_105), PyRep::Integer(low_st)])
         .await
         .expect("Neutral fires weapon at Fortizar");

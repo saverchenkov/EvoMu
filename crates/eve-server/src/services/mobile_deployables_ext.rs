@@ -667,27 +667,64 @@ fn step_mmju_spools_in_actor(
         })
     });
     for entry in completed {
-        let is_scrambled = ballpark.is_ball_scrambled(entry.ship_id)
-            || ballpark
-                .combat_states
-                .get(&entry.ship_id)
-                .is_some_and(|cs| cs.is_warp_scrambled() || cs.is_mwd_mjd_disabled);
-        if is_scrambled {
-            continue;
-        }
-        let Some(ball) = ballpark.balls.get_mut(&entry.ship_id) else {
+        let valid_in_db = db.with_snapshot(|snap| {
+            let st = read_deployable_state_snap(snap);
+            let Some(rec) = st.deployables.get(&entry.unit_id) else {
+                return None;
+            };
+            let is_active = !rec.is_unanchored
+                && now_unix < rec.expires_at_unix
+                && (rec.anchor_completed
+                    || (rec.anchor_start_unix > 0
+                        && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)));
+            if rec.solar_system_id != solar_system_id
+                || !is_active
+                || !snap.items.contains_key(&entry.unit_id)
+            {
+                return None;
+            }
+            let pilot_aboard = snap.characters.get(&entry.char_id).is_some_and(|c| {
+                c.active_ship_id == entry.ship_id
+                    && c.station_id.is_none()
+                    && c.structure_id.is_none()
+                    && c.solar_system_id == solar_system_id
+            });
+            if !pilot_aboard {
+                return None;
+            }
+            let pos = snap
+                .item_positions
+                .get(&entry.unit_id)
+                .copied()
+                .map(DVec3::from_array)
+                .unwrap_or_else(|| DVec3::from_array(rec.position));
+            Some(pos)
+        });
+        let Some(unit_pos) = valid_in_db else {
             continue;
         };
-        if matches!(ball.mode, MovementMode::Warp { .. }) {
+        let is_blocked = ballpark.is_ball_scrambled(entry.ship_id)
+            || ballpark.combat_states.get(&entry.ship_id).is_some_and(|cs| {
+                cs.is_cloaked || cs.is_warp_scrambled() || cs.is_mwd_mjd_disabled
+            });
+        if is_blocked {
             continue;
         }
-        let dir = DVec3::from_array(entry.direction).normalize_or_zero();
-        let jump_dir = if dir.length_squared() > 0.5 { dir } else { DVec3::X };
-        let new_pos = ball.position + jump_dir * MMJU_JUMP_DISTANCE_M;
-        ball.position = new_pos;
-        db.with_mut_snapshot(|snap| {
-            snap.item_positions.insert(entry.ship_id, new_pos.to_array());
+        let can_jump = ballpark.balls.get(&entry.ship_id).is_some_and(|ball| {
+            let unit_radius = ballpark.balls.get(&entry.unit_id).map(|u| u.radius).unwrap_or(150.0);
+            let surface_dist = ((ball.position - unit_pos).length() - ball.radius - unit_radius).max(0.0);
+            !matches!(ball.mode, MovementMode::Warp { .. })
+                && surface_dist <= MMJU_ACTIVATION_RANGE_M
+                && ball.mass < MMJU_MAX_SHIP_MASS_KG
         });
+        if !can_jump {
+            continue;
+        }
+        if let Ok(new_pos) = ballpark.micro_jump(entry.ship_id, MMJU_JUMP_DISTANCE_M) {
+            db.with_mut_snapshot(|snap| {
+                snap.item_positions.insert(entry.ship_id, new_pos.to_array());
+            });
+        }
     }
 }
 

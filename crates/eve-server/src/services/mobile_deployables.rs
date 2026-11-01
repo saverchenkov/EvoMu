@@ -83,7 +83,7 @@ pub struct MobileDeployableRuntimeState {
     pub observatory_pings_done: HashMap<i64, u32>,
     #[serde(default)]
     pub cloak_activated_unix: HashMap<i64, u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_mmju_spools")]
     pub mmju_spools: HashMap<i64, MmjuSpoolEntry>,
     #[serde(default)]
     pub siphon_last_cycle_unix: HashMap<i64, u64>,
@@ -141,11 +141,60 @@ pub struct PersistedDamageRecord {
     pub max_structure_hp: f64,
 }
 
+fn deserialize_mmju_spools<'de, D>(deserializer: D) -> Result<HashMap<i64, MmjuSpoolEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct MmjuSpoolsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for MmjuSpoolsVisitor {
+        type Value = HashMap<i64, MmjuSpoolEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map or sequence of MmjuSpoolEntry")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut out = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+            while let Some((k, v)) = map.next_entry::<i64, MmjuSpoolEntry>()? {
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out = HashMap::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(entry) = seq.next_element::<MmjuSpoolEntry>()? {
+                out.insert(entry.ship_id, entry);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(MmjuSpoolsVisitor)
+}
+
 pub fn read_deployable_state_snap(snap: &eve_db::WorldStateSnapshot) -> MobileDeployableRuntimeState {
-    snap.owner_notes
-        .get(&MOBILE_DEPLOYABLE_NOTE_ID)
-        .and_then(|n| serde_json::from_str::<MobileDeployableRuntimeState>(&n.note).ok())
-        .unwrap_or_default()
+    match snap.owner_notes.get(&MOBILE_DEPLOYABLE_NOTE_ID) {
+        Some(n) => match serde_json::from_str::<MobileDeployableRuntimeState>(&n.note) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::error!(
+                    note_id = MOBILE_DEPLOYABLE_NOTE_ID,
+                    error = %e,
+                    "Failed to deserialize MobileDeployableRuntimeState; returning default"
+                );
+                MobileDeployableRuntimeState::default()
+            }
+        },
+        None => MobileDeployableRuntimeState::default(),
+    }
 }
 
 pub fn write_deployable_state_snap<R>(
@@ -1167,4 +1216,49 @@ pub async fn handle_activate_micro_jump_unit(
         ("jumpDistanceMeters", eve_proto::PyRep::Real(MMJU_JUMP_DISTANCE_M)),
         ("spoolCompleteUnix", eve_proto::PyRep::Integer(spool_complete_unix as i64)),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deployable_runtime_state_backward_compat_mmju_spools() {
+        let legacy_json = r#"{
+            "deployables": {
+                "7001": {
+                    "item_id": 7001,
+                    "type_id": 33475,
+                    "group_id": 1246,
+                    "owner_id": 9001,
+                    "solar_system_id": 30002537,
+                    "anchor_start_unix": 1000,
+                    "anchor_duration_secs": 60,
+                    "anchor_completed": true,
+                    "expires_at_unix": 50000,
+                    "last_interaction_unix": 1000,
+                    "reinforced_until_unix": null,
+                    "position": [10.0, 20.0, 30.0]
+                }
+            },
+            "damaged_items": {},
+            "mmju_spools": [
+                {
+                    "ship_id": 8001,
+                    "char_id": 9001,
+                    "unit_id": 7001,
+                    "solar_system_id": 30002537,
+                    "started_unix": 1200,
+                    "complete_at_unix": 1212,
+                    "direction": [1.0, 0.0, 0.0]
+                }
+            ]
+        }"#;
+        let parsed: MobileDeployableRuntimeState =
+            serde_json::from_str(legacy_json).expect("legacy Vec mmju_spools must deserialize");
+        assert_eq!(parsed.deployables.len(), 1);
+        assert!(parsed.deployables.contains_key(&7001));
+        assert_eq!(parsed.mmju_spools.len(), 1);
+        assert_eq!(parsed.mmju_spools[&8001].unit_id, 7001);
+    }
 }

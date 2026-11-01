@@ -334,7 +334,11 @@ async fn test_mobile_cyno_beacon_and_covert_mobile_cyno_beacon_lifecycle_and_fle
     ctx.advance_secs(31);
     let post_counts = rpc(&ctx, &mut owner_sess, "map", "GetBeaconCount", &[]).await.unwrap();
     let PyRep::Dict(cnt_entries) = post_counts else { panic!("expected dict") };
-    assert!(cnt_entries.iter().any(|(k, v)| k.as_i64() == Some(LOWSEC_VARD as i64) && v.as_i64() == Some(1)));
+    assert!(cnt_entries.iter().any(|(k, v)| {
+        k.as_i64() == Some(LOWSEC_VARD as i64)
+            && (v.as_i64() == Some(1)
+                || matches!(v, PyRep::Tuple(t) if t.first().and_then(|x| x.as_i64()) == Some(1)))
+    }));
 
     assert_eq!(
         rpc(
@@ -615,4 +619,31 @@ async fn test_mobile_micro_jump_unit_component_spool_mass_scram_and_concurrent_u
         "Mid-spool scrambled cruiser must NOT jump (moved {:.1} m)",
         (scram_post - scram_pre).length()
     );
+
+    // Mid-spool cloak and mid-spool unit expiry must both prevent jump on completion
+    let _ = sys_h.set_ball_position(830_001, owner_pre).await;
+    let _ = sys_h.set_ball_position(830_002, hostile_pre).await;
+    for s in [&mut owner_sess, &mut hostile_sess] {
+        rpc(&ctx, s, "beyonce", "CallComponentFromClient", &comp_args)
+            .await
+            .expect("Start second MMJU spool");
+    }
+    if let Ok(mut bp) = sys_h.ballpark.write() {
+        if let Some(cs) = bp.combat_states.get_mut(&830_001) {
+            cs.is_cloaked = true;
+        }
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
+            if let Some(rec) = st.deployables.get_mut(&mmju_id) {
+                rec.expires_at_unix = ctx.now_unix() + 5;
+            }
+        });
+    });
+    ctx.advance_secs(13);
+    let _ = rpc(&ctx, &mut owner_sess, "beyonce", "UpdateStateRequest", &[]).await;
+    let owner_cloaked_pos = sys_h.get_ball_snapshot(830_001).await.unwrap().unwrap().1.position;
+    let hostile_expired_pos = sys_h.get_ball_snapshot(830_002).await.unwrap().unwrap().1.position;
+    assert!((owner_cloaked_pos - owner_pre).length() < 500.0, "Mid-spool cloaked ship must NOT jump");
+    assert!((hostile_expired_pos - hostile_pre).length() < 500.0, "Ship on expired MMJU must NOT jump");
 }

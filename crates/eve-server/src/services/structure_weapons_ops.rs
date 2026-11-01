@@ -26,6 +26,48 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     }
 }
 
+fn loaded_charge_sde_damage(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    mod_item: &eve_db::InventoryItemRecord,
+) -> Option<(i64, DamageVector)> {
+    let mod_sde = ctx.sde.types.get(&mod_item.type_id)?;
+    if !matches!(mod_sde.group_id, 1327 | 1328 | 1330 | 1562) {
+        return None;
+    }
+    let dmg_mult = mod_sde.default_attributes.get(&64).copied().unwrap_or(1.0);
+    let mut charge_candidates: Vec<(i64, u32)> = snap
+        .items
+        .values()
+        .filter(|it| {
+            it.location_id == structure_id
+                && it.flag == mod_item.flag
+                && it.item_id != mod_item.item_id
+                && it.quantity > 0
+                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
+        })
+        .map(|it| (it.item_id, it.type_id))
+        .collect();
+    charge_candidates.sort_by_key(|&(iid, _)| iid);
+    let (charge_iid, charge_tid) = charge_candidates.first().copied()?;
+    let csde = ctx.sde.types.get(&charge_tid)?;
+    let em = csde.default_attributes.get(&114).copied().unwrap_or(0.0) * dmg_mult;
+    let explosive = csde.default_attributes.get(&116).copied().unwrap_or(0.0) * dmg_mult;
+    let kinetic = csde.default_attributes.get(&117).copied().unwrap_or(0.0) * dmg_mult;
+    let thermal = csde.default_attributes.get(&118).copied().unwrap_or(0.0) * dmg_mult;
+    let dmg = DamageVector {
+        em,
+        thermal,
+        kinetic,
+        explosive,
+    };
+    if dmg.total() <= 0.0 {
+        return None;
+    }
+    Some((charge_iid, dmg))
+}
+
 pub fn structure_online_defense_volley_omni(
     ctx: &ServerContext,
     snap: &WorldStateSnapshot,
@@ -39,14 +81,9 @@ pub fn structure_online_defense_volley_omni(
         if !snap.module_online_states.get(&item.item_id).copied().unwrap_or(true) {
             continue;
         }
-        let grp = ctx.sde.types.get(&item.type_id).map(|t| t.group_id).unwrap_or(0);
-        total += match grp {
-            1330 => 1_000.0, // Standup Point Defense Battery
-            1562 => 1_200.0, // Standup Multirole Missile Launcher
-            1327 => 6_000.0, // Standup Anticapital Missile Launcher
-            1328 => 2_800.0, // Standup Guided Bomb Launcher
-            _ => 0.0,
-        };
+        if let Some((_, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, item) {
+            total += dmg.total();
+        }
     }
     total
 }
@@ -57,13 +94,13 @@ pub async fn trigger_structure_auto_defense_on_grid(
     sys_id: u32,
     structure_id: i64,
     attacker_char_id: Option<i64>,
-    _now_unix: u64,
+    now_unix: u64,
 ) {
     ops::sync_pending_profiles_in_ctx(ctx);
-    let Some((st_pos, pilot_opt, volley_omni)) = ctx.db.with_mut_snapshot(|snap| {
+    let Some((st_pos, _st_owner_id, pilot_opt)) = ctx.db.with_mut_snapshot(|snap| {
         if let Some(att_id) = attacker_char_id.filter(|&id| id > 0) {
             let mut def = load_defense_settings(snap, structure_id);
-            def.record_attacker(att_id, ctx.now_unix());
+            def.record_attacker(att_id, now_unix);
             save_defense_settings(snap, &def);
         }
         let st = snap.structures.get(&structure_id)?;
@@ -72,8 +109,12 @@ pub async fn trigger_structure_auto_defense_on_grid(
         }
         let ext = load_ext_state(snap);
         let pilot_opt = ext.active_pilot_by_structure.get(&structure_id).copied();
-        let volley = structure_online_defense_volley_omni(ctx, snap, structure_id);
-        Some((DVec3::from_array(st.position), pilot_opt, volley))
+        let ceo_id = snap
+            .corporations
+            .get(&st.owner_corp_id)
+            .map(|c| c.ceo_id)
+            .unwrap_or(0);
+        Some((DVec3::from_array(st.position), ceo_id, pilot_opt))
     }) else {
         return;
     };
@@ -101,7 +142,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
         Vec::new()
     };
 
-    let targets: Vec<(i64, i64)> = ctx.db.with_mut_snapshot(|snap| {
+    let (targets, volley_dmg): (Vec<(i64, i64)>, DamageVector) = ctx.db.with_mut_snapshot(|snap| {
         let matched: Vec<(i64, i64)> = candidates
             .into_iter()
             .filter(|&(_, cid)| evaluate_auto_defense_target(ctx, snap, structure_id, cid))
@@ -109,8 +150,86 @@ pub async fn trigger_structure_auto_defense_on_grid(
         let mut ext = load_ext_state(snap);
         ext.structure_auto_targets
             .insert(structure_id, matched.iter().map(|&(bid, _)| bid).collect());
+
+        let mut total_dmg = DamageVector::default();
+        if !matched.is_empty() {
+            let st_sde = snap
+                .structures
+                .get(&structure_id)
+                .and_then(|st| ctx.sde.types.get(&st.type_id));
+            let max_cap = st_sde
+                .and_then(|t| t.default_attributes.get(&482).copied())
+                .unwrap_or(400_000.0);
+            let rech_s = (st_sde
+                .and_then(|t| t.default_attributes.get(&55).copied())
+                .unwrap_or(5_760_000.0)
+                / 1_000.0)
+                .max(1.0);
+            let mut cur_cap = match ext.structure_cap_state.get(&structure_id).copied() {
+                Some((prev_cap, prev_ts)) => {
+                    let dt = now_unix.saturating_sub(prev_ts) as f64;
+                    (prev_cap + (max_cap / rech_s) * dt).min(max_cap)
+                }
+                None => max_cap,
+            };
+
+            let mut mod_items: Vec<eve_db::InventoryItemRecord> = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.location_id == structure_id
+                        && (27..=34).contains(&(it.flag as u16))
+                        && snap.module_online_states.get(&it.item_id).copied().unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+            mod_items.sort_by_key(|m| m.item_id);
+
+            for mod_item in mod_items {
+                if ext
+                    .standup_module_cycle_until_unix
+                    .get(&mod_item.item_id)
+                    .is_some_and(|&u| now_unix < u)
+                {
+                    continue;
+                }
+                let Some(mod_sde) = ctx.sde.types.get(&mod_item.type_id) else {
+                    continue;
+                };
+                let cap_need = mod_sde.default_attributes.get(&6).copied().unwrap_or(0.0);
+                if cur_cap + 1e-6 < cap_need {
+                    continue;
+                }
+                let Some((charge_iid, dmg)) = loaded_charge_sde_damage(ctx, snap, structure_id, &mod_item) else {
+                    continue;
+                };
+                if let Some(ch_it) = snap.items.get_mut(&charge_iid) {
+                    if ch_it.quantity > 1 {
+                        ch_it.quantity -= 1;
+                        ch_it.version += 1;
+                    } else {
+                        snap.items.remove(&charge_iid);
+                    }
+                }
+                cur_cap = (cur_cap - cap_need).max(0.0);
+                ext.structure_cap_state.insert(structure_id, (cur_cap, now_unix));
+                let cycle_secs = mod_sde
+                    .default_attributes
+                    .get(&51)
+                    .or_else(|| mod_sde.default_attributes.get(&73))
+                    .map(|&ms| (ms / 1_000.0).ceil() as u64)
+                    .unwrap_or(10)
+                    .max(1);
+                ext.standup_module_cycle_until_unix
+                    .insert(mod_item.item_id, now_unix.saturating_add(cycle_secs));
+                total_dmg.em += dmg.em;
+                total_dmg.thermal += dmg.thermal;
+                total_dmg.kinetic += dmg.kinetic;
+                total_dmg.explosive += dmg.explosive;
+            }
+        }
         save_ext_state(snap, &ext);
-        matched
+        (matched, total_dmg)
     });
 
     for (ship_id, target_char_id) in targets {
@@ -140,16 +259,23 @@ pub async fn trigger_structure_auto_defense_on_grid(
             "charid",
             vec![PyRep::String("otheradd".into()), PyRep::Integer(structure_id)],
         );
-        if volley_omni > 0.0 {
-            let per = volley_omni * 0.25;
-            let dmg = DamageVector {
-                em: per,
-                thermal: per,
-                kinetic: per,
-                explosive: per,
-            };
+        if volley_dmg.total() > 0.0 {
+            if let Some(gunner_char) = pilot_opt {
+                if crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+                    ctx,
+                    gunner_char,
+                    structure_id,
+                    sys_id,
+                    ship_id,
+                    false,
+                )
+                .is_err()
+                {
+                    continue;
+                }
+            }
             if let Ok(Some((dealt, _, _))) = sys_handle
-                .apply_damage_with_attacker(ship_id, dmg, pilot_opt)
+                .apply_damage_with_attacker(ship_id, volley_dmg, pilot_opt.or(Some(structure_id)))
                 .await
             {
                 if dealt > 0.0 {
