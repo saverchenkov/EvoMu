@@ -40,16 +40,6 @@ impl From<StoredVisitRecord> for SolarSystemVisitRecord {
     }
 }
 
-pub fn record_system_jump(ctx: &ServerContext, solar_system_id: u32) {
-    if solar_system_id == 0 {
-        return;
-    }
-    let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.record_system_jump(solar_system_id, 0, now_unix);
-    });
-}
-
 pub fn record_solar_system_visit(ctx: &ServerContext, char_id: i64, solar_system_id: u32) {
     if char_id <= 0 || solar_system_id == 0 {
         return;

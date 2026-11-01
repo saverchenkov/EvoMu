@@ -143,9 +143,9 @@ async fn test_ui_star_map_data_and_map_stats() {
         .expect("GetDeadspaceAgentsMap");
     assert!(matches!(deadspace_agents, PyRep::ObjectEx { .. }));
 
-    // Record jump events via map_service::record_system_jump and kill events, then verify map.GetHistory(1/2/3)
-    eve_server::services::map_service::record_system_jump(&ctx, jita);
-    eve_server::services::map_service::record_system_jump(&ctx, jita);
+    // Record jump events via map_service::record_solar_system_jump and kill events, then verify map.GetHistory(1/2/3)
+    eve_server::services::map_service::record_solar_system_jump(&ctx, P1, jita);
+    eve_server::services::map_service::record_solar_system_jump(&ctx, P1, jita);
     let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         snap.record_system_kill(jita, 1, 2, 0, now_u);
@@ -184,11 +184,11 @@ async fn test_ui_star_map_data_and_map_stats() {
         .expect("GetHistory(2)");
     assert_eq!(find_sys_row(hist_kills, jita), (3, 2, 0), "GetHistory(2) must return (3, 2, 0) kills");
 
-    // stat_type 3 => pilots in space (0 while docked)
+    // stat_type 3 => active pilots (1 after P1 jumped in Jita)
     let hist_pilots = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(3)])
         .await
         .expect("GetHistory(3)");
-    assert_eq!(find_sys_row(hist_pilots, jita), (0, 0, 0), "GetHistory(3) must return 0 pilots in space");
+    assert_eq!(find_sys_row(hist_pilots, jita), (1, 0, 0), "GetHistory(3) must return 1 active pilot in Jita");
 }
 
 #[tokio::test]
