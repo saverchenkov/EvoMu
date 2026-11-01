@@ -108,6 +108,16 @@ pub fn sync_char_contacts_to_db(ctx: &ServerContext, char_id: i64) {
         .ok()
         .and_then(|g| g.get(&char_id).cloned())
         .unwrap_or_default();
+    let contacts_for_db = contacts.clone();
+    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+        snap.char_contacts.insert(char_id, contacts_for_db);
+        snap.char_contact_labels.insert(char_id, labels);
+        Ok::<_, eve_proto::BridgeRpcError>(())
+    }) {
+        eve_db::record_last_wal_error(&e.message);
+        hydrate_social_state_from_db(ctx);
+        return;
+    }
     if let Ok(mut se) = ctx.social_extras.lock() {
         let mut cmap = HashMap::new();
         let mut blocked_set = HashSet::new();
@@ -128,10 +138,6 @@ pub fn sync_char_contacts_to_db(ctx: &ServerContext, char_id: i64) {
         se.contacts.insert(char_id, cmap);
         se.blocked.insert(char_id, blocked_set);
     }
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.char_contacts.insert(char_id, contacts);
-        snap.char_contact_labels.insert(char_id, labels);
-    });
 }
 
 pub fn is_blocked_by(ctx: &ServerContext, target_char_id: i64, sender_char_id: i64) -> bool {
@@ -385,6 +391,15 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
             char_contacts,
             chat_channel_acl,
         ) = social_snap;
+        se.cspa_charges.clear();
+        se.trashed_mails.clear();
+        se.char_notes.clear();
+        se.mailing_lists.clear();
+        se.calendar_events.clear();
+        se.contacts.clear();
+        se.blocked.clear();
+        se.blocked_in_channel.clear();
+        se.muted_in_channel.clear();
         se.mailing_lists_seeded = seeded;
         for (cid, charge) in cspa_charges {
             se.cspa_charges.insert(cid, charge);
@@ -472,39 +487,55 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 .collect()
         };
         if let Ok(mut esi_cc) = ctx.esi_state.char_contacts.write() {
+            esi_cc.clear();
             for (&id, list) in &snap.char_contacts {
                 esi_cc.insert(id, to_esi(list));
             }
         }
         if let Ok(mut esi_cl) = ctx.esi_state.char_contact_labels.write() {
+            esi_cl.clear();
             for (&id, labels) in &snap.char_contact_labels {
                 esi_cl.insert(id, labels.clone());
             }
         }
         if let Ok(mut esi_corpc) = ctx.esi_state.corp_contacts.write() {
+            esi_corpc.clear();
             for (&id, list) in &snap.corp_contacts {
                 esi_corpc.insert(id, to_esi(list));
             }
         }
         if let Ok(mut esi_corpl) = ctx.esi_state.corp_contact_labels.write() {
+            esi_corpl.clear();
             for (&id, labels) in &snap.corp_contact_labels {
                 esi_corpl.insert(id, labels.iter().map(|(lid, n, _)| (*lid, n.clone())).collect());
             }
         }
         if let Ok(mut esi_ac) = ctx.esi_state.alliance_contacts.write() {
+            esi_ac.clear();
             for (&id, list) in &snap.alliance_contacts {
                 esi_ac.insert(id, to_esi(list));
             }
         }
         if let Ok(mut esi_al) = ctx.esi_state.alliance_contact_labels.write() {
+            esi_al.clear();
             for (&id, labels) in &snap.alliance_contact_labels {
                 esi_al.insert(id, labels.clone());
             }
+        }
+        if let Ok(mut names) = ctx.esi_state.custom_item_names.write() {
+            names.clear();
+            for (&item_id, name) in &snap.item_custom_names {
+                names.insert(item_id, name.clone());
+            }
+        }
+        if let Ok(mut del) = ctx.esi_state.deleted_mails.write() {
+            del.clear();
         }
         for &(char_id, mail_id) in &snap.deleted_mails {
             ctx.esi_state.mark_mail_deleted(char_id, mail_id);
         }
         if let Ok(mut esi_ml) = ctx.esi_state.mail_labels.write() {
+            esi_ml.clear();
             for (&char_id, labels) in &snap.mail_labels {
                 let entry = esi_ml
                     .entry(char_id)

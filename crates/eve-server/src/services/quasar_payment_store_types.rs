@@ -6,8 +6,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64, DynamicValue,
+    GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
@@ -36,11 +36,11 @@ pub fn emit_balance_changed_notice(
     encode_bytes_field(2, &user_ident, &mut attr);
 
     let mut amt_curr = Vec::new();
-    encode_varint_field(1, (amount.abs() * 100) as u64, &mut amt_curr);
+    encode_varint_field(1, encode_zigzag64(amount * 100), &mut amt_curr);
     encode_bytes_field(4, &amt_curr, &mut attr);
 
     let mut bal_curr = Vec::new();
-    encode_varint_field(1, (balance_after * 100) as u64, &mut bal_curr);
+    encode_varint_field(1, encode_zigzag64(balance_after * 100), &mut bal_curr);
     encode_bytes_field(5, &bal_curr, &mut attr);
 
     encode_string_field(6, description, &mut attr);

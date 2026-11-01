@@ -280,10 +280,10 @@ pub(super) fn handle_mail_and_calendar(
                         message: format!("Recipient {rec_id} has blocked you"),
                     }));
                 }
-                if let Some(charge) = extra_cspa
-                    .get(&rec_id)
-                    .copied()
-                    .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied()))
+                if let Some(charge) = ctx
+                    .db
+                    .with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied())
+                    .or_else(|| extra_cspa.get(&rec_id).copied())
                 {
                     if charge.0 > 0 && !friendly_contact && target_label == 1 {
                         total_cspa = match total_cspa.checked_add(charge) {
@@ -880,16 +880,19 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("CustomLabel");
             let color = args.get(1).and_then(|a| a.as_str()).unwrap_or("#ffffff");
-            let lid = ctx.db.try_with_mut_snapshot(|snap| {
+            let lid = match ctx.db.try_with_mut_snapshot(|snap| {
                 let list = snap.mail_labels.entry(char_id).or_default();
                 let next_id = (0..24).map(|k| 64i64 << k).find(|&id| !list.iter().any(|l| l.label_id == id)).unwrap_or(64i64 << 24);
                 list.push(MailLabelRecord { label_id: next_id, name: name.to_string(), color: color.to_string() });
-                if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
-                    let esi_list = map.entry(char_id).or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
-                    esi_list.push(crate::esi::runtime_state::EsiMailLabel { label_id: next_id, name: name.to_string(), color: color.to_string() });
-                }
-                Ok::<_, std::convert::Infallible>(next_id)
-            }).unwrap();
+                Ok::<_, BridgeRpcError>(next_id)
+            }) {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
+                let esi_list = map.entry(char_id).or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
+                esi_list.push(crate::esi::runtime_state::EsiMailLabel { label_id: lid, name: name.to_string(), color: color.to_string() });
+            }
             Some(Ok(PyRep::Integer(lid)))
         }
 
@@ -909,16 +912,18 @@ pub(super) fn handle_mail_and_calendar(
                 };
                 lbl.name = name.to_string();
                 lbl.color = color.to_string();
-                if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
-                    if let Some(el) = map.get_mut(&char_id).and_then(|v| v.iter_mut().find(|l| l.label_id == label_id)) {
-                        el.name = name.to_string();
-                        el.color = color.to_string();
-                    }
-                }
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(label_id)), ("name", PyRep::String(name.to_string())), ("color", PyRep::String(color.to_string()))]))),
+                Ok(()) => {
+                    if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
+                        if let Some(el) = map.get_mut(&char_id).and_then(|v| v.iter_mut().find(|l| l.label_id == label_id)) {
+                            el.name = name.to_string();
+                            el.color = color.to_string();
+                        }
+                    }
+                    Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(label_id)), ("name", PyRep::String(name.to_string())), ("color", PyRep::String(color.to_string()))])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -945,15 +950,17 @@ pub(super) fn handle_mail_and_calendar(
                         assigned.retain(|&l| l != label_id);
                     }
                 }
-                if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
-                    if let Some(esi_list) = map.get_mut(&char_id) {
-                        esi_list.retain(|l| l.label_id != label_id);
-                    }
-                }
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(label_id)), ("deleted", PyRep::Bool(true))]))),
+                Ok(()) => {
+                    if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
+                        if let Some(esi_list) = map.get_mut(&char_id) {
+                            esi_list.retain(|l| l.label_id != label_id);
+                        }
+                    }
+                    Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(label_id)), ("deleted", PyRep::Bool(true))])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

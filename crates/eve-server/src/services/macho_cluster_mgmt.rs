@@ -592,21 +592,10 @@ pub fn handle(
                     PyRep::None
                 }
                 _ => {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        let mut log: Vec<String> = snap
-                            .service_state_blobs
-                            .get("db2_proc_log")
-                            .and_then(|s| serde_json::from_str(s).ok())
-                            .unwrap_or_default();
-                        if log.len() >= 256 {
-                            log.drain(0..log.len().saturating_sub(255));
-                        }
-                        log.push(format!("{proc_name} called at {}", ctx.now_unix()));
-                        if let Ok(json) = serde_json::to_string(&log) {
-                            snap.service_state_blobs.insert("db2_proc_log".into(), json);
-                        }
-                    });
-                    PyRep::None
+                    return Some(Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "InvalidProcedure".into(),
+                    }));
                 }
             };
             Some(Ok(result))

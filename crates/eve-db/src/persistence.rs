@@ -881,6 +881,10 @@ impl WorldRepository {
     }
 
     /// Delegates infallible snapshot mutations through `run_mut_snapshot_tx`.
+    /// On a durable SQLite/WAL persistence failure, `run_mut_snapshot_tx` rolls back
+    /// `WorldStateSnapshot` from the committed SQLite tables and records the error in
+    /// `LAST_WAL_PERSIST_ERROR` so `ServerContext::dispatch_rpc` can return an atomic RPC error
+    /// without panicking.
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
@@ -893,7 +897,7 @@ impl WorldRepository {
             }
             true
         }) {
-            panic!("Durable WAL persistence failure: {persist_err}");
+            record_last_wal_error(&persist_err);
         }
         out.expect("with_mut_snapshot closure must run")
     }
@@ -947,6 +951,19 @@ impl WorldRepository {
         self.with_mut_snapshot(|snap| {
             snap.asteroids.entry(record.asteroid_id).or_insert(record);
         });
+    }
+}
+
+static WAL_ERROR_HOOK: std::sync::OnceLock<std::sync::Arc<dyn Fn(&str) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
+    let _ = WAL_ERROR_HOOK.set(hook);
+}
+
+pub fn record_last_wal_error(err: &str) {
+    if let Some(hook) = WAL_ERROR_HOOK.get() {
+        hook(err);
     }
 }
 

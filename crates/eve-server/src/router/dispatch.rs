@@ -5,7 +5,33 @@ use crate::services;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
+use std::sync::{Arc, Once};
 use tracing::{info, warn};
+
+tokio::task_local! {
+    static DISPATCH_WAL_ERROR: std::cell::RefCell<Option<String>>;
+}
+
+static WAL_HOOK_ONCE: Once = Once::new();
+
+pub fn ensure_wal_error_hook_installed() {
+    WAL_HOOK_ONCE.call_once(|| {
+        eve_db::set_wal_error_hook(Arc::new(record_dispatch_wal_error));
+    });
+}
+
+pub fn record_dispatch_wal_error(err: &str) {
+    let _ = DISPATCH_WAL_ERROR.try_with(|slot| {
+        *slot.borrow_mut() = Some(err.to_string());
+    });
+}
+
+pub fn take_dispatch_wal_error() -> Option<String> {
+    DISPATCH_WAL_ERROR
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten()
+}
 
 fn append_unimplemented_rpc_log(
     session_id: u64,
@@ -87,17 +113,42 @@ impl ServerContext {
             .unwrap_or(0);
 
         let prev_station_id = session.station_id;
+        ensure_wal_error_hook_installed();
         let start_time = std::time::Instant::now();
-        let res = Box::pin(self.dispatch_rpc_inner(
-            session,
-            service,
-            bound_id,
-            method,
-            args,
-            kwargs,
-            caller_trace,
-        ))
-        .await;
+        let (mut res, wal_err) = DISPATCH_WAL_ERROR
+            .scope(std::cell::RefCell::new(None), async {
+                let r = Box::pin(self.dispatch_rpc_inner(
+                    session,
+                    service,
+                    bound_id,
+                    method,
+                    args,
+                    kwargs,
+                    caller_trace,
+                ))
+                .await;
+                let err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
+                (r, err)
+            })
+            .await;
+        if let Some(wal_err) = wal_err {
+            if res.is_ok() {
+                res = Err(BridgeRpcError {
+                    code: "DatabasePersistenceError".into(),
+                    message: wal_err,
+                });
+            }
+        }
+        if res.is_err() {
+            crate::services::fleet_social::hydrate_social_state_from_db(self);
+            if let Some(cid) = session.character_id {
+                if let Ok(mut q) = self.pending_notifications.write() {
+                    if let Some(v) = q.get_mut(&cid) {
+                        v.truncate(initial_len);
+                    }
+                }
+            }
+        }
         let duration = start_time.elapsed();
 
         let status_desc = match &res {
