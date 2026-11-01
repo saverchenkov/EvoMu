@@ -534,7 +534,7 @@ pub async fn handle_structure_module_activate(
     char_id: i64,
     structure_id: i64,
     module_id: i64,
-    effect_name: &str,
+    _effect_name: &str,
     target_id_opt: Option<i64>,
     is_overload: bool,
 ) -> Result<PyRep, BridgeRpcError> {
@@ -545,7 +545,7 @@ pub async fn handle_structure_module_activate(
         ));
     }
     let now_unix = ctx.now_unix();
-    let (st, mod_type_id, mod_group_id, slot_flag, owner_ally, gunner_fleet_members) =
+    let (st, mod_type_id, mod_group_id, slot_flag, _owner_ally, _gunner_fleet_members) =
         ctx.db.with_snapshot(|snap| {
             let st = snap
                 .structures
