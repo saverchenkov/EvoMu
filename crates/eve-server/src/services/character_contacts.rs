@@ -596,30 +596,19 @@ pub fn handle_contacts(
                 .map(|m| m.max(0) as u64);
             let contact_type = if (99_000_000..100_000_000).contains(&contact_id) {
                 "alliance"
-            } else if (1_000_000..2_000_000).contains(&contact_id)
-                || (98_000_000..99_000_000).contains(&contact_id)
-            {
+            } else if (1_000_000..2_000_000).contains(&contact_id) || (98_000_000..99_000_000).contains(&contact_id) {
                 "corporation"
             } else {
                 "character"
             };
 
-            let mut guard = match ctx.esi_state.char_contacts.write() {
-                Ok(g) => g,
-                Err(_) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "LockPoisoned".into(),
-                        message: "Contact state lock poisoned".into(),
-                    }))
-                }
+            let Ok(mut guard) = ctx.esi_state.char_contacts.write() else {
+                return Some(Err(BridgeRpcError { code: "LockPoisoned".into(), message: "Contact state lock poisoned".into() }));
             };
             let list = guard.entry(char_id).or_default();
             let existing_pos = list.iter().position(|e| e.contact_id == contact_id);
             if existing_pos.is_none() && list.len() >= 1_024 {
-                return Some(Err(BridgeRpcError {
-                    code: "MaxContactsExceeded".into(),
-                    message: "Character has reached the maximum of 1,024 contacts".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "MaxContactsExceeded".into(), message: "Character has reached the maximum of 1,024 contacts".into() }));
             }
             let (is_blocked, label_mask) = if let Some(idx) = existing_pos {
                 list[idx].standing = standing;
@@ -631,45 +620,32 @@ pub fn handle_contacts(
             } else {
                 let label_ids = req_label_mask.map(label_ids_from_mask).unwrap_or_default();
                 let mask = label_mask_from_ids(&label_ids);
-                list.push(EsiContactEntry {
-                    contact_id,
-                    contact_type: contact_type.to_string(),
-                    standing,
-                    is_watched: in_watchlist,
-                    is_blocked: false,
-                    label_ids,
-                });
+                list.push(EsiContactEntry { contact_id, contact_type: contact_type.to_string(), standing, is_watched: in_watchlist, is_blocked: false, label_ids });
                 (false, mask)
             };
             drop(guard);
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
+            if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
+                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg }));
+            }
 
             // AddressBookSvc.OnPersonalContactsAdded(contacts, relationshipID, watchlist, labelMask):
             // each contact is read as `contact.contactID` / `contact.isOnline`. (`OnContactChange` is
             // scattered client-side by that handler, so the server does not send it.)
             let contact = PyRep::keyval([
                 ("contactID", PyRep::Integer(contact_id)),
-                // A contact that has blocked us never reveals presence (as notify_watchlist_presence).
                 ("isOnline", PyRep::Bool(!is_blocked_by(ctx, contact_id, char_id) && is_character_online(ctx, contact_id))),
             ]);
             if ctx.sde.agents.contains_key(&contact_id) {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnAgentAdded",
-                    "charid",
-                    vec![PyRep::Integer(contact_id)],
-                );
+                ctx.notify(NotificationTarget::Character(char_id), "OnAgentAdded", "charid", vec![PyRep::Integer(contact_id)]);
             }
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnPersonalContactsAdded",
                 "charid",
-                vec![
-                    PyRep::List(vec![contact]),
-                    PyRep::Real(standing),
-                    PyRep::Bool(in_watchlist),
-                    PyRep::Integer(label_mask),
-                ],
+                vec![PyRep::List(vec![contact]), PyRep::Real(standing), PyRep::Bool(in_watchlist), PyRep::Integer(label_mask)],
             );
             ctx.notify(NotificationTarget::Character(char_id), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
 
@@ -743,7 +719,9 @@ pub fn handle_contacts(
                     updated_count += 1;
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
             // the client's current value (EditContactsRelationshipID leaves the watchlist untouched).
@@ -785,7 +763,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsDeleted(contacts): each entry is read as `contact.contactID`.
             if !removed_ids.is_empty() {
@@ -851,7 +831,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // `OnBlockContacts` is scattered by the client itself (AddressBookSvc.BlockOwner).
             Some(Ok(PyRep::keyval([
@@ -888,7 +870,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // `OnUnblockContacts` is scattered by the client itself (AddressBookSvc.UnblockOwner);
             // ContactsForm.OnUnblockContact(contactID) only reloads the contacts tab.
@@ -937,7 +921,9 @@ pub fn handle_contacts(
             }
             labels.push((label_id, name.to_string()));
             drop(guard);
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::Integer(label_id)))
         }
 
@@ -1006,7 +992,9 @@ pub fn handle_contacts(
                     message: format!("Contact label {label_id} not found"),
                 }));
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(label_id)),
                 ("name", PyRep::String(new_name.to_string())),
@@ -1042,7 +1030,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(label_id)),
                 ("deleted", PyRep::Bool(removed)),
@@ -1083,7 +1073,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated as i64)),
                 ("labelMask", PyRep::Integer(label_mask)),
@@ -1117,7 +1109,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated as i64)),
                 ("labelMask", PyRep::Integer(label_mask)),

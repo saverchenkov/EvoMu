@@ -789,10 +789,9 @@ fn handle_chat_rpc(
                 let charge = if friendly || recipient_id == char_id {
                     IskCents(0)
                 } else {
-                    s.cspa_charges
-                        .get(&recipient_id)
-                        .copied()
-                        .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&recipient_id).copied()))
+                    ctx.db
+                        .with_snapshot(|snap| snap.character_cspa_charges.get(&recipient_id).copied())
+                        .or_else(|| s.cspa_charges.get(&recipient_id).copied())
                         .unwrap_or(IskCents(0))
                 };
                 (blocked, charge)
@@ -1202,14 +1201,13 @@ fn handle_contacts_notifications_calendar(
                 .unwrap_or(2_950.0)
                 .clamp(0.0, 1_000_000.0);
             let charge = IskCents::from_f64_isk(isk);
-            ctx.social_extras
-                .lock()
-                .unwrap()
-                .cspa_charges
-                .insert(char_id, charge);
-            ctx.db.with_mut_snapshot(|snap| {
+            if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                 snap.character_cspa_charges.insert(char_id, charge);
-            });
+                Ok(())
+            }) {
+                return Some(Err(e));
+            }
+            ctx.social_extras.lock().unwrap().cspa_charges.insert(char_id, charge);
             Some(Ok(PyRep::Real(isk)))
         }
 
@@ -1258,14 +1256,10 @@ fn handle_contacts_notifications_calendar(
                             }
                         });
                     if !friendly {
-                        let charge = s
-                            .cspa_charges
-                            .get(&rec_id)
-                            .copied()
-                            .or_else(|| {
-                                ctx.db
-                                    .with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied())
-                            })
+                        let charge = ctx
+                            .db
+                            .with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied())
+                            .or_else(|| s.cspa_charges.get(&rec_id).copied())
                             .unwrap_or_else(|| IskCents::from_f64_isk(2_950.0));
                         if charge.0 > 0 {
                             total_cspa = total_cspa.checked_add(charge).unwrap_or(total_cspa);
@@ -1299,14 +1293,13 @@ fn handle_contacts_notifications_calendar(
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             if method == "SetNote" {
                 let note = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
-                ctx.social_extras
-                    .lock()
-                    .unwrap()
-                    .char_notes
-                    .insert((char_id, item_id), note.to_string());
-                ctx.db.with_mut_snapshot(|snap| {
+                if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                     snap.char_notes.insert((char_id, item_id), note.to_string());
-                });
+                    Ok(())
+                }) {
+                    return Some(Err(e));
+                }
+                ctx.social_extras.lock().unwrap().char_notes.insert((char_id, item_id), note.to_string());
                 Some(Ok(PyRep::Bool(true)))
             } else {
                 let note = ctx

@@ -316,7 +316,7 @@ async fn test_quasar_mail_calendar_contacts_standings_complete() {
         assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
     }
 
-    let mut mail_bytes = Vec::new();
+    let mut mail_bytes = encode_seq_id(1, 90000002);
     encode_string_field(3, "Operation Orders", &mut mail_bytes);
     encode_string_field(4, "Fleet form up in Jita at 20:00", &mut mail_bytes);
     let mail_req = make_public_req("eve.mail.CCPSendMailRequest", mail_bytes, now);
@@ -329,6 +329,19 @@ async fn test_quasar_wars_tags_bookmarks_fleet_medal_security_complete() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.insert(
+            1001,
+            eve_db::WarRecord {
+                war_id: 1001,
+                aggressor_corp_id: 98000001,
+                defender_corp_id: 98000002,
+                mutual: false,
+                started_unix: now,
+                active: true,
+            },
+        );
+    });
     let sess = make_auth_session(108, 1, 90000001, 98000001);
 
     for (url, payload, want) in [

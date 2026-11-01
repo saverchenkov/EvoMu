@@ -15,7 +15,10 @@
 //! - `presence`, `search`, `bookmark`, `duel`, `securitystatus`
 
 use super::quasar_social_chat::ctx_now_unix;
-use crate::quasar_gateway::{PublicGatewayRouter, QuasarHandlerFn};
+use crate::quasar_gateway::{
+    PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
+};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
@@ -29,7 +32,6 @@ use std::sync::{Arc, RwLock};
 pub struct QuasarCommunityState {
     pub mails: RwLock<HashMap<u64, (u32, Vec<u32>, String, String, u64)>>,
     pub next_mail_id: AtomicU64,
-    pub wars: RwLock<HashMap<u64, (u64, u64, u64, u64)>>, // war_id -> (aggressor, defender, kills_agg, kills_def)
     pub tags: RwLock<HashMap<String, String>>,
     pub standings: RwLock<HashMap<(u32, u32), f64>>, // (from_id, to_id) -> standing (-10.0..=10.0)
 }
@@ -40,26 +42,33 @@ fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &id_bytes, out);
 }
 
-pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
+pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state = Arc::new(QuasarCommunityState::default());
     state.next_mail_id.store(50001, Ordering::SeqCst);
-
-    // Pre-seed an active war
-    {
-        let mut wars = state.wars.write().unwrap_or_else(|e| e.into_inner());
-        wars.insert(1001, (98000001, 98000002, 12, 4));
-    }
 
     // ========================================================================
     // MAIL DOMAIN (5 protos)
     // ========================================================================
 
     // 1. eve.mail.cspa.GetRequest -> GetResponse
+    let db_cspa_get = Arc::clone(&db);
     router.register_handler(
         "eve.mail.cspa.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let char_id = extract_id(dyn_msg.get(1))
+                .map(|u| u as i64)
+                .or_else(|| ctx.effective_character_id().map(|c| c as i64))
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?;
+            let cents = db_cspa_get
+                .with_snapshot(|snap| snap.character_cspa_charges.get(&char_id).copied())
+                .unwrap_or(eve_db::IskCents(0));
+            let units = (cents.0 / 100).max(0) as u64;
+            let nanos = ((cents.0.rem_euclid(100)) as u64) * 10_000_000;
             let mut charge = Vec::new();
-            encode_varint_field(1, 0, &mut charge); // 0 ISK CSPA charge
+            encode_varint_field(1, units, &mut charge);
+            if nanos > 0 {
+                encode_varint_field(2, nanos, &mut charge);
+            }
             let mut out = Vec::new();
             encode_bytes_field(1, &charge, &mut out);
             Ok(GoogleAny {
@@ -69,12 +78,44 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
         }),
     );
 
+    // 1b. eve.mail.cspa.SetRequest -> SetResponse
+    let db_cspa_set = Arc::clone(&db);
+    router.register_handler(
+        "eve.mail.cspa.SetRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let char_id = ctx
+                .effective_character_id()
+                .map(|c| c as i64)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?;
+            let units = (extract_id(dyn_msg.get(1)).unwrap_or(0) as i64).clamp(0, 1_000_000);
+            db_cspa_set
+                .try_with_mut_snapshot(|snap| {
+                    snap.character_cspa_charges
+                        .insert(char_id, eve_db::IskCents(units.saturating_mul(100)));
+                    Ok::<_, String>(())
+                })
+                .map_err(|e| (STATUS_INTERNAL_ERROR, format!("Failed to persist CSPA charge: {e}")))?;
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.mail.cspa.SetResponse"),
+                value: Vec::new(),
+            })
+        }),
+    );
+
     // 2. eve.mail.CCPSendMailRequest -> CCPSendMailResponse
     let state_mail = Arc::clone(&state);
+    let db_mail = Arc::clone(&db);
     router.register_handler(
         "eve.mail.CCPSendMailRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let sender = ctx.effective_character_id().unwrap_or(90000001);
+            let sender = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?;
+            crate::quasar_gateway::require_admin_role(ctx)?;
+            let recipients = extract_ids(dyn_msg.get(1));
+            if recipients.is_empty() {
+                return Err((STATUS_BAD_REQUEST, "At least one recipient is required".to_string()));
+            }
             let subject = match dyn_msg.get(3) {
                 Some(DynamicValue::String(s)) => s.clone(),
                 _ => "Fleet Notification".into(),
@@ -84,12 +125,28 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
                 _ => "Corporate fleet mobilization orders".into(),
             };
 
-            let mail_id = state_mail.next_mail_id.fetch_add(1, Ordering::SeqCst);
+            let recipients_for_db = recipients.clone();
+            let mail_id = db_mail
+                .try_with_mut_snapshot(|snap| {
+                    let id = snap.next_entity_id.max(1) as u64;
+                    snap.next_entity_id = snap.next_entity_id.max(1) + 1;
+                    for &rid in &recipients_for_db {
+                        snap.mails.push(eve_db::MailRecord {
+                            message_id: id as i64,
+                            sender_id: sender as i64,
+                            recipient_id: rid as i64,
+                            subject: subject.clone(),
+                            body: body.clone(),
+                        });
+                    }
+                    Ok::<_, String>(id)
+                })
+                .map_err(|e| (STATUS_INTERNAL_ERROR, format!("Failed to persist mail: {e}")))?;
             state_mail
                 .mails
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(mail_id, (sender, vec![90000002], subject, body, ctx_now_unix(ctx)));
+                .insert(mail_id, (sender, recipients, subject, body, ctx_now_unix(ctx)));
 
             let mut out = Vec::new();
             encode_seq_id(1, mail_id, &mut out); // successes
@@ -166,14 +223,38 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     // ========================================================================
 
     // 6. eve.contact.label.GetForCharacterRequest -> GetForCharacterResponse
+    let db_char_labels = Arc::clone(&db);
     router.register_handler(
         "eve.contact.label.GetForCharacterRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let session_char_id = ctx
+                .effective_character_id()
+                .map(|c| c as i64)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?;
+            if let Some(req_id) = extract_id(dyn_msg.get(1)) {
+                if req_id as i64 != session_char_id {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        "Cannot read another character's contact labels".to_string(),
+                    ));
+                }
+            }
+            let labels: Vec<(u64, String)> = db_char_labels.with_snapshot(|snap| {
+                let mut v = Vec::new();
+                if let Some(cl) = snap.char_contact_labels.get(&session_char_id) {
+                    for (id, name) in cl {
+                        v.push((*id as u64, name.clone()));
+                    }
+                }
+                v
+            });
             let mut out = Vec::new();
-            let mut l = Vec::new();
-            encode_varint_field(1, 1, &mut l); // id
-            encode_string_field(2, "Fleet Members", &mut l);
-            encode_bytes_field(1, &l, &mut out);
+            for (id, name) in labels {
+                let mut l = Vec::new();
+                encode_varint_field(1, id, &mut l);
+                encode_string_field(2, &name, &mut l);
+                encode_bytes_field(1, &l, &mut out);
+            }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.contact.label.GetForCharacterResponse"),
                 value: out,
@@ -182,14 +263,38 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     );
 
     // 7. eve.contact.label.GetForCorporationRequest -> GetForCorporationResponse
+    let db_corp_labels = Arc::clone(&db);
     router.register_handler(
         "eve.contact.label.GetForCorporationRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let session_char_id = ctx
+                .effective_character_id()
+                .map(|c| c as i64)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?;
+            let session_corp_id = db_corp_labels
+                .with_snapshot(|snap| snap.characters.get(&session_char_id).map(|c| c.corporation_id))
+                .ok_or_else(|| (STATUS_FORBIDDEN, "Character has no corporation".to_string()))?;
+            if let Some(req_corp) = extract_id(dyn_msg.get(1)) {
+                if req_corp as i64 != session_corp_id {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        "Cannot read another corporation's contact labels".to_string(),
+                    ));
+                }
+            }
+            let labels: Vec<(u64, String)> = db_corp_labels.with_snapshot(|snap| {
+                snap.corp_contact_labels
+                    .get(&session_corp_id)
+                    .map(|cl| cl.iter().map(|(id, name, _)| (*id as u64, name.clone())).collect())
+                    .unwrap_or_default()
+            });
             let mut out = Vec::new();
-            let mut l = Vec::new();
-            encode_varint_field(1, 2, &mut l); // id
-            encode_string_field(2, "Allies", &mut l);
-            encode_bytes_field(1, &l, &mut out);
+            for (id, name) in labels {
+                let mut l = Vec::new();
+                encode_varint_field(1, id, &mut l);
+                encode_string_field(2, &name, &mut l);
+                encode_bytes_field(1, &l, &mut out);
+            }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.contact.label.GetForCorporationResponse"),
                 value: out,
@@ -231,18 +336,30 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     // ========================================================================
 
     // 9. eve.war.GetRequest -> GetResponse
-    let state_war_get = Arc::clone(&state);
+    let db_war_get = Arc::clone(&db);
     router.register_handler(
         "eve.war.GetRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let war_id = extract_id(dyn_msg.get(1)).unwrap_or(1001);
-            let wars = state_war_get.wars.read().unwrap_or_else(|e| e.into_inner());
-            let (agg, def, _k_agg, _k_def) = wars.get(&war_id).copied().unwrap_or((98000001, 98000002, 0, 0));
+            let war_id = extract_id(dyn_msg.get(1))
+                .map(|u| u as i64)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "war_id required".to_string()))?;
+            let (agg, def, open_for_allies) = db_war_get
+                .with_snapshot(|snap| {
+                    snap.wars.get(&war_id).map(|w| {
+                        let open = snap
+                            .war_lifecycle_meta
+                            .get(&war_id)
+                            .and_then(|m| m.open_for_allies)
+                            .unwrap_or(!w.mutual);
+                        (w.aggressor_corp_id as u64, w.defender_corp_id as u64, open)
+                    })
+                })
+                .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
 
             let mut attr = Vec::new();
             encode_seq_id(1, agg, &mut attr); // aggressor
             encode_seq_id(2, def, &mut attr); // defender
-            encode_varint_field(3, 1, &mut attr); // open_for_allies = true
+            encode_varint_field(3, u64::from(open_for_allies), &mut attr); // open_for_allies
 
             let mut out = Vec::new();
             encode_bytes_field(1, &attr, &mut out);
@@ -254,14 +371,17 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     );
 
     // 10. eve.war.GetAllRequest -> GetAllResponse
-    let state_war_all = Arc::clone(&state);
+    let db_war_all = Arc::clone(&db);
     router.register_handler(
         "eve.war.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            let wars = state_war_all.wars.read().unwrap_or_else(|e| e.into_inner());
+            let mut war_ids: Vec<u64> = db_war_all.with_snapshot(|snap| {
+                snap.wars.keys().map(|&k| k as u64).collect()
+            });
+            war_ids.sort_unstable();
             let mut out = Vec::new();
-            for wid in wars.keys() {
-                encode_seq_id(1, *wid, &mut out);
+            for wid in war_ids {
+                encode_seq_id(1, wid, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetAllResponse"),
@@ -271,13 +391,36 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     );
 
     // 11. eve.war.GetDestructionStatisticsRequest -> GetDestructionStatisticsResponse
-    let state_war_stat = Arc::clone(&state);
+    let db_war_stat = Arc::clone(&db);
     router.register_handler(
         "eve.war.GetDestructionStatisticsRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let war_id = extract_id(dyn_msg.get(1)).unwrap_or(1001);
-            let wars = state_war_stat.wars.read().unwrap_or_else(|e| e.into_inner());
-            let (_agg, _def, k_agg, k_def) = wars.get(&war_id).copied().unwrap_or((98000001, 98000002, 12, 4));
+            let war_id = extract_id(dyn_msg.get(1))
+                .map(|u| u as i64)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "war_id required".to_string()))?;
+            let (k_agg, k_def) = db_war_stat
+                .with_snapshot(|snap| {
+                    snap.wars.get(&war_id).map(|w| {
+                        let k_agg = snap
+                            .killmails
+                            .values()
+                            .filter(|km| {
+                                km.attacker_corp_id == w.aggressor_corp_id
+                                    && km.victim_corp_id == w.defender_corp_id
+                            })
+                            .count() as u64;
+                        let k_def = snap
+                            .killmails
+                            .values()
+                            .filter(|km| {
+                                km.attacker_corp_id == w.defender_corp_id
+                                    && km.victim_corp_id == w.aggressor_corp_id
+                            })
+                            .count() as u64;
+                        (k_agg, k_def)
+                    })
+                })
+                .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
 
             let mut by_agg = Vec::new();
             encode_varint_field(1, k_agg, &mut by_agg); // ships_killed
@@ -295,11 +438,37 @@ pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
     );
 
     // 12. eve.war.GetAlliesRequest -> GetAlliesResponse
+    let db_war_allies = Arc::clone(&db);
     router.register_handler(
         "eve.war.GetAlliesRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let war_id = extract_id(dyn_msg.get(1))
+                .map(|u| u as i64)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "war_id required".to_string()))?;
+            let allies: Vec<u64> = db_war_allies
+                .with_snapshot(|snap| {
+                    if !snap.wars.contains_key(&war_id) {
+                        return None;
+                    }
+                    let list = snap
+                        .war_lifecycle_meta
+                        .get(&war_id)
+                        .map(|m| {
+                            m.allies
+                                .iter()
+                                .filter_map(|a| a.corporation_id.or(a.alliance_id))
+                                .filter(|&id| id > 0)
+                                .map(|id| id as u64)
+                                .collect::<Vec<u64>>()
+                        })
+                        .unwrap_or_default();
+                    Some(list)
+                })
+                .ok_or_else(|| (STATUS_NOT_FOUND, "War not found".to_string()))?;
             let mut out = Vec::new();
-            encode_seq_id(1, 98000003, &mut out);
+            for aid in allies {
+                encode_seq_id(1, aid, &mut out);
+            }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.war.GetAlliesResponse"),
                 value: out,
@@ -435,5 +604,20 @@ fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
         Some(DynamicValue::Uint32(u)) => Some(*u as u64),
         Some(DynamicValue::Int32(i)) => Some(*i as u64),
         _ => None,
+    }
+}
+
+fn extract_ids(val: Option<&DynamicValue>) -> Vec<u32> {
+    match val {
+        Some(DynamicValue::Repeated(items)) => items
+            .iter()
+            .filter_map(|item| extract_id(Some(item)))
+            .filter(|&id| id > 0)
+            .map(|id| id as u32)
+            .collect(),
+        other => extract_id(other)
+            .filter(|&id| id > 0)
+            .map(|id| vec![id as u32])
+            .unwrap_or_default(),
     }
 }

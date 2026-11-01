@@ -603,7 +603,7 @@ pub fn dispatch_character_mail_routes(
             }
             let now = ctx.now_unix();
             let specs_for_notify = recipient_specs.clone();
-            let res: Result<i64, RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
+            let res: Result<(i64, Vec<(i64, i64)>), RouteExecutionResult> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(sender) = snap.characters.get(&char_id).cloned() else {
                     return Err(RouteExecutionResult::error(
                         404,
@@ -617,14 +617,19 @@ pub fn dispatch_character_mail_routes(
                             .characters
                             .get(&rid)
                             .is_some_and(|rc| rc.corporation_id == sender.corporation_id);
-                        let is_exempt_contact = ctx
-                            .esi_state
+                        let is_exempt_contact = snap
                             .char_contacts
-                            .read()
-                            .ok()
-                            .and_then(|map| map.get(&rid).cloned())
-                            .and_then(|list| list.into_iter().find(|c| c.contact_id == char_id))
-                            .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
+                            .get(&rid)
+                            .and_then(|list| list.iter().find(|c| c.contact_id == char_id))
+                            .is_some_and(|c| !c.is_blocked && c.standing > -10.0)
+                            || ctx
+                                .esi_state
+                                .char_contacts
+                                .read()
+                                .ok()
+                                .and_then(|map| map.get(&rid).cloned())
+                                .and_then(|list| list.into_iter().find(|c| c.contact_id == char_id))
+                                .is_some_and(|c| !c.is_blocked && c.standing > -10.0);
                         if !same_corp && !is_exempt_contact {
                             let cspa = snap
                                 .character_cspa_charges
@@ -672,14 +677,7 @@ pub fn dispatch_character_mail_routes(
                 snap.mail_timestamps.insert(mail_id, now);
                 snap.read_mails.insert((char_id, mail_id));
                 snap.mail_assigned_labels.insert((char_id, mail_id), vec![2]);
-                ctx.esi_state.set_mail_meta(
-                    char_id,
-                    mail_id,
-                    crate::esi::runtime_state::EsiMailMeta {
-                        is_read: true,
-                        labels: vec![2],
-                    },
-                );
+                let mut recip_metas = Vec::new();
                 for (rid, rtype) in recipient_specs {
                     snap.mails.push(MailRecord {
                         message_id: mail_id,
@@ -696,23 +694,34 @@ pub fn dispatch_character_mail_routes(
                         };
                         snap.mail_assigned_labels
                             .insert((rid, mail_id), vec![label_id]);
-                        ctx.esi_state.set_mail_meta(
-                            rid,
-                            mail_id,
-                            crate::esi::runtime_state::EsiMailMeta {
-                                is_read: false,
-                                labels: vec![label_id],
-                            },
-                        );
+                        recip_metas.push((rid, label_id));
                     }
                 }
-                Ok(mail_id)
+                Ok((mail_id, recip_metas))
             });
-            if let Ok(mail_id) = res {
+            if let Ok((mail_id, ref recip_metas)) = res {
+                ctx.esi_state.set_mail_meta(
+                    char_id,
+                    mail_id,
+                    crate::esi::runtime_state::EsiMailMeta {
+                        is_read: true,
+                        labels: vec![2],
+                    },
+                );
+                for &(rid, label_id) in recip_metas {
+                    ctx.esi_state.set_mail_meta(
+                        rid,
+                        mail_id,
+                        crate::esi::runtime_state::EsiMailMeta {
+                            is_read: false,
+                            labels: vec![label_id],
+                        },
+                    );
+                }
                 notify_esi_mail_sent(ctx, char_id, mail_id, subject, &specs_for_notify);
             }
             Some(match res {
-                Ok(mail_id) => RouteExecutionResult::created_json(json!(mail_id)),
+                Ok((mail_id, _)) => RouteExecutionResult::created_json(json!(mail_id)),
                 Err(e) => e,
             })
         }
@@ -832,10 +841,10 @@ pub fn dispatch_character_mail_routes(
                     ));
                 }
                 snap.deleted_mails.insert((char_id, mail_id));
-                ctx.esi_state.mark_mail_deleted(char_id, mail_id);
                 Ok(())
             });
             if res.is_ok() {
+                ctx.esi_state.mark_mail_deleted(char_id, mail_id);
                 // Deleted outside the game client: mailSvc.OnMailDeleted(messageIDs).
                 crate::services::mail_notify::emit_mail_deleted(ctx, char_id, &[mail_id]);
             }

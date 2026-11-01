@@ -216,12 +216,14 @@ pub(super) fn handle_add_corporation(
             }],
         );
         let released = super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
-        Ok((cid, released))
+        Ok((old_corp_id, cid, released))
     });
 
     match res {
-        Ok((corp_id, released)) => {
+        Ok((old_corp_id, corp_id, released)) => {
             crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
+            let old_corp_role = session.corp_role;
+            let old_alliance_id = session.alliance_id;
             session.corporation_id = Some(corp_id);
             session.alliance_id = None;
             session.corp_role = u64::MAX;
@@ -230,6 +232,19 @@ pub(super) fn handle_add_corporation(
                     session.ship_id = Some(act_ship);
                 }
             }
+            let mut sess_changes = vec![
+                (PyRep::String("corpid".into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)])),
+                (PyRep::String("corprole".into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_role as i64), PyRep::Integer(u64::MAX as i64)])),
+            ];
+            if let Some(prev_ally) = old_alliance_id {
+                sess_changes.push((PyRep::String("allianceid".into()), PyRep::Tuple(vec![PyRep::Integer(prev_ally), PyRep::None])));
+            }
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnSessionChanged",
+                "clientID",
+                vec![PyRep::Bool(false), PyRep::Integer(session.session_id as i64), PyRep::Dict(sess_changes)],
+            );
             let change = PyRep::Dict(vec![
                 (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
                 (PyRep::String(("corporationName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(name.to_string())])),
@@ -661,7 +676,7 @@ pub(super) fn handle_corp_gov(
             let title_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Squad Leader");
             let roles_mask = (args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR;
             let grantable_mask = (args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64) & !corp_roles::ROLE_DIRECTOR;
-            let prev = ctx.db.with_mut_snapshot(|snap| {
+            let prev = match ctx.db.try_with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let prev = state.titles.insert(title_id, (title_name.to_string(), roles_mask));
                 let prev_rmask = prev.as_ref().map_or(0, |&(_, r)| r);
@@ -694,8 +709,11 @@ pub(super) fn handle_corp_gov(
                     grantable_roles: dec(grantable_mask),
                     ..Default::default()
                 });
-                prev
-            });
+                Ok::<_, BridgeRpcError>(prev)
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
             let change = PyRep::Dict(vec![
                 (PyRep::String(("titleName").into()), PyRep::Tuple(vec![old_name, PyRep::String(title_name.to_string())])),
@@ -726,7 +744,7 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "DeleteTitle") => {
             if !has_director { return deny_role("Deleting corporation titles requires CEO or Director role"); }
             let title_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let prev = ctx.db.with_mut_snapshot(|snap| {
+            let prev = match ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(titles) = snap.corp_titles.get_mut(&corp_id) {
                     titles.retain(|t| t.title_id != title_id);
                 }
@@ -746,8 +764,11 @@ pub(super) fn handle_corp_gov(
                         }
                     }
                 }
-                prev
-            });
+                Ok::<_, BridgeRpcError>(prev)
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let (old_name, old_roles) = prev.map_or((PyRep::None, PyRep::Integer(0)), |(n, r)| (PyRep::String(n), PyRep::Integer(r as i64)));
             let change = PyRep::Dict(vec![
                 (PyRep::String(("titleName").into()), PyRep::Tuple(vec![old_name, PyRep::String(("").into())])),

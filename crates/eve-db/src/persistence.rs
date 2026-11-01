@@ -807,6 +807,12 @@ impl WorldRepository {
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         if f(&mut guard) {
+            if let Some(poison_err) = check_wal_poison() {
+                sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp).expect(
+                    "Fatal: failed to roll back dirty state from SQLite after poisoned dispatch",
+                );
+                return Err(poison_err);
+            }
             for (&sid, st) in &mut guard.system_states {
                 st.solar_system_id = sid;
             }
@@ -881,6 +887,10 @@ impl WorldRepository {
     }
 
     /// Delegates infallible snapshot mutations through `run_mut_snapshot_tx`.
+    /// On a durable SQLite/WAL persistence failure, `run_mut_snapshot_tx` rolls back
+    /// `WorldStateSnapshot` from the committed SQLite tables and records the error in
+    /// `LAST_WAL_PERSIST_ERROR` so `ServerContext::dispatch_rpc` can return an atomic RPC error
+    /// without panicking.
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut WorldStateSnapshot) -> R,
@@ -893,7 +903,9 @@ impl WorldRepository {
             }
             true
         }) {
-            panic!("Durable WAL persistence failure: {persist_err}");
+            if !record_last_wal_error(&persist_err) {
+                panic!("WAL persistence failed outside dispatch_rpc: {persist_err}");
+            }
         }
         out.expect("with_mut_snapshot closure must run")
     }
@@ -947,6 +959,34 @@ impl WorldRepository {
         self.with_mut_snapshot(|snap| {
             snap.asteroids.entry(record.asteroid_id).or_insert(record);
         });
+    }
+}
+
+static WAL_ERROR_HOOK: std::sync::OnceLock<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+static WAL_POISON_CHECK_HOOK: std::sync::OnceLock<
+    std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>) {
+    let _ = WAL_ERROR_HOOK.set(hook);
+}
+
+pub fn set_wal_poison_check_hook(hook: std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>) {
+    let _ = WAL_POISON_CHECK_HOOK.set(hook);
+}
+
+pub fn check_wal_poison() -> Option<String> {
+    WAL_POISON_CHECK_HOOK.get().and_then(|hook| hook())
+}
+
+pub fn record_last_wal_error(err: &str) -> bool {
+    tracing::error!("WAL/SQLite persistence error (snapshot rolled back): {err}");
+    if let Some(hook) = WAL_ERROR_HOOK.get() {
+        hook(err)
+    } else {
+        false
     }
 }
 

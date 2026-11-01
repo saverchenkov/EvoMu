@@ -6,8 +6,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, encode_zigzag64,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -90,13 +90,17 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.plex.vault.api.BalanceRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx
+                .effective_user_id()
+                .filter(|&u| u > 0)
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?
+                as u64;
             let bal = db_plex_bal.with_snapshot(|snap| {
                 snap.account_plex_vault.get(&uid).copied().unwrap_or(0)
             });
 
             let mut curr = Vec::new();
-            encode_varint_field(1, (bal * 100) as u64, &mut curr); // field 1: total_in_cents
+            encode_varint_field(1, encode_zigzag64(bal * 100), &mut curr); // field 1: total_in_cents (sint64)
 
             let mut out = Vec::new();
             encode_bytes_field(1, &curr, &mut out); // field 1: balance
@@ -1224,7 +1228,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.plex.vault.transaction.api.GetAllLoggedForUserRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let txs = db_tx_all.with_snapshot(|snap| {
                 get_plex_transactions(snap)
                     .into_iter()
@@ -1250,7 +1254,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.plex.vault.transaction.api.GetLogRequest",
         Arc::new(move |ctx, any, dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let tx_id = extract_u64_id(&any.value, dyn_msg).filter(|id| *id > 0).ok_or_else(|| {
                 (STATUS_BAD_REQUEST, "Missing transaction ID".to_string())
             })?;
@@ -1274,11 +1278,11 @@ fn register_payment_token_and_purchase_handlers(
             encode_bytes_field(2, &user_ident, &mut attr); // #2 user_owner
 
             let mut amt_curr = Vec::new();
-            encode_varint_field(1, (tx.amount.abs() * 100) as u64, &mut amt_curr);
+            encode_varint_field(1, encode_zigzag64(tx.amount * 100), &mut amt_curr);
             encode_bytes_field(4, &amt_curr, &mut attr); // #4 amount_transferred
 
             let mut bal_curr = Vec::new();
-            encode_varint_field(1, (tx.balance_after * 100) as u64, &mut bal_curr);
+            encode_varint_field(1, encode_zigzag64(tx.balance_after * 100), &mut bal_curr);
             encode_bytes_field(5, &bal_curr, &mut attr); // #5 resulting_balance
 
             encode_string_field(6, &tx.description, &mut attr); // #6 description
@@ -1298,7 +1302,7 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve_public.plex.vault.transaction.api.GetStatisticsRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
             let (earliest, count, incomes, expenses) = db_stats.with_snapshot(|snap| {
                 let txs: Vec<_> = get_plex_transactions(snap)
                     .into_iter()
@@ -1322,10 +1326,10 @@ fn register_payment_token_and_purchase_handlers(
             let mut entry = Vec::new();
             encode_varint_field(1, 1, &mut entry); // category = 1
             let mut inc_curr = Vec::new();
-            encode_varint_field(1, (incomes * 100) as u64, &mut inc_curr);
+            encode_varint_field(1, encode_zigzag64(incomes * 100), &mut inc_curr);
             encode_bytes_field(3, &inc_curr, &mut entry); // incomes
             let mut exp_curr = Vec::new();
-            encode_varint_field(1, (expenses * 100) as u64, &mut exp_curr);
+            encode_varint_field(1, encode_zigzag64(expenses * 100), &mut exp_curr);
             encode_bytes_field(4, &exp_curr, &mut entry); // expenses
             encode_varint_field(5, count, &mut entry); // transactions_count
 

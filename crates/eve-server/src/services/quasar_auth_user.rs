@@ -356,7 +356,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve_public.user.license.api.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let Some(uid_i32) = ctx.effective_user_id() else {
+                return Err((
+                    crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                    "Authenticated user required".to_string(),
+                ));
+            };
+            let uid = uid_i32 as u64;
             let now = ctx.now_unix();
             let expiry = read_identity_store(&db_lic_get, |guard| {
                 guard.omega_subscriptions.get(&uid).copied().unwrap_or(0)
@@ -364,11 +370,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             let is_active = expiry > now;
 
             let mut lic_attr = Vec::new();
-            encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
             if is_active && expiry > 0 {
                 let mut exp_ts = Vec::new();
                 encode_varint_field(1, expiry, &mut exp_ts);
                 encode_bytes_field(2, &exp_ts, &mut lic_attr);
+            } else {
+                encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
             }
             let mut out = Vec::new();
             encode_bytes_field(1, &lic_attr, &mut out);
@@ -386,7 +393,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.legal.agreement.api.GetLatestRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let Some(uid_i32) = ctx.effective_user_id() else {
+                return Err((
+                    crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                    "Authenticated user required".to_string(),
+                ));
+            };
+            let uid = uid_i32 as u64;
             let accepted = read_identity_store(&db_latest, |st| {
                 st.accepted_agreements.get(&uid).cloned().unwrap_or_default()
             });
@@ -410,9 +423,20 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     let db_accept = Arc::clone(&db);
     router.register_handler(
         "eve.user.legal.agreement.api.AcceptRequest",
-        Arc::new(move |ctx, any, _dyn_msg| {
-            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let agreement_id = if !any.value.is_empty() {
+        Arc::new(move |ctx, any, dyn_msg| {
+            let Some(uid_i32) = ctx.effective_user_id() else {
+                return Err((
+                    crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                    "Authenticated user required".to_string(),
+                ));
+            };
+            let uid = uid_i32 as u64;
+            let decoded_field = extract_dyn_string(dyn_msg, &any.value, 3)
+                .or_else(|| extract_dyn_string(dyn_msg, &any.value, 1))
+                .unwrap_or_default();
+            let agreement_id = if !decoded_field.is_empty() {
+                decoded_field
+            } else if !any.value.is_empty() && any.value.iter().all(|&b| b >= 0x20) {
                 String::from_utf8_lossy(&any.value).into_owned()
             } else {
                 "eula_v24".to_string()

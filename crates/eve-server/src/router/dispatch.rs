@@ -5,7 +5,46 @@ use crate::services;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
+use std::sync::{Arc, Once};
 use tracing::{info, warn};
+
+tokio::task_local! {
+    static DISPATCH_WAL_ERROR: std::cell::RefCell<Option<String>>;
+}
+
+static WAL_HOOK_ONCE: Once = Once::new();
+
+pub fn ensure_wal_error_hook_installed() {
+    WAL_HOOK_ONCE.call_once(|| {
+        eve_db::set_wal_error_hook(Arc::new(record_dispatch_wal_error));
+        eve_db::set_wal_poison_check_hook(Arc::new(current_dispatch_wal_error));
+    });
+}
+
+pub fn record_dispatch_wal_error(err: &str) -> bool {
+    DISPATCH_WAL_ERROR
+        .try_with(|slot| {
+            let mut guard = slot.borrow_mut();
+            if guard.is_none() {
+                *guard = Some(err.to_string());
+            }
+        })
+        .is_ok()
+}
+
+pub fn current_dispatch_wal_error() -> Option<String> {
+    DISPATCH_WAL_ERROR
+        .try_with(|slot| slot.borrow().clone())
+        .ok()
+        .flatten()
+}
+
+pub fn take_dispatch_wal_error() -> Option<String> {
+    DISPATCH_WAL_ERROR
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten()
+}
 
 fn append_unimplemented_rpc_log(
     session_id: u64,
@@ -87,17 +126,43 @@ impl ServerContext {
             .unwrap_or(0);
 
         let prev_station_id = session.station_id;
+        ensure_wal_error_hook_installed();
         let start_time = std::time::Instant::now();
-        let res = Box::pin(self.dispatch_rpc_inner(
-            session,
-            service,
-            bound_id,
-            method,
-            args,
-            kwargs,
-            caller_trace,
-        ))
-        .await;
+        let (mut res, wal_err) = DISPATCH_WAL_ERROR
+            .scope(std::cell::RefCell::new(None), async {
+                let r = Box::pin(self.dispatch_rpc_inner(
+                    session,
+                    service,
+                    bound_id,
+                    method,
+                    args,
+                    kwargs,
+                    caller_trace,
+                ))
+                .await;
+                let err = DISPATCH_WAL_ERROR.with(|slot| slot.borrow_mut().take());
+                (r, err)
+            })
+            .await;
+        let wal_failed = wal_err.is_some();
+        if let Some(wal_err) = wal_err {
+            if res.is_ok() {
+                res = Err(BridgeRpcError {
+                    code: "DatabasePersistenceError".into(),
+                    message: wal_err,
+                });
+            }
+        }
+        if wal_failed {
+            crate::services::fleet_social::hydrate_social_state_from_db(self);
+            if let Some(cid) = session.character_id {
+                if let Ok(mut q) = self.pending_notifications.write() {
+                    if let Some(v) = q.get_mut(&cid) {
+                        v.truncate(initial_len);
+                    }
+                }
+            }
+        }
         let duration = start_time.elapsed();
 
         let status_desc = match &res {
@@ -1263,4 +1328,63 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         return;
     }
     crate::services::mining_sites::spawn_seeded_site_entities(ctx, sys_id, newly_spawned, guard_waves).await;
+}
+
+#[cfg(test)]
+mod wal_poison_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_b11r2_p1_01_second_with_mut_snapshot_refused_after_wal_error() {
+        ensure_wal_error_hook_installed();
+        let tmp_path = std::env::temp_dir().join(format!(
+            "evomu_b11r2_p1_01_poison_{}.json",
+            std::process::id()
+        ));
+        let wal_dir = tmp_path.with_extension("json.wal");
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_dir_all(&wal_dir);
+
+        let repo = eve_db::WorldRepository::new_empty_with_snapshot_path(Some(tmp_path.clone()))
+            .expect("new_empty_with_snapshot_path");
+        std::fs::write(&tmp_path, b"{}").expect("seed tmp_path");
+        // Block WAL append by placing a directory at `<tmp_path>.wal`.
+        std::fs::create_dir_all(&wal_dir).expect("create_dir_all wal_dir");
+
+        let recorded_err = DISPATCH_WAL_ERROR
+            .scope(std::cell::RefCell::new(None), async {
+                repo.with_mut_snapshot(|snap| {
+                    snap.service_state_blobs
+                        .insert("first_tx".into(), "should_rollback".into());
+                });
+                assert!(
+                    current_dispatch_wal_error().is_some(),
+                    "first WAL failure must poison DISPATCH_WAL_ERROR scope"
+                );
+                // Even if the WAL path becomes writable again, the poisoned scope must refuse commits.
+                let _ = std::fs::remove_dir_all(&wal_dir);
+                repo.with_mut_snapshot(|snap| {
+                    snap.service_state_blobs
+                        .insert("second_tx".into(), "must_not_persist".into());
+                });
+                take_dispatch_wal_error()
+            })
+            .await;
+
+        assert!(recorded_err.is_some(), "dispatch scope must report WAL error");
+        repo.with_snapshot(|snap| {
+            assert!(
+                !snap.service_state_blobs.contains_key("first_tx"),
+                "first failed mutation must not be persisted"
+            );
+            assert!(
+                !snap.service_state_blobs.contains_key("second_tx"),
+                "second mutation in poisoned dispatch scope must not be persisted"
+            );
+        });
+
+        drop(repo);
+        let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_dir_all(&wal_dir);
+    }
 }

@@ -222,7 +222,14 @@ pub fn dispatch_char_social_mail_route(
             if let Err(e) = res {
                 return Some(e);
             }
-            crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) =
+                crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id)
+            {
+                return Some(RouteExecutionResult::error(
+                    500,
+                    format!("Persistence error: {}", e.message),
+                ));
+            }
             Some(if method == "POST" {
                 RouteExecutionResult::created_json(json!(contact_ids))
             } else {
@@ -270,7 +277,14 @@ pub fn dispatch_char_social_mail_route(
                     list.retain(|c| !ids.contains(&c.contact_id));
                 }
             }
-            crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) =
+                crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id)
+            {
+                return Some(RouteExecutionResult::error(
+                    500,
+                    format!("Persistence error: {}", e.message),
+                ));
+            }
             Some(RouteExecutionResult::no_content(0))
         }
 
