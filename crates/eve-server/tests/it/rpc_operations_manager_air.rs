@@ -552,6 +552,10 @@ async fn test_operations_tasks_sites_and_events() {
     assert_eq!(unblock_rep, PyRep::Bool(true));
 
     // 4. Skip task: skip_task
+    let prev_role = sess.role;
+    if !op_defs.client_completable_tasks.contains(&task_id) {
+        sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    }
     let skip_rep = call_rpc(
         &ctx,
         &mut sess,
@@ -561,6 +565,7 @@ async fn test_operations_tasks_sites_and_events() {
     )
     .await
     .expect("skip_task");
+    sess.role = prev_role;
     assert_eq!(skip_rep, PyRep::Bool(true));
 
     let skip_notifs = ctx.drain_notifications_for_char(PILOT_AIR);

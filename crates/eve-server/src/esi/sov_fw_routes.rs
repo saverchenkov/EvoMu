@@ -207,7 +207,7 @@ pub fn dispatch_sov_route(
                         .sov_campaign_scores
                         .get(&st.structure_id)
                         .map(|s| (s.attackers_score, s.defender_score))
-                        .unwrap_or((0.0, 1.0));
+                        .unwrap_or((0.4, 0.6));
                     campaigns.push(json!({
                         "campaign_id": st.structure_id,
                         "constellation_id": sys.constellation_id as i64,

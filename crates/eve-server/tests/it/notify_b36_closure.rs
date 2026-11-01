@@ -118,13 +118,19 @@ async fn test_b36_progression_notifications() {
 
     // Negative check 1 (`F-02`): NPE `operationsManager` emits `OnOperationTaskCompleted` ONLY —
     // never dungeon `ProgressionService` `OnProgressionTaskCompleted` / `OnProgressionAdvanced`!
+    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
+    let (&real_op, _) = op_defs
+        .op_tasks
+        .iter()
+        .find(|(_, ts)| ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
+        .expect("SDE operation with client-completable tasks");
     let _ = ctx
         .dispatch_rpc(
             &mut s1,
             "operationsManager",
             None,
             "activate_operation_in_solar_system",
-            &[PyRep::Integer(1)],
+            &[PyRep::Integer(real_op)],
             &kw,
             None,
         )

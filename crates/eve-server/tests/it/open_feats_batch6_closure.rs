@@ -45,6 +45,7 @@ fn new_persistent_ctx() -> (TempDbGuard, PathBuf, ServerContext) {
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
     db.with_mut_snapshot(|s| *s = demo_snap);
     let ctx = ServerContext::with_sde_and_repository(sde, db);
+    eve_server::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
     crate::common::pin_clock(&ctx);
     (TempDbGuard(db_path.clone()), db_path, ctx)
 }
@@ -52,6 +53,7 @@ fn new_persistent_ctx() -> (TempDbGuard, PathBuf, ServerContext) {
 fn reload_ctx(db_path: &PathBuf, sde: Arc<eve_sde::SdeRegistry>) -> ServerContext {
     let db = Arc::new(eve_db::WorldRepository::open_sqlite(db_path).expect("reopen WorldRepository"));
     let ctx = ServerContext::with_sde_and_repository(sde, db);
+    eve_server::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
     crate::common::pin_clock(&ctx);
     ctx
 }
@@ -353,6 +355,11 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     let ship_id = ctx.db.with_snapshot(|s| s.characters[&PILOT_1].active_ship_id);
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_1).unwrap().home_station_id = 60_015_054);
     let mut sess = char_session(&ctx, PILOT_1, Some(STATION_ID), Some(SYS_ID), Some(ship_id));
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_1)]).await.unwrap();
+    sess.station_id = Some(STATION_ID);
+    sess.solar_system_id = Some(SYS_ID);
+    sess.ship_id = Some(ship_id);
 
     let op_defs = get_operation_defs(&ctx.sde);
     let (&cat_id, cat_ops) = op_defs
@@ -397,7 +404,25 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     // Server-observed task rejects client spoofing, then advances on real stationSvc.Undock
     let spoof_res = rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_complete".into()), PyRep::Integer(undock_tid)]).await.unwrap();
     assert_eq!(spoof_res, PyRep::Bool(false));
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     rpc(&ctx, &mut sess, "stationSvc", "Undock", &[PyRep::Integer(ship_id)]).await.expect("stationSvc.Undock");
+    let undock_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    assert!(
+        undock_notifs.iter().any(|n| {
+            n.event == "OnOperationTaskCompleted"
+                && n.args == vec![PyRep::Integer(cat_id), PyRep::Integer(undock_op_id), PyRep::Integer(undock_tid)]
+        }),
+        "stationSvc.Undock must emit OnOperationTaskCompleted for server-observed task (cat={cat_id}, op={undock_op_id}, tid={undock_tid}), got: {:?}",
+        undock_notifs.iter().map(|n| (&n.event, &n.args)).collect::<Vec<_>>()
+    );
+    if ctx.db.with_snapshot(|s| s.characters[&PILOT_1].balance) > bal_before {
+        assert!(
+            undock_notifs.iter().any(|n| {
+                n.event == "OnAccountChange" && n.args.first().and_then(|a| a.as_str()) == Some("cash")
+            }),
+            "stationSvc.Undock ISK reward must emit OnAccountChange('cash')"
+        );
+    }
     let PyRep::Dict(undock_prog) = rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[]).await.unwrap() else {
         panic!("expected progress dict after Undock");
     };
@@ -454,6 +479,11 @@ async fn test_opportunities_complete_from_events_and_persist() {
     let (_dir, db_path, ctx) = new_persistent_ctx();
     let (ship_id, account_id) = ctx.db.with_snapshot(|s| (s.characters[&PILOT_1].active_ship_id, s.characters[&PILOT_1].user_id));
     let mut sess = char_session(&ctx, PILOT_1, Some(STATION_ID), Some(SYS_ID), Some(ship_id));
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_1)]).await.unwrap();
+    sess.station_id = Some(STATION_ID);
+    sess.solar_system_id = Some(SYS_ID);
+    sess.ship_id = Some(ship_id);
     sess.user_id = Some(account_id);
 
     let undock_ach_id = ctx

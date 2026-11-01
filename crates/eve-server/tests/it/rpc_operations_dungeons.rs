@@ -282,6 +282,10 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert_eq!(unblk, PyRep::Bool(true));
 
     // 4. Skip task with 3 positional arguments (category_id, operation_id, task_id)
+    let prev_role_skip = p1.role;
+    if !op_defs.client_completable_tasks.contains(&task_to_skip) {
+        p1.role |= eve_machonet::service_roles::ROLE_GMH;
+    }
     let skip = rpc(
         &ctx,
         &mut p1,
@@ -291,6 +295,7 @@ async fn test_operations_tasks_operations_and_telemetry() {
     )
     .await
     .expect("skip_task");
+    p1.role = prev_role_skip;
     assert_eq!(skip, PyRep::Bool(true));
 
     let notifs_skip = ctx.drain_notifications_for_char(P1);
@@ -358,7 +363,12 @@ async fn test_operations_tasks_operations_and_telemetry() {
         "Operation with 2 of 3 tasks finished must remain in progress (66%), not prematurely 100%"
     );
     rpc(&ctx, &mut p1, "operationsManager", "unblock_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("unblock 3rd");
+    let prev_role = p1.role;
+    if !op_defs.client_completable_tasks.contains(&blocked_tid) {
+        p1.role |= eve_machonet::service_roles::ROLE_GMH;
+    }
     rpc(&ctx, &mut p1, "operationsManager", "skip_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("skip 3rd");
+    p1.role = prev_role;
     if let Ok(PyRep::List(comp_ops_after)) = rpc(&ctx, &mut p1, "operationsManager", "get_operations_completed_at_least_once", &[]).await {
         let _ = comp_ops_after;
     }

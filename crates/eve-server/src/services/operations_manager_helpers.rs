@@ -610,7 +610,13 @@ pub fn advance_server_operation_tasks_in_db(
     let op_defs = get_operation_defs(sde);
     db.with_mut_snapshot(|snap| {
         let mut store = super::operations_manager::load_store(snap);
-        let Some(active_op) = store.by_character.get(&char_id).and_then(|r| r.active_operation_id) else {
+        let curr_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id);
+        let Some(active_op) = store
+            .by_character
+            .get(&char_id)
+            .filter(|r| r.active_operation_system_id.is_none_or(|op_s| curr_sys == Some(op_s)))
+            .and_then(|r| r.active_operation_id)
+        else {
             return Vec::new();
         };
         let Some(tasks) = op_defs.op_tasks.get(&active_op) else {
@@ -665,6 +671,54 @@ pub fn advance_server_operation_tasks_in_db(
         }
         completed_out
     })
+}
+
+/// Advances active SDE operation tasks for `char_id` and emits `OnAccountChange('cash')` + `OnOperationTaskCompleted`.
+pub fn advance_and_notify_server_operation_tasks(
+    db: &eve_db::WorldRepository,
+    sde: &eve_sde::SdeRegistry,
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    char_id: i64,
+    event_names: &[&str],
+    now_unix: u64,
+) {
+    let completed = advance_server_operation_tasks_in_db(db, sde, char_id, event_names, now_unix);
+    if completed.is_empty() {
+        return;
+    }
+    let Some(sink) = gateway
+        .macho_notify_sink
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .cloned()
+    else {
+        return;
+    };
+    for (cat_id, op_id, tid, bal) in completed {
+        if let Some(b) = bal {
+            sink(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnAccountChange",
+                "charid",
+                vec![
+                    eve_proto::PyRep::String("cash".into()),
+                    eve_proto::PyRep::Integer(char_id),
+                    eve_proto::PyRep::Real(b.to_wire_f64()),
+                ],
+            );
+        }
+        sink(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnOperationTaskCompleted",
+            "charid",
+            vec![
+                eve_proto::PyRep::Integer(cat_id),
+                eve_proto::PyRep::Integer(op_id),
+                eve_proto::PyRep::Integer(tid),
+            ],
+        );
+    }
 }
 
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`

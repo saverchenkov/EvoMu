@@ -482,9 +482,10 @@ impl AchievementManager {
                 now_unix,
             );
             if let Some(ref sde) = self.sde {
-                let _ = crate::services::operations_manager_helpers::advance_server_operation_tasks_in_db(
+                crate::services::operations_manager_helpers::advance_and_notify_server_operation_tasks(
                     db,
                     sde,
+                    gateway,
                     i64::from(character_id),
                     event_names,
                     now_unix,
@@ -1064,13 +1065,7 @@ pub fn register_achievement_handlers(
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
                     let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
-                        a.reached_milestones
-                            .iter()
-                            .rev()
-                            .take(a.unclaimed_reward_count as usize)
-                            .copied()
-                            .rev()
-                            .collect()
+                        a.reached_milestones.iter().rev().take(a.unclaimed_reward_count as usize).copied().rev().collect()
                     } else {
                         (1..=a.unclaimed_reward_count).collect()
                     };
@@ -1317,13 +1312,7 @@ pub fn register_achievement_handlers(
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
                     let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
-                        a.reached_milestones
-                            .iter()
-                            .rev()
-                            .take(a.unclaimed_reward_count as usize)
-                            .copied()
-                            .rev()
-                            .collect()
+                        a.reached_milestones.iter().rev().take(a.unclaimed_reward_count as usize).copied().rev().collect()
                     } else {
                         (1..=a.unclaimed_reward_count).collect()
                     };
