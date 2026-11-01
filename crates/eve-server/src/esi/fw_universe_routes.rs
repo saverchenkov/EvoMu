@@ -1013,18 +1013,12 @@ pub fn dispatch_fw_universe_route(
                         format!("Character {char_id} not found"),
                     );
                 };
-                let Some(fid) = char_fw_faction(snap, char_id) else {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Character {char_id} is not enlisted in Faction Warfare"),
-                    );
-                };
+                let fid_opt = char_fw_faction(snap, char_id);
                 let rec = snap.fw_character_stats.get(&char_id);
                 let (kills, vp) = char_fw_stats(snap, char_id);
                 let current_rank = rec.map(|r| r.current_rank).unwrap_or(0);
                 let highest_rank = rec.map(|r| r.highest_rank).unwrap_or(0);
                 let mut obj = json!({
-                    "faction_id": fid,
                     "current_rank": current_rank,
                     "highest_rank": highest_rank,
                     "kills": {
@@ -1038,8 +1032,11 @@ pub fn dispatch_fw_universe_route(
                         "total": vp.total,
                     }
                 });
-                if let Some(enlisted_unix) = rec.and_then(|r| r.enlisted_on_unix) {
-                    obj["enlisted_on"] = json!(format_iso8601_utc(enlisted_unix));
+                if let Some(fid) = fid_opt {
+                    obj["faction_id"] = json!(fid);
+                    if let Some(enlisted_unix) = rec.and_then(|r| r.enlisted_on_unix) {
+                        obj["enlisted_on"] = json!(format_iso8601_utc(enlisted_unix));
+                    }
                 }
                 RouteExecutionResult::ok_json(obj, 3600)
             }))
@@ -1079,12 +1076,6 @@ pub fn dispatch_fw_universe_route(
                     vp.yesterday += cv.yesterday;
                     vp.last_week += cv.last_week;
                     vp.total += cv.total;
-                }
-                if corp_faction.is_none() && !snap.fw_corp_enlisted_on.contains_key(&corp_id) {
-                    return RouteExecutionResult::error(
-                        404,
-                        format!("Corporation {corp_id} is not enlisted in Faction Warfare"),
-                    );
                 }
                 let mut obj = json!({
                     "pilots": pilots,

@@ -387,6 +387,13 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     let undock_op_id = op_defs.task_to_op[&undock_tid];
     rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(undock_op_id), PyRep::Integer(SYS_ID as i64), PyRep::Integer(cat_id)]).await.unwrap();
 
+    // Server-observed task rejects non-GM skip_task and pays no op/category ISK
+    let skip_err = rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(undock_tid)])
+        .await
+        .expect_err("non-GM skip_task on server-observed task must fail");
+    assert_eq!(skip_err.code, "CustomInfo");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&PILOT_1].balance), bal_before);
+
     // Server-observed task rejects client spoofing, then advances on real stationSvc.Undock
     let spoof_res = rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("task_complete".into()), PyRep::Integer(undock_tid)]).await.unwrap();
     assert_eq!(spoof_res, PyRep::Bool(false));

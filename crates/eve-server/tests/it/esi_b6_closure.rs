@@ -353,13 +353,17 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
             "esi-corporations.read_fw_stats.v1".to_string(),
         ],
     );
-    validate_and_json(
+    let (unenlisted_char_fw, _) = validate_and_json(
         &router,
         &spec,
-        404,
+        200,
         &EsiHttpRequest::new("GET", &format!("/v1/characters/{char_u}/fw/stats/"))
             .with_bearer_token(&unenlisted_token),
     );
+    assert!(unenlisted_char_fw.get("faction_id").is_none());
+    assert!(unenlisted_char_fw.get("enlisted_on").is_none());
+    assert_eq!(unenlisted_char_fw["kills"]["total"], 0);
+    assert_eq!(unenlisted_char_fw["victory_points"]["total"], 0);
 
     // 6. /corporations/{corporation_id}/fw/stats: 401, 403, 200, 404
     let corp_path = format!("/v1/corporations/{corp_a}/fw/stats/");
@@ -386,13 +390,18 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
         403,
         &EsiHttpRequest::new("GET", "/v1/corporations/999999999/fw/stats/").with_bearer_token(&char_token),
     );
-    validate_and_json(
+    let (unenlisted_corp_fw, _) = validate_and_json(
         &router,
         &spec,
-        404,
+        200,
         &EsiHttpRequest::new("GET", &format!("/v1/corporations/{corp_u}/fw/stats/"))
             .with_bearer_token(&unenlisted_token),
     );
+    assert!(unenlisted_corp_fw.get("faction_id").is_none());
+    assert!(unenlisted_corp_fw.get("enlisted_on").is_none());
+    assert_eq!(unenlisted_corp_fw["pilots"], 0);
+    assert_eq!(unenlisted_corp_fw["kills"]["total"], 0);
+    assert_eq!(unenlisted_corp_fw["victory_points"]["total"], 0);
 
     // 7. SQLite persistence across ServerContext reload
     drop(router);

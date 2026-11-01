@@ -635,12 +635,17 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let is_gm = session.has_gm_role();
             let op_defs = get_operation_defs(&ctx.sde);
             let Some(task_id) = args
                 .get(2)
                 .and_then(|a| a.as_i64())
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .filter(|id| (1..=100_000).contains(id) && op_defs.task_to_op.contains_key(id))
+                .filter(|id| {
+                    (1..=100_000).contains(id)
+                        && op_defs.task_to_op.contains_key(id)
+                        && (is_gm || op_defs.client_completable_tasks.contains(id))
+                })
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
@@ -668,9 +673,19 @@ pub fn handle(
                 None
             };
             let now = ctx.now_unix();
-            let (cat_id, op_id) = ctx.db.with_mut_snapshot(|snap| {
+            let (cat_id, op_id) = match ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
+                if let Some(active_op) = rec.active_operation_id {
+                    let belongs_to_active = sde_op_id == Some(active_op)
+                        || op_defs
+                            .op_tasks
+                            .get(&active_op)
+                            .is_some_and(|ts| ts.contains(&task_id));
+                    if !belongs_to_active {
+                        return Err(BridgeRpcError::user_error("CustomInfo"));
+                    }
+                }
                 if rec.skipped_tasks.len() < 512 {
                     rec.skipped_tasks.insert(task_id);
                 }
@@ -680,8 +695,11 @@ pub fn handle(
                     .or(rec.active_operation_id)
                     .unwrap_or(1);
                 save_store(snap, &store, now);
-                (cat_id, op_id)
-            });
+                Ok((cat_id, op_id))
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             crate::services::notify_emitters_batch8_ops::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
