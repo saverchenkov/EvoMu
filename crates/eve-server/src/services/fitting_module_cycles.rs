@@ -759,7 +759,7 @@ pub(crate) async fn handle_module_cycles(
                 let EwarCapitalPrep {
                     warp_scramble_points, disables_target_mwd_mjd, warp_core_stab_bonus,
                     hic_bubble_radius_m, hic_velocity_multiplier, hic_sig_multiplier, hic_mass_addition,
-                    mjd_jump_distance_m, grants_interdiction_nullification, target_velocity_multiplier,
+                    mjd_jump_distance_m, mjfg_field_params, grants_interdiction_nullification, target_velocity_multiplier,
                     immobilize_self, self_disallow_assistance, self_ewar_immune, self_disable_mwd_mjd,
                     self_mass_multiplier, is_adc, remote_shield_amount, remote_armor_amount,
                     remote_hull_amount, remote_cap_amount, remote_optimal, remote_falloff,
@@ -1176,6 +1176,7 @@ pub(crate) async fn handle_module_cycles(
                 original_signature_radius: None,
                 original_mass: None,
                 mjd_jump_distance_m,
+                mjfg_field_params,
                 grants_interdiction_nullification,
                 effective_max_capacitor,
                 lance_beam_dir: None,

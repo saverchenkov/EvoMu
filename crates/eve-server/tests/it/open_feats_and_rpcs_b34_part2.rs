@@ -106,8 +106,6 @@ async fn b34_normal_cyno_lighting_rules() {
 
 #[tokio::test]
 async fn b34_tenebrex_jammer_state_and_reinforcement() {
-    // parity: feat:modules.cynosural-field-jammer-structure
-    eve_testkit::attest(&["feat:modules.cynosural-field-jammer-structure"]);
     let ctx = build_ctx();
     let jam_sys = 30_004_761u32;
     let mut sess = seed_pilot(&ctx, 94110, 84110, 621, jam_sys, true);
@@ -135,6 +133,49 @@ async fn b34_tenebrex_jammer_state_and_reinforcement() {
             self_destruct_at_unix: None,
         });
         s.sov_runtime.tenebrex_spool_ready_unix.insert(998_200, now_u + 300);
+    });
+
+    // Hubless Tenebrex must NOT jam even after spool
+    ctx.advance_virtual_clock(305);
+    assert!(
+        eve_server::services::inventory_fitting::fitting_cyno_portal::active_cyno_jammer(&ctx, jam_sys).is_none(),
+        "Hubless Tenebrex must NOT jam cynos"
+    );
+
+    // Seed Sovereignty Hub with Cynosural Suppression upgrade + fresh 300s spool
+    let now_u2 = ctx.now_unix_secs();
+    ctx.db.with_mut_snapshot(|s| {
+        s.structures.insert(998_201, UpwellStructureRecord {
+            structure_id: 998_201,
+            type_id: 32458,
+            owner_corp_id: 1000125,
+            solar_system_id: jam_sys,
+            name: "Sov Hub".into(),
+            position: [10_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 100,
+            shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            hull_hp: 100_000.0,
+            reinforced_until_unix: 0,
+            last_damage_tick: 0,
+            last_damage_unix: 0,
+            self_destruct_at_unix: None,
+        });
+        s.sov_runtime.sov_hubs.insert(
+            998_201,
+            eve_db::PersistedSovHubData {
+                hub_id: 998_201,
+                upgrades: vec![eve_db::PersistedHubUpgrade {
+                    type_id: eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
+        s.sov_runtime.tenebrex_spool_ready_unix.insert(998_200, now_u2 + 300);
     });
 
     // Spooling up -> not active yet

@@ -13,6 +13,7 @@ pub(crate) struct EwarCapitalPrep {
     pub hic_sig_multiplier: Option<f64>,
     pub hic_mass_addition: Option<f64>,
     pub mjd_jump_distance_m: Option<f64>,
+    pub mjfg_field_params: Option<(f64, usize, usize)>,
     pub grants_interdiction_nullification: bool,
     pub target_velocity_multiplier: Option<f64>,
     pub immobilize_self: bool,
@@ -70,6 +71,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                 let mut hic_sig_multiplier: Option<f64> = None;
                 let mut hic_mass_addition: Option<f64> = None;
                 let mut mjd_jump_distance_m: Option<f64> = None;
+                let mut mjfg_field_params: Option<(f64, usize, usize)> = None;
                 let grants_interdiction_nullification = mod_type.group_id == 4117;
                 if grants_interdiction_nullification {
                     // Interdiction Nullifiers (`group 4117`) can only be activated on Interceptors (831),
@@ -334,27 +336,37 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                 }
 
-                // Micro Jump Drive (`group_id == 1189 | 1533 | 4769`, e.g., `Large Micro Jump Drive` `4383`, `Capital MJD` `83465`, `Capital MJFG` `83485`)
+                // Micro Jump Drive / Field Generator (`group_id == 1189 | 1533 | 4769`)
                 if is_mjd {
-                    if m.type_id == 83485 {
-                        if !matches!(ship_group_id, 547 | 4594) {
-                            return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Capital Micro Jump Field Generator can only be activated on Carriers (547) or Lancer Dreadnoughts (4594)".into() }));
-                        }
-                        if let Ok(Some(mut cs)) = sys.get_combat_state(ship_id).await {
-                            cs.is_capital_mjfg = true;
-                            let _ = sys.set_combat_state(ship_id, cs).await;
-                        }
+                    if m.type_id == 83485 && !matches!(ship_group_id, 547 | 4594) {
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Capital Micro Jump Field Generator can only be activated on Carriers (547) or Lancer Dreadnoughts (4594)".into() }));
                     } else if m.type_id == 83465 && !matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
                         return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Capital Micro Jump Drive can only be activated on capital ships".into() }));
                     }
-                    let default_dist = if matches!(m.type_id, 83465 | 83485) { 250_000.0 } else { 100_000.0 };
-                    let jump_dist = mod_type
-                        .default_attributes
-                        .get(&2064)
-                        .copied()
-                        .filter(|&d| d > 0.0)
-                        .unwrap_or(default_dist);
+                    let jump_dist = [2066u16, 2064u16]
+                        .into_iter()
+                        .find_map(|aid| {
+                            let v = mod_state.get_attribute(aid, &ctx.sde);
+                            (v > 0.0).then_some(v)
+                        })
+                        .unwrap_or(100_000.0);
                     mjd_jump_distance_m = Some(jump_dist);
+                    let radius_m = mod_state.get_attribute(2067, &ctx.sde);
+                    if radius_m > 0.0 {
+                        let extra_cap = mod_state.get_attribute(2832, &ctx.sde);
+                        let max_ships = if extra_cap > 0.0 {
+                            (extra_cap as usize).saturating_add(1)
+                        } else {
+                            25
+                        };
+                        let cap_limit = mod_state.get_attribute(5686, &ctx.sde);
+                        let max_caps = if cap_limit > 0.0 {
+                            cap_limit as usize
+                        } else {
+                            0
+                        };
+                        mjfg_field_params = Some((radius_m, max_ships, max_caps));
+                    }
                     let mjd_sig_pct = mod_state.get_attribute(973, &ctx.sde);
                     if mjd_sig_pct > 0.0 {
                         hic_sig_multiplier = Some(1.0 + mjd_sig_pct / 100.0);
@@ -800,6 +812,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
         hic_sig_multiplier,
         hic_mass_addition,
         mjd_jump_distance_m,
+        mjfg_field_params,
         grants_interdiction_nullification,
         target_velocity_multiplier,
         immobilize_self,

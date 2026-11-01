@@ -9,11 +9,6 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn b34_auto_targeting_and_cargo_expanders() {
-    // parity: feat:modules.automated-targeting-system, feat:modules.cargo-expanders
-    eve_testkit::attest(&[
-        "feat:modules.automated-targeting-system",
-        "feat:modules.cargo-expanders",
-    ]);
     let ctx = build_ctx();
     let mut sess = seed_pilot(&ctx, 94001, 84001, 621, NULL_SYS, true); // Caracal (621)
     let base_info = rpc(&ctx, &mut sess, "dogmaIM", "GetAllInfo", vec![PyRep::Bool(true), PyRep::Bool(true)])
@@ -55,10 +50,6 @@ async fn b34_auto_targeting_and_cargo_expanders() {
 
 #[tokio::test]
 async fn b34_bastion_effects_and_wormhole_mjd_interaction() {
-    // parity: feat:modules.bastion-wormhole-and-mjd-interaction
-    eve_testkit::attest(&[
-        "feat:modules.bastion-wormhole-and-mjd-interaction",
-    ]);
     let ctx = build_ctx();
     let mut sess = seed_pilot(&ctx, 94010, 84010, 28659, NULL_SYS, true); // Paladin (28659, Marauder)
     fit_mod(&ctx, &mut sess, 84010, 74011, 33400, 27).await.expect("fit Bastion Module I");
@@ -107,11 +98,6 @@ async fn b34_bastion_effects_and_wormhole_mjd_interaction() {
 
 #[tokio::test]
 async fn b34_cehe_and_capital_mjd_mjfg() {
-    // parity: feat:modules.capital-emergency-hull-energizer, feat:modules.capital-micro-jump-drive
-    eve_testkit::attest(&[
-        "feat:modules.capital-emergency-hull-energizer",
-        "feat:modules.capital-micro-jump-drive",
-    ]);
     let ctx = build_ctx();
     // Subcapital cannot activate CEHE
     let mut sub_sess = seed_pilot(&ctx, 94020, 84020, 621, NULL_SYS, true);
@@ -175,11 +161,6 @@ async fn b34_cehe_and_capital_mjd_mjfg() {
 
 #[tokio::test]
 async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
-    // parity: feat:modules.cloak-stabilization-timer, feat:modules.clone-vat-bay-fuel
-    eve_testkit::attest(&[
-        "feat:modules.cloak-stabilization-timer",
-        "feat:modules.clone-vat-bay-fuel",
-    ]);
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
     let mut cov_sess = seed_pilot(&ctx, 94030, 84030, 11957, NULL_SYS, true);
@@ -306,10 +287,6 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
 
 #[tokio::test]
 async fn b34_command_bursts_strength_range_duration_fitting() {
-    // parity: feat:modules.command-burst-range
-    eve_testkit::attest(&[
-        "feat:modules.command-burst-range",
-    ]);
     let ctx = build_ctx();
     // Alpha clone cannot activate Command Burst
     let mut alpha_sess = seed_pilot(&ctx, 94040, 84040, 22474, NULL_SYS, true); // Damnation (22474, Command Ship)
@@ -367,14 +344,6 @@ async fn b34_command_bursts_strength_range_duration_fitting() {
 
 #[tokio::test]
 async fn b34_cyno_covert_cyno_portal_jammer_and_lance() {
-    // parity: feat:modules.cyno-lighting-rules, feat:modules.covert-cyno-rules, feat:modules.covert-jump-portal-generator, feat:modules.cynosural-field-jammer-structure, feat:modules.disruptive-lance
-    eve_testkit::attest(&[
-        "feat:modules.cyno-lighting-rules",
-        "feat:modules.covert-cyno-rules",
-        "feat:modules.covert-jump-portal-generator",
-        "feat:modules.cynosural-field-jammer-structure",
-        "feat:modules.disruptive-lance",
-    ]);
     let ctx = build_ctx();
     let dest_sys = 30004760u32;
     let mut cyno_sess = seed_pilot(&ctx, 94050, 84050, 11957, dest_sys, true); // Falcon (11957)
@@ -398,6 +367,36 @@ async fn b34_cyno_covert_cyno_portal_jammer_and_lance() {
     // Tenebrex Cyno Jammer spool-up (300s) and reinforcement disable
     let now_u = ctx.now_unix_secs();
     ctx.db.with_mut_snapshot(|s| {
+        s.structures.insert(998_101, eve_db::UpwellStructureRecord {
+            structure_id: 998_101,
+            type_id: 32458,
+            owner_corp_id: 1000125,
+            solar_system_id: dest_sys,
+            name: "Sov Hub".into(),
+            position: [10_000.0, 0.0, 0.0],
+            state: "ShieldVulnerable".into(),
+            quantum_core_installed: true,
+            fuel_blocks: 100,
+            shield_hp: 100_000.0,
+            armor_hp: 100_000.0,
+            hull_hp: 100_000.0,
+            reinforced_until_unix: 0,
+            last_damage_tick: 0,
+            last_damage_unix: 0,
+            self_destruct_at_unix: None,
+        });
+        s.sov_runtime.sov_hubs.insert(
+            998_101,
+            eve_db::PersistedSovHubData {
+                hub_id: 998_101,
+                upgrades: vec![eve_db::PersistedHubUpgrade {
+                    type_id: eve_server::services::sov_gameplay::UPGRADE_CYNOSURAL_SUPPRESSION,
+                    online: true,
+                    low_power: false,
+                }],
+                ..Default::default()
+            },
+        );
         s.structures.insert(998_100, eve_db::UpwellStructureRecord {
             structure_id: 998_100,
             type_id: 37534,

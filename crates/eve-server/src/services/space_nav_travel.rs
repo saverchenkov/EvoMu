@@ -1033,7 +1033,7 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
     let Some(mut cs) = handle.get_combat_state(ship_id).await.ok().flatten() else {
         return;
     };
-    if !has_cloak_mod && !active_cap_mjfg && !cs.is_cloaked && !cs.is_capital_mjfg {
+    if !has_cloak_mod && !active_cap_mjfg && !cs.is_cloaked {
         return;
     }
     let Some((_, mut ball)) = handle.get_ball_snapshot(ship_id).await.ok().flatten() else {
@@ -1125,8 +1125,7 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
         cs_changed = true;
     }
 
-    if active_cap_mjfg && !cs.is_capital_mjfg && cs.mjfg_spool_remaining_s <= 0.0 {
-        cs.is_capital_mjfg = true;
+    if active_cap_mjfg && cs.mjfg_spool_remaining_s <= 0.0 && cs.mjfg_original_sig_radius.is_none() {
         cs.mjfg_spool_remaining_s = 9.0;
         let orig_sig = cs.mjfg_original_sig_radius.unwrap_or(cs.signature_radius);
         cs.mjfg_original_sig_radius = Some(orig_sig);

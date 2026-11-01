@@ -116,6 +116,7 @@ pub struct ActiveModuleCycle {
     pub original_signature_radius: Option<f64>,
     pub original_mass: Option<f64>,
     pub mjd_jump_distance_m: Option<f64>,
+    pub mjfg_field_params: Option<(f64, usize, usize)>,
     pub grants_interdiction_nullification: bool,
     pub effective_max_capacitor: Option<f64>,
     /// Maximum effective range in meters for targeted modules (`plan:DG-4`).

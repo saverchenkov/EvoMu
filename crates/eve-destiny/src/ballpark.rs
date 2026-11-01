@@ -669,14 +669,6 @@ impl Ballpark {
         } else {
             distance_meters
         };
-        if self
-            .combat_states
-            .get(&ball_id)
-            .is_some_and(|cs| cs.is_capital_mjfg)
-        {
-            let _ = self.micro_jump_field(ball_id, eff_dist, 10_000.0, 50)?;
-            return Ok(self.balls[&ball_id].position);
-        }
         let (current_pos, dir) = self.heading_for_ball(ball_id);
         let target_pos = current_pos + dir * eff_dist;
         self.set_ball_position(ball_id, target_pos);
@@ -705,6 +697,23 @@ impl Ballpark {
         field_radius_meters: f64,
         max_jumped_ships: usize,
     ) -> Result<Vec<BallId>, String> {
+        self.micro_jump_field_with_capitals(
+            ball_id,
+            distance_meters,
+            field_radius_meters,
+            max_jumped_ships,
+            0,
+        )
+    }
+
+    pub fn micro_jump_field_with_capitals(
+        &mut self,
+        ball_id: BallId,
+        distance_meters: f64,
+        field_radius_meters: f64,
+        max_jumped_ships: usize,
+        max_jumped_capitals: usize,
+    ) -> Result<Vec<BallId>, String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
@@ -725,12 +734,8 @@ impl Ballpark {
         let (caster_pos, dir) = self.heading_for_ball(ball_id);
         let delta = dir * distance_meters;
         let max_extra = max_jumped_ships.saturating_sub(1);
-        let caster_is_cap_mjfg = self
-            .combat_states
-            .get(&ball_id)
-            .is_some_and(|cs| cs.is_capital_mjfg);
 
-        let mut candidates: Vec<(BallId, f64)> = self
+        let mut candidates: Vec<(BallId, f64, bool)> = self
             .balls
             .iter()
             .filter_map(|(&other_id, b)| {
@@ -744,7 +749,8 @@ impl Ballpark {
                 if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657 | 1971 | 1980 | 1981) {
                     return None;
                 }
-                if caster_is_cap_mjfg && matches!(grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+                let is_cap = matches!(grp, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
+                if is_cap && max_jumped_capitals == 0 {
                     return None;
                 }
                 let is_marauder = grp == 900 || matches!(b.type_id, 28659 | 28661 | 28665 | 28710);
@@ -769,7 +775,7 @@ impl Ballpark {
                 }
                 let dist = (b.position - caster_pos).length();
                 if dist <= field_radius_meters + 1e-3 {
-                    Some((other_id, dist))
+                    Some((other_id, dist, is_cap))
                 } else {
                     None
                 }
@@ -781,11 +787,20 @@ impl Ballpark {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0))
         });
-        candidates.truncate(max_extra);
 
-        let mut jumped_ids = Vec::with_capacity(1 + candidates.len());
+        let mut jumped_ids = Vec::with_capacity(1 + max_extra.min(candidates.len()));
         jumped_ids.push(ball_id);
-        for (cid, _) in candidates {
+        let mut cap_count = 0usize;
+        for (cid, _, is_cap) in candidates {
+            if jumped_ids.len() > max_extra {
+                break;
+            }
+            if is_cap {
+                if cap_count >= max_jumped_capitals {
+                    continue;
+                }
+                cap_count += 1;
+            }
             jumped_ids.push(cid);
         }
 

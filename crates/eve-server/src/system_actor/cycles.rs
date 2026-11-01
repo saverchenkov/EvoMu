@@ -298,14 +298,22 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             }
 
-            // 1b. Micro Jump Drive 100 km translation upon spool-up completion (`feat:modules.micro-jump-drive`)
+            // 1b. Micro Jump Drive / Field Generator translation upon spool-up completion (`feat:modules.micro-jump-drive`)
             if let Some(jump_dist) = cycle.mjd_jump_distance_m {
                 let scrambled = ballpark.is_ball_scrambled(cycle.ship_id)
                     || ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
                 if !scrambled {
-                    if cycle.module_type_id == 37479 { let _ = ballpark.micro_jump_field(cycle.ship_id, jump_dist, 6_000.0, 25); }
-                    else if cycle.module_type_id == 83485 { let _ = ballpark.micro_jump_field(cycle.ship_id, jump_dist, 10_000.0, 50); }
-                    else { let _ = ballpark.micro_jump(cycle.ship_id, jump_dist); }
+                    if let Some((radius_m, max_ships, max_caps)) = cycle.mjfg_field_params {
+                        let _ = ballpark.micro_jump_field_with_capitals(
+                            cycle.ship_id,
+                            jump_dist,
+                            radius_m,
+                            max_ships,
+                            max_caps,
+                        );
+                    } else {
+                        let _ = ballpark.micro_jump(cycle.ship_id, jump_dist);
+                    }
                 }
             }
 

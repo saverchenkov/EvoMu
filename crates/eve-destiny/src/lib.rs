@@ -260,9 +260,6 @@ pub struct CombatState {
     /// Capacitor recorded on the previous 1 Hz step to detect MJFG activation on Command Destroyers.
     #[serde(default)]
     pub last_step_capacitor: Option<f64>,
-    /// True when a Capital Micro Jump Field Generator (`83485`) is active on a Capital ship.
-    #[serde(default)]
-    pub is_capital_mjfg: bool,
     /// Active turret tracking speed multiplier (e.g., Abyssal Multibody Tracking Pylon `1.8`).
     #[serde(default = "default_one_f64")]
     pub tracking_speed_multiplier: f64,
@@ -322,7 +319,6 @@ impl Default for CombatState {
             mjfg_spool_remaining_s: 0.0,
             mjfg_original_sig_radius: None,
             last_step_capacitor: None,
-            is_capital_mjfg: false,
             tracking_speed_multiplier: 1.0,
             shield_boost_multiplier: 1.0,
             rng_state: default_combat_rng_state(),

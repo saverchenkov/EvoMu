@@ -980,28 +980,29 @@ pub fn is_tenebrex_jammer_active_in_snap(
     solar_system_id: u32,
     now_unix: u64,
 ) -> bool {
-    let hub_in_sys = snap
+    let Some(hid) = snap
         .structures
         .values()
         .find(|s| s.solar_system_id == solar_system_id && s.type_id == TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
-        .map(|s| s.structure_id);
-    if let Some(hid) = hub_in_sys {
-        if snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u) {
-            return false;
-        }
-        let upg_ok = snap
-            .sov_runtime
-            .sov_hubs
-            .get(&hid)
-            .is_some_and(|hub_cfg| {
-                hub_cfg
-                    .upgrades
-                    .iter()
-                    .any(|u| u.type_id == UPGRADE_CYNOSURAL_SUPPRESSION && u.online && !u.low_power)
-            });
-        if !upg_ok {
-            return false;
-        }
+        .map(|s| s.structure_id)
+    else {
+        return false;
+    };
+    if snap.sov_runtime.hacked_hubs.get(&hid).is_some_and(|&u| now_unix < u) {
+        return false;
+    }
+    let upg_ok = snap
+        .sov_runtime
+        .sov_hubs
+        .get(&hid)
+        .is_some_and(|hub_cfg| {
+            hub_cfg
+                .upgrades
+                .iter()
+                .any(|u| u.type_id == UPGRADE_CYNOSURAL_SUPPRESSION && u.online && !u.low_power)
+        });
+    if !upg_ok {
+        return false;
     }
     snap.structures.values().any(|st| {
         st.solar_system_id == solar_system_id
@@ -1012,7 +1013,7 @@ pub fn is_tenebrex_jammer_active_in_snap(
                 .sov_runtime
                 .tenebrex_spool_ready_unix
                 .get(&st.structure_id)
-                .is_none_or(|&ready| now_unix >= ready)
+                .is_some_and(|&ready| now_unix >= ready)
     })
 }
 
