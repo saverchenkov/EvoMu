@@ -1329,7 +1329,7 @@ pub async fn activate_command_burst(
             booster.corporation_id == member.corporation_id
                 || (booster.alliance_id.is_some() && booster.alliance_id == member.alliance_id)
         });
-        if sys_sec >= 0.45 && member_char_id != char_id && !same_corp_or_alliance {
+        if sys_sec >= 0.45 && member_char_id != char_id {
             let is_illegal_target = {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                 let st = cw.get_or_create(member_char_id);
@@ -1341,12 +1341,13 @@ pub async fn activate_command_burst(
                     })
                 })) || ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&member_char_id).is_some_and(|rec| rec.security_status <= -4.95)
-            }) || crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(
-                ctx,
-                char_id,
-                member_char_id,
-                now_unix_burst,
-            );
+            }) || (!same_corp_or_alliance
+                && crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(
+                    ctx,
+                    char_id,
+                    member_char_id,
+                    now_unix_burst,
+                ));
             if is_illegal_target {
                 continue;
             }

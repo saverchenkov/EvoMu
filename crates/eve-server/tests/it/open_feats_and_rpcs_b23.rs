@@ -304,7 +304,6 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
 
 #[tokio::test]
 async fn test_b23_weapon_timer_scope_and_pvp_logoff_renewal() {
-    // parity: feat:crimewatch.pvp-logoff-timer-renewal
     let ctx = ServerContext::new();
     let char_id: i64 = 95_230_020;
     let ship_id: i64 = 105_230_020;
@@ -516,7 +515,6 @@ async fn test_b23_concord_response_scaling_and_highsec_criminal_restrictions() {
 
 #[tokio::test]
 async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
-    // parity: feat:crimewatch.criminal-wreck-auto-abandon
     let ctx = ServerContext::new();
     let thief_id: i64 = 95_230_040;
     let thief_ship: i64 = 105_230_040;

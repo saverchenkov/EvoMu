@@ -299,7 +299,7 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
     assert_eq!(cam[0].as_i64(), Some(900_123));
 
     let amb = find_notif(&notifs, "OnDungeonTriggerAmbientSound");
-    assert_eq!(amb.len(), 4);
+    assert_eq!(amb.len(), 3);
     assert_eq!(amb[0].as_i64(), Some(i64::from(dungeon_id)));
     assert_eq!(amb[1].as_i64(), Some(401));
 
@@ -325,8 +325,6 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
     assert!(notifs2.is_empty());
 }
 
-/// parity: notify:OnFleetEscalatingPathMessage
-/// parity: notify:OnCloakModuleForceDeactivated
 #[tokio::test]
 async fn b23_fleet_escalation_decloak_and_jump_queue_notifications() {
     let mut ctx = ServerContext::new();

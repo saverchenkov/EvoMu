@@ -200,7 +200,7 @@ pub fn emit_dungeon_camera_interest_core(
     );
 }
 
-/// Emits `OnDungeonTriggerAmbientSound(dungeonID, soundID, entityItemID, emitterID)` (`4` args, `id_type = "charid"`).
+/// Emits `OnDungeonTriggerAmbientSound(dungeonID, soundID, entityItemID)` (`3` args, `id_type = "charid"`).
 pub fn emit_dungeon_trigger_ambient_sound_core(
     db: &eve_db::WorldRepository,
     pending_notifications: Option<
@@ -211,7 +211,7 @@ pub fn emit_dungeon_trigger_ambient_sound_core(
     dungeon_id: i64,
     sound_id: i64,
     entity_item_id: i64,
-    emitter_id: i64,
+    _emitter_id: i64,
 ) {
     push_char_notification_core(
         db,
@@ -223,7 +223,6 @@ pub fn emit_dungeon_trigger_ambient_sound_core(
             PyRep::Integer(dungeon_id),
             PyRep::Integer(sound_id),
             PyRep::Integer(entity_item_id),
-            PyRep::Integer(emitter_id),
         ],
     );
 }
@@ -316,10 +315,11 @@ pub fn emit_jump_queue_update(
     char_id: i64,
     sys_id: SolarSystemId,
     space: i64,
-    queue: i64,
+    queue: Vec<i64>,
     jump_keys: Vec<i64>,
     key_life: i64,
 ) {
+    let queue_rep = queue.into_iter().map(PyRep::Integer).collect();
     let keys = jump_keys.into_iter().map(PyRep::Integer).collect();
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -328,7 +328,7 @@ pub fn emit_jump_queue_update(
         vec![
             PyRep::Integer(i64::from(sys_id)),
             PyRep::Integer(space),
-            PyRep::Integer(queue),
+            PyRep::List(queue_rep),
             PyRep::List(keys),
             PyRep::Integer(key_life),
         ],
@@ -369,12 +369,7 @@ pub fn try_enqueue_jump_queue(
         if !entry.queued_chars.contains(&char_id) {
             entry.queued_chars.push(char_id);
         }
-        let pos = entry
-            .queued_chars
-            .iter()
-            .position(|&c| c == char_id)
-            .map(|i| (i + 1) as i64)
-            .unwrap_or(1);
+        let queued_chars = entry.queued_chars.clone();
         let key = entry
             .granted_keys
             .get(&char_id)
@@ -384,11 +379,11 @@ pub fn try_enqueue_jump_queue(
             snap.service_state_blobs
                 .insert(JUMP_QUEUE_STATE_BLOB_KEY.to_string(), json);
         }
-        Some((0_i64, pos, vec![key], 60_i64))
+        Some((0_i64, queued_chars, vec![key], 60_i64))
     });
 
-    if let Some((space, queue_pos, keys, key_life)) = outcome {
-        emit_jump_queue_update(ctx, char_id, dest_sys, space, queue_pos, keys, key_life);
+    if let Some((space, queued_chars, keys, key_life)) = outcome {
+        emit_jump_queue_update(ctx, char_id, dest_sys, space, queued_chars, keys, key_life);
         return Err(BridgeRpcError::user_error("JumpQueueActive"));
     }
     Ok(())
