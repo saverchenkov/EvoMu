@@ -377,8 +377,8 @@ pub fn handle(
                 ("value3", DbColumnType::I4),
             ]);
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
-                let mut sys_ids: std::collections::BTreeSet<u32> = snap.system_states.keys().copied().collect();
                 let mut jump_counts: HashMap<u32, i64> = HashMap::new();
+                let mut sys_ids: std::collections::BTreeSet<u32> = snap.system_states.keys().copied().collect();
                 let mut kill_totals: HashMap<u32, (i64, i64, i64)> = HashMap::new();
                 let mut active_pilots: HashMap<u32, std::collections::HashSet<i64>> = HashMap::new();
                 for ch in snap.characters.values() {
