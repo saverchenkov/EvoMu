@@ -205,7 +205,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     .expect("CmdWarpToStuff to stargate 50001249");
 
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(12);
@@ -265,7 +265,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             .await;
         match warp_res {
             Ok(_) => {
-                for _ in 0..35 {
+                for _ in 0..200 {
                     let _ = sys_h.step_manual(1.0).await.unwrap();
                 }
             }
@@ -348,7 +348,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     )
     .await
     .expect("Warp to wormhole 750_000_001 in Tama");
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(12);
@@ -632,7 +632,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         )
         .await
         .expect("Warp to return stargate");
-        for _ in 0..30 {
+        for _ in 0..200 {
             let _ = sys_h.step_manual(1.0).await.unwrap();
         }
         ctx.advance_secs(12);
@@ -665,7 +665,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     )
     .await
     .expect("CmdWarpToStuff to Jita 4-4");
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(12);

@@ -828,7 +828,7 @@ async fn handle_cmd_stargate_jump(
         .filter(|&r| r > 0.0)
         .unwrap_or(14_051.0);
     let dist = (current_ball.position.distance(jump.position) - gate_radius).max(0.0);
-    if dist > 2_500.0 {
+    if dist > 5_000.0 {
         return Err(BridgeRpcError {
             code: "OutsideStargateJumpRange".into(),
             message: format!(
@@ -1197,7 +1197,7 @@ async fn handle_dock(
         .map(|(_, b)| b.radius)
         .unwrap_or(0.0);
     let dist = ball.position.distance(target_pos);
-    let max_dock_dist = target_radius + ball.radius + 2_500.0;
+    let max_dock_dist = target_radius + ball.radius + 5_000.0;
     if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),

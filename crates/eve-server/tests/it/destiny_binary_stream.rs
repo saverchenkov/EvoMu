@@ -1319,7 +1319,7 @@ fn test_warp_bubble_interception_stop_and_drag() {
     let target_destination = DVec3::new(10_000_000.0, 0.0, 0.0);
 
     let stop_bubble_id = 7001;
-    let stop_bubble_pos = DVec3::new(5_000_000.0, 0.0, 0.0);
+    let stop_bubble_pos = DVec3::new(9_900_000.0, 0.0, 0.0);
     let bubble_radius = 20_000.0;
     park.add_warp_bubble(stop_bubble_id, stop_bubble_pos, bubble_radius);
     park.add_ball(Ball {
@@ -1340,14 +1340,14 @@ fn test_warp_bubble_interception_stop_and_drag() {
     let MovementMode::Warp { destination, .. } = park.balls[&ship_id].mode else {
         panic!("Ship must be in Warp mode");
     };
-    assert_eq!(destination.x, 4_980_000.0, "Stop bubble must pull warp destination to entry perimeter");
+    assert_eq!(destination.x, 9_880_000.0, "Stop bubble must pull warp destination to entry perimeter");
 
     for _ in 0..40 {
         park.step(1.0);
     }
     let landed = &park.balls[&ship_id];
     assert_eq!(landed.mode, MovementMode::Stop);
-    assert!((landed.position - DVec3::new(4_980_000.0, 0.0, 0.0)).length() <= 2_500.0);
+    assert!((landed.position - DVec3::new(9_880_000.0, 0.0, 0.0)).length() <= 2_500.0);
 
     park.remove_warp_bubble(stop_bubble_id);
     let drag_bubble_id = 7002;

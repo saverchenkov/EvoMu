@@ -121,7 +121,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
             .await;
         match warp_res {
             Ok(_) => {
-                for _ in 0..40 {
+                for _ in 0..200 {
                     let _ = handle.step_manual(1.0).await.unwrap();
                 }
             }

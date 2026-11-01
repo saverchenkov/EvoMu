@@ -203,7 +203,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         .await
         .unwrap();
         let sys_h = ctx.systems.get_or_spawn(from_sys);
-        for _ in 0..30 {
+        for _ in 0..200 {
             let _ = sys_h.step_manual(1.0).await.unwrap();
         }
         ctx.advance_secs(30);
@@ -281,7 +281,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(30);
@@ -483,7 +483,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(30);

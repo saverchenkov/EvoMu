@@ -44,7 +44,7 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
         target_id: ship_tgt, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(100_000.0),
     }).await.unwrap();
 
-    // Target 1200/3000 (40%) < Source 800/1000 (80%): no drain on standard hull despite 1200 GJ > 800 GJ
+    // Target 400 GJ <= Source 800 GJ: no drain on standard hull
     let mut s_cs = sys.get_combat_state(ship_src).await.unwrap().unwrap();
     s_cs.capacitor_recharge_time_ms = 0.0;
     s_cs.max_capacitor = 1_000.0;
@@ -52,18 +52,18 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     sys.set_combat_state(ship_src, s_cs.clone()).await.unwrap();
     let mut t_cs = sys.get_combat_state(ship_tgt).await.unwrap().unwrap();
     t_cs.capacitor_recharge_time_ms = 0.0;
-    t_cs.max_capacitor = 3_000.0;
-    t_cs.capacitor = 1_200.0;
+    t_cs.max_capacitor = 500.0;
+    t_cs.capacitor = 400.0;
     sys.set_combat_state(ship_tgt, t_cs.clone()).await.unwrap();
 
     rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.expect("Activate Nosferatu");
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 1_200.0);
+    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 400.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
-    // Target 400/500 (80%) > Source 500/2000 (25%): drains despite 400 GJ < 500 GJ
+    // Target 1200 GJ > Source 500 GJ: drains on standard hull
     let mut s_cs2 = sys.get_combat_state(ship_src).await.unwrap().unwrap();
     s_cs2.capacitor_recharge_time_ms = 0.0;
     s_cs2.max_capacitor = 2_000.0;
@@ -71,18 +71,18 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     sys.set_combat_state(ship_src, s_cs2).await.unwrap();
     let mut t_cs2 = sys.get_combat_state(ship_tgt).await.unwrap().unwrap();
     t_cs2.capacitor_recharge_time_ms = 0.0;
-    t_cs2.max_capacitor = 500.0;
-    t_cs2.capacitor = 400.0;
+    t_cs2.max_capacitor = 3_000.0;
+    t_cs2.capacitor = 1_200.0;
     sys.set_combat_state(ship_tgt, t_cs2).await.unwrap();
     rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.unwrap();
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 400.0);
+    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 1_200.0);
     assert!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor > 500.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
-    // Blood Raider Bhaalgorn (17920) overrides relative % limit
+    // Blood Raider Bhaalgorn (17920) overrides absolute GJ limit
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&ship_src).unwrap().type_id = 17_920; });
     ctx.invalidate_ship_fitting(ship_src);
     sys.set_combat_state(ship_src, s_cs).await.unwrap();
@@ -91,7 +91,7 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.unwrap();
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 1_200.0);
+    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 400.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
     // 2. Heavy Stasis Grappler Mechanics (`feat:modules.stasis-grappler-mechanics`)

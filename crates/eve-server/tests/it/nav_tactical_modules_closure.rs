@@ -249,7 +249,7 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
     let vec_item_id: i64 = 74_001;
     give_item(&ctx, vec_item_id, 77_825, char_id, ship_id, InventoryFlag::Cargo, 2);
 
-    // Non-inventory space ball IDs (e.g., stargate or container ball) are rejected with InvalidVectorItem (no beacon fallback)
+    // Non-inventory space ball IDs (e.g., stargate or container ball) are rejected with VectorItemNotFound (no beacon fallback)
     let far_from_star = star_cel.position + DVec3::new(2_000_000_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_id, ship_id, 587, jita_sys, far_from_star).await;
     assert_eq!(
@@ -257,7 +257,7 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
             .await
             .unwrap_err()
             .code,
-        "InvalidVectorItem"
+        "VectorItemNotFound"
     );
 
     // Out of star proximity (> 1,496,000,000,000 m = 10 AU) -> rejected

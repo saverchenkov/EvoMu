@@ -447,6 +447,14 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
         max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 50.0,
         speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
     }).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(vector_id, eve_db::InventoryItemRecord {
+            item_id: vector_id, type_id: 77_825, owner_id: char_id, location_id: ship_id,
+            flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1,
+            dynamic_attributes: std::collections::HashMap::new(), source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+        });
+    });
 
     let mut sess = SessionState::new(81_003);
     sess.user_id = Some(700);

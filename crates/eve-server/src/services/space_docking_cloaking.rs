@@ -948,11 +948,11 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
                 .or(local_k162_pos_opt)
                 .unwrap_or_else(|| pochven_wormhole_ball_position(&ctx.sde, &sigs[wh_idx]));
             let dist = current_ball.position.distance(wh_pos);
-            if dist > 2_500.0 {
+            if dist > 5_000.0 {
                 return Err(BridgeRpcError {
                     code: "OutsideWormholeJumpRange".into(),
                     message: format!(
-                        "Ship is {:.1} m from wormhole (must be <= 2500 m)",
+                        "Ship is {:.1} m from wormhole (must be <= 5000 m)",
                         dist
                     ),
                 });

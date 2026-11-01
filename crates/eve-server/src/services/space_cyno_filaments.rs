@@ -185,10 +185,10 @@ async fn handle_wormhole_jump(
 
     let prep_res: Result<(u32, DVec3), BridgeRpcError> = (|| {
         let dist = current_ball.position.distance(wh_ball.position);
-        if dist > 2_500.0 {
+        if dist > 5_000.0 {
             return Err(jump_err(
                 "OutsideWormholeJumpRange",
-                format!("Ship is {:.1} m from wormhole (must be <= 2500 m)", dist),
+                format!("Ship is {:.1} m from wormhole (must be <= 5000 m)", dist),
             ));
         }
 

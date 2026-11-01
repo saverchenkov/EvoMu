@@ -335,7 +335,7 @@ pub async fn handle_use_warp_vector(
     let (dest_pos, dist_m, remaining_qty, prev_item, prev_cd_until) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(vec_item) = snap.items.get(&target_id).cloned() else {
             return Err(BridgeRpcError {
-                code: "InvalidVectorItem".into(),
+                code: "VectorItemNotFound".into(),
                 message: format!("Warp vector item {target_id} not found in active ship {ship_id} cargo"),
             });
         };

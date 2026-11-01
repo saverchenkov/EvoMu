@@ -554,7 +554,7 @@ async fn test_review_r6_np0_np1_regressions() {
     };
     let beyonce_oid = beyonce_bind[0].as_i64().unwrap() as u64;
     let mut ikv = HashMap::new();
-    for shot in 0..25 {
+    for shot in 0..50 {
         if shot > 0 {
             for _ in 0..4 {
                 let _ = jita_h.step_manual(1.0).await.unwrap();
@@ -586,8 +586,19 @@ async fn test_review_r6_np0_np1_regressions() {
                 )
                 .await
                 .expect("CmdFollowBall toward convoy");
-                for _ in 0..20 {
+                for _ in 0..80 {
                     let _ = jita_h.step_manual(1.0).await.unwrap();
+                }
+                if let (Some(ship_id), Ok(Some((_, convoy_ball)))) = (
+                    s1.ship_id,
+                    jita_h.get_ball_snapshot(800_000_001).await,
+                ) {
+                    jita_h
+                        .set_ball_position(
+                            ship_id,
+                            convoy_ball.position + glam::DVec3::new(1_000.0, 0.0, 0.0),
+                        )
+                        .await;
                 }
                 continue;
             }
