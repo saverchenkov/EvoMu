@@ -190,7 +190,7 @@ pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOf
 /// Load all available LP store offers for a corporation:
 /// dynamic `WorldStateSnapshot` overrides first, then authoritative Tranquility ESI LP store offers
 /// for `corp_id`, supplemented for Paragon (`1_000_419`) by V24 SDE `shipcosmeticlicenses.fsdbinary`
-/// emblem types and for FW militia corps (`1_000_179..=1_000_182`) by V24 SDE FW-exclusive boosters.
+/// emblem types.
 pub fn get_corp_lp_offers_with_sde(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,
@@ -209,51 +209,6 @@ pub fn get_corp_lp_offers_with_sde(
             {
                 esi_offers.push(sde_offer.clone());
             }
-        }
-    }
-    // DERIVED: `data/esi_lp_store_offers.json` lacks V24 FW-exclusive boosters (`91916..=91977`:
-    // Electronics, Defense, Mobility, and Hardpoint I/II/III); supplement the 4 militia LP stores.
-    let fw_boosters: &[(i64, u32)] = match corp_id {
-        1_000_179 => &[
-            (910_001, 91916), (910_002, 91929), (910_003, 91930),
-            (910_004, 91932), (910_005, 91939), (910_006, 91940),
-            (910_007, 91947), (910_008, 91952), (910_009, 91951),
-            (910_010, 91962), (910_041, 91970), (910_042, 91971),
-        ],
-        1_000_180 => &[
-            (910_011, 91920), (910_012, 91927), (910_013, 91928),
-            (910_014, 91934), (910_015, 91941), (910_016, 91942),
-            (910_017, 91948), (910_018, 91953), (910_019, 91954),
-            (910_020, 91963), (910_043, 91972), (910_044, 91973),
-        ],
-        1_000_181 => &[
-            (910_021, 91921), (910_022, 91925), (910_023, 91926),
-            (910_024, 91935), (910_025, 91944), (910_026, 91943),
-            (910_027, 91949), (910_028, 91958), (910_029, 91959),
-            (910_030, 91964), (910_045, 91974), (910_046, 91975),
-        ],
-        1_000_182 => &[
-            (910_031, 91922), (910_032, 91923), (910_033, 91924),
-            (910_034, 91936), (910_035, 91945), (910_036, 91946),
-            (910_037, 91950), (910_038, 91960), (910_039, 91961),
-            (910_040, 91965), (910_047, 91976), (910_048, 91977),
-        ],
-        _ => &[],
-    };
-    for (idx, &(oid, tid)) in fw_boosters.iter().enumerate() {
-        if !esi_offers.iter().any(|o| o.type_id == tid || o.offer_id == oid) {
-            let tier = ((idx % 3) + 1) as i64;
-            esi_offers.push(LPOffer {
-                offer_id: oid,
-                corp_id,
-                type_id: tid,
-                quantity: 1,
-                lp_cost: tier * 1_500,
-                isk_cost: IskCents(tier * 150_000_00),
-                ak_cost: 0,
-                req_items: Vec::new(),
-                min_standing: None,
-            });
         }
     }
     esi_offers

@@ -1006,146 +1006,198 @@ impl PhasedAsteroidFieldState {
     }
 }
 
-/// Evaluates elapsed hourly siphon cycles for a deployed Mobile Siphon Unit (`group_id == 1247`)
-/// within `100_000.0` m of an Upwell Refinery (`group_id == 1406`) or Control Tower (`group_id == 365`).
+/// Evaluates elapsed hourly siphon cycles on the solar system actor tick for anchored
+/// Mobile Siphon Units (`group_id == 1247`) within `100_000.0` m of active POS structures:
+/// Control Tower (`365`), Silo/Coupling Array (`404`), Moon Harvesting Array (`416`), or Reactor (`438`).
 ///
-/// Uses SDE dogma attributes `siphonRawMaterial` (`1928`), `siphonProMaterial` (`1929`),
-/// `siphonPolyMaterial` (`1933`), and `siphonWasteAmount` (`1930`), stacks stolen items into the
-/// siphon's cargo up to its SDE `capacity` (`900`/`1000`/`1200` m3), destroys wasted units on the
-/// source stack, and records `siphon_last_cycle:{unit_id}` so repeated read queries at the same
-/// timestamp are idempotent while `advance_secs(3600)` advances hourly theft cycles.
-pub async fn process_mobile_siphon_cycles(ctx: &ServerContext, sys_id: u32, unit_id: i64) {
-    let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap_or_default();
-    let Some(u_ball) = balls.iter().find(|b| {
-        b.id == unit_id && ctx.sde.types.get(&b.type_id).is_some_and(|t| t.group_id == 1247)
-    }) else {
-        return;
-    };
-    // DERIVED: 100_000.0 m siphon operating range per EVE Mobile_structures mechanics.
-    let Some(ref_ball) = balls
-        .iter()
+/// Upwell Refineries (`group_id == 1406`) and private player `InventoryFlag::Hangar` stacks are excluded
+/// (`Mobile_structures.md:114`). Cycles start strictly after anchoring completes (`anchor_start + anchor_duration`),
+/// firing once per elapsed `3,600` seconds (`0` theft at `t = 0` or while unanchored).
+pub fn step_mobile_siphons_in_actor(
+    ballpark: &eve_destiny::Ballpark,
+    sde: &eve_sde::SdeRegistry,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    solar_system_id: u32,
+    now_unix: u64,
+) {
+    let siphon_balls: Vec<(i64, u32, glam::DVec3)> = ballpark
+        .balls
+        .values()
         .filter(|b| {
-            b.id != unit_id
-                && ctx.sde.types.get(&b.type_id).is_some_and(|t| matches!(t.group_id, 1406 | 365))
-                && b.position.distance(u_ball.position) <= 100_000.0
+            sde.types
+                .get(&b.type_id)
+                .is_some_and(|t| t.group_id == crate::services::mobile_deployables::GROUP_MOBILE_SIPHON)
         })
-        .min_by(|a, b| {
-            a.position
-                .distance(u_ball.position)
-                .partial_cmp(&b.position.distance(u_ball.position))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-    else {
-        return;
-    };
-    let Some(u_type) = ctx.sde.types.get(&u_ball.type_id) else {
-        return;
-    };
-    let raw_rate = u_type.default_attributes.get(&1928).copied().unwrap_or(0.0) as i32;
-    let pro_rate = u_type.default_attributes.get(&1929).copied().unwrap_or(0.0) as i32;
-    let poly_rate = u_type.default_attributes.get(&1933).copied().unwrap_or(0.0) as i32;
-    let waste_pct = u_type.default_attributes.get(&1930).copied().unwrap_or(0.0).clamp(0.0, 95.0);
-    let max_cap = u_type.capacity.max(0.0);
-    if max_cap <= 0.0 || (raw_rate <= 0 && pro_rate <= 0 && poly_rate <= 0) {
+        .map(|b| (b.id, b.type_id, b.position))
+        .collect();
+    if siphon_balls.is_empty() {
         return;
     }
-    let ref_id = ref_ball.id;
-    let now_unix = ctx.now_unix();
-    let state_key = format!("siphon_last_cycle:{unit_id}");
-    ctx.db.with_mut_snapshot(|s| {
-        let Some(siphon_owner) = s.items.get(&unit_id).map(|i| i.owner_id) else {
-            return;
-        };
-        let (cycles, next_last) = match s
-            .service_state_blobs
-            .get(&state_key)
-            .and_then(|v| v.parse::<u64>().ok())
-        {
-            None => (1u64, now_unix),
-            Some(last) => {
-                let c = now_unix.saturating_sub(last) / 3_600;
-                (c, last.saturating_add(c * 3_600))
-            }
-        };
-        if cycles == 0 {
-            return;
-        }
-        s.service_state_blobs.insert(state_key, next_last.to_string());
-        for _ in 0..cycles.min(24) {
-            let used_m3: f64 = s
-                .items
-                .values()
-                .filter(|i| i.location_id == unit_id && i.quantity > 0)
-                .map(|i| {
-                    ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1)
-                        * (i.quantity as f64)
-                })
-                .sum();
-            let rem_m3 = (max_cap - used_m3).max(0.0);
-            if rem_m3 <= 1e-6 {
-                break;
-            }
-            let candidate = s.items.values().find_map(|i| {
-                if i.location_id != ref_id || i.quantity <= 0 {
-                    return None;
-                }
-                let t = ctx.sde.types.get(&i.type_id)?;
-                let rate = match t.group_id {
-                    427 | 1884 | 1920..=1923 => raw_rate,
-                    428 => pro_rate,
-                    974 => poly_rate,
-                    _ if t.category_id == 25 => raw_rate,
-                    _ => 0,
-                };
-                if rate <= 0 {
-                    return None;
-                }
-                let unit_vol = t.volume.max(0.01);
-                let fit_qty = (rem_m3 / unit_vol).floor() as i32;
-                if fit_qty <= 0 {
-                    return None;
-                }
-                let want_steal = rate.min(fit_qty);
-                let waste_qty = ((want_steal as f64) * (waste_pct / 100.0)).round() as i32;
-                let total_drain = want_steal.saturating_add(waste_qty).min(i.quantity);
-                let actual_waste = ((total_drain as f64) * (waste_pct / (100.0 + waste_pct))).round() as i32;
-                let actual_steal = (total_drain - actual_waste).max(0).min(fit_qty);
-                (actual_steal > 0).then_some((i.item_id, i.type_id, actual_steal, total_drain))
-            });
-            let Some((src_id, src_tid, steal_qty, drain_qty)) = candidate else {
-                break;
+    let pos_balls: Vec<(i64, glam::DVec3)> = ballpark
+        .balls
+        .values()
+        .filter(|b| {
+            sde.types
+                .get(&b.type_id)
+                .is_some_and(|t| matches!(t.group_id, 365 | 404 | 416 | 438))
+        })
+        .map(|b| (b.id, b.position))
+        .collect();
+    if pos_balls.is_empty() {
+        return;
+    }
+    db.with_mut_snapshot(|s| {
+        let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(s);
+        for (unit_id, u_type_id, u_pos) in siphon_balls {
+            let Some(rec) = dep_state.deployables.get(&unit_id) else {
+                continue;
             };
-            if let Some(src) = s.items.get_mut(&src_id) {
-                src.quantity -= drain_qty;
-                if src.quantity <= 0 {
-                    s.items.remove(&src_id);
-                }
-            }
-            if let Some(existing_id) = s
-                .items
-                .values()
-                .find(|i| i.location_id == unit_id && i.type_id == src_tid && !i.singleton)
-                .map(|i| i.item_id)
+            if rec.solar_system_id != solar_system_id
+                || rec.group_id != crate::services::mobile_deployables::GROUP_MOBILE_SIPHON
+                || rec.is_unanchored
             {
-                if let Some(dst) = s.items.get_mut(&existing_id) {
-                    dst.quantity = dst.quantity.saturating_add(steal_qty);
+                continue;
+            }
+            let anchor_ready = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
+            if now_unix < anchor_ready {
+                continue;
+            }
+            // DERIVED: 100_000.0 m POS siphon operating range (`Mobile_structures.md:107-115`).
+            let mut nearby_pos: Vec<(i64, f64)> = pos_balls
+                .iter()
+                .filter_map(|&(pid, ppos)| {
+                    let dist = ppos.distance(u_pos);
+                    (pid != unit_id && dist <= 100_000.0).then_some((pid, dist))
+                })
+                .collect();
+            if nearby_pos.is_empty() {
+                continue;
+            }
+            nearby_pos.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let Some(u_type) = sde.types.get(&u_type_id) else {
+                continue;
+            };
+            let raw_rate = u_type.default_attributes.get(&1928).copied().unwrap_or(0.0) as i32;
+            let pro_rate = u_type.default_attributes.get(&1929).copied().unwrap_or(0.0) as i32;
+            let poly_rate = u_type.default_attributes.get(&1933).copied().unwrap_or(0.0) as i32;
+            let waste_pct = u_type.default_attributes.get(&1930).copied().unwrap_or(0.0).clamp(0.0, 95.0);
+            let max_cap = u_type.capacity.max(0.0);
+            if max_cap <= 0.0 || (raw_rate <= 0 && pro_rate <= 0 && poly_rate <= 0) {
+                continue;
+            }
+            let Some(siphon_owner) = s.items.get(&unit_id).map(|i| i.owner_id) else {
+                continue;
+            };
+            let state_key = format!("siphon_last_cycle:{unit_id}");
+            let last_cycle = s
+                .service_state_blobs
+                .get(&state_key)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(anchor_ready)
+                .max(anchor_ready);
+            let cycles = now_unix.saturating_sub(last_cycle) / 3_600;
+            if cycles == 0 {
+                s.service_state_blobs
+                    .entry(state_key)
+                    .or_insert_with(|| anchor_ready.to_string());
+                continue;
+            }
+            let next_last = last_cycle.saturating_add(cycles * 3_600);
+            s.service_state_blobs.insert(state_key, next_last.to_string());
+            for _ in 0..cycles.min(24) {
+                let used_m3: f64 = s
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == unit_id && i.quantity > 0)
+                    .map(|i| {
+                        sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1)
+                            * (i.quantity as f64)
+                    })
+                    .sum();
+                let rem_m3 = (max_cap - used_m3).max(0.0);
+                if rem_m3 <= 1e-6 {
+                    break;
                 }
-            } else {
-                s.next_entity_id += 1;
-                let nid = s.next_entity_id;
-                s.items.insert(
-                    nid,
-                    eve_db::InventoryItemRecord {
-                        item_id: nid,
-                        type_id: src_tid,
-                        owner_id: siphon_owner,
-                        location_id: unit_id,
-                        flag: eve_db::InventoryFlag::Cargo,
-                        quantity: steal_qty,
-                        singleton: false,
-                        ..Default::default()
-                    },
-                );
+                let mut found = None;
+                for &(pos_id, _) in &nearby_pos {
+                    let Some(pos_owner) = s.items.get(&pos_id).map(|p| p.owner_id) else {
+                        continue;
+                    };
+                    found = s.items.values().find_map(|i| {
+                        if i.location_id != pos_id
+                            || i.quantity <= 0
+                            || i.owner_id != pos_owner
+                            || !matches!(
+                                i.flag,
+                                eve_db::InventoryFlag::Cargo | eve_db::InventoryFlag::None
+                            )
+                            || s.is_item_locked_in_contract_or_job(i.item_id)
+                        {
+                            return None;
+                        }
+                        let t = sde.types.get(&i.type_id)?;
+                        let rate = match t.group_id {
+                            427 | 1884 | 1920..=1923 => raw_rate,
+                            428 => pro_rate,
+                            974 => poly_rate,
+                            _ if t.category_id == 25 => raw_rate,
+                            _ => 0,
+                        };
+                        if rate <= 0 {
+                            return None;
+                        }
+                        let unit_vol = t.volume.max(0.01);
+                        let fit_qty = (rem_m3 / unit_vol).floor() as i32;
+                        if fit_qty <= 0 {
+                            return None;
+                        }
+                        let want_steal = rate.min(fit_qty);
+                        let waste_qty = ((want_steal as f64) * (waste_pct / 100.0)).round() as i32;
+                        let total_drain = want_steal.saturating_add(waste_qty).min(i.quantity);
+                        let actual_waste =
+                            ((total_drain as f64) * (waste_pct / (100.0 + waste_pct))).round() as i32;
+                        let actual_steal = (total_drain - actual_waste).max(0).min(fit_qty);
+                        (actual_steal > 0).then_some((i.item_id, i.type_id, actual_steal, total_drain))
+                    });
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                let Some((src_id, src_tid, steal_qty, drain_qty)) = found else {
+                    break;
+                };
+                if let Some(src) = s.items.get_mut(&src_id) {
+                    src.quantity -= drain_qty;
+                    if src.quantity <= 0 {
+                        s.items.remove(&src_id);
+                    }
+                }
+                if let Some(existing_id) = s
+                    .items
+                    .values()
+                    .find(|i| i.location_id == unit_id && i.type_id == src_tid && !i.singleton)
+                    .map(|i| i.item_id)
+                {
+                    if let Some(dst) = s.items.get_mut(&existing_id) {
+                        dst.quantity = dst.quantity.saturating_add(steal_qty);
+                    }
+                } else {
+                    s.next_entity_id += 1;
+                    let nid = s.next_entity_id;
+                    s.items.insert(
+                        nid,
+                        eve_db::InventoryItemRecord {
+                            item_id: nid,
+                            type_id: src_tid,
+                            owner_id: siphon_owner,
+                            location_id: unit_id,
+                            flag: eve_db::InventoryFlag::Cargo,
+                            quantity: steal_qty,
+                            singleton: false,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
     });

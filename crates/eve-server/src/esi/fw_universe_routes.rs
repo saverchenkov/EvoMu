@@ -1007,10 +1007,16 @@ pub fn dispatch_fw_universe_route(
                 Err(e) => return Some(e),
             };
             Some(ctx.db.with_snapshot(|snap| {
-                let Some(ch) = snap.characters.get(&char_id) else {
+                let Some( _ch) = snap.characters.get(&char_id) else {
                     return RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
+                    );
+                };
+                let Some(fid) = char_fw_faction(snap, char_id) else {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Character {char_id} is not enlisted in Faction Warfare"),
                     );
                 };
                 let rec = snap.fw_character_stats.get(&char_id);
@@ -1018,6 +1024,7 @@ pub fn dispatch_fw_universe_route(
                 let current_rank = rec.map(|r| r.current_rank).unwrap_or(0);
                 let highest_rank = rec.map(|r| r.highest_rank).unwrap_or(0);
                 let mut obj = json!({
+                    "faction_id": fid,
                     "current_rank": current_rank,
                     "highest_rank": highest_rank,
                     "kills": {
@@ -1031,9 +1038,6 @@ pub fn dispatch_fw_universe_route(
                         "total": vp.total,
                     }
                 });
-                if let Some(fid) = rec.and_then(|r| r.faction_id).or(ch.war_faction_id) {
-                    obj["faction_id"] = json!(fid);
-                }
                 if let Some(enlisted_unix) = rec.and_then(|r| r.enlisted_on_unix) {
                     obj["enlisted_on"] = json!(format_iso8601_utc(enlisted_unix));
                 }
@@ -1056,13 +1060,15 @@ pub fn dispatch_fw_universe_route(
                 let mut pilots = 0_i64;
                 let mut kills = FwWindowedStat::default();
                 let mut vp = FwWindowedStat::default();
-                let mut corp_faction = None;
+                let mut corp_faction = snap.fw_runtime.corp_war_factions.get(&corp_id).copied();
                 let mut member_ids: Vec<i64> = corp.members.iter().copied().collect();
                 member_ids.sort_unstable();
                 for mid in member_ids {
                     if let Some(fid) = char_fw_faction(snap, mid) {
                         pilots += 1;
-                        if corp_faction.is_none() {
+                        if corp_faction.is_none()
+                            && !snap.fw_runtime.direct_enlisted_chars.contains_key(&mid)
+                        {
                             corp_faction = Some(fid);
                         }
                     }
@@ -1073,6 +1079,12 @@ pub fn dispatch_fw_universe_route(
                     vp.yesterday += cv.yesterday;
                     vp.last_week += cv.last_week;
                     vp.total += cv.total;
+                }
+                if corp_faction.is_none() && !snap.fw_corp_enlisted_on.contains_key(&corp_id) {
+                    return RouteExecutionResult::error(
+                        404,
+                        format!("Corporation {corp_id} is not enlisted in Faction Warfare"),
+                    );
                 }
                 let mut obj = json!({
                     "pilots": pilots,

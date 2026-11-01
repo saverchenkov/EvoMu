@@ -780,6 +780,17 @@ async fn handle_request_scans(
             message: "No active scanner probes in space".into(),
         }));
     }
+    let balls = sys_handle.list_balls().await.unwrap_or_default();
+    let inhibitor_positions =
+        crate::services::space_destiny::space_cyno_filaments::active_scan_inhibitor_positions(ctx, sys_id, &balls);
+    let caller_ship_id = session.ship_id.or_else(|| active_probes.first().map(|p| p.ship_id));
+    if let Some(csid) = caller_ship_id {
+        if let Some(cb) = balls.iter().find(|b| b.id == csid) {
+            if inhibitor_positions.iter().any(|pos| cb.position.distance(*pos) <= 30_000.0) {
+                return Some(Ok(PyRep::List(Vec::new())));
+            }
+        }
+    }
 
     let (astro_lvl, rangefinding_lvl, pinpointing_lvl, fitted_scan_bonus_pct) = ctx.db.with_snapshot(|snap| {
         let sk = snap.skills.get(&char_id);
@@ -966,13 +977,6 @@ async fn handle_request_scans(
         .collect();
     if !combat_probes.is_empty() {
         let caller_ship = session.ship_id;
-        let balls = sys_handle.list_balls().await.unwrap_or_default();
-        // DERIVED: 30_000.0 m Mobile Scan Inhibitor (`33_589`) sphere hides ships/drones/fighters.
-        let inhibitor_positions: Vec<DVec3> = balls
-            .iter()
-            .filter(|b| b.type_id == 33_589)
-            .map(|b| b.position)
-            .collect();
         for ball in balls {
             if Some(ball.id) == caller_ship {
                 continue;

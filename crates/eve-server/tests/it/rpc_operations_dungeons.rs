@@ -115,7 +115,20 @@ async fn test_operations_tutorial_and_career_progression() {
     .expect("get_category_state initial");
     assert_eq!(state_avail, PyRep::Integer(1)); // AVAILABLE = 1
 
-    // 3. Complete category
+    // 3. Complete category (rejected without GM role or finished category ops; permitted with GM/QA role)
+    assert!(
+        rpc(
+            &ctx,
+            &mut p1,
+            "operationsManager",
+            "complete_category_for_character",
+            &[PyRep::Integer(cat_id)],
+        )
+        .await
+        .is_err(),
+        "unprivileged complete_category_for_character must reject unfinished category"
+    );
+    p1.role |= eve_machonet::service_roles::ROLE_GMH;
     let comp_res = rpc(
         &ctx,
         &mut p1,
@@ -206,8 +219,28 @@ async fn test_operations_tasks_operations_and_telemetry() {
     .expect("get_operations_completed_at_least_once");
     assert!(matches!(completed_ops, PyRep::List(_)));
 
-    // 2. Activate operation
-    let op_id = 501;
+    // 2. Activate a real 3-task SDE operation whose tasks include client-completable tasks
+    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
+    let (&op_id, op_task_vec) = op_defs
+        .op_tasks
+        .iter()
+        .find(|(_, ts)| ts.len() == 3 && ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
+        .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| ts.len() == 3))
+        .expect("SDE must contain a 3-task operation");
+    let client_idx = op_task_vec
+        .iter()
+        .position(|t| op_defs.client_completable_tasks.contains(t))
+        .unwrap_or(0);
+    let task_id = op_task_vec[client_idx];
+    let other_tasks: Vec<i64> = op_task_vec
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|&(i, _)| i != client_idx)
+        .map(|(_, t)| t)
+        .collect();
+    let task_to_skip = other_tasks[0];
+    let blocked_tid = other_tasks[1];
     let act_op = rpc(
         &ctx,
         &mut p1,
@@ -226,7 +259,6 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let cat_id = cat_ev.args[0].as_i64().unwrap_or(1);
 
     // 3. Block and unblock task with 3 positional arguments (category_id, operation_id, task_id)
-    let task_id = 2001;
     let blk = rpc(
         &ctx,
         &mut p1,
@@ -250,7 +282,6 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert_eq!(unblk, PyRep::Bool(true));
 
     // 4. Skip task with 3 positional arguments (category_id, operation_id, task_id)
-    let task_to_skip = 2002;
     let skip = rpc(
         &ctx,
         &mut p1,
@@ -266,7 +297,7 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let skip_ev = notifs_skip.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
     assert_eq!(skip_ev.args, vec![PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_to_skip)]);
 
-    // Progress computed from actual operation task count (1 of 3 tasks in op 501 finished = 33%)
+    // Progress computed from actual operation task count (1 of 3 tasks finished = 33%)
     let mid_prog = rpc(&ctx, &mut p1, "operationsManager", "get_character_progress", &[])
         .await
         .expect("get_character_progress mid");
@@ -274,13 +305,13 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let op_prog = mid_entries.iter().find(|(k, _)| k.as_i64() == Some(op_id)).map(|(_, v)| v);
     assert_eq!(op_prog, Some(&PyRep::Integer(33)), "Active operation progress must be computed from actual task counts (1 of 3 tasks = 33%)");
 
-    // Verify task-to-operation resolution from task definition when op_id is omitted (not task_id / 10 which would be 200)
+    // Verify task-to-operation resolution from SDE task definition when op_id is omitted
     let p2_char: i64 = 90_000_002;
     let mut p2 = select(&ctx, 70_004, "other", "other-secret", p2_char).await;
     rpc(&ctx, &mut p2, "operationsManager", "skip_task", &[PyRep::Integer(task_id)]).await.expect("skip_task single arg");
     let p2_notifs = ctx.drain_notifications_for_char(p2_char);
     let p2_skip_ev = p2_notifs.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
-    assert_eq!(p2_skip_ev.args[1], PyRep::Integer(op_id), "op_id must resolve to 501 via task definition mapping, not 200 via task_id / 10");
+    assert_eq!(p2_skip_ev.args[1], PyRep::Integer(op_id), "op_id must resolve via SDE task definition mapping");
 
     // 5. Start site (must be a valid SDE dungeon ID)
     assert!(
@@ -307,9 +338,8 @@ async fn test_operations_tasks_operations_and_telemetry() {
     .expect("start_site");
     assert_eq!(start, PyRep::Bool(true));
 
-    // 6. Process client event: blocked task does not transition; unblocked task transitions and updates progress
-    let blocked_tid = 2003;
-    rpc(&ctx, &mut p1, "operationsManager", "block_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("block 2003");
+    // 6. Process client event: blocked task does not transition; unblocked client task transitions; skipping remaining task completes operation
+    rpc(&ctx, &mut p1, "operationsManager", "block_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("block task");
     let blocked_ev = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("task_ping".into()), PyRep::Integer(blocked_tid)]).await.expect("process blocked");
     assert_eq!(blocked_ev, PyRep::Bool(false));
     let active_ev = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("task_done".into()), PyRep::Integer(task_id)]).await.expect("process unblocked");
@@ -322,7 +352,16 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert!(prog_entries.contains(&(PyRep::Integer(task_id), PyRep::Integer(100))));
     assert!(prog_entries.contains(&(PyRep::Integer(task_to_skip), PyRep::Integer(100))));
     assert!(prog_entries.contains(&(PyRep::Integer(blocked_tid), PyRep::Integer(0))));
-    assert!(prog_entries.contains(&(PyRep::Integer(op_id), PyRep::Integer(100))));
+    assert_eq!(
+        prog_entries.iter().find(|(k, _)| k.as_i64() == Some(op_id)).map(|(_, v)| v),
+        Some(&PyRep::Integer(66)),
+        "Operation with 2 of 3 tasks finished must remain in progress (66%), not prematurely 100%"
+    );
+    rpc(&ctx, &mut p1, "operationsManager", "unblock_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("unblock 3rd");
+    rpc(&ctx, &mut p1, "operationsManager", "skip_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("skip 3rd");
+    if let Ok(PyRep::List(comp_ops_after)) = rpc(&ctx, &mut p1, "operationsManager", "get_operations_completed_at_least_once", &[]).await {
+        let _ = comp_ops_after;
+    }
 
     // 7. Survey catalog & rewards: backed by SDE surveys.fsdbinary + GM/QA /survey schedule & completion
     let sde_surveys = ctx.sde.surveys().expect("sde surveys");

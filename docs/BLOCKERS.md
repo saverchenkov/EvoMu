@@ -1,6 +1,6 @@
 # Known Environmental Dependencies & Reproducibility Notes (`docs/BLOCKERS.md`)
 
-_Last updated: 2026-10-24 against `origin/main` (`2f23c1b9`). See also [`docs/OPEN_FINDINGS.md`](./OPEN_FINDINGS.md) for active code/audit findings._
+_Last updated: 2026-10-31 against `origin/main` (`7cb3b205`). See also [`docs/OPEN_FINDINGS.md`](./OPEN_FINDINGS.md) for active code/audit findings._
 
 ## 1. V24.01 Client `.fsdbinary` C-Extension Loader (`tools/sde-import/cfsd_runner.c`) — **RESOLVED (`plan:D-1`, `plan:D-2` DONE)**
 
@@ -60,3 +60,18 @@ _Last updated: 2026-10-24 against `origin/main` (`2f23c1b9`). See also [`docs/OP
 - **Context:** Authoritative V24.01 client/SDE tables for Mercenary Den hourly Infomorph Decryption Key yield per planet/development stage, concurrent Mercenary Tactical Operation (MTO) slot capacity, MTO generation cadence, and MTO completion anarchy delta are not present in the local `.fsdbinary` SDE import.
 - **Current Fallback (`DERIVED`):** [`infomorphs_per_hour`](../crates/eve-server/src/services/quasar_sov_mercden.rs) (`65/68/71/74/78` IDK/hr, `DERIVED` synthetic deterministic lower bound of `Mercenary_Tactical_Operation.md:28-34` ranges), [`activity_capacity`](../crates/eve-server/src/services/quasar_sov_mercden.rs) (`2 + stage`, `DERIVED` synthetic slot capacity), [`ACTIVITY_GENERATION_SECS`](../crates/eve-server/src/services/quasar_sov_mercden.rs) (`3 * 86_400`, `DERIVED` 72h cadence), and `anarchy_impact: -10` (`DERIVED` synthetic MTO anarchy delta) in `crates/eve-server/src/services/quasar_sov_mercden.rs` are server-side `DERIVED` placeholders.
 - **Parity Ledger Status:** Per `AGENTS.md`, `feat:sovereignty.mercenary-den`, `feat:sovereignty.mercenary-den-development-anarchy`, and `feat:sovereignty.mercenary-den-anarchy-evolution` remain untagged (`OPEN`) until authoritative V24.01 client/SDE Mercenary Den yield, capacity, and anarchy tables are extracted and wired.
+
+## 11. Project Discovery MMOS Task Catalog, Consensus Polygons & Reward Tables (`feat:pve.project-discovery` OPEN)
+
+- **Context:** In EVE Online V24.01, Project Discovery Flow Cytometry sample polygons, gold-standard calibration tasks, community consensus matrices, XP rank curve (`needed_xp_for_level`), and ISK/Analysis Kredit payout schedules are hosted externally by MMOS (`Massively Multiplayer Online Science`) and CCP's server backend rather than bundled in the client `.fsdbinary` static data archives (`data/evomu_sde.sqlite` contains the loot crate types `55_358` / `55_359` in `crates.fsdbinary`, not MMOS sample datasets).
+- **Parity Ledger Status:** Per `AGENTS.md` ("Real client data only — when real data is absent, keep the feature open and record the data gap"), `feat:pve.project-discovery` remains untagged (`OPEN`) until authoritative sample/consensus fixtures or external dataset imports are available.
+
+## 12. Seasonal Login Campaign Active Schedule Windows (`feat:pve.seasonal-login` OPEN)
+
+- **Context:** `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` (`SdeRegistry::seasonal_login_campaigns()`) ships the per-tier Alpha and Omega item reward tables for historical/defined campaign IDs, whereas active campaign start/end schedule timestamps and live event selection are server-only operational configuration not present in local client static data.
+- **Parity Ledger Status:** Per `AGENTS.md`, `feat:pve.seasonal-login` remains untagged (`OPEN`) until authoritative campaign schedule definitions are imported.
+
+## 13. Expired 2023 Faction Warfare Boosters Absent from Tranquility LP Store Catalogs (`feat:fw.fw-boosters` OPEN)
+
+- **Context:** In V24.01 `sde_types`, Faction Warfare booster types `91_916..=91_977` carry dogma attribute `2829` (`boosterLastInjectionDatetime = 1679990400000`, `2023-03-28`, expired limited-time event boosters) and are absent (`0` offers) from Tranquility's live ESI `/loyalty/stores/{corporation_id}/offers/` catalog (`data/esi_lp_store_offers.json`) for militia corporations `1_000_179..=1_000_182`. Neither V24.01 `.fsdbinary` archives nor Tranquility ESI contain authoritative LP/ISK offer pricing for those expired event boosters.
+- **Parity Ledger Status:** Synthetic LP store offer injection has been removed from [`crates/eve-server/src/services/lp_store_catalog.rs`](../crates/eve-server/src/services/lp_store_catalog.rs) so ESI and `LPStoreMgr` serve only authentic Tranquility/SDE offers, and `feat:fw.fw-boosters` remains untagged (`OPEN`) per `AGENTS.md`.

@@ -174,6 +174,8 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
         create_pilot_in_new_corp(&ctx, "fw_pilot_a", "FW Pilot A", "FWPA").await;
     let (char_b, _corp_b, mut sess_b) =
         create_pilot_in_new_corp(&ctx, "fw_pilot_b", "FW Pilot B", "FWPB").await;
+    let (char_u, corp_u, _sess_u) =
+        create_pilot_in_new_corp(&ctx, "fw_unenlisted", "Unenlisted Pilot", "UNEN").await;
 
     let kw = HashMap::new();
     // Enlist Pilot A's corp in Caldari State (500001) and Pilot B in Gallente Federation (500004)
@@ -228,7 +230,7 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
     .expect("DonateLPsToSolarSystem");
     eve_server::services::fw_services::add_victory_points(&ctx, fw_sys_id, 500);
 
-    // Record a live PvP killmail between opposing FW pilots and record FW kill/VP event
+    // Record a live PvP killmail between opposing FW pilots -> combat hook populates FW kills, VP, and LP
     process_ship_destruction_with_aggression(
         &ctx,
         char_b,
@@ -240,17 +242,6 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
         glam::DVec3::new(100.0, 200.0, 300.0),
         false,
     );
-    let now_fw = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        eve_server::services::fw_services::record_fw_stat_event_in_snap(
-            snap,
-            now_fw,
-            char_a,
-            Some(500_001),
-            1,
-            20,
-        );
-    });
 
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
@@ -353,6 +344,22 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
         403,
         &EsiHttpRequest::new("GET", "/v1/characters/999999999/fw/stats/").with_bearer_token(&char_token),
     );
+    let unenlisted_token = issue_token_with_scopes(
+        &ctx,
+        "fw_unenlisted",
+        char_u,
+        vec![
+            "esi-characters.read_fw_stats.v1".to_string(),
+            "esi-corporations.read_fw_stats.v1".to_string(),
+        ],
+    );
+    validate_and_json(
+        &router,
+        &spec,
+        404,
+        &EsiHttpRequest::new("GET", &format!("/v1/characters/{char_u}/fw/stats/"))
+            .with_bearer_token(&unenlisted_token),
+    );
 
     // 6. /corporations/{corporation_id}/fw/stats: 401, 403, 200, 404
     let corp_path = format!("/v1/corporations/{corp_a}/fw/stats/");
@@ -378,6 +385,13 @@ async fn test_esi_b6_fw_stats_systems_leaderboards_and_wars_live_rpc_driven() {
         &spec,
         403,
         &EsiHttpRequest::new("GET", "/v1/corporations/999999999/fw/stats/").with_bearer_token(&char_token),
+    );
+    validate_and_json(
+        &router,
+        &spec,
+        404,
+        &EsiHttpRequest::new("GET", &format!("/v1/corporations/{corp_u}/fw/stats/"))
+            .with_bearer_token(&unenlisted_token),
     );
 
     // 7. SQLite persistence across ServerContext reload

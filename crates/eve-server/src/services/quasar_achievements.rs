@@ -198,6 +198,7 @@ pub struct AchievementManager {
     pub sde_achievement_hash: String,
     pub sde_definitions_json: Vec<u8>,
     db: Option<Arc<WorldRepository>>,
+    sde: Option<Arc<eve_sde::SdeRegistry>>,
 }
 
 impl Default for AchievementManager {
@@ -281,6 +282,7 @@ impl AchievementManager {
             sde_achievement_hash,
             sde_definitions_json,
             db,
+            sde,
         }
     }
 
@@ -295,33 +297,6 @@ impl AchievementManager {
                 }
                 if let Ok(cat_json) = serde_json::to_string(&cat_map) {
                     snap.quasar_state_blobs.insert("quasar_achievement_cat_scores".into(), cat_json);
-                }
-                let mut opp_state: serde_json::Value = snap
-                    .quasar_state_blobs
-                    .get("quasar_opportunities")
-                    .and_then(|j| serde_json::from_str(j).ok())
-                    .unwrap_or_else(|| serde_json::json!({}));
-                if !opp_state.is_object() {
-                    opp_state = serde_json::json!({});
-                }
-                if let Some(obj) = opp_state.as_object_mut() {
-                    for (&cid, list) in &*map {
-                        let completed_ids: Vec<u32> = list
-                            .iter()
-                            .filter(|a| a.completed)
-                            .map(|a| a.def.id)
-                            .collect();
-                        if !completed_ids.is_empty() {
-                            let entry = obj
-                                .entry(cid.to_string())
-                                .or_insert_with(|| serde_json::json!({"tracked": [], "history": [], "completed": []}));
-                            if let Some(eobj) = entry.as_object_mut() {
-                                eobj.insert("completed".into(), serde_json::json!(completed_ids));
-                            }
-                        }
-                    }
-                    snap.quasar_state_blobs
-                        .insert("quasar_opportunities".into(), opp_state.to_string());
                 }
                 Ok::<(), String>(())
             });
@@ -496,6 +471,25 @@ impl AchievementManager {
     ) {
         if delta == 0 || event_names.is_empty() {
             return;
+        }
+        if let Some(ref db) = self.db {
+            crate::services::quasar_goal_tale_notices::record_server_opportunity_event(
+                db,
+                &self.definitions,
+                character_id,
+                event_names,
+                delta,
+                now_unix,
+            );
+            if let Some(ref sde) = self.sde {
+                let _ = crate::services::operations_manager_helpers::advance_server_operation_tasks_in_db(
+                    db,
+                    sde,
+                    i64::from(character_id),
+                    event_names,
+                    now_unix,
+                );
+            }
         }
         let mut event_ids: Vec<u32> = self
             .definitions
