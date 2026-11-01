@@ -671,7 +671,7 @@ pub fn handle_clone_jump(
             ch.version += 1;
             ch.system_epoch += 1;
         }
-        let cleared_zarzakh_gate = if !same_structure_swap {
+        let cleared_zarzakh_gate = if dest_sys_id != 30_100_000 {
             snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
         } else {
             None

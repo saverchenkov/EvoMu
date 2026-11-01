@@ -337,6 +337,11 @@ impl SystemRegistry {
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
         }
+        crate::services::cluster_macho_misc_services::populate_shipcaster_balls_from_db(
+            solar_system_id,
+            &mut initial_ballpark,
+            db_opt.as_ref(),
+        );
         let mut initial_asteroids = HashMap::new();
         let mut initial_asteroid_templates = HashMap::new();
         let initial_pending_disruptors = if let (Some(sde), Some(db)) = (&sde_opt, &db_opt) {

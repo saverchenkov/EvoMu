@@ -1060,14 +1060,6 @@ pub async fn handle(
                 .map(|s| s.security_status)
                 .unwrap_or(1.0);
             let corr5 = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id) >= 5;
-            if item_type.group_id == 361 && (sys_sec >= 0.45 || (sys_sec > 0.0 && !corr5)) {
-                return Some(Err(BridgeRpcError {
-                    code: "CantAnchorInEmpire".into(),
-                    message: format!(
-                        "Mobile Warp Disruptor cannot be anchored in high-sec or low-sec system {sys_id} (security {sys_sec:.2} > 0.0)"
-                    ),
-                }));
-            }
             if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_INHIBITOR
                 && !crate::services::mobile_deployables::is_starter_or_career_system(&ctx.sde, sys_id)
                 && (sys_sec >= 0.45 || sys_id >= 31_000_000 || sys_id == 30_100_000)
@@ -1076,6 +1068,20 @@ pub async fn handle(
                     code: "CantAnchorInHighSecOrWormhole".into(),
                     message: format!(
                         "Mobile Cynosural Inhibitor cannot be anchored in high-sec, wormhole, Abyssal, or Zarzakh space (system {sys_id})"
+                    ),
+                }));
+            }
+            if sys_id == 30_100_000
+                && (matches!(item_type.category_id, 22 | 23)
+                    || item_type.default_attributes.get(&5561).copied().unwrap_or(0.0) > 0.0)
+            {
+                return Some(Err(BridgeRpcError::user_error("AnchoringDisallowedInZarzakh")));
+            }
+            if item_type.group_id == 361 && (sys_sec >= 0.45 || (sys_sec > 0.0 && !corr5)) {
+                return Some(Err(BridgeRpcError {
+                    code: "CantAnchorInEmpire".into(),
+                    message: format!(
+                        "Mobile Warp Disruptor cannot be anchored in high-sec or low-sec system {sys_id} (security {sys_sec:.2} > 0.0)"
                     ),
                 }));
             }

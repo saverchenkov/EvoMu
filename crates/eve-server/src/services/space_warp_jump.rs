@@ -813,6 +813,21 @@ async fn handle_cmd_stargate_jump(
         .unwrap_or(DVec3::ZERO);
     let arrival_pos = dest_gate_pos + DVec3::new(gate_radius + 1_500.0, 0.0, 0.0);
 
+    // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
+    // Validated and debited BEFORE mutating character solar system state (`P2` rollback safety).
+    if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
+        crate::services::space_navigation_advanced::process_zarzakh_gate_toll(
+            ctx,
+            char_id,
+            ship_id,
+            gate_id,
+            jump.destination_stargate_id,
+            &current_ball,
+            args,
+            kwargs,
+        )?;
+    }
+
     let updated_ch = ctx
         .db
         .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
@@ -821,16 +836,13 @@ async fn handle_cmd_stargate_jump(
             message: e.to_string(),
         })?;
 
-    // Zarzakh Gate Toll & Gate Lock (`feat:navigation.zarzakh-gate-toll`):
-    // Applied only after system transition succeeds; rolls back transition on toll failure.
     let mut zarzakh_lock_expiry = None;
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
-        if let Err(e) = crate::services::space_navigation_advanced::process_zarzakh_gate_toll(ctx, char_id, &current_ball, args, kwargs) {
-            let _ = ctx.db.set_character_solar_system(char_id, old_sys, &ctx.sde);
-            return Err(e);
-        }
         let expiry = now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS);
-        ctx.db.with_mut_snapshot(|snap| { snap.zarzakh_gate_locks.insert(char_id, (jump.destination_stargate_id, expiry)); });
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks
+                .insert(char_id, (jump.destination_stargate_id, expiry));
+        });
         zarzakh_lock_expiry = Some(expiry);
     }
     let _ = old_handle

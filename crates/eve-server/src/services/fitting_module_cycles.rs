@@ -225,6 +225,20 @@ pub(crate) async fn handle_module_cycles(
                 return Some(res);
             }
 
+            if sys_id == 30_100_000 {
+                let script_clears_hazard_ban = mod_type.group_id == 899
+                    && m.charge_type_id.is_some_and(|cid| {
+                        cid == 29003
+                            || cid == 45010
+                            || ctx.sde.types.get(&cid).is_some_and(|t| t.group_id == 908)
+                    });
+                if !script_clears_hazard_ban
+                    && mod_type.default_attributes.get(&5561).copied().unwrap_or(0.0) > 0.0
+                {
+                    return Some(Err(BridgeRpcError::user_error("ModuleDisallowedInHazardSystem")));
+                }
+            }
+
             if matches!(mod_type.group_id, 1770 | 538 | 47 | 48 | 1313 | 815) {
                 let eval_ctx = fit.evaluated_context(&ctx.sde);
                 let mod_state = eval_ctx
@@ -306,6 +320,9 @@ pub(crate) async fn handle_module_cycles(
 
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
             if mod_type.group_id == 589 {
+                if sys_id == 30_100_000 && mod_type.default_attributes.get(&5561).copied().unwrap_or(0.0) > 0.0 {
+                    return Some(Err(BridgeRpcError::user_error("ModuleDisallowedInHazardSystem")));
+                }
                 let sys_sec = ctx
                     .sde
                     .solar_systems

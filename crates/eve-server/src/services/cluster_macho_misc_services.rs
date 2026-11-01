@@ -152,6 +152,56 @@ pub struct OfferedLoadSlot {
     pub expires_unix: u64,
 }
 
+/// Pending two-step Zarzakh stargate transit toll confirmation quote (`feat:navigation.zarzakh-gate-toll`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingZarzakhTollQuote {
+    pub from_gate_id: i64,
+    pub to_gate_id: i64,
+    pub ship_id: i64,
+    pub quoted_toll_cents: eve_db::IskCents,
+    pub expires_unix: u64,
+}
+
+/// DERIVED: Zarzakh Horizon Siege state machine timing constants (`feat:navigation.zarzakh-local-horizon-siege`,
+/// `Zarzakh.md:39`, `auditor_rows.json:6968-6974`).
+pub const HORIZON_SIEGE_WARNING_SECS: u64 = 300;
+pub const HORIZON_SIEGE_ACTIVE_SECS: u64 = 3_600;
+pub const HORIZON_SIEGE_COOLDOWN_SECS: u64 = 7_200;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HorizonSiegePhase {
+    #[default]
+    Normal,
+    Warning,
+    Active,
+    Stabilizing,
+}
+
+impl HorizonSiegePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Warning => "Warning",
+            Self::Active => "Active",
+            Self::Stabilizing => "Stabilizing",
+        }
+    }
+}
+
+/// Persisted Zarzakh Horizon Siege state machine (`feat:navigation.zarzakh-local-horizon-siege`,
+/// `feat:navigation.deathless-shipcaster-zarzakh`).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ZarzakhHorizonSiegeState {
+    pub phase: HorizonSiegePhase,
+    pub phase_started_unix: u64,
+    pub active_start_unix: u64,
+    pub active_until_unix: u64,
+    pub cooldown_until_unix: u64,
+    pub instability_points: u32,
+    pub triggered_by_campaign_id: Option<i64>,
+    pub fulcrum_restricted_to_pirates: bool,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct PersistedClusterMiscState {
     #[serde(default)]
@@ -170,6 +220,10 @@ struct PersistedClusterMiscState {
     target_cooldowns: HashMap<i64, u64>,
     #[serde(default)]
     target_charges: HashMap<i64, u32>,
+    #[serde(default)]
+    zarzakh_toll_quotes: HashMap<i64, PendingZarzakhTollQuote>,
+    #[serde(default)]
+    zarzakh_horizon_siege: ZarzakhHorizonSiegeState,
 }
 
 #[derive(Default)]
@@ -183,6 +237,8 @@ pub struct ClusterMiscRuntimeState {
     pub char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
     pub target_cooldowns: HashMap<i64, u64>,
     pub target_charges: HashMap<i64, u32>,
+    pub zarzakh_toll_quotes: HashMap<i64, PendingZarzakhTollQuote>,
+    pub zarzakh_horizon_siege: ZarzakhHorizonSiegeState,
 }
 
 /// DERIVED: Canonical Empire Landing Pads (Shipcaster Beacons) in Faction Warfare warzones.
@@ -294,6 +350,18 @@ pub fn derived_landing_pads() -> Vec<LandingPadRecord> {
             is_disrupted: false,
             position: glam::DVec3::new(120_000.0, 0.0, 0.0),
         },
+        // DERIVED: Zarzakh (`30_100_000`) and SDE type `79018` (`Deathless Interstellar Shipcaster`)
+        // are authoritative SDE IDs; landing-pad item ID `104_000_030` and coordinates are server-side placements (`feat:navigation.deathless-shipcaster-zarzakh`).
+        LandingPadRecord {
+            item_id: 104_000_030,
+            type_id: 79018, // Deathless Interstellar Shipcaster
+            solar_system_id: 30_100_000, // Zarzakh
+            faction_id: 0,
+            is_built: true,
+            link_timestamp: 1_700_000_000,
+            is_disrupted: false,
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+        },
     ]
 }
 
@@ -339,6 +407,40 @@ pub fn derived_launchers() -> Vec<LauncherRecord> {
             solar_system_id: 30100000, // Zarzakh Deathless Shipcaster
             faction_id: 0,
             linked_pad_ids: vec![104_000_020, 104_000_021],
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+        },
+        // DERIVED: Turnur (`30002086`), Vard (`30002538`), Alsavoinon (`30003841`), Hikkoken (`30045338`)
+        // and SDE type `79018` are authoritative SDE IDs; beacon item IDs `105_000_011..=105_000_014` and positions are server-side placements (`feat:navigation.deathless-shipcaster-zarzakh`).
+        LauncherRecord {
+            item_id: 105_000_011,
+            type_id: 79018,
+            solar_system_id: 30002086, // Turnur
+            faction_id: 0,
+            linked_pad_ids: vec![104_000_030],
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+        },
+        LauncherRecord {
+            item_id: 105_000_012,
+            type_id: 79018,
+            solar_system_id: 30002538, // Vard
+            faction_id: 0,
+            linked_pad_ids: vec![104_000_030],
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+        },
+        LauncherRecord {
+            item_id: 105_000_013,
+            type_id: 79018,
+            solar_system_id: 30003841, // Alsavoinon
+            faction_id: 0,
+            linked_pad_ids: vec![104_000_030],
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+        },
+        LauncherRecord {
+            item_id: 105_000_014,
+            type_id: 79018,
+            solar_system_id: 30045338, // Hikkoken
+            faction_id: 0,
+            linked_pad_ids: vec![104_000_030],
             position: glam::DVec3::new(250_000.0, 0.0, 0.0),
         },
     ]
@@ -433,6 +535,8 @@ impl ClusterMiscRuntimeState {
             char_energy: HashMap::new(),
             target_cooldowns: HashMap::new(),
             target_charges: HashMap::new(),
+            zarzakh_toll_quotes: HashMap::new(),
+            zarzakh_horizon_siege: ZarzakhHorizonSiegeState::default(),
         };
         let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
             snap.service_state_blobs
@@ -442,18 +546,38 @@ impl ClusterMiscRuntimeState {
         if let Some(p) = persisted {
             st.char_settings = p.char_settings;
             if !p.landing_pads.is_empty() {
-                st.landing_pads = p.landing_pads;
+                let mut merged = p.landing_pads;
+                for canon in derived_landing_pads() {
+                    if !merged.iter().any(|x| x.item_id == canon.item_id) {
+                        merged.push(canon);
+                    }
+                }
+                st.landing_pads = merged;
             }
             if !p.launchers.is_empty() {
-                st.launchers = p.launchers;
+                let mut merged = p.launchers;
+                for canon in derived_launchers() {
+                    if !merged.iter().any(|x| x.item_id == canon.item_id) {
+                        merged.push(canon);
+                    }
+                }
+                st.launchers = merged;
             }
             if !p.starter_launchers.is_empty() {
-                st.starter_launchers = p.starter_launchers;
+                let mut merged = p.starter_launchers;
+                for canon in derived_starter_launchers() {
+                    if !merged.iter().any(|x| x.item_id == canon.item_id) {
+                        merged.push(canon);
+                    }
+                }
+                st.starter_launchers = merged;
             }
             st.offered_load_slots = p.offered_load_slots;
             st.char_energy = p.char_energy;
             st.target_cooldowns = p.target_cooldowns;
             st.target_charges = p.target_charges;
+            st.zarzakh_toll_quotes = p.zarzakh_toll_quotes;
+            st.zarzakh_horizon_siege = p.zarzakh_horizon_siege;
         }
         st
     }
@@ -482,6 +606,8 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
         char_energy: st.char_energy.clone(),
         target_cooldowns: st.target_cooldowns.clone(),
         target_charges: st.target_charges.clone(),
+        zarzakh_toll_quotes: st.zarzakh_toll_quotes.clone(),
+        zarzakh_horizon_siege: st.zarzakh_horizon_siege.clone(),
     });
     if let Ok(json) = serde_json::to_string(&p) {
         let _ = ctx.db.try_with_mut_snapshot(|snap| {
@@ -523,16 +649,40 @@ pub fn populate_shipcaster_balls_from_db(
     let launchers = persisted
         .as_ref()
         .filter(|p| !p.launchers.is_empty())
-        .map(|p| p.launchers.clone())
+        .map(|p| {
+            let mut merged = p.launchers.clone();
+            for canon in derived_launchers() {
+                if !merged.iter().any(|x| x.item_id == canon.item_id) {
+                    merged.push(canon);
+                }
+            }
+            merged
+        })
         .unwrap_or_else(derived_launchers);
     let starter_launchers = persisted
         .as_ref()
         .filter(|p| !p.starter_launchers.is_empty())
-        .map(|p| p.starter_launchers.clone())
+        .map(|p| {
+            let mut merged = p.starter_launchers.clone();
+            for canon in derived_starter_launchers() {
+                if !merged.iter().any(|x| x.item_id == canon.item_id) {
+                    merged.push(canon);
+                }
+            }
+            merged
+        })
         .unwrap_or_else(derived_starter_launchers);
     let pads = persisted
         .filter(|p| !p.landing_pads.is_empty())
-        .map(|p| p.landing_pads)
+        .map(|p| {
+            let mut merged = p.landing_pads;
+            for canon in derived_landing_pads() {
+                if !merged.iter().any(|x| x.item_id == canon.item_id) {
+                    merged.push(canon);
+                }
+            }
+            merged
+        })
         .unwrap_or_else(derived_landing_pads);
     for l in launchers {
         if l.solar_system_id == solar_system_id {
@@ -759,7 +909,160 @@ pub fn check_and_apply_shipcaster_target_cooldown(
     res
 }
 
+fn advance_horizon_siege_at(state: &mut ZarzakhHorizonSiegeState, now_unix: u64) -> bool {
+    let prev_phase = state.phase;
+    let prev_restricted = state.fulcrum_restricted_to_pirates;
+    if state.phase == HorizonSiegePhase::Warning
+        && state.active_start_unix > 0
+        && now_unix >= state.active_start_unix
+    {
+        if now_unix < state.active_until_unix {
+            state.phase = HorizonSiegePhase::Active;
+            state.phase_started_unix = state.active_start_unix;
+            state.fulcrum_restricted_to_pirates = true;
+            state.instability_points = state.instability_points.max(100);
+        } else if now_unix < state.cooldown_until_unix {
+            state.phase = HorizonSiegePhase::Stabilizing;
+            state.phase_started_unix = state.active_until_unix;
+            state.fulcrum_restricted_to_pirates = false;
+        } else {
+            state.phase = HorizonSiegePhase::Normal;
+            state.phase_started_unix = state.cooldown_until_unix;
+            state.fulcrum_restricted_to_pirates = false;
+            state.instability_points = 0;
+        }
+    }
+    if state.phase == HorizonSiegePhase::Active
+        && state.active_until_unix > 0
+        && now_unix >= state.active_until_unix
+    {
+        if now_unix < state.cooldown_until_unix {
+            state.phase = HorizonSiegePhase::Stabilizing;
+            state.phase_started_unix = state.active_until_unix;
+            state.fulcrum_restricted_to_pirates = false;
+        } else {
+            state.phase = HorizonSiegePhase::Normal;
+            state.phase_started_unix = state.cooldown_until_unix;
+            state.fulcrum_restricted_to_pirates = false;
+            state.instability_points = 0;
+        }
+    }
+    if state.phase == HorizonSiegePhase::Stabilizing
+        && state.cooldown_until_unix > 0
+        && now_unix >= state.cooldown_until_unix
+    {
+        state.phase = HorizonSiegePhase::Normal;
+        state.phase_started_unix = state.cooldown_until_unix;
+        state.fulcrum_restricted_to_pirates = false;
+        state.instability_points = 0;
+    }
+    state.phase != prev_phase || state.fulcrum_restricted_to_pirates != prev_restricted
+}
+
+fn emit_zarzakh_horizon_siege_changed(_ctx: &ServerContext, _state: &ZarzakhHorizonSiegeState) {
+    // Horizon Siege state is kept server-side only; do not emit `OnInsurgencyStateChangedForFaction`
+    // with a synthetic keyval payload.
+}
+
+pub fn tick_zarzakh_horizon_siege(ctx: &ServerContext, now_unix: u64) -> ZarzakhHorizonSiegeState {
+    let (state, changed) = with_misc_state(ctx, |st| {
+        let changed = advance_horizon_siege_at(&mut st.zarzakh_horizon_siege, now_unix);
+        (st.zarzakh_horizon_siege.clone(), changed)
+    });
+    if changed {
+        let is_active = state.phase == HorizonSiegePhase::Active;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("zarzakh_horizon_siege_active".into(), is_active.to_string());
+        });
+        persist_misc_state(ctx);
+        emit_zarzakh_horizon_siege_changed(ctx, &state);
+    }
+    state
+}
+
+pub fn get_zarzakh_horizon_siege_state(ctx: &ServerContext) -> ZarzakhHorizonSiegeState {
+    tick_zarzakh_horizon_siege(ctx, ctx.now_unix())
+}
+
+/// Schedules a Zarzakh Horizon Siege warning countdown (`HORIZON_SIEGE_WARNING_SECS = 300s`)
+/// when an Insurgency Forward Operating Base enters armor reinforcement (`feat:navigation.zarzakh-local-horizon-siege`).
+pub fn schedule_zarzakh_horizon_siege(
+    ctx: &ServerContext,
+    campaign_id: Option<i64>,
+) -> ZarzakhHorizonSiegeState {
+    let now = ctx.now_unix();
+    let state = with_misc_state(ctx, |st| {
+        let _ = advance_horizon_siege_at(&mut st.zarzakh_horizon_siege, now);
+        if st.zarzakh_horizon_siege.phase != HorizonSiegePhase::Active {
+            let active_start = now + HORIZON_SIEGE_WARNING_SECS;
+            let active_until = active_start + HORIZON_SIEGE_ACTIVE_SECS;
+            let cooldown_until = active_until + HORIZON_SIEGE_COOLDOWN_SECS;
+            st.zarzakh_horizon_siege = ZarzakhHorizonSiegeState {
+                phase: HorizonSiegePhase::Warning,
+                phase_started_unix: now,
+                active_start_unix: active_start,
+                active_until_unix: active_until,
+                cooldown_until_unix: cooldown_until,
+                instability_points: st
+                    .zarzakh_horizon_siege
+                    .instability_points
+                    .saturating_add(50)
+                    .min(100),
+                triggered_by_campaign_id: campaign_id,
+                fulcrum_restricted_to_pirates: false,
+            };
+        }
+        st.zarzakh_horizon_siege.clone()
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "zarzakh_horizon_siege_active".into(),
+            (state.phase == HorizonSiegePhase::Active).to_string(),
+        );
+    });
+    persist_misc_state(ctx);
+    emit_zarzakh_horizon_siege_changed(ctx, &state);
+    state
+}
+
+/// Immediately activates a Zarzakh Horizon Siege (`HorizonSiegePhase::Active`) when an Insurgency FOB
+/// is destroyed or an Insurgency resolves as `EmpireWin` (`feat:navigation.zarzakh-local-horizon-siege`,
+/// `feat:navigation.deathless-shipcaster-zarzakh`).
+pub fn trigger_zarzakh_horizon_siege(
+    ctx: &ServerContext,
+    campaign_id: Option<i64>,
+    duration_secs: u64,
+) -> ZarzakhHorizonSiegeState {
+    let now = ctx.now_unix();
+    let dur = duration_secs.max(1);
+    let state = with_misc_state(ctx, |st| {
+        st.zarzakh_horizon_siege = ZarzakhHorizonSiegeState {
+            phase: HorizonSiegePhase::Active,
+            phase_started_unix: now,
+            active_start_unix: now,
+            active_until_unix: now + dur,
+            cooldown_until_unix: now + dur + HORIZON_SIEGE_COOLDOWN_SECS,
+            instability_points: 100,
+            triggered_by_campaign_id: campaign_id,
+            fulcrum_restricted_to_pirates: true,
+        };
+        st.zarzakh_horizon_siege.clone()
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs
+            .insert("zarzakh_horizon_siege_active".into(), "true".into());
+    });
+    persist_misc_state(ctx);
+    emit_zarzakh_horizon_siege_changed(ctx, &state);
+    state
+}
+
 pub fn is_zarzakh_horizon_siege_active(ctx: &ServerContext) -> bool {
+    let state = get_zarzakh_horizon_siege_state(ctx);
+    if state.phase == HorizonSiegePhase::Active {
+        return true;
+    }
     ctx.db.with_snapshot(|snap| {
         snap.service_state_blobs
             .get("zarzakh_horizon_siege_active")
@@ -769,9 +1072,29 @@ pub fn is_zarzakh_horizon_siege_active(ctx: &ServerContext) -> bool {
 }
 
 pub fn set_zarzakh_horizon_siege_active(ctx: &ServerContext, active: bool) {
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs
-            .insert("zarzakh_horizon_siege_active".into(), active.to_string());
-    });
+    if active {
+        let _ = trigger_zarzakh_horizon_siege(ctx, None, HORIZON_SIEGE_ACTIVE_SECS);
+    } else {
+        let now = ctx.now_unix();
+        let state = with_misc_state(ctx, |st| {
+            st.zarzakh_horizon_siege = ZarzakhHorizonSiegeState {
+                phase: HorizonSiegePhase::Normal,
+                phase_started_unix: now,
+                active_start_unix: 0,
+                active_until_unix: 0,
+                cooldown_until_unix: 0,
+                instability_points: 0,
+                triggered_by_campaign_id: None,
+                fulcrum_restricted_to_pirates: false,
+            };
+            st.zarzakh_horizon_siege.clone()
+        });
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("zarzakh_horizon_siege_active".into(), "false".into());
+        });
+        persist_misc_state(ctx);
+        emit_zarzakh_horizon_siege_changed(ctx, &state);
+    }
 }
 

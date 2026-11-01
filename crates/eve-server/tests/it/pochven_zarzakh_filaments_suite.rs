@@ -513,7 +513,7 @@ async fn test_zarzakh_fulcrum_deathless_shipcaster_mechanics() {
         .await.expect_err("Insufficient funds for Zarzakh toll");
     assert_eq!(toll_err.code, "InsufficientFundsForZarzakhGateToll");
 
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().balance = eve_db::IskCents::from_isk(50_000_000); });
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().balance = eve_db::IskCents::from_isk(250_000_000); });
     ctx.advance_secs(15);
     let mut bystander_sess = SessionState::new(883_299);
     bystander_sess.character_id = Some(90_000_002);
@@ -524,7 +524,7 @@ async fn test_zarzakh_fulcrum_deathless_shipcaster_mechanics() {
         .await.expect("Orca jumps through Turnur gate paying toll");
     assert_eq!(toll_jump_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(zarzakh_sys as i64));
     let bal_after = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
-    assert!(bal_after < eve_db::IskCents::from_isk(50_000_000), "Toll deducted on entering Zarzakh");
+    assert!(bal_after < eve_db::IskCents::from_isk(250_000_000), "Toll deducted on entering Zarzakh");
 
     // RF-07: Assert Quasar ActivatedNotice delivered ONLY to jumping pilot (NoticeScope::Character), not bystander in Zarzakh
     let notices = ctx.quasar_gateway.poll_notices(sess.session_id);

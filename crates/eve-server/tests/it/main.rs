@@ -471,3 +471,5 @@ mod economy_industry_lookup_sov_closure;
 mod economy_market_lookup_social_closure;
 mod economy_market_lookup_social_closure_part2;
 mod plan_w31_closure;
+mod open_feats_and_rpcs_b8;
+mod open_feats_and_rpcs_b8_part2;

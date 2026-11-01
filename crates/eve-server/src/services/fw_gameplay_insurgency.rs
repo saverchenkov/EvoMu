@@ -287,6 +287,11 @@ pub fn check_docking_allowed(
         if matches!(eff_war_fac, Some(500_001..=500_004)) {
             return Err(BridgeRpcError::user_error("FulcrumRefusesEmpireMilitia"));
         }
+        if crate::services::cluster_macho_misc_services::is_zarzakh_horizon_siege_active(ctx)
+            && !matches!(eff_war_fac, Some(500_010 | 500_011))
+        {
+            return Err(BridgeRpcError::user_error("HorizonSiegeFulcrumLockdown"));
+        }
         let now_unix = ctx.now_unix();
         let cw = ctx.crimewatch.read().unwrap_or_else(|e| e.into_inner());
         let weapons_active = cw
@@ -459,6 +464,12 @@ pub fn evaluate_and_resolve_insurgency_campaign(
 
     if outcome == "PirateWin" {
         let _ = spawn_pirate_stronghold(ctx, campaign_id);
+    } else if outcome == "EmpireWin" || outcome == "AntiPirateWin" {
+        let _ = crate::services::cluster_macho_misc_services::trigger_zarzakh_horizon_siege(
+            ctx,
+            Some(campaign_id),
+            crate::services::cluster_macho_misc_services::HORIZON_SIEGE_ACTIVE_SECS,
+        );
     }
 
     let mut updated_balances: Vec<(i64, f64)> = Vec::new();
@@ -727,6 +738,12 @@ pub async fn apply_pirate_fob_structure_damage(
             attacker_fac,
             contrib_pts,
         } => {
+            if state == "ArmorReinforced" && reinf_until > 0 {
+                let _ = crate::services::cluster_macho_misc_services::schedule_zarzakh_horizon_siege(
+                    ctx,
+                    Some(camp_id),
+                );
+            }
             record_insurgency_contribution(ctx, camp_id, attacker_char_id, attacker_fac, contrib_pts);
             Ok(PyRep::keyval([
                 ("structureID", PyRep::Integer(structure_id)),
@@ -766,6 +783,7 @@ pub async fn apply_pirate_fob_structure_damage(
 /// automatic Frontline insurgency spawning when warzone frontlines lack a campaign, and post-surrender FW I-Hub
 /// vulnerability unlocking (`24h + 1 downtime` = `25h`).
 pub async fn tick_insurgency_campaigns(ctx: &ServerContext, now_unix: u64) {
+    let _ = crate::services::cluster_macho_misc_services::tick_zarzakh_horizon_siege(ctx, now_unix);
     // 1. Unlock post-surrender FW I-Hub vulnerability once `surrender_ihub_vulnerable_unix` elapses.
     let unlocked_surrender_sys: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
         let due: Vec<u32> = snap

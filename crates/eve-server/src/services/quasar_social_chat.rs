@@ -86,6 +86,10 @@ pub fn is_wormhole_system(sys_id: u32) -> bool {
     (31_000_000..32_000_000).contains(&sys_id)
 }
 
+pub fn is_delayed_local_system(sys_id: u32) -> bool {
+    is_wormhole_system(sys_id) || sys_id == 30_100_000
+}
+
 pub fn get_solar_system_members(
     db: &WorldRepository,
     subscribers: Option<&Arc<RwLock<HashMap<u64, GatewaySubscriber>>>>,
@@ -94,7 +98,7 @@ pub fn get_solar_system_members(
     _caller_corpid: Option<u32>,
     moderation: Option<&ChatModerationState>,
 ) -> (Vec<Vec<u8>>, Vec<u32>) {
-    let is_wh = is_wormhole_system(sys_id);
+    let is_wh = is_delayed_local_system(sys_id);
     let wh_speakers: Option<std::collections::HashSet<u32>> = if is_wh {
         moderation.map(|m| {
             m.wormhole_speakers
@@ -295,7 +299,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_FORBIDDEN, "Local chat is disabled in Abyssal Deadspace".into()));
             }
 
-            let is_wh = is_wormhole_system(sys_id);
+            let is_wh = is_delayed_local_system(sys_id);
             if is_wh {
                 let is_new = state_bcast
                     .wormhole_speakers
@@ -399,15 +403,23 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             };
             save_mutes_to_db(&db_mute, &mutes_snapshot);
 
-            let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
-            let mut ref_notice = Vec::new();
-            encode_bytes_field(1, &member_bytes, &mut ref_notice);
-            encode_sequential_id(2, sys_id, &mut ref_notice);
-            let notice_any = GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.MembershipRefreshedNotice"),
-                value: ref_notice,
-            };
-            ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+            let is_revealed = !is_delayed_local_system(sys_id)
+                || state_mute
+                    .wormhole_speakers
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&(sys_id, char_id));
+            if is_revealed {
+                let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
+                let mut ref_notice = Vec::new();
+                encode_bytes_field(1, &member_bytes, &mut ref_notice);
+                encode_sequential_id(2, sys_id, &mut ref_notice);
+                let notice_any = GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.MembershipRefreshedNotice"),
+                    value: ref_notice,
+                };
+                ctx_queue_notice(NoticeScope::SolarSystem(sys_id), notice_any, now);
+            }
 
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.chat.local.api.admin.MuteResponse"),
@@ -565,7 +577,7 @@ pub fn on_character_enter_local_chat(
         None => return Ok(0),
     };
 
-    let is_wh = is_wormhole_system(solar_system_id);
+    let is_wh = is_delayed_local_system(solar_system_id);
     let d1 = if !is_wh {
         let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
         let mut join_payload = Vec::new();
@@ -620,7 +632,7 @@ pub fn on_character_leave_local_chat(
     solar_system_id: u32,
     now_unix: u64,
 ) -> Result<usize, eve_proto::BridgeRpcError> {
-    let is_wh = is_wormhole_system(solar_system_id);
+    let is_wh = is_delayed_local_system(solar_system_id);
     if is_wh {
         let was_revealed = gateway
             .chat_moderation
@@ -668,6 +680,18 @@ pub fn on_character_local_chat_membership_refreshed(
         Some(quad) => quad,
         None => return Ok(0),
     };
+
+    if is_delayed_local_system(sys_id) {
+        let is_revealed = gateway
+            .chat_moderation
+            .wormhole_speakers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(sys_id, char_id));
+        if !is_revealed {
+            return Ok(0);
+        }
+    }
 
     let member_bytes = encode_chat_member(char_id, corpid, aid, fid);
     let mut ref_notice = Vec::new();

@@ -480,6 +480,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         hic_bubble_radius_m = None;
                     } else {
                         // Unscripted mode: AoE Warp Disruption Bubble + HIC self-penalties
+                        if sys_id == 30_100_000 && mod_type.default_attributes.get(&5561).copied().unwrap_or(0.0) > 0.0 {
+                            return Some(Err(BridgeRpcError::user_error("ModuleDisallowedInHazardSystem")));
+                        }
                         hic_bubble_radius_m = Some(base_wdfg_range);
                         hic_velocity_multiplier = Some(0.40);
                         let sig_bonus_pct = mod_type

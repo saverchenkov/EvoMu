@@ -40,7 +40,7 @@ async fn setup_nav_pilot(
                 constellation_id: 20_000_020,
                 region_id: 10_000_002,
                 active_ship_id: ship_id,
-                balance: IskCents::from_isk(100_000_000),
+                balance: IskCents::from_isk(500_000_000),
                 plex_balance: 0,
                 loyalty_points: HashMap::new(),
                 standings: HashMap::new(),

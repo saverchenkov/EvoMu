@@ -485,7 +485,9 @@ pub(crate) async fn handle_cyno_generator_activation(
     let is_cyno = mod_type
         .effect_ids
         .iter()
-        .any(|e| ctx.sde.effects.get(e).is_some_and(|d| d.name == CYNO_EFFECT_NAME));
+        .any(|e| ctx.sde.effects.get(e).is_some_and(|d| d.name == CYNO_EFFECT_NAME))
+        || type_attr(ctx, mod_type, ATTR_IS_INDUSTRIAL_CYNO) > 0.0
+        || matches!(mod_type.type_id, 21096 | 28646 | 52694);
     if !is_cyno {
         return None;
     }
@@ -503,6 +505,9 @@ async fn light_cyno(
     module_id: i64,
     mod_type: &eve_sde::InvType,
 ) -> Result<PyRep, BridgeRpcError> {
+    if sys_id == 30_100_000 {
+        return Err(err("CynoDisallowedInZarzakh", "Cynosural fields cannot be lit in Zarzakh"));
+    }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Active ship type unknown"))?;
     if !hull_allowed(ctx, mod_type, ship_type) {
@@ -510,9 +515,6 @@ async fn light_cyno(
             "CannotLightCynoInSystem",
             format!("{} cannot be operated from {}", mod_type.name, ship_type.name),
         ));
-    }
-    if sys_id == 30_100_000 {
-        return Err(err("CynoDisallowedInZarzakh", "Cynosural fields cannot be lit in Zarzakh"));
     }
     if ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070) {
         return Err(err(

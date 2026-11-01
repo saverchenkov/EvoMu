@@ -1167,7 +1167,7 @@ impl ServerContext {
                     motd: String::new(), owner_id: None, members: std::collections::HashSet::new(),
                     is_system_local: true, solar_system_id: Some(new_sys), is_private: false,
                     operators: std::collections::HashSet::new(), password: None,
-                    is_delayed_local: crate::services::quasar_social_chat::is_wormhole_system(new_sys),
+                    is_delayed_local: crate::services::quasar_social_chat::is_delayed_local_system(new_sys),
                 });
             chan.members.insert(char_id);
             Ok::<(), std::convert::Infallible>(())
@@ -1349,30 +1349,16 @@ impl ServerContext {
     }
 
     pub fn notify_fitted_item_trashed(
-        &self,
-        char_id: i64,
-        item_id: i64,
-        type_id: i64,
-        quantity: i64,
-        old_location_id: i64,
-        old_flag: i64,
+        &self, char_id: i64, item_id: i64, type_id: i64, quantity: i64, old_location_id: i64, old_flag: i64,
     ) -> Vec<PendingMachoNotification> {
         self.notify(
-            NotificationTarget::Character(char_id),
-            "OnItemChange",
-            "charid",
+            NotificationTarget::Character(char_id), "OnItemChange", "charid",
             vec![
                 PyRep::keyval([
-                    ("itemID", PyRep::Integer(item_id)),
-                    ("typeID", PyRep::Integer(type_id)),
-                    ("locationID", PyRep::Integer(10)),
-                    ("flagID", PyRep::Integer(147)),
-                    ("quantity", PyRep::Integer(quantity)),
+                    ("itemID", PyRep::Integer(item_id)), ("typeID", PyRep::Integer(type_id)),
+                    ("locationID", PyRep::Integer(10)), ("flagID", PyRep::Integer(147)), ("quantity", PyRep::Integer(quantity)),
                 ]),
-                PyRep::Dict(vec![
-                    (PyRep::Integer(3), PyRep::Integer(old_location_id)),
-                    (PyRep::Integer(4), PyRep::Integer(old_flag)),
-                ]),
+                PyRep::Dict(vec![(PyRep::Integer(3), PyRep::Integer(old_location_id)), (PyRep::Integer(4), PyRep::Integer(old_flag))]),
             ],
         )
     }

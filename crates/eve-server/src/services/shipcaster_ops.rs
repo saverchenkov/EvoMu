@@ -154,7 +154,11 @@ pub(crate) async fn execute_shipcaster_jump(
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.location_id = dest_sys as i64;
         }
-        snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
+        if origin_sys == 30_100_000 {
+            snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
+        } else {
+            None
+        }
     });
     if let Some(locked_gate_id) = cleared_zarzakh_gate {
         crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
@@ -482,6 +486,14 @@ pub async fn handle(
                     return Some(Err(rpc_err(
                         "FobFactionMismatch",
                         "Cannot jump to another pirate faction's Forward Operating Base",
+                    )));
+                }
+            } else if to_system_id == 30_100_000 && launcher.faction_id == 0 {
+                // Deathless Shipcaster beacons into Zarzakh refuse Empire militia characters (`feat:navigation.deathless-shipcaster-zarzakh`)
+                if matches!(char_war_faction, Some(500_001..=500_004)) {
+                    return Some(Err(rpc_err(
+                        "EmpireMilitiaRefused",
+                        "The Deathless Shipcaster refuses characters enlisted in an Empire militia",
                     )));
                 }
             } else if launcher.faction_id > 0 && char_war_faction != Some(launcher.faction_id as i64) {

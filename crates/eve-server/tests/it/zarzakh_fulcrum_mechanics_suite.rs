@@ -34,7 +34,7 @@ async fn test_zarzakh_gate_toll_and_journal() {
         if let Some(ch) = s.characters.get_mut(&char_id) {
             ch.solar_system_id = turnur_sys;
             ch.active_ship_id = ship_id;
-            ch.balance = eve_db::IskCents::from_isk(50_000_000);
+            ch.balance = eve_db::IskCents::from_isk(150_000_000);
             ch.war_faction_id = None;
             ch.station_id = None;
             ch.structure_id = None;
@@ -131,9 +131,9 @@ async fn test_zarzakh_gate_toll_and_journal() {
         .expect("Confirmed toll jump succeeds");
     assert_eq!(jump_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(30100000));
 
-    // Verify journal entry recorded and exact toll debited (150M kg Orca -> 1.5M ISK)
+    // Verify journal entry recorded and exact toll debited (150M kg Orca -> 100M ISK)
     let bal_after = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
-    assert_eq!(bal_after.to_f64_isk(), 48_500_000.0, "Toll of 1,500,000 ISK debited for 150M kg Orca");
+    assert_eq!(bal_after.to_f64_isk(), 50_000_000.0, "Toll of 100,000,000 ISK debited for 150M kg Orca");
     let has_journal = ctx.db.with_snapshot(|s| {
         s.wallet_journal.iter().any(|j| j.character_id == char_id && j.entry_type == "zarzakh_gate_toll")
     });
