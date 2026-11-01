@@ -932,20 +932,6 @@ fn step_observatories_in_actor(
     });
 }
 
-/// Lazily synchronizes harvested/reacted material siphoning for `unit_id` (or all siphons in `solar_system_id`).
-pub fn sync_siphon_unit(ctx: &ServerContext, unit_id: i64) {
-    let now_unix = ctx.now_unix();
-    let sys_opt = ctx.db.with_snapshot(|snap| {
-        read_deployable_state_snap(snap)
-            .deployables
-            .get(&unit_id)
-            .map(|r| r.solar_system_id)
-    });
-    if let Some(sys_id) = sys_opt {
-        step_siphons_in_db(&ctx.sde, &ctx.db, sys_id, Some(unit_id), now_unix);
-    }
-}
-
 fn step_siphons_in_db(
     sde: &SdeRegistry,
     db: &std::sync::Arc<eve_db::WorldRepository>,
@@ -1287,7 +1273,6 @@ pub async fn sync_system_deployables(ctx: &ServerContext, solar_system_id: u32) 
             .any(|r| r.solar_system_id == solar_system_id && now_unix >= r.expires_at_unix);
         due_spool || due_obs || due_expiry
     };
-    step_siphons_in_db(&ctx.sde, &ctx.db, solar_system_id, None, now_unix);
     if needs_actor_step {
         let handle = ctx.systems.get_or_spawn(solar_system_id);
         let _ = handle.step_manual(0.0).await;
