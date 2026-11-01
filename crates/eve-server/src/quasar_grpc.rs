@@ -87,6 +87,28 @@ pub fn normalize_macho_rpc_reply(
                 PyRep::Dict(Vec::new()),
             ]));
         }
+    } else if service == "jumpTimers" && method == "GetTimers" {
+        if let Ok(ref rep) = rpc_res {
+            if matches!(rep, PyRep::KeyVal(_) | PyRep::Dict(_)) {
+                let jump_activation = rep
+                    .dict_get("jumpActivation")
+                    .cloned()
+                    .unwrap_or(PyRep::None);
+                let jump_fatigue = rep
+                    .dict_get("jumpFatigue")
+                    .cloned()
+                    .unwrap_or(PyRep::None);
+                let last_updated = rep
+                    .dict_get("lastUpdated")
+                    .cloned()
+                    .unwrap_or(PyRep::None);
+                return Ok(PyRep::Tuple(vec![
+                    jump_activation,
+                    jump_fatigue,
+                    last_updated,
+                ]));
+            }
+        }
     }
     rpc_res
 }
@@ -1205,5 +1227,24 @@ mod tests {
             assert!(ack.is_empty());
             assert!(reader.next_message().await.unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn normalize_macho_rpc_reply_converts_jump_timers_keyval_to_three_tuple() {
+        let raw = Ok(PyRep::keyval([
+            ("jumpActivation", PyRep::Integer(133_500_000_000_000_000)),
+            ("jumpFatigue", PyRep::Integer(133_500_010_000_000_000)),
+            ("lastUpdated", PyRep::Integer(133_499_990_000_000_000)),
+        ]));
+        let normalized =
+            normalize_macho_rpc_reply("jumpTimers", "GetTimers", raw).expect("normalized");
+        assert_eq!(
+            normalized,
+            PyRep::Tuple(vec![
+                PyRep::Integer(133_500_000_000_000_000),
+                PyRep::Integer(133_500_010_000_000_000),
+                PyRep::Integer(133_499_990_000_000_000),
+            ])
+        );
     }
 }

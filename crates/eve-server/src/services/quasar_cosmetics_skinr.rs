@@ -1062,7 +1062,31 @@ fn handle_title_def_get_latest(
 
     let mut checkpoint = Vec::new();
     encode_string_field(1, &url, &mut checkpoint);
-    encode_bytes_field(2, &encode_semver(ver), &mut checkpoint);
+    let ver_bytes = if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
+        let mut s = Vec::new();
+        for fno in 1..=3 {
+            if let Some(v) = client_ver.get(fno).and_then(as_u64) {
+                encode_varint_field(fno, v, &mut s);
+            }
+        }
+        for fno in 4..=5 {
+            match client_ver.get(fno) {
+                Some(DynamicValue::String(tag)) => encode_string_field(fno, tag, &mut s),
+                Some(DynamicValue::Repeated(tags)) => {
+                    for t in tags {
+                        if let DynamicValue::String(tag) = t {
+                            encode_string_field(fno, tag, &mut s);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
+    } else {
+        encode_semver(ver)
+    };
+    encode_bytes_field(2, &ver_bytes, &mut checkpoint);
     encode_bytes_field(3, &crc_msg, &mut checkpoint);
 
     let mut out = Vec::new();

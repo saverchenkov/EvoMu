@@ -1135,7 +1135,7 @@ pub fn register_achievement_handlers(
     let mgr_cdn = Arc::clone(&manager);
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
             let url = format!("http://127.0.0.1:26004/cdn/achievements/v24.1.{count}/{hash}.json");
@@ -1143,10 +1143,34 @@ pub fn register_achievement_handlers(
             let mut checkpoint = Vec::new();
             encode_string_field(1, &url, &mut checkpoint);
 
-            let mut spec = Vec::new();
-            encode_varint_field(1, 24, &mut spec);
-            encode_varint_field(2, 1, &mut spec);
-            encode_varint_field(3, count as u64, &mut spec);
+            let spec = if let Some(DynamicValue::Message(client_ver)) = dyn_msg.get(1) {
+                let mut s = Vec::new();
+                for fno in 1..=3 {
+                    if let Some(v) = client_ver.get(fno).and_then(extract_u64_val) {
+                        encode_varint_field(fno, v, &mut s);
+                    }
+                }
+                for fno in 4..=5 {
+                    match client_ver.get(fno) {
+                        Some(DynamicValue::String(tag)) => encode_string_field(fno, tag, &mut s),
+                        Some(DynamicValue::Repeated(tags)) => {
+                            for t in tags {
+                                if let DynamicValue::String(tag) = t {
+                                    encode_string_field(fno, tag, &mut s);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                s
+            } else {
+                let mut s = Vec::new();
+                encode_varint_field(1, 24, &mut s);
+                encode_varint_field(2, 1, &mut s);
+                encode_varint_field(3, count as u64, &mut s);
+                s
+            };
             encode_bytes_field(2, &spec, &mut checkpoint);
 
             let crc_val =
