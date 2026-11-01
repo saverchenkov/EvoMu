@@ -820,13 +820,21 @@ async fn handle_cmd_stargate_jump(
         }
     }
 
-    let gate_radius = ctx
-        .sde
-        .types
-        .get(&16)
-        .map(|t| t.radius)
-        .filter(|&r| r > 0.0)
-        .unwrap_or(14_051.0);
+    let gate_ball_radius = old_handle
+        .get_ball_snapshot(gate_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.radius)
+        .filter(|&r| r > 0.0);
+    let gate_radius = gate_ball_radius.unwrap_or_else(|| {
+        ctx.sde
+            .types
+            .get(&16)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(14_051.0)
+    });
     let dist = (current_ball.position.distance(jump.position) - gate_radius).max(0.0);
     if dist > 2_500.0 {
         return Err(BridgeRpcError {

@@ -82,16 +82,20 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     };
     assert!((crane_catch_dest.x - 29_880_000.0).abs() < 10.0, "got {}", crane_catch_dest.x);
 
-    // Shuttle (group 31, SDE attr 1538 = 1.0) ignores catch bubble AND warps out from inside a bubble
+    // Shuttle (group 31, SDE attr 1538 = 1.0) ignores catch bubble AND warps out from inside an active bubble
+    let origin_bubble_id: i64 = 88_705;
+    sys.add_warp_bubble(origin_bubble_id, origin, 20_000.0).await.unwrap();
+    spawn_in_space(&ctx, shuttle_char, shuttle_id, 672, null_sys, origin).await;
     ctx.dispatch_rpc(
         &mut shuttle_sess, "beyonce", Some(b_shuttle), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
-    ).await.expect("Shuttle warp past catch bubble");
+    ).await.expect("Shuttle warp from inside active bubble");
     let (_, shuttle_catch) = sys.get_ball_snapshot(shuttle_id).await.unwrap().unwrap();
     let MovementMode::Warp { destination: shuttle_dest, .. } = shuttle_catch.mode else {
         panic!("Expected Shuttle in Warp mode");
     };
     assert!((shuttle_dest.x - 30_000_000.0).abs() < 10.0, "got {}", shuttle_dest.x);
+    sys.remove_warp_bubble(origin_bubble_id).await.unwrap();
     sys.remove_warp_bubble(catch_bubble_id).await.unwrap();
 
     // 1b. Drag bubble 100 km BEHIND destination at 30,100 km (20 km radius -> drags Crane to 30,080 km!)
@@ -243,6 +247,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let ls_stage5 = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
         .await.expect("Low-sec Corruption Stage 5 allows interdiction probe launch");
     assert_eq!(ls_stage5.dict_get("bubbleRadius"), Some(&PyRep::Real(20_000.0)));
+    assert_eq!(ls_stage5.dict_get("lifetimeSeconds"), Some(&PyRep::Real(120.0)));
     ctx.advance_secs(6);
 
     // 3c. Move to null-sec (`null_sys`), test 15 m3 (3-probe) capacity + 60s auto-reload when last loaded probe is fired!
@@ -271,6 +276,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let p1 = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)])
         .await.expect("Launch last loaded Warp Disrupt Probe -> triggers 60s auto-reload");
     let p1_id = p1.dict_get("probeID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(p1.dict_get("lifetimeSeconds"), Some(&PyRep::Real(120.0)));
     assert_eq!(p1.dict_get("reloading"), Some(&PyRep::Bool(true)));
     assert_eq!(p1.dict_get("remainingInLauncher"), Some(&PyRep::Integer(3)));
     assert_eq!(ctx.crimewatch.read().unwrap().states.get(&sabre_char).map(|s| s.weapon_timer_until_unix).unwrap_or(0), 0);

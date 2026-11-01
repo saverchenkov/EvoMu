@@ -173,7 +173,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let expected_dir = (station_pos - orbit_cel.position).normalize();
     let st_radius = ctx.sde.types[&st_rec.station_type_id].radius;
     let ship_radius = ctx.sde.types[&ball.type_id].radius;
-    let expected_offset = (st_radius * 0.015 + ship_radius).clamp(500.0, 2_000.0);
+    let expected_offset = st_radius + ship_radius + 500.0;
     let expected_spawn = station_pos + expected_dir * expected_offset;
     assert!(ball.position.distance(expected_spawn) < 1.0);
     assert!(
@@ -233,7 +233,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
 
     // 3. Docking perimeter & Crimewatch checks (`feat:navigation.dock-station`)
     sys_handle
-        .set_ball_position(first_ship_id, station_pos + DVec3::new(50_000.0, 0.0, 0.0))
+        .set_ball_position(first_ship_id, station_pos + DVec3::new(150_000.0, 0.0, 0.0))
         .await;
     let far_dock = ctx
         .dispatch_rpc(

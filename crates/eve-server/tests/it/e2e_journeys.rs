@@ -252,6 +252,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     ] {
         let cur_sys = sess.solar_system_id.unwrap();
         let sys_h = ctx.systems.get_or_spawn(cur_sys);
+        let _ = sys_h.step_manual(300.0).await;
         let warp_res = ctx
             .dispatch_rpc(
                 &mut sess,
@@ -265,12 +266,29 @@ async fn test_e2e_01_to_18_integration_journeys() {
             .await;
         match warp_res {
             Ok(_) => {
+                let ship_id = sess.ship_id.unwrap();
                 for _ in 0..200 {
                     let _ = sys_h.step_manual(1.0).await.unwrap();
+                    if let Ok(Some((_, b))) = sys_h.get_ball_snapshot(ship_id).await {
+                        if !matches!(b.mode, eve_destiny::MovementMode::Warp { .. }) {
+                            break;
+                        }
+                    }
                 }
             }
             Err(e) if e.code == "WarpDistanceTooShort" => {
-                for _ in 0..10 {
+                ctx.dispatch_rpc(
+                    &mut sess,
+                    "beyonce",
+                    Some(cur_bound),
+                    "CmdFollowBall",
+                    &[PyRep::Integer(gate_id), PyRep::Real(0.0)],
+                    &kw,
+                    None,
+                )
+                .await
+                .expect("CmdFollowBall to nearby stargate");
+                for _ in 0..120 {
                     let _ = sys_h.step_manual(1.0).await.unwrap();
                 }
             }

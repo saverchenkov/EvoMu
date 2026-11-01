@@ -336,6 +336,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     if let PyRep::KeyVal(fkv) = fresh_launch {
         first_probe_bubble_id = fkv.get("probeID").unwrap().as_i64().unwrap();
     }
+    null_handle.step_manual(3.0).await.expect("Arm fresh 120s Warp Disrupt Probe");
 
     // 3. Verify non-nullified warp is dragged/stopped by bubble, and Interdiction Nullifier (`58919`, `feat:modules.interdiction-nullifier`) bypasses bubbles
     ctx.db.with_mut_snapshot(|snap| {
@@ -349,7 +350,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     ctx.invalidate_ship_fitting(ship_id);
     let warp_start = DVec3::new(15_000_000.0, 0.0, 0.0);
     let warp_dest_cel_id = 88_999;
-    let warp_dest_pos = DVec3::new(40_000_000.0, 0.0, 0.0);
+    let warp_dest_pos = DVec3::new(25_130_000.0, 0.0, 0.0);
     null_handle
         .spawn_ball(Ball {
             id: warp_dest_cel_id,
@@ -389,9 +390,9 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         caught_dest.x
     );
 
-    // Reset ship inside bubble at 25,000 km -> cannot warp without nullifier, CAN warp once nullifier activated
+    // Reset ship inside bubble at 24,980 km -> cannot warp without nullifier, CAN warp once nullifier activated
     let (_, mut reset_ball) = null_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    reset_ball.position = sphere_bubble_pos;
+    reset_ball.position = DVec3::new(24_980_000.0, 0.0, 0.0);
     reset_ball.mode = MovementMode::Stop;
     null_handle.spawn_ball(reset_ball.clone()).await.unwrap();
 
@@ -429,7 +430,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     let MovementMode::Warp { destination: nullified_dest, .. } = nullified_ball.mode else {
         panic!("Expected ship in Warp mode");
     };
-    assert!((nullified_dest.x - 40_000_000.0).abs() < 1.0);
+    assert!((nullified_dest.x - 25_130_000.0).abs() < 1.0);
 
     let _ = null_handle.remove_warp_bubble(first_probe_bubble_id).await;
     let _ = null_handle.remove_warp_bubble(mobile_bubble_id).await;
