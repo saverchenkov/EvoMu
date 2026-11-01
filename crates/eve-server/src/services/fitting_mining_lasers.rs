@@ -81,6 +81,28 @@ pub(crate) async fn handle_mining_and_deactivate(
             let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
+                if sys.is_module_mjd_or_mjfg_spooling_sync(ship_id, module_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "CantDeactivateWhileSpooling".into(),
+                        message: "Cannot deactivate Micro Jump Drive or Micro Jump Field Generator while spooling".into(),
+                    }));
+                }
+                let is_cap_mjfg = mod_type_opt
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .is_some_and(|t| t.group_id == 1533 && t.name.contains("Capital"));
+                if is_cap_mjfg
+                    && sys
+                        .get_combat_state(ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|cs| cs.mjfg_spool_remaining_s > 0.0)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "CantDeactivateWhileSpooling".into(),
+                        message: "Cannot deactivate Capital Micro Jump Field Generator while spooling".into(),
+                    }));
+                }
                 removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {

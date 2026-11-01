@@ -907,14 +907,17 @@ impl WarpBubble {
         let t0 = proj - thc; // entry point along ray
         let t1 = proj + thc; // exit point along ray
 
-        // If origin is already inside the bubble
+        // Stop/catch bubble (within 500 km in front of destination) or drag bubble (within 500 km behind destination):
+        // Check segment overlap of bubble chord [t0, t1] with [max(0, dist - 500_000.0), dist + 500_000.0].
+        let win_start = (dist - 500_000.0).max(0.0);
+        let win_end = dist + 500_000.0;
+        if t1 < win_start || t0 > win_end {
+            return None;
+        }
         if t0 <= 0.0 && t1 >= 0.0 {
             return Some(origin);
         }
-
-        // Stop/catch bubble (within 500 km in front of destination) or drag bubble (within 500 km behind destination):
-        // Check segment overlap of bubble chord [t0, t1] with [max(0, dist - 500_000.0), dist + 500_000.0].
-        if t0 > 0.0 && t1 >= (dist - 500_000.0).max(0.0) && t0 <= dist + 500_000.0 {
+        if t0 > 0.0 {
             Some(origin + dir_norm * t0)
         } else {
             None

@@ -76,6 +76,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
         &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
     ).await.expect("Crane warp into exit-corridor catch bubble");
+    for _ in 0..10 { sys.step_manual(1.0).await.unwrap(); }
     let (_, crane_catch) = sys.get_ball_snapshot(target_ship_id).await.unwrap().unwrap();
     let MovementMode::Warp { destination: crane_catch_dest, .. } = crane_catch.mode else {
         panic!("Expected Crane in Warp mode");
@@ -106,6 +107,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
         &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
     ).await.expect("Crane warp into drag bubble");
+    for _ in 0..10 { sys.step_manual(1.0).await.unwrap(); }
     let (_, crane_drag) = sys.get_ball_snapshot(target_ship_id).await.unwrap().unwrap();
     let MovementMode::Warp { destination: crane_drag_dest, .. } = crane_drag.mode else {
         panic!("Expected Crane in Warp mode for drag");
@@ -632,6 +634,12 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(wcs_id)]).await.unwrap();
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
     sys.step_manual(3.0).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess_mjd, "dogmaIM", "Deactivate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap_err().code, "CantDeactivateWhileSpooling");
+    let mjd_bid = ctx.bind_object(&mut sess_mjd, "beyonce", 30000142).unwrap();
+    let empty_kw = std::collections::HashMap::new();
+    assert_eq!(ctx.dispatch_rpc(&mut sess_mjd, "beyonce", Some(mjd_bid), "CmdStop", &[], &empty_kw, None).await.unwrap_err().code, "CantMoveWhileModuleActive");
+    assert_eq!(ctx.dispatch_rpc(&mut sess_mjd, "beyonce", Some(mjd_bid), "CmdSetSpeedFraction", &[PyRep::Real(0.5)], &empty_kw, None).await.unwrap_err().code, "CantMoveWhileModuleActive");
+    assert_eq!(ctx.dispatch_rpc(&mut sess_mjd, "beyonce", Some(mjd_bid), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(50001248)], &empty_kw, None).await.unwrap_err().code, "CantMoveWhileModuleActive");
     rpc(&ctx, &mut sess_scram, "dogmaIM", "Activate", vec![
         PyRep::Integer(scrambler_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship_mjd), PyRep::Integer(1),
     ]).await.unwrap();
@@ -661,4 +669,15 @@ fn test_warp_catch_bubble_350km_in_front_of_destination() {
     };
     let hit = bubble.intercept_warp(origin, dest).expect("Catch bubble 350 km in front of destination must intercept warp");
     assert!((hit.x - (dest.x - 370_000.0)).abs() < 1.0, "Expected entry at dest - 370 km, got {:?}", hit);
+    let mid_route = eve_destiny::WarpBubble { id: 99_002, position: DVec3::new(dest.x - 600_000.0, 0.0, 0.0), radius: 20_000.0 };
+    assert!(mid_route.intercept_warp(origin, dest).is_none(), "Bubble > 500 km mid-route must not intercept");
+    let mut bp = eve_destiny::Ballpark::new(30000142);
+    bp.add_ball(eve_destiny::Ball { id: 1, type_id: 587, position: origin, velocity: DVec3::ZERO, max_velocity: 365.0, inertia: 3.45, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop });
+    bp.warp_bubble_mgr.add_bubble(bubble);
+    bp.set_mode(1, eve_destiny::MovementMode::new_warp(origin, dest, 3.0)).unwrap();
+    bp.warp_bubble_mgr.remove_bubble(99_001);
+    for _ in 0..20 { bp.step(1.0); }
+    if let eve_destiny::MovementMode::Warp { destination, .. } = bp.balls[&1].mode {
+        assert!((destination - dest).length() < 1.0, "Despawned bubble during alignment must not alter destination");
+    }
 }

@@ -1125,7 +1125,7 @@ impl Ballpark {
         true
     }
 
-    pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
+    pub fn set_mode(&mut self, ball_id: BallId, mode: MovementMode) -> Result<(), String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
@@ -1195,23 +1195,8 @@ impl Ballpark {
                 }
             }
 
-            // Check bubble interception along the warp path
-            if let MovementMode::Warp {
-                origin,
-                ref mut destination,
-                ref mut total_distance,
-                ..
-            } = mode
-            {
-                let bubble_immune = self.is_ball_bubble_immune(ball_id) || is_emergency_warp;
-                if !bubble_immune {
-                    if let Some((_bid, intercept_pos)) =
-                        self.warp_bubble_mgr.check_interception(origin, *destination)
-                    {
-                        *destination = intercept_pos;
-                        *total_distance = (*destination - origin).length();
-                    }
-                }
+            // Clear target locks on warp initiation (bubble interception is evaluated at warp entry)
+            if matches!(mode, MovementMode::Warp { .. }) {
                 if let Some(locks) = self.target_locks.remove(&ball_id) {
                     for l in locks {
                         self.pending_events.push(DestinyEvent::OnTarget {

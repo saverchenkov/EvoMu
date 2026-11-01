@@ -256,7 +256,7 @@ async fn ensure_ship_not_immobilized(
     Ok(())
 }
 
-async fn ensure_not_mjd_spooling(
+pub(crate) async fn ensure_not_mjd_spooling(
     handle: &crate::system_actor::SystemHandle,
     ship_id: i64,
 ) -> Result<(), BridgeRpcError> {
@@ -748,6 +748,7 @@ pub(crate) async fn handle_cmd_stop(
         });
     };
     let handle = ctx.systems.get_or_spawn(sys_id);
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
@@ -815,6 +816,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         });
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,

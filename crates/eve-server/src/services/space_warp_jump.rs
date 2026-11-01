@@ -130,6 +130,8 @@ async fn handle_cmd_warp_to_stuff(
             message: "Session has no active ship".into(),
         });
     };
+    let mjd_handle = ctx.systems.get_or_spawn(sys_id);
+    crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(&mjd_handle, ship_id).await?;
     crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(ctx, sys_id, ship_id, "warp").await?;
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp")?;
@@ -470,13 +472,12 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos,
     );
     let landing_dist = current_ball.position.distance(landing_pos);
-    let effective_warp_dist = landing_dist - min_range;
-    if effective_warp_dist < 150_000.0 {
+    if landing_dist < 150_000.0 {
         return Err(BridgeRpcError {
             code: "WarpDistanceTooShort".into(),
             message: format!(
                 "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                effective_warp_dist.max(0.0)
+                landing_dist.max(0.0)
             ),
         });
     }
@@ -1109,7 +1110,7 @@ async fn handle_dock(
         });
     }
 
-    let target_pos = if is_structure {
+    let (target_pos, sde_target_radius) = if is_structure {
         let st_opt = ctx
             .db
             .with_snapshot(|snap| snap.structures.get(&dock_id).cloned());
@@ -1170,7 +1171,14 @@ async fn handle_dock(
                 ),
             });
         }
-        DVec3::from_array(st.position)
+        let r = ctx
+            .sde
+            .types
+            .get(&st.type_id)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(0.0);
+        (DVec3::from_array(st.position), r)
     } else {
         crate::services::space_navigation_advanced::validate_npc_station_docking(ship_group_id, true)?;
         let st_opt = ctx
@@ -1188,7 +1196,14 @@ async fn handle_dock(
             });
         };
         crate::services::station_structure_handlers::validate_npc_station_docking_gate(ctx, char_id, dock_id)?;
-        st.position
+        let r = ctx
+            .sde
+            .types
+            .get(&st.station_type_id)
+            .map(|t| t.radius)
+            .filter(|&r| r > 0.0)
+            .unwrap_or(0.0);
+        (st.position, r)
     };
 
     if matches!(ball.mode, MovementMode::Warp { .. }) {
@@ -1203,9 +1218,12 @@ async fn handle_dock(
         .ok()
         .flatten()
         .map(|(_, b)| b.radius)
-        .unwrap_or(0.0);
+        .filter(|&r| r > 0.0)
+        .unwrap_or(sde_target_radius);
     let dist = ball.position.distance(target_pos);
-    let max_dock_dist = target_radius + ball.radius + 5_000.0;
+    let max_dock_dist = target_radius
+        + crate::services::nav_warp_interdiction::STATION_DOCKING_RING_STANDOFF_M
+        + 2_500.0;
     if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),

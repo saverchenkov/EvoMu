@@ -425,6 +425,9 @@ fn test_interdiction_bubbles_trapping_nullifier_and_micro_jump() {
 
     let warp_mode = MovementMode::new_warp(DVec3::ZERO, bubble_pos, 3.0);
     park.set_mode(1001, warp_mode).expect("Initiate warp");
+    for _ in 0..10 {
+        park.step(1.0);
+    }
     if let MovementMode::Warp { destination, .. } = park.balls[&1001].mode {
         let dist_to_center = (destination - bubble_pos).length();
         assert!(
