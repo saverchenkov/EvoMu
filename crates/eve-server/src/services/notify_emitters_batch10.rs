@@ -221,6 +221,13 @@ pub fn emit_signal_tracker_full_state_for_system(
                                 ("difficulty", PyRep::None),
                                 ("factionID", PyRep::None),
                                 ("scanStrength", PyRep::Real(a.signal_strength)),
+                                ("signalStrength", PyRep::Real(a.signal_strength)),
+                                ("scanStrengthAttribute", PyRep::None),
+                                ("deviation", PyRep::Real(0.0)),
+                                ("groupID", PyRep::None),
+                                ("typeID", PyRep::None),
+                                ("expiryTime", PyRep::None),
+                                ("isSiteExpired", PyRep::Bool(false)),
                                 (
                                     "position",
                                     PyRep::Tuple(vec![

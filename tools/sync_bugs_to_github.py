@@ -527,13 +527,16 @@ def find_existing_issue(repo: str, stack_hash: int, dry_run: bool = False) -> Op
         return None
 
     unsigned_hash = stack_hash & 0xFFFFFFFFFFFFFFFF
-    search_terms = [f"0x{unsigned_hash:016x}", str(stack_hash)]
+    search_terms = [
+        f'"**Signature Hash:** `0x{unsigned_hash:016x}`" in:body',
+        f'"(or `{stack_hash}`)" in:body',
+    ]
     for term in search_terms:
         cmd = [
             "gh", "issue", "list",
             "--repo", repo,
             "--state", "all",
-            "--search", f'"{term}" in:body',
+            "--search", term,
             "--json", "number,title,state",
             "--limit", "1",
         ]

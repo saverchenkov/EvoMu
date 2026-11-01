@@ -982,7 +982,6 @@ async fn handle_request_scans(
                 continue;
             }
             let Some(type_rec) = ctx.sde.types.get(&ball.type_id) else { continue };
-            let group_id = type_rec.group_id;
             let category_id = type_rec.category_id;
             if matches!(category_id, 6 | 18 | 87)
                 && inhibitor_positions
