@@ -131,6 +131,7 @@ impl ServerContext {
                 (r, err)
             })
             .await;
+        let wal_failed = wal_err.is_some();
         if let Some(wal_err) = wal_err {
             if res.is_ok() {
                 res = Err(BridgeRpcError {
@@ -139,8 +140,10 @@ impl ServerContext {
                 });
             }
         }
-        if res.is_err() {
+        if wal_failed {
             crate::services::fleet_social::hydrate_social_state_from_db(self);
+        }
+        if res.is_err() {
             if let Some(cid) = session.character_id {
                 if let Ok(mut q) = self.pending_notifications.write() {
                     if let Some(v) = q.get_mut(&cid) {

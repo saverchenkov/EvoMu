@@ -962,6 +962,7 @@ pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
 }
 
 pub fn record_last_wal_error(err: &str) {
+    tracing::error!("WAL/SQLite persistence error (snapshot rolled back): {err}");
     if let Some(hook) = WAL_ERROR_HOOK.get() {
         hook(err);
     }

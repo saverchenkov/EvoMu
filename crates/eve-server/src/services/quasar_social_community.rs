@@ -111,6 +111,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let sender = ctx
                 .effective_character_id()
                 .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))?;
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let recipients = extract_ids(dyn_msg.get(1));
             if recipients.is_empty() {
                 return Err((STATUS_BAD_REQUEST, "At least one recipient is required".to_string()));
@@ -124,20 +125,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 _ => "Corporate fleet mobilization orders".into(),
             };
 
-            let mail_id = state_mail.next_mail_id.fetch_add(1, Ordering::SeqCst);
             let recipients_for_db = recipients.clone();
-            db_mail
+            let mail_id = db_mail
                 .try_with_mut_snapshot(|snap| {
+                    let id = snap.next_entity_id.max(1) as u64;
+                    snap.next_entity_id = snap.next_entity_id.max(1) + 1;
                     for &rid in &recipients_for_db {
                         snap.mails.push(eve_db::MailRecord {
-                            message_id: mail_id as i64,
+                            message_id: id as i64,
                             sender_id: sender as i64,
                             recipient_id: rid as i64,
                             subject: subject.clone(),
                             body: body.clone(),
                         });
                     }
-                    Ok::<_, String>(())
+                    Ok::<_, String>(id)
                 })
                 .map_err(|e| (STATUS_INTERNAL_ERROR, format!("Failed to persist mail: {e}")))?;
             state_mail
@@ -242,13 +244,6 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 if let Some(cl) = snap.char_contact_labels.get(&session_char_id) {
                     for (id, name) in cl {
                         v.push((*id as u64, name.clone()));
-                    }
-                }
-                if let Some(ml) = snap.mail_labels.get(&session_char_id) {
-                    for l in ml {
-                        if !v.iter().any(|(_, n)| n == &l.name) {
-                            v.push((l.label_id as u64, l.name.clone()));
-                        }
                     }
                 }
                 v

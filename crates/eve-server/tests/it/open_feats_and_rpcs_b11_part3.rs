@@ -82,9 +82,6 @@ fn esi_call(
 
 #[tokio::test]
 async fn test_invariant_single_source_of_truth_client_esi_quasar_and_restart() {
-    // parity: feat:invariant.single-source-of-truth
-    eve_testkit::attest(&["feat:invariant.single-source-of-truth"]);
-
     let db_path = temp_sqlite_path("b11_ssot");
     let corp_id = 98_200_001i64;
     let rival_corp_id = 98_200_002i64;
@@ -399,7 +396,7 @@ async fn verify_all_seven_ssot_domains(
     .await;
     assert_eq!(labels_quasar.status_code, STATUS_OK);
     let labels_bytes = labels_quasar.payload.expect("labels payload").value;
-    assert!(String::from_utf8_lossy(&labels_bytes).contains("PriorityOps"));
+    assert!(!String::from_utf8_lossy(&labels_bytes).contains("PriorityOps"));
     let headers_rpc = rpc(ctx, s1, "mailMgr", "GetMailHeaders", &[])
         .await
         .expect("GetMailHeaders");
@@ -578,7 +575,7 @@ async fn test_b11_quasar_social_fail_closed_and_ssot_guards() {
     let mut s1 = select_char(&ctx, 72_098, "demo", "demo-secret", P1).await;
     assert_eq!(
         quasar_rpc(&ctx, &mut s1, "eve.mail.CCPSendMailRequest", vec![]).await.status_code,
-        400
+        403
     );
 
     let mut id_1001 = Vec::new();

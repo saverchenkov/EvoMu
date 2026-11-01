@@ -624,7 +624,9 @@ pub fn handle_contacts(
                 (false, mask)
             };
             drop(guard);
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
                 return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg }));
             }
@@ -717,7 +719,9 @@ pub fn handle_contacts(
                     updated_count += 1;
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
             // the client's current value (EditContactsRelationshipID leaves the watchlist untouched).
@@ -759,7 +763,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsDeleted(contacts): each entry is read as `contact.contactID`.
             if !removed_ids.is_empty() {
@@ -825,7 +831,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // `OnBlockContacts` is scattered by the client itself (AddressBookSvc.BlockOwner).
             Some(Ok(PyRep::keyval([
@@ -862,7 +870,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // `OnUnblockContacts` is scattered by the client itself (AddressBookSvc.UnblockOwner);
             // ContactsForm.OnUnblockContact(contactID) only reloads the contacts tab.
@@ -911,7 +921,9 @@ pub fn handle_contacts(
             }
             labels.push((label_id, name.to_string()));
             drop(guard);
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::Integer(label_id)))
         }
 
@@ -980,7 +992,9 @@ pub fn handle_contacts(
                     message: format!("Contact label {label_id} not found"),
                 }));
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(label_id)),
                 ("name", PyRep::String(new_name.to_string())),
@@ -1016,7 +1030,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(label_id)),
                 ("deleted", PyRep::Bool(removed)),
@@ -1057,7 +1073,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated as i64)),
                 ("labelMask", PyRep::Integer(label_mask)),
@@ -1091,7 +1109,9 @@ pub fn handle_contacts(
                     }
                 }
             }
-            sync_char_contacts_to_db(ctx, char_id);
+            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
             Some(Ok(PyRep::keyval([
                 ("updatedCount", PyRep::Integer(updated as i64)),
                 ("labelMask", PyRep::Integer(label_mask)),

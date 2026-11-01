@@ -83,7 +83,10 @@ pub fn label_ids_from_mask(mask: u64) -> Vec<i64> {
         .collect()
 }
 
-pub fn sync_char_contacts_to_db(ctx: &ServerContext, char_id: i64) {
+pub fn sync_char_contacts_to_db(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Result<(), eve_proto::BridgeRpcError> {
     let contacts: Vec<eve_db::SocialContactRecord> = ctx
         .esi_state
         .char_contacts
@@ -116,7 +119,7 @@ pub fn sync_char_contacts_to_db(ctx: &ServerContext, char_id: i64) {
     }) {
         eve_db::record_last_wal_error(&e.message);
         hydrate_social_state_from_db(ctx);
-        return;
+        return Err(e);
     }
     if let Ok(mut se) = ctx.social_extras.lock() {
         let mut cmap = HashMap::new();
@@ -138,6 +141,7 @@ pub fn sync_char_contacts_to_db(ctx: &ServerContext, char_id: i64) {
         se.contacts.insert(char_id, cmap);
         se.blocked.insert(char_id, blocked_set);
     }
+    Ok(())
 }
 
 pub fn is_blocked_by(ctx: &ServerContext, target_char_id: i64, sender_char_id: i64) -> bool {

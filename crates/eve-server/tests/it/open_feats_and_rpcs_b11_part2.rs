@@ -221,9 +221,6 @@ pub(crate) fn capture_observable_state(ctx: &ServerContext) -> ObservableWorldSt
 
 #[tokio::test]
 async fn test_invariant_atomic_rollback_randomized_fault_injection() {
-    // parity: feat:invariant.atomic-rollback-all-stores
-    eve_testkit::attest(&["feat:invariant.atomic-rollback-all-stores"]);
-
     let db_path = temp_sqlite_path("b11_atomic_rollback");
     let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open_sqlite"));
     let ctx = Arc::new(ServerContext::with_repository(repo));
