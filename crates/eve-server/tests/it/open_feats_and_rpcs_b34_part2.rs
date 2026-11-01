@@ -10,8 +10,6 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn b34_normal_cyno_lighting_rules() {
-    // parity: feat:modules.cyno-lighting-rules
-    eve_testkit::attest(&["feat:modules.cyno-lighting-rules"]);
     let ctx = build_ctx();
 
     // 1. Not in fleet (even when s.fleets is completely empty!) -> MustBeInFleet (B34-F-03)

@@ -15,7 +15,8 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
-    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK, STATUS_PRECONDITION_FAILED,
+    STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_OK,
+    STATUS_PRECONDITION_FAILED,
 };
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_b34_services::{
@@ -183,13 +184,14 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
     let mut no_char_admin = SessionState::new(1003);
     no_char_admin.user_id = Some(3);
     no_char_admin.role = eve_machonet::service_roles::ROLE_GM_MASK;
-    for m in [
+    let r = quasar_rpc(
+        &ctx,
+        &mut no_char_admin,
         "eve.dailygoal.api.admin.RegenerateCurrentGoalsRequest",
-        "eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsRequest",
-    ] {
-        let r = quasar_rpc(&ctx, &mut no_char_admin, m, Vec::new()).await;
-        assert!(r.status_code == STATUS_BAD_REQUEST || r.status_code == STATUS_FORBIDDEN);
-    }
+        Vec::new(),
+    )
+    .await;
+    assert!(r.status_code == STATUS_BAD_REQUEST || r.status_code == STATUS_FORBIDDEN);
 
     // Admin RegenerateCurrentGoalsRequest
     let regen_rsp = quasar_rpc(
@@ -218,7 +220,7 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
         "Expected Created notice"
     );
 
-    // Monthly regeneration
+    // Monthly regeneration returns STATUS_NOT_IMPLEMENTED
     let m_rsp = quasar_rpc(
         &ctx,
         &mut admin_sess,
@@ -226,8 +228,7 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
         Vec::new(),
     )
     .await;
-    assert_eq!(m_rsp.status_code, STATUS_OK);
-    let _ = drain_notices(&mut rx);
+    assert_eq!(m_rsp.status_code, STATUS_NOT_IMPLEMENTED);
 
     // Query goals via eve.dailygoal.api.GetAllRequest & GetRequest
     let all_rsp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.GetAllRequest", Vec::new()).await;

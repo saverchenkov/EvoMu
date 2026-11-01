@@ -185,7 +185,35 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
     let mut cov_sess = seed_pilot(&ctx, 94030, 84030, 11957, NULL_SYS, true);
     fit_mod(&ctx, &mut cov_sess, 84030, 74030, 11578, 27).await.expect("fit Covert Ops Cloaking Device II");
     cov_sess.station_id = None;
-    spawn_in_space(&ctx, 94030, 84030, 11957, NULL_SYS, DVec3::ZERO).await;
+    spawn_in_space(&ctx, 94030, 84030, 11957, NULL_SYS, DVec3::new(5_000_000_000.0, 0.0, 0.0)).await;
+
+    // Anchor a real Mobile Observatory (10m deploy + 10m ping interval) > 2km away to avoid proximity decloak
+    let mut obs_sess = seed_pilot(&ctx, 94039, 84039, 587, NULL_SYS, true);
+    let obs_id = 74039_i64;
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(94039).or_default().insert(
+            3392,
+            eve_db::TrainedSkillRecord {
+                type_id: 3392,
+                level: 3,
+                skill_points: 10_000.0,
+            },
+        );
+    });
+    give_item(
+        &ctx,
+        obs_id,
+        eve_server::services::mobile_deployables::TYPE_MOBILE_OBSERVATORY,
+        94039,
+        84039,
+        InventoryFlag::Cargo,
+        1,
+    );
+    obs_sess.station_id = None;
+    spawn_in_space(&ctx, 94039, 84039, 587, NULL_SYS, DVec3::new(5_100_000_000.0, 0.0, 0.0)).await;
+    rpc(&ctx, &mut obs_sess, "posMgr", "AnchorStructure", vec![PyRep::Integer(obs_id)])
+        .await
+        .expect("anchor Mobile Observatory");
 
     // Activate cloak through dogmaIM.Activate RPC and assert cloak_stabilization_remaining_s (B34-F-02)
     rpc(&ctx, &mut cov_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74030), PyRep::String("default".into())])
@@ -195,12 +223,15 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
     assert!(cs.is_cloaked, "Ship must be cloaked after Activate");
     assert!((cs.cloak_stabilization_remaining_s - 900.0).abs() < 1.0, "Cloak stabilization timer must start at 900s");
 
-    // Immune to observatory decloak ping while stabilization timer runs
-    let decloaked_early = eve_server::services::space_destiny::space_nav_travel::trigger_observatory_decloak_ping(
-        &ctx, NULL_SYS, DVec3::ZERO, 50_000.0,
-    )
-    .await;
-    assert!(decloaked_early.is_empty(), "Ship must be immune to observatory ping while stabilization timer > 0");
+    // Advance 601s so the Mobile Observatory finishes 10m deploy and fires its first decloak ping;
+    // ship has only been cloaked ~601s (< 900s stabilization timer) so it must remain cloaked
+    ctx.advance_virtual_clock(601);
+    for _ in 0..10 {
+        sys.step_manual(60.1).await.unwrap();
+    }
+    let cs_mid = sys.get_combat_state(84030).await.unwrap().unwrap();
+    assert!(cs_mid.is_cloaked, "Ship must be immune to observatory ping while stabilization timer > 0");
+    assert!(cs_mid.cloak_stabilization_remaining_s > 0.0, "Stabilization timer must still be positive at 601s");
 
     // Deactivating cloak resets cloak_stabilization_remaining_s to 0.0
     rpc(&ctx, &mut cov_sess, "dogmaIM", "Deactivate", vec![PyRep::Integer(74030), PyRep::String("default".into())])
@@ -210,19 +241,18 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
     assert!(!cs_decloaked.is_cloaked, "Ship must be decloaked");
     assert_eq!(cs_decloaked.cloak_stabilization_remaining_s, 0.0, "Decloak must reset stabilization timer to 0");
 
-    // Re-cloak and expire stabilization timer -> observatory ping decloaks ship
+    // Re-cloak and advance virtual clock + simulation past 900s -> real observatory ping decloaks ship
     ctx.advance_virtual_clock(35);
     rpc(&ctx, &mut cov_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74030), PyRep::String("default".into())])
         .await
         .expect("re-activate Covert Ops Cloak");
-    let mut cs2 = sys.get_combat_state(84030).await.unwrap().unwrap();
-    cs2.cloak_stabilization_remaining_s = 0.0;
-    sys.set_combat_state(84030, cs2).await.unwrap();
-    let decloaked_after = eve_server::services::space_destiny::space_nav_travel::trigger_observatory_decloak_ping(
-        &ctx, NULL_SYS, DVec3::ZERO, 50_000.0,
-    )
-    .await;
-    assert_eq!(decloaked_after, vec![84030], "Expired stabilization timer must allow observatory decloak");
+    ctx.mechanic_rng.set_seed(Some(42));
+    ctx.advance_virtual_clock(3_000);
+    for _ in 0..50 {
+        sys.step_manual(60.0).await.unwrap();
+    }
+    let cs_after = sys.get_combat_state(84030).await.unwrap().unwrap();
+    assert!(!cs_after.is_cloaked, "Expired stabilization timer (>900s) must allow real observatory ping to decloak");
 
     // Clone Vat Bay I (23735) on Rorqual (28352) requires Liquid Ozone, immobilizes ship, and gates clone install on active cycle
     let mut rorq_sess = seed_pilot(&ctx, 94031, 84031, 28352, NULL_SYS, true);

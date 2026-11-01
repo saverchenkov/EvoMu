@@ -7,7 +7,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
-    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
+    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_daily_goals::{
     encode_goal_attributes, encode_goal_earnings, encode_goal_identifier, extract_uuid,
@@ -548,40 +548,15 @@ pub fn register_handlers(
         }),
     );
 
-    // 2. eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsRequest -> RegenerateCurrentMonthlyGoalsResponse
-    let mgr = Arc::clone(&daily_goals);
+    // 2. eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsRequest -> STATUS_NOT_IMPLEMENTED
     router.register_handler(
         "eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsRequest",
         Arc::new(move |ctx, _any, _dyn| {
             require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_BAD_REQUEST, "Missing character Identifier".into()));
-            };
-            let now_unix = ctx.now_unix();
-            let goals = mgr.get_or_init_goals_at(cid, now_unix);
-
-            let regen_bytes = encode_period_regenerated(2, now_unix);
-            ctx_queue_notice(
-                NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.PeriodRegenerated"),
-                    value: regen_bytes,
-                },
-                now_unix,
-            );
-
-            let mut out = Vec::new();
-            for g in &goals {
-                let created_bytes = encode_daily_goal_created(g);
-                encode_bytes_field(1, &created_bytes, &mut out);
-            }
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsResponse"
-                ),
-                value: out,
-            })
+            Err((
+                STATUS_NOT_IMPLEMENTED,
+                "Monthly daily-goal regeneration is not implemented".into(),
+            ))
         }),
     );
 
