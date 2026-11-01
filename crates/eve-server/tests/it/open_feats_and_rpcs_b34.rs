@@ -55,9 +55,8 @@ async fn b34_auto_targeting_and_cargo_expanders() {
 
 #[tokio::test]
 async fn b34_bastion_effects_and_wormhole_mjd_interaction() {
-    // parity: feat:modules.bastion-module-effects, feat:modules.bastion-wormhole-and-mjd-interaction
+    // parity: feat:modules.bastion-wormhole-and-mjd-interaction
     eve_testkit::attest(&[
-        "feat:modules.bastion-module-effects",
         "feat:modules.bastion-wormhole-and-mjd-interaction",
     ]);
     let ctx = build_ctx();
@@ -144,10 +143,20 @@ async fn b34_cehe_and_capital_mjd_mjfg() {
     assert!(attr_from_all_info(&info, "shipInfo", 113) <= 0.05 + 1e-6, "CEHE must grant massive hull EM resistance");
 
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
-    let cap_pos = sys.micro_jump(84021, 250_000.0).await.expect("Capital MJD 250 km jump");
-    assert!((cap_pos.length() - 250_000.0).abs() < 1.0, "Capital MJD must jump 250 km forward");
+    // Activate Capital MJD (83465) via dogmaIM.Activate and advance cycle ticks (B34-F-01)
+    rpc(&ctx, &mut rev_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74023), PyRep::String("default".into())])
+        .await
+        .expect("activate Capital MJD");
+    let _ = sys.step_manual(180.0).await;
+    let cap_pos = sys.get_ball_snapshot(84021).await.unwrap().unwrap().1.position;
+    assert!((cap_pos.length() - 250_000.0).abs() < 100.0, "Capital MJD must jump 250 km forward via cycle, got {cap_pos:?}");
 
-    // Capital MJFG (83485) on Thanatos (23911, Carrier) jumps subcapitals within 10 km 250 km forward
+    // Capital MJFG (83485) on Thanatos (23911, Carrier) jumps subcapitals within 10 km 250 km forward via cycle
+    if let Ok(Some(mut cs)) = sys.get_combat_state(84020).await {
+        cs.undock_invulnerable_remaining_ticks = 0;
+        cs.gate_cloak_remaining_ticks = 0;
+        let _ = sys.set_combat_state(84020, cs).await;
+    }
     let mut car_sess = seed_pilot(&ctx, 94022, 84022, 23911, NULL_SYS, true);
     fit_mod(&ctx, &mut car_sess, 84022, 74024, 83485, 19).await.expect("fit Capital MJFG");
     car_sess.station_id = None;
@@ -155,9 +164,13 @@ async fn b34_cehe_and_capital_mjd_mjfg() {
     rpc(&ctx, &mut car_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74024), PyRep::String("default".into())])
         .await
         .expect("activate Capital MJFG");
-    let jumped = sys.micro_jump_field(84022, 250_000.0, 10_000.0, 50).await.expect("Capital MJFG field jump");
-    assert!(jumped.contains(&84020), "Capital MJFG must jump subcapital within 10 km");
-    assert!(!jumped.contains(&84021), "Capital MJFG must NOT jump capital ships");
+    let _ = sys.step_manual(180.0).await;
+    let mjfg_pos = sys.get_ball_snapshot(84022).await.unwrap().unwrap().1.position;
+    let sub_pos = sys.get_ball_snapshot(84020).await.unwrap().unwrap().1.position;
+    let cap_other_pos = sys.get_ball_snapshot(84021).await.unwrap().unwrap().1.position;
+    assert!((mjfg_pos.length() - 250_000.0).abs() < 100.0, "Capital MJFG caster must jump 250 km forward");
+    assert!(sub_pos.x > 240_000.0, "Capital MJFG must jump subcapital within 10 km, got sub_pos={sub_pos:?}");
+    assert!((cap_other_pos.length() - 250_000.0).abs() < 100.0, "Capital MJFG must NOT jump other capital ships");
 }
 
 #[tokio::test]
@@ -169,12 +182,18 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
     ]);
     let ctx = build_ctx();
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
-    let mut cov_sess = seed_pilot(&ctx, 94030, 84030, 11957, NULL_SYS, false);
+    let mut cov_sess = seed_pilot(&ctx, 94030, 84030, 11957, NULL_SYS, true);
+    fit_mod(&ctx, &mut cov_sess, 84030, 74030, 11578, 27).await.expect("fit Covert Ops Cloaking Device II");
+    cov_sess.station_id = None;
     spawn_in_space(&ctx, 94030, 84030, 11957, NULL_SYS, DVec3::ZERO).await;
-    let mut cs = sys.get_combat_state(84030).await.unwrap().unwrap();
-    cs.is_cloaked = true;
-    cs.cloak_stabilization_remaining_s = 900.0;
-    sys.set_combat_state(84030, cs).await.unwrap();
+
+    // Activate cloak through dogmaIM.Activate RPC and assert cloak_stabilization_remaining_s (B34-F-02)
+    rpc(&ctx, &mut cov_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74030), PyRep::String("default".into())])
+        .await
+        .expect("activate Covert Ops Cloak");
+    let cs = sys.get_combat_state(84030).await.unwrap().unwrap();
+    assert!(cs.is_cloaked, "Ship must be cloaked after Activate");
+    assert!((cs.cloak_stabilization_remaining_s - 900.0).abs() < 1.0, "Cloak stabilization timer must start at 900s");
 
     // Immune to observatory decloak ping while stabilization timer runs
     let decloaked_early = eve_server::services::space_destiny::space_nav_travel::trigger_observatory_decloak_ping(
@@ -183,7 +202,19 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
     .await;
     assert!(decloaked_early.is_empty(), "Ship must be immune to observatory ping while stabilization timer > 0");
 
-    // Once stabilization timer expires, observatory ping decloaks ship
+    // Deactivating cloak resets cloak_stabilization_remaining_s to 0.0
+    rpc(&ctx, &mut cov_sess, "dogmaIM", "Deactivate", vec![PyRep::Integer(74030), PyRep::String("default".into())])
+        .await
+        .expect("deactivate Covert Ops Cloak");
+    let cs_decloaked = sys.get_combat_state(84030).await.unwrap().unwrap();
+    assert!(!cs_decloaked.is_cloaked, "Ship must be decloaked");
+    assert_eq!(cs_decloaked.cloak_stabilization_remaining_s, 0.0, "Decloak must reset stabilization timer to 0");
+
+    // Re-cloak and expire stabilization timer -> observatory ping decloaks ship
+    ctx.advance_virtual_clock(35);
+    rpc(&ctx, &mut cov_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74030), PyRep::String("default".into())])
+        .await
+        .expect("re-activate Covert Ops Cloak");
     let mut cs2 = sys.get_combat_state(84030).await.unwrap().unwrap();
     cs2.cloak_stabilization_remaining_s = 0.0;
     sys.set_combat_state(84030, cs2).await.unwrap();
@@ -192,7 +223,6 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
     )
     .await;
     assert_eq!(decloaked_after, vec![84030], "Expired stabilization timer must allow observatory decloak");
-    let _ = &mut cov_sess;
 
     // Clone Vat Bay I (23735) on Rorqual (28352) requires Liquid Ozone, immobilizes ship, and gates clone install on active cycle
     let mut rorq_sess = seed_pilot(&ctx, 94031, 84031, 28352, NULL_SYS, true);
@@ -246,12 +276,9 @@ async fn b34_cloak_stabilization_and_clone_vat_bay_fuel() {
 
 #[tokio::test]
 async fn b34_command_bursts_strength_range_duration_fitting() {
-    // parity: feat:modules.command-burst-strength-formula, feat:modules.command-burst-range, feat:modules.command-burst-duration-reload, feat:modules.command-burst-fitting-and-clone-restrictions
+    // parity: feat:modules.command-burst-range
     eve_testkit::attest(&[
-        "feat:modules.command-burst-strength-formula",
         "feat:modules.command-burst-range",
-        "feat:modules.command-burst-duration-reload",
-        "feat:modules.command-burst-fitting-and-clone-restrictions",
     ]);
     let ctx = build_ctx();
     // Alpha clone cannot activate Command Burst

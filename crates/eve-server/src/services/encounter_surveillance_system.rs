@@ -557,12 +557,18 @@ pub async fn handle_ess_link(
         }
     }
     if link_started_only {
+        let (snap_main_cents, snap_reserve_cents) = ctx.db.with_snapshot(|snap| {
+            snap.system_states
+                .get(&sys_id)
+                .map(|s| (s.ess_main_bank, s.ess_reserve_bank))
+                .unwrap_or((IskCents(0), IskCents(0)))
+        });
         if method == "AttemptLinkToReserveBank" {
             super::notify_emitters_batch6::emit_ess_reserve_bank_link_notification(ctx, sys_id);
             super::quasar_b34_services::emit_ess_reserve_bank_primed(
                 &ctx.quasar_gateway,
                 sys_id,
-                IskCents(0),
+                snap_reserve_cents,
                 now_unix,
             );
         } else {
@@ -571,15 +577,15 @@ pub async fn handle_ess_link(
                 &ctx.quasar_gateway,
                 char_id as u32,
                 sys_id,
-                0,
-                IskCents(0),
-                IskCents(0),
+                ship_id.max(0) as u64,
+                snap_main_cents,
+                snap_reserve_cents,
                 now_unix,
             );
             super::quasar_b34_services::emit_ess_main_bank_primed(
                 &ctx.quasar_gateway,
                 sys_id,
-                IskCents(0),
+                snap_main_cents,
                 now_unix,
             );
         }
@@ -615,6 +621,12 @@ pub async fn handle_ess_link(
             };
             list.push((char_id, payout, now_u));
         });
+        let (post_main_cents, post_reserve_cents) = ctx.db.with_snapshot(|snap| {
+            snap.system_states
+                .get(&sys_id)
+                .map(|s| (s.ess_main_bank, s.ess_reserve_bank))
+                .unwrap_or((IskCents(0), IskCents(0)))
+        });
         let link_id = ess_ball_id;
         if method != "AttemptLinkToReserveBank" {
             super::notify_emitters_batch6::emit_main_bank_player_hack_success(ctx, char_id, sys_id, link_id);
@@ -624,7 +636,7 @@ pub async fn handle_ess_link(
                 &ctx.quasar_gateway,
                 char_id as u32,
                 sys_id,
-                IskCents(0),
+                post_reserve_cents,
                 stolen_cents,
                 IskCents(0),
                 now_u,
@@ -632,24 +644,18 @@ pub async fn handle_ess_link(
             super::quasar_b34_services::emit_ess_solar_system_persisted(
                 &ctx.quasar_gateway,
                 sys_id,
-                IskCents(0),
-                IskCents(0),
+                post_main_cents,
+                post_reserve_cents,
                 now_u,
             );
         } else if reserve_terminated {
             // V24 `dynamicresources.common.ess.const.UNLINKED_MANUAL = 0` (`unlink_reason_description(0) -> None`, normal completion disconnect)
             super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
-        let (post_main, post_reserve) = ctx.db.with_snapshot(|snap| {
-            snap.system_states
-                .get(&sys_id)
-                .map(|s| (s.ess_main_bank.to_wire_f64(), s.ess_reserve_bank.to_wire_f64()))
-                .unwrap_or((0.0, 0.0))
-        });
         let ess_data = PyRep::keyval([
             ("solarSystemID", PyRep::Integer(sys_id as i64)),
-            ("mainBank", PyRep::Real(post_main)),
-            ("reserveBank", PyRep::Real(post_reserve)),
+            ("mainBank", PyRep::Real(post_main_cents.to_wire_f64())),
+            ("reserveBank", PyRep::Real(post_reserve_cents.to_wire_f64())),
         ]);
         super::notify_emitters_batch6::emit_system_ess_data_changed(ctx, sys_id as i64, ess_data);
     }

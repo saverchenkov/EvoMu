@@ -7,7 +7,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
+    STATUS_NOT_FOUND, STATUS_PRECONDITION_FAILED,
 };
 use crate::services::quasar_daily_goals::{
     encode_goal_attributes, encode_goal_earnings, encode_goal_identifier, extract_uuid,
@@ -486,7 +486,9 @@ pub fn register_handlers(
         "eve.dailygoal.api.admin.RegenerateCurrentGoalsRequest",
         Arc::new(move |ctx, _any, _dyn| {
             require_admin_role(ctx)?;
-            let cid = ctx.effective_character_id().unwrap_or(1);
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_BAD_REQUEST, "Missing character Identifier".into()));
+            };
             let now_unix = ctx.now_unix();
             let templates = mgr.get_templates();
             let mut new_goals = Vec::new();
@@ -552,7 +554,9 @@ pub fn register_handlers(
         "eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsRequest",
         Arc::new(move |ctx, _any, _dyn| {
             require_admin_role(ctx)?;
-            let cid = ctx.effective_character_id().unwrap_or(1);
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_BAD_REQUEST, "Missing character Identifier".into()));
+            };
             let now_unix = ctx.now_unix();
             let goals = mgr.get_or_init_goals_at(cid, now_unix);
 
@@ -745,12 +749,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            if ctx.effective_character_id().is_none() && require_admin_role(ctx).is_err() {
-                return Err((
-                    STATUS_FORBIDDEN,
-                    "Authentication required for loyaltypoints assetholding DepositRequest".into(),
-                ));
-            }
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let op = parse_lp_operation_request(dyn_msg, ctx.effective_character_id())?;
             let hex = op_uuid_hex(&op.op_uuid);
             let now_unix = ctx.now_unix();
@@ -855,12 +854,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            if ctx.effective_character_id().is_none() && require_admin_role(ctx).is_err() {
-                return Err((
-                    STATUS_FORBIDDEN,
-                    "Authentication required for loyaltypoints assetholding WithdrawRequest".into(),
-                ));
-            }
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let op = parse_lp_operation_request(dyn_msg, ctx.effective_character_id())?;
             let hex = op_uuid_hex(&op.op_uuid);
             let now_unix = ctx.now_unix();
@@ -981,12 +975,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            if ctx.effective_character_id().is_none() && require_admin_role(ctx).is_err() {
-                return Err((
-                    STATUS_FORBIDDEN,
-                    "Authentication required for ApplyMultiplierFactorRequest".into(),
-                ));
-            }
+            crate::quasar_gateway::require_admin_role(ctx)?;
             let sys_id = extract_nested_u32(dyn_msg, 1, 1)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing solar_system Identifier".into()))?;
             if sys_id == 0 {
@@ -1004,6 +993,9 @@ pub fn register_handlers(
                 (u, n)
             };
             let mult = (units as f64) + (f64::from(nanos) / 1_000_000_000.0);
+            if !(mult.is_finite() && (0.0..=10.0).contains(&mult)) {
+                return Err((STATUS_BAD_REQUEST, "Multiplier out of valid range [0.0, 10.0]".into()));
+            }
             let now_unix = ctx.now_unix();
 
             let (main_cents, reserve_cents) = db_bounty

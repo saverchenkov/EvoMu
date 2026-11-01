@@ -19,8 +19,7 @@ use eve_server::quasar_gateway::{
 };
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_b34_services::{
-    emit_ess_main_bank_link_established, emit_ess_main_bank_primed,
-    emit_ess_main_bank_theft_completed, emit_ess_reserve_bank_primed,
+    emit_ess_reserve_bank_primed,
 };
 use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
@@ -180,6 +179,18 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
     .await;
     assert_eq!(forb.status_code, STATUS_FORBIDDEN);
 
+    // Admin session with no character_id must be rejected without touching character 1 (B34-F-08)
+    let mut no_char_admin = SessionState::new(1003);
+    no_char_admin.user_id = Some(3);
+    no_char_admin.role = eve_machonet::service_roles::ROLE_GM_MASK;
+    for m in [
+        "eve.dailygoal.api.admin.RegenerateCurrentGoalsRequest",
+        "eve.dailygoal.api.admin.RegenerateCurrentMonthlyGoalsRequest",
+    ] {
+        let r = quasar_rpc(&ctx, &mut no_char_admin, m, Vec::new()).await;
+        assert!(r.status_code == STATUS_BAD_REQUEST || r.status_code == STATUS_FORBIDDEN);
+    }
+
     // Admin RegenerateCurrentGoalsRequest
     let regen_rsp = quasar_rpc(
         &ctx,
@@ -320,15 +331,31 @@ async fn test_b34_loyalty_points_wallet_assetholding_closure() {
 
     let cid: u32 = 90_000_001;
     let issuer_corp: u32 = 1_000_035;
-    let mut sess = SessionState::new(1001);
-    sess.user_id = Some(1);
+    let mut unpriv_sess = SessionState::new(1001);
+    unpriv_sess.user_id = Some(1);
+    unpriv_sess.character_id = Some(i64::from(cid));
+
+    let mut sess = SessionState::new(1002);
+    sess.user_id = Some(2);
     sess.character_id = Some(i64::from(cid));
+    sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
     let mut rx = ctx
         .quasar_gateway
         .subscribe_session(&sess, Vec::new(), sess.session_id);
 
     let dep_uuid = [0x11u8; 16];
     let dep_req = make_lp_op_req(dep_uuid, Some(cid), None, issuer_corp, 2_500);
+
+    // Non-GM session must be rejected with STATUS_FORBIDDEN (B34-P0-01)
+    let forb_dep = quasar_rpc(
+        &ctx,
+        &mut unpriv_sess,
+        "eve.loyaltypoints.assetholding.operation.api.DepositRequest",
+        dep_req.clone(),
+    )
+    .await;
+    assert_eq!(forb_dep.status_code, STATUS_FORBIDDEN);
+
     let dep_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -378,8 +405,17 @@ async fn test_b34_loyalty_points_wallet_assetholding_closure() {
     .await;
     assert_eq!(over_rsp.status_code, STATUS_PRECONDITION_FAILED);
 
-    // Valid withdraw of 1_000 LP
+    // Valid withdraw of 1_000 LP (non-GM rejected first, B34-P0-02)
     let wd_req = make_lp_op_req([0x33u8; 16], Some(cid), None, issuer_corp, 1_000);
+    let forb_wd = quasar_rpc(
+        &ctx,
+        &mut unpriv_sess,
+        "eve.loyaltypoints.assetholding.operation.api.WithdrawRequest",
+        wd_req.clone(),
+    )
+    .await;
+    assert_eq!(forb_wd.status_code, STATUS_FORBIDDEN);
+
     let wd_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -414,13 +450,29 @@ async fn test_b34_solarsystem_bounty_npc_and_ess_bank_closure() {
 
     let sys_id: u32 = 30_000_142;
     let cid: u32 = 9001;
-    let mut sess = SessionState::new(1001);
-    sess.user_id = Some(1);
+    let mut unpriv_sess = SessionState::new(1001);
+    unpriv_sess.user_id = Some(1);
+    unpriv_sess.character_id = Some(i64::from(cid));
+    unpriv_sess.solar_system_id = Some(sys_id);
+
+    let mut sess = SessionState::new(1002);
+    sess.user_id = Some(2);
     sess.character_id = Some(i64::from(cid));
     sess.solar_system_id = Some(sys_id);
+    sess.role = eve_machonet::service_roles::ROLE_GM_MASK;
     let mut rx = ctx
         .quasar_gateway
         .subscribe_session(&sess, Vec::new(), sess.session_id);
+
+    // Non-GM session must be rejected with STATUS_FORBIDDEN (B34-P0-03)
+    let forb_mult = quasar_rpc(
+        &ctx,
+        &mut unpriv_sess,
+        "eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(forb_mult.status_code, STATUS_FORBIDDEN);
 
     // Invalid solar_system_id 0 -> STATUS_BAD_REQUEST
     let bad_rsp = quasar_rpc(
@@ -432,10 +484,26 @@ async fn test_b34_solarsystem_bounty_npc_and_ess_bank_closure() {
     .await;
     assert_eq!(bad_rsp.status_code, STATUS_BAD_REQUEST);
 
-    // Valid ApplyMultiplierFactorRequest (135% -> 1.35)
-    let mut req = Vec::new();
+    // Out-of-range multiplier (11.0 > 10.0) -> STATUS_BAD_REQUEST
+    let mut oor_req = Vec::new();
     let mut s_bytes = Vec::new();
     encode_varint_field(1, u64::from(sys_id), &mut s_bytes);
+    encode_bytes_field(1, &s_bytes, &mut oor_req);
+    encode_varint_field(2, 1100, &mut oor_req);
+    let mut oor_det = Vec::new();
+    encode_varint_field(1, 11, &mut oor_det);
+    encode_bytes_field(3, &oor_det, &mut oor_req);
+    let oor_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest",
+        oor_req,
+    )
+    .await;
+    assert_eq!(oor_rsp.status_code, STATUS_BAD_REQUEST);
+
+    // Valid ApplyMultiplierFactorRequest (135% -> 1.35)
+    let mut req = Vec::new();
     encode_bytes_field(1, &s_bytes, &mut req);
     encode_varint_field(2, 135, &mut req);
     let mut det = Vec::new();
@@ -468,44 +536,115 @@ async fn test_b34_solarsystem_bounty_npc_and_ess_bank_closure() {
         .iter()
         .any(|n| n.normalized_type_name() == "eve.solarsystem.bounty.bank.SolarSystemPersisted"));
 
-    // Emit ESS MainBank & ReserveBank notices and decode them via descriptor registry
-    emit_ess_main_bank_link_established(
-        &ctx.quasar_gateway,
-        cid,
-        sys_id,
-        700_001,
-        IskCents::from_isk(5_000_000),
-        IskCents::from_isk(20_000_000),
-        ctx.now_unix(),
+    // Test ESS MainBank & ReserveBank notices through real essMgr.AttemptLinkToMainBank flow (B34-F-07)
+    let nullsec_sys: u32 = 30_004_759;
+    let ess_ball_id: i64 = 800_001;
+    let ship_id: i64 = 700_001;
+    let ess_cid: i64 = 94_999;
+    let mut ess_sess = crate::modules_advanced_tactical::seed_pilot(
+        &ctx,
+        ess_cid,
+        ship_id,
+        587,
+        nullsec_sys,
+        false,
     );
-    emit_ess_main_bank_primed(
-        &ctx.quasar_gateway,
-        sys_id,
-        IskCents::from_isk(5_000_000),
-        ctx.now_unix(),
-    );
-    emit_ess_main_bank_theft_completed(
-        &ctx.quasar_gateway,
-        cid,
-        sys_id,
-        IskCents::from_isk(20_000_000),
-        IskCents::from_isk(5_000_000),
-        IskCents(0),
-        ctx.now_unix(),
-    );
+    ess_sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.system_states.entry(nullsec_sys).or_insert_with(|| eve_db::SystemDynamicState {
+            solar_system_id: nullsec_sys,
+            ..Default::default()
+        });
+        st.ess_main_bank = IskCents::from_isk(5_000_000);
+        st.ess_reserve_bank = IskCents::from_isk(20_000_000);
+    });
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(ess_cid, eve_server::services::combat_crimewatch::SafetyLevel::Yellow);
+    });
+    let sys_handle = ctx.systems.get_or_spawn(nullsec_sys);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ess_ball_id,
+            type_id: 32882,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 50_000_000.0,
+            radius: 500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    crate::modules_advanced_tactical::spawn_in_space(
+        &ctx,
+        ess_cid,
+        ship_id,
+        587,
+        nullsec_sys,
+        glam::DVec3::new(1000.0, 0.0, 0.0),
+    )
+    .await;
+
+    let mut ess_rx = ctx
+        .quasar_gateway
+        .subscribe_session(&ess_sess, Vec::new(), ess_sess.session_id);
+
+    let kw = std::collections::HashMap::new();
+    ctx.dispatch_rpc(
+        &mut ess_sess,
+        "essMgr",
+        None,
+        "AttemptLinkToMainBank",
+        &[eve_proto::PyRep::Integer(ess_ball_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AttemptLinkToMainBank start");
+    for _ in 0..5 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    ctx.dispatch_rpc(
+        &mut ess_sess,
+        "essMgr",
+        None,
+        "AttemptLinkToMainBank",
+        &[eve_proto::PyRep::Integer(ess_ball_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("AttemptLinkToMainBank complete");
+
     emit_ess_reserve_bank_primed(
         &ctx.quasar_gateway,
-        sys_id,
+        nullsec_sys,
         IskCents::from_isk(20_000_000),
         ctx.now_unix(),
     );
 
-    let ess_notices = drain_notices(&mut rx);
+    let ess_notices = drain_notices(&mut ess_rx);
+    let link_est = ess_notices
+        .iter()
+        .find(|n| n.normalized_type_name() == "eve.solarsystem.bounty.bank.main.MainBankLinkEstablished")
+        .expect("MainBankLinkEstablished notice");
+    let link_dyn = reg
+        .decode_dynamic(
+            "eve.solarsystem.bounty.bank.main.MainBankLinkEstablished",
+            &link_est.value,
+        )
+        .expect("decode MainBankLinkEstablished");
+    // Field 3 is main_bank_balance (non-zero 5_000_000 ISK), Field 5 is ship_id
+    assert!(link_dyn.get(3).is_some(), "MainBankLinkEstablished must carry real main_bank balance");
+    assert!(link_dyn.get(5).is_some(), "MainBankLinkEstablished must carry real ship_id");
+
     for expected in [
         "eve.solarsystem.bounty.bank.main.MainBankLinkEstablished",
         "eve.solarsystem.bounty.bank.main.MainBankPrimed",
         "eve.solarsystem.bounty.bank.main.MainBankTheftCompleted",
         "eve.solarsystem.bounty.bank.reserve.ReserveBankPrimed",
+        "eve.solarsystem.bounty.bank.SolarSystemPersisted",
     ] {
         let n = ess_notices
             .iter()
