@@ -1061,6 +1061,13 @@ async fn handle_cone_scan(
         })
         .unwrap_or(DVec3::new(0.0, 0.0, 1.0));
 
+    crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
+    let scan_inhibitors = crate::services::mobile_deployables_ext::active_scan_inhibitor_positions(ctx, sys_id);
+    if caller_ship.is_some()
+        && crate::services::mobile_deployables_ext::is_pos_scan_inhibited(&scan_inhibitors, caller_pos)
+    {
+        return Some(Ok(PyRep::List(Vec::new())));
+    }
     let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
     let balls = sys_handle.list_balls().await.unwrap_or_default();
     let all_ball_ids: std::collections::HashSet<i64> = balls.iter().map(|b| b.id).collect();
@@ -1081,12 +1088,12 @@ async fn handle_cone_scan(
                 continue;
             }
         }
-        let group_id = ctx
+        let (group_id, cat_id) = ctx
             .sde
             .types
             .get(&ball.type_id)
-            .map(|t| t.group_id)
-            .unwrap_or(0);
+            .map(|t| (t.group_id, t.category_id))
+            .unwrap_or((0, 0));
         if group_id == 906 {
             continue;
         }
@@ -1100,6 +1107,12 @@ async fn handle_cone_scan(
             if caller_bub.is_none() || b_bub != caller_bub {
                 continue;
             }
+        }
+        if group_id != 1275
+            && matches!(cat_id, 6 | 18 | 87)
+            && crate::services::mobile_deployables_ext::is_pos_scan_inhibited(&scan_inhibitors, ball.position)
+        {
+            continue;
         }
         if let Ok(Some(cs)) = sys_handle.get_combat_state(ball.id).await {
             if cs.is_cloaked {

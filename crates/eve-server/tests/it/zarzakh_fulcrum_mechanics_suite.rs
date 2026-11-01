@@ -171,6 +171,8 @@ async fn test_zarzakh_gate_toll_and_journal() {
 
 #[tokio::test]
 async fn test_fulcrum_docking_and_alignment_services() {
+    // parity: feat:structures.fulcrum-alignment-services
+    eve_testkit::attest(&["feat:structures.fulcrum-alignment-services"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -228,7 +230,15 @@ async fn test_fulcrum_docking_and_alignment_services() {
     let _ = z_handle.spawn_ball(ship_b).await;
     let fulcrum_beyonce = ctx.bind_object(&mut sess, "beyonce", zarzakh_sys as i64).unwrap();
 
-    // 1. Weapons / Retribution timer refuses docking
+    // 1. Empire militia & retribution timer refuse docking via beyonce.CmdDock
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001));
+    let emp_dock_err = ctx
+        .dispatch_rpc(&mut sess, "beyonce", Some(fulcrum_beyonce), "CmdDock", &[PyRep::Integer(fulcrum_station_id), PyRep::Integer(ship_id)], &kw, None)
+        .await
+        .expect_err("Fulcrum refuses docking to Empire militia pilot");
+    assert_eq!(emp_dock_err.code, "FulcrumRefusesEmpireMilitia");
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().war_faction_id = None);
+
     let now = ctx.now_unix();
     eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
         rt.disapproval_flags.insert(char_id, now + 300); // 5 min retribution timer
@@ -249,10 +259,12 @@ async fn test_fulcrum_docking_and_alignment_services() {
         .expect("Neutral pilot docks at Fulcrum");
     assert!(matches!(dock_rep, PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::Integer(_)));
 
-    // 2. Neutral pilot has access to standard services: repair, fitting, market, insurance, industry
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_station_id, 17)); // fitting
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_station_id, 21)); // repair
-    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_station_id, 13)); // market
+    // 2. Neutral pilot invokes standard Fulcrum station RPCs: repair, insurance, reprocessing, fitting, market
+    sess.station_id = Some(fulcrum_station_id);
+    assert!(eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, fulcrum_station_id, 17));
+    assert!(ctx.dispatch_rpc(&mut sess, "repairSvc", None, "GetRepairQuotes", &[], &kw, None).await.is_ok());
+    assert!(ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrices", &[], &kw, None).await.is_ok());
+    assert!(ctx.dispatch_rpc(&mut sess, "reprocessingSvc", None, "GetQuotes", &[], &kw, None).await.is_ok());
 
     // 3. Jump cloning: refused for neutral character
     sess.station_id = Some(fulcrum_station_id);
@@ -312,8 +324,22 @@ async fn test_fulcrum_docking_and_alignment_services() {
         .expect_err("Non-pirate corp office rental refused at Fulcrum");
     assert_eq!(office_denied.code, "FulcrumOfficeRequiresPirateEnlistment");
 
-    // Enlist corporation itself in Guristas (500010) -> office rental allowed
+    // Solo pirate director in a corp whose CEO is neutral is still refused office rental
     ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().ceo_id = 90_000_002;
+        s.corporations.get_mut(&corp_id).unwrap().member_roles.insert(char_id, eve_db::corp_roles::ROLE_RENT_OFFICE);
+        s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_010);
+        if let Some(c2) = s.characters.get_mut(&90_000_002) { c2.war_faction_id = None; }
+    });
+    let solo_denied = ctx
+        .dispatch_rpc(&mut sess, "officeManager", None, "RentOffice", &[PyRep::Integer(fulcrum_station_id)], &kw, None)
+        .await
+        .expect_err("Neutral-corp pirate member refused Fulcrum office");
+    assert_eq!(solo_denied.code, "FulcrumOfficeRequiresPirateEnlistment");
+
+    // Enlist corp CEO in Angel Cartel -> office rental allowed
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&corp_id).unwrap().ceo_id = char_id;
         s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500010);
         s.fw_runtime.corp_war_factions.insert(corp_id, 500010);
     });

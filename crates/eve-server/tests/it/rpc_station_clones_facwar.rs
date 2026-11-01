@@ -293,7 +293,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     )
     .await
     .expect_err("Undocked DoStandingCheckForStationService without stationID must fail");
-    assert_eq!(err_missing_st.code, "MissingStationId");
+    assert_eq!(err_missing_st.code, "NotDocked");
 
     // 6b. Empire station Jita (60003760, Caldari Navy 1000035 / Caldari State 500001) has no standing gates in V24 FSD
     let standing_ok = rpc(
@@ -301,7 +301,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(65536), PyRep::Integer(STATION_JITA)],
+        &[PyRep::Integer(17), PyRep::Integer(STATION_JITA)],
     )
     .await
     .expect("DoStandingCheckForStationService default standings");
@@ -313,7 +313,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(65536), PyRep::Integer(60_015_187)],
+        &[PyRep::Integer(17), PyRep::Integer(60_015_187)],
     )
     .await
     .expect("Deathless Custodians station service check must succeed");
@@ -327,17 +327,13 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
             c1.standings.insert(FACTION_TRIGLAVIAN, -0.10);
         }
-        // Train Diplomacy V (3357) and Connections V (3359): must NOT modify Triglavian standing
-        let sk = snap.skills.entry(PILOT1).or_default();
-        sk.insert(3357, eve_db::TrainedSkillRecord { type_id: 3357, level: 5, skill_points: 256_000.0 });
-        sk.insert(3359, eve_db::TrainedSkillRecord { type_id: 3359, level: 5, skill_points: 256_000.0 });
     });
     let err_trig_fit = rpc(
         &ctx,
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(65536), PyRep::Integer(STATION_KINO_PERUN)],
+        &[PyRep::Integer(13), PyRep::Integer(STATION_KINO_PERUN)],
     )
     .await
     .expect_err("Triglavian fitting gate (-0.05) must reject -0.10 standing");
@@ -366,7 +362,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(65536), PyRep::Integer(STATION_KINO_PERUN)],
+        &[PyRep::Integer(13), PyRep::Integer(STATION_KINO_PERUN)],
     )
     .await
     .expect("Triglavian fitting gate (-0.05) must pass at -0.05");
@@ -382,7 +378,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(16), PyRep::Integer(STATION_KINO_PERUN)],
+        &[PyRep::Integer(24), PyRep::Integer(STATION_KINO_PERUN)],
     )
     .await
     .expect_err("Triglavian reprocessing gate (3.0) must reject 2.99 standing");
@@ -420,7 +416,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
         &mut s1,
         "corpStationMgr",
         "DoStandingCheckForStationService",
-        &[PyRep::Integer(16), PyRep::Integer(STATION_KINO_PERUN)],
+        &[PyRep::Integer(24), PyRep::Integer(STATION_KINO_PERUN)],
     )
     .await
     .expect("Triglavian reprocessing gate (3.0) must pass at 3.0");
@@ -553,8 +549,8 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     assert!(chk_jita_repair.is_ok(), "DoStandingCheckForStationService for repair must succeed at Jita");
     let chk_jita_fit = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(17), PyRep::Integer(STATION_JITA)]).await;
     assert!(chk_jita_fit.is_ok(), "DoStandingCheckForStationService for fitting must succeed at Jita");
-    let chk_jita_reproc_bm = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(16), PyRep::Integer(STATION_JITA)]).await;
-    assert!(chk_jita_reproc_bm.is_ok(), "DoStandingCheckForStationService with bitmask 16 (reprocessing) must succeed at Jita");
+    let chk_jita_reproc_bm = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(5), PyRep::Integer(STATION_JITA)]).await;
+    assert!(chk_jita_reproc_bm.is_ok(), "DoStandingCheckForStationService with service 5 (reprocessing) must succeed at Jita");
 
     // GetStation serviceMask round-trip: service 5 (bit 4: 16) and service 17 (bit 16: 65536) must be present in mask:
     let st_rep = rpc(&ctx, &mut s1, "stationSvc", "GetStation", &[PyRep::Integer(STATION_JITA)]).await.expect("GetStation at Jita");

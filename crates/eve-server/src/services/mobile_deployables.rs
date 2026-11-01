@@ -80,15 +80,33 @@ pub struct MobileDeployableRuntimeState {
     pub deployables: HashMap<i64, MobileDeployableRecord>,
     pub damaged_items: HashMap<i64, PersistedDamageRecord>,
     #[serde(default)]
-    pub mmju_spools: Vec<MmjuSpoolEntry>,
+    pub observatory_pings_done: HashMap<i64, u32>,
+    #[serde(default)]
+    pub cloak_activated_unix: HashMap<i64, u64>,
+    #[serde(default, deserialize_with = "deserialize_mmju_spools")]
+    pub mmju_spools: HashMap<i64, MmjuSpoolEntry>,
+    #[serde(default)]
+    pub siphon_last_cycle_unix: HashMap<i64, u64>,
+    #[serde(default)]
+    pub pending_decloak_notifications: Vec<PendingDecloakNotice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MmjuSpoolEntry {
     pub ship_id: i64,
-    pub mju_id: i64,
+    pub char_id: i64,
+    pub unit_id: i64,
     pub solar_system_id: u32,
-    pub spool_complete_unix: u64,
+    pub started_unix: u64,
+    pub complete_at_unix: u64,
+    pub direction: [f64; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingDecloakNotice {
+    pub char_id: i64,
+    pub ship_id: i64,
+    pub module_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +127,8 @@ pub struct MobileDeployableRecord {
     #[serde(default)]
     pub last_ping_unix: Option<u64>,
     pub position: [f64; 3],
+    #[serde(default)]
+    pub deployed_fleet_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,11 +141,60 @@ pub struct PersistedDamageRecord {
     pub max_structure_hp: f64,
 }
 
+fn deserialize_mmju_spools<'de, D>(deserializer: D) -> Result<HashMap<i64, MmjuSpoolEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct MmjuSpoolsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for MmjuSpoolsVisitor {
+        type Value = HashMap<i64, MmjuSpoolEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map or sequence of MmjuSpoolEntry")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut out = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+            while let Some((k, v)) = map.next_entry::<i64, MmjuSpoolEntry>()? {
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out = HashMap::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(entry) = seq.next_element::<MmjuSpoolEntry>()? {
+                out.insert(entry.ship_id, entry);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(MmjuSpoolsVisitor)
+}
+
 pub fn read_deployable_state_snap(snap: &eve_db::WorldStateSnapshot) -> MobileDeployableRuntimeState {
-    snap.owner_notes
-        .get(&MOBILE_DEPLOYABLE_NOTE_ID)
-        .and_then(|n| serde_json::from_str::<MobileDeployableRuntimeState>(&n.note).ok())
-        .unwrap_or_default()
+    match snap.owner_notes.get(&MOBILE_DEPLOYABLE_NOTE_ID) {
+        Some(n) => match serde_json::from_str::<MobileDeployableRuntimeState>(&n.note) {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::error!(
+                    note_id = MOBILE_DEPLOYABLE_NOTE_ID,
+                    error = %e,
+                    "Failed to deserialize MobileDeployableRuntimeState; returning default"
+                );
+                MobileDeployableRuntimeState::default()
+            }
+        },
+        None => MobileDeployableRuntimeState::default(),
+    }
 }
 
 pub fn write_deployable_state_snap<R>(
@@ -200,16 +269,9 @@ pub fn is_mobile_structure(sde: &SdeRegistry, type_id: u32) -> bool {
 }
 
 /// Checks if a mobile structure can be scooped back into cargo.
-/// Mobile Micro Jump Units (group 1276), Cyno Beacons (group 4093), Mobile Observatories (group 4107), CRAB Beacons (group 4137), and Cyno Inhibitors (group 1249) cannot be scooped.
 pub fn can_deployable_be_scooped(group_id: u32) -> bool {
-    !matches!(
-        group_id,
-        GROUP_MOBILE_MICRO_JUMP_UNIT
-            | GROUP_MOBILE_CYNO_BEACON
-            | GROUP_MOBILE_OBSERVATORY
-            | GROUP_CRAB_BEACON
-            | GROUP_MOBILE_CYNO_INHIBITOR
-    )
+    group_id != GROUP_CRAB_BEACON
+        && !crate::services::mobile_deployables_ext::is_single_use_deployable(group_id)
 }
 
 /// Determines if `sys_id` is a new-player starter system or career-agent system (`feat:structures.mobile-deploy-restrictions`).
@@ -231,7 +293,7 @@ pub fn check_mobile_deployment_restrictions(
     ctx: &ServerContext,
     session: &SessionState,
     item_id: i64,
-    _type_id: u32,
+    type_id: u32,
     group_id: u32,
     sys_id: u32,
     anchor_pos: DVec3,
@@ -244,76 +306,10 @@ pub fn check_mobile_deployment_restrictions(
         });
     }
 
-    // 2. Mobile Cyno Beacon & Mobile Observatory Anchoring III + space/fleet requirements
-    if matches!(group_id, GROUP_MOBILE_CYNO_BEACON | GROUP_MOBILE_OBSERVATORY) {
-        let char_id = session.character_id.unwrap_or(0);
-        let anchoring_lvl = ctx.db.with_snapshot(|snap| {
-            snap.skills
-                .get(&char_id)
-                .and_then(|sk| sk.get(&SKILL_ANCHORING))
-                .map(|r| r.level)
-                .unwrap_or(0)
-        });
-        if anchoring_lvl < 3 {
-            return Err(BridgeRpcError {
-                code: "SkillRequired".into(),
-                message: "Deploying this structure requires Anchoring III".into(),
-            });
-        }
-    }
-    // 3. Mobile Cyno Beacon fleet requirement, CRAB Beacon low/null security requirement, & Mobile Cyno Inhibitor high-sec / wormhole / Abyssal / Zarzakh ban
-    if group_id == GROUP_MOBILE_CYNO_BEACON && session.fleet_id.is_none() {
-        return Err(BridgeRpcError {
-            code: "MustBeInFleet".into(),
-            message: "Deploying a Mobile Cynosural Beacon requires active fleet membership".into(),
-        });
-    }
-    if group_id == GROUP_MOBILE_OBSERVATORY {
-        if (31_000_000..32_000_000).contains(&sys_id) {
-            return Err(BridgeRpcError {
-                code: "CannotDeployInWormhole".into(),
-                message: "Mobile Observatory cannot be deployed in wormhole space".into(),
-            });
-        }
-        if (32_000_000..33_000_000).contains(&sys_id) {
-            return Err(BridgeRpcError {
-                code: "CannotDeployInAbyssalSpace".into(),
-                message: "Mobile Observatory cannot be deployed in Abyssal space".into(),
-            });
-        }
-        if ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) == Some(10_000_070) {
-            return Err(BridgeRpcError {
-                code: "CannotDeployInPochven".into(),
-                message: "Mobile Observatory cannot be deployed in Pochven".into(),
-            });
-        }
-        let sys_sec = ctx
-            .sde
-            .solar_systems
-            .get(&sys_id)
-            .map(|s| s.security_status)
-            .unwrap_or(1.0);
-        if sys_sec >= 0.45 {
-            return Err(BridgeRpcError {
-                code: "CannotDeployInHighSec".into(),
-                message: "Mobile Observatory cannot be deployed in high-security space".into(),
-            });
-        }
-        let in_deadspace = crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
-            reg.sites_by_system.get(&sys_id).is_some_and(|sites| {
-                sites.iter().any(|s| {
-                    s.dungeon_id > 0
-                        && (anchor_pos - DVec3::from_array(s.position)).length() <= 150_000.0
-                })
-            })
-        });
-        if in_deadspace {
-            return Err(BridgeRpcError {
-                code: "CannotDeployInDeadspace".into(),
-                message: "Mobile Observatory cannot be deployed in deadspace".into(),
-            });
-        }
-    }
+    // 2. Type-specific security, space-class, fleet, inhibitor, and special proximity rules (Step 4B)
+    crate::services::mobile_deployables_ext::validate_ext_deployment_restrictions(
+        ctx, session, item_id, type_id, group_id, sys_id, anchor_pos,
+    )?;
     if group_id == GROUP_CRAB_BEACON {
         crate::services::pve_crab_beacons::validate_crab_deployment_system(&ctx.sde, sys_id)?;
     }
@@ -360,8 +356,18 @@ pub fn check_mobile_deployment_restrictions(
         // Distance from Upwell structures (>= 50 km)
         for st in snap.structures.values() {
             if st.solar_system_id == sys_id && st.state != "Destroyed" {
-                let spos = DVec3::from_array(st.position);
-                if (anchor_pos - spos).length() < MIN_STRUCTURE_DISTANCE_M {
+                let spos = snap
+                    .item_positions
+                    .get(&st.structure_id)
+                    .copied()
+                    .map(DVec3::from_array)
+                    .unwrap_or_else(|| DVec3::from_array(st.position));
+                let min_st_dist = if group_id == 1247 && matches!(st.type_id, 35835 | 35836 | 81826) {
+                    5_000.0
+                } else {
+                    MIN_STRUCTURE_DISTANCE_M
+                };
+                if (anchor_pos - spos).length() < min_st_dist {
                     return Err(BridgeRpcError {
                         code: "DeploymentTooCloseToStructure".into(),
                         message: format!(
@@ -486,23 +492,21 @@ pub fn register_mobile_deployable(
     position: DVec3,
 ) -> Option<PersistedDamageRecord> {
     let now_unix = ctx.now_unix();
-    let lifetime_secs = match group_id {
-        GROUP_MOBILE_DEPOT => DEPOT_LIFETIME_SECS,
-        GROUP_MOBILE_TRACTOR => MTU_LIFETIME_SECS,
-        GROUP_MOBILE_MICRO_JUMP_UNIT => MMJU_ACTIVATION_DELAY_SECS.saturating_add(MMJU_LIFETIME_SECS),
-        GROUP_MOBILE_CYNO_INHIBITOR => CYNO_INHIBITOR_LIFETIME_SECS,
-        GROUP_MOBILE_CYNO_BEACON => {
-            let active_dur = if type_id == TYPE_COVERT_MOBILE_CYNO_BEACON {
-                COVERT_CYNO_BEACON_DURATION_SECS
-            } else {
-                CYNO_BEACON_DURATION_SECS
-            };
-            CYNO_BEACON_SPOOL_SECS.saturating_add(active_dur)
-        }
-        GROUP_MOBILE_OBSERVATORY => OBSERVATORY_LIFETIME_SECS,
-        GROUP_CRAB_BEACON => crate::services::pve_crab_beacons::CRAB_BEACON_IDLE_LIFETIME_SECS,
-        _ => 2 * 86_400,
+    let lifetime_secs = if group_id == GROUP_CRAB_BEACON {
+        crate::services::pve_crab_beacons::CRAB_BEACON_IDLE_LIFETIME_SECS
+    } else {
+        crate::services::mobile_deployables_ext::total_lifetime_secs(
+            type_id,
+            group_id,
+            anchor_duration_secs,
+        )
     };
+    let deployed_fleet_id = ctx.db.with_snapshot(|snap| {
+        snap.fleets
+            .values()
+            .find(|f| f.members.contains(&owner_id))
+            .map(|f| f.fleet_id)
+    });
 
     if group_id == GROUP_CRAB_BEACON {
         crate::services::pve_crab_beacons::register_crab_beacon(
@@ -517,6 +521,8 @@ pub fn register_mobile_deployable(
 
     write_deployable_state(ctx, |st| {
         let damaged = st.damaged_items.remove(&item_id);
+        st.observatory_pings_done.remove(&item_id);
+        st.siphon_last_cycle_unix.remove(&item_id);
         let record = MobileDeployableRecord {
             item_id,
             type_id,
@@ -532,6 +538,7 @@ pub fn register_mobile_deployable(
             reinforced_until_unix: None,
             last_ping_unix: None,
             position: [position.x, position.y, position.z],
+            deployed_fleet_id,
         };
         st.deployables.insert(item_id, record);
         damaged
@@ -582,11 +589,24 @@ pub fn step_mobile_deployables_in_actor(
     deactivation_hook: Option<&crate::system_actor::ModuleDeactivationHook>,
     sde_opt: Option<&eve_sde::SdeRegistry>,
     db_opt: Option<&std::sync::Arc<eve_db::WorldRepository>>,
+    rng_opt: Option<&crate::rng::MechanicRng>,
     solar_system_id: u32,
     dt: f64,
     now_unix: u64,
 ) {
     let (Some(db), Some(sde)) = (db_opt, sde_opt) else { return; };
+
+    // 0. Process pending MMJU 12s spools, Mobile Observatory 10m pings, and Mobile Siphon cycles before expiry removal
+    crate::services::mobile_deployables_ext::step_ext_deployables_in_actor(
+        ballpark,
+        Some(active_module_cycles),
+        deactivation_hook,
+        sde,
+        db,
+        rng_opt.or(Some(mechanic_rng)),
+        solar_system_id,
+        now_unix,
+    );
 
     // 1. Expiry sweep: find all deployables in this solar system where now_unix >= expires_at_unix
     let expired_ids: Vec<i64> = db.with_snapshot(|snap| {
@@ -619,15 +639,14 @@ pub fn step_mobile_deployables_in_actor(
                 snap.sp6_lifecycle.space_object_meta.remove(&eid);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&eid);
+                    st.observatory_pings_done.remove(&eid);
+                    st.siphon_last_cycle_unix.remove(&eid);
                 });
             }
         });
     }
 
-    // 2. Clear expired reinforcement timers, process MMJU spools, and execute Mobile Observatory decloak pings
-    let mut ready_mmju_jumps: Vec<(i64, [f64; 3])> = Vec::new();
-    let mut seen_mmju_ships: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut observatory_pings: Vec<i64> = Vec::new();
+    // 2. Clear expired reinforcement timers and mark completed anchoring transitions
     db.with_mut_snapshot(|snap| {
         write_deployable_state_snap(snap, |st| {
             for rec in st.deployables.values_mut() {
@@ -640,33 +659,8 @@ pub fn step_mobile_deployables_in_actor(
                     {
                         rec.anchor_completed = true;
                     }
-                    if rec.group_id == GROUP_MOBILE_OBSERVATORY
-                        && !rec.is_unanchored
-                        && now_unix >= rec.anchor_start_unix.saturating_add(OBSERVATORY_DEPLOY_SECS)
-                        && now_unix < rec.expires_at_unix
-                    {
-                        if rec.last_ping_unix.is_none_or(|last| now_unix >= last.saturating_add(OBSERVATORY_PING_INTERVAL_SECS)) {
-                            rec.last_ping_unix = Some(now_unix);
-                            observatory_pings.push(rec.item_id);
-                        }
-                    }
                 }
             }
-            let mut remaining_spools = Vec::with_capacity(st.mmju_spools.len());
-            for sp in st.mmju_spools.drain(..) {
-                if sp.solar_system_id == solar_system_id && now_unix >= sp.spool_complete_unix {
-                    if seen_mmju_ships.insert(sp.ship_id) {
-                        if let Some(mju_rec) = st.deployables.get(&sp.mju_id) {
-                            if !mju_rec.is_unanchored && now_unix < mju_rec.expires_at_unix {
-                                ready_mmju_jumps.push((sp.ship_id, mju_rec.position));
-                            }
-                        }
-                    }
-                } else {
-                    remaining_spools.push(sp);
-                }
-            }
-            st.mmju_spools = remaining_spools;
         });
         for meta in snap.sp6_lifecycle.space_object_meta.values_mut() {
             if !meta.anchor_completed {
@@ -679,164 +673,6 @@ pub fn step_mobile_deployables_in_actor(
             }
         }
     });
-
-    for (ship_id, mju_pos_arr) in ready_mmju_jumps {
-        let (pilot_still_in_ship, dyn_mass_add) = db.with_snapshot(|snap| {
-            let ok = snap
-                .characters
-                .values()
-                .any(|c| c.active_ship_id == ship_id && c.station_id.is_none() && c.structure_id.is_none());
-            let plate_add: f64 = snap
-                .items
-                .values()
-                .filter(|i| {
-                    i.location_id == ship_id
-                        && matches!(i.flag as u16, 11..=34 | 92..=99 | 125..=132)
-                        && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
-                })
-                .filter_map(|i| {
-                    let t = sde.types.get(&i.type_id)?;
-                    let m_act = snap.module_active_states.contains(&i.item_id);
-                    let base = if t.group_id == 46 && !m_act { 0.0 } else { t.default_attributes.get(&796).copied().unwrap_or(0.0) };
-                    let active_add = if m_act { t.default_attributes.get(&67).copied().unwrap_or(0.0) } else { 0.0 };
-                    Some(base + active_add)
-                })
-                .sum();
-            (ok, plate_add)
-        });
-        if !pilot_still_in_ship {
-            continue;
-        }
-        let mju_pos = DVec3::from_array(mju_pos_arr);
-        let ship_valid = ballpark.balls.get(&ship_id).is_some_and(|b| {
-            let base_hull_mass = sde.types.get(&b.type_id).map(|t| t.mass).unwrap_or(b.mass);
-            let effective_mass = b.mass.max(base_hull_mass + dyn_mass_add);
-            !matches!(b.mode, eve_destiny::MovementMode::Warp { .. })
-                && effective_mass < MMJU_MAX_SHIP_MASS_KG
-                && (b.position - mju_pos).length() <= 2_500.0
-        }) && !ballpark
-            .combat_states
-            .get(&ship_id)
-            .is_some_and(|cs| cs.is_cloaked || cs.is_mwd_mjd_disabled)
-            && !ballpark.is_ball_scrambled(ship_id);
-        if !ship_valid {
-            continue;
-        }
-        if let Ok(new_pos) = ballpark.micro_jump(ship_id, MMJU_JUMP_DISTANCE_M) {
-            db.with_mut_snapshot(|snap| {
-                snap.item_positions.insert(ship_id, [new_pos.x, new_pos.y, new_pos.z]);
-            });
-        }
-    }
-
-    for _obs_id in observatory_pings {
-        let mut cloaked_ships: Vec<i64> = ballpark
-            .combat_states
-            .iter()
-            .filter(|(_, cs)| {
-                cs.is_cloaked
-                    && cs.gate_cloak_remaining_ticks == 0
-                    && cs.cloak_stabilization_remaining_s <= 0.0
-            })
-            .map(|(&sid, _)| sid)
-            .collect();
-        cloaked_ships.sort_unstable();
-        for sid in cloaked_ships {
-            if !mechanic_rng.roll(OBSERVATORY_DECLOAK_CHANCE) {
-                continue;
-            }
-            let mut removed_cloaks = Vec::new();
-            let mut kept_cycles = Vec::with_capacity(active_module_cycles.len());
-            for cyc in active_module_cycles.drain(..) {
-                let is_cloak = cyc.ship_id == sid
-                    && (cyc.effect_name.to_ascii_lowercase().contains("cloak")
-                        || sde.types.get(&cyc.module_type_id).is_some_and(|t| t.group_id == 330));
-                if is_cloak {
-                    removed_cloaks.push(cyc);
-                } else {
-                    kept_cycles.push(cyc);
-                }
-            }
-            *active_module_cycles = kept_cycles;
-
-            let (pilot_opt, fallback_cloak_mod) = db.with_mut_snapshot(|snap| {
-                for rc in &removed_cloaks {
-                    snap.module_active_states.remove(&rc.module_id);
-                    snap.module_active_charges.remove(&rc.module_id);
-                }
-                let pilot = snap
-                    .characters
-                    .values()
-                    .find(|c| c.active_ship_id == sid)
-                    .map(|c| c.character_id)
-                    .or_else(|| snap.items.get(&sid).map(|i| i.owner_id));
-                let fb = if removed_cloaks.is_empty() {
-                    let found = snap
-                        .items
-                        .values()
-                        .find(|i| {
-                            i.location_id == sid
-                                && sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 330)
-                        })
-                        .map(|i| (i.item_id, i.type_id));
-                    if let Some((mid, _)) = found {
-                        snap.module_active_states.remove(&mid);
-                    }
-                    found
-                } else {
-                    None
-                };
-                (pilot, fb)
-            });
-
-            if removed_cloaks.is_empty() {
-                if let Some((mid, mtid)) = fallback_cloak_mod {
-                    removed_cloaks.push(crate::system_actor::ActiveModuleCycle {
-                        ship_id: sid,
-                        module_id: mid,
-                        module_type_id: mtid,
-                        owner_char_id: pilot_opt,
-                        effect_name: "effects.Cloak".to_string(),
-                        repeat: 1,
-                        duration_s: 5.0,
-                        ..Default::default()
-                    });
-                }
-            }
-
-            let cloak_mod_id_opt = removed_cloaks.first().map(|c| c.module_id);
-            let sde_tgt_delay_s = removed_cloaks
-                .first()
-                .and_then(|c| sde.types.get(&c.module_type_id))
-                .and_then(|t| t.default_attributes.get(&560).copied())
-                .map(|ms| if ms > 200.0 { ms / 1000.0 } else { ms })
-                .unwrap_or(0.0);
-            if let Some(cs) = ballpark.combat_states.get_mut(&sid) {
-                if cs.cloak_configured_targeting_delay_s <= 0.0 && sde_tgt_delay_s > 0.0 {
-                    cs.cloak_configured_targeting_delay_s = sde_tgt_delay_s;
-                }
-            }
-            ballpark.deactivate_cloak(sid);
-            if let Some(mut meta) = ballpark.ball_slim_meta.get(&sid).cloned() {
-                meta.is_cloaked = false;
-                ballpark.change_slim_item(sid, meta);
-            }
-            ballpark.emit_event(
-                Some(sid),
-                eve_destiny::DestinyEvent::OnSpecialFX {
-                    ball_id: sid,
-                    module_id: cloak_mod_id_opt,
-                    guid: "effects.Cloak".to_string(),
-                    is_active: false,
-                },
-            );
-            if let (Some(cid), Some(hook)) = (pilot_opt, deactivation_hook) {
-                for rc in &removed_cloaks {
-                    hook(cid, rc);
-                }
-            }
-        }
-    }
 
     // 3. MTU tractoring and looting
     let active_mtus: Vec<MobileDeployableRecord> = db.with_snapshot(|snap| {
@@ -1346,13 +1182,31 @@ pub async fn handle_activate_micro_jump_unit(
     if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) || ship_cs.as_ref().is_some_and(|cs| cs.is_mwd_mjd_disabled) {
         return Err(BridgeRpcError { code: "WarpScrambled".into(), message: "Cannot activate Mobile Micro Jump Unit while warp scrambled".into() });
     }
-    if read_deployable_state(ctx).mmju_spools.iter().any(|sp| sp.ship_id == ship_id && sp.spool_complete_unix > now_unix) {
-        return Err(BridgeRpcError { code: "MicroJumpAlreadySpooling".into(), message: "Ship is already spooling a Mobile Micro Jump Unit".into() });
+    let already_spooling = read_deployable_state(ctx)
+        .mmju_spools
+        .values()
+        .any(|sp| sp.ship_id == ship_id && sp.complete_at_unix > now_unix);
+    if already_spooling {
+        return Err(BridgeRpcError {
+            code: "MicroJumpAlreadySpooling".into(),
+            message: "Ship is already spooling a Mobile Micro Jump Unit".into(),
+        });
     }
 
     let spool_complete_unix = now_unix.saturating_add(MMJU_SPOOL_TIME_SECS as u64);
     write_deployable_state(ctx, |st| {
-        st.mmju_spools.push(MmjuSpoolEntry { ship_id, mju_id, solar_system_id: sys_id, spool_complete_unix });
+        st.mmju_spools.insert(
+            ship_id,
+            MmjuSpoolEntry {
+                ship_id,
+                char_id,
+                unit_id: mju_id,
+                solar_system_id: sys_id,
+                started_unix: now_unix,
+                complete_at_unix: spool_complete_unix,
+                direction: [0.0, 0.0, 1.0],
+            },
+        );
     });
 
     Ok(eve_proto::PyRep::keyval([
@@ -1362,4 +1216,49 @@ pub async fn handle_activate_micro_jump_unit(
         ("jumpDistanceMeters", eve_proto::PyRep::Real(MMJU_JUMP_DISTANCE_M)),
         ("spoolCompleteUnix", eve_proto::PyRep::Integer(spool_complete_unix as i64)),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deployable_runtime_state_backward_compat_mmju_spools() {
+        let legacy_json = r#"{
+            "deployables": {
+                "7001": {
+                    "item_id": 7001,
+                    "type_id": 33475,
+                    "group_id": 1246,
+                    "owner_id": 9001,
+                    "solar_system_id": 30002537,
+                    "anchor_start_unix": 1000,
+                    "anchor_duration_secs": 60,
+                    "anchor_completed": true,
+                    "expires_at_unix": 50000,
+                    "last_interaction_unix": 1000,
+                    "reinforced_until_unix": null,
+                    "position": [10.0, 20.0, 30.0]
+                }
+            },
+            "damaged_items": {},
+            "mmju_spools": [
+                {
+                    "ship_id": 8001,
+                    "char_id": 9001,
+                    "unit_id": 7001,
+                    "solar_system_id": 30002537,
+                    "started_unix": 1200,
+                    "complete_at_unix": 1212,
+                    "direction": [1.0, 0.0, 0.0]
+                }
+            ]
+        }"#;
+        let parsed: MobileDeployableRuntimeState =
+            serde_json::from_str(legacy_json).expect("legacy Vec mmju_spools must deserialize");
+        assert_eq!(parsed.deployables.len(), 1);
+        assert!(parsed.deployables.contains_key(&7001));
+        assert_eq!(parsed.mmju_spools.len(), 1);
+        assert_eq!(parsed.mmju_spools[&8001].unit_id, 7001);
+    }
 }

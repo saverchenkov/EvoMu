@@ -482,7 +482,7 @@ pub fn evaluate_character_setting(
             return snap
                 .structures
                 .get(&structure_id)
-                .is_some_and(|st| crate::services::structure_control_ops::can_character_control_structure(snap, &ext, st, char_id));
+                .is_some_and(|st| crate::services::structure_control_ops::can_character_control_structure_with_profile(snap, &ext, st, Some(prof), char_id));
         }
         if let Some(res) = evaluate_domain_acl_on_profile(snap, &ext, prof, char_id, &[setting_id], false) {
             return res.is_ok();
@@ -490,6 +490,11 @@ pub fn evaluate_character_setting(
         if let Some(&granted) = prof.general_settings.get(&setting_id) {
             return granted;
         }
+    } else if setting_id == SETTING_DEFENSE_CAN_CONTROL_STRUCTURE {
+        return snap
+            .structures
+            .get(&structure_id)
+            .is_some_and(|st| crate::services::structure_control_ops::can_character_control_structure_with_profile(snap, &ext, st, None, char_id));
     } else if is_external
         && !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(now))
     {
@@ -672,8 +677,10 @@ pub fn apply_due_profiles_and_check_upwell_market(
     if snap.structures.contains_key(&structure_id) {
         let mut ext = load_ext_state(snap);
         if ext.pending_profile_applications.values().any(|&(_, apply_at)| now_unix >= apply_at) {
-            ops::apply_pending_profile_applications(&mut ext, now_unix);
-            save_ext_state(snap, &ext);
+            let released = ops::apply_pending_profile_applications_with_snap(snap, &mut ext, now_unix);
+            if !released.is_empty() {
+                crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
+            }
         }
     }
     check_upwell_market_access_and_rate(ctx, snap, structure_id, char_id, now_unix, offline_err_code)

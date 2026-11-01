@@ -256,6 +256,7 @@ pub struct TypeMaterialEntry {
 /// Static definition of a randomized material range (`Prismaticite`, `Unrefined *` minerals) from `typematerials.fsdbinary`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RandomizedMaterialEntry { pub material_type_id: TypeId, pub quantity_min: u64, pub quantity_max: u64 }
+pub type RandomizedTypeMaterialEntry = RandomizedMaterialEntry;
 
 /// Static definition of a Dogma attribute (`dgmAttributeTypes`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -977,43 +978,26 @@ impl SdeRegistry {
 
     /// Returns the sorted list of variation `type_id`s whose `variation_parent_type_id` equals `parent_type_id` in $O(1)$.
     pub fn variations_of(&self, parent_type_id: TypeId) -> &[TypeId] {
-        self.variations_by_parent
-            .get(&parent_type_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.variations_by_parent.get(&parent_type_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Returns all published type IDs assigned to `market_group_id` (`D-1`, `feat:market.market-groups`).
     pub fn types_in_market_group(&self, market_group_id: u32) -> Vec<TypeId> {
-        let mut list: Vec<TypeId> = self
-            .types
-            .values()
-            .filter(|t| t.published && t.market_group_id == Some(market_group_id))
-            .map(|t| t.type_id)
-            .collect();
+        let mut list: Vec<TypeId> = self.types.values().filter(|t| t.published && t.market_group_id == Some(market_group_id)).map(|t| t.type_id).collect();
         list.sort_unstable();
         list
     }
 
     /// Returns all published types that belong to any market group (`D-1`, `feat:market.market-groups`).
     pub fn published_market_types(&self) -> Vec<TypeId> {
-        let mut list: Vec<TypeId> = self
-            .types
-            .values()
-            .filter(|t| t.published && t.market_group_id.is_some())
-            .map(|t| t.type_id)
-            .collect();
+        let mut list: Vec<TypeId> = self.types.values().filter(|t| t.published && t.market_group_id.is_some()).map(|t| t.type_id).collect();
         list.sort_unstable();
         list
     }
 
     /// Returns child market groups of `parent_group_id` (`D-1`, `feat:market.market-groups`).
     pub fn market_groups_for_parent(&self, parent_group_id: Option<u32>) -> Vec<&MarketGroupInfo> {
-        let mut list: Vec<&MarketGroupInfo> = self
-            .market_groups
-            .values()
-            .filter(|mg| mg.parent_group_id == parent_group_id)
-            .collect();
+        let mut list: Vec<&MarketGroupInfo> = self.market_groups.values().filter(|mg| mg.parent_group_id == parent_group_id).collect();
         list.sort_by_key(|mg| mg.market_group_id);
         list
     }

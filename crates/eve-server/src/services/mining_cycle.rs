@@ -375,7 +375,10 @@ fn cycle_fit(
 fn damage_crystal(ctx: &ServerContext, cycle: &ActiveMiningCycle, crystal: CrystalUse) -> (f64, bool) {
     let Some(ct) = ctx.sde.types.get(&crystal.type_id) else { return (0.0, false) };
     let a = |id: u16| ct.default_attributes.get(&id).copied().unwrap_or(0.0);
-    if a(attr::CRYSTALS_GET_DAMAGED) < 0.5 || !ctx.mechanic_rng.roll(a(attr::CRYSTAL_VOLATILITY_CHANCE)) {
+    let vol_chance = (a(attr::CRYSTAL_VOLATILITY_CHANCE)
+        * dbuff_multiplier(ctx, cycle.ship_id, ct, attr::CRYSTAL_VOLATILITY_CHANCE))
+        .clamp(0.0, 1.0);
+    if a(attr::CRYSTALS_GET_DAMAGED) < 0.5 || !ctx.mechanic_rng.roll(vol_chance) {
         return (0.0, false);
     }
     let dmg = a(attr::CRYSTAL_VOLATILITY_DAMAGE);

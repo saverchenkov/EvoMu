@@ -287,6 +287,7 @@ pub fn handle(
                                 && o.vol_remaining > 0
                                 && resolve_station_solar_system(ctx, snap, o.station_id)
                                     == Some(solar_system_id)
+                                && crate::services::market_trading::is_structure_market_online(snap, o.station_id)
                         }),
                     )
                 });
@@ -914,11 +915,11 @@ pub fn handle(
 
                     // Match globally against any resting PLEX buy orders across all regions
                     let mut candidate_bids: Vec<(i64, i64)> = snap.market_orders.values().filter(|o| {
-                            let struct_ok = o.station_id == station_id
-                                || !snap.structures.contains_key(&o.station_id)
-                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
-                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
-                                ).is_ok();
+                            let struct_ok = if o.station_id == station_id {
+                                true
+                            } else {
+                                crate::services::market_trading::is_structure_market_online(snap, o.station_id)
+                            };
                             o.type_id == PLEX_TYPE_ID
                                 && struct_ok
                                 && o.is_bid

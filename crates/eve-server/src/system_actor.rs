@@ -1071,6 +1071,7 @@ impl SystemRegistry {
                                         deact_guard.as_ref(),
                                         sde_opt.as_deref(),
                                         db_opt.as_ref(),
+                                        mechanic_rng_opt.as_deref(),
                                         solar_system_id,
                                         dt,
                                         step_now_unix,

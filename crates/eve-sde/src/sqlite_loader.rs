@@ -251,37 +251,27 @@ impl SdeRegistry {
                         let func = m.func?;
                         let domain = m.domain.unwrap_or_else(|| "shipID".to_string());
                         let effect_id = m.effect_id.and_then(|v| u16::try_from(v).ok());
-                        if func == "EffectStopper" {
-                            Some(EffectModifierSpec {
-                                domain,
-                                func,
-                                modified_attribute_id: m
-                                    .modified_attribute_id
-                                    .and_then(|v| u16::try_from(v).ok())
-                                    .unwrap_or(0),
-                                modifying_attribute_id: m
-                                    .modifying_attribute_id
-                                    .and_then(|v| u16::try_from(v).ok())
-                                    .unwrap_or(0),
-                                operator: m.operator.unwrap_or(0),
-                                group_id: m.group_id,
-                                skill_type_id: m.skill_type_id,
-                                effect_id,
-                            })
+                        let (mod_attr, src_attr) = if func == "EffectStopper" {
+                            (
+                                m.modified_attribute_id.and_then(|v| u16::try_from(v).ok()).unwrap_or(0),
+                                m.modifying_attribute_id.and_then(|v| u16::try_from(v).ok()).unwrap_or(0),
+                            )
                         } else {
-                            Some(EffectModifierSpec {
-                                domain,
-                                func,
-                                modified_attribute_id: u16::try_from(m.modified_attribute_id?)
-                                    .ok()?,
-                                modifying_attribute_id: u16::try_from(m.modifying_attribute_id?)
-                                    .ok()?,
-                                operator: m.operator.unwrap_or(0),
-                                group_id: m.group_id,
-                                skill_type_id: m.skill_type_id,
-                                effect_id,
-                            })
-                        }
+                            (
+                                u16::try_from(m.modified_attribute_id?).ok()?,
+                                u16::try_from(m.modifying_attribute_id?).ok()?,
+                            )
+                        };
+                        Some(EffectModifierSpec {
+                            domain,
+                            func,
+                            modified_attribute_id: mod_attr,
+                            modifying_attribute_id: src_attr,
+                            operator: m.operator.unwrap_or(0),
+                            group_id: m.group_id,
+                            skill_type_id: m.skill_type_id,
+                            effect_id,
+                        })
                     })
                     .collect();
                 Ok(DogmaEffectType {
@@ -306,17 +296,26 @@ impl SdeRegistry {
             }
         }
 
-        let (mut type_materials, mut randomized_type_materials) = (HashMap::new(), HashMap::new());
+        let mut type_materials = HashMap::new();
+        let mut randomized_type_materials = HashMap::new();
         {
-            let mut stmt = conn.prepare("SELECT type_id, materials_json, randomized_materials_json FROM sde_type_materials")?;
+            let mut stmt = conn
+                .prepare("SELECT type_id, materials_json, randomized_materials_json FROM sde_type_materials")
+                .or_else(|_| conn.prepare("SELECT type_id, materials_json, '[]' FROM sde_type_materials"))?;
             let rows = stmt.query_map([], |r| {
-                let (tid, m_str, rm_str) = (r.get::<_, i64>(0)? as TypeId, r.get::<_, String>(1)?, r.get::<_, String>(2)?);
-                Ok((tid, parse_json_col::<Vec<TypeMaterialEntry>>(1, &m_str)?, parse_json_col::<Vec<RandomizedMaterialEntry>>(2, &rm_str)?))
+                let tid = r.get::<_, i64>(0)? as TypeId;
+                let m_str: String = r.get(1)?;
+                let rm_str: String = r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "[]".to_string());
+                let entries: Vec<TypeMaterialEntry> = parse_json_col(1, &m_str)?;
+                let rand_entries: Vec<RandomizedTypeMaterialEntry> = parse_json_col(2, &rm_str)?;
+                Ok((tid, entries, rand_entries))
             })?;
             for r in rows {
                 let (tid, entries, rand_entries) = r?;
                 type_materials.insert(tid, entries);
-                if !rand_entries.is_empty() { randomized_type_materials.insert(tid, rand_entries); }
+                if !rand_entries.is_empty() {
+                    randomized_type_materials.insert(tid, rand_entries);
+                }
             }
         }
 

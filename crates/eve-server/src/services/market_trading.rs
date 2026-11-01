@@ -198,10 +198,14 @@ pub(crate) fn can_bid_match_seller_station(
 
 pub(crate) fn is_structure_market_online(snap: &eve_db::WorldStateSnapshot, structure_id: i64) -> bool {
     let Some(st) = snap.structures.get(&structure_id) else { return true };
-    if st.state == "Destroyed" || !st.quantum_core_installed || st.fuel_blocks == 0 {
+    if !crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
+        || st.state == "HullReinforced"
+        || !st.quantum_core_installed
+        || st.fuel_blocks == 0
+    {
         return false;
     }
-    if !matches!(st.type_id, 35826 | 35827 | 35833 | 35834 | 40340 | 47512..=47516) {
+    if !matches!(st.type_id, 35826 | 35827 | 35833 | 35834 | 35836 | 40340 | 47512..=47516) {
         return false;
     }
     snap.items.values().any(|item| {
@@ -347,6 +351,7 @@ pub(crate) fn best_asks_to_summary_rows<'a>(
 }
 
 pub(crate) fn sweep_and_notify_expired(ctx: &ServerContext) {
+    crate::services::station_structure::structure_upwell_ops::sync_pending_profiles_in_ctx(ctx);
     let now = ctx.now_unix();
     let swept = ctx.db.with_mut_snapshot(|s| super::market_contracts::sweep_expired_orders(s, now));
     if !swept.is_empty() {
@@ -936,11 +941,15 @@ pub fn handle(
                         } else {
                             false
                         };
-                        let struct_ok = o.station_id == station_id
-                            || !snap.structures.contains_key(&o.station_id)
-                            || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
+                        let struct_ok = if o.station_id == station_id || !snap.structures.contains_key(&o.station_id) {
+                            true
+                        } else if o.is_bid {
+                            is_structure_market_online(snap, o.station_id)
+                        } else {
+                            crate::services::structure_profile_services::check_upwell_market_access_and_rate(
                                 ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
-                            ).is_ok();
+                            ).is_ok()
+                        };
                         o.type_id == type_id
                             && struct_ok
                             && reach_ok

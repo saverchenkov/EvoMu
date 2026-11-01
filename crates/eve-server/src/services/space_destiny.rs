@@ -922,6 +922,8 @@ pub(crate) async fn handle_update_state_request(
     if ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("dungeon_runtime_store")) {
         let _ = crate::services::pve_dungeon_runtime::check_dungeon_triggers(ctx, char_id, sys_id, ship_id).await;
     }
+    crate::services::mobile_deployables_ext::sync_system_deployables(ctx, sys_id).await;
+    crate::services::structure_weapons_ops::trigger_system_structures_auto_defense(ctx, sys_id).await;
     handle
         .push_set_state(ship_id)
         .await
@@ -1016,8 +1018,8 @@ async fn handle_call_component_from_client(
     if comp_name == "microJumpDriver"
         && matches!(comp_method, "ActivateMicroJumpDrive" | "StartMicroJumpDriveForShip" | "")
     {
-        return crate::services::mobile_deployables::handle_activate_micro_jump_unit(
-            ctx, session, trader_id,
+        return crate::services::mobile_deployables_ext::handle_mmju_activate(
+            ctx, session, char_id, ship_id, sys_id, trader_id,
         )
         .await;
     }

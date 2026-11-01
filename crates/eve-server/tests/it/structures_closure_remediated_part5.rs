@@ -260,7 +260,7 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
     ]);
 
     let ctx = new_ctx();
-    let mkt_sys: u32 = ctx.sde.solar_systems.keys().copied().next().unwrap_or(30_000_142);
+    let mkt_sys: u32 = RANCER;
     let station_id = ctx.sde.stations.values().find(|s| s.solar_system_id == mkt_sys).map(|s| s.station_id);
     let region_id = ctx.sde.solar_systems.get(&mkt_sys).map(|s| s.region_id).unwrap_or(10_000_002);
     ctx.db.with_mut_snapshot(|snap| {
@@ -459,6 +459,36 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
     let asks_offline = rpc(&ctx, &mut sess_vip, "marketProxy", "GetStationAsks", &[PyRep::Integer(st_id)]).await.unwrap();
     assert_eq!(rowset_len(&asks_offline), 0, "Offline market hub asks must be filtered from GetStationAsks");
     assert_eq!(rpc(&ctx, &mut sess_vip, "marketProxy", "PlaceBuyOrder", &buy_args).await.unwrap_err().code, "MarketHubOffline");
+
+    // R-MKT-UPWELL-ELIGIBILITY-02: Tatara (35836) is market-capable; HullReinforced is treated as offline in GetStationAsks/GetSystemAsks/PlaceBuyOrder;
+    // and external NPC station sellers without structure market ACL can fill ranged Upwell buy orders when online (and not when HullReinforced).
+    let npc_sta = station_id.unwrap_or(60_003_760);
+    let ext_item_id = 880_826_499;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(880_826_100, true);
+        snap.structures.get_mut(&st_id).unwrap().type_id = 35836; // Tatara (Large Refinery)
+        snap.skills.entry(vip_cid).or_default().insert(3447, eve_db::TrainedSkillRecord { type_id: 3447, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(ext_item_id, make_item(ext_item_id, 1230, dock_only_cid, npc_sta, InventoryFlag::Hangar, 500, false));
+    });
+    assert_eq!(rowset_len(&rpc(&ctx, &mut sess_vip, "marketProxy", "GetStationAsks", &[PyRep::Integer(st_id)]).await.unwrap()), 1, "Tatara (35836) with online Market Hub must expose asks");
+    assert!(rowset_len(&rpc(&ctx, &mut sess_vip, "marketProxy", "GetSystemAsks", &[]).await.unwrap()) >= 1);
+    let ranged_buy = [PyRep::Integer(st_id), PyRep::Integer(1230), PyRep::Real(120.0), PyRep::Integer(500), PyRep::Integer(32767), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false)];
+    rpc(&ctx, &mut sess_vip, "marketProxy", "PlaceBuyOrder", &ranged_buy).await.expect("Tatara PlaceBuyOrder");
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&st_id).unwrap().state = "HullReinforced".into());
+    assert_eq!(rowset_len(&rpc(&ctx, &mut sess_vip, "marketProxy", "GetStationAsks", &[PyRep::Integer(st_id)]).await.unwrap()), 0, "HullReinforced structure market must be offline");
+    assert_eq!(rpc(&ctx, &mut sess_vip, "marketProxy", "PlaceBuyOrder", &ranged_buy).await.unwrap_err().code, "MarketHubOffline");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.get_mut(&st_id).unwrap().state = life::STATE_SHIELD_VULNERABLE.into();
+        let ch = snap.characters.get_mut(&dock_only_cid).unwrap();
+        ch.structure_id = None;
+        ch.station_id = Some(npc_sta);
+    });
+    sess_dock_only.structure_id = None;
+    sess_dock_only.station_id = Some(npc_sta);
+    let ext_sell = PyRep::keyval([("stationID", PyRep::Integer(npc_sta)), ("typeID", PyRep::Integer(1230)), ("itemID", PyRep::Integer(ext_item_id)), ("price", PyRep::Real(110.0)), ("quantity", PyRep::Integer(200)), ("duration", PyRep::Integer(0))]);
+    let dock_only_bal0 = ctx.db.get_character(dock_only_cid).unwrap().balance.0;
+    rpc(&ctx, &mut sess_dock_only, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![ext_sell]), PyRep::Bool(false), PyRep::Integer(0)]).await.expect("External NPC station seller fills ranged Tatara buy order without structure market ACL");
+    assert!(ctx.db.get_character(dock_only_cid).unwrap().balance.0 > dock_only_bal0);
 }
 
 #[tokio::test]
@@ -565,7 +595,26 @@ async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_struc
     blocked_sess.ship_id = Some(blocked_ship);
 
     // Negative (BF-04): Blocked pilot cannot TakeControl; Positive: defenseGroupIDs pilot CAN TakeControl
+    assert_eq!(rpc(&ctx, &mut gunner_sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(17)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut blocked_sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(17)]).await.unwrap(), PyRep::Bool(false));
     assert!(rpc(&ctx, &mut blocked_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.is_err());
+    rpc(&ctx, &mut gunner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap();
+    assert_eq!(gunner_sess.ship_id, Some(st_id));
+
+    // R-STRUCT-PENDING-PROFILE-SYNC-01: Delayed ChangeProfiles revokes unauthorized controller & syncs defense_settings when due
+    let p_open = rpc(&ctx, &mut owner_sess, "structureProfiles", "CreateProfile", &[PyRep::String("P1".into()), PyRep::String("".into())]).await.unwrap().as_i64().unwrap();
+    let p_lock = rpc(&ctx, &mut owner_sess, "structureProfiles", "CreateProfile", &[PyRep::String("P2".into()), PyRep::String("".into())]).await.unwrap().as_i64().unwrap();
+    rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p_open), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(dock_grp), PyRep::Integer(1)]), PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)]), PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Bool(true), PyRep::Integer(0)])])]).await.unwrap();
+    rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p_lock), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(dock_grp), PyRep::Integer(1)]), PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Bool(false), PyRep::Integer(0)])])]).await.unwrap();
+    rpc(&ctx, &mut owner_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(p_open)]).await.unwrap();
+    rpc(&ctx, &mut owner_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(p_lock)]).await.unwrap();
+    ctx.advance_virtual_clock(305);
+    assert_eq!(rpc(&ctx, &mut gunner_sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(17)]).await.unwrap(), PyRep::Bool(false));
+    let _ = ctx.systems.get_or_spawn(RANCER).step_manual(1.0).await.unwrap();
+    ctx.sync_session(&mut gunner_sess);
+    assert_eq!(gunner_sess.ship_id, Some(gunner_ship), "Due pending profile transition on tick must release unauthorized controller");
+    assert!(!ctx.db.with_snapshot(|s| eve_server::services::structure_acl_defense_rules::load_defense_settings(s, st_id).auto_defense_enabled));
+    rpc(&ctx, &mut owner_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(p_lock), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(dock_grp), PyRep::Integer(1)]), PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_grp), PyRep::Integer(1)])])]).await.unwrap();
     rpc(&ctx, &mut gunner_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.unwrap();
     assert_eq!(gunner_sess.ship_id, Some(st_id));
 

@@ -636,6 +636,11 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
             .any(|(e, _)| e == "OnFleetJumpBeaconDeployableChange")
     );
 
+    const LOWSEC_VARD: u32 = 30_002_537;
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&PILOT_A).unwrap().solar_system_id = LOWSEC_VARD; snap.items.get_mut(&ship_a).unwrap().location_id = LOWSEC_VARD as i64; snap.item_positions.insert(ship_a, [300_000.0, 0.0, 0.0]); });
+    sess_a.solar_system_id = Some(LOWSEC_VARD);
+    let _ = rpc(&ctx, &mut sess_a, "beyonce", "UpdateStateRequest", &[]).await;
+
     rpc(
         &ctx,
         &mut sess_a,
@@ -653,7 +658,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         find_notif(&cyno_on_notifs, "OnFleetJumpBeaconDeployableChange"),
         &[
             PyRep::Integer(beacon_id),
-            PyRep::Integer(SYS_JITA as i64),
+            PyRep::Integer(LOWSEC_VARD as i64),
             PyRep::Integer(beacon_id),
             PyRep::Integer(PILOT_A),
             PyRep::Bool(true),
@@ -670,7 +675,7 @@ async fn notify_batch8_ammo_drones_and_fleet_events() {
         find_notif(&cyno_off_notifs, "OnFleetJumpBeaconDeployableChange"),
         &[
             PyRep::Integer(beacon_id),
-            PyRep::Integer(SYS_JITA as i64),
+            PyRep::Integer(LOWSEC_VARD as i64),
             PyRep::Integer(beacon_id),
             PyRep::Integer(PILOT_A),
             PyRep::Bool(false),

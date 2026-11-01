@@ -65,6 +65,8 @@ pub struct AccessGroupRecord {
     pub group_id: i64, pub creator_id: i64, pub owner_corp_id: i64, pub name: String, pub description: String, pub members: HashMap<i64, i64>,
 }
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureAccessProfile {
@@ -78,6 +80,13 @@ pub struct StructureAccessProfile {
     #[serde(default)] pub defense_settings: Option<crate::services::structure_acl_defense_rules::StructureDefenseSettings>,
     #[serde(default)] pub is_default: bool,
     #[serde(default)] pub service_acl_rules: HashMap<i64, Vec<(i64, i64)>>,
+    #[serde(default)] pub service_acl_groups: HashMap<i64, HashSet<i64>>,
+    #[serde(default)] pub has_defense_config: bool,
+    #[serde(default = "default_true")] pub auto_defense_enabled: bool,
+    #[serde(default = "default_true")] pub auto_target_attackers: bool,
+    #[serde(default = "default_true")] pub auto_target_war_targets: bool,
+    #[serde(default)] pub defense_standing_threshold: f64,
+    #[serde(default = "default_true")] pub target_blocked_acl: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)] #[serde(default)]
@@ -97,6 +106,11 @@ pub struct StructureExtendedState {
     #[serde(default)] pub gunner_immobilized_until_unix: HashMap<i64, u64>,
     #[serde(default)] pub in_flight_guided_bombs: HashMap<i64, InFlightGuidedBombRecord>,
     #[serde(default)] pub weapon_cooldowns: HashMap<i64, f64>,
+    #[serde(default)] pub default_profile_by_corp: HashMap<i64, i64>,
+    #[serde(default)] pub structure_auto_targets: HashMap<i64, Vec<i64>>,
+    #[serde(default)] pub vorton_tether_until_unix: HashMap<i64, u64>,
+    #[serde(default)] pub structure_cap_state: HashMap<i64, (f64, u64)>,
+    #[serde(default)] pub structure_auto_shot_cursor: HashMap<i64, usize>,
 }
 
 pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {
@@ -685,7 +699,8 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
 
 pub(crate) fn require_structure_control_role(snap: &WorldStateSnapshot, char_id: i64, st: &UpwellStructureRecord) -> Result<(), BridgeRpcError> {
     if let Some(corp) = snap.corporations.get(&st.owner_corp_id) {
-        let member_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+        let member_role = corp.member_roles.get(&char_id).copied().unwrap_or(0)
+            | snap.corp_role_assignments.get(&(st.owner_corp_id, char_id)).map(|a| a.roles).unwrap_or(0);
         const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER | eve_db::corp_roles::ROLE_STARBASE_OPERATOR | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
         if (corp.ceo_id != 0 || !corp.member_roles.is_empty()) && char_id != corp.ceo_id && (member_role & CTRL_ROLES) == 0 {
             return Err(err("CorpRoleDenied", format!("Character {char_id} lacks structure defense/control role for structure {}", st.structure_id)));
@@ -790,7 +805,7 @@ pub fn service_id_for_module_type(type_id: u32) -> Option<i64> {
 pub fn structure_allows_market_orders(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> bool {
     use super::structure_lifecycle as life;
     let Some(st) = snap.structures.get(&structure_id) else { return false; };
-    if !life::is_operational(&st.state) || !st.quantum_core_installed || st.fuel_blocks == 0 { return false; }
+    if !life::is_operational(&st.state) || st.state == "HullReinforced" || !st.quantum_core_installed || st.fuel_blocks == 0 { return false; }
     let Some(profile) = life::structure_profile(ctx, st.type_id) else { return false; };
     !matches!(profile.hull_class, life::HullClass::Medium | life::HullClass::Flex)
         && snap.items.values().any(|i| i.location_id == structure_id && i.type_id == 35_892 && (164..=171).contains(&(i.flag as u16)) && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true) && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0)
@@ -835,7 +850,9 @@ pub(crate) fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &
     let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
     if corp_id != 0 && char_corp != corp_id { return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation")); }
     let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-    let has_role = (session.corp_role & req) != 0 || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0));
+    let has_role = (session.corp_role & req) != 0
+        || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0))
+        || snap.corp_role_assignments.get(&(corp_id, char_id)).is_some_and(|a| (a.roles & req) != 0);
     if !has_role { return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role")); }
     Ok(())
 }
@@ -945,6 +962,21 @@ pub(crate) fn is_structure_service_online(ctx: &ServerContext, snap: &WorldState
     use super::structure_lifecycle as life;
     let online = life::online_service_type_ids(ctx, snap, structure_id);
     online.iter().any(|&tid| i64::from(tid) == service_id || service_id_for_module_type(tid) == Some(service_id))
+}
+
+pub fn sync_pending_profiles_in_ctx(ctx: &ServerContext) {
+    let now_unix = ctx.now_unix();
+    let released = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        if ext.pending_profile_applications.values().any(|&(_, t)| now_unix >= t) {
+            apply_pending_profile_applications_with_snap(snap, &mut ext, now_unix)
+        } else {
+            Vec::new()
+        }
+    });
+    if !released.is_empty() {
+        crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);
+    }
 }
 
 /// Credits a structure-service tax or fee to the owning corporation's division 1 (`1000` master wallet)

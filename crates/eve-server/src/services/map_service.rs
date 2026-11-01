@@ -109,29 +109,38 @@ pub fn handle(
                 .into_iter()
                 .map(|(sys_id, cnt)| (sys_id, (cnt, 0)))
                 .collect();
+            let now_unix = ctx.now_unix();
             ctx.db.with_snapshot(|snap| {
+                let deploy_st = crate::services::mobile_deployables::read_deployable_state_snap(snap);
                 for s in snap.structures.values() {
                     // Pharolux Cyno Beacon structure type 35840 (NOT 35841 Ansiblex Jump Gate)
                     if s.type_id == 35840 && s.state != "Destroyed" {
                         counts.entry(i64::from(s.solar_system_id)).or_insert((0, 0)).1 += 1;
                     }
                 }
-                let now_unix = ctx.now_unix();
-                let dep_state = crate::services::mobile_deployables::read_deployable_state_snap(snap);
                 for it in snap.items.values() {
                     if !(30_000_000..40_000_000).contains(&it.location_id) {
                         continue;
                     }
                     if matches!(it.type_id, 21096 | 49746 | 56099) {
                         counts.entry(it.location_id).or_insert((0, 0)).0 += 1;
-                    } else if it.type_id == 57319 {
-                        if let Some(rec) = dep_state.deployables.get(&it.item_id) {
-                            if !rec.is_unanchored
-                                && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
-                                && now_unix < rec.expires_at_unix
-                            {
-                                counts.entry(it.location_id).or_insert((0, 0)).0 += 1;
-                            }
+                    } else if matches!(it.type_id, 57319 | 58906) {
+                        let active = deploy_st.deployables.get(&it.item_id).is_some_and(|r| {
+                            !r.is_unanchored
+                                && now_unix < r.expires_at_unix
+                                && (r.anchor_completed
+                                    || (r.anchor_start_unix > 0
+                                        && now_unix >= r.anchor_start_unix.saturating_add(r.anchor_duration_secs)))
+                        });
+                        let bpos = snap.item_positions.get(&it.item_id).copied().map(glam::DVec3::from_array);
+                        let inhibited = crate::services::structure_acl_defense_rules::is_cyno_inhibited(
+                            ctx,
+                            snap,
+                            it.location_id as u32,
+                            bpos,
+                        );
+                        if active && !inhibited {
+                            counts.entry(it.location_id).or_insert((0, 0)).0 += 1;
                         }
                     }
                 }

@@ -108,6 +108,7 @@ pub(crate) fn is_container_group(group_id: u32, type_id: TypeId) -> bool {
             12 | 340
                 | 448
                 | 649
+                | 1247
                 | crate::services::mobile_deployables::GROUP_MOBILE_DEPOT
                 | crate::services::mobile_deployables::GROUP_CRAB_BEACON
         )
@@ -543,6 +544,9 @@ pub(crate) fn validate_container_and_bay_move(
             if dest_type.group_id == crate::services::mobile_deployables::GROUP_CRAB_BEACON {
                 return Err(BridgeRpcError::user_error("CannotPutItemsInCrabBeacon"));
             }
+            if dest_type.group_id == 1247 {
+                return Err(BridgeRpcError { code: "CannotAddToSiphon".into(), message: "Items cannot be placed into a Mobile Siphon Unit".into() });
+            }
             if dest_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_DEPOT {
                 if dest_item.owner_id != char_id {
                     return Err(BridgeRpcError { code: "OwnershipViolation".into(), message: "Only the owner may store items in this Mobile Depot".into() });
@@ -753,6 +757,8 @@ pub async fn validate_single_item_can_be_opened(
     }
     if grp == 1246 {
         crate::services::mobile_deployables::touch_mobile_depot_interaction(ctx, item_id);
+    } else if grp == 1247 {
+        crate::services::mobile_deployables_ext::sync_siphon_unit(ctx, item_id);
     }
     crate::services::character_skill_ops::verify_in_space_container_proximity(ctx, char_id, location_id, item_id).await?;
     let st = read_container_ship_state(ctx);

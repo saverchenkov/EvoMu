@@ -358,11 +358,11 @@ pub fn handle_orders_escrow(
                         .market_orders
                         .values()
                         .filter(|o| {
-                            let struct_ok = o.station_id == station_id
-                                || !snap.structures.contains_key(&o.station_id)
-                                || crate::services::structure_profile_services::check_upwell_market_access_and_rate(
-                                    ctx, snap, o.station_id, char_id, now_unix, "MarketHubOffline",
-                                ).is_ok();
+                            let struct_ok = if o.station_id == station_id {
+                                true
+                            } else {
+                                crate::services::market_trading::is_structure_market_online(snap, o.station_id)
+                            };
                             o.type_id == type_id
                                 && struct_ok
                                 && o.region_id == region_id

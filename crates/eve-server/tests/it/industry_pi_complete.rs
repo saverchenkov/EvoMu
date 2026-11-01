@@ -474,8 +474,10 @@ async fn run_industry_jobs_suite() -> (usize, f64, f64, i64, &'static str) {
             ] {
                 snap.structures.insert(sid, make_structure(sid, stype, corp_id, ssys, format!("Refinery {sid}")));
                 for (flag, svc_type) in [
-                    (InventoryFlag::ServiceSlot0, 35_894_u32),
+                    (InventoryFlag::ServiceSlot0, 45_537_u32),
                     (InventoryFlag::ServiceSlot1, 35_891_u32),
+                    (InventoryFlag::ServiceSlot2, 45_538_u32),
+                    (InventoryFlag::ServiceSlot3, 45_539_u32),
                 ] {
                     let svc = seed_item(snap, svc_type, corp_id, sid, flag, 1, true, false, None);
                     snap.items.get_mut(&svc).unwrap().dynamic_attributes.insert(2, 1.0);

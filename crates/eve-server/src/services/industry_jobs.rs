@@ -17,7 +17,8 @@ use crate::router::ServerContext;
 use crate::services::industry_pi::{
     ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, compute_industry_job_costs_for_char,
     emit_industry_job, finalize_completed_industry_job_response, handle_industry_job_queries,
-    is_fulcrum_pirate_ship_bonus_applicable, is_structure_industry_service_online,
+    is_fulcrum_pirate_ship_bonus_applicable,
+    is_structure_industry_service_online_for_bp,
     load_job_cost_meta, resolve_decryptor_modifiers, resolve_facility_modifiers_and_system,
     resolve_structure_rig_bonus, restore_blueprint_flag, save_job_cost_meta,
     solar_system_jump_distance, sync_industry_job_pause_states,
@@ -238,7 +239,7 @@ pub fn handle_industry_jobs(
                         }
                     }
                 }
-                if !is_structure_industry_service_online(snap, station_id, activity_id) {
+                if !is_structure_industry_service_online_for_bp(&ctx.sde, snap, station_id, activity_id, bp_type_id) {
                     return Err(BridgeRpcError {
                         code: "FacilityServiceOffline".into(),
                         message: format!(

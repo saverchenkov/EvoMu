@@ -621,6 +621,7 @@ pub async fn apply_live_combat_damage_to_upwell_structure(
                 cs.max_structure_hp = (out.hull_hp / hr.max(1e-6)).max(out.hull_hp).max(1.0);
             }
         }
+        crate::services::structure_weapons_ops::trigger_structure_auto_defense_on_grid(ctx, sys_handle, sys_id, target_ball_id, Some(attacker_char_id), now_unix).await;
     }
     Ok(Some((out.applied_damage, destroyed, sr, ar, hr, became_invuln)))
 }
