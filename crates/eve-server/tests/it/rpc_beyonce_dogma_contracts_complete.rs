@@ -614,8 +614,9 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
     ctx.db.with_mut_snapshot(|s| { s.fw_system_occupations.insert(30_000_142, eve_db::FwSystemOccupationRecord { solar_system_id: 30_000_142, occupier_faction_id: 500_004, owner_faction_id: 500_001, victory_points: 1200, victory_points_threshold: 3000 }); });
     let lp_fw = rpc(&ctx, &mut s1, "map", "GetConstellationLPData", &[PyRep::Integer(20_000_020)]).await;
     assert!(format!("{lp_fw:?}").contains("500004"));
+    eve_server::services::pve_exploration::with_pve_exploration_reg_db(&ctx.db, ctx.now_unix(), |reg| { reg.escalations_by_char.entry(C1).or_default().push(eve_server::services::pve_exploration::EscalatingPathEntry { instance_id: 910_001, character_id: C1, source_dungeon_id: 1001, expedition_dungeon_id: 2001, expedition_name: "Test".into(), destination_solar_system_id: 30_000_142, step_index: 1, total_steps: 4, journal_text: "Test".into(), created_at_sec: ctx.now_unix(), expires_at_sec: ctx.now_unix() + 86_400, dungeons_entered: vec![1001] }); });
     let agents = rpc(&ctx, &mut s1, "map", "GetDeadspaceAgentsMap", &[]).await;
-    assert!(agents.crowset_rows().unwrap().len() > 32);
+    assert_eq!(agents.crowset_rows().unwrap().len(), 1);
     let hist = rpc(&ctx, &mut s1, "map", "GetHistory", &[PyRep::Integer(3), PyRep::Integer(1)]).await;
     assert!(!hist.crowset_rows().unwrap().is_empty());
 

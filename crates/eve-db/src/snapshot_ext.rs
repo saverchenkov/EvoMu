@@ -941,6 +941,8 @@ impl WorldStateSnapshot {
         character_id: i64,
         timestamp_unix: u64,
     ) {
+        self.system_jump_events
+            .retain(|e| timestamp_unix.saturating_sub(e.timestamp_unix) <= 86_400);
         self.system_jump_events.push(SystemJumpEvent {
             solar_system_id,
             character_id,
@@ -956,6 +958,8 @@ impl WorldStateSnapshot {
         pod_kills: u32,
         timestamp_unix: u64,
     ) {
+        self.system_kill_events
+            .retain(|e| timestamp_unix.saturating_sub(e.timestamp_unix) <= 86_400);
         self.system_kill_events.push(SystemKillEvent {
             solar_system_id,
             ship_kills,

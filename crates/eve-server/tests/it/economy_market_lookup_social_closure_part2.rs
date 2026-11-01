@@ -8,23 +8,13 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::{NotificationRecord, ServerContext};
 use std::collections::HashMap;
 
-async fn rpc(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    svc: &str,
-    meth: &str,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.dispatch_rpc(sess, svc, None, meth, args, &HashMap::new(), None)
-        .await
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, meth: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, meth, args, &HashMap::new(), None).await
 }
 
 fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {
-        PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| match k {
-            PyRep::String(s) if s == key => Some(v),
-            _ => None,
-        }),
+        PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| matches!(k, PyRep::String(s) if s == key).then_some(v)),
         PyRep::KeyVal(entries) => entries.iter().find_map(|(k, v)| (k == key).then_some(v)),
         PyRep::Object { args, .. } => dict_get(args, key),
         _ => None,
@@ -32,22 +22,15 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 }
 
 fn extract_rowset_lines(rep: &PyRep) -> Vec<Vec<PyRep>> {
-    match rep {
-        PyRep::Rowset { rows, .. } => rows.clone(),
-        other => panic!("expected PyRep::Rowset, got {other:?}"),
-    }
+    match rep { PyRep::Rowset { rows, .. } => rows.clone(), other => panic!("expected PyRep::Rowset, got {other:?}") }
 }
 
 fn crowset_row_vals(rep: &PyRep, sys_id: i64) -> Option<(i64, i64, i64)> {
-    let PyRep::ObjectEx { list, .. } = rep else {
-        panic!("expected CRowset ObjectEx, got {rep:?}");
-    };
+    let PyRep::ObjectEx { list, .. } = rep else { panic!("expected CRowset ObjectEx, got {rep:?}"); };
     list.iter().find_map(|row| match row {
         PyRep::DBRow { columns, .. } => {
             let sid = columns.iter().find_map(|(k, v)| (k == "solarSystemID").then(|| v.as_i64()).flatten())?;
-            if sid != sys_id {
-                return None;
-            }
+            if sid != sys_id { return None; }
             let v1 = columns.iter().find_map(|(k, v)| (k == "value1").then(|| v.as_i64()).flatten()).unwrap_or(0);
             let v2 = columns.iter().find_map(|(k, v)| (k == "value2").then(|| v.as_i64()).flatten()).unwrap_or(0);
             let v3 = columns.iter().find_map(|(k, v)| (k == "value3").then(|| v.as_i64()).flatten()).unwrap_or(0);
@@ -582,11 +565,7 @@ async fn test_star_map_data_feeds_and_fw_zone_upgrades() {
     assert!(matches!(complex_rows.first(), Some(PyRep::DBRow { columns, .. }) if columns.len() == 4 && columns[0].0 == "solarSystemID" && columns[3].0 == "dungeonName"));
 
     let now_unix = ctx.now_unix();
-    let mk_esc = |id: i64, cid: i64, did: u32, name: &str, sys: u32, step: u8| eve_server::services::pve_exploration::EscalatingPathEntry {
-        instance_id: id, character_id: cid, source_dungeon_id: 1001, expedition_dungeon_id: did,
-        expedition_name: name.into(), destination_solar_system_id: sys, step_index: step, total_steps: 4,
-        journal_text: name.into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001],
-    };
+    let mk_esc = |id: i64, cid: i64, did: u32, name: &str, sys: u32, step: u8| eve_server::services::pve_exploration::EscalatingPathEntry { instance_id: id, character_id: cid, source_dungeon_id: 1001, expedition_dungeon_id: did, expedition_name: name.into(), destination_solar_system_id: sys, step_index: step, total_steps: 4, journal_text: name.into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001] };
     eve_server::services::pve_exploration::with_pve_exploration_reg_db(&ctx.db, now_unix, |reg| {
         reg.escalations_by_char.entry(90_000_001).or_default().push(mk_esc(910_001, 90_000_001, 2001, "Caller Escalation", 30_000_142, 2));
         reg.escalations_by_char.entry(90_000_002).or_default().push(mk_esc(910_002, 90_000_002, 2002, "Other Pilot Escalation", 30_002_187, 1));
@@ -685,4 +664,20 @@ async fn test_map_history_jumps_kills_timeframes_and_visit_stats() {
     assert_eq!(crowset_row_vals(&npc_1h, 30_000_142), Some((3, 3, 0)));
     let npc_24h = rpc(&ctx, &mut sess, "map", "GetHistory", &[PyRep::Integer(5), PyRep::Integer(24)]).await.unwrap();
     assert_eq!(crowset_row_vals(&npc_24h, 30_000_142), Some((5, 5, 0)));
+}
+
+#[test]
+fn test_record_system_jump_and_kill_prunes_events_older_than_24h() {
+    let ctx = ServerContext::new();
+    let now = 1_700_200_000u64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.record_system_jump(30_000_142, 90_000_001, now - 86_401);
+        snap.record_system_jump(30_000_142, 90_000_002, now - 86_400);
+        snap.record_system_jump(30_000_142, 90_000_003, now);
+        assert_eq!(snap.system_jump_events.len(), 2);
+        snap.record_system_kill(30_000_142, 1, 2, 0, now - 86_401);
+        snap.record_system_kill(30_000_142, 3, 4, 1, now - 86_400);
+        snap.record_system_kill(30_000_142, 5, 6, 2, now);
+        assert_eq!(snap.system_kill_events.len(), 2);
+    });
 }
