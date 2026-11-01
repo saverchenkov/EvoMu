@@ -217,7 +217,8 @@ async fn spawn_grid_entity(
         is_cloaked: false,
         category_id: cat,
         group_id: grp,
-        skin_id: None, skin_material_set_id: None,
+        skin_id: None,
+        skin_material_set_id: None,
     };
     let _ = sys_h
         .spawn_ball_with_meta(

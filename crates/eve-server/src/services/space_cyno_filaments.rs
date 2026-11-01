@@ -1070,12 +1070,30 @@ async fn handle_cone_scan(
     }
     let cos_half_angle = (scan_angle.to_radians() * 0.5).cos();
     let balls = sys_handle.list_balls().await.unwrap_or_default();
+    let inhibitor_positions = active_scan_inhibitor_positions(ctx, sys_id, &balls);
+    // DERIVED: 30_000.0 m Mobile Scan Inhibitor (`33_589`, group `1275`) cloak sphere radius;
+    // ships inside an active inhibitor sphere have inoperable sensors (`Mobile_structures.md:92`).
+    if inhibitor_positions.iter().any(|pos| caller_pos.distance(*pos) <= 30_000.0) {
+        return Some(Ok(PyRep::List(Vec::new())));
+    }
     let all_ball_ids: std::collections::HashSet<i64> = balls.iter().map(|b| b.id).collect();
     let mut matches: Vec<PyRep> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
     for ball in balls {
         if Some(ball.id) == caller_ship {
+            continue;
+        }
+        let is_ship_or_drone = ctx
+            .sde
+            .types
+            .get(&ball.type_id)
+            .is_some_and(|t| matches!(t.category_id, 6 | 18 | 87));
+        if is_ship_or_drone
+            && inhibitor_positions
+                .iter()
+                .any(|pos| ball.position.distance(*pos) <= 30_000.0)
+        {
             continue;
         }
         let dist = ball.position.distance(caller_pos);
@@ -1290,4 +1308,29 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
         ("jumpCooldownMinutes", PyRep::Real(cd_min)), ("distanceLY", PyRep::Real(dist_ly)),
         ("fuelConsumed", PyRep::Integer(plan.fuel_units as i64)), ("fuelTypeID", PyRep::Integer(plan.fuel_type_id as i64)),
     ]))
+}
+
+/// Returns positions of anchored, warmed-up (`60`s activation delay elapsed), non-expired
+/// Mobile Scan Inhibitors (`33_589`, group `1275`) in `sys_id`.
+pub fn active_scan_inhibitor_positions(
+    ctx: &ServerContext,
+    sys_id: u32,
+    balls: &[Ball],
+) -> Vec<DVec3> {
+    let now_unix = ctx.now_unix();
+    let dep_state = crate::services::mobile_deployables::read_deployable_state(ctx);
+    balls
+        .iter()
+        .filter(|b| {
+            b.type_id == 33_589
+                && dep_state.deployables.get(&b.id).is_some_and(|rec| {
+                    rec.solar_system_id == sys_id
+                        && rec.group_id == crate::services::mobile_deployables_ext::GROUP_MOBILE_SCAN_INHIBITOR
+                        && !rec.is_unanchored
+                        && now_unix >= rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs)
+                        && now_unix < rec.expires_at_unix
+                })
+        })
+        .map(|b| b.position)
+        .collect()
 }

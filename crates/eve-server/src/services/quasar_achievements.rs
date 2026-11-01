@@ -198,6 +198,7 @@ pub struct AchievementManager {
     pub sde_achievement_hash: String,
     pub sde_definitions_json: Vec<u8>,
     db: Option<Arc<WorldRepository>>,
+    sde: Option<Arc<eve_sde::SdeRegistry>>,
 }
 
 impl Default for AchievementManager {
@@ -281,6 +282,7 @@ impl AchievementManager {
             sde_achievement_hash,
             sde_definitions_json,
             db,
+            sde,
         }
     }
 
@@ -469,6 +471,26 @@ impl AchievementManager {
     ) {
         if delta == 0 || event_names.is_empty() {
             return;
+        }
+        if let Some(ref db) = self.db {
+            crate::services::quasar_goal_tale_notices::record_server_opportunity_event(
+                db,
+                &self.definitions,
+                character_id,
+                event_names,
+                delta,
+                now_unix,
+            );
+            if let Some(ref sde) = self.sde {
+                crate::services::operations_manager_helpers::advance_and_notify_server_operation_tasks(
+                    db,
+                    sde,
+                    gateway,
+                    i64::from(character_id),
+                    event_names,
+                    now_unix,
+                );
+            }
         }
         let mut event_ids: Vec<u32> = self
             .definitions
@@ -1043,13 +1065,7 @@ pub fn register_achievement_handlers(
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
                     let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
-                        a.reached_milestones
-                            .iter()
-                            .rev()
-                            .take(a.unclaimed_reward_count as usize)
-                            .copied()
-                            .rev()
-                            .collect()
+                        a.reached_milestones.iter().rev().take(a.unclaimed_reward_count as usize).copied().rev().collect()
                     } else {
                         (1..=a.unclaimed_reward_count).collect()
                     };
@@ -1296,13 +1312,7 @@ pub fn register_achievement_handlers(
             for a in &achievements {
                 if a.unclaimed_reward_count > 0 {
                     let ms_ids: Vec<u32> = if !a.reached_milestones.is_empty() {
-                        a.reached_milestones
-                            .iter()
-                            .rev()
-                            .take(a.unclaimed_reward_count as usize)
-                            .copied()
-                            .rev()
-                            .collect()
+                        a.reached_milestones.iter().rev().take(a.unclaimed_reward_count as usize).copied().rev().collect()
                     } else {
                         (1..=a.unclaimed_reward_count).collect()
                     };

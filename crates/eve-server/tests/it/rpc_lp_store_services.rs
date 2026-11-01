@@ -167,7 +167,7 @@ async fn test_lp_store_offers_and_purchases() {
     sess.station_id = Some(60_015_067);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
-            ch.station_id = Some(60_015_067);
+            ch.station_id = Some(60_015_067); ch.war_faction_id = Some(500_001);
         }
     });
     let take_fw_rep = rpc(

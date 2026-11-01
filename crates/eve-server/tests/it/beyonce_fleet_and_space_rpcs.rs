@@ -469,7 +469,7 @@ async fn test_beyonce_structures_containers_and_siphons() {
 
     let siphon_id = 77_000_001;
     ctx.db.with_mut_snapshot(|snap| {
-        seed_item(snap, siphon_id, 33475, C1, SYS_ORIGIN as i64, InventoryFlag::None, 1);
+        seed_item(snap, siphon_id, 33477, C1, SYS_ORIGIN as i64, InventoryFlag::None, 1);
         seed_item(snap, 77_000_002, 34, C1, siphon_id, InventoryFlag::None, 100);
     });
     let cap_usage = ctx

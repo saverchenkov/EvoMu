@@ -1015,6 +1015,17 @@ pub(super) async fn handle_finder_and_tactical(
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SetTargetTag requires targetID".into() }));
             };
             let tag_str = args.get(1).and_then(|a| match a { PyRep::String(s) => Some(s.trim().to_string()), PyRep::Integer(i) => Some(i.to_string()), _ => None }).unwrap_or_default();
+            if !tag_str.is_empty()
+                && !(tag_str.len() == 1
+                    && tag_str
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || (b'1'..=b'9').contains(&b)))
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "SetTargetTag requires an alphanumeric tag (A-Z, 1-9) or empty to clear".into(),
+                }));
+            }
             let tags_dict = {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
                 let tags = ex.target_tags.entry(fleet_id).or_default();

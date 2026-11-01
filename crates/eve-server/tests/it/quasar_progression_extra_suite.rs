@@ -354,8 +354,8 @@ async fn quasar_community_progression_tales_and_goals() {
     pub_opp(&ctx, &mut sess, "eve_public.opportunity.api.Discovered", disc_ev).await;
     let opp_state3: serde_json::Value = ctx.db.with_snapshot(|s| serde_json::from_str(&s.quasar_state_blobs["quasar_opportunities"]).unwrap());
     assert!(opp_state3["90000001"]["history"].as_array().unwrap().iter().any(|h| h["key"].as_str() == Some("discovered:feature_combat_anomalies")));
-    assert!(ctx.quasar_gateway.poll_notices(sess.session_id).iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("achievement.api.ProgressedNotice"))));
-    assert!(ctx.quasar_gateway.progression.achievements.get_or_init_achievements(90_000_001).iter().any(|a| a.def.id == 102 && a.progress >= 3));
+    assert!(!ctx.quasar_gateway.poll_notices(sess.session_id).iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("achievement.api.ProgressedNotice"))));
+    assert!(ctx.quasar_gateway.progression.achievements.get_or_init_achievements(90_000_001).iter().all(|a| a.def.id != 102 || a.progress == 0));
 }
 
 #[tokio::test]

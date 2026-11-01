@@ -336,6 +336,11 @@ impl SdeRegistry {
         self.load_cfsd_nested("res:/staticdata/surveys.fsdbinary")
     }
 
+    /// Decodes `res:/staticdata/operationcategories.fsdbinary`.
+    pub fn operation_categories(&self) -> Result<BTreeMap<String, Value>, SdeError> {
+        self.load_cfsd_nested("res:/staticdata/operationcategories.fsdbinary")
+    }
+
     /// Decodes `res:/staticdata/operations.fsdbinary`.
     pub fn operations(&self) -> Result<BTreeMap<String, Value>, SdeError> {
         self.load_cfsd_nested("res:/staticdata/operations.fsdbinary")

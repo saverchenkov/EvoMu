@@ -556,7 +556,7 @@ pub fn process_ship_destruction_with_aggression(
     crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, ship_id);
     let hull_val = ctx.sde.types.get(&ship_type_id).map(|t| t.base_price).unwrap_or(250_000.0).max(250_000.0);
     let now_unix = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
+    let kill_id = ctx.db.with_mut_snapshot(|snap| {
         let fitted_val: f64 = snap
             .items
             .values()
@@ -578,7 +578,15 @@ pub fn process_ship_destruction_with_aggression(
             now_unix,
         );
         kill_id
-    })
+    });
+    crate::services::fw_gameplay::on_player_ship_destroyed_in_combat(
+        ctx,
+        solar_system_id,
+        attacker_char_id,
+        victim_char_id,
+        ship_type_id,
+    );
+    kill_id
 }
 
 /// Advances in-flight missiles and active Breacher Pod DoTs in `solar_system_id` by `dt` seconds

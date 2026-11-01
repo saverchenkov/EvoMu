@@ -189,8 +189,8 @@ pub fn paragon_sde_evermark_offers(sde: &eve_sde::SdeRegistry) -> &'static [LPOf
 
 /// Load all available LP store offers for a corporation:
 /// dynamic `WorldStateSnapshot` overrides first, then authoritative Tranquility ESI LP store offers
-/// for `corp_id`, supplemented for Paragon (`1_000_419`) by any V24 SDE `shipcosmeticlicenses.fsdbinary`
-/// emblem types (`DERIVED` fallback) not already present by `type_id` / `offer_id`.
+/// for `corp_id`, supplemented for Paragon (`1_000_419`) by V24 SDE `shipcosmeticlicenses.fsdbinary`
+/// emblem types.
 pub fn get_corp_lp_offers_with_sde(
     sde: &eve_sde::SdeRegistry,
     snap: &eve_db::WorldStateSnapshot,

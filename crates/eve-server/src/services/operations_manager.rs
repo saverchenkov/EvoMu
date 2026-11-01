@@ -50,6 +50,8 @@ pub struct CharacterOperationsRecord {
     #[serde(default)]
     pub claimed_vgs_rewards: Vec<u32>,
     #[serde(default)]
+    pub claimed_operation_rewards: HashSet<String>,
+    #[serde(default)]
     pub operation_events: Vec<(String, i64)>,
     pub client_events_logged: u64,
     #[serde(default)]
@@ -199,99 +201,6 @@ pub fn handle_survey_slash(
             "Usage: /survey schedule <survey_id> [duration_secs] [type_id:qty,...] [vgs_id,...] | /survey complete [survey_id] [char_id]",
         ))),
     }
-}
-
-/// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
-/// if the character has started an operation site (`start_site`) and is still in that solar system.
-pub fn active_operation_dungeon_for_character(
-    ctx: &ServerContext,
-    char_id: i64,
-) -> Option<(u32, u32, i64, String)> {
-    let (dungeon_id, site_id) = ctx.db.with_snapshot(|snap| {
-        let store = load_store(snap);
-        let rec = store.by_character.get(&char_id)?;
-        let char_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id);
-        if let Some(op_sys) = rec.active_operation_system_id {
-            if char_sys != Some(op_sys) {
-                return None;
-            }
-        }
-        Some((rec.active_dungeon_id?, rec.active_site_id?))
-    })?;
-    let d = ctx.sde.dungeons.get(&dungeon_id)?;
-    let dname = d.name.clone();
-    // DERIVED: When an SDE dungeon has no asteroid room row in `sde_dungeon_asteroid_counts`,
-    // derive a deterministic primary room ID from `dungeon_id * 100 + 1`.
-    let room_id = ctx
-        .sde
-        .dungeon_asteroids
-        .get(&dungeon_id)
-        .and_then(|rows| rows.first().map(|r| r.room_id))
-        .unwrap_or(dungeon_id.saturating_mul(100).saturating_add(1));
-    Some((dungeon_id, room_id, site_id, dname))
-}
-
-/// Resolves the NPE/Career operation spawnpoint solar system for `(char_id, operation_id)`.
-/// Uses the character's activated operation system if present, or resolves the character's
-/// starter school solar system from `ctx.sde.schools`.
-pub fn resolve_operation_spawnpoint_solar_system(
-    ctx: &ServerContext,
-    char_id: i64,
-    operation_id: Option<i64>,
-) -> Option<u32> {
-    ctx.db.with_snapshot(|snap| {
-        let store = load_store(snap);
-        if let Some(rec) = store.by_character.get(&char_id) {
-            if let Some(sys_id) = rec.active_operation_system_id {
-                if operation_id.is_none() || rec.active_operation_id == operation_id {
-                    return Some(sys_id);
-                }
-            }
-        }
-        if let Some(ch) = snap.characters.get(&char_id) {
-            if let Some(school) = ctx.sde.schools.get(&ch.school_id) {
-                if school.solar_system_id > 0 {
-                    return Some(school.solar_system_id);
-                }
-            }
-            if let Some(school) = ctx
-                .sde
-                .schools
-                .values()
-                .find(|s| s.race_id == ch.race_id && s.solar_system_id > 0)
-            {
-                return Some(school.solar_system_id);
-            }
-            if ch.solar_system_id > 0 && ctx.sde.solar_systems.contains_key(&ch.solar_system_id) {
-                return Some(ch.solar_system_id);
-            }
-        }
-        None
-    })
-}
-
-/// Checks whether `target_id` (a site ID, dungeon ID, or solar system ID) is an active
-/// operation site or system for `char_id` in the character's current solar system.
-pub fn is_operation_site_or_system(ctx: &ServerContext, char_id: i64, target_id: i64) -> bool {
-    if target_id <= 0 {
-        return false;
-    }
-    ctx.db.with_snapshot(|snap| {
-        let store = load_store(snap);
-        let Some(rec) = store.by_character.get(&char_id) else {
-            return false;
-        };
-        let char_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id);
-        if let Some(op_sys) = rec.active_operation_system_id {
-            if char_sys != Some(op_sys) {
-                return false;
-            }
-        }
-        rec.active_operation_id == Some(target_id)
-            || rec.active_site_id == Some(target_id)
-            || rec.active_dungeon_id.map(i64::from) == Some(target_id)
-            || rec.active_operation_system_id.map(i64::from) == Some(target_id)
-    })
 }
 
 pub(crate) fn load_store(snap: &eve_db::WorldStateSnapshot) -> OperationsStore {
@@ -494,19 +403,40 @@ pub fn handle(
             let Some(cat_id) = args.first().and_then(|a| a.as_i64()).filter(|id| (1..=1_000).contains(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
+            let is_gm = session.has_gm_role();
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let op_defs = get_operation_defs(&ctx.sde);
+            let cat_isk = op_defs.category_isk_rewards.get(&cat_id).copied().unwrap_or(0);
+            let new_bal = match ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                if rec.completed_categories.len() < 128 {
-                    rec.completed_categories.insert(cat_id);
-                }
-                if rec.active_category_id == Some(cat_id) {
-                    rec.active_category_id = None;
-                    rec.active_operation_id = None;
-                }
+                let mut claimed = {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    if !can_complete_operation_category(op_defs, is_gm, rec, cat_id) {
+                        return Err(rpc_err(
+                            "UserError",
+                            format!("Category {cat_id} requires GM privileges or completion of all category operations"),
+                        ));
+                    }
+                    if rec.completed_categories.len() < 128 {
+                        rec.completed_categories.insert(cat_id);
+                    }
+                    if rec.active_category_id == Some(cat_id) {
+                        rec.active_category_id = None;
+                        rec.active_operation_id = None;
+                    }
+                    std::mem::take(&mut rec.claimed_operation_rewards)
+                };
+                let bal = grant_operation_reward_bundle(snap, char_id, &format!("cat:{cat_id}"), &mut claimed, cat_isk, &[], now);
+                store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
                 save_store(snap, &store, now);
-            });
+                Ok(bal)
+            }) {
+                Ok(b) => b,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Some(bal) = new_bal {
+                let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+            }
             crate::services::character_expert_systems::stop_active_operation_node_graph(ctx, char_id, cat_id);
             ctx.notify(NotificationTarget::Character(char_id), "OnOperationCategoryCompleted", "charid", vec![PyRep::Integer(cat_id)]);
             Some(Ok(PyRep::Bool(true)))
@@ -614,9 +544,19 @@ pub fn handle(
 
         ("operationsManager", "activate_operation_in_solar_system") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(op_id) = args.first().and_then(|a| a.as_i64()).filter(|id| (1..=100_000).contains(id)) else {
+            let op_defs = get_operation_defs(&ctx.sde);
+            let Some(op_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id) && op_defs.op_tasks.contains_key(id))
+            else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
+            if let Some(req_cat) = args.get(2).and_then(|a| a.as_i64()) {
+                if !(1..=1_000).contains(&req_cat) {
+                    return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                }
+            }
             let char_sys = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)));
             let Some(curr_sys) = char_sys.filter(|id| ctx.sde.solar_systems.contains_key(id)) else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
@@ -629,17 +569,31 @@ pub fn handle(
             } else {
                 curr_sys
             };
+            let is_gm = session.has_gm_role();
             let now = ctx.now_unix();
+            let act_rws = op_defs.op_activation_rewards.get(&op_id).map(Vec::as_slice).unwrap_or(&[]);
             let cat_id = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.solar_system_id = op_sys;
                 }
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.active_operation_id = Some(op_id);
-                rec.active_operation_system_id = Some(op_sys);
-                let cat_id = args.get(2).and_then(|a| a.as_i64()).or(rec.active_category_id).unwrap_or(1);
-                rec.active_category_id = Some(cat_id);
+                let (cat_id, can_grant_act, mut claimed) = {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    let prereqs_met = is_gm
+                        || op_defs
+                            .op_prerequisites
+                            .get(&op_id)
+                            .is_none_or(|ps| ps.iter().all(|p| rec.completed_operations.contains(p)));
+                    rec.active_operation_id = Some(op_id);
+                    rec.active_operation_system_id = Some(op_sys);
+                    let cat_id = args.get(2).and_then(|a| a.as_i64()).or(rec.active_category_id).unwrap_or(1);
+                    rec.active_category_id = Some(cat_id);
+                    (cat_id, prereqs_met, std::mem::take(&mut rec.claimed_operation_rewards))
+                };
+                if can_grant_act {
+                    let _ = grant_operation_reward_bundle(snap, char_id, &format!("op_act:{op_id}"), &mut claimed, 0, act_rws, now);
+                }
+                store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
                 save_store(snap, &store, now);
                 cat_id
             });
@@ -681,12 +635,17 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let is_gm = session.has_gm_role();
             let op_defs = get_operation_defs(&ctx.sde);
             let Some(task_id) = args
                 .get(2)
                 .and_then(|a| a.as_i64())
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .filter(|id| (1..=100_000).contains(id) && op_defs.task_to_op.contains_key(id))
+                .filter(|id| {
+                    (1..=100_000).contains(id)
+                        && op_defs.task_to_op.contains_key(id)
+                        && (is_gm || op_defs.client_completable_tasks.contains(id))
+                })
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
@@ -714,9 +673,19 @@ pub fn handle(
                 None
             };
             let now = ctx.now_unix();
-            let (cat_id, op_id) = ctx.db.with_mut_snapshot(|snap| {
+            let (cat_id, op_id) = match ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
+                if let Some(active_op) = rec.active_operation_id {
+                    let belongs_to_active = sde_op_id == Some(active_op)
+                        || op_defs
+                            .op_tasks
+                            .get(&active_op)
+                            .is_some_and(|ts| ts.contains(&task_id));
+                    if !belongs_to_active {
+                        return Err(BridgeRpcError::user_error("CustomInfo"));
+                    }
+                }
                 if rec.skipped_tasks.len() < 512 {
                     rec.skipped_tasks.insert(task_id);
                 }
@@ -726,8 +695,11 @@ pub fn handle(
                     .or(rec.active_operation_id)
                     .unwrap_or(1);
                 save_store(snap, &store, now);
-                (cat_id, op_id)
-            });
+                Ok((cat_id, op_id))
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             crate::services::notify_emitters_batch8_ops::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
@@ -1045,6 +1017,11 @@ pub fn handle(
             }
 
             let op_defs = get_operation_defs(&ctx.sde);
+            let is_gm = session.has_gm_role();
+            let curr_sys = session.solar_system_id.or_else(|| {
+                ctx.db
+                    .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+            });
             let explicit_task_id = extra_data
                 .and_then(|ed| match ed {
                     PyRep::Dict(dict) => dict.iter().find_map(|(k, v)| {
@@ -1063,49 +1040,61 @@ pub fn handle(
                 .filter(|id| (1..=100_000).contains(id) && op_defs.task_to_op.contains_key(id));
             let completed_task = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                let target_task = explicit_task_id.or_else(|| {
-                    if !args.is_empty() || !kwargs.is_empty() {
-                        if let Some(op) = rec.active_operation_id {
-                            if let Some(tasks) = op_defs.op_tasks.get(&op) {
-                                tasks
-                                    .iter()
-                                    .find(|t| {
-                                        !rec.completed_tasks.contains(t)
-                                            && !rec.skipped_tasks.contains(t)
-                                    })
-                                    .copied()
-                                    .or_else(|| tasks.first().copied())
-                            } else {
-                                None
+                let (transitioned, reward_ops, mut claimed) = {
+                    let rec = store.by_character.entry(char_id).or_default();
+                    let active_op_opt = rec.active_operation_id.filter(|_| {
+                        rec.active_operation_system_id.is_none_or(|op_s| curr_sys == Some(op_s))
+                    });
+                    let target_task = active_op_opt.and_then(|op| {
+                        let tasks = op_defs.op_tasks.get(&op)?;
+                        match explicit_task_id {
+                            Some(tid) => tasks.contains(&tid).then_some(tid),
+                            None if !args.is_empty() || !kwargs.is_empty() => tasks
+                                .iter()
+                                .find(|t| !rec.completed_tasks.contains(t) && !rec.skipped_tasks.contains(t))
+                                .copied(),
+                            None => None,
+                        }
+                    });
+                    push_operation_event(rec, event_name, target_task.unwrap_or(0));
+                    let mut tr = None;
+                    let mut rw = None;
+                    if let (Some(op_id), Some(tid)) = (active_op_opt, target_task) {
+                        let allowed_task = is_gm || op_defs.client_completable_tasks.contains(&tid);
+                        if allowed_task
+                            && !rec.blocked_tasks.contains(&tid)
+                            && !rec.completed_tasks.contains(&tid)
+                            && !rec.skipped_tasks.contains(&tid)
+                        {
+                            rec.completed_tasks.insert(tid);
+                            let cat_id = rec.active_category_id.unwrap_or(1);
+                            let op_all_done = op_defs.op_tasks.get(&op_id).is_some_and(|ts| {
+                                !ts.is_empty()
+                                    && ts
+                                        .iter()
+                                        .all(|t| rec.completed_tasks.contains(t) || rec.skipped_tasks.contains(t))
+                            });
+                            if op_all_done {
+                                rec.completed_operations.insert(op_id);
                             }
-                        } else {
-                            None
+                            tr = Some((cat_id, op_id, tid));
+                            rw = Some((tid, op_id, op_all_done));
                         }
-                    } else {
-                        None
                     }
-                });
-                push_operation_event(rec, event_name, target_task.unwrap_or(0));
-                let mut transitioned = None;
-                if let Some(tid) = target_task {
-                    if !rec.blocked_tasks.contains(&tid) {
-                        rec.completed_tasks.insert(tid);
-                        if let Some(op_id) = rec.active_operation_id {
-                            rec.completed_operations.insert(op_id);
-                        }
-                        let cat_id = rec.active_category_id.unwrap_or(1);
-                        let op_id = rec
-                            .active_operation_id
-                            .or_else(|| op_defs.task_to_op.get(&tid).copied())
-                            .unwrap_or(1);
-                        transitioned = Some((cat_id, op_id, tid));
-                    }
+                    (tr, rw, std::mem::take(&mut rec.claimed_operation_rewards))
+                };
+                let mut new_bal = None;
+                if let Some((tid, op_id, op_all_done)) = reward_ops {
+                    new_bal = grant_task_and_op_completion_rewards(snap, op_defs, char_id, tid, op_id, op_all_done, &mut claimed, now);
                 }
+                store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
                 save_store(snap, &store, now);
-                transitioned
+                (transitioned, new_bal)
             });
-            if let Some((cat_id, op_id, tid)) = completed_task {
+            if let Some(bal) = completed_task.1 {
+                let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+            }
+            if let Some((cat_id, op_id, tid)) = completed_task.0 {
                 ctx.notify(
                     NotificationTarget::Character(char_id),
                     "OnOperationTaskCompleted",
@@ -1187,14 +1176,12 @@ pub fn handle(
                 let home_station_id = snap
                     .characters
                     .get(&char_id)
-                    .map(|c| {
-                        if c.home_station_id > 0 {
-                            c.home_station_id
-                        } else {
-                            c.station_id.unwrap_or(60_003_760)
-                        }
+                    .and_then(|c| {
+                        c.station_id
+                            .or(c.structure_id)
+                            .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
                     })
-                    .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))?;
+                    .ok_or_else(|| rpc_err("CharacterNotFound", "Character or home station not found"))?;
                 let mut store = load_store(snap);
                 let catalog = combined_survey_catalog(&ctx.sde, &store.custom_surveys);
                 let (survey_id, item_rewards) = {

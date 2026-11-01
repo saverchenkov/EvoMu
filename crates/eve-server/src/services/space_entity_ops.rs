@@ -679,7 +679,6 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let unit_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            crate::services::mobile_deployables_ext::sync_siphon_unit(ctx, unit_id);
             let ratio_res = ctx.db.with_snapshot(|s| {
                 let it = s.items.get(&unit_id)?;
                 let cap = ctx.sde.types.get(&it.type_id).map(|t| t.capacity).unwrap_or(1200.0);

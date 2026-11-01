@@ -239,7 +239,8 @@ pub async fn handle(
         ("cache", "Setting") => {
             let (section, key, new_val) = match args {
                 [PyRep::String(s), PyRep::String(k), PyRep::String(v), ..] => (s.as_str(), k.as_str(), Some(v.as_str())),
-                [PyRep::String(s), PyRep::String(k)] => (s.as_str(), k.as_str(), None),
+                [PyRep::String(s), PyRep::String(k), PyRep::None, ..]
+                | [PyRep::String(s), PyRep::String(k)] => (s.as_str(), k.as_str(), None),
                 [PyRep::String(k)] => ("zsystem", k.as_str(), None),
                 _ => ("zsystem", "SP-Allowed-Extensions", None),
             };

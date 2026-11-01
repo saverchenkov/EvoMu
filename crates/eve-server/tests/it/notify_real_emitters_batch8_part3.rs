@@ -183,12 +183,16 @@ async fn notify_batch8_operations_npe_and_client_node_graphs() {
     let (&op_id, tasks) = op_defs
         .op_tasks
         .iter()
-        .find(|(_, ts)| ts.len() >= 2)
+        .find(|(_, ts)| ts.len() >= 2 && op_defs.client_completable_tasks.contains(&ts[0]))
+        .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| ts.len() >= 2))
         .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| !ts.is_empty()))
         .expect("at least one operation with tasks in SDE");
     let cat_id = 1_i64;
     let first_task_id = tasks[0];
     let expected_next_task = tasks.get(1).copied().map(PyRep::Integer).unwrap_or(PyRep::None);
+    if !op_defs.client_completable_tasks.contains(&first_task_id) {
+        sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    }
 
     let _ = drain_all(&ctx, &mut sess, PILOT_A);
     let act_op = rpc(

@@ -236,6 +236,8 @@ async fn test_operations_tutorial_and_categories() {
         .expect("get_active_category_id initial");
     assert_eq!(active_cat_initial, PyRep::None);
 
+    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
+    let (&any_sde_op, _) = op_defs.op_tasks.iter().next().expect("SDE operation");
     let cat_id = 42;
     let is_cat_comp_before = call_rpc(
         &ctx,
@@ -287,7 +289,7 @@ async fn test_operations_tutorial_and_categories() {
         &mut sess,
         "operationsManager",
         "activate_operation_in_solar_system",
-        &[PyRep::Integer(1), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(cat_id)],
+        &[PyRep::Integer(any_sde_op), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(cat_id)],
     )
     .await
     .expect("activate_operation_in_solar_system");
@@ -309,7 +311,20 @@ async fn test_operations_tutorial_and_categories() {
     .expect("get_category_state active");
     assert_eq!(cat_state_active, PyRep::Integer(2)); // ACTIVE = 2
 
-    // 5. Complete category: complete_category_for_character
+    // 5. Complete category: complete_category_for_character (rejected without GM/finished ops; succeeds with GM role)
+    assert!(
+        call_rpc(
+            &ctx,
+            &mut sess,
+            "operationsManager",
+            "complete_category_for_character",
+            &[PyRep::Integer(cat_id)],
+        )
+        .await
+        .is_err(),
+        "unprivileged complete_category_for_character must reject unfinished category"
+    );
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
     let complete_rep = call_rpc(
         &ctx,
         &mut sess,
@@ -459,8 +474,20 @@ async fn test_operations_tasks_sites_and_events() {
     .expect("get_operations_completed_at_least_once init");
     assert_eq!(completed_ops_init, PyRep::List(Vec::new()));
 
-    // 2. Activate operation: activate_operation_in_solar_system
-    let op_id = 501;
+    // 2. Activate operation: activate_operation_in_solar_system (real 2-task SDE operation)
+    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
+    let (&op_id, op_task_vec) = op_defs
+        .op_tasks
+        .iter()
+        .find(|(_, ts)| ts.len() == 2 && ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
+        .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| ts.len() == 2))
+        .expect("SDE must contain a 2-task operation");
+    let client_idx = op_task_vec
+        .iter()
+        .position(|t| op_defs.client_completable_tasks.contains(t))
+        .unwrap_or(1);
+    let task_id_2 = op_task_vec[client_idx];
+    let task_id = op_task_vec[1 - client_idx];
     let act_rep = call_rpc(
         &ctx,
         &mut sess,
@@ -490,7 +517,6 @@ async fn test_operations_tasks_sites_and_events() {
     );
 
     // 3. Task blocking and unblocking: block_task, unblock_task
-    let task_id = 1_001;
     let block_rep = call_rpc(
         &ctx,
         &mut sess,
@@ -526,6 +552,10 @@ async fn test_operations_tasks_sites_and_events() {
     assert_eq!(unblock_rep, PyRep::Bool(true));
 
     // 4. Skip task: skip_task
+    let prev_role = sess.role;
+    if !op_defs.client_completable_tasks.contains(&task_id) {
+        sess.role |= eve_machonet::service_roles::ROLE_GMH;
+    }
     let skip_rep = call_rpc(
         &ctx,
         &mut sess,
@@ -535,6 +565,7 @@ async fn test_operations_tasks_sites_and_events() {
     )
     .await
     .expect("skip_task");
+    sess.role = prev_role;
     assert_eq!(skip_rep, PyRep::Bool(true));
 
     let skip_notifs = ctx.drain_notifications_for_char(PILOT_AIR);
@@ -580,7 +611,6 @@ async fn test_operations_tasks_sites_and_events() {
     assert_eq!(start_rep, PyRep::Bool(true));
 
     // 6. Process client event: process_client_event
-    let task_id_2 = 1_002;
     let event_rep = call_rpc(
         &ctx,
         &mut sess,

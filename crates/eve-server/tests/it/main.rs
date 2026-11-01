@@ -504,3 +504,6 @@ mod open_feats_b41_part2;
 mod open_feats_and_rpcs_b11;
 mod open_feats_and_rpcs_b11_part2;
 mod open_feats_and_rpcs_b11_part3;
+mod open_feats_batch6_closure;
+mod open_feats_batch6_part2_closure;
+mod esi_b6_closure;

@@ -201,14 +201,14 @@ fn format_opportunity_id_value(v: &DynamicValue) -> String {
 }
 
 /// Consumes client-published `eve_public.opportunity.api.{Viewed,Tracked,Untracked,Completed,Discovered}`
-/// events from `publicGatewaySvc.PublishEvent` / `PublishEventPayload`, updates live achievement/goal
-/// progression state, and queues progression notices to the character's subscribed session.
+/// events from `publicGatewaySvc.PublishEvent` / `PublishEventPayload`, recording only UI
+/// `tracked`, `viewed`, and `history` metadata without advancing server opportunity or achievement completion.
 pub fn handle_opportunity_event(
     manager: &crate::services::quasar_progression::ProgressionManagers,
     descriptors: &eve_proto::quasar::QuasarDescriptorRegistry,
     session: &eve_machonet::SessionState,
     any: &GoogleAny,
-    now_unix: u64,
+    _now_unix: u64,
 ) {
     let event_name = eve_proto::quasar::QuasarDescriptorRegistry::normalize_type_name(&any.type_url);
     if !matches!(
@@ -225,16 +225,8 @@ pub fn handle_opportunity_event(
         return;
     };
     let Ok(dyn_msg) = descriptors.decode_dynamic(&any.type_url, &any.value) else { return };
-    let mut delta = 1u64;
     let opp_key = if event_name.ends_with(".Discovered") {
         let Some(DynamicValue::Message(disc_opp)) = dyn_msg.get(1) else { return };
-        if let Some(amt) = disc_opp.get(2).and_then(|v| match v {
-            DynamicValue::Uint64(u) if *u > 0 => Some(*u),
-            DynamicValue::Int64(i) if *i > 0 => u64::try_from(*i).ok(),
-            _ => None,
-        }) {
-            delta = amt;
-        }
         let tag = match disc_opp.get(1) {
             Some(DynamicValue::Message(m)) => match m.get(1) {
                 Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.clone(),
@@ -265,17 +257,18 @@ pub fn handle_opportunity_event(
         if id_str.is_empty() { return; }
         format!("v{variant_num}:{id_str}")
     };
-    if let Some((ach, done, ms)) = manager.achievements.add_progress(cid, 102, delta, now_unix) {
-        manager.achievements.save_to_db();
-        let cat_score = manager.achievements.category_score(cid, ach.def.category_id);
-        crate::services::quasar_achievements::emit_achievement_notices(cid, ach.def.id, ach.def.category_id, ach.progress, cat_score, done, &ms, now_unix);
-    }
     if let Some(ref db) = manager.extra.db {
         db.with_mut_snapshot(|snap| {
             let mut state: serde_json::Value = snap.quasar_state_blobs.get("quasar_opportunities").and_then(|j| serde_json::from_str(j).ok()).unwrap_or_else(|| serde_json::json!({}));
             if !state.is_object() { state = serde_json::json!({}); }
             if let Some(obj) = state.as_object_mut() {
-                let ch_entry = obj.entry(cid.to_string()).or_insert_with(|| serde_json::json!({"tracked": [], "history": []}));
+                let ch_entry = obj.entry(cid.to_string()).or_insert_with(|| serde_json::json!({"tracked": [], "viewed": [], "history": [], "completed": []}));
+                if let Some(eobj) = ch_entry.as_object_mut() {
+                    eobj.entry("tracked").or_insert_with(|| serde_json::json!([]));
+                    eobj.entry("viewed").or_insert_with(|| serde_json::json!([]));
+                    eobj.entry("history").or_insert_with(|| serde_json::json!([]));
+                    eobj.entry("completed").or_insert_with(|| serde_json::json!([]));
+                }
                 if event_name.ends_with(".Tracked") {
                     if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
                         if !arr.iter().any(|x| x.as_str() == Some(&opp_key)) {
@@ -287,6 +280,13 @@ pub fn handle_opportunity_event(
                     if let Some(arr) = ch_entry.get_mut("tracked").and_then(|v| v.as_array_mut()) {
                         arr.retain(|x| x.as_str() != Some(&opp_key));
                     }
+                } else if event_name.ends_with(".Viewed") {
+                    if let Some(arr) = ch_entry.get_mut("viewed").and_then(|v| v.as_array_mut()) {
+                        if !arr.iter().any(|x| x.as_str() == Some(&opp_key)) {
+                            if arr.len() >= 256 { arr.remove(0); }
+                            arr.push(serde_json::Value::String(opp_key.clone()));
+                        }
+                    }
                 }
                 if let Some(hist) = ch_entry.get_mut("history").and_then(|v| v.as_array_mut()) {
                     if hist.len() >= 256 { hist.remove(0); }
@@ -296,6 +296,87 @@ pub fn handle_opportunity_event(
             snap.quasar_state_blobs.insert("quasar_opportunities".into(), state.to_string());
         });
     }
+}
+
+/// Records server-observed gameplay progress and completion for SDE opportunities
+/// (`achievements.static` + `achievementevents.fsdbinary`) directly in `quasar_opportunities`,
+/// decoupled from `quasar_achievements` and unreachable from client `PublishEventPayload` calls.
+pub fn record_server_opportunity_event(
+    db: &eve_db::WorldRepository,
+    definitions: &[crate::services::quasar_achievements::AchievementDef],
+    character_id: u32,
+    event_names: &[&str],
+    delta: u64,
+    now_unix: u64,
+) {
+    if character_id == 0 || delta == 0 || event_names.is_empty() {
+        return;
+    }
+    let matching_defs: Vec<&crate::services::quasar_achievements::AchievementDef> = definitions
+        .iter()
+        .filter(|d| {
+            !d.is_client_achievement
+                && !d.conditions.is_empty()
+                && d.conditions.iter().any(|c| event_names.contains(&c.event_name.as_str()))
+        })
+        .collect();
+    if matching_defs.is_empty() {
+        return;
+    }
+    db.with_mut_snapshot(|snap| {
+        let mut state: serde_json::Value = snap
+            .quasar_state_blobs
+            .get("quasar_opportunities")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !state.is_object() {
+            state = serde_json::json!({});
+        }
+        if let Some(obj) = state.as_object_mut() {
+            let ch_entry = obj
+                .entry(character_id.to_string())
+                .or_insert_with(|| serde_json::json!({"tracked": [], "viewed": [], "history": [], "completed": [], "progress": {}, "completed_at": {}}));
+            if let Some(eobj) = ch_entry.as_object_mut() {
+                eobj.entry("completed").or_insert_with(|| serde_json::json!([]));
+                eobj.entry("progress").or_insert_with(|| serde_json::json!({}));
+                eobj.entry("completed_at").or_insert_with(|| serde_json::json!({}));
+                for def in &matching_defs {
+                    if let Some(prog_obj) = eobj.get_mut("progress").and_then(|v| v.as_object_mut()) {
+                        for cond in &def.conditions {
+                            if event_names.contains(&cond.event_name.as_str()) {
+                                let k = format!("{}:{}", def.id, cond.condition_id);
+                                let prev = prog_obj.get(&k).and_then(|v| v.as_u64()).unwrap_or(0);
+                                let next = prev.saturating_add(delta).min(cond.target_value);
+                                prog_obj.insert(k, serde_json::json!(next));
+                            }
+                        }
+                    }
+                    let all_done = eobj
+                        .get("progress")
+                        .and_then(|v| v.as_object())
+                        .is_some_and(|prog_obj| {
+                            def.conditions.iter().all(|c| {
+                                let k = format!("{}:{}", def.id, c.condition_id);
+                                prog_obj.get(&k).and_then(|v| v.as_u64()).unwrap_or(0) >= c.target_value
+                            })
+                        });
+                    if all_done {
+                        if let Some(comp_arr) = eobj.get_mut("completed").and_then(|v| v.as_array_mut()) {
+                            let id_u64 = u64::from(def.id);
+                            if !comp_arr.iter().any(|x| x.as_u64() == Some(id_u64)) {
+                                comp_arr.push(serde_json::json!(def.id));
+                                if let Some(cat_obj) = eobj.get_mut("completed_at").and_then(|v| v.as_object_mut()) {
+                                    cat_obj.insert(def.id.to_string(), serde_json::json!(now_unix));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        snap.quasar_state_blobs
+            .insert("quasar_opportunities".into(), state.to_string());
+    });
 }
 
 /// Filters completed PvE encounters against an active tale template's site/dungeon category and SDE definition

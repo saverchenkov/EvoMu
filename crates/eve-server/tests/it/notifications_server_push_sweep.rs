@@ -240,12 +240,25 @@ async fn test_notify_sweep_operations_survey_and_market() {
     let mut sess = login_pilot_char(&ctx, 9105, "demo", "demo-secret", P1).await;
     let mut seen = Vec::new();
 
-    call(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(1)]).await;
+    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
+    let (&real_op, real_tasks) = op_defs
+        .op_tasks
+        .iter()
+        .find(|(_, ts)| ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
+        .expect("SDE operation with client-completable task");
+    let real_tid = real_tasks
+        .iter()
+        .copied()
+        .find(|t| op_defs.client_completable_tasks.contains(t))
+        .expect("client-completable task");
+    call(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(real_op)]).await;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryChanged").first(), Some(&PyRep::Integer(1)));
-    call(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(10)]).await;
+    call(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(real_tid)]).await;
     let task_notif = take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationTaskCompleted");
-    assert_eq!(task_notif.get(2), Some(&PyRep::Integer(10)));
+    assert_eq!(task_notif.get(2), Some(&PyRep::Integer(real_tid)));
+    sess.role |= eve_machonet::service_roles::ROLE_GMH;
     call(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await;
+    sess.role &= !eve_machonet::service_roles::ROLE_GMH;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryCompleted").first(), Some(&PyRep::Integer(1)));
 
     let now = ctx.now_unix();
