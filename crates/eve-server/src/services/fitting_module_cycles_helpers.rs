@@ -1216,31 +1216,10 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         dynamic_attribute_overrides: HashMap::new(),
                     });
                 let pulse_res = run_pre_notify_instant_module_effects(
-                    ctx,
-                    &sys,
-                    sys_id,
-                    char_id,
-                    ship_id,
-                    module_id,
-                    &m_eff,
-                    &mod_type,
-                    &mod_state,
-                    is_overloaded,
-                    target_id,
-                    duration_s,
-                    &empty_kw,
-                )
-                .await;
+                    ctx, &sys, sys_id, char_id, ship_id, module_id, &m_eff, &mod_type, &mod_state, is_overloaded, target_id, duration_s, &empty_kw,
+                ).await;
                 if pulse_res.is_err() {
-                    deactivate_repeating_cycle_after_action(
-                        ctx,
-                        &sys,
-                        Some(char_id),
-                        ship_id,
-                        module_id,
-                        &effect_name,
-                    )
-                    .await;
+                    deactivate_repeating_cycle_after_action(ctx, &sys, Some(char_id), ship_id, module_id, &effect_name).await;
                 }
             }
         }
@@ -1262,11 +1241,56 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
         52 | 53 | 55 | 65 | 68 | 71 | 74 | 201 | 208 | 291 | 379 | 506..=512
             | 524 | 771 | 899 | 1245 | 1672 | 1674 | 1986 | 4060 | 4500 | 4805 | 4807
     ) {
+        let now_unix = ctx.now_unix();
+        let sys_sec = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.modified_system_securities.get(&sys_id).copied()
+        }).unwrap_or_else(|| ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0));
+        let trigger_lowsec_sentry = !(32_000_000..=33_000_000).contains(&sys_id)
+            && sys_sec > 0.0
+            && sys_sec < 0.45
+            && {
+                let (vcid_opt, is_mobile_or_jetcan) = ctx.db.with_snapshot(|snap| {
+                    let vcid = if snap.characters.contains_key(&target_id) {
+                        Some(target_id)
+                    } else {
+                        snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                            .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
+                    };
+                    let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
+                    let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
+                    let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
+                    (vcid, (it_tid == 23 && !anchored) || is_mobile)
+                });
+                if let Some(vcid) = vcid_opt.filter(|&v| v != char_id && !is_mobile_or_jetcan) {
+                    let v_suspect_or_crim = {
+                        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                        let st = cw.get_or_create(vcid);
+                        st.is_suspect(now_unix) || st.is_criminal(now_unix)
+                    };
+                    let has_le = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| rt.has_limited_engagement_with(vcid, char_id, now_unix));
+                    let is_legal = ctx.db.with_snapshot(|snap| {
+                        crate::services::combat_crimewatch::is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
+                    }) || v_suspect_or_crim || has_le;
+                    !is_legal
+                } else {
+                    false
+                }
+            };
         let is_pod = sys.get_ball_snapshot(target_id).await.ok().flatten().is_some_and(|(_, b)| b.type_id == 670)
             || ctx.db.with_snapshot(|s| s.items.get(&target_id).is_some_and(|i| i.type_id == 670));
         crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
             ctx, char_id, ship_id, sys_id, target_id, is_pod,
-        )
+        )?;
+        if trigger_lowsec_sentry {
+            if let Some((_, ab)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() {
+                if let Some(origin) = crate::services::security_mgr::nearest_sentry_gun_origin(ctx, sys_id, ab.position) {
+                    let _ = crate::services::combat_crimewatch::crimewatch_timers::step_sentry_gun_grid_aggression(
+                        ctx, sys_id, char_id, ship_id, origin, true,
+                    ).await;
+                }
+            }
+        }
+        Ok(())
     } else if matches!(group_id, 41 | 67 | 325 | 585 | 1697 | 1698 | 2018) {
         crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_remote_assistance(
             ctx, char_id, ship_id, sys_id, target_id,
@@ -1289,32 +1313,18 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     method: &str,
     target_id: i64,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
-    // 1. Target lock check
     let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
     if !locks.iter().any(|l| l.target_id == target_id && l.locked) {
-        return Err(BridgeRpcError {
-            code: "TargetNotLocked".into(),
-            message: format!("Target {target_id} is not locked"),
-        });
+        return Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} is not locked") });
     }
-
-    // 2. Cloak / tether check
     if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
         if cs.is_cloaked {
-            return Err(BridgeRpcError {
-                code: "Cloaked".into(),
-                message: "Cannot activate module while cloaked".into(),
-            });
+            return Err(BridgeRpcError { code: "Cloaked".into(), message: "Cannot activate module while cloaked".into() });
         }
         if cs.is_tethered {
-            return Err(BridgeRpcError {
-                code: "Tethered".into(),
-                message: "Cannot activate remote assistance module while tethered".into(),
-            });
+            return Err(BridgeRpcError { code: "Tethered".into(), message: "Cannot activate remote assistance module while tethered".into() });
         }
     }
-
-    // 3. Distance check (maxRange + falloff)
     let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
     let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
     let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
@@ -1324,38 +1334,22 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     let target_pos = ctx.db.with_snapshot(|s| s.structures.get(&target_id).map(|st| DVec3::from_array(st.position)));
     if let (Some(apos), Some(tpos)) = (attacker_pos, target_pos) {
         if apos.distance(tpos) > max_range {
-            return Err(BridgeRpcError {
-                code: "TargetOutOfRange".into(),
-                message: format!("Target {target_id} is out of module range"),
-            });
+            return Err(BridgeRpcError { code: "TargetOutOfRange".into(), message: format!("Target {target_id} is out of module range") });
         }
     }
-
-    // 4. Capacitor deduction check
     let cap_need = mod_state.get_attribute(attr_ids::CAPACITOR_NEED, &ctx.sde);
     if cap_need > 0.0 {
         let cs = sys.get_combat_state(ship_id).await.ok().flatten();
         let cur_cap = cs.as_ref().map(|c| c.capacitor).unwrap_or(0.0);
         if cur_cap < cap_need {
-            return Err(BridgeRpcError {
-                code: "NotEnoughCapacitor".into(),
-                message: "Not enough capacitor to activate module".into(),
-            });
+            return Err(BridgeRpcError { code: "NotEnoughCapacitor".into(), message: "Not enough capacitor to activate module".into() });
         }
         let _ = sys.set_capacitor(ship_id, cur_cap - cap_need).await;
     }
-
     let rep_hp = mod_type.default_attributes.get(&68).copied().unwrap_or(1_500.0);
     let (pct, enabled) = crate::services::sov_gameplay::apply_mercenary_den_shield_repair(ctx, sys_id, ship_id, target_id, rep_hp).await?;
     crate::services::notify_emitters_batch3_space::emit_module_activation_godma_notifications(
-        ctx,
-        char_id,
-        ship_id,
-        module_id,
-        m.type_id,
-        "shieldRepair",
-        5.0,
-        Some(target_id),
+        ctx, char_id, ship_id, module_id, m.type_id, "shieldRepair", 5.0, Some(target_id),
     );
     Ok(Some(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),

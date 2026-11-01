@@ -199,7 +199,8 @@ async fn test_b41_insurgency_laundering_roamer_drops_fob_and_war_hq_crates() {
     init_insurgency_campaign(&ctx, 7_702, FACTION_ANGEL_CARTEL, 500_003, rear_sys, vec![rear_sys, cmd_sys]);
     fast_forward_secs(&ctx, FORECASTING_DURATION_SECS + 10);
 
-    // Raise front_sys to Corruption Stage 3 & Suppression Stage 3 so named roamers spawn.
+    // Raise front_sys to Corruption Stage 3 & Suppression Stage 3 so named roamers can roll (seed 11 rolls < 0.35 on both draws).
+    ctx.mechanic_rng.set_seed(Some(11));
     assert_eq!(add_system_corruption(&ctx, gur_camp_id, front_sys, 600).1, 3);
     assert_eq!(add_system_suppression(&ctx, gur_camp_id, front_sys, 600).1, 3);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -333,6 +334,7 @@ async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() 
     for def_id in amb1.ore_defender_ids {
         kill_npc_with_turret_rpc(&ctx, &mut pir_pilots[0].2, front_sys, p0_sid, 220_001, def_id).await;
     }
+    let p0_bal0 = ctx.db.with_snapshot(|s| s.characters[&pir_pilots[0].0].balance);
     let corr0 = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp_id].corruption_points[&front_sys]);
     fast_forward_secs(&ctx, MINING_AMBUSH_RANSOM_SECS + 2);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -340,6 +342,7 @@ async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() 
     assert!(!sys_h.is_ball_scrambled_sync(amb1.rorqual_ball_id));
     assert!(matches!(sys_h.get_ball_snapshot(amb1.rorqual_ball_id).await.unwrap().unwrap().1.mode, MovementMode::Warp { .. }));
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp_id].corruption_points[&front_sys]), corr0 + 50);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&pir_pilots[0].0].balance), p0_bal0, "Ransom pays LP only, zero synthetic ISK");
     for (idx, (_, _, s)) in pir_pilots.iter_mut().enumerate() {
         assert_eq!(total_lp_via_rpc(&ctx, s).await - pir_lp0[idx], (MINING_AMBUSH_BASE_LP * 5) / 6);
     }
@@ -464,20 +467,27 @@ async fn test_b41_insurgency_outpost_raid_sizes_timers_defenders_bc_and_respawn(
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp_id].suppression_points[&front_sys]), 5);
 
-    // 3. Moderate Outpost Raid: Battleship rejected; Battlecruiser (24698 Drake) gets 1.25x speed (720s vs 900s) & 1.25x LP (33,750) + 1.5% (+15 pts).
+    // 3. Moderate Outpost Raid: Battleship rejected; Battlecruiser (24698 Drake) gets SDE dbuff 2544 (+20% BC skill bonus), 15-min (900s) capture, 52,500 LP + 1.5% (+15 pts).
     ctx.db.with_mut_snapshot(|s| s.items.get_mut(&101_300_002).unwrap().type_id = 638);
     let _ = sys_h.set_ball_position(101_300_002, OutpostRaidSize::Moderate.gate_position()).await;
     assert_eq!(rpc_call(&ctx, &mut s_pir, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_mod)]).await.unwrap_err().code, "ShipRestrictedForComplex");
 
     ctx.db.with_mut_snapshot(|s| s.items.get_mut(&101_300_002).unwrap().type_id = 24_698);
+    ctx.invalidate_ship_fitting(101_300_002);
+    let bc_bonus_outside = ctx.get_or_rebuild_ship_fitting(91_300_002, 101_300_002).unwrap().evaluated_context(&ctx.sde).ship.get_attribute(743, &ctx.sde);
     let lp_before_mod = total_lp_via_rpc(&ctx, &mut s_pir).await;
     rpc_call(&ctx, &mut s_pir, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(g_mod)]).await.expect("enter Moderate raid in Battlecruiser");
+    let bc_bonus_inside = ctx.get_or_rebuild_ship_fitting(91_300_002, 101_300_002).unwrap().evaluated_context(&ctx.sde).ship.get_attribute(743, &ctx.sde);
+    assert!((bc_bonus_inside - bc_bonus_outside * 1.20).abs() < 1e-6, "Moderate pocket applies SDE dbuff 2544 (+20% BC skill bonus): {bc_bonus_outside} -> {bc_bonus_inside}");
     let mordus_mod = ctx.db.with_snapshot(|s| load_ops_state(s).outpost_raids[&g_mod].mordus_defender_ball_id.unwrap());
     kill_npc_with_turret_rpc(&ctx, &mut s_pir, front_sys, 101_300_002, 230_001, mordus_mod).await;
     fast_forward_secs(&ctx, 725);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    assert!(!ctx.db.with_snapshot(|s| load_ops_state(s).outpost_raids[&g_mod].completed_on_cooldown), "Moderate capture takes full 900s (no 1.25x speed)");
+    fast_forward_secs(&ctx, 180);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.db.with_snapshot(|s| load_ops_state(s).outpost_raids[&g_mod].completed_on_cooldown));
-    assert_eq!(total_lp_via_rpc(&ctx, &mut s_pir).await - lp_before_mod, 33_750);
+    assert_eq!(total_lp_via_rpc(&ctx, &mut s_pir).await - lp_before_mod, 52_500);
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp_id].corruption_points[&front_sys]), 17);
 
     // 4. Static Large ADV Outpost Raid (Battleship 638): 15-min (900s) capture, 1.0% (+10 pts), and static 40-min (2,400s) respawn.
@@ -533,7 +543,10 @@ async fn test_b41_proving_grounds_fleet_queue_restrictions_boundary_timeout_and_
     assert_eq!(rpc_call(&ctx, &mut sessions[0], "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(ids[0].2), PyRep::Integer(fil_tid as i64)]).await.unwrap_err().code, "MustBeInSpace");
     set_pilot_location(&ctx, &mut sessions[0], jita, None);
 
-    ctx.db.with_mut_snapshot(|s| s.items.get_mut(&ids[0].1).unwrap().type_id = 606);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fleets.insert(501, FleetRecord { fleet_id: 501, boss_id: ids[0].0, members: vec![ids[0].0, ids[1].0], ..Default::default() });
+        s.items.get_mut(&ids[0].1).unwrap().type_id = 606;
+    });
     assert_eq!(rpc_call(&ctx, &mut sessions[0], "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(ids[0].2), PyRep::Integer(fil_tid as i64)]).await.unwrap_err().code, "InvalidShipForFilament");
     ctx.db.with_mut_snapshot(|s| s.items.get_mut(&ids[0].1).unwrap().type_id = 638);
 
@@ -625,8 +638,16 @@ async fn test_b41_proving_grounds_fleet_queue_restrictions_boundary_timeout_and_
         (m.active, m.winner_char_id, m.event_id, bal_after > bal_p0_before || items_after > items_p0_before)
     });
     assert!(!m_active && m_winner == Some(ids[0].0) && got_reward);
+    for &dead_cid in &[ids[2].0, ids[3].0] {
+        let dead_notifs = ctx.drain_notifications_for_char(dead_cid);
+        let sess_chg = dead_notifs.iter().find(|n| n.event == "OnSessionChanged").expect("pushed OnSessionChanged on arena pod respawn");
+        let chg = &sess_chg.args[1];
+        assert!(chg.dict_get("stationid").is_some() && chg.dict_get("solarsystemid2").is_some() && chg.dict_get("shipid").is_some());
+    }
+    let win_notifs = ctx.drain_notifications_for_char(ids[0].0);
+    assert!(win_notifs.iter().any(|n| n.event == "OnPVPFilamentsCharacterStatistics"), "pushed OnPVPFilamentsCharacterStatistics");
+    assert!(win_notifs.iter().any(|n| n.event == "OnPVPFilamentsLeaderboard"), "pushed OnPVPFilamentsLeaderboard");
 
-    ctx.sync_session(&mut sessions[0]);
     let stats_rep = rpc_call(&ctx, &mut sessions[0], "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(ev_id)]).await.unwrap();
     assert_eq!(stats_rep.dict_get("wins").and_then(PyRep::as_i64), Some(1));
     let exit_rep = rpc_call(&ctx, &mut sessions[0], "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70_000 + mid)]).await.expect("exit arena via end gate");

@@ -317,12 +317,18 @@ fn validate_pilot_ship_modules_and_implants(
     let max_meta = f64::from(spec.max_meta_level);
     let mut limited_count = 0_usize;
     for fit_it in snap.items.values() {
-        if fit_it.location_id != ship_id
-            || !matches!(fit_it.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171)
-        {
+        if fit_it.location_id != ship_id {
+            continue;
+        }
+        let is_fitted = matches!(fit_it.flag as u16, 11..=34 | 92..=99 | 125..=132 | 164..=171);
+        let is_cargo = fit_it.flag == eve_db::InventoryFlag::Cargo;
+        if !is_fitted && !is_cargo {
             continue;
         }
         if let Some(t) = sde.types.get(&fit_it.type_id) {
+            if is_cargo && t.category_id != 7 {
+                continue;
+            }
             let meta = t
                 .default_attributes
                 .get(&633)
@@ -333,7 +339,7 @@ fn validate_pilot_ship_modules_and_implants(
                 return Err(BridgeRpcError {
                     code: "InvalidModuleTierForFilament".into(),
                     message: format!(
-                        "Fitted module {} (meta {meta:.0}) exceeds Proving Grounds limit (<= {})",
+                        "Module {} (meta {meta:.0}) exceeds Proving Grounds limit (<= {})",
                         t.name, spec.max_meta_level
                     ),
                 });
@@ -342,18 +348,20 @@ fn validate_pilot_ship_modules_and_implants(
                 if sde.type_lists.get(&ban_lid).is_some_and(|tl| tl.contains(t)) {
                     return Err(BridgeRpcError {
                         code: "BannedModuleForFilament".into(),
-                        message: format!("Fitted module {} is banned in this Proving Grounds event", t.name),
+                        message: format!("Module {} is banned in this Proving Grounds event", t.name),
                     });
                 }
             }
-            if let Some(lim_lid) = spec.limited_modules_list_id {
-                if sde.type_lists.get(&lim_lid).is_some_and(|tl| tl.contains(t)) {
-                    limited_count += 1;
-                    if limited_count > spec.number_of_limited_modules.max(1) {
-                        return Err(BridgeRpcError {
-                            code: "InvalidModuleTierForFilament".into(),
-                            message: "Fitted modules exceed Proving Grounds limited-module cap".into(),
-                        });
+            if is_fitted {
+                if let Some(lim_lid) = spec.limited_modules_list_id {
+                    if sde.type_lists.get(&lim_lid).is_some_and(|tl| tl.contains(t)) {
+                        limited_count += 1;
+                        if limited_count > spec.number_of_limited_modules.max(1) {
+                            return Err(BridgeRpcError {
+                                code: "InvalidModuleTierForFilament".into(),
+                                message: "Fitted modules exceed Proving Grounds limited-module cap".into(),
+                            });
+                        }
                     }
                 }
             }
@@ -365,7 +373,7 @@ fn validate_pilot_ship_modules_and_implants(
         .cloned()
         .unwrap_or_default();
     for imp in snap.items.values() {
-        if (imp.location_id == pilot_id || imp.owner_id == pilot_id)
+        if imp.location_id == pilot_id
             && imp.flag == eve_db::InventoryFlag::Implant
             && !implant_type_ids.contains(&imp.type_id)
         {
@@ -796,12 +804,18 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let fleet_members_info: Vec<(i64, i64, u32)> = ctx.db.with_snapshot(|snap| {
+            let fleet_check: Result<Vec<(i64, i64, u32)>, BridgeRpcError> = ctx.db.with_snapshot(|snap| {
                 let Some(fl) = snap.fleets.values().find(|f| f.members.contains(&char_id)) else {
-                    return Vec::new();
+                    return Ok(Vec::new());
                 };
                 if fl.members.len() <= 1 {
-                    return Vec::new();
+                    return Ok(Vec::new());
+                }
+                if fl.boss_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "NotFleetBoss".into(),
+                        message: "Only the fleet boss may activate a Proving Grounds filament for a fleet".into(),
+                    });
                 }
                 let mut members = Vec::with_capacity(fl.members.len());
                 members.push((char_id, cur_ship_for_check, cur_sys_for_check));
@@ -817,8 +831,12 @@ pub async fn handle(
                         .unwrap_or((0, 0));
                     members.push((mcid, mship, msys));
                 }
-                members
+                Ok(members)
             });
+            let fleet_members_info = match fleet_check {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             for &(mcid, mship, msys) in &fleet_members_info {
                 if mcid == char_id {
                     continue;
@@ -836,16 +854,32 @@ pub async fn handle(
                 }
             }
             let sys_handle_origin = ctx.systems.get_or_spawn(cur_sys_for_check);
+            let caller_pos_vec = DVec3::from_array(caller_origin_pos);
             let mut party_origins: Vec<(i64, i64, [f64; 3])> = Vec::new();
             if fleet_members_info.is_empty() {
                 party_origins.push((char_id, cur_ship_for_check, caller_origin_pos));
             } else {
                 for &(mcid, mship, _) in &fleet_members_info {
-                    let pos = sys_handle_origin
-                        .get_ball_position_sync(mship)
-                        .map(|p| [p.x, p.y, p.z])
-                        .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&mship).copied()))
-                        .unwrap_or(caller_origin_pos);
+                    let pos_opt = if mcid == char_id {
+                        Some(caller_origin_pos)
+                    } else {
+                        sys_handle_origin
+                            .get_ball_position_sync(mship)
+                            .map(|p| [p.x, p.y, p.z])
+                            .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&mship).copied()))
+                    };
+                    let Some(pos) = pos_opt else {
+                        return Some(Err(BridgeRpcError {
+                            code: "FleetMemberNotInSystem".into(),
+                            message: "Fleet member ship position not found in space".into(),
+                        }));
+                    };
+                    if mcid != char_id && DVec3::from_array(pos).distance(caller_pos_vec) > 30_000.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "FleetMemberOutOfRange".into(),
+                            message: "All fleet members must be within 30 km of the filament activator".into(),
+                        }));
+                    }
                     party_origins.push((mcid, mship, pos));
                 }
             }
@@ -978,6 +1012,16 @@ pub async fn handle(
                     });
                 }
                 let match_spec = get_pvp_filament_match_spec(&ctx.sde, it_type_id);
+                if party_origins.len() < match_spec.fleet_size {
+                    return Err(BridgeRpcError {
+                        code: "FleetTooSmallForFilament".into(),
+                        message: format!(
+                            "Fleet size {} is smaller than required Proving Grounds team size {}",
+                            party_origins.len(),
+                            match_spec.fleet_size
+                        ),
+                    });
+                }
                 if party_origins.len() > match_spec.fleet_size {
                     return Err(BridgeRpcError {
                         code: "FleetTooLargeForFilament".into(),
@@ -1000,7 +1044,7 @@ pub async fn handle(
                 }
 
                 let total_required_pilots = (match_spec.fleet_size * match_spec.number_of_fleets).max(2);
-                let needed_others = total_required_pilots.saturating_sub(party_origins.len());
+                let needed_fleets = match_spec.number_of_fleets.max(2).saturating_sub(1);
 
                 if let Some(it) = snap.items.get_mut(&item_id) {
                     if it.quantity > 1 {
@@ -1010,47 +1054,68 @@ pub async fn handle(
                     }
                 }
 
-                let mut matched_opponents: Vec<(i64, u32, i64, u64)> = store
-                    .queue
-                    .iter()
-                    .filter_map(|(&cid, qe)| {
-                        if party_origins.iter().any(|&(pcid, _, _)| pcid == cid)
-                            || qe.type_id != it_type_id
-                        {
+                let mut ticket_groups: HashMap<i64, Vec<(i64, u32, i64, u64)>> = HashMap::new();
+                for (&cid, qe) in &store.queue {
+                    if party_origins.iter().any(|&(pcid, _, _)| pcid == cid) || qe.type_id != it_type_id {
+                        continue;
+                    }
+                    ticket_groups.entry(qe.item_id).or_default().push((
+                        cid,
+                        qe.solar_system_id,
+                        qe.location_id,
+                        qe.joined_unix,
+                    ));
+                }
+                let mut valid_tickets: Vec<(u64, i64, Vec<(i64, u32, i64, u64)>)> = ticket_groups
+                    .into_iter()
+                    .filter_map(|(ticket_id, mut members)| {
+                        if members.len() != match_spec.fleet_size {
                             return None;
                         }
-                        let opp_ch = snap.characters.get(&cid)?;
-                        if opp_ch.station_id.is_some()
-                            || opp_ch.structure_id.is_some()
-                            || opp_ch.active_ship_id <= 0
-                        {
+                        let all_ready = members.iter().all(|&(cid, _, _, _)| {
+                            let Some(opp_ch) = snap.characters.get(&cid) else {
+                                return false;
+                            };
+                            if opp_ch.station_id.is_some()
+                                || opp_ch.structure_id.is_some()
+                                || opp_ch.active_ship_id <= 0
+                                || !ready_opponents.contains(&cid)
+                            {
+                                return false;
+                            }
+                            validate_pilot_ship_modules_and_implants(
+                                &ctx.sde,
+                                snap,
+                                cid,
+                                opp_ch.active_ship_id,
+                                it_type_id,
+                                &match_spec,
+                            )
+                            .is_ok()
+                        });
+                        if !all_ready {
                             return None;
                         }
-                        let opp_ship_ty = snap
-                            .items
-                            .get(&opp_ch.active_ship_id)
-                            .map(|i| i.type_id)
-                            .unwrap_or(0);
-                        if !is_ship_allowed_for_pvp_filament(&ctx.sde, it_type_id, opp_ship_ty) {
-                            return None;
-                        }
-                        if !ready_opponents.contains(&cid) {
-                            return None;
-                        }
-                        Some((cid, qe.solar_system_id, qe.location_id, qe.joined_unix))
+                        members.sort_by_key(|&(cid, _, _, joined)| (joined, cid));
+                        let min_joined = members.first().map_or(0, |m| m.3);
+                        Some((min_joined, ticket_id, members))
                     })
                     .collect();
-                matched_opponents.sort_by_key(|&(cid, _, _, joined)| (joined, cid));
+                valid_tickets.sort_by_key(|&(joined, tid, _)| (joined, tid));
 
                 for &(pcid, _, ppos) in &party_origins {
                     store.origin_positions.insert(pcid, ppos);
                     store.stats.entry(pcid).or_insert((0, 0, 0, 0, 0.0));
                 }
-                let match_data = if matched_opponents.len() >= needed_others {
-                    matched_opponents.truncate(needed_others);
-                    for &(opp_id, _, _, _) in &matched_opponents {
-                        if let Some(qe) = store.queue.remove(&opp_id) {
-                            store.queue_refund_targets.remove(&qe.item_id);
+                let match_data = if valid_tickets.len() >= needed_fleets {
+                    valid_tickets.truncate(needed_fleets);
+                    let mut matched_opponents: Vec<(i64, u32, i64, u64)> =
+                        Vec::with_capacity(needed_fleets * match_spec.fleet_size);
+                    for (_, ticket_id, members) in valid_tickets {
+                        store.queue_refund_targets.remove(&ticket_id);
+                        for m in members {
+                            store.queue.remove(&m.0);
+                            matched_opponents.push(m);
                         }
                     }
                     store.next_match_id += 1;
@@ -1154,180 +1219,91 @@ pub async fn handle(
                 Ok(Some((mid, end_gate_id, arena_offset, teams, participants))) => {
                     let char_ids: Vec<i64> = participants.iter().map(|(c, _, _)| *c).collect();
                     for &cid in &char_ids {
-                        crate::services::notify_emitters_batch3_space::emit_pvp_match_found_and_expiry(
-                            ctx,
-                            cid,
-                            ctx.now_unix().saturating_add(900),
-                        );
+                        crate::services::notify_emitters_batch3_space::emit_pvp_match_found_and_expiry(ctx, cid, ctx.now_unix().saturating_add(900));
                     }
-                    spawn_matched_arena_instance(
-                        ctx,
-                        session,
-                        mid,
-                        end_gate_id,
-                        arena_offset,
-                        teams,
-                        participants,
-                    )
-                    .await;
+                    spawn_matched_arena_instance(ctx, session, mid, end_gate_id, arena_offset, teams, participants).await;
                     Some(Ok(PyRep::Integer(5)))
                 }
                 Ok(None) => Some(Ok(PyRep::Integer(30))),
                 Err(e) => {
-                    crate::services::notify_emitters_batch3_space::emit_pvp_matchmaking_failure(
-                        ctx,
-                        char_id,
-                        1,
-                    );
+                    crate::services::notify_emitters_batch3_space::emit_pvp_matchmaking_failure(ctx, char_id, 1);
                     Some(Err(e))
                 }
             }
         }
-
         ("pvpFilamentMgr", "LeavePVPQueue") => {
             let item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
                 let Some(entry) = store.queue.remove(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "NotInPvpQueue".into(),
-                        message: "Character is not queued for PvP".into(),
-                    });
+                    return Err(BridgeRpcError { code: "NotInPvpQueue".into(), message: "Character is not queued for PvP".into() });
                 };
                 if let Some(expected_id) = item_id_arg {
                     if entry.item_id != expected_id {
                         store.queue.insert(char_id, entry);
                         save_pvp_store(snap, &store);
-                        return Err(BridgeRpcError {
-                            code: "FilamentNotFound".into(),
-                            message: "Filament item does not match queued filament".into(),
-                        });
+                        return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: "Filament item does not match queued filament".into() });
                     }
                 }
                 if entry.item_id > 0 {
                     store.queue.retain(|_, qe| qe.item_id != entry.item_id);
                 }
-                let (refund_owner, refund_loc) = store
-                    .queue_refund_targets
-                    .remove(&entry.item_id)
-                    .unwrap_or((char_id, entry.location_id));
-                if let Some(it) = snap
-                    .items
-                    .get_mut(&entry.item_id)
-                    .filter(|it| it.owner_id == refund_owner && it.type_id == entry.type_id)
-                {
+                let (refund_owner, refund_loc) = store.queue_refund_targets.remove(&entry.item_id).unwrap_or((char_id, entry.location_id));
+                if let Some(it) = snap.items.get_mut(&entry.item_id).filter(|it| it.owner_id == refund_owner && it.type_id == entry.type_id) {
                     it.quantity += 1;
                 } else {
                     snap.next_entity_id += 1;
                     let new_iid = snap.next_entity_id;
-                    snap.items.insert(
-                        new_iid,
-                        eve_db::InventoryItemRecord {
-                            item_id: new_iid,
-                            type_id: entry.type_id,
-                            owner_id: refund_owner,
-                            location_id: refund_loc,
-                            flag: eve_db::InventoryFlag::from_u16(entry.flag),
-                            quantity: 1,
-                            singleton: false,
-                            ..Default::default()
-                        },
-                    );
+                    snap.items.insert(new_iid, eve_db::InventoryItemRecord {
+                        item_id: new_iid, type_id: entry.type_id, owner_id: refund_owner, location_id: refund_loc,
+                        flag: eve_db::InventoryFlag::from_u16(entry.flag), quantity: 1, singleton: false, ..Default::default()
+                    });
                 }
                 save_pvp_store(snap, &store);
                 Ok(())
             });
-            match res {
-                Ok(()) => Some(Ok(PyRep::None)),
-                Err(e) => Some(Err(e)),
-            }
+            match res { Ok(()) => Some(Ok(PyRep::None)), Err(e) => Some(Err(e)) }
         }
-
         ("pvpFilamentMgr", "GetAllEvents") => {
             let events_rep = with_pvp_store_events(ctx, |store| {
-                let dict = store
-                    .events
-                    .iter()
-                    .map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e)))
-                    .collect();
-                PyRep::Dict(dict)
+                PyRep::Dict(store.events.iter().map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect())
             });
             Some(Ok(events_rep))
         }
-
         ("pvpFilamentMgr", "GetActiveEvents") => {
             let now_i64 = now_unix as i64;
             let active_rep = with_pvp_store_events(ctx, |store| {
-                let dict = store
-                    .events
-                    .iter()
-                    .filter(|e| e.start_unix <= now_i64 && now_i64 <= e.end_unix)
-                    .map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e)))
-                    .collect();
-                PyRep::Dict(dict)
+                PyRep::Dict(store.events.iter().filter(|e| e.start_unix <= now_i64 && now_i64 <= e.end_unix).map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect())
             });
             Some(Ok(active_rep))
         }
-
         ("pvpFilamentMgr", "GetMostRecentEvent") => {
             let now_i64 = now_unix as i64;
             let recent_rep = with_pvp_store_events(ctx, |store| {
-                store
-                    .events
-                    .iter()
-                    .filter(|e| e.start_unix <= now_i64)
-                    .max_by_key(|e| (e.end_unix, e.start_unix, e.event_id))
-                    .or_else(|| store.events.iter().max_by_key(|e| (e.end_unix, e.event_id)))
-                    .map(event_to_keyval)
-                    .unwrap_or(PyRep::None)
+                store.events.iter().filter(|e| e.start_unix <= now_i64).max_by_key(|e| (e.end_unix, e.start_unix, e.event_id))
+                    .or_else(|| store.events.iter().max_by_key(|e| (e.end_unix, e.event_id))).map(event_to_keyval).unwrap_or(PyRep::None)
             });
             Some(Ok(recent_rep))
         }
-
         ("pvpFilamentMgr", "GetNextEventDate") => {
             let now_i64 = now_unix as i64;
-            let next_date = with_pvp_store_events(ctx, |store| {
-                store
-                    .events
-                    .iter()
-                    .filter(|e| e.start_unix > now_i64)
-                    .map(|e| e.start_unix)
-                    .min()
-            });
-            let rep = match next_date {
-                Some(ts) => PyRep::Integer(unix_to_filetime(ts)),
-                None => PyRep::None,
-            };
-            Some(Ok(rep))
+            let next_date = with_pvp_store_events(ctx, |store| store.events.iter().filter(|e| e.start_unix > now_i64).map(|e| e.start_unix).min());
+            Some(Ok(next_date.map(|ts| PyRep::Integer(unix_to_filetime(ts))).unwrap_or(PyRep::None)))
         }
-
         ("pvpFilamentMgr", "GetLeaderboard") => {
             let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(171);
-            let entries = ctx.db.with_snapshot(|snap| {
-                let store = load_pvp_store(snap);
-                build_leaderboard_rows_for_event(&store, event_id)
-            });
+            let entries = ctx.db.with_snapshot(|snap| build_leaderboard_rows_for_event(&load_pvp_store(snap), event_id));
             Some(Ok(PyRep::List(entries)))
         }
-
         ("pvpFilamentMgr", "GetCharacterStatistics") => {
             let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(171);
-            let target_cid = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .filter(|&c| c > 0)
-                .unwrap_or(char_id);
-            let stats = ctx.db.with_snapshot(|snap| {
-                let store = load_pvp_store(snap);
-                build_character_statistics_for_event(&store, event_id, target_cid)
-            });
+            let target_cid = args.get(1).and_then(|a| a.as_i64()).filter(|&c| c > 0).unwrap_or(char_id);
+            let stats = ctx.db.with_snapshot(|snap| build_character_statistics_for_event(&load_pvp_store(snap), event_id, target_cid));
             Some(Ok(stats))
         }
-
         ("pvpFilamentMgr", "AbyssalPVPEndGateActivation") => {
             Some(handle_pvp_end_gate_activation(ctx, session, char_id, args, now_unix).await)
         }
-
         _ => None,
     }
 }

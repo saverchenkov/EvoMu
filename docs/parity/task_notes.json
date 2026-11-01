@@ -273,7 +273,7 @@
   },
   "Q-7": {
     "assessment": "PARTIAL",
-    "note": "Quasar Space, Celestials, Navigation, Bubble Presence, and Insurgency handlers wired; feat:fw.corruption-suppression-effects remains OPEN pending client stage/site tables."
+    "note": "Quasar Space, Celestials, Navigation, Bubble Presence, and Insurgency handlers wired; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending."
   },
   "Q-8": {
     "assessment": "PARTIAL",

@@ -144,7 +144,8 @@ impl ServerContext {
         let systems = Arc::new(
             SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
                 .with_mechanic_rng(Arc::clone(&mechanic_rng))
-                .with_tactical_state(Arc::clone(&tactical_state)),
+                .with_tactical_state(Arc::clone(&tactical_state))
+                .with_notifications(Arc::clone(&pending_notifications), notify_tx.clone()),
         );
         let combat_ephemeral = Arc::new(RwLock::new(crate::services::combat_crimewatch::CombatRuntimeState::default()));
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
@@ -1110,9 +1111,23 @@ impl ServerContext {
                     && e.booster_side_effects == active_booster_side_effects
             });
         if let Some(mut existing) = cached {
+            let pocket_dbuffs = crate::services::insurgency_complex_ops::active_insurgency_pocket_dbuffs(
+                self,
+                char_id,
+                ship_id,
+                existing.ship.type_id,
+            );
+            let dbuff_id = Some(crate::services::insurgency_complex_ops::MODERATE_OUTPOST_BC_SKILL_DBUFF_ID);
+            let had_pocket_dbuff = existing.gang_bursts.iter().any(|b| b.dbuff_id == dbuff_id);
+            let want_pocket_dbuff = !pocket_dbuffs.is_empty();
             let needs_recalc = existing.character_skills != skill_levels
                 || existing.implants != active_implants
-                || existing.projected_ewar != active_projected;
+                || existing.projected_ewar != active_projected
+                || had_pocket_dbuff != want_pocket_dbuff;
+            if had_pocket_dbuff != want_pocket_dbuff {
+                existing.gang_bursts.retain(|b| b.dbuff_id != dbuff_id);
+                existing.gang_bursts.extend(pocket_dbuffs);
+            }
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
             crate::services::combat_crimewatch::with_mut_combat_ephemeral(self, |rt| {
@@ -1130,6 +1145,10 @@ impl ServerContext {
             if needs_recalc {
                 existing.projected_ewar = active_projected;
                 existing.recalculate_stats(&self.sde);
+                self.ship_fittings
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(ship_id, existing.clone());
             }
             return Ok(existing);
         }
@@ -1148,6 +1167,12 @@ impl ServerContext {
             .with_boosters(active_boosters);
         fit.booster_side_effects = active_booster_side_effects;
         fit.projected_ewar = active_projected;
+        fit.gang_bursts = crate::services::insurgency_complex_ops::active_insurgency_pocket_dbuffs(
+            self,
+            char_id,
+            ship_id,
+            ship_item.type_id,
+        );
         for (&attr_id, &val) in &ship_item.dynamic_attributes {
             fit.ship.base_attributes.insert(attr_id, val);
         }

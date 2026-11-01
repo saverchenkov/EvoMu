@@ -56,15 +56,10 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
     let cs = ctx.build_ship_combat_state(char_id, ship_id, 621);
     let _ = jita_handle.spawn_ball_with_combat(ship_ball, cs).await;
 
-    // 1. feat:navigation.filament-pvp: Hull restriction, 2v2 team size, match, hazard isolation, leaderboard, and exit
-    // Negative test (R-PVP-FORMAT-01): Cruiser (621) rejected for 72984 ("2v2 Battleships Proving Filament")
-    let bad_hull_err = ctx.dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id), PyRep::Integer(72984)], &kw, None)
-        .await.expect_err("Cruiser must be rejected for 2v2 Battleships Proving Filament");
-    assert_eq!(bad_hull_err.code, "InvalidShipForFilament");
-
     let (char_id2, char_id3, char_id4) = (90_000_002_i64, 90_000_003_i64, 90_000_004_i64);
     let (ship_id2, ship_id3, ship_id4) = (100_000_035_i64, 100_000_038_i64, 100_000_039_i64);
     let (pvp_fil_id2, pvp_fil_id3, pvp_fil_id4) = (100_000_036_i64, 100_000_041_i64, 100_000_042_i64);
+
     let mut sess2 = SessionState::new(883_203);
     common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
     ctx.dispatch_rpc(&mut sess2, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id2)], &kw, None)
@@ -72,7 +67,6 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
 
     ctx.db.with_mut_snapshot(|snap| {
         let tmpl = snap.characters.get(&char_id).unwrap().clone();
-        snap.items.get_mut(&ship_id).unwrap().type_id = 638; // Raven Battleship
         for (cid, sid, fid) in [(char_id2, ship_id2, pvp_fil_id2), (char_id3, ship_id3, pvp_fil_id3), (char_id4, ship_id4, pvp_fil_id4)] {
             let ch = snap.characters.entry(cid).or_insert_with(|| { let mut r = tmpl.clone(); r.character_id = cid; r });
             ch.solar_system_id = jita_sys; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = sid;
@@ -85,11 +79,13 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
                 flag: InventoryFlag::Cargo, quantity: 5, singleton: false, ..Default::default()
             });
         }
+        snap.fleets.insert(77_001, eve_db::FleetRecord { fleet_id: 77_001, boss_id: char_id, members: vec![char_id, char_id2], ..Default::default() });
+        snap.fleets.insert(77_002, eve_db::FleetRecord { fleet_id: 77_002, boss_id: char_id3, members: vec![char_id3, char_id4], ..Default::default() });
     });
     sess2.solar_system_id = Some(jita_sys); sess2.station_id = None; sess2.structure_id = None; sess2.ship_id = Some(ship_id2);
     let mut sess3 = sess.clone(); sess3.session_id = 883_206; sess3.user_id = Some(1003); sess3.character_id = Some(char_id3); sess3.solar_system_id = Some(jita_sys); sess3.ship_id = Some(ship_id3);
     let mut sess4 = sess.clone(); sess4.session_id = 883_207; sess4.user_id = Some(1004); sess4.character_id = Some(char_id4); sess4.solar_system_id = Some(jita_sys); sess4.ship_id = Some(ship_id4);
-    for (cid, sid, x_off) in [(char_id2, ship_id2, 60_000_000.0), (char_id3, ship_id3, 70_000_000.0), (char_id4, ship_id4, 80_000_000.0)] {
+    for (cid, sid, x_off) in [(char_id2, ship_id2, 50_000_500.0), (char_id3, ship_id3, 70_000_000.0), (char_id4, ship_id4, 70_000_500.0)] {
         let b = eve_destiny::Ball {
             id: sid, type_id: 638, position: glam::DVec3::new(x_off, 0.0, 0.0),
             velocity: glam::DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 100_000_000.0,
@@ -99,25 +95,27 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
         let _ = jita_handle.spawn_ball_with_combat(b, cs_b).await;
     }
 
+    // 1. feat:navigation.filament-pvp: Hull restriction, 2v2 team size, match, hazard isolation, leaderboard, and exit
+    // Negative test (R-PVP-FORMAT-01): Cruiser (621) rejected for 72984 ("2v2 Battleships Proving Filament")
+    let bad_hull_err = ctx.dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id), PyRep::Integer(72984)], &kw, None)
+        .await.expect_err("Cruiser must be rejected for 2v2 Battleships Proving Filament");
+    assert_eq!(bad_hull_err.code, "InvalidShipForFilament");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = 638; // Raven Battleship
+    });
+
     let join_rep1 = ctx.dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id), PyRep::Integer(72984)], &kw, None)
-        .await.expect("pvpFilamentMgr.JoinPVPQueue pilot 1");
-    assert_eq!(join_rep1, PyRep::Integer(30), "First pilot queued receives 30s countdown / queue status");
+        .await.expect("pvpFilamentMgr.JoinPVPQueue fleet 1");
+    assert_eq!(join_rep1, PyRep::Integer(30), "First 2-pilot fleet queued receives 30s countdown / queue status");
 
-    // Negative/queue test (R-PVP-FORMAT-01): 2nd and 3rd pilots do NOT form a 2v2 match yet (requires 4 pilots)
-    let join_rep2 = ctx.dispatch_rpc(&mut sess2, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id2), PyRep::Integer(72984)], &kw, None)
-        .await.expect("pvpFilamentMgr.JoinPVPQueue pilot 2");
-    assert_eq!(join_rep2, PyRep::Integer(30), "Second pilot stays queued until 4 pilots are ready for 2v2");
-    let join_rep3 = ctx.dispatch_rpc(&mut sess3, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id3), PyRep::Integer(72984)], &kw, None)
-        .await.expect("pvpFilamentMgr.JoinPVPQueue pilot 3");
-    assert_eq!(join_rep3, PyRep::Integer(30), "Third pilot stays queued until 4 pilots are ready for 2v2");
-
-    // 4th pilot joins -> 2v2 match forms with team_a (2 pilots) and team_b (2 pilots)
-    let join_rep4 = ctx.dispatch_rpc(&mut sess4, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id4), PyRep::Integer(72984)], &kw, None)
+    // 2nd 2-pilot fleet joins -> 2v2 match forms with team_a (2 pilots) and team_b (2 pilots)
+    let join_rep4 = ctx.dispatch_rpc(&mut sess3, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(pvp_fil_id3), PyRep::Integer(72984)], &kw, None)
         .await.expect("pvpFilamentMgr.JoinPVPQueue pilot 4");
     assert_eq!(join_rep4, PyRep::Integer(5), "Fourth pilot forms 2v2 match: 5s match warp initiated");
     let p1_sys = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().solar_system_id);
     assert_eq!(p1_sys, 32000001, "Pilot 1 moved to arena 32000001 in DB");
     sess.solar_system_id = Some(32000001);
+    ctx.sync_session(&mut sess4);
     assert_eq!(sess4.solar_system_id, Some(32000001), "Pilot 4 moved to arena 32000001");
 
     // R-ABY-LEAK-01: Verify real Tachyon Cloud (80876) in 32000001 does NOT affect PvP arena ships in 32000001

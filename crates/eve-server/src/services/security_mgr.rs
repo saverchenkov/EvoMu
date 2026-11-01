@@ -21,9 +21,10 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::combat_crimewatch::with_combat_runtime;
+use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use glam::DVec3;
 use std::collections::HashMap;
 
 /// Returns true if `faction_id` is Guristas (`500010`) or Angel Cartel (`500011`).
@@ -87,10 +88,9 @@ pub fn handle_security_mgr_call(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match ("securityMgr", method) {
         ("securityMgr", "get_modified_systems") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
             let sec_map = compute_modified_systems(ctx);
             let entries = sec_map
                 .into_iter()
@@ -144,7 +144,14 @@ pub fn sync_corruption_security_status_change(
     if was_lawless == is_lawless {
         return;
     }
-    let has_override = with_combat_runtime(ctx, |rt| {
+    let has_override = with_mut_combat_runtime(ctx, |rt| {
+        if is_lawless {
+            for ((sid, _), st) in &mut rt.sentry_gun_aggression {
+                if *sid == sys_id {
+                    st.active_on_grid = false;
+                }
+            }
+        }
         rt.modified_system_securities.contains_key(&sys_id)
     });
     if has_override {
@@ -209,7 +216,7 @@ pub fn insurgency_pvp_loot_drop_threshold(
         .get(&sys_id)
         .is_some_and(|s| s.region_id == 10_000_070);
     let base = if is_pochven { 0.60 } else { 0.50 };
-    if is_self_destruct || attacker_char_id <= 0 || attacker_char_id == victim_char_id {
+    if is_self_destruct || attacker_char_id <= 0 || victim_char_id <= 0 || attacker_char_id == victim_char_id {
         return base;
     }
     let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
@@ -334,6 +341,153 @@ pub fn apply_counter_insurgency_sentry_ewar(
     }
 }
 
+/// Resolves an authentic SDE dungeon template name from `sde.dungeons` for Pirate Insurgency archetypes.
+pub fn sde_insurgency_dungeon_name(
+    sde: &eve_sde::SdeRegistry,
+    archetype_ids: &[u32],
+    faction_id: u32,
+    fallback: &str,
+) -> String {
+    let mut matching: Vec<&eve_sde::DungeonTemplate> = sde
+        .dungeons
+        .values()
+        .filter(|d| d.archetype_id.is_some_and(|a| archetype_ids.contains(&a)))
+        .collect();
+    matching.sort_by_key(|d| (if d.faction_id == Some(faction_id) { 0u8 } else { 1u8 }, d.dungeon_id));
+    matching
+        .first()
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Synchronizes stage-gated Pirate Insurgency dungeon & Ice Heist instances in `snap` for `sys_id`.
+pub fn sync_stage_gated_insurgency_sites_in_snap(
+    sde: &eve_sde::SdeRegistry,
+    snap: &mut eve_db::WorldStateSnapshot,
+    sys_id: u32,
+    now: u64,
+) {
+    let covering: Vec<(i64, u32)> = snap
+        .insurgency_runtime
+        .campaigns
+        .values()
+        .filter(|c| c.systems.contains(&sys_id) && now >= c.forecasting_end_unix && now < c.winddown_end_unix)
+        .map(|c| (c.pirate_faction_id, c.fob_solar_system_id))
+        .collect();
+
+    if let Some(&(pirate_fac, fob_sys)) = covering.first() {
+        let c_st = {
+            let st = snap.system_states.entry(sys_id).or_default();
+            st.solar_system_id = sys_id;
+            if st.fw_complex_position.is_none() {
+                // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
+                st.fw_complex_position = Some([0.0, 0.0, 0.0]);
+            }
+            st.insurgency_corruption_stage
+        };
+        let p_u32 = pirate_fac as u32;
+        let mut ensure_site = |stype: &str, sname: &dyn Fn() -> String, rew: f64, target_sys: u32| {
+            if !snap.insurgency_runtime.insurgency_instances.iter().any(|s| {
+                s.solar_system_id == target_sys && s.site_type == stype && !s.completed
+            }) {
+                let sid = snap
+                    .insurgency_runtime
+                    .insurgency_instances
+                    .iter()
+                    .filter(|s| s.instance_id < 1_800_000_000)
+                    .map(|s| s.instance_id)
+                    .max()
+                    .unwrap_or(960_000)
+                    .max(960_000)
+                    + 1;
+                snap.insurgency_runtime
+                    .insurgency_instances
+                    .push(eve_db::PersistedInsurgencySiteRecord {
+                        instance_id: sid,
+                        solar_system_id: target_sys,
+                        site_type: stype.into(),
+                        name: sname(),
+                        // DERIVED (synthetic): baseline corruption/suppression point reward for site completion.
+                        corruption_reward: rew,
+                        completed: false,
+                    });
+            }
+        };
+
+        ensure_site(
+            "CorporateOutpostRaid",
+            &|| sde_insurgency_dungeon_name(sde, &[75, 76, 77, 78], p_u32, "Corporate Outpost Raid"),
+            100.0,
+            sys_id,
+        );
+        if c_st >= 1 {
+            ensure_site(
+                "MiningOpAmbush",
+                &|| sde_insurgency_dungeon_name(sde, &[79], p_u32, "Mining Op Ambush"),
+                200.0,
+                sys_id,
+            );
+        }
+        if (3..=4).contains(&c_st) {
+            ensure_site(
+                "IceRefineryHeist",
+                &|| sde_insurgency_dungeon_name(sde, &[74], p_u32, "Ice Refinery Heist"),
+                300.0,
+                sys_id,
+            );
+            if !snap
+                .insurgency_runtime
+                .ice_heist_instances
+                .iter()
+                .any(|h| h.solar_system_id == sys_id && !h.completed)
+            {
+                let hid = snap
+                    .insurgency_runtime
+                    .ice_heist_instances
+                    .iter()
+                    .map(|h| h.instance_id)
+                    .max()
+                    .unwrap_or(860_000)
+                    .max(860_000)
+                    + 1;
+                snap.insurgency_runtime
+                    .ice_heist_instances
+                    .push(eve_db::PersistedIceHeistRecord {
+                        instance_id: hid,
+                        solar_system_id: sys_id,
+                        pirate_tankers_saved: 0,
+                        empire_tankers_saved: 0,
+                        completed: false,
+                    });
+            }
+        }
+        if covering.iter().any(|&(_, fsys)| fsys == sys_id) || fob_sys == sys_id {
+            ensure_site(
+                "PirateLaunderingFacility",
+                &|| sde_insurgency_dungeon_name(sde, &[72], p_u32, "Pirate Laundering Facility"),
+                150.0,
+                sys_id,
+            );
+        }
+
+        let war_hqs: &[(u32, u32)] = if pirate_fac == crate::services::insurgency_services::FACTION_ANGEL_CARTEL {
+            &[(30_002_974, 500_003), (30_002_055, 500_002)]
+        } else {
+            &[(30_045_324, 500_001), (30_003_788, 500_004)]
+        };
+        for &(hq_sys, emp_fac) in war_hqs {
+            ensure_site(
+                "CounterInsurgencyOutpost",
+                &|| sde_insurgency_dungeon_name(sde, &[73], emp_fac, "Counter-Insurgency Outpost"),
+                100.0,
+                hq_sys,
+            );
+        }
+    }
+
+    prune_ineligible_insurgency_sites_in_snap(snap, sys_id);
+}
+
 /// Prunes stage-gated insurgency sites in `snap` when system corruption stages drop (`docs/eve-wiki/Insurgency.md:77-83`).
 pub fn prune_ineligible_insurgency_sites_in_snap(snap: &mut eve_db::WorldStateSnapshot, sys_id: u32) {
     let c_st = snap.system_states.get(&sys_id).map_or(0, |st| st.insurgency_corruption_stage);
@@ -355,4 +509,31 @@ pub fn prune_ineligible_insurgency_sites_in_snap(snap: &mut eve_db::WorldStateSn
             _ => true,
         }
     });
+    if !(3..=4).contains(&c_st) {
+        snap.insurgency_runtime
+            .ice_heist_instances
+            .retain(|h| h.solar_system_id != sys_id || h.instance_id < 860_001);
+    }
+}
+
+/// Returns the nearest SDE stargate (`sde.jumps`) or NPC station (`sde.stations`) position within `500 km` sentry range.
+pub fn nearest_sentry_gun_origin(ctx: &ServerContext, sys_id: u32, pos: DVec3) -> Option<DVec3> {
+    let gates = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| j.from_solar_system_id == sys_id)
+        .map(|j| (j.stargate_id, j.position));
+    let stations = ctx
+        .sde
+        .stations
+        .values()
+        .filter(|s| s.solar_system_id == sys_id)
+        .map(|s| (s.station_id, s.position));
+    gates
+        .chain(stations)
+        .map(|(id, p)| (p.distance(pos), id, p))
+        .filter(|&(dist, _, _)| dist <= 500_000.0)
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, _, p)| p)
 }

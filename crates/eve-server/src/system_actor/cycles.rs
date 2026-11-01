@@ -1240,6 +1240,7 @@ impl SystemHandle {
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
             asteroids, asteroid_templates, sde_opt, db_opt, mechanic_rng_opt,
             sim_elapsed_secs, pending_cycle_actions, tactical_state,
+            pending_notifications_opt, notify_tx_opt,
         } = &mut *st;
         if dt > 0.0 && dt.is_finite() {
             *sim_elapsed_secs += dt;
@@ -1265,6 +1266,7 @@ impl SystemHandle {
         );
         let pg_dead = crate::services::pvp_filament_arena::step_proving_grounds_arena_hazards_in_ballpark(
             &mut bp, sde_opt.as_deref(), db_opt.as_ref(), self.solar_system_id,
+            pending_notifications_opt.as_deref(), notify_tx_opt.as_ref(),
         );
         let step_now_unix = db_opt.as_ref().map(|db| db.clock().now_unix_secs()).unwrap_or(0);
         let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();

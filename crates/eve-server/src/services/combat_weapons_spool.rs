@@ -283,6 +283,13 @@ pub async fn handle_ship_or_npc_destruction(
         (c, a, imps)
     });
 
+    let drop_threshold = crate::services::security_mgr::insurgency_pvp_loot_drop_threshold(
+        ctx,
+        sys_id,
+        attacker_char_id,
+        victim_char_opt.unwrap_or(0),
+        false,
+    );
     let mut dropped_entries = Vec::new();
     let mut destroyed_entries = Vec::new();
     let mut escape_frigate_id: Option<i64> = None;
@@ -417,7 +424,6 @@ pub async fn handle_ship_or_npc_destruction(
             .collect();
         contained.sort_by_key(|i| i.item_id);
 
-        let drop_threshold = if ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070) { 0.60 } else { 0.50 };
         let hull_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(if is_pod_target { 1_000.0 } else { 250_000.0 });
         let mut items_isk = 0.0;
         let mut fw_items_isk = 0.0;
@@ -801,7 +807,7 @@ pub async fn handle_ship_or_npc_destruction(
         if bounty > 0.0 {
             let supp_mult = crate::services::security_mgr::insurgency_suppression_bounty_and_sec_multiplier(ctx, sys_id);
             let eff_bounty = bounty * supp_mult;
-            with_mut_combat_runtime(ctx, |rt| {
+            let bounty_newly_credited = with_mut_combat_runtime(ctx, |rt| {
                 let _ = rt.destroyed_npc_cache.remove(&target_ball_id);
                 if attacker_char_id > 0 && rt.bounty_credited_balls.insert(target_ball_id) {
                     rt.pending_bounty_tick_started_unix
@@ -813,6 +819,9 @@ pub async fn handle_ship_or_npc_destruction(
                     rt.bounty_tick_next_flush_unix
                         .entry((sys_id, attacker_char_id))
                         .or_insert_with(|| now_unix.saturating_add(1_200));
+                    true
+                } else {
+                    false
                 }
             });
             let old_sec = ctx.db.with_snapshot(|snap| {
@@ -821,7 +830,7 @@ pub async fn handle_ship_or_npc_destruction(
                     .map(|c| c.security_status)
                     .unwrap_or(0.0)
             });
-            if old_sec < 5.0 {
+            if bounty_newly_credited && old_sec < 5.0 {
                 let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, bounty) * supp_mult;
                 let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
                 ctx.db.with_mut_snapshot(|snap| {

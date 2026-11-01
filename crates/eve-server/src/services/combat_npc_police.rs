@@ -42,6 +42,7 @@ pub fn is_outlaw_ship_docking_refused(
         .unwrap_or(0.0);
     if sys_sec < 0.45
         || is_concord_suppressed_in_system(ctx, solar_system_id)
+        || is_faction_police_suppressed(ctx, solar_system_id)
         || is_sentry_disabled_by_corruption(ctx, solar_system_id)
     {
         return false;

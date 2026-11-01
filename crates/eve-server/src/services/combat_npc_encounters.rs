@@ -343,6 +343,8 @@ pub async fn handle_npc_destroyed_in_space(
             npc.archetype == "Drifter" && npc.custom_cargo_loot.is_some();
         let drop_pos = npc.spawn_position;
         let drop_cls = npc.sleeper_wh_class.max(5);
+        let base_bounty = npc.bounty_isk;
+        let mut credited = false;
         {
             let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
             if solar_system_id < 31_000_000
@@ -360,8 +362,39 @@ pub async fn handle_npc_destroyed_in_space(
                 rt.bounty_tick_next_flush_unix
                     .entry((solar_system_id, killer))
                     .or_insert_with(|| db.clock().now_unix_secs().saturating_add(1_200));
+                credited = true;
             }
             rt.destroyed_npc_cache.insert(killed_ball_id, npc);
+        }
+        if credited {
+            db.with_mut_snapshot(|snap| {
+                let old_sec = snap
+                    .characters
+                    .get(&killer)
+                    .map(|c| c.security_status)
+                    .unwrap_or(0.0);
+                if old_sec < 5.0 {
+                    let gain = crate::combat::npc_ai::compute_sec_status_gain(old_sec, base_bounty) * supp_mult;
+                    let new_sec = (old_sec + gain).min(5.0).clamp(-10.0, 10.0);
+                    if let Some(ch) = snap.characters.get_mut(&killer) {
+                        ch.security_status = new_sec;
+                    }
+                    let mut rt = combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+                    rt.sync_from_persisted(&snap.combat_crimewatch_state);
+                    rt.sec_status_transactions
+                        .entry(killer)
+                        .or_default()
+                        .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                            timestamp_unix: now,
+                            old_sec,
+                            new_sec,
+                            delta: new_sec - old_sec,
+                            reason: "NPC Pirate Bounty".into(),
+                            solar_system_id,
+                        });
+                    snap.combat_crimewatch_state = rt.to_persisted();
+                }
+            });
         }
         if drop_drifter_sleeper_loot && killer > 0 {
             let _ = crate::services::pve_exploration_sites::drop_sleeper_wreck_core(

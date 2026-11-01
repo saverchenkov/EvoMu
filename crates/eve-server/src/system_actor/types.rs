@@ -194,6 +194,8 @@ pub(crate) struct SystemActorState {
     pub sim_elapsed_secs: f64,
     pub pending_cycle_actions: Vec<PendingCycleAction>,
     pub tactical_state: Arc<std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>>,
+    pub pending_notifications_opt: Option<Arc<std::sync::RwLock<HashMap<i64, Vec<crate::router::PendingMachoNotification>>>>>,
+    pub notify_tx_opt: Option<tokio::sync::broadcast::Sender<(i64, crate::router::PendingMachoNotification)>>,
 }
 
 pub enum SystemCommand {

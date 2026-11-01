@@ -217,7 +217,7 @@ pub fn destroy_pod_and_respawn_faction_corvette_in_snap(
     let imp_items: Vec<(ItemId, TypeId)> = snap
         .items
         .values()
-        .filter(|i| (i.location_id == cid || i.owner_id == cid) && i.flag == eve_db::InventoryFlag::Implant)
+        .filter(|i| i.location_id == cid && i.flag == eve_db::InventoryFlag::Implant)
         .map(|i| (i.item_id, i.type_id))
         .collect();
     for (iid, tid) in imp_items {

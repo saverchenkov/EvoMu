@@ -450,19 +450,21 @@ async fn batch10_proving_grounds_and_tournament_notifications() {
                 make_item(fid, 72_984, cid, sid, InventoryFlag::Cargo, 1, false),
             );
         }
+        snap.fleets.insert(77_021, eve_db::FleetRecord { fleet_id: 77_021, boss_id: PILOT_A, members: vec![PILOT_A, p3_id], ..Default::default() });
+        snap.fleets.insert(77_022, eve_db::FleetRecord { fleet_id: 77_022, boss_id: PILOT_B, members: vec![PILOT_B, p4_id], ..Default::default() });
     });
-    let mut sess_3 = sess_b.clone();
-    sess_3.session_id = 90_003;
-    sess_3.user_id = Some(1003);
-    sess_3.character_id = Some(p3_id);
-    sess_3.ship_id = Some(ship3);
-    let mut sess_4 = sess_b.clone();
-    sess_4.session_id = 90_004;
-    sess_4.user_id = Some(1004);
-    sess_4.character_id = Some(p4_id);
-    sess_4.ship_id = Some(ship4);
+    let sys_h = ctx.systems.get_or_spawn(sess_a.solar_system_id.unwrap_or(30000142));
+    for (cid, sid) in [(PILOT_A, sess_a.ship_id.unwrap()), (PILOT_B, sess_b.ship_id.unwrap()), (p3_id, ship3), (p4_id, ship4)] {
+        let b = eve_destiny::Ball {
+            id: sid, type_id: 638, position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO, max_velocity: 250.0, inertia: 0.5, mass: 100_000_000.0,
+            radius: 300.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+        };
+        let cs = ctx.build_ship_combat_state(cid, sid, 638);
+        let _ = sys_h.spawn_ball_with_combat(b, cs).await;
+    }
 
-    // Negative: first 3 pilots joining stay queued (status 30) and do NOT emit match-found notifications
+    // Negative: first 2-pilot fleet joining stays queued (status 30) and does NOT emit match-found notifications
     assert_eq!(
         rpc(&ctx, &mut sess_a, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72_984)])
             .await
@@ -470,18 +472,6 @@ async fn batch10_proving_grounds_and_tournament_notifications() {
         PyRep::Integer(30)
     );
     assert!(!has_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnMatchFound"));
-    assert_eq!(
-        rpc(&ctx, &mut sess_3, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f3), PyRep::Integer(72_984)])
-            .await
-            .unwrap(),
-        PyRep::Integer(30)
-    );
-    assert_eq!(
-        rpc(&ctx, &mut sess_4, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f4), PyRep::Integer(72_984)])
-            .await
-            .unwrap(),
-        PyRep::Integer(30)
-    );
     assert!(!has_notif(&drain_all(&ctx, &mut sess_a, PILOT_A), "OnProvingGroundsMatchFound"));
 
     // Positive: 4th pilot joins -> forms match and emits all 3 proving grounds notifications

@@ -373,7 +373,11 @@ pub fn check_deadspace_warp_allowed(
             }
             false
         });
-    if blocked {
+    if blocked
+        || crate::services::insurgency_complex_ops::is_warp_into_outpost_raid_pocket_blocked(
+            ctx, sys_id, ship_pos, anchor_pos, dest_pos,
+        )
+    {
         return Err(BridgeRpcError::user_error("NaturalPhenomenaDisruptingWarp"));
     }
 

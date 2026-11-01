@@ -246,7 +246,7 @@ pub fn is_candidate_hostile_to_edencom(
         return false;
     }
 
-    let drone_owner_opt = with_combat_runtime(ctx, |rt| {
+    let drone_owner_opt = with_combat_ephemeral(ctx, |rt| {
         rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
     })
     .or_else(|| {
@@ -276,7 +276,7 @@ pub fn is_candidate_hostile_to_edencom(
         return standing < 0.0;
     }
 
-    let other_npc_opt = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&cand_id).cloned());
+    let other_npc_opt = with_combat_ephemeral(ctx, |rt| rt.npc_entities.get(&cand_id).cloned());
     if let Some(other_npc) = other_npc_opt {
         if matches!(
             other_npc.archetype.as_str(),
@@ -332,7 +332,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     let mut active_npc_scram_targets: HashSet<i64> = HashSet::new();
 
     for nid in npc_ids {
-        let Some(mut npc) = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
+        let Some(mut npc) = with_combat_ephemeral(ctx, |rt| rt.npc_entities.get(&nid).cloned()) else {
             continue;
         };
         let npc_dead = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner()).combat_states.get(&nid).is_some_and(|cs| cs.structure_hp <= 0.0);
@@ -341,7 +341,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             continue;
         };
 
-        let is_debugged = with_combat_runtime(ctx, |rt| {
+        let is_debugged = with_combat_ephemeral(ctx, |rt| {
             rt.behavior_debugging_active.contains(&nid)
                 || rt.behavior_debugging_active.contains(&(solar_system_id as i64))
                 || !rt.behavior_debugging_active.is_empty()
@@ -382,7 +382,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         // 1. Remote Repair (`feat:npc.npc-remote-repair`, `feat:npc.sleepers`):
         // If not ECM-jammed, repair damaged fellow NPCs in the same `spawn_group_id` within `remote_rep_range`.
         if !npc.ecm_jammed && (npc.remote_shield_rep > 0.0 || npc.remote_armor_rep > 0.0) {
-            let group_peers: Vec<i64> = with_combat_runtime(ctx, |rt| {
+            let group_peers: Vec<i64> = with_combat_ephemeral(ctx, |rt| {
                 rt.npc_entities
                     .values()
                     .filter(|p| {
@@ -445,7 +445,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
 
         // Add any hostile ships or active player drones within grid aggro range that pass standings aggression check
         for (&cand_id, cand_ball) in &ball_map {
-            let is_player_drone = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.contains_key(&cand_id))
+            let is_player_drone = with_combat_ephemeral(ctx, |rt| rt.active_drones_in_space.contains_key(&cand_id))
                 || ctx.db.with_snapshot(|snap| {
                     snap.items.get(&cand_id).is_some_and(|item| {
                         ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023))
@@ -461,7 +461,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             {
                 continue;
             }
-            if with_combat_runtime(ctx, |rt| rt.npc_entities.contains_key(&cand_id)) {
+            if with_combat_ephemeral(ctx, |rt| rt.npc_entities.contains_key(&cand_id)) {
                 continue;
             }
             let dist = npc_ball.position.distance(cand_ball.position);
@@ -486,7 +486,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                         .and_then(|item| snap.characters.get(&item.owner_id))
                         .map(|c| c.character_id)
                 }).or_else(|| {
-                    with_combat_runtime(ctx, |rt| {
+                    with_combat_ephemeral(ctx, |rt| {
                         rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
                     })
                 })
@@ -606,7 +606,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             let sig_weight = (sig_radius / 40.0).clamp(0.5, 5.0) * 10.0;
             let role_mult = if has_ewar { 1.5 } else if has_logi { 1.3 } else { 1.0 };
             let (drone_sig, drone_dps, drone_attacking) = if is_player_drone {
-                let d_state = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&cand_id).cloned());
+                let d_state = with_combat_ephemeral(ctx, |rt| rt.active_drones_in_space.get(&cand_id).cloned());
                 let d_tid = d_state.as_ref().map(|d| d.type_id).unwrap_or(cand_ball.type_id);
                 let d_sig = ctx.sde.types.get(&d_tid).and_then(|t| t.default_attributes.get(&552).copied()).unwrap_or(25.0);
                 let attacking = d_state
@@ -928,7 +928,7 @@ pub async fn destroy_specialized_npc_with_hint(
         .unwrap_or(DVec3::ZERO);
     let _ = sys_handle.remove_ball(npc_ball_id).await;
 
-    let npc_opt = with_mut_combat_runtime(ctx, |rt| {
+    let npc_opt = with_mut_combat_ephemeral(ctx, |rt| {
         rt.npc_entities
             .remove(&npc_ball_id)
             .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
@@ -978,7 +978,7 @@ pub async fn destroy_specialized_npc_with_hint(
     }
     if archetype == "CloneSoldier" {
         let until = ctx.now_unix().saturating_add(1_200);
-        with_mut_combat_runtime(ctx, |rt| {
+        with_mut_combat_ephemeral(ctx, |rt| {
             rt.clone_soldier_cooldown_until.insert(solar_system_id, until);
         });
     }
@@ -993,12 +993,7 @@ pub async fn destroy_specialized_npc_with_hint(
     };
 
     if npc_type_id == Some(crate::services::pve_fob_observatory::WORLD_ARK_BOSS_TYPE_ID) {
-        crate::services::pve_fob_observatory::on_world_ark_boss_killed(
-            ctx,
-            solar_system_id,
-            killer_char_id,
-        )
-        .await;
+        crate::services::pve_fob_observatory::on_world_ark_boss_killed(ctx, solar_system_id, killer_char_id).await;
     }
 
     crate::combat::crimewatch::credit_specialized_npc_bounty_and_sec_status(

@@ -221,6 +221,19 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         ctx.sync_session(&mut session);
                         let mut write_failed = false;
                         for notif in ctx.drain_notifications_for_char(cid) {
+                            if notif.event == "OnSessionChanged" {
+                                let prev_sys = session.solar_system_id;
+                                ctx.sync_session(&mut session);
+                                if session.solar_system_id != prev_sys {
+                                    ballpark_ready = false;
+                                    if let Some(new_sys) = session.solar_system_id {
+                                        sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
+                                    }
+                                }
+                                if session.station_id.is_some() || session.structure_id.is_some() {
+                                    ballpark_ready = false;
+                                }
+                            }
                             let notif_pkt = MachoPacket::new_broadcast_notification(
                                 MACHO_PROXY_NODE_ID,
                                 client_id,
