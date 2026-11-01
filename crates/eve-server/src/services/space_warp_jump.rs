@@ -382,7 +382,12 @@ async fn handle_cmd_warp_to_stuff(
         });
     if resolved_pos.is_none() && target_id > 0 && target_id != ship_id && !is_unresolved_sig_ball {
         if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
-            if matches!(tb.mode, MovementMode::Rigid) {
+            let is_asteroid = ctx
+                .sde
+                .types
+                .get(&tb.type_id)
+                .is_some_and(|t| t.category_id == 25);
+            if matches!(tb.mode, MovementMode::Rigid) || is_asteroid {
                 let sys_wh_class = crate::services::wormhole_lifecycle_ops::system_wormhole_profile_sde(&ctx.sde, sys_id).0;
                 let is_drifter_ball = matches!(tb.type_id, 34_494 | 35_650..=35_654)
                     || ((14..=18).contains(&sys_wh_class)
@@ -576,10 +581,7 @@ async fn handle_cmd_warp_to_stuff(
                 "charid",
                 vec![
                     PyRep::Integer(ship_id),
-                    PyRep::Real(dest_pos.x),
-                    PyRep::Real(dest_pos.y),
-                    PyRep::Real(dest_pos.z),
-                    PyRep::Real(warp_speed),
+                    PyRep::Integer(i64::from(current_ball.type_id)),
                 ],
             );
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);

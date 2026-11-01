@@ -623,6 +623,12 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ));
         entries.push(("localSuppressionStageAndMaximum", zero_of_five));
     }
+    if meta.group_id == 988 {
+        // DERIVED: V24.01 `wormhole.py:21` (`Assemble`) passes `self.slimItem.nebulaType`
+        // to `spaceMgr.GetNebulaTextureForType`; missing `nebulaType` yields `None` and
+        // raises `TypeError: Could not match argument 0 to expected type: wstring` in `trinity.Load`.
+        entries.push(("nebulaType", PyRep::Integer(1)));
+    }
     PyRep::Dict(
         entries
             .into_iter()

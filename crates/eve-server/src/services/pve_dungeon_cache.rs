@@ -950,10 +950,7 @@ pub async fn handle(
             "charid",
             vec![
                 PyRep::Integer(ship_id),
-                PyRep::Real(dest_pos.x),
-                PyRep::Real(dest_pos.y),
-                PyRep::Real(dest_pos.z),
-                PyRep::Real(warp_speed),
+                PyRep::Integer(i64::from(current_ball.type_id)),
             ],
         );
 

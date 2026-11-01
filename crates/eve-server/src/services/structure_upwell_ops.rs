@@ -233,6 +233,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureDirectory", "GetStructures") => Some(super::structure_lifecycle_rpc::handle_get_structures(ctx, session, false)),
         ("structureDirectory", "GetCorporationStructures") => Some(super::structure_lifecycle_rpc::handle_get_structures(ctx, session, true)),
         ("structureDirectory", "GetStructureInfo") => Some(super::structure_lifecycle_rpc::handle_get_structure_info(ctx, session, args)),
+        ("structureDirectory", "GetStructureMapData") => Some(handle_get_structure_map_data(ctx, session, args)),
         // parity: feat:structures.deliveries
         ("structureDeliveries", "Deliver") => Some(super::structure_lifecycle_rpc::handle_structure_deliver(ctx, session, args)),
         // parity: feat:structures.cargo-dropoff
@@ -983,4 +984,36 @@ pub fn credit_structure_owner_corp_div1(
             meta: eve_db::ledger::JournalMeta::new(ref_type_id, first_party_id, owner_corp_id, now_unix),
         });
     }
+}
+
+fn handle_get_structure_map_data(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let sys_id = args
+        .first()
+        .and_then(|v| v.as_i64())
+        .and_then(|v| u32::try_from(v).ok())
+        .or(session.solar_system_id)
+        .unwrap_or(30_000_142);
+    let rows = ctx.db.with_snapshot(|snap| {
+        snap.structures
+            .values()
+            .filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed")
+            .map(|st| {
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(st.structure_id)),
+                    ("typeID", PyRep::Integer(i64::from(st.type_id))),
+                    ("name", PyRep::String(st.name.clone())),
+                    ("x", PyRep::Real(st.position[0])),
+                    ("y", PyRep::Real(st.position[1])),
+                    ("z", PyRep::Real(st.position[2])),
+                    ("ownerID", PyRep::Integer(st.owner_corp_id)),
+                    ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
+                ])
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::List(rows))
 }

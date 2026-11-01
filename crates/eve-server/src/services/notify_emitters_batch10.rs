@@ -212,6 +212,7 @@ pub fn emit_signal_tracker_full_state_for_system(
                                 ("targetID", PyRep::String(a.anomaly_id.clone())),
                                 ("dungeonName", PyRep::String(a.name.clone())),
                                 ("anomalyType", PyRep::String(a.anomaly_type.clone())),
+                                ("archetypeID", PyRep::None),
                                 ("scanStrength", PyRep::Real(a.signal_strength)),
                                 (
                                     "position",
