@@ -1,19 +1,34 @@
 {
   "fake_done": [
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 899-915) injects ContractRecord (6_301, 6_302) directly into snap.contracts via ctx.db.with_mut_snapshot (:780-867) with zero contractMgr.CreateContract RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/contracts"
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:372-408 and crates/eve-server/tests/it/character_esi_social_mail.rs:1003-1165 (route reads only ephemeral ctx.esi_state.alliance_contacts disconnected from MachoNet alliance contact RPCs and SQLite WorldStateSnapshot; sole test injects EsiContactEntry directly into ctx.esi_state.alliance_contacts)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /alliances/{alliance_id}/contacts"
     },
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 927-938) injects synthetic bid_history on ContractRecord 6_301 directly into snap.contracts via ctx.db.with_mut_snapshot (:815-822) with zero contractMgr.PlaceBid RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/contracts/{contract_id}/bids"
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:410-436 and crates/eve-server/tests/it/character_esi_social_mail.rs:1003-1178 (route reads only ephemeral ctx.esi_state.alliance_contact_labels disconnected from MachoNet alliance contact RPCs and SQLite WorldStateSnapshot; sole test injects tuples directly into ctx.esi_state.alliance_contact_labels)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /alliances/{alliance_id}/contacts/labels"
     },
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 916-926) injects ContractRecord 6_301 and InventoryItemRecord 880_621 (with InventoryFlag::Hangar rather than contract escrow) directly into snap.contracts and snap.items via ctx.db.with_mut_snapshot (:780-814) with zero contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/contracts/{contract_id}/items"
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:648-719 and crates/eve-server/tests/it/character_esi_social_mail.rs:361-465 (route reads ephemeral ctx.esi_state.calendar_events/calendar_responses disconnected from MachoNet calendarMgr and SQLite WorldStateSnapshot; sole test injects EsiCalendarEvent fixtures directly into ctx.esi_state at :414-449)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /characters/{character_id}/calendar"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:721-793 and crates/eve-server/tests/it/character_esi_social_mail.rs:361-495 (route reads only ephemeral ctx.esi_state.calendar_events/calendar_responses; sole test seeds EsiCalendarEvent directly into ctx.esi_state at :414-449 without calendarMgr RPCs or SQLite persistence)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /characters/{character_id}/calendar/{event_id}"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:938-1002 and crates/eve-server/tests/it/character_esi_social_mail.rs:541-561 (route reads only ephemeral ctx.esi_state.calendar_events/calendar_responses disconnected from MachoNet calendarMgr and SQLite WorldStateSnapshot; sole test seeds ctx.esi_state directly at :414-449)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /characters/{character_id}/calendar/{event_id}/attendees"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:277-303 and crates/eve-server/tests/it/character_esi_social_mail.rs:911-928 (route reads only ephemeral ctx.esi_state.char_contact_labels disconnected from MachoNet addressbook/contact labels and SQLite WorldStateSnapshot; sole test writes labels directly into ctx.esi_state.char_contact_labels)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /characters/{character_id}/contacts/labels"
     },
     {
       "evidence": "The only tagged test, test_esi_faction_warfare_routes_reflect_live_state (crates/eve-server/tests/it/esi_universe_fw_complete.rs:313-332), hand-writes FwCharacterStatsRecord (rank 3/4, kills 2/5/12, VP 400/1200/3400) straight into snap.fw_character_stats via ctx.db.with_mut_snapshot, and asserts those same numbers back at :389-400. The 'live update' at :584-596 also mutates the snapshot directly (+1 kill, +150 VP), and :614-615 asserts 13/3550. No FW kill, complex capture or enlistment RPC ever drives these stats. This is the injection pattern behind the existing fake flags on esi:GET /fw/stats, /fw/leaderboards/characters and /fw/leaderboards/corporations, which share this test.",
@@ -26,79 +41,24 @@
       "id": "esi:GET /characters/{character_id}/industry/jobs"
     },
     {
-      "evidence": "Sole tagged test test_esi6_industry_and_mining_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:986, 1104-1119, 1220-1234) pushes two MiningLedgerRecord structs straight into snap.mining_ledger via ctx.db.with_mut_snapshot (:1104-1119) and reads them back over HTTP (:1220-1234) without executing any mining cycle or RPC.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/mining"
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:784-815 and crates/eve-server/tests/it/character_esi_social_mail.rs:1370-1388 (route reads only ephemeral ctx.esi_state.mail_lists ignoring MachoNet mailingListsMgr state and SQLite WorldStateSnapshot; sole test injects `(14_001, \"Alliance Logistics Ping\")` directly into ctx.esi_state.mail_lists at :1375-1378)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /characters/{character_id}/mail/lists"
     },
     {
-      "evidence": "Sole tagged test test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:168-201, 580-612, 684-696) injects MarketOrderRecord and MarketOrderMeta (order 6201) directly into snap.market_orders and snap.market_order_meta via ctx.db.with_mut_snapshot with zero marketProxy order-placement RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/orders"
+      "evidence": "crates/eve-server/tests/it/esi_corp_alliance.rs:638-800 (sole tagged test) bypasses market purchase and ramProxy research/copy jobs by directly inserting BPO and BPC InventoryItemRecord entries with hand-populated dynamic_attributes (1112 => 8.0, 1113 => 16.0) and blueprint_runs_remaining: Some(5) via ctx.db.with_mut_snapshot (:692-723).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "esi:GET /corporations/{corporation_id}/blueprints"
     },
     {
-      "evidence": "Sole tagged test test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:168-201, 580-612, 698-715) injects MarketOrderRecord and MarketOrderMeta (order 6202 with state: Some(\"cancelled\")) directly into snap.market_orders and snap.market_order_meta via ctx.db.with_mut_snapshot with zero marketProxy order-placement, fulfilment, or cancellation RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/orders/history"
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:305-342 and crates/eve-server/tests/it/character_esi_social_mail.rs:1003-1125 (route reads only ephemeral ctx.esi_state.corp_contacts disconnected from MachoNet corpRegistry/addressbook contact RPCs and SQLite WorldStateSnapshot; sole test injects EsiContactEntry directly into ctx.esi_state.corp_contacts)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /corporations/{corporation_id}/contacts"
     },
     {
-      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1307-1398, 1429-1444) writes PlanetaryColonyRecord directly into snap.planetary_colonies via ctx.db.with_mut_snapshot (:1334-1343) without creating a colony via planetMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/planets"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1307-1398, 1446-1461) writes PlanetaryColonyLayoutRecord (pins, routes, links) directly into snap.planetary_colony_layouts via ctx.db.with_mut_snapshot (:1344-1398) without building colony pins/routes/links via planetMgr.UserUpdateNetwork.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /characters/{character_id}/planets/{planet_id}"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 978-982) injects synthetic bid_history on public ContractRecord 6_301 directly into snap.contracts via ctx.db.with_mut_snapshot (:815-822) with zero contractMgr.PlaceBid RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /contracts/public/bids/{contract_id}"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 972-977) injects public ContractRecord 6_301 and InventoryItemRecord 880_621 directly into snap.contracts and snap.items via ctx.db.with_mut_snapshot (:780-814) with zero contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /contracts/public/items/{contract_id}"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 962-971) injects public ContractRecord 6_301 directly into snap.contracts via ctx.db.with_mut_snapshot (:787-824) with zero contractMgr.CreateContract RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /contracts/public/{region_id}"
-    },
-    {
-      "evidence": "Both tagged tests inject MoonExtractionRecord directly into snap.moon_extractions via ctx.db.with_mut_snapshot instead of scheduling/starting moon extractions via moon-mining RPCs: crates/eve-server/tests/it/esi_market_industry_pi.rs:1120-1134, 1244-1252 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:465-479, 561-565.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /corporation/{corporation_id}/mining/extractions"
-    },
-    {
-      "evidence": "Both tagged tests inject ObserverMiningRecord directly into snap.observer_mining_ledger via ctx.db.with_mut_snapshot instead of harvesting fractured moon ore on grid with a refinery observer: crates/eve-server/tests/it/esi_market_industry_pi.rs:1135-1146, 1253-1264 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:480-491, 568-575. Corp twin of FLAGGED_FAKE esi:GET /characters/{character_id}/mining.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /corporation/{corporation_id}/mining/observers"
-    },
-    {
-      "evidence": "Both tagged tests inject ObserverMiningRecord directly into snap.observer_mining_ledger via ctx.db.with_mut_snapshot instead of live moon-chunk mining cycles: crates/eve-server/tests/it/esi_market_industry_pi.rs:1135-1146, 1265-1273 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:480-491, 570-575.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /corporation/{corporation_id}/mining/observers/{observer_id}"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 939-949) injects corporation ContractRecord 6_302 directly into snap.contracts via ctx.db.with_mut_snapshot (:826-866) with zero contractMgr.CreateContract RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /corporations/{corporation_id}/contracts"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 956-961) injects corporation ContractRecord 6_302 directly into snap.contracts via ctx.db.with_mut_snapshot (:826-866) with zero contractMgr.PlaceBid RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/bids"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 950-955) injects corporation ContractRecord 6_302 and item_ids directly into snap.contracts and snap.items via ctx.db.with_mut_snapshot (:780-866) with zero contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "esi:GET /corporations/{corporation_id}/contracts/{contract_id}/items"
-    },
-    {
-      "evidence": "Both tagged tests inject CustomsOfficeRecord directly into snap.corp_customs_offices via ctx.db.with_mut_snapshot instead of anchoring and configuring a Customs Office via posMgr / planetOrbitalRegistry RPCs: crates/eve-server/tests/it/esi_market_industry_pi.rs:1399-1417, 1463-1480 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:494-513, 578-582.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /corporations/{corporation_id}/customs_offices"
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:344-370 and crates/eve-server/tests/it/character_esi_social_mail.rs:1003-1135 (route reads only ephemeral ctx.esi_state.corp_contact_labels disconnected from MachoNet contact RPCs and SQLite WorldStateSnapshot; sole test injects tuples directly into ctx.esi_state.corp_contact_labels)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /corporations/{corporation_id}/contacts/labels"
     },
     {
       "evidence": "Same test and same seeding (esi_universe_fw_complete.rs:302-333). The corp kills/VP asserted at :428-438 (2/5/12, 400/1200/3400) are just the hand-written character record summed over a one-member corp seeded via with_mut_snapshot, and enlisted_on comes from a directly inserted snap.fw_corp_enlisted_on (:333). No FW gameplay path produces the values. The sibling rows esi:GET /fw/stats and /fw/leaderboards/corporations are already FLAGGED_FAKE for this exact test.",
@@ -111,14 +71,24 @@
       "id": "esi:GET /corporations/{corporation_id}/industry/jobs"
     },
     {
-      "evidence": "Both tagged tests bypass marketProxy RPCs and inject MarketOrderRecord + MarketOrderMeta directly via ctx.db.with_mut_snapshot: test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:613-635, 717-730) and test_esi_corp_endpoint_specific_role_gates_and_routes (crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:401-429, 549-558). Twin of FLAGGED_FAKE esi:GET /characters/{character_id}/orders.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /corporations/{corporation_id}/orders"
+      "evidence": "crates/eve-server/src/esi/corp_governance_routes.rs:334-365 computes member limit via a DERIVED skill sum starting from 0 (:349-363, omitting EVE's base 10-member limit when CEO skills are untrained and ignoring live UpdateCorporationAbilities unless snap.corp_member_limits is populated); sole tagged test crates/eve-server/tests/it/esi_corp_governance.rs:658-817 injects CorporationRecord, TrainedSkillRecord, and snap.corp_member_limits = 650 directly via ctx.db.with_mut_snapshot (:684-710, 805-807).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "esi:GET /corporations/{corporation_id}/members/limit"
     },
     {
-      "evidence": "Both tagged tests bypass marketProxy fill/cancel/expiry flows and inject historical MarketOrderRecord + MarketOrderMeta (state: Some(\"expired\")) directly via ctx.db.with_mut_snapshot: crates/eve-server/tests/it/esi_market_industry_pi.rs:636-659, 731-743 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:430-458, 549-558. Twin of FLAGGED_FAKE esi:GET /characters/{character_id}/orders/history.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /corporations/{corporation_id}/orders/history"
+      "evidence": "crates/eve-server/src/esi/corp_governance_routes.rs:11-29 (CORP_ROLE_TABLE only maps 10 of 40+ EVE corporation role bitflags, omitting ROLE_TRADER, Hangar_Take_1..7, Hangar_Query_1..7, Container_Take_1..7, Account_Take_1..7, Account_Query_1..7, Deliveries_Take/Query, Contract_Manager, Starbase_Defense_Operator, Starbase_Fuel_Technician, Fitting_Manager, Brand_Manager, Project_Manager, and Skill_Plan_Manager; sole tagged test test_esi5_corporation_members_limit_titles_and_roles_history at crates/eve-server/tests/it/esi_corp_governance.rs:684-751 seeds CorporationRecord and CorpMemberRoleAssignment directly via with_mut_snapshot instead of corpRegistry RPCs)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /corporations/{corporation_id}/roles"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/esi_corp_governance.rs:684-763 (sole tagged test test_esi5_corporation_members_limit_titles_and_roles_history injects CorpRoleHistoryEntry directly via with_mut_snapshot at :752-762 without exercising live corpRegistry.UpdateMember role mutations, and test_esi_corp_roles_personnel_manager_and_grantable_role_gate at crates/eve-server/tests/it/esi_p6_closure.rs:663 discards the empty response without asserting role history entries; crates/eve-server/src/esi/corp_governance_routes.rs:443-481)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:GET /corporations/{corporation_id}/roles/history"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/esi_corp_governance.rs:899-1131 (sole tagged test) bypasses all Upwell anchoring, fitting, fueling, reinforcement, and profile RPCs by directly inserting CorporationRecord, UpwellStructureRecord, structure_vulnerability_windows, a sidecar StructureEsiTimerMeta (profile_id: 42 and hardcoded timer/fuel/unanchor timestamps), and ServiceSlot items via ctx.db.with_mut_snapshot (:931-1010).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "esi:GET /corporations/{corporation_id}/structures"
     },
     {
       "evidence": "crates/eve-server/tests/it/esi_universe_fw_complete.rs:313-348,584-596 (test_esi_faction_warfare_routes_reflect_live_state) directly injects snap.fw_character_stats and snap.fw_corp_stats via ctx.db.with_mut_snapshot without earning any FW kill or complex capture victory point through gameplay RPCs.",
@@ -151,16 +121,6 @@
       "id": "esi:GET /incursions"
     },
     {
-      "evidence": "crates/eve-server/src/esi/economy_industry_routes.rs:95-134 omits all SDE NPC stations with industry services unless an active or seeded job in snap.industry_jobs happens to reference job.facility_id (:113-131), and substitutes st.reprocessing_stations_take as the NPC station industry tax (:125-128, labelled DERIVED, whereas live EVE NPC station industry tax is 0.25% / 0.0025, wiki:Manufacturing). Tested only against a seeded Jita job in crates/eve-server/tests/it/esi_market_industry_pi.rs:1095-1107.",
-      "flagged_by_audit": "20261029-182230",
-      "id": "esi:GET /industry/facilities"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_industry_and_mining_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:1040-1103, 1173-1205, 1277-1286) injects IndustryJobRecord 6401..6405 directly into snap.industry_jobs via ctx.db.with_mut_snapshot instead of installing jobs via industryManager.InstallJob.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /industry/systems"
-    },
-    {
       "evidence": "crates/eve-server/src/esi/economy_routes.rs:265-300. average_price is the plain mean of the price field of every open order, buy and sell mixed, across all regions (:267-283). It is not derived from market history. adjusted_price is the static SDE base_price, explicitly labelled DERIVED (:284-291), instead of CCP's rolling adjusted price. Both fields therefore carry invented values that industry cost and insurance consumers rely on.",
       "flagged_by_audit": "20261029-085904",
       "id": "esi:GET /markets/prices"
@@ -169,21 +129,6 @@
       "evidence": "Both tagged tests inject Upwell structures, Standup Market Hub I (35892) service modules, and MarketOrderRecord entries directly into WorldStateSnapshot via ctx.db.with_mut_snapshot instead of anchoring/fitting structures and placing orders via live RPCs: crates/eve-server/tests/it/esi_market_industry_pi.rs:283-378, 523-535 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:174-291, 294-320.",
       "flagged_by_audit": "20261030-185800",
       "id": "esi:GET /markets/structures/{structure_id}"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/esi_market_industry_pi.rs:351-357,440-455 (test_esi6_market_public_and_structure_routes) injects a hand-crafted MarketHistoryDayRecord (date '2025-12-15', average 5.8, volume 850000) directly into snap.market_history via ctx.db.with_mut_snapshot instead of executing market orders and verifying server-aggregated OHLCV history.",
-      "flagged_by_audit": "20261029-225602",
-      "id": "esi:GET /markets/{region_id}/history"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_market_public_and_structure_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:331-378, 435-470) clears snap.market_orders and injects orders 6101 and 6102 directly via ctx.db.with_mut_snapshot instead of placing orders through marketProxy.PlaceCharOrder / PlaceCorpOrder RPCs.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /markets/{region_id}/orders"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_market_public_and_structure_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:331-378, 495-500) populates active regional order types (34 and 587) exclusively by injecting orders 6101 and 6102 into snap.market_orders via ctx.db.with_mut_snapshot.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "esi:GET /markets/{region_id}/types"
     },
     {
       "evidence": "crates/eve-server/tests/it/esi_universe_sov_complete.rs:569-594,628-637 (test_esi_sovereignty_campaigns_reflect_live_command_node_events) directly mutates ihub.state = 'CommandNodeEvent' and injects SovCampaignScoreRecord (0.4/0.6, then 0.8/0.2) via ctx.db.with_mut_snapshot without running any Entosis Link or command-node capture RPC; crates/eve-server/src/esi/sov_fw_routes.rs:206-210 also falls back to hardcoded (0.4, 0.6) scores.",
@@ -201,6 +146,11 @@
       "id": "esi:GET /sovereignty/structures"
     },
     {
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:795-936 and crates/eve-server/tests/it/character_esi_social_mail.rs:496-540 (sole test seeds EsiCalendarEvent into ephemeral ctx.esi_state.calendar_events at :414-449 and mutates unpersisted ctx.esi_state.calendar_responses at :918-922)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "esi:PUT /characters/{character_id}/calendar/{event_id}"
+    },
+    {
       "evidence": "crates/eve-server/tests/it/combat_sleepers_pochven_zarzakh.rs:459-559 manually inserts InsuranceContractState via with_mut_combat_runtime (:470-481,501-512) instead of calling insuranceSvc.InsureShip, never tests voiding via repackaging, trading, market selling, or contracting, calls internal process_ship_insurance_payout directly (:543,557) instead of ship/CONCORD destruction, and never verifies that an insurance EVE-mail is sent.",
       "flagged_by_audit": "20261029-225602",
       "id": "feat:combat.insurance-void-and-expiry"
@@ -211,7 +161,7 @@
       "id": "feat:combat.pochven-loot-drop"
     },
     {
-      "evidence": "crates/eve-server/tests/it/corp_projects_welcome_alliance_closure.rs:461-468 bypasses live gameplay events completely and calls internal Rust helper social_corp_projects::record_server_project_activity(&ctx, PILOT_2, &['DestroyNPCShips'], 5, None) directly (:462) for one method\u2014zero NPC kills, mining, manufacturing, item delivery, FW captures, ship damage, or LP earning RPCs are executed.",
+      "evidence": "crates/eve-server/tests/it/corp_projects_welcome_alliance_closure.rs:461-468 bypasses live gameplay events completely and calls internal Rust helper social_corp_projects::record_server_project_activity(&ctx, PILOT_2, &['DestroyNPCShips'], 5, None) directly (:462) for one method—zero NPC kills, mining, manufacturing, item delivery, FW captures, ship damage, or LP earning RPCs are executed.",
       "flagged_by_audit": "20261029-225602",
       "id": "feat:corporation.corp-project-contribution-methods"
     },
@@ -306,43 +256,83 @@
       "id": "feat:economy.paragon-hub"
     },
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 916-938) populates snap.contracts (including synthetic bid_history) and snap.items directly via ctx.db.with_mut_snapshot instead of creating contracts and placing bids through contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.contracts.char-items-bids"
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:938-1002 and crates/eve-server/tests/it/character_esi_social_mail.rs:541-561 (backed by ephemeral ctx.esi_state.calendar_events/calendar_responses injected in test at :414-449, disconnected from calendarMgr and SQLite persistence)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.calendar.attendees"
     },
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 899-915) populates snap.contracts directly via ctx.db.with_mut_snapshot instead of creating contracts through contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.contracts.char-list"
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:721-793 and crates/eve-server/tests/it/character_esi_social_mail.rs:361-495 (backed by ephemeral ctx.esi_state.calendar_events injected in test at :414-449, disconnected from calendarMgr and unpersisted across restart)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.calendar.event"
     },
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 939-961) populates snap.contracts and snap.items directly via ctx.db.with_mut_snapshot instead of creating and bidding on corporation contracts through contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.contracts.corp"
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:648-719 and crates/eve-server/tests/it/character_esi_social_mail.rs:361-465 (backed by ephemeral ctx.esi_state.calendar_events injected in test at :414-449, disconnected from calendarMgr and unpersisted across restart)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.calendar.list"
     },
     {
-      "evidence": "Sole tagged test test_esi6_contracts_character_corporation_and_public_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:746-867, 962-982) populates snap.contracts and snap.items directly via ctx.db.with_mut_snapshot instead of creating and bidding on public contracts through contractMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.contracts.public"
+      "evidence": "crates/eve-server/src/esi/char_social_routes.rs:795-936 and crates/eve-server/tests/it/character_esi_social_mail.rs:496-540 (sole test seeds EsiCalendarEvent in ephemeral ctx.esi_state at :414-449 and asserts unpersisted ctx.esi_state.calendar_responses)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.calendar.respond"
     },
     {
-      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:258-333, 382-456, 584-615, which directly seeds and mutates snap.fw_character_stats (rank 3/4, kills 2/5/12, VP 400/1_200/3_400) and snap.fw_corp_enlisted_on via ctx.db.with_mut_snapshot with zero FW enlistment, kill, or complex capture RPCs \u2014 the exact defect for which esi:GET /characters/{character_id}/fw/stats (auditor_rows.json:9196-9198) and esi:GET /corporations/{corporation_id}/fw/stats (:9226-9228) are FLAGGED_FAKE.",
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:372-436 and crates/eve-server/tests/it/character_esi_social_mail.rs:1003-1178 (backed solely by ephemeral ctx.esi_state.alliance_contacts and alliance_contact_labels injected directly by the test, disconnected from MachoNet alliance contact RPCs and SQLite persistence)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.contacts.alliance"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:305-370 and crates/eve-server/tests/it/character_esi_social_mail.rs:1003-1135 (backed solely by ephemeral ctx.esi_state.corp_contacts and corp_contact_labels injected directly by the test, disconnected from MachoNet corp contact RPCs and SQLite persistence)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.contacts.corp"
+    },
+    {
+      "evidence": "Closed solely by test_esi5_corporation_divisions_blueprints_and_standings in crates/eve-server/tests/it/esi_corp_alliance.rs:638-800, which injects researched BPO and BPC records directly into WorldStateSnapshot via ctx.db.with_mut_snapshot (:692-723) without executing any live industry or inventory RPCs.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:esi.corporation.blueprints"
+    },
+    {
+      "evidence": "Closed solely by crates/eve-server/tests/it/esi_corp_governance.rs:658-817, which bypasses corpRegistry creation, member recruitment, and UpdateCorporationAbilities RPCs by directly seeding CorporationRecord, members, CEO skills, and corp_member_limits via ctx.db.with_mut_snapshot (:684-710, 805-807).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:esi.corporation.members"
+    },
+    {
+      "evidence": "crates/eve-server/src/esi/corp_governance_routes.rs:607-664 and crates/eve-server/tests/it/esi_corp_governance.rs:396-480,640-655 (route reads snap.corp_projects / snap.corp_project_contributors disconnected from live Quasar corporationgoal state, and sole tagged test test_esi5_corporation_medals_container_logs_and_projects injects CorpProjectRecord and contributors via with_mut_snapshot)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.corporation.projects"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/esi_corp_governance.rs:658-763 and crates/eve-server/src/esi/corp_governance_routes.rs:11-29 (sole tagged test seeds CorpMemberRoleAssignment and CorpRoleHistoryEntry via with_mut_snapshot rather than live corpRegistry RPCs, while decode_corp_roles truncates bitmasks to 10 roles and drops Trader plus all divisional hangar/container/wallet/deliveries roles)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.corporation.roles"
+    },
+    {
+      "evidence": "Closed solely by test_esi5_corporation_structures_timers_starbase_detail_and_plan_closure in crates/eve-server/tests/it/esi_corp_governance.rs:899-1131, which injects UpwellStructureRecord, StructureEsiTimerMeta, structure_vulnerability_windows, and service modules directly via ctx.db.with_mut_snapshot (:931-1010) instead of driving live structure lifecycle RPCs.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:esi.corporation.structures"
+    },
+    {
+      "evidence": "Closed solely by crates/eve-server/tests/it/esi_corp_governance.rs:899-1131, which hand-populates a sidecar snap.structure_esi_timer_meta struct (:971-982) via ctx.db.with_mut_snapshot rather than deriving profile_id, fuel_expires, unanchors_at, and reinforcement schedule transitions from live Upwell StructureExtendedState.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:esi.corporations.structures-services-timers"
+    },
+    {
+      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:258-333, 382-456, 584-615, which directly seeds and mutates snap.fw_character_stats (rank 3/4, kills 2/5/12, VP 400/1_200/3_400) and snap.fw_corp_enlisted_on via ctx.db.with_mut_snapshot with zero FW enlistment, kill, or complex capture RPCs — the exact defect for which esi:GET /characters/{character_id}/fw/stats (auditor_rows.json:9196-9198) and esi:GET /corporations/{corporation_id}/fw/stats (:9226-9228) are FLAGGED_FAKE.",
       "id": "feat:esi.faction-warfare.char-corp-stats"
     },
     {
-      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:258-333, 458-543, asserting back the same hand-injected FwCharacterStatsRecord (2/5/12 kills, 400/1_200/3_400 VP) seeded via ctx.db.with_mut_snapshot \u2014 the exact defect for which esi:GET /fw/leaderboards, esi:GET /fw/leaderboards/characters, and esi:GET /fw/leaderboards/corporations (auditor_rows.json:9246-9258) are FLAGGED_FAKE.",
+      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:258-333, 458-543, asserting back the same hand-injected FwCharacterStatsRecord (2/5/12 kills, 400/1_200/3_400 VP) seeded via ctx.db.with_mut_snapshot — the exact defect for which esi:GET /fw/leaderboards, esi:GET /fw/leaderboards/characters, and esi:GET /fw/leaderboards/corporations (auditor_rows.json:9246-9258) are FLAGGED_FAKE.",
       "id": "feat:esi.faction-warfare.leaderboards"
     },
     {
-      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:258-343, 545-569, asserting back the directly snapshot-seeded snap.fw_character_stats and snap.fw_system_occupations without any FW gameplay RPCs \u2014 the exact defect for which esi:GET /fw/stats (auditor_rows.json:9261-9263) is FLAGGED_FAKE.",
+      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:258-343, 545-569, asserting back the directly snapshot-seeded snap.fw_character_stats and snap.fw_system_occupations without any FW gameplay RPCs — the exact defect for which esi:GET /fw/stats (auditor_rows.json:9261-9263) is FLAGGED_FAKE.",
       "id": "feat:esi.faction-warfare.stats"
     },
     {
-      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:334-343, 570-607, which directly inserts FwSystemOccupationRecord (victory_points: 2_250, threshold 4_500) and mutates occ.victory_points = 4_500 via ctx.db.with_mut_snapshot (:584-587) instead of driving FW complex captures or bunker flips \u2014 the exact defect for which esi:GET /fw/systems (auditor_rows.json:9266-9268) is FLAGGED_FAKE.",
+      "evidence": "Closed solely by test_esi_faction_warfare_routes_reflect_live_state in crates/eve-server/tests/it/esi_universe_fw_complete.rs:334-343, 570-607, which directly inserts FwSystemOccupationRecord (victory_points: 2_250, threshold 4_500) and mutates occ.victory_points = 4_500 via ctx.db.with_mut_snapshot (:584-587) instead of driving FW complex captures or bunker flips — the exact defect for which esi:GET /fw/systems (auditor_rows.json:9266-9268) is FLAGGED_FAKE.",
       "id": "feat:esi.faction-warfare.systems"
     },
     {
-      "evidence": "Closed solely by test_esi_incursions_wars_and_single_killmail_reflect_live_state in crates/eve-server/tests/it/esi_universe_sov_complete.rs:662-737, which directly inserts a hand-written IncursionRecord in Jita's constellation (:692-706) and mutates inc.influence = 0.15 / inc.state = \"withdrawing\" via ctx.db.with_mut_snapshot (:725-731) without spawning or completing any incursion site \u2014 the exact defect for which companion esi:GET /incursions (auditor_rows.json:9271-9273) is FLAGGED_FAKE.",
+      "evidence": "Closed solely by test_esi_incursions_wars_and_single_killmail_reflect_live_state in crates/eve-server/tests/it/esi_universe_sov_complete.rs:662-737, which directly inserts a hand-written IncursionRecord in Jita's constellation (:692-706) and mutates inc.influence = 0.15 / inc.state = \"withdrawing\" via ctx.db.with_mut_snapshot (:725-731) without spawning or completing any incursion site — the exact defect for which companion esi:GET /incursions (auditor_rows.json:9271-9273) is FLAGGED_FAKE.",
       "id": "feat:esi.incursions.list"
     },
     {
@@ -351,49 +341,14 @@
       "id": "feat:esi.industry.char-jobs"
     },
     {
-      "evidence": "Sole tagged test test_esi6_industry_and_mining_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:986, 1104-1119, 1220-1234) pushes two MiningLedgerRecord structs straight into snap.mining_ledger via ctx.db.with_mut_snapshot (:1104-1119) and reads them back over HTTP (:1220-1234) rather than recording real character mining activity through mining laser/strip miner cycles.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.industry.char-mining"
-    },
-    {
-      "evidence": "Closed solely by the two ctx.db.with_mut_snapshot MoonExtractionRecord injection tests in crates/eve-server/tests/it/esi_market_industry_pi.rs:1120-1134, 1244-1252 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:465-479, 561-565.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.industry.corp-extractions"
-    },
-    {
       "evidence": "Closed by the same GET /corporations/{corporation_id}/industry/jobs handler (crates/eve-server/src/esi/economy_industry_routes.rs:294-357) and test (crates/eve-server/tests/it/esi_market_industry_pi.rs:1157-1165) that synthesize location_id, blueprint_location_id, and output_location_id as j.facility_id (:330-341, labelled DERIVED) and omit job cost and completion metadata.",
       "flagged_by_audit": "20261029-182230",
       "id": "feat:esi.industry.corp-jobs"
     },
     {
-      "evidence": "Closed solely by the two ctx.db.with_mut_snapshot ObserverMiningRecord injection tests in crates/eve-server/tests/it/esi_market_industry_pi.rs:1135-1146, 1253-1273 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:480-491, 568-575.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.industry.corp-observers"
-    },
-    {
-      "evidence": "Closed by the same GET /industry/facilities handler (crates/eve-server/src/esi/economy_industry_routes.rs:95-134) and test (crates/eve-server/tests/it/esi_market_industry_pi.rs:1095-1107) that omit SDE NPC industry stations without seeded jobs and substitute st.reprocessing_stations_take (:125-128, labelled DERIVED) for NPC station industry tax (wiki:Manufacturing).",
-      "flagged_by_audit": "20261029-182230",
-      "id": "feat:esi.industry.facilities"
-    },
-    {
-      "evidence": "Closed solely by test_esi6_industry_and_mining_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:1040-1103, 1173-1205, 1277-1286) injecting IndustryJobRecord entries directly via ctx.db.with_mut_snapshot.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.industry.systems"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:168-201, 580-612, 684-715) populates snap.market_orders and snap.market_order_meta directly via ctx.db.with_mut_snapshot instead of placing and cancelling/filling orders through marketProxy RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.market.char-orders"
-    },
-    {
-      "evidence": "Closed solely by the two ctx.db.with_mut_snapshot order-injection tests test_esi6_market_character_and_corporation_orders_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:613-659, 717-743) and test_esi_corp_endpoint_specific_role_gates_and_routes (crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:401-458, 549-558), without ever placing, modifying, cancelling, or expiring corporation orders via marketProxy RPCs.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.market.corp-orders"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/esi_market_industry_pi.rs:351-357,440-455 seeds snap.market_history directly via ctx.db.with_mut_snapshot with hardcoded OHLCV numbers instead of executing market trades and verifying daily history aggregation.",
-      "flagged_by_audit": "20261029-225602",
-      "id": "feat:esi.market.history"
+      "evidence": "crates/eve-server/src/esi/char_social_mail_routes.rs:784-815 and crates/eve-server/tests/it/character_esi_social_mail.rs:1370-1388 (backed solely by ephemeral ctx.esi_state.mail_lists injected in test at :1375-1378, disconnected from mailingListsMgr and lost on restart)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:esi.mail.lists"
     },
     {
       "evidence": "Closed by the same /markets/prices handler (crates/eve-server/src/esi/economy_routes.rs:7,21,265-300). It serves a mixed buy/sell open-order mean as average_price and the static SDE base_price (labelled DERIVED) as adjusted_price.",
@@ -401,37 +356,12 @@
       "id": "feat:esi.market.prices"
     },
     {
-      "evidence": "Closed solely by test_esi6_market_public_and_structure_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:331-378, 435-470), which wipes snap.market_orders and seeds regional orders via ctx.db.with_mut_snapshot rather than live market order placement.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.market.region-orders"
-    },
-    {
       "evidence": "Closed solely by the two ctx.db.with_mut_snapshot structure/service-module/order injection tests in crates/eve-server/tests/it/esi_market_industry_pi.rs:283-378, 523-535 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:174-291, 294-320.",
       "flagged_by_audit": "20261030-185800",
       "id": "feat:esi.market.structure-orders"
     },
     {
-      "evidence": "Closed solely by test_esi6_market_public_and_structure_routes (crates/eve-server/tests/it/esi_market_industry_pi.rs:331-378, 495-500) using ctx.db.with_mut_snapshot order injection rather than live market order placement.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.market.types"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1307-1343, 1429-1444) injects PlanetaryColonyRecord directly into snap.planetary_colonies via ctx.db.with_mut_snapshot with zero planetMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.planetary-interaction.colonies"
-    },
-    {
-      "evidence": "Closed solely by the two ctx.db.with_mut_snapshot CustomsOfficeRecord injection tests in crates/eve-server/tests/it/esi_market_industry_pi.rs:1399-1417, 1463-1480 and crates/eve-server/tests/it/esi_market_industry_pi_part2.rs:494-513, 578-582.",
-      "flagged_by_audit": "20261030-185800",
-      "id": "feat:esi.planetary-interaction.customs"
-    },
-    {
-      "evidence": "Sole tagged test test_esi6_planetary_interaction_and_plan_closure (crates/eve-server/tests/it/esi_market_industry_pi.rs:1344-1398, 1446-1461) injects PlanetaryColonyLayoutRecord directly into snap.planetary_colony_layouts via ctx.db.with_mut_snapshot with zero planetMgr RPCs.",
-      "flagged_by_audit": "20261030-160120",
-      "id": "feat:esi.planetary-interaction.layout"
-    },
-    {
-      "evidence": "Closed solely by test_esi_sovereignty_campaigns_reflect_live_command_node_events in crates/eve-server/tests/it/esi_universe_sov_complete.rs:569-646, which directly mutates ihub.state = \"CommandNodeEvent\" and injects SovCampaignScoreRecord (0.4/0.6, then 0.8/0.2) via ctx.db.with_mut_snapshot (:569-594, 628-637) without running any Entosis Link or command-node capture RPC, while crates/eve-server/src/esi/sov_fw_routes.rs:206-210 falls back to hardcoded (0.4, 0.6) scores \u2014 the exact defect for which companion esi:GET /sovereignty/campaigns (auditor_rows.json:9306-9308) is FLAGGED_FAKE.",
+      "evidence": "Closed solely by test_esi_sovereignty_campaigns_reflect_live_command_node_events in crates/eve-server/tests/it/esi_universe_sov_complete.rs:569-646, which directly mutates ihub.state = \"CommandNodeEvent\" and injects SovCampaignScoreRecord (0.4/0.6, then 0.8/0.2) via ctx.db.with_mut_snapshot (:569-594, 628-637) without running any Entosis Link or command-node capture RPC, while crates/eve-server/src/esi/sov_fw_routes.rs:206-210 falls back to hardcoded (0.4, 0.6) scores — the exact defect for which companion esi:GET /sovereignty/campaigns (auditor_rows.json:9306-9308) is FLAGGED_FAKE.",
       "id": "feat:esi.sovereignty.campaigns"
     },
     {
@@ -585,7 +515,7 @@
       "id": "feat:modules.mobile-depot-deployment-and-refitting"
     },
     {
-      "evidence": "crates/eve-server/src/services/fitting_mining_lasers.rs:776-795 compute_nanite_repair_params uses invented constants: 'DERIVED: 4.0 paste per 5 m\u00b3 unit ... (synthesized)', volume/5 clamped to 1..=250, and 'DERIVED: 0.67 HP/s base repair rate per 5 m\u00b3'. It also cuts paste cost by 5% per level of Thermodynamics (:783). system_actor/cycles.rs:136-139 adds an invented 'DERIVED: 2.0 HP/s' tether repair rate. wiki:Overheating (articles/Overheating.md:163-168) says Thermodynamics reduces heat damage, not paste use. Only Nanite Operation (paste) and Nanite Interfacing (repair amount per second) affect paste repairs, and the wiki never mentions scaling by module volume. The test (open_feats_b35_d.rs:79-80, :133) asserts the synthesized paste counts 2/4/8, the 0.67/1.34/2.68 HP/s rates, and 'Thermodynamics V must reduce 8 paste to 6'. Under AGENTS.md, rows that rest on synthesized data stay open.",
+      "evidence": "crates/eve-server/src/services/fitting_mining_lasers.rs:776-795 compute_nanite_repair_params uses invented constants: 'DERIVED: 4.0 paste per 5 m³ unit ... (synthesized)', volume/5 clamped to 1..=250, and 'DERIVED: 0.67 HP/s base repair rate per 5 m³'. It also cuts paste cost by 5% per level of Thermodynamics (:783). system_actor/cycles.rs:136-139 adds an invented 'DERIVED: 2.0 HP/s' tether repair rate. wiki:Overheating (articles/Overheating.md:163-168) says Thermodynamics reduces heat damage, not paste use. Only Nanite Operation (paste) and Nanite Interfacing (repair amount per second) affect paste repairs, and the wiki never mentions scaling by module volume. The test (open_feats_b35_d.rs:79-80, :133) asserts the synthesized paste counts 2/4/8, the 0.67/1.34/2.68 HP/s rates, and 'Thermodynamics V must reduce 8 paste to 6'. Under AGENTS.md, rows that rest on synthesized data stay open.",
       "flagged_by_audit": "20261031-111626",
       "id": "feat:modules.nanite-repair-paste-in-space"
     },
@@ -729,6 +659,21 @@
       "id": "feat:pve.incursion-payout"
     },
     {
+      "evidence": "crates/eve-server/src/services/insurgency_complex_ops.rs:437-505 (invented 2_500*mult LP and 15*mult pts on DERIVED 1000-pt scale crediting Empire War HQ suppression to c.fob_solar_system_id) and crates/eve-server/tests/it/open_feats_b41.rs:88-90,177-292 (seeds Stage 3 via internal helpers and injects war_faction_id plus crates via with_mut_snapshot for 3 of 4 War HQs)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:pve.insurgency-laundering"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/insurgency_complex_ops.rs:51-56,1208-1223 (DERIVED synthetic timers, 30,000 LP, 50 pts, and hardcoded 5_000_000.0 ISK ransom) and crates/eve-server/tests/it/open_feats_b41.rs:88-90,295-395 (seeds Stage 1 via internal add_system_corruption, sets NPC HP to 1.0, and never tests 5-pilot LP split scaling)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:pve.insurgency-mining-ambush"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/insurgency_complex_ops.rs:106-123,1318-1329 (invented LP payouts 15k/22.5k/27k/30k vs wiki:Insurgency 29k/41.5k/52.5k/52.5k, Moderate battlecruiser skill bonus misimplemented as 1.25x speed/LP multiplier, DERIVED 200-pt stage scale) and crates/eve-server/tests/it/open_feats_b41.rs:88-90,398-502 (mutates sh.type_id via with_mut_snapshot bypassing ship-restriction gates and sets NPC HP to 1.0)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:pve.insurgency-outpost-raid"
+    },
+    {
       "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:35-37 hardcodes DEFAULT_LOGIN_CAMPAIGN_ID = 2261 ('Capsuleer Day XXI', a seasonal event track). Every character gets it through unwrap_or(DEFAULT_LOGIN_CAMPAIGN_ID) at :386-388 and :474-476, so which daily campaign is active never comes from a live schedule or from static data. The 'once per day' boundary is UTC midnight, today = now_unix()/86_400 (:381, :469), not EVE downtime. The claim path falls back to the hardcoded Jita station 60_003_760 (:492). The tagged test admits the gap itself, '// DATA GAP: requires live login campaign schedule' (crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:72), and only checks campaign 2261 rewards after advancing a pinned clock by 86_400 s (:193). Rows backed by an invented active-campaign choice stay open under AGENTS.md.",
       "flagged_by_audit": "20261026-174136",
       "id": "feat:pve.login-campaign"
@@ -747,6 +692,11 @@
       "evidence": "crates/eve-server/src/services/agents_missions_helpers.rs:248-314 computes mission ISK rewards using the DERIVED heuristic base_isk = base_lp * 1000 and bonus_reward = isk_reward / 2 because per-mission ISK reward tables are server-authored and not in V24 client FSD.",
       "flagged_by_audit": "20261026-171500",
       "id": "feat:pve.mission-lp-isk-reward-formula"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pvp_filament_arena.rs:36-38,210,312-313,420-469 (violates acceptance clause 'exceeding the arena timer inflicts escalating environmental damage until destruction' by awarding an instant HP-tiebreak win and +100 synthetic points at 900s) and crates/eve-server/tests/it/open_feats_b41.rs:505-634 (injects FleetRecord via with_mut_snapshot, teleports via set_ball_position, mutates HP via set_combat_state, zero combat)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:pve.proving-grounds-queue-and-rewards"
     },
     {
       "evidence": "Sole tagged test test_wormhole_capital_escalations_sentries_drifter_relay_and_downtime_despawn (crates/eve-server/tests/it/wormhole_pve_escalations_closure.rs:54-132, 384, 405) injects ships/skills via ctx.db.with_mut_snapshot + 50,000,000.0 shield HP overrides (:104) and teleports the test ship via internal sentry_sys_handle.set_ball_position (:384, :405).",
@@ -789,6 +739,11 @@
       "id": "feat:quasar.career"
     },
     {
+      "evidence": "crates/eve-server/tests/it/quasar_social_complete.rs:514-666 (test_quasar_corporation_governance_complete) bypasses corpRegistry, ramProxy, invbroker, and marketProxy by directly seeding 16 WorldStateSnapshot maps via ctx.db.with_mut_snapshot (:524-575), executes under ROLE_GM_DEFAULT (:24), and performs only !fields.is_empty() shape checks on 10 corporation sub-domain endpoints (:627-636).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:quasar.corporation"
+    },
+    {
       "evidence": "Quasar cosmetics market and SKINR sequencing rely on derived fee, tier pricing, and duration formulas in quasar_cosmetics_market.rs and quasar_cosmetics_skinr_seq.rs.",
       "flagged_by_audit": "20261026-170000",
       "id": "feat:quasar.cosmetic"
@@ -797,6 +752,16 @@
       "evidence": "crates/eve-server/src/services/quasar_daily_goals.rs:198-242 initializes DailyGoalManager with zero templates (templates: Vec::new()) on a fresh ServerContext::new(), as explicitly asserted at crates/eve-server/tests/it/quasar_progression_complete.rs:176 (assert!(ctx.quasar_gateway.progression.daily_goals.get_templates().is_empty())), with no production daily goal pool, rotation, or milestone streak progression (feat:pve.daily-goals is MISSING). Tagged tests (crates/eve-server/tests/it/quasar_progression_complete.rs:126-153, 177 and crates/eve-server/tests/it/quasar_drafts_titles_dailygoals.rs) inject synthetic fixture goals via configure_test_daily_goals / configure_template.",
       "flagged_by_audit": "20261030-001553",
       "id": "feat:quasar.dailygoal"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_entitlement_membership.rs:65-74,103-107,170-184,249-266 fabricates default \"standard_pilot\"/\"special_access\" entitlement strings and stores ship logo entitlements in an isolated quasar_auth_user blob disconnected from LPStoreMgr Paragon emblem purchases; sole tagged test crates/eve-server/tests/it/quasar_identity_complete.rs:288-609 grants ship logos only via GM-only admin GrantRequest (:493-520).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:quasar.entitlement"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_social_freelance.rs:29-127,277-289 persists freelance projects in an isolated quasar_state_blobs[\"quasar_freelance\"] JSON blob disconnected from WorldStateSnapshot.corp_projects (used by ESI /corporations/{id}/projects at crates/eve-server/src/esi/corp_governance_routes.rs:619-656) and hardcodes a 50,000,000 ISK fallback escrow (:287-288); sole tagged test crates/eve-server/tests/it/quasar_social_complete_part2.rs:163-296 seeds corp wallet and items via with_mut_snapshot (:179-205) under ROLE_GM_DEFAULT (:15) and never exercises non-item-delivery contribution methods.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:quasar.freelance"
     },
     {
       "evidence": "This feature row is closed by the same test_authentic_freelance_pirate_stargate_remediated (quasar_sov_pirate_remediation.rs:113-133). Its corruption/suppression stage model rests on the DERIVED INSURGENCY_STAGE_THRESHOLDS (quasar_space_services.rs:45-48) and the matching invented stage formula insurgency_services::insurgency_stage (referenced at quasar_space_services.rs:46-47, :710, :775). The test asserts the synthetic thresholds (:236-242), so the pirate-insurgency feature is validated against invented data, not client static data.",
@@ -834,7 +799,7 @@
       "id": "feat:sovereignty.skyhook-reagent-maturity"
     },
     {
-      "evidence": "Acceptance (ledger.json:65053): ADM is computed from the indices 'and upgrades', and it scales entosis capture time. In crates/eve-server/tests/it/sov_fw_complete.rs:477-492 the dev indices are seeded straight into system_states (:423-425). The test asserts adm\u22483.8 and checks the entosis scaling only by calling the internal helper sov_services::scale_entosis_capture_seconds(600, adm) (:489-491). No entosis link cycle is timed, and no hub upgrade's effect on ADM is tested.",
+      "evidence": "Acceptance (ledger.json:65053): ADM is computed from the indices 'and upgrades', and it scales entosis capture time. In crates/eve-server/tests/it/sov_fw_complete.rs:477-492 the dev indices are seeded straight into system_states (:423-425). The test asserts adm≈3.8 and checks the entosis scaling only by calling the internal helper sov_services::scale_entosis_capture_seconds(600, adm) (:489-491). No entosis link cycle is timed, and no hub upgrade's effect on ADM is tested.",
       "flagged_by_audit": "20261028-093759",
       "id": "feat:sovereignty.sov-adm"
     },
@@ -879,24 +844,19 @@
       "id": "feat:structures.anchor-restrictions"
     },
     {
-      "evidence": "crates/eve-server/src/services/structure_acl_defense_rules.rs:246 mutates `session.ship_id = Some(structure_id)`, falsely treating an Upwell structure as a ship session rather than structure control, and invents non-catalog `structureControl.BoardStructure`/`EjectFromStructure` RPCs.",
-      "flagged_by_audit": "20261026-094345",
-      "id": "feat:structures.board-structure"
-    },
-    {
       "evidence": "crates/eve-server/src/services/structure_acl_defense_rules.rs:325-360,686-691 and crates/eve-server/tests/it/structure_acl_and_features_complete.rs:325-360 implement and test invented RPCs `structureControl.SetDefenseSettings`/`GetDefenseSettings`/`EvaluateDefenseTarget` (admitted non-client methods suppressed via rpc-lint) that read/write an unintegrated JSON blob in `service_state_blobs` without ballpark or weapon defense integration.",
       "flagged_by_audit": "20261026-094345",
       "id": "feat:structures.defense-settings"
     },
     {
-      "evidence": "crates/eve-server/tests/it/structure_acl_and_features_complete.rs:230-248 asserts docking access by invoking an internal Rust helper `verify_structure_docking_acl` directly rather than exercising any client docking RPC (`stationSvc.Dock`). In crates/eve-server/src/services/structure_acl_defense_rules.rs:200-213, `verify_structure_docking_acl` is unrouted and never invoked by any RPC handler.",
-      "flagged_by_audit": "20261026-094345",
-      "id": "feat:structures.docking-acl"
+      "evidence": "crates/eve-server/tests/it/open_feats_b38_part2.rs:421-546 (sole tagged test bypasses FW enlistment and crimewatch gameplay to seed ch.war_faction_id, corp_war_factions, weapon_timer_until_unix, disapproval_flags, pvp_timer_until_unix, and direct_enlisted_chars via direct snapshot/lock mutation)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "feat:structures.fulcrum-alignment-services"
     },
     {
-      "evidence": "crates/eve-server/tests/it/structure_acl_and_features_complete.rs:609-658 and crates/eve-server/src/services/structure_acl_defense_rules.rs:408-438 \u2014 Tagged test manually inserts an InventoryItemRecord (type 33476) into snap.items/snap.item_positions and calls internal Rust helper acl_rules::is_cyno_inhibited(&ctx, snap, ...) directly; it never tests deploying/anchoring the Mobile Cynosural Inhibitor via RPC, never enforces the 2-minute activation delay or 1-hour lifetime (mobile_deployables.rs:321-365 defaults group 1249 to a 2-day lifetime), and never tests that activating a standard/industrial Cynosural Field module (dogmaIM.Activate) is blocked within 100 km while Covert Cynosural Fields remain unaffected.",
-      "flagged_by_audit": "20261028-144025",
-      "id": "feat:structures.mobile-cyno-inhibitor"
+      "evidence": "crates/eve-server/tests/it/structures_closure_remediated_part4.rs:280-345 directly injects UpwellStructureRecord, jump_bridge_links, and online service modules via ctx.db.with_mut_snapshot instead of anchoring/fitting through live RPCs; crates/eve-server/src/services/station_structure_handlers.rs:497-498,538-539 evaluates apply_pending_profile_applications (crates/eve-server/src/services/structure_upwell_ops.rs:131-140) on an ephemeral read-only copy without persisting the applied profile transition or releasing unauthorized structure controllers.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:structures.profiles"
     },
     {
       "evidence": "crates/eve-server/src/services/repair_service.rs:76-91 rejects quotes and repairs with StructureServiceOffline whenever the structure is LowPower or NotOperational. Per wiki:Upwell_structure.md:203-208 the repair shop is always available and needs only a core, not a service module or fuel. The test asserts the opposite: crates/eve-server/tests/it/plan_upwell_structures_closure_part2.rs:210-212 expects GetRepairQuotes and RepairItemsInStructure to fail with StructureServiceOffline in LowPower. The per-HP cost is an invented formula, max(1, base_price*0.0125/max_hp) with made-up defaults of 10_000 ISK and 100/40 HP (repair_service.rs:36-46). It comes from no client or static data, and the acceptance text requires the cost to be based on base item value and missing HP.",
@@ -904,9 +864,19 @@
       "id": "feat:structures.repairshop-service-quotes-and-restoration"
     },
     {
+      "evidence": "crates/eve-server/tests/it/structures_closure_remediated_part4.rs:147-431 (sole tagged test) bypasses structureDeployment.Anchor and Standup fitting RPCs by directly injecting UpwellStructureRecord entries, jump_bridge_links, Standup Market Hub I (35892), and module_online_states via ctx.db.with_mut_snapshot (:280-345), and mutates pilot solar_system_id via with_mut_snapshot (:419).",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:structures.structure-directory"
+    },
+    {
       "evidence": "crates/eve-server/src/services/lookup_svc.rs:419-452 LookupWarableCorporationsOrAlliances is a plain name/ticker filter over player corps (id >= 98M) and all alliances. It never checks whether a war can be declared on the target: it doesn't exclude the caller's own corp or alliance, NPC-allied entities or corps that can't be war-decced. The test crates/eve-server/tests/it/rpc_core_services_batch.rs:25-54, :300-318 seeds corp 98_000_001, whose only member and CEO is the logged-in demo pilot 90_000_001, and asserts that this corp and its own alliance are returned as 'warable'. That is the opposite of the expected behaviour, so the acceptance clause is never really exercised.",
       "flagged_by_audit": "20261026-151210",
       "id": "feat:ui.lookup"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_cosmetics_skinr_seq.rs:978-998 fabricates +500 EverMarks per license on SKINR InitiateRequest (instead of live IRIS Paragon ship-turn-in missions with 23h cooldown and 1:1 corp EverMark matching per wiki:EverMark); crates/eve-server/src/services/lp_store_catalog.rs:132-146 synthesizes DERIVED emblem prices (750 EM for frigates vs live 5,000 EM); crates/eve-server/tests/it/pi_and_evermarks_remediation.rs:489-588 seeds SKINR items via with_mut_snapshot (:489-491), mints EverMarks via the fabricated SKINR hook (:517-567), and delivers a physical item without one-per-character direct emblem injection.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "feat:wallet.evermarks"
     },
     {
       "evidence": "crates/eve-server/src/services/wallet_services_ext.rs:121-136 uses the invented DERIVED HyperCore formula ceil(est_value * (ticket_count/512)^0.25 / 5_000_000), and GetActiveHistoricPrices (:967-976) substitutes static SDE base_price.max(100.0) instead of market history / adjusted item price. Tested in crates/eve-server/tests/it/serverops_hypernet_gaps.rs:46-217.",
@@ -919,7 +889,7 @@
       "id": "feat:wallet.hypernet-relay"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 — default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
       "flagged_by_audit": "20261025-200428",
       "id": "feat:wallet.nes-store"
     },
@@ -1119,6 +1089,21 @@
       "id": "plan:E-5"
     },
     {
+      "evidence": "Closed solely by crates/eve-server/tests/it/esi_corp_governance.rs:899-1212, while across crates/eve-server/tests/it/esi_corp_governance.rs:163-252,419-526,684-763,931-1070 and crates/eve-server/tests/it/esi_corp_alliance.rs:160-203,464-525,660-752,864-959 corporation/alliance governance, medals, projects, titles, role history, shareholders, blueprints, standings, and structures are seeded via ctx.db.with_mut_snapshot instead of mutated through live corpRegistry/allianceRegistry/structure/Quasar RPCs as required by action_plan.md ESI-5.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "plan:ESI-5"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/quasar_q5_q6_closure.rs:75-250 (sole tagged test) runs under ROLE_GM_DEFAULT (:19), sends only 4 empty-payload read requests (:91-143) asserting only status_code == STATUS_OK and normalized_type_name() with zero decoded value assertions, and then inspects a static on-disk parity.json/auditor_rows.json file (:184-249) rather than testing the 19 Q-5 packages against live machoNet/ESI state.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "plan:Q-5"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/quasar_q5_q6_closure.rs:75-250 (sole tagged test) dispatches zero Q-6 Economy, Industry, or Planetary Quasar requests—listing the 15 Q-6 package names only as strings (:168-183) to scan an on-disk JSON file (:184-249)—while Q-6 cosmetics/store rows (feat:quasar.cosmetic, store/targetaudience/offer/api/requests_pb2.pyj) remain FLAGGED_FAKE.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "plan:Q-6"
+    },
+    {
       "evidence": "Closed by crates/eve-server/src/services/quasar_achievements_ops.rs:117-226 and crates/eve-server/tests/it/quasar_progression_extra_suite.rs:57-174 (commented '// DATA GAP' at :58, 147), which fall back to hardcoded achievement ID 2 (quasar_achievements_ops.rs:125, 165, 203) and compute category IDs, showcase scores, and milestones (1..=ach.def.milestone_targets.len(), :140-143, 173-176) from the DERIVED achievement definitions in crates/eve-server/src/services/quasar_achievements.rs:149-190, 257-306 for which feat:quasar.achievement and quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj (auditor_rows.json:9707, 9977) are FLAGGED_FAKE.",
       "id": "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj"
     },
@@ -1201,7 +1186,7 @@
       "id": "quasar:eveProto/generated/eve_public/cosmetic/market/skin/Order_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_cosmetics_market.rs:46-53, 925-995, 1110-1168 prices Paragon Hub SKIN listings and purchases using synthesized flat broker fees (LISTING_DURATIONS_SECS: 100_000..=2_500_000 ISK), fixed 10%/20% seller tax ignoring Paragon Hub tax-reduction skills (wiki:Ship_SKINR), and tier * 1_000 / tier * 2_500 EverMark buyer fees \u2014 the same derived schedule for which cosmetic/market/skin/listing/api/requests_pb2.pyj, cosmetic/market/api/api_pb2.pyj, feat:cosmetics.skinr-market, and feat:economy.paragon-hub are already FLAGGED_FAKE. Tested in crates/eve-server/tests/it/quasar_cosmetics_market_state.rs:229-454, asserting the synthetic 100,000 ISK broker fee, 2,000 EverMark fee, and 20% tax (:443-452).",
+      "evidence": "crates/eve-server/src/services/quasar_cosmetics_market.rs:46-53, 925-995, 1110-1168 prices Paragon Hub SKIN listings and purchases using synthesized flat broker fees (LISTING_DURATIONS_SECS: 100_000..=2_500_000 ISK), fixed 10%/20% seller tax ignoring Paragon Hub tax-reduction skills (wiki:Ship_SKINR), and tier * 1_000 / tier * 2_500 EverMark buyer fees — the same derived schedule for which cosmetic/market/skin/listing/api/requests_pb2.pyj, cosmetic/market/api/api_pb2.pyj, feat:cosmetics.skinr-market, and feat:economy.paragon-hub are already FLAGGED_FAKE. Tested in crates/eve-server/tests/it/quasar_cosmetics_market_state.rs:229-454, asserting the synthetic 100,000 ISK broker fee, 2,000 EverMark fee, and 20% tax (:443-452).",
       "flagged_by_audit": "20261029-182230",
       "id": "quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj"
     },
@@ -1236,7 +1221,7 @@
       "id": "quasar:eveProto/generated/eve_public/cosmetic/skin/thirdparty/sequencing/job/api/requests_pb2.pyj"
     },
     {
-      "evidence": "Both tagged tests \u2014 quasar_daily_goals_lifecycle_and_rewards (crates/eve-server/tests/it/quasar_progression_complete.rs:126-153, 179, 230-241) and quasar_daily_goals_configurable_and_admin_targeting (crates/eve-server/tests/it/quasar_drafts_titles_dailygoals.rs:441-498) \u2014 inject hand-authored DailyGoalTemplate fixtures ([0x44, 0x47, 0x01, ..., 1..5] and [0x44, 0x47, 0x02, ..., 99]) via configure_template, backed by crates/eve-server/src/services/quasar_daily_goals.rs:200-274 which synthesizes DERIVED targets, rewards, completion costs, and SDEDG UUIDs (the same service for which feat:quasar.dailygoal, feat:pve.daily-goals, notices_pb2.pyj, and requests_pb2.pyj are FLAGGED_FAKE).",
+      "evidence": "Both tagged tests — quasar_daily_goals_lifecycle_and_rewards (crates/eve-server/tests/it/quasar_progression_complete.rs:126-153, 179, 230-241) and quasar_daily_goals_configurable_and_admin_targeting (crates/eve-server/tests/it/quasar_drafts_titles_dailygoals.rs:441-498) — inject hand-authored DailyGoalTemplate fixtures ([0x44, 0x47, 0x01, ..., 1..5] and [0x44, 0x47, 0x02, ..., 99]) via configure_template, backed by crates/eve-server/src/services/quasar_daily_goals.rs:200-274 which synthesizes DERIVED targets, rewards, completion costs, and SDEDG UUIDs (the same service for which feat:quasar.dailygoal, feat:pve.daily-goals, notices_pb2.pyj, and requests_pb2.pyj are FLAGGED_FAKE).",
       "flagged_by_audit": "20261030-185800",
       "id": "quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj"
     },
@@ -1251,9 +1236,24 @@
       "id": "quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj"
     },
     {
-      "evidence": "The only tagged test (crates/eve-server/tests/it/quasar_feature_packages_complete.rs:144-149, :238-255) sends IncrementContributionScoreRequest and SetContributionScoreRequest with an empty `Vec::new()` payload through dispatch_and_verify_request (:61-96, :69). That helper asserts only status_code == STATUS_OK, the correlation id and normalized_type_name(). It never checks that victory points changed, that ScoreContributionNotice / SolarSystemScoresNotice was published, or what happens with a non-zero delta. Only the 403 path (:257-277) has a real check. The handler (crates/eve-server/src/services/quasar_sov_services.rs:371-457) also falls back to a hardcoded fixture character, `effective_character_id().unwrap_or(90_000_001)` (:373), in production.",
-      "flagged_by_audit": "20261028-122814",
-      "id": "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj"
+      "evidence": "crates/eve-server/tests/it/quasar_social_complete_part2.rs:163-296 and crates/eve-server/src/services/quasar_social_freelance.rs:1041-1102 (sole tagged test test_quasar_freelance_complete never subscribes to or polls any itemdelivery notice, while DeliverRequest destroys delivered items without depositing them into any corporation hangar/delivery container)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_social_freelance.rs:1041-1069 and crates/eve-server/tests/it/quasar_social_complete_part2.rs:235-264 (DeliverRequest deletes contributed items from snap.items without depositing them into any corporation delivery hangar/container, and state lives in unpersisted FreelanceRuntimeState)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/quasar_social_complete_part2.rs:163-296 and crates/eve-server/src/services/quasar_social_freelance.rs:903 (sole tagged test test_quasar_freelance_complete never polls or decodes any eve_public.freelance.project.api.*Notice, and DeleteRequest emits eve_public.acl.api.DeletedNotice instead of a freelance project notice)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj"
+    },
+    {
+      "evidence": "Closed solely by crates/eve-server/tests/it/quasar_social_complete_part2.rs:163-296, which omits reward budget fields on CreateRequest (:208-223) and relies on crates/eve-server/src/services/quasar_social_freelance.rs:287-288's hardcoded 50,000,000 ISK default budget to assert a 300,000 ISK payout (:265-272), seeds state via with_mut_snapshot (:179-205), and never exercises CloseRequest, UpdateRequest, or cursor pagination.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj"
     },
     {
       "evidence": "Depends on read_store_catalog (empty outside test seeding) and derived 1 PLEX = 5 USD cents formula in quasar_payment_store.rs.",
@@ -1261,9 +1261,24 @@
       "id": "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj"
     },
     {
+      "evidence": "crates/eve-server/tests/it/quasar_store_vault_suite.rs:424-441 and crates/eve-server/tests/it/quasar_identity_complete_part2.rs:250-355 (neither tagged test triggers CancelledNotice or PaymentFailedNotice through a live Quasar request or billing tick; test_payment_schedules_tokens_and_user_license seeds payment_schedules via with_mut_snapshot at :425 and calls Rust helper cancel_user_payment_schedule directly at :436 to enqueue CancelledNotice)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj"
+    },
+    {
       "evidence": "No production path creates a payment schedule. The only writer of the 'payment_schedules' blob is cancel_user_payment_schedule (quasar_payment_store_types.rs:61-77), and only tests call it. The tests seed schedules by writing JSON into snap.service_state_blobs (quasar_store_vault_suite.rs:415-426). They assert only status_code == OK for GetRequest/GetActiveByTypeRequest (:427-433), not payload content. The CancelledNotice comes from the test-only helper call (:436), not from client traffic.",
       "flagged_by_audit": "20261029-100543",
       "id": "quasar:eveProto/generated/eve_public/payment/schedule/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:733-768 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:18 (DisableAllRequest emits QuickPayRemovedNotice using ctx.effective_user_id().unwrap_or(1) with no authentication check, and QuickPayAddedNotice has no live Quasar handler emitter — tests invoke Rust helper add_user_quick_pay_token directly)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:649,679,735 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:447-450 (GetQuickPayRequest, GetRequest, and DisableAllRequest omit authentication checks and default unauthenticated sessions to ctx.effective_user_id().unwrap_or(1), exposing and mutating user 1's payment tokens; tagged test injects PaymentTokenRecord fixtures via with_mut_snapshot)",
+      "flagged_by_audit": "20261031-151747",
+      "id": "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj"
     },
     {
       "evidence": "crates/eve-server/src/services/insurgency_services.rs:229-274, 313-326, 344-348, 394-414 encodes IncreasedNotice, SetNotice, and ResetNotice using the hardcoded synthetic 1000 denominator (:234, :254, labelled DERIVED) and 200-points-per-stage insurgency_stage formula (:344-348) for which quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj and feat:quasar.pirate are already FLAGGED_FAKE. Tested in crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs:266-336, which asserts the synthetic 400/1000, 200/1000, 201/1000, and 0/1000 fractions.",
@@ -1271,7 +1286,7 @@
       "id": "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj"
     },
     {
-      "evidence": "The GetStageThresholdsRequest response comes from crates/eve-server/src/services/quasar_space_services.rs:45-48 `INSURGENCY_STAGE_THRESHOLDS: [u64; 5] = [200, 400, 600, 800, 1000]`. The code labels it 'DERIVED (synthetic \u2014 the client's insurgency corruption / suppression stage table is not part of the EvoMu SDE import)', so the real data is in the client but was never imported. The handler is at :734-750, and GetSystemInfoRequest (:687-733) hardcodes a 1000-point denominator. The tagged test crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs:177-179 calls the thresholds DERIVED, and :236-242 asserts exactly the invented [200..1000]/1000 table. AGENTS.md: rows backed by synthesized data stay open.",
+      "evidence": "The GetStageThresholdsRequest response comes from crates/eve-server/src/services/quasar_space_services.rs:45-48 `INSURGENCY_STAGE_THRESHOLDS: [u64; 5] = [200, 400, 600, 800, 1000]`. The code labels it 'DERIVED (synthetic — the client's insurgency corruption / suppression stage table is not part of the EvoMu SDE import)', so the real data is in the client but was never imported. The handler is at :734-750, and GetSystemInfoRequest (:687-733) hardcodes a 1000-point denominator. The tagged test crates/eve-server/tests/it/quasar_sov_pirate_remediation.rs:177-179 calls the thresholds DERIVED, and :236-242 asserts exactly the invented [200..1000]/1000 table. AGENTS.md: rows backed by synthesized data stay open.",
       "flagged_by_audit": "20261028-122814",
       "id": "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj"
     },
@@ -1286,7 +1301,7 @@
       "id": "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj"
     },
     {
-      "evidence": "Closed in this tree (claims.md:27), but the hub resources served by these requests come from compute_hub_resources (crates/eve-server/src/services/quasar_sov_hub.rs:380-426, 429+). It reads star_power (:269-288, labelled 'DERIVED (synthetic \u2014 the client sovereignty resource star configuration table is not part of the EvoMu SDE import)') and PLANET_RESOURCE_TABLE (:290-306, labelled DERIVED synthetic). upgrade_definition hard-codes fuel_startup: 0 as a 'DERIVED placeholder' (:188-191, :244-245), although wiki:Sovereignty.md:37 says an upgrade that is taken offline has to pay its fuel startup cost again. The claims file (claims.md:41) and the test itself (sovereignty_mercden_parity_closure_part3.rs:24-27, 'DATA GAP') keep sov-power, sov-workforce, sov-hub-upgrades and sov-hub-fuel open for exactly these tables. A proto row that serves the same synthetic numbers can't be DONE.",
+      "evidence": "Closed in this tree (claims.md:27), but the hub resources served by these requests come from compute_hub_resources (crates/eve-server/src/services/quasar_sov_hub.rs:380-426, 429+). It reads star_power (:269-288, labelled 'DERIVED (synthetic — the client sovereignty resource star configuration table is not part of the EvoMu SDE import)') and PLANET_RESOURCE_TABLE (:290-306, labelled DERIVED synthetic). upgrade_definition hard-codes fuel_startup: 0 as a 'DERIVED placeholder' (:188-191, :244-245), although wiki:Sovereignty.md:37 says an upgrade that is taken offline has to pay its fuel startup cost again. The claims file (claims.md:41) and the test itself (sovereignty_mercden_parity_closure_part3.rs:24-27, 'DATA GAP') keep sov-power, sov-workforce, sov-hub-upgrades and sov-hub-fuel open for exactly these tables. A proto row that serves the same synthetic numbers can't be DONE.",
       "flagged_by_audit": "20261031-123150",
       "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj"
     },
@@ -1321,7 +1336,7 @@
       "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj"
     },
     {
-      "evidence": "GetCapacityRequest returns activity_capacity() = 2 + stage, labelled 'DERIVED (synthetic \u2014 server-only MTO slot capacity formula is not in .fsdbinary)' (crates/eve-server/src/services/quasar_sov_mercden.rs:92-96, 729-745). StartRequest sets an invented fixed expiry of now + 1_800 (:711), places the site at a 'DERIVED (synthetic)' offset of +15 km/+5 km from the den (:696-704), and reports dungeon_id = site ball id & 0x7FFFFFFF (:710), a fabricated dungeon ID. The tagged test sovereignty_equinox_gameplay_closure_part2.rs:147-148 checks only status_code == STATUS_OK for GetCapacityRequest and GetAllRequest, a shape-only check. The same test admits 'DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)' (:29).",
+      "evidence": "GetCapacityRequest returns activity_capacity() = 2 + stage, labelled 'DERIVED (synthetic — server-only MTO slot capacity formula is not in .fsdbinary)' (crates/eve-server/src/services/quasar_sov_mercden.rs:92-96, 729-745). StartRequest sets an invented fixed expiry of now + 1_800 (:711), places the site at a 'DERIVED (synthetic)' offset of +15 km/+5 km from the den (:696-704), and reports dungeon_id = site ball id & 0x7FFFFFFF (:710), a fabricated dungeon ID. The tagged test sovereignty_equinox_gameplay_closure_part2.rs:147-148 checks only status_code == STATUS_OK for GetCapacityRequest and GetAllRequest, a shape-only check. The same test admits 'DATA GAP: feat:pve.mercenary-tactical-ops (open until real SDE tables imported)' (:29).",
       "flagged_by_audit": "20261031-123150",
       "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj"
     },
@@ -1331,7 +1346,7 @@
       "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj"
     },
     {
-      "evidence": "Re-confirmed and still flagged. GetAsOwnerResponse still embeds encode_infomorphs_gen_definition with the DERIVED infomorphs_per_hour rates (quasar_sov_mercden.rs:69-80, 549-558). The register_handlers header itself says 'DERIVED (synthetic): DATA GAP \u2014 Mercenary Den evolution rates and activity generation parameters are server-only tables not shipped in V24 client FSD' (:493).",
+      "evidence": "Re-confirmed and still flagged. GetAsOwnerResponse still embeds encode_infomorphs_gen_definition with the DERIVED infomorphs_per_hour rates (quasar_sov_mercden.rs:69-80, 549-558). The register_handlers header itself says 'DERIVED (synthetic): DATA GAP — Mercenary Den evolution rates and activity generation parameters are server-only tables not shipped in V24 client FSD' (:493).",
       "flagged_by_audit": "20261031-123150",
       "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj"
     },
@@ -1361,22 +1376,22 @@
       "id": "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-254 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:246-256 \u2014 store.category.api handlers serve the 4-entry hardcoded category fixture in default_store_catalog().",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-254 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:246-256 — store.category.api handlers serve the 4-entry hardcoded category fixture in default_store_catalog().",
       "flagged_by_audit": "20261025-200428",
       "id": "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:290-328 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:283-300 \u2014 store.offer.api handlers serve the 4-entry hardcoded offer fixture (1001..=1004) in default_store_catalog().",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:290-328 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:283-300 — store.offer.api handlers serve the 4-entry hardcoded offer fixture (1001..=1004) in default_store_catalog().",
       "flagged_by_audit": "20261025-200428",
       "id": "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:255-289 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:258-281 \u2014 store.product.api handlers serve the 4-entry hardcoded product fixture (101..=104) in default_store_catalog().",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:255-289 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:258-281 — store.product.api handlers serve the 4-entry hardcoded product fixture (101..=104) in default_store_catalog().",
       "flagged_by_audit": "20261025-200428",
       "id": "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:509-540, crates/eve-server/src/services/quasar_payment_store_types.rs:146-247, crates/eve-server/tests/it/quasar_store_vault_suite.rs:148-159, crates/eve-server/tests/it/quasar_extended_endpoints.rs:365-372 \u2014 GetOffersForTargetAudienceRequest serves the same 4-entry hardcoded fixture (seed_store_catalog) that caused store/category/api_pb2.pyj, store/offer/api_pb2.pyj, and store/product/api_pb2.pyj to be flagged fake, and ignores the request's target-audience filter completely; tagged tests only assert status_code == 200 and !offers.is_empty() against an empty request payload.",
+      "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:509-540, crates/eve-server/src/services/quasar_payment_store_types.rs:146-247, crates/eve-server/tests/it/quasar_store_vault_suite.rs:148-159, crates/eve-server/tests/it/quasar_extended_endpoints.rs:365-372 — GetOffersForTargetAudienceRequest serves the same 4-entry hardcoded fixture (seed_store_catalog) that caused store/category/api_pb2.pyj, store/offer/api_pb2.pyj, and store/product/api_pb2.pyj to be flagged fake, and ignores the request's target-audience filter completely; tagged tests only assert status_code == 200 and !offers.is_empty() against an empty request payload.",
       "flagged_by_audit": "20261026-073033",
       "id": "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj"
     },
@@ -1389,6 +1404,11 @@
       "evidence": "crates/eve-server/src/services/fast_checkout_and_activity.rs:65-101 standard_plex_offers() is a hand-written fixture labelled DERIVED: offer IDs 1001-1004, 110/240/500/1100 PLEX, invented USD prices 4.99-39.99 and invented tags. handle_get_offers_for_user serves it whenever no offers are cached (:725). Nothing in production ever enables fast checkout: UserFastCheckoutState defaults to enabled=false (:55-63). The tagged test (crates/eve-server/tests/it/rpc_crates_offers.rs:551-650) turns it on by calling the internal Rust helper set_user_fast_checkout_enabled directly (:574), not any client or server path. It then asserts only that the list is non-empty (:589). This is the same kind of hardcoded store fixture already flagged on store/offer/api_pb2.pyj and store/product/api_pb2.pyj.",
       "flagged_by_audit": "20261026-161125",
       "id": "rpc:FastCheckoutService.GetOffersForUser"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/fast_checkout_and_activity_complete.rs:70-177 (sole tagged test) injects Metenox UpwellStructureRecord and MoonExtractionRecord directly via ctx.db.with_mut_snapshot (:93-137) and asserts only tuple length and PyRep variant types on RequestMiningCycleOutput (:153-177) with zero value assertions on material type_id, 40% yield quantity, or volume; crates/eve-server/src/services/fast_checkout_and_activity.rs:215-217 falls back to synthesized derive_moon_ores_from_sde.",
+      "flagged_by_audit": "20261031-160712",
+      "id": "rpc:FastCheckoutService.RequestMiningCycleOutput"
     },
     {
       "evidence": "It returns the synthesized task record created by get_new_task (project_discovery.rs:498-515), serialized as JSON with an internal fetch_count, instead of real MMOS task payload data. The test (rpc_discovery_seasons.rs:92-101) asserts the invented fields task_id='task_1', samples=10 and fetch_count 1->2. It is fixture-driven, with no real sample data.",
@@ -1466,7 +1486,7 @@
       "id": "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances"
     },
     {
-      "evidence": "crates/eve-server/src/services/macho_cluster_mgmt.rs:334-380 returns a dict whose keys were made up for this handler (runs_started, total_requests, systems_stepped, sde_types_count, world_items_count, \u2026), with no client-derived schema. Most values are container sizes (sde.types.len(), snap.items.len()) or counters that StartLoad/StopLoad write. Test notify_real_emitters_batch8_part5.rs:286-324 checks only those self-written keys, plus loose bounds such as sde_types_count > 1000 and world_items_count > 0.",
+      "evidence": "crates/eve-server/src/services/macho_cluster_mgmt.rs:334-380 returns a dict whose keys were made up for this handler (runs_started, total_requests, systems_stepped, sde_types_count, world_items_count, …), with no client-derived schema. Most values are container sizes (sde.types.len(), snap.items.len()) or counters that StartLoad/StopLoad write. Test notify_real_emitters_batch8_part5.rs:286-324 checks only those self-written keys, plus loose bounds such as sde_types_count > 1000 and world_items_count > 0.",
       "flagged_by_audit": "20261031-074747",
       "id": "rpc:loadService.GetTotalStats"
     },
@@ -1496,7 +1516,7 @@
       "id": "rpc:loginCampaignManager.get_client_campaign_state"
     },
     {
-      "evidence": "crates/eve-server/src/services/lookup_svc.rs:419-452 returns every player corporation (corporation_id >= 98_000_000) and every alliance matching the query string without checking war eligibility (structure ownership) or excluding the caller's own corporation or alliance \u2014 the exact defect for which feat:ui.lookup is already FLAGGED_FAKE. Tested in crates/eve-server/tests/it/rpc_core_services_batch.rs:300-319, which asserts that the caller's own corp (98_000_001) and alliance (99_000_001) are returned as warable.",
+      "evidence": "crates/eve-server/src/services/lookup_svc.rs:419-452 returns every player corporation (corporation_id >= 98_000_000) and every alliance matching the query string without checking war eligibility (structure ownership) or excluding the caller's own corporation or alliance — the exact defect for which feat:ui.lookup is already FLAGGED_FAKE. Tested in crates/eve-server/tests/it/rpc_core_services_batch.rs:300-319, which asserts that the caller's own corp (98_000_001) and alliance (99_000_001) are returned as warable.",
       "flagged_by_audit": "20261029-182230",
       "id": "rpc:lookupSvc.LookupWarableCorporationsOrAlliances"
     },
@@ -1511,7 +1531,7 @@
       "id": "rpc:milestoneMgr.ProcessCharacterLogon"
     },
     {
-      "evidence": "crates/eve-server/src/services/misc_client_services.rs:1453-1474, crates/eve-server/tests/it/rpc_missing_batch3_part2.rs:197-205 \u2014 raffleMgr.character_Seeding is collapsed into the same match arm as QA_SeedRaffles (\"QA_SeedRaffles\" | \"character_Seeding\"), ignoring arguments and seeding 3 hardcoded type_ids (34, 35, 36) with fixed ticket count 8 and price 100_000 * 100 instead of character-specific seeding; the test only asserts that the returned integer is >= 3.",
+      "evidence": "crates/eve-server/src/services/misc_client_services.rs:1453-1474, crates/eve-server/tests/it/rpc_missing_batch3_part2.rs:197-205 — raffleMgr.character_Seeding is collapsed into the same match arm as QA_SeedRaffles (\"QA_SeedRaffles\" | \"character_Seeding\"), ignoring arguments and seeding 3 hardcoded type_ids (34, 35, 36) with fixed ticket count 8 and price 100_000 * 100 instead of character-specific seeding; the test only asserts that the returned integer is >= 3.",
       "flagged_by_audit": "20261026-073033",
       "id": "rpc:raffleMgr.character_Seeding"
     },
@@ -1650,7 +1670,9 @@
   ],
   "rejected_triage": [
     "destiny:OnDockingAccepted",
+    "destiny:OnDroneActivityChange",
     "notify:OnAmmoInBankChanged",
+    "notify:OnBeanPrime",
     "notify:OnChargeLoadedToModule",
     "notify:OnClearFetchedData",
     "notify:OnClientEvent_MarketItemReceived",
@@ -1683,6 +1705,7 @@
     "sde:res:/localizationfsd/localization_fsd_en-us.pickle",
     "sde:res:/localizationfsd/localization_fsd_es.pickle",
     "sde:res:/localizationfsd/localization_fsd_fr.pickle",
+    "sde:res:/localizationfsd/localization_fsd_it.pickle",
     "sde:res:/localizationfsd/localization_fsd_ja.pickle",
     "sde:res:/localizationfsd/localization_fsd_ko.pickle",
     "sde:res:/localizationfsd/localization_fsd_main.pickle",
@@ -2612,7 +2635,7 @@
       "why_missing": "High-sec Abyssal filament security band restrictions and exit suspect flagging are not covered by feat:navigation.filament-abyssal."
     },
     {
-      "acceptance": "Unprovoked aggression against non-suspect capsuleers in high-sec triggers CONCORD intervention with system security response delays: 0.5 = 19s (\u00b11s), 0.6 = 14s, 0.7 = 11s, 0.8 = 8s, 0.9 = 6s, 1.0 = 6s; CONCORD ships spawn on grid, apply 100% web, warp scramble, capacitor drain, and ECM jam, and destroy the criminal ship; CONCORD hulls are completely invulnerable to damage.",
+      "acceptance": "Unprovoked aggression against non-suspect capsuleers in high-sec triggers CONCORD intervention with system security response delays: 0.5 = 19s (±1s), 0.6 = 14s, 0.7 = 11s, 0.8 = 8s, 0.9 = 6s, 1.0 = 6s; CONCORD ships spawn on grid, apply 100% web, warp scramble, capacitor drain, and ECM jam, and destroy the criminal ship; CONCORD hulls are completely invulnerable to damage.",
       "added_by_audit": "20261020-230707",
       "attest_ok": false,
       "category": "feat",
@@ -2643,7 +2666,7 @@
       "why_missing": "No row covers ownership changes caused by criminal status; wreck-loot covers only the base drop chance."
     },
     {
-      "acceptance": "Faction police engage capsuleers in ships when their security status is at or below a threshold that depends on system security:\n\n| System security | Threshold |\n|---|---|\n| 1.0 | \u22122.0 |\n| 0.9 | \u22122.5 |\n| 0.8 | \u22123.0 |\n| 0.7 | \u22123.5 |\n| 0.6 | \u22124.0 |\n| 0.5 | \u22124.5 |\n\nBelow the threshold, in that system:\n- the character's cloak is disabled;\n- docking or tethering in a ship is refused, while docking in a capsule is allowed;\n- capsules are not attacked.",
+      "acceptance": "Faction police engage capsuleers in ships when their security status is at or below a threshold that depends on system security:\n\n| System security | Threshold |\n|---|---|\n| 1.0 | −2.0 |\n| 0.9 | −2.5 |\n| 0.8 | −3.0 |\n| 0.7 | −3.5 |\n| 0.6 | −4.0 |\n| 0.5 | −4.5 |\n\nBelow the threshold, in that system:\n- the character's cloak is disabled;\n- docking or tethering in a ship is refused, while docking in a capsule is allowed;\n- capsules are not attacked.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2655,7 +2678,7 @@
         "wiki:Security_status"
       ],
       "title": "Faction police thresholds per system security",
-      "why_missing": "feat:crimewatch.faction-police says 'at \u22125', which contradicts the live per-security thresholds. The cloak, dock and pod rules are missing."
+      "why_missing": "feat:crimewatch.faction-police says 'at −5', which contradicts the live per-security thresholds. The cloak, dock and pod rules are missing."
     },
     {
       "acceptance": "A ship with a criminal timer in high-sec, or jumping into high-sec with one, cannot warp, jump, dock, eject, store or switch ships until it is destroyed. The capsule may then warp. CONCORD still destroys a ship that used session-change invulnerability even if the timer expired meanwhile.",
@@ -2706,7 +2729,7 @@
       "why_missing": "suspect-flag and criminal-flag are generic one-liners. The low-sec ship-vs-pod classification and the high-sec entry consequence are untested."
     },
     {
-      "acceptance": "At security status \u22124.95 or below, a character is an outlaw:\n- anyone may attack them anywhere without CONCORD response or penalty;\n- remote assistance to them is a suspect offence, even for corp members;\n- assisting outlaws in low-sec is not an offence.",
+      "acceptance": "At security status −4.95 or below, a character is an outlaw:\n- anyone may attack them anywhere without CONCORD response or penalty;\n- remote assistance to them is a suspect offence, even for corp members;\n- assisting outlaws in low-sec is not an offence.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2754,7 +2777,7 @@
       "why_missing": "Existing feat:crimewatch.safety-settings only mentions SetSafetyLevel RPC; server-side refusal of illegal module activations and looting under safety rules is not specified."
     },
     {
-      "acceptance": "Security status gains from NPC kills (belt, mission and incursion rats) stop at +5.0. Clone soldier tags cannot raise security status above 0.0. Security status is clamped to \u221210..+10.",
+      "acceptance": "Security status gains from NPC kills (belt, mission and incursion rats) stop at +5.0. Clone soldier tags cannot raise security status above 0.0. Security status is clamped to −10..+10.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -2770,7 +2793,7 @@
       "why_missing": "sec-status-gain and sec-status-tags rows have no caps; the +5.0 NPC cap and the 0.0 tag cap are untested."
     },
     {
-      "acceptance": "Each clone soldier tag turned in at a low-sec CONCORD exchange adds +0.5 security status, but only within its band:\n\n| Tag | Band |\n|---|---|\n| Trainer | \u221210 to \u22128 |\n| Recruiter | \u22128 to \u22125 |\n| Transporter | \u22125 to \u22122 |\n| Negotiator | \u22122 to 0 |\n\nA tag used outside its band is refused.",
+      "acceptance": "Each clone soldier tag turned in at a low-sec CONCORD exchange adds +0.5 security status, but only within its band:\n\n| Tag | Band |\n|---|---|\n| Trainer | −10 to −8 |\n| Recruiter | −8 to −5 |\n| Transporter | −5 to −2 |\n| Negotiator | −2 to 0 |\n\nA tag used outside its band is refused.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -3426,7 +3449,7 @@
       "why_missing": "feat:crimewatch.security-bands and feat:pve.insurgency do not test the Stage 3-5 Corruption overrides to sentry guns, CONCORD response, and bubble/bomb restrictions."
     },
     {
-      "acceptance": "Each Corruption and Suppression stage (1\u20135) applies that stage's published system effects: security posture changes via securityMgr.get_modified_systems, plus the stage-gated site spawns and NPC behaviour. Effects are removed when the stage drops.",
+      "acceptance": "Each Corruption and Suppression stage (1–5) applies that stage's published system effects: security posture changes via securityMgr.get_modified_systems, plus the stage-gated site spawns and NPC behaviour. Effects are removed when the stage drops.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -3439,7 +3462,7 @@
         "client:security/client/securitySvc.pyj"
       ],
       "title": "Per-stage corruption/suppression system effects",
-      "why_missing": "feat:pve.insurgency only requires that levels are returned and change; feat:crimewatch.security-bands only reads modified systems. The stage\u2192effect table is untested."
+      "why_missing": "feat:pve.insurgency only requires that levels are returned and change; feat:crimewatch.security-bands only reads modified systems. The stage→effect table is untested."
     },
     {
       "acceptance": "FW systems dynamically calculate operational status based on warzone graph adjacency: Frontline (directly borders an enemy-held system, 100% LP/VP payouts, spawns all site tiers); Command Operation (adjacent to a Frontline, 75% LP/VP); Rearguard (borders only friendly/allied systems, 50% LP/VP, site capture counts reduced).",
@@ -3521,7 +3544,7 @@
       "why_missing": "No reward row exists for insurgency outcomes; fw-lp covers complexes/kills only."
     },
     {
-      "acceptance": "The pirate FOB spawns in the insurgency hub system and is dockable only by the pirate militia. It becomes attackable only once the Empire side reaches its suppression goal, and uses a single 3h (\u00b11h jitter) armor reinforcement timer. Destroying it raises Suppression by one level (max 5) in every affected system and ends the insurgency as an Empire win.",
+      "acceptance": "The pirate FOB spawns in the insurgency hub system and is dockable only by the pirate militia. It becomes attackable only once the Empire side reaches its suppression goal, and uses a single 3h (±1h jitter) armor reinforcement timer. Destroying it raises Suppression by one level (max 5) in every affected system and ends the insurgency as an Empire win.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -3570,7 +3593,7 @@
       "why_missing": "feat:pve.insurgency only covers corruption/suppression read-out and feat:fw.fw-pirate is a single line; the phase machine, with its V24.01 timings (48h forecast, 7-day max), has no testable row."
     },
     {
-      "acceptance": "When a system reaches Corruption level 3, an adjacent system with security 0.0\u20130.8 joins the insurgency and starts spawning sites. If no adjacent system is valid, a random valid system adjacent to the insurgency is chosen.",
+      "acceptance": "When a system reaches Corruption level 3, an adjacent system with security 0.0–0.8 joins the insurgency and starts spawning sites. If no adjacent system is valid, a random valid system adjacent to the insurgency is chosen.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -5249,7 +5272,7 @@
       "why_missing": "feat:mining.moon-fracture mentions 'or auto-fracture' only as an alternative. No row specifies the 3-hour auto-detonation or its rig modifier, and no test exercises it."
     },
     {
-      "acceptance": "moonExtractions.StartNewExtraction accepts a player-chosen duration from 6 to 56 days, and the chunk arrives at start + duration. Chunk volume = 30,000 m\u00b3 per hour of extraction, split by the moon's survey composition fractions. CancelExtraction before arrival stops the extraction and produces no chunk.",
+      "acceptance": "moonExtractions.StartNewExtraction accepts a player-chosen duration from 6 to 56 days, and the chunk arrives at start + duration. Chunk volume = 30,000 m³ per hour of extraction, split by the moon's survey composition fractions. CancelExtraction before arrival stops the extraction and produces no chunk.",
       "added_by_audit": "20261019-222106",
       "attest_ok": false,
       "category": "feat",
@@ -5614,7 +5637,7 @@
       "why_missing": "feat:modules.jump-portal bundles Titan and Black Ops portals together without specifying or testing the covert-hull restriction, Covert Cyno target requirement, or per-ship mass fuel consumption formula."
     },
     {
-      "acceptance": "Who and where:\n- Normal cynos fit only on Force Recons and Black Ops.\n- Refused in high-sec, within 200 km of a Mobile Cynosural Inhibitor, and in systems jammed by a Tenebrex or an incursion.\n- Can be lit in wormhole space, but no jump drive can lock to it.\n\nActivation:\n- Requires fleet membership and speed below 500 m/s.\n- The cyno is visible system-wide and on the map, and only fleet members can jump to it.\n\nCycle and fuel:\n- Base cycle 10 min, halved on Recon/Black Ops (except Marshal).\n- 500 Liquid Ozone per cycle, \u221210% per Cynosural Field Theory level; Force Recons get \u221280% fuel.\n\nWhile lit:\n- The ship's nominal speed is 0.\n- It cannot dock or eject, but can self-destruct.",
+      "acceptance": "Who and where:\n- Normal cynos fit only on Force Recons and Black Ops.\n- Refused in high-sec, within 200 km of a Mobile Cynosural Inhibitor, and in systems jammed by a Tenebrex or an incursion.\n- Can be lit in wormhole space, but no jump drive can lock to it.\n\nActivation:\n- Requires fleet membership and speed below 500 m/s.\n- The cyno is visible system-wide and on the map, and only fleet members can jump to it.\n\nCycle and fuel:\n- Base cycle 10 min, halved on Recon/Black Ops (except Marshal).\n- 500 Liquid Ozone per cycle, −10% per Cynosural Field Theory level; Force Recons get −80% fuel.\n\nWhile lit:\n- The ship's nominal speed is 0.\n- It cannot dock or eject, but can self-destruct.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -5863,7 +5886,7 @@
       "why_missing": "feat:modules.interdiction-sphere is one line ('spawn a warp disruption field in null/WH; prevents warp and drags'). Probe variants, lifetimes, launcher cadence, the shuttle exemption and the corruption-5 exception are absent."
     },
     {
-      "acceptance": "Titan bridges:\n- go only to normal cynos or beacons and accept any subcapital;\n- stay open 60 s, immobilise the titan, and cost 500 Strontium (modified by skill).\n\nBlack Ops bridges accept only covert-cloak-capable hulls; Rorqual bridges accept only mining ships. Both stay open 20 s and cost nothing to open.\n\nFor every bridge:\n- Each jumper must be in fleet and within 2,500 m.\n- Each jumper costs fuel = mass \u00d7 portal mass factor \u00d7 base cost \u00d7 skill modifier \u00d7 ly, taken from the bridger's fuel bay, then cargo.\n- Ships in a bubble or warp-disrupted below 0 WCS cannot take the bridge; the host itself may be bubbled.",
+      "acceptance": "Titan bridges:\n- go only to normal cynos or beacons and accept any subcapital;\n- stay open 60 s, immobilise the titan, and cost 500 Strontium (modified by skill).\n\nBlack Ops bridges accept only covert-cloak-capable hulls; Rorqual bridges accept only mining ships. Both stay open 20 s and cost nothing to open.\n\nFor every bridge:\n- Each jumper must be in fleet and within 2,500 m.\n- Each jumper costs fuel = mass × portal mass factor × base cost × skill modifier × ly, taken from the bridger's fuel bay, then cargo.\n- Ships in a bubble or warp-disrupted below 0 WCS cannot take the bridge; the host itself may be bubbled.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -6399,7 +6422,7 @@
       "why_missing": "No navigation row covers collision physics, although bumping is a core tactic (gate/structure bumping, anti-warp bumping)."
     },
     {
-      "acceptance": "A conduit jump moves the conduit ship plus eligible fleet members within 10 km to the target cyno, for a flat isotope cost by conduit class (not mass-based).\n- Black Ops: up to 30 ships, covert-ops-cloak-capable hulls only.\n- Rorqual: up to 30 dedicated mining ships, and only while its Industrial Core is inactive.\n- T1 carriers and supercarriers: 5\u201330 ships by Capital Jump Portal Generation level; command carriers double that.\n- Eligible ships: shuttles, capsules, corvettes, frigates, destroyers, cruisers, battlecruisers and battleships.\n- Titans cannot conduit jump.\n- Members who opted out of conduit jumps are skipped.",
+      "acceptance": "A conduit jump moves the conduit ship plus eligible fleet members within 10 km to the target cyno, for a flat isotope cost by conduit class (not mass-based).\n- Black Ops: up to 30 ships, covert-ops-cloak-capable hulls only.\n- Rorqual: up to 30 dedicated mining ships, and only while its Industrial Core is inactive.\n- T1 carriers and supercarriers: 5–30 ships by Capital Jump Portal Generation level; command carriers double that.\n- Eligible ships: shuttles, capsules, corvettes, frigates, destroyers, cruisers, battlecruisers and battleships.\n- Titans cannot conduit jump.\n- Members who opted out of conduit jumps are skipped.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -6539,7 +6562,7 @@
       "why_missing": "feat:navigation.gate-cloak only says '60 s cloak broken by moving'. The area-effect and proximity immunities are untested."
     },
     {
-      "acceptance": "Range and fuel:\n- Max range per hull class follows the V24 table (e.g. dreadnought/carrier/FAX 3.5 ly, supercarrier/titan 3.0, JF/Rorqual 5.0, Black Ops 4.0); Jump Drive Calibration adds +20%/level.\n- Isotope type follows the hull faction (Helium/Nitrogen/Oxygen/Hydrogen).\n- Isotopes used = D \u00d7 fuel/ly \u00d7 (1 \u2212 0.1\u00d7JFC) \u00d7 (1 \u2212 0.1\u00d7JF skill, JF only) \u00d7 the stacking-penalised economizer terms.\n\nActivation:\n- Consumes 95% capacitor, minus 5% per Jump Drive Operation level.\n- Refused inside a warp disruption bubble or when warp core strength is below 0.\n- Alignment is not required.",
+      "acceptance": "Range and fuel:\n- Max range per hull class follows the V24 table (e.g. dreadnought/carrier/FAX 3.5 ly, supercarrier/titan 3.0, JF/Rorqual 5.0, Black Ops 4.0); Jump Drive Calibration adds +20%/level.\n- Isotope type follows the hull faction (Helium/Nitrogen/Oxygen/Hydrogen).\n- Isotopes used = D × fuel/ly × (1 − 0.1×JFC) × (1 − 0.1×JF skill, JF only) × the stacking-penalised economizer terms.\n\nActivation:\n- Consumes 95% capacitor, minus 5% per Jump Drive Operation level.\n- Refused inside a warp disruption bubble or when warp core strength is below 0.\n- Alignment is not required.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -6554,7 +6577,7 @@
       "why_missing": "feat:navigation.jump-drive only says 'jump to a cyno within range consuming isotopes'. The range table, skill modifiers, fuel formula, capacitor cost and disruption gates are not testable from it."
     },
     {
-      "acceptance": "After a jump of L effective light-years:\n- Fatigue = max(10\u00d7(1+L) min, existing fatigue\u00d7(1+L)), capped at 5 h.\n- Jump activation cooldown = max((1+L) min, pre-jump fatigue/10), capped at 30 min.\n- Fatigue decays in real time, offline included.\n\nEffective distance reductions:\n- Black Ops and the covert ships they bridge: \u221275%.\n- Capsules, shuttles, haulers, blockade runners, DSTs, freighters, JFs, capital industrials and industrial command ships: \u221290%.\n\njumpTimers.GetTimers reports both timers.",
+      "acceptance": "After a jump of L effective light-years:\n- Fatigue = max(10×(1+L) min, existing fatigue×(1+L)), capped at 5 h.\n- Jump activation cooldown = max((1+L) min, pre-jump fatigue/10), capped at 30 min.\n- Fatigue decays in real time, offline included.\n\nEffective distance reductions:\n- Black Ops and the covert ships they bridge: −75%.\n- Capsules, shuttles, haulers, blockade runners, DSTs, freighters, JFs, capital industrials and industrial command ships: −90%.\n\njumpTimers.GetTimers reports both timers.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -6741,7 +6764,7 @@
       "why_missing": "Warp bubble 500km vector drag and forward catch anchor calculations are not defined in any ledger row."
     },
     {
-      "acceptance": "Starting a warp consumes capacitor = warpCapacitorNeed \u00d7 ship mass \u00d7 distance, reduced by Warp Drive Operation and SDE modifiers. With insufficient capacitor the warp is handled per V24 rules (shortened or refused), and capacitor updates reach the client.",
+      "acceptance": "Starting a warp consumes capacitor = warpCapacitorNeed × ship mass × distance, reduced by Warp Drive Operation and SDE modifiers. With insufficient capacitor the warp is handled per V24 rules (shortened or refused), and capacitor updates reach the client.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -6772,7 +6795,7 @@
       "why_missing": "No navigation or dogma row covers the warp-exit invulnerability window."
     },
     {
-      "acceptance": "Warping to a celestial lands at its warp-in point; warping to a station or stargate lands at its docking or jump perimeter. Warps to targets closer than 150 km are refused with the live error. The requested 0\u2013100 km offset is applied relative to the landing point.",
+      "acceptance": "Warping to a celestial lands at its warp-in point; warping to a station or stargate lands at its docking or jump perimeter. Warps to targets closer than 150 km are refused with the live error. The requested 0–100 km offset is applied relative to the landing point.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -7341,7 +7364,7 @@
       "why_missing": "No abyssal row specifies these restrictions or the downtime handling."
     },
     {
-      "acceptance": "Arrival and gate:\n- Ships arrive 35\u201370 km from the pocket gate.\n- The gate unlocks only when every NPC in the pocket is dead.\n\nNPCs:\n- Abyssal NPCs leave no wrecks, pay no bounty and cost no faction standing.\n\nLoot:\n- The Triglavian Bioadaptive Cache (300 HP) drops the pocket loot.\n- Extraction nodes and subnodes (T1+) roll their limited loot pool, and may be empty.",
+      "acceptance": "Arrival and gate:\n- Ships arrive 35–70 km from the pocket gate.\n- The gate unlocks only when every NPC in the pocket is dead.\n\nNPCs:\n- Abyssal NPCs leave no wrecks, pay no bounty and cost no faction standing.\n\nLoot:\n- The Triglavian Bioadaptive Cache (300 HP) drops the pocket loot.\n- Extraction nodes and subnodes (T1+) roll their limited loot pool, and may be empty.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -7514,7 +7537,7 @@
       "why_missing": "No row states what happens when a regular hack fails; only ghost sites mention detonation."
     },
     {
-      "acceptance": "A hacking board has a System Core, Defensive Subsystems (Firewall, Anti-Virus, Restoration Node, Virus Suppressor), Utility Subsystems (Kernel Rot, Polymorphic Shield, Secondary Vector, Self Repair) and Data Caches. Each has coherence and strength, set by difficulty and by the virus's analyzer/skill stats. Empty nodes show the distance (1\u20135) to the nearest core/utility/cache, and combat resolves per the V24 rules.",
+      "acceptance": "A hacking board has a System Core, Defensive Subsystems (Firewall, Anti-Virus, Restoration Node, Virus Suppressor), Utility Subsystems (Kernel Rot, Polymorphic Shield, Secondary Vector, Self Repair) and Data Caches. Each has coherence and strength, set by difficulty and by the virus's analyzer/skill stats. Empty nodes show the distance (1–5) to the nearest core/utility/cache, and combat resolves per the V24 rules.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -7594,7 +7617,7 @@
       "why_missing": "feat:dogma.system-wide-effects lists wormholes/Pochven/storms but not incursions; no incursion row requires these effects."
     },
     {
-      "acceptance": "dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances lists heists. Spawn rules: only at corruption 3\u20134, with a 4h respawn that persists across downtime.\n\nIn the site:\n- tanker NPCs spawn at the refinery and are web-immune;\n- each side escorts them to its own scoring zone;\n- the first side to 10 tankers wins 150,000 LP;\n- pirates near the Upwell Thunderchild guards are destroyed.",
+      "acceptance": "dungeonInstanceCacheMgr.GetPirateInsurgencyIceHeistInstances lists heists. Spawn rules: only at corruption 3–4, with a 4h respawn that persists across downtime.\n\nIn the site:\n- tanker NPCs spawn at the refinery and are web-immune;\n- each side escorts them to its own scoring zone;\n- the first side to 10 tankers wins 150,000 LP;\n- pirates near the Upwell Thunderchild guards are destroyed.",
       "added_by_audit": "20261017-214922",
       "attest_ok": false,
       "category": "feat",
@@ -7654,7 +7677,7 @@
       "why_missing": "Insurgency site types are not listed anywhere in the ledger."
     },
     {
-      "acceptance": "Each storm is centred on a null-sec system. Its core is the centre plus systems 1 jump away, with full effects; its periphery is systems 2\u20133 jumps away, with weaker effects. Extra storm PvE sites spawn only in the core. The centre moves one jump every 24\u201348h in a semi-random direction, avoiding retracing. Overlapping storms apply both effect sets.",
+      "acceptance": "Each storm is centred on a null-sec system. Its core is the centre plus systems 1 jump away, with full effects; its periphery is systems 2–3 jumps away, with weaker effects. Extra storm PvE sites spawn only in the core. The centre moves one jump every 24–48h in a semi-random direction, avoiding retracing. Overlapping storms apply both effect sets.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -7928,7 +7951,7 @@
       "why_missing": "feat:scanning.moon-survey-probe is FLAGGED_FAKE. The implementation targets a moon ID through dogmaIM.Activate and returns the composition instantly (crates/eve-server/tests/mining_complete.rs:2516-2539). No row specifies alignment, range, misses or flight time."
     },
     {
-      "acceptance": "Core probes scan from 0.25 to 32 AU and combat probes from 0.5 to 64 AU, in power-of-two steps. Max deviation = base deviation \u00d7 (range / base range) \u00d7 (1 \u2212 0.05\u00d7Astrometrics) \u00d7 (1 \u2212 0.05\u00d7Astrometric Pinpointing). Probes past their max flight time (RSS 16m40s, others 1h6m40s) return to cargo if there is room, otherwise they are lost.",
+      "acceptance": "Core probes scan from 0.25 to 32 AU and combat probes from 0.5 to 64 AU, in power-of-two steps. Max deviation = base deviation × (range / base range) × (1 − 0.05×Astrometrics) × (1 − 0.05×Astrometric Pinpointing). Probes past their max flight time (RSS 16m40s, others 1h6m40s) return to cargo if there is room, otherwise they are lost.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -7973,7 +7996,7 @@
       "why_missing": "feat:scanning.probe-scan-math covers strength and deviation but not what information is revealed at each threshold."
     },
     {
-      "acceptance": "Signature difficulty levels are data-driven. Level I\u2013III signatures resolve with the minimum strength of 42; Level IV needs a combined probe strength of at least 72, and Level V at least 104. Weaker probes can't reach 100% at any geometry.",
+      "acceptance": "Signature difficulty levels are data-driven. Level I–III signatures resolve with the minimum strength of 42; Level IV needs a combined probe strength of at least 72, and Level V at least 104. Weaker probes can't reach 100% at any geometry.",
       "added_by_audit": "20261018-073440",
       "attest_ok": false,
       "category": "feat",
@@ -8301,7 +8324,7 @@
       "why_missing": "feat:structures.deploy-anchor says '24h anchoring then core', which misstates the live sequence. The pause rule and the no-timer vulnerability during anchoring and onlining are untested."
     },
     {
-      "acceptance": "Medium Upwell structures with an online service module enter armor reinforcement when shields are depleted. They exit at the owner's hour plus a period that depends on space, \u00b11.5 h jitter:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 2.5 d |\n| Null/low-sec | 3.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nLarge/XL structures exit after 24 h \u00b13 h.\n\nThese skip armor reinforcement and go straight to vulnerable armor:\n- FLEX structures;\n- abandoned structures;\n- low-power Large/XL structures.",
+      "acceptance": "Medium Upwell structures with an online service module enter armor reinforcement when shields are depleted. They exit at the owner's hour plus a period that depends on space, ±1.5 h jitter:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 2.5 d |\n| Null/low-sec | 3.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nLarge/XL structures exit after 24 h ±3 h.\n\nThese skip armor reinforcement and go straight to vulnerable armor:\n- FLEX structures;\n- abandoned structures;\n- low-power Large/XL structures.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
@@ -8378,7 +8401,7 @@
       "why_missing": "feat:structures.npc-station-services uses station-operation services only; no row gates docking or services by militia alignment."
     },
     {
-      "acceptance": "When armor is depleted, Large/XL structures enter hull reinforcement and exit after the owner's hour plus a period that depends on space, \u00b13 h:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 1.5 d |\n| Null/low-sec | 2.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nOther structure classes:\n- FLEX structures exit at the next chosen hour after 30 min \u00b130 min.\n- Medium and abandoned structures have no hull timer, so their hull is immediately vulnerable.",
+      "acceptance": "When armor is depleted, Large/XL structures enter hull reinforcement and exit after the owner's hour plus a period that depends on space, ±3 h:\n\n| Space | Exit after |\n|---|---|\n| Wormhole | 1.5 d |\n| Null/low-sec | 2.5 d |\n| High-sec | 4.5 d |\n| War HQ | 24 h |\n\nOther structure classes:\n- FLEX structures exit at the next chosen hour after 30 min ±30 min.\n- Medium and abandoned structures have no hull timer, so their hull is immediately vulnerable.",
       "added_by_audit": "20261018-090529",
       "attest_ok": false,
       "category": "feat",
