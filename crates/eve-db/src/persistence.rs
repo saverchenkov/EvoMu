@@ -807,6 +807,12 @@ impl WorldRepository {
         let mut conn = self.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut fp = self.sqlite_fp.lock().unwrap_or_else(|e| e.into_inner());
         if f(&mut guard) {
+            if let Some(poison_err) = check_wal_poison() {
+                sqlite_store::rollback_dirty_from_sqlite(&conn, &mut guard, &fp).expect(
+                    "Fatal: failed to roll back dirty state from SQLite after poisoned dispatch",
+                );
+                return Err(poison_err);
+            }
             for (&sid, st) in &mut guard.system_states {
                 st.solar_system_id = sid;
             }
@@ -959,8 +965,20 @@ impl WorldRepository {
 static WAL_ERROR_HOOK: std::sync::OnceLock<std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>> =
     std::sync::OnceLock::new();
 
+static WAL_POISON_CHECK_HOOK: std::sync::OnceLock<
+    std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>,
+> = std::sync::OnceLock::new();
+
 pub fn set_wal_error_hook(hook: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>) {
     let _ = WAL_ERROR_HOOK.set(hook);
+}
+
+pub fn set_wal_poison_check_hook(hook: std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>) {
+    let _ = WAL_POISON_CHECK_HOOK.set(hook);
+}
+
+pub fn check_wal_poison() -> Option<String> {
+    WAL_POISON_CHECK_HOOK.get().and_then(|hook| hook())
 }
 
 pub fn record_last_wal_error(err: &str) -> bool {

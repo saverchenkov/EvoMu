@@ -210,14 +210,18 @@ async fn test_journey_structures() {
     .await
     .expect("structureDeployment.Anchor");
     let struct_id = anchored.dict_get("structureID").and_then(|v| v.as_i64()).unwrap_or(cit_item);
-    let structs = call_rpc(&ctx, &mut sess, "structureDirectory", "GetMyDockableStructures", &[])
+    let corp_structs = call_rpc(&ctx, &mut sess, "structureDirectory", "GetMyCorporationStructures", &[])
         .await
-        .expect("GetMyDockableStructures");
-    assert!(format!("{structs:?}").contains(&struct_id.to_string()));
+        .expect("GetMyCorporationStructures");
+    assert!(format!("{corp_structs:?}").contains(&struct_id.to_string()));
 
     // 2. Complete anchoring, dock, insert Quantum Core (56201 -> flag 172), undock, and unanchor
     let core_id = ctx.db.add_or_stack_item(90_000_001, ship_id, InventoryFlag::Cargo, 56_201, 1).unwrap().item_id;
     ctx.advance_secs(25 * 3_600);
+    let structs = call_rpc(&ctx, &mut sess, "structureDirectory", "GetMyDockableStructures", &[])
+        .await
+        .expect("GetMyDockableStructures");
+    assert!(format!("{structs:?}").contains(&struct_id.to_string()));
     let _ = sys_h.set_ball_position(ship_id, glam::DVec3::new(60_000.0, 5.0e9, 0.0)).await;
     call_rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
         .await
