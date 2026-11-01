@@ -572,13 +572,15 @@ pub fn handle(
             let is_gm = session.has_gm_role();
             let now = ctx.now_unix();
             let act_rws = op_defs.op_activation_rewards.get(&op_id).map(Vec::as_slice).unwrap_or(&[]);
-            let cat_id = ctx.db.with_mut_snapshot(|snap| {
+            let (cat_id, prev_op, is_replay) = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.solar_system_id = op_sys;
                 }
                 let mut store = load_store(snap);
-                let (cat_id, can_grant_act, mut claimed) = {
+                let (cat_id, prev_op, is_replay, can_grant_act, mut claimed) = {
                     let rec = store.by_character.entry(char_id).or_default();
+                    let prev_op = rec.active_operation_id.filter(|&p| p != op_id);
+                    let is_replay = rec.completed_operations.contains(&op_id);
                     let prereqs_met = is_gm
                         || op_defs
                             .op_prerequisites
@@ -588,15 +590,21 @@ pub fn handle(
                     rec.active_operation_system_id = Some(op_sys);
                     let cat_id = args.get(2).and_then(|a| a.as_i64()).or(rec.active_category_id).unwrap_or(1);
                     rec.active_category_id = Some(cat_id);
-                    (cat_id, prereqs_met, std::mem::take(&mut rec.claimed_operation_rewards))
+                    (cat_id, prev_op, is_replay, prereqs_met, std::mem::take(&mut rec.claimed_operation_rewards))
                 };
                 if can_grant_act {
                     let _ = grant_operation_reward_bundle(snap, char_id, &format!("op_act:{op_id}"), &mut claimed, 0, act_rws, now);
                 }
                 store.by_character.entry(char_id).or_default().claimed_operation_rewards = claimed;
                 save_store(snap, &store, now);
-                cat_id
+                (cat_id, prev_op, is_replay)
             });
+            if prev_op.is_some() {
+                ctx.notify(NotificationTarget::Character(char_id), "OnOperationDeactivated", "charid", vec![]);
+            }
+            if is_replay {
+                ctx.notify(NotificationTarget::Character(char_id), "OnOperationReplayed", "charid", vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)]);
+            }
             crate::services::character_expert_systems::start_client_node_graph_for_operation(ctx, char_id, op_id, cat_id, op_sys);
             ctx.notify(NotificationTarget::Character(char_id), "OnOperationCategoryChanged", "charid", vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)]);
             Some(Ok(PyRep::Bool(true)))

@@ -646,6 +646,14 @@ pub fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
+            let admin_or_prog =
+                eve_db::service_roles::ROLE_ADMIN | eve_machonet::service_roles::ROLE_PROGRAMMER;
+            if !session.has_gm_role() && (session.role & admin_or_prog) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             Some(Err(BridgeRpcError {
                 code: "UnimplementedRPC".into(),
                 message: "debug.Exec is not implemented".into(),
