@@ -193,12 +193,8 @@ async fn test_ui_star_map_data_and_map_stats() {
 
 #[tokio::test]
 async fn test_ui_neocom_badges_info_panels_and_photo_mode() {
-    // parity: feat:ui.neocom-badges, feat:ui.info-panels, feat:ui.photo-mode
-    eve_testkit::attest(&[
-        "feat:ui.neocom-badges",
-        "feat:ui.info-panels",
-        "feat:ui.photo-mode",
-    ]);
+    // parity: feat:ui.neocom-badges, feat:ui.photo-mode
+    eve_testkit::attest(&["feat:ui.neocom-badges", "feat:ui.photo-mode"]);
 
     let ctx = ServerContext::new();
     let mut s = select_pilot(&ctx, 9102, "demo", "demo-secret", P1).await;
@@ -557,10 +553,9 @@ async fn test_ui_browser_lockdown_policy_and_persistence() {
 
 #[tokio::test]
 async fn test_ui_search_and_agency_content_warp() {
-    // parity: feat:ui.search, feat:ui.agency, rpc:custom_agency_provider.warp_to_content
+    // parity: feat:ui.search, rpc:custom_agency_provider.warp_to_content
     eve_testkit::attest(&[
         "feat:ui.search",
-        "feat:ui.agency",
         "rpc:custom_agency_provider.warp_to_content",
     ]);
 
@@ -663,4 +658,25 @@ async fn test_beyonce_bind_unbind_and_bill_get() {
     } else {
         panic!("expected PyRep::List from billMgr.get");
     }
+}
+
+#[tokio::test]
+async fn test_stargate_jump_records_single_map_history_jump() {
+    let ctx = ServerContext::new();
+    let mut s = select_pilot(&ctx, 9230, "demo", "demo-secret", P1).await;
+    rpc(&ctx, &mut s, "stationSvc", "Undock", &[]).await.expect("Undock");
+    let ship_id = s.ship_id.expect("ship_id");
+    let gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == 30_000_142).expect("Jita gate").clone();
+    ctx.systems.get_or_spawn(30_000_142).set_ball_position(ship_id, gate.position).await;
+    ctx.advance_secs(11);
+    let bid = ctx.bind_object(&mut s, "beyonce", 30_000_142).expect("bind beyonce");
+    ctx.dispatch_rpc(&mut s, "beyonce", Some(bid), "CmdStargateJump", &[PyRep::Integer(gate.stargate_id)], &HashMap::new(), None).await.expect("CmdStargateJump");
+    let PyRep::ObjectEx { list, .. } = rpc(&ctx, &mut s, "map", "GetHistory", &[PyRep::Integer(1)]).await.expect("GetHistory(1)") else { panic!("expected CRowset") };
+    let jumps = list.into_iter().find_map(|r| match r {
+        PyRep::DBRow { columns, .. } if columns.iter().any(|(k, v)| k == "solarSystemID" && v.as_i64() == Some(i64::from(gate.to_solar_system_id))) => {
+            columns.iter().find_map(|(k, v)| (k == "value1").then(|| v.as_i64()).flatten())
+        }
+        _ => None,
+    });
+    assert_eq!(jumps, Some(1), "one CmdStargateJump must record exactly 1 jump in map.GetHistory(1)");
 }
