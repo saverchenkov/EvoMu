@@ -450,8 +450,8 @@ async fn test_structure_settings_parity() {
     .expect("CharacterHasService non-operational");
     assert_eq!(non_op_has, PyRep::Bool(false));
 
-    // 6. Test clear_memoized (client_local -> UnimplementedRPC)
-    let clear_err = rpc(
+    // 6. Test clear_memoized (client-side memoized cache invalidation -> None)
+    let clear_res = rpc(
         &ctx,
         &mut sess,
         "structureSettings",
@@ -459,8 +459,8 @@ async fn test_structure_settings_parity() {
         &[],
     )
     .await
-    .expect_err("structureSettings.clear_memoized");
-    assert_eq!(clear_err.code, eve_server::router::ERR_UNIMPLEMENTED);
+    .expect("structureSettings.clear_memoized");
+    assert_eq!(clear_res, PyRep::None);
 }
 
 #[tokio::test]

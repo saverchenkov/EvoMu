@@ -849,16 +849,6 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         let pocket = pocket_pos_for_complex(gid);
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let guard_id = gid + 500_000_000;
-        let guard_alive = sys_handle.get_ball_snapshot(guard_id).await.ok().flatten().is_some();
-        let guard_cleared = ctx.db.with_snapshot(|s| {
-            s.fw_runtime.complex_guards_cleared.get(&gid).copied().unwrap_or(false)
-        }) || !guard_alive;
-        if !guard_cleared {
-            continue;
-        }
-        ctx.db.with_mut_snapshot(|s| {
-            s.fw_runtime.complex_guards_cleared.insert(gid, true);
-        });
         let mut present: Vec<(i64, i64)> = Vec::new();
         for (cid, shid) in occupants {
             let cloaked = sys_handle
@@ -888,6 +878,18 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
         if present.iter().any(|&(_, f)| f != first_fac) {
             // Contested by opposing militia ships inside the capture pocket -> timer paused!
             continue;
+        }
+        if first_fac != occ_fac {
+            let guard_alive = sys_handle.get_ball_snapshot(guard_id).await.ok().flatten().is_some();
+            let guard_cleared = ctx.db.with_snapshot(|s| {
+                s.fw_runtime.complex_guards_cleared.get(&gid).copied().unwrap_or(false)
+            }) || !guard_alive;
+            if !guard_cleared {
+                continue;
+            }
+            ctx.db.with_mut_snapshot(|s| {
+                s.fw_runtime.complex_guards_cleared.insert(gid, true);
+            });
         }
         let (occ_adv, attacker_adv) = ctx
             .db

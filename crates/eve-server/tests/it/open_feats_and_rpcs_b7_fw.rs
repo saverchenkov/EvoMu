@@ -215,8 +215,13 @@ async fn capture_novice_complex_live(
     .await
     .expect("ActivateAccelerationGate into Novice pocket");
 
-    let guard_id = novice_gate + 500_000_000;
-    kill_target_live(ctx, sess, sys_id, ship_id, gun_base_id, guard_id).await;
+    let occ_fac = ctx
+        .db
+        .with_snapshot(|s| s.fw_runtime.fw_complexes.get(&novice_gate).map(|c| c.2));
+    if occ_fac != sess.war_faction_id {
+        let guard_id = novice_gate + 500_000_000;
+        kill_target_live(ctx, sess, sys_id, ship_id, gun_base_id, guard_id).await;
+    }
 
     eve_server::sp6_lifecycle::tick_background_cluster(ctx).await;
     ctx.advance_secs(900);
