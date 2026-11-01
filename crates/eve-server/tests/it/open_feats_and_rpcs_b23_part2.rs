@@ -19,7 +19,6 @@ const TAMA_SYS: u32 = 30_002_813; // 0.3
 
 #[tokio::test]
 async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
-    // parity: feat:crimewatch.abyssal-suspect-flag-tier
     let ctx = ServerContext::new();
     let char_id: i64 = 95_230_101;
     let ship_id: i64 = 105_230_101;
@@ -79,7 +78,6 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
 
 #[tokio::test]
 async fn test_b23_war_interference_and_command_burst_filtering() {
-    // parity: feat:crimewatch.third-party-assistance-legality, feat:crimewatch.safety-setting-action-block
     let ctx = ServerContext::new();
     let corp_a: i64 = 98_230_201;
     let corp_b: i64 = 98_230_202;
@@ -116,7 +114,23 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
         .expect("corpmate assistance is legal");
     assert!(!ctx.crimewatch.write().unwrap().get_or_create(corpmate_a).is_criminal(now));
 
-    // Neutral third party assisting war participant in high-sec triggers Criminal + CONCORD + notification
+    // Negative: Neutral third party assisting an IDLE war member (no PvP timer) -> no flag
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.safety_levels.insert(neutral_logi, SafetyLevel::Green);
+    });
+    evaluate_and_record_remote_assistance(&ctx, neutral_logi, ship_logi, AMARR_SYS, ship_a)
+        .expect("assisting idle war member with no PvP timer is legal even on Green safety");
+    {
+        let mut cw = ctx.crimewatch.write().unwrap();
+        let st = cw.get_or_create(neutral_logi);
+        assert!(!st.is_criminal(now));
+        assert!(!st.is_suspect(now));
+    }
+
+    // Activate PvP timer on pilot_a (war engagement)
+    ctx.crimewatch.write().unwrap().get_or_create(pilot_a).pvp_timer_until_unix = now + 900;
+
+    // Neutral third party assisting war participant with active PvP timer in high-sec triggers Criminal + CONCORD + notification
     with_mut_combat_runtime(&ctx, |rt| {
         rt.safety_levels.insert(neutral_logi, SafetyLevel::Red);
     });
@@ -216,7 +230,6 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
 
 #[tokio::test]
 async fn test_b23_le_interference_concord_and_jump_into_highsec_concord() {
-    // parity: feat:crimewatch.highsec-criminal-restrictions, feat:crimewatch.lowsec-suspect-vs-criminal, feat:crimewatch.third-party-assistance-legality
     let ctx = ServerContext::new();
     let p1: i64 = 95_230_301;
     let s1: i64 = 105_230_301;

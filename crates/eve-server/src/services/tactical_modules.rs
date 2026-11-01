@@ -1324,16 +1324,22 @@ pub async fn activate_command_burst(
     let mut affected_ships = Vec::new();
     for (member_char_id, member_ship_id) in candidate_ship_ids {
         if affected_ships.len() >= 256 { break; }
-        if sys_sec >= 0.45 && member_char_id != char_id {
+        let same_corp_or_alliance = ctx.db.with_snapshot(|snap| {
+            let (Some(booster), Some(member)) = (snap.characters.get(&char_id), snap.characters.get(&member_char_id)) else { return false; };
+            booster.corporation_id == member.corporation_id
+                || (booster.alliance_id.is_some() && booster.alliance_id == member.alliance_id)
+        });
+        if sys_sec >= 0.45 && member_char_id != char_id && !same_corp_or_alliance {
             let is_illegal_target = {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                 let st = cw.get_or_create(member_char_id);
                 st.is_criminal(now_unix_burst) || st.is_suspect(now_unix_burst)
-            } || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
-                    m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp)
-                })
-            }) || ctx.db.with_snapshot(|snap| {
+            } || (crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
+                && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
+                        m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp)
+                    })
+                })) || ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&member_char_id).is_some_and(|rec| rec.security_status <= -4.95)
             }) || crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(
                 ctx,

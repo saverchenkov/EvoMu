@@ -1166,6 +1166,9 @@ pub async fn handle_crimewatch(
 }
 
 pub(crate) fn is_war_interference_assistance(ctx: &ServerContext, helper_char_id: i64, beneficiary_char_id: i64, now_unix: u64) -> bool {
+    if !crate::sp6_lifecycle::has_active_pvp_timer(ctx, beneficiary_char_id, now_unix) {
+        return false;
+    }
     ctx.db.with_snapshot(|snap| {
         let (Some(helper), Some(ben)) = (snap.characters.get(&helper_char_id), snap.characters.get(&beneficiary_char_id)) else { return false; };
         let (h_ent, b_ent) = (helper.alliance_id.unwrap_or(helper.corporation_id), ben.alliance_id.unwrap_or(ben.corporation_id));
@@ -1303,8 +1306,9 @@ pub fn evaluate_and_record_remote_assistance(
             .map(|m| m.iter().filter(|&(&pid, &exp)| pid != helper_char_id && now_unix <= exp).map(|(&pid, _)| pid).collect())
             .unwrap_or_default()
     });
+    let ben_has_pvp = crate::sp6_lifecycle::has_active_pvp_timer(ctx, ben_id, now_unix);
     let war_interference = is_war_interference_assistance(ctx, helper_char_id, ben_id, now_unix);
-    let third_party_interference = !ben_le_partners.is_empty() || war_interference;
+    let third_party_interference = (ben_has_pvp && !ben_le_partners.is_empty()) || war_interference;
     let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
     if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
         && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)

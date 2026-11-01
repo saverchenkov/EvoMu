@@ -49,7 +49,6 @@ fn seed_market_char(ctx: &ServerContext, cid: i64, corp: u32, isk: i64, plex: i6
 
 #[tokio::test]
 async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
-    // parity: feat:cosmetics.skinr-sequencing-studio, feat:cosmetics.skinr-paragon-hub-listing
     let ctx = ServerContext::new();
     let seller_cid: u32 = 95_230_001;
     let buyer_cid: u32 = 95_230_002;
@@ -181,7 +180,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
 
 #[tokio::test]
 async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
-    // parity: feat:crimewatch.sec-status-gain-caps, feat:crimewatch.sec-tag-tier-bands, feat:crimewatch.outlaw-status, feat:crimewatch.faction-police-thresholds
     let ctx = ServerContext::new();
     let char_id: i64 = 95_230_010;
     let ship_id: i64 = 105_230_010;
@@ -306,7 +304,7 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
 
 #[tokio::test]
 async fn test_b23_weapon_timer_scope_and_pvp_logoff_renewal() {
-    // parity: feat:crimewatch.weapon-timer-scope, feat:crimewatch.pvp-logoff-timer-renewal, feat:crimewatch.abyssal-suspect-flag-tier
+    // parity: feat:crimewatch.pvp-logoff-timer-renewal
     let ctx = ServerContext::new();
     let char_id: i64 = 95_230_020;
     let ship_id: i64 = 105_230_020;
@@ -381,7 +379,6 @@ async fn test_b23_weapon_timer_scope_and_pvp_logoff_renewal() {
 
 #[tokio::test]
 async fn test_b23_concord_response_scaling_and_highsec_criminal_restrictions() {
-    // parity: feat:crimewatch.concord-response-scaling, feat:crimewatch.highsec-criminal-restrictions, feat:crimewatch.lowsec-suspect-vs-criminal
     let ctx = ServerContext::new();
     let _ = concord_response_delay_sec(0.5);
     for (sec, expected_delay) in [
@@ -519,7 +516,7 @@ async fn test_b23_concord_response_scaling_and_highsec_criminal_restrictions() {
 
 #[tokio::test]
 async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
-    // parity: feat:crimewatch.suspect-timer-looting-ess, feat:crimewatch.criminal-wreck-auto-abandon
+    // parity: feat:crimewatch.criminal-wreck-auto-abandon
     let ctx = ServerContext::new();
     let thief_id: i64 = 95_230_040;
     let thief_ship: i64 = 105_230_040;
@@ -603,7 +600,6 @@ async fn test_b23_suspect_looting_ess_and_criminal_wreck_auto_abandon() {
 
 #[tokio::test]
 async fn test_b23_limited_engagement_duel_safety_and_third_party_assistance() {
-    // parity: feat:crimewatch.limited-engagement-duel, feat:crimewatch.safety-setting-action-block, feat:crimewatch.third-party-assistance-legality
     let ctx = ServerContext::new();
     let p1_id: i64 = 95_230_050;
     let p1_ship: i64 = 105_230_050;
