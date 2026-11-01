@@ -106,6 +106,13 @@ async fn test_waypoints_warp_vector_and_align_tick_rounding() {
         "Autopilot warp must land at gate_radius + 15,000m"
     );
 
+    // Stargate jump refused at ~3 km outside gate perimeter (> 2,500 m jump range)
+    spawn_in_space(&ctx, char_id, ship_id, 587, jita_sys, jita_jump.position + DVec3::new(gate_radius + 3_000.0, 0.0, 0.0)).await;
+    let far_jump = ctx
+        .dispatch_rpc(&mut sess, "beyonce", Some(b_jita), "CmdStargateJump", &[PyRep::Integer(jita_jump.stargate_id)], &kw, None)
+        .await;
+    assert_eq!(far_jump.unwrap_err().code, "OutsideStargateJumpRange");
+
     // Stargate jump arrival pops matching front waypoint (`dest_sys_id`)
     spawn_in_space(&ctx, char_id, ship_id, 587, jita_sys, jita_jump.position).await;
     ctx.dispatch_rpc(
