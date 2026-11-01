@@ -444,9 +444,6 @@ impl PublicGatewayRouter {
 
         // 7. Quasar Character & Progression Track (Q-4) handlers
         crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db), Arc::clone(&self.progression));
-
-        // 8. Batch-9 Quasar Campaign, Objective, Track & Definition handlers
-        crate::services::quasar_b9_services::register_handlers(self, Arc::clone(&db), Arc::clone(&self.progression));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
