@@ -949,7 +949,8 @@ pub async fn handle(
             };
             let structs_list = ctx.db.with_snapshot(|snap| {
                 let is_sov_struct = |type_id: u32| -> bool {
-                    type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
+                    matches!(type_id, 32226 | 32458 | 81080)
+                        || type_id == crate::services::sov_services::TYPE_ORBITAL_SKYHOOK
                         || type_id == crate::services::sov_services::TYPE_SOVEREIGNTY_HUB
                         || ctx
                             .sde

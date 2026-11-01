@@ -316,6 +316,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         .map(|(&id, b)| (id, b.clone()))
         .collect();
 
+    let has_system_npcs = with_combat_ephemeral(ctx, |rt| {
+        rt.npc_entities.values().any(|n| n.solar_system_id == solar_system_id)
+            || rt.npc_scrambled_ships.contains_key(&solar_system_id)
+    });
+    if !has_system_npcs {
+        return;
+    }
     let (npc_ids, prev_npc_scram_targets): (Vec<i64>, HashSet<i64>) = with_mut_combat_ephemeral(ctx, |rt| {
         let ids = rt
             .npc_entities
