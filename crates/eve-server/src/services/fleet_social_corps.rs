@@ -22,9 +22,7 @@ pub fn read_corp_gov<R>(
 }
 
 pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64) {
-    if corp_id <= 0 {
-        return;
-    }
+    if corp_id <= 0 { return; }
     let now_unix = ctx.now_unix();
     let has_due = ctx.db.with_snapshot(|snap| {
         snap.corp_governance.get(&corp_id).is_some_and(|g| {
@@ -34,31 +32,26 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
                 || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
         })
     });
-    if !has_due {
-        return;
-    }
-    let dec = |m: u64| -> Vec<String> {
-        crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect()
-    };
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut promoted: Vec<(i64, u64)> = Vec::new();
-        let mut promoted_scoped: Vec<(i64, u64, u64, u64)> = Vec::new();
+    if !has_due { return; }
+    let dec = |m: u64| -> Vec<String> { crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect() };
+    let matured_changes: Vec<(i64, u64, u64, u64, u64, u64, u64, u64, u64)> = ctx.db.with_mut_snapshot(|snap| {
+        let (mut promoted, mut promoted_scoped) = (Vec::<(i64, u64)>::new(), Vec::<(i64, u64, u64, u64)>::new());
         if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
-            g.pending_role_grants.retain(|&mid, &mut (p_mask, eff)| {
-                let due = now_unix >= eff;
-                if due { promoted.push((mid, p_mask)); }
-                !due
-            });
-            g.pending_title_role_grants.retain(|_, &mut (_, eff)| now_unix < eff);
-            g.pending_scoped_role_grants.retain(|&mid, &mut (hq, base, other, eff)| {
-                let due = now_unix >= eff;
-                if due { promoted_scoped.push((mid, hq, base, other)); }
-                !due
-            });
+            g.pending_role_grants.retain(|&mid, &mut (p_mask, eff)| { if now_unix >= eff { promoted.push((mid, p_mask)); false } else { true } });
+            g.pending_title_role_grants.retain(|&mid, &mut (t_mask, eff)| { if now_unix >= eff { promoted.push((mid, t_mask)); false } else { true } });
+            g.pending_scoped_role_grants.retain(|&mid, &mut (hq, base, other, eff)| { if now_unix >= eff { promoted_scoped.push((mid, hq, base, other)); false } else { true } });
             if let Some((ff_val, _)) = g.pending_friendly_fire.filter(|&(_, eff)| now_unix >= eff) {
                 g.friendly_fire_legal = ff_val;
                 g.pending_friendly_fire = None;
             }
+        }
+        let mut touched: HashMap<i64, (u64, u64, u64, u64)> = HashMap::new();
+        for mid in promoted.iter().map(|&(m, _)| m).chain(promoted_scoped.iter().map(|&(m, _, _, _)| m)) {
+            touched.entry(mid).or_insert_with(|| {
+                let r0 = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&mid).copied()).unwrap_or(0);
+                let ra0 = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
+                (r0, ra0.roles_at_hq, ra0.roles_at_base, ra0.roles_at_other)
+            });
         }
         for (mid, p_mask) in promoted {
             let new_eff = snap.corporations.get_mut(&corp_id).map_or(p_mask, |corp| {
@@ -84,7 +77,21 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
             sc.roles_at_base = dec(ra.roles_at_base);
             sc.roles_at_other = dec(ra.roles_at_other);
         }
+        touched.into_iter().map(|(mid, (r0, hq0, base0, other0))| {
+            let r1 = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&mid).copied()).unwrap_or(r0);
+            let ra1 = snap.corp_role_assignments.get(&(corp_id, mid)).cloned().unwrap_or_default();
+            (mid, r0, r1, hq0, ra1.roles_at_hq, base0, ra1.roles_at_base, other0, ra1.roles_at_other)
+        }).collect()
     });
+    if !matured_changes.is_empty() {
+        let corp_ally = ctx.db.with_snapshot(|s| s.corporations.get(&corp_id).and_then(|c| c.alliance_id));
+        for (mid, r0, r1, hq0, hq1, base0, base1, other0, other1) in matured_changes {
+            if r0 != r1 {
+                super::fleet_social_persistence::with_social_state(ctx, |s| { s.forced_session_corp_sync.insert(mid, (corp_id, corp_ally, r1)); });
+            }
+            super::fleet_social_corp_tail::emit_corp_role_session_changed(ctx, corp_id, mid, r0, r1, hq0, hq1, base0, base1, other0, other1);
+        }
+    }
 }
 
 pub(crate) fn get_character_medals_and_decorations(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> (Vec<PyRep>, Vec<PyRep>) {
@@ -1247,7 +1254,10 @@ pub(super) fn handle_corps(
                 let Some(c) = snap.corporations.get(&corp_id) else { return false; };
                 if !c.members.contains(&target_id) { return false; }
                 let caller_role = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                let auth = char_id == target_id || char_id == c.ceo_id || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER);
+                let auth = char_id == target_id
+                    || char_id == c.ceo_id
+                    || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
+                    || corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER);
                 if !auth || target_id == c.ceo_id { return false; }
                 if super::fleet_social_corp_tail::member_kick_blocker(snap, corp_id, target_id, now_unix).is_some() {
                     return false;

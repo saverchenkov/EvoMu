@@ -141,43 +141,6 @@ pub async fn handle_corp_hangar_invbroker(
         }
     }
 
-    if service == "corpFittingMgr"
-        && matches!(
-            method,
-            "SaveFitting"
-                | "SaveManyFittings"
-                | "DeleteFitting"
-                | "DeleteManyFittings"
-                | "UpdateFitting"
-                | "UpdateNameAndDescription"
-        )
-    {
-        let (_, char_id) = match ServerContext::require_character(session) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        };
-        let owner_id = args
-            .first()
-            .and_then(|a| a.as_i64())
-            .or(session.corporation_id)
-            .unwrap_or(char_id);
-        if owner_id >= 2_000_000 {
-            let (is_ceo, roles) = super::fleet_social::get_effective_corp_roles(ctx, owner_id, char_id);
-            let has_role = is_ceo
-                || eve_db::corp_roles::has_role(
-                    roles,
-                    eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 41),
-                );
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Managing corporation fittings requires Fitting Manager or Director role"
-                        .into(),
-                }));
-            }
-        }
-        return None;
-    }
     if service != "invbroker" {
         return None;
     }

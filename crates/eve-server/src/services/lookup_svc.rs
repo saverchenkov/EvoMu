@@ -418,9 +418,9 @@ pub fn handle(
 
         ("lookupSvc", "LookupWarableCorporationsOrAlliances") => {
             let (query, exact) = parse_search_args(args);
-            let mut results = Vec::new();
             let caller_corp_id = session.corporation_id;
             let caller_alliance_id = session.alliance_id;
+            let mut results = Vec::new();
 
             ctx.db.with_snapshot(|snap| {
                 let effective_caller_alliance = caller_alliance_id.or_else(|| {
@@ -434,11 +434,12 @@ pub fn handle(
                         .any(|s| s.owner_corp_id == corp_id && s.state != "Destroyed")
                 };
 
-                // Player corporations (group 2): must be war-eligible (own >= 1 non-destroyed Upwell structure)
-                // and must not be the caller's own corporation or in the caller's own alliance.
+                // Standalone player corporations (group 2): must be war-eligible (own >= 1 non-destroyed Upwell structure),
+                // not in an alliance, and not the caller's own corporation.
                 for corp in snap.corporations.values() {
                     if corp.corporation_id >= 98_000_000
                         && Some(corp.corporation_id) != caller_corp_id
+                        && corp.alliance_id.is_none()
                         && (effective_caller_alliance.is_none()
                             || corp.alliance_id != effective_caller_alliance)
                         && is_corp_war_eligible(corp.corporation_id)

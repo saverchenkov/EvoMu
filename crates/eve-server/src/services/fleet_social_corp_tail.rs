@@ -338,7 +338,7 @@ pub(crate) fn handle_update_members(
             let eff = if opt_m.is_some() { (new_m & !HANGAR_DIV_MASK) | (desired & held) } else { old_m };
             (new_m, eff, pend, newly)
         };
-        let mut results: Vec<(i64, u64, u64, u64, bool)> = Vec::new();
+        let mut results: Vec<(i64, u64, u64, u64, bool, (u64, u64, u64, u64, u64, u64))> = Vec::new();
         for sp in &specs {
             let target_char_id = sp.target_char_id;
             let old_roles = snap
@@ -549,7 +549,14 @@ pub(crate) fn handle_update_members(
             );
             let delayed = (pending_hangar | pending_title_delayed | pend_hq | pend_base | pend_other) != 0
                 || new_roles > old_roles;
-            results.push((target_char_id, old_roles, new_roles, effective_roles, delayed));
+            results.push((
+                target_char_id,
+                old_roles,
+                new_roles,
+                effective_roles,
+                delayed,
+                (old_ra.roles_at_hq, eff_hq, old_ra.roles_at_base, eff_base, old_ra.roles_at_other, eff_other),
+            ));
         }
         let released_controllers =
             crate::services::structure_control_ops::release_unauthorized_structure_controllers_in_snap(snap);
@@ -562,7 +569,10 @@ pub(crate) fn handle_update_members(
                 ctx,
                 &released_controllers,
             );
-            for &(tid, old_roles, new_roles, effective_roles, _) in &results {
+            let corp_ally = ctx
+                .db
+                .with_snapshot(|s| s.corporations.get(&corp_id).and_then(|c| c.alliance_id));
+            for &(tid, old_roles, new_roles, effective_roles, _, (old_hq, eff_hq, old_base, eff_base, old_other, eff_other)) in &results {
                 if session.character_id == Some(tid) {
                     session.corp_role = effective_roles;
                     if let Some((_, _, _, restored_ship)) = released_controllers.iter().find(|r| r.1 == tid) {
@@ -570,7 +580,16 @@ pub(crate) fn handle_update_members(
                             session.ship_id = Some(*restored_ship);
                         }
                     }
+                } else {
+                    super::fleet_social_persistence::with_social_state(ctx, |s| {
+                        s.forced_session_corp_sync
+                            .insert(tid, (corp_id, corp_ally, effective_roles));
+                    });
                 }
+                emit_corp_role_session_changed(
+                    ctx, corp_id, tid, old_roles, effective_roles,
+                    old_hq, eff_hq, old_base, eff_base, old_other, eff_other,
+                );
                 let change = PyRep::Dict(vec![(
                     PyRep::String(("roles").into()),
                     PyRep::Tuple(vec![
@@ -585,7 +604,7 @@ pub(crate) fn handle_update_members(
                     vec![PyRep::Integer(corp_id), PyRep::Integer(tid), change],
                 );
             }
-            let &(first_tid, _, first_new, _, delayed) = &results[0];
+            let &(first_tid, _, first_new, _, delayed, _) = &results[0];
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(first_tid)),
                 ("roles", PyRep::Integer(first_new as i64)),
@@ -595,6 +614,79 @@ pub(crate) fn handle_update_members(
         }
         Err(e) => Some(Err(e)),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_corp_role_session_changed(
+    ctx: &ServerContext,
+    corp_id: i64,
+    tid: i64,
+    old_roles: u64,
+    new_roles: u64,
+    old_hq: u64,
+    new_hq: u64,
+    old_base: u64,
+    new_base: u64,
+    old_other: u64,
+    new_other: u64,
+) {
+    let mut changes: Vec<(PyRep, PyRep)> = Vec::new();
+    let pair = |a: u64, b: u64| PyRep::Tuple(vec![PyRep::Integer(a as i64), PyRep::Integer(b as i64)]);
+    if old_roles != new_roles {
+        changes.push((PyRep::String("corprole".into()), pair(old_roles, new_roles)));
+        changes.push((PyRep::String("rolesAtAll".into()), pair(old_roles, new_roles)));
+    }
+    if old_hq != new_hq {
+        changes.push((PyRep::String("rolesAtHQ".into()), pair(old_hq, new_hq)));
+    }
+    if old_base != new_base {
+        changes.push((PyRep::String("rolesAtBase".into()), pair(old_base, new_base)));
+    }
+    if old_other != new_other {
+        changes.push((PyRep::String("rolesAtOther".into()), pair(old_other, new_other)));
+    }
+    if changes.is_empty() {
+        return;
+    }
+    let (uid, ally_id, ship_id, sta_id, st_id, sys_id) = ctx.db.with_snapshot(|s| {
+        let ch = s.characters.get(&tid);
+        let ally = ch.and_then(|c| c.alliance_id).or_else(|| s.corporations.get(&corp_id).and_then(|c| c.alliance_id));
+        (
+            ch.map_or(1, |c| c.user_id),
+            ally,
+            ch.map_or(0, |c| c.active_ship_id),
+            ch.and_then(|c| c.station_id),
+            ch.and_then(|c| c.structure_id),
+            ch.map_or(30_000_142, |c| c.solar_system_id),
+        )
+    });
+    let (const_id, reg_id) = ctx.sde.solar_systems.get(&sys_id).map_or((20_000_020, 10_000_002), |sys| (sys.constellation_id, sys.region_id));
+    let sess_kv = PyRep::keyval([
+        ("userid", PyRep::Integer(uid as i64)),
+        ("charid", PyRep::Integer(tid)),
+        ("corpid", PyRep::Integer(corp_id)),
+        ("allianceid", ally_id.map_or(PyRep::None, PyRep::Integer)),
+        ("corprole", PyRep::Integer(new_roles as i64)),
+        ("rolesAtAll", PyRep::Integer(new_roles as i64)),
+        ("rolesAtHQ", PyRep::Integer(new_hq as i64)),
+        ("rolesAtBase", PyRep::Integer(new_base as i64)),
+        ("rolesAtOther", PyRep::Integer(new_other as i64)),
+        ("shipid", if ship_id > 0 { PyRep::Integer(ship_id) } else { PyRep::None }),
+        ("stationid", sta_id.map_or(PyRep::None, PyRep::Integer)),
+        ("structureid", st_id.map_or(PyRep::None, PyRep::Integer)),
+        ("solarsystemid", if sta_id.is_none() && st_id.is_none() { PyRep::Integer(sys_id as i64) } else { PyRep::None }),
+        ("solarsystemid2", PyRep::Integer(sys_id as i64)),
+        ("constellationid", PyRep::Integer(const_id as i64)),
+        ("regionid", PyRep::Integer(reg_id as i64)),
+        ("sessionChangeReason", PyRep::String("corprole".into())),
+        ("nextSessionChange", PyRep::None),
+    ]);
+    ctx.notify(
+        NotificationTarget::Character(tid),
+        "OnSessionChanged",
+        "charid",
+        vec![PyRep::Bool(false), sess_kv, PyRep::Dict(changes)],
+    );
 }
 
 fn remove_member_to_bloodline_npc_in_snap(
@@ -802,10 +894,8 @@ pub(crate) fn handle_kick_out_members(
         let any_other = target_ids.iter().any(|&tid| tid != char_id);
         if any_other
             && char_id != corp.ceo_id
-            && !corp_roles::has_role(
-                caller_role,
-                corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER,
-            )
+            && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
+            && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER)
         {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),

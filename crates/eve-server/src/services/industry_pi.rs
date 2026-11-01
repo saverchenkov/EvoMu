@@ -904,36 +904,158 @@ pub(crate) fn handle_industry_job_queries(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if args.len() != 1 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "ConnectJob expects 1 argument (job)".into(),
+                }));
+            }
+            let job_arg = &args[0];
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(j) = snap.industry_jobs.get(&job_id).cloned() else {
-                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
-                };
-                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
                 let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if j.installer_id != char_id {
+                let explicit_loc = job_arg
+                    .dict_get("inputLocationID")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| job_arg.dict_get("locationID").and_then(|v| v.as_i64()))
+                    .or_else(|| job_arg.dict_get("facilityID").and_then(|v| v.as_i64()));
+                let (owner_id, location_id, flag_id) = if let Some(loc_id) = explicit_loc {
+                    let flg_id = job_arg
+                        .dict_get("inputFlagID")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| job_arg.dict_get("inputFlag").and_then(|v| v.as_i64()))
+                        .or_else(|| job_arg.dict_get("flagID").and_then(|v| v.as_i64()))
+                        .or_else(|| job_arg.dict_get("flag").and_then(|v| v.as_i64()))
+                        .unwrap_or(eve_db::InventoryFlag::Hangar as i64);
+                    let oid = job_arg
+                        .dict_get("ownerID")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or_else(|| {
+                            if (116..=122).contains(&flg_id) {
+                                char_corp
+                            } else {
+                                char_id
+                            }
+                        });
+                    (oid, loc_id, flg_id)
+                } else if let Some(job_id) = job_arg
+                    .as_i64()
+                    .or_else(|| job_arg.dict_get("jobID").and_then(|v| v.as_i64()))
+                {
+                    let Some(j) = snap.industry_jobs.get(&job_id) else {
+                        return Err(BridgeRpcError {
+                            code: "JobNotFound".into(),
+                            message: format!("Industry job {job_id} not found"),
+                        });
+                    };
+                    let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                    let oid = if meta.use_corp && meta.owner_id > 0 {
+                        meta.owner_id
+                    } else {
+                        j.installer_id
+                    };
+                    let flg_id = if meta.use_corp {
+                        eve_db::InventoryFlag::CorpSAG1 as i64
+                    } else {
+                        eve_db::InventoryFlag::Hangar as i64
+                    };
+                    (oid, j.facility_id, flg_id)
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidArguments".into(),
+                        message: "ConnectJob requires a job KeyVal/Object with locationID/inputLocationID or a valid jobID".into(),
+                    });
+                };
+
+                if owner_id != char_id {
+                    let is_corp = owner_id == char_corp && char_corp >= 2_000_000;
                     let corp = snap.corporations.get(&char_corp);
-                    let caller_roles = corp.and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(session.corp_role);
-                    let has_role = corp.is_some_and(|c| c.ceo_id == char_id)
-                        || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
-                    let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
-                    if !is_corp_job || !has_role {
-                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role") });
+                    let caller_roles = corp
+                        .and_then(|c| c.member_roles.get(&char_id).copied())
+                        .unwrap_or(session.corp_role);
+                    let div_bits = if (116..=122).contains(&flag_id) {
+                        let div_idx = (flag_id as u16) - 116;
+                        (1u64 << (13 + div_idx)) | (1u64 << (20 + div_idx))
+                    } else {
+                        0
+                    };
+                    let has_role = session.has_gm_role()
+                        || corp.is_some_and(|c| c.ceo_id == char_id)
+                        || (caller_roles
+                            & (eve_db::corp_roles::ROLE_DIRECTOR
+                                | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                                | div_bits)
+                            != 0);
+                    if !is_corp || !has_role {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!(
+                                "Caller {char_id} lacks permission to monitor hangar ({owner_id}, {location_id}, {flag_id})"
+                            ),
+                        });
                     }
                 }
-                let nid = -8_950_000_000_000_i64 - char_id;
-                let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
-                set.insert(job_id);
-                snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
-                    note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
-                    note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
-                });
-                Ok(PyRep::keyval([
-                    ("jobID", PyRep::Integer(j.job_id)),
-                    ("installerID", PyRep::Integer(j.installer_id)),
-                    ("status", PyRep::String(j.status)),
-                    ("connected", PyRep::Bool(true)),
-                    ("subscriberCharID", PyRep::Integer(char_id)),
+
+                snap.next_entity_id += 1;
+                let monitor_id = snap.next_entity_id;
+                let mut monitors =
+                    crate::services::notify_emitters_batch3::load_industry_material_monitors(snap);
+                monitors.insert(
+                    monitor_id,
+                    crate::services::notify_emitters_batch3::IndustryMaterialMonitorSub {
+                        char_id,
+                        owner_id,
+                        location_id,
+                        flag_id,
+                    },
+                );
+                crate::services::notify_emitters_batch3::save_industry_material_monitors(
+                    snap, &monitors,
+                );
+                if let Some(jid) = job_arg
+                    .as_i64()
+                    .or_else(|| job_arg.dict_get("jobID").and_then(|v| v.as_i64()))
+                {
+                    let nid = -8_950_000_000_000_i64 - char_id;
+                    let mut set: std::collections::BTreeSet<i64> = snap
+                        .owner_notes
+                        .get(&nid)
+                        .and_then(|n| serde_json::from_str(&n.note).ok())
+                        .unwrap_or_default();
+                    set.insert(jid);
+                    snap.owner_notes.insert(
+                        nid,
+                        eve_db::OwnerNoteRecord {
+                            note_id: nid,
+                            character_id: char_id,
+                            item_id: jid,
+                            label: "industry_monitor".into(),
+                            note: serde_json::to_string(&set).unwrap_or_default(),
+                            timestamp_unix: 0,
+                        },
+                    );
+                }
+
+                let mut avail_map: std::collections::BTreeMap<i64, i64> =
+                    std::collections::BTreeMap::new();
+                for it in snap.items.values() {
+                    if it.owner_id == owner_id
+                        && it.location_id == location_id
+                        && (it.flag as i64) == flag_id
+                        && it.quantity > 0
+                        && !it.singleton
+                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                    {
+                        *avail_map.entry(i64::from(it.type_id)).or_insert(0) +=
+                            i64::from(it.quantity);
+                    }
+                }
+                let avail_entries: Vec<(PyRep, PyRep)> = avail_map
+                    .into_iter()
+                    .map(|(tid, qty)| (PyRep::Integer(tid), PyRep::Integer(qty)))
+                    .collect();
+                Ok(PyRep::Tuple(vec![
+                    PyRep::Integer(monitor_id),
+                    PyRep::Dict(avail_entries),
                 ]))
             });
             Some(res)
@@ -946,6 +1068,18 @@ pub(crate) fn handle_industry_job_queries(
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut monitors = crate::services::notify_emitters_batch3::load_industry_material_monitors(snap);
+                if let Some(sub) = monitors.get(&job_id) {
+                    if sub.char_id != char_id && !session.has_gm_role() {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!("Monitor {job_id} belongs to another character"),
+                        });
+                    }
+                    monitors.remove(&job_id);
+                    crate::services::notify_emitters_batch3::save_industry_material_monitors(snap, &monitors);
+                    return Ok(PyRep::Bool(true));
+                }
                 let Some(j) = snap.industry_jobs.get(&job_id) else {
                     return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
                 };

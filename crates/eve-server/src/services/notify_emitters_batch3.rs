@@ -333,36 +333,145 @@ pub fn emit_facilities_updated(
     }
 }
 
-/// Emits `OnIndustryMaterials(jobID, materials)` when an industry job consumes non-empty input materials.
+pub const INDUSTRY_MATERIAL_MONITORS_NOTE_ID: i64 = -8_950_000_000_001_i64;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndustryMaterialMonitorSub {
+    pub char_id: i64,
+    pub owner_id: i64,
+    pub location_id: i64,
+    pub flag_id: i64,
+}
+
+pub fn load_industry_material_monitors(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::BTreeMap<i64, IndustryMaterialMonitorSub> {
+    snap.owner_notes
+        .get(&INDUSTRY_MATERIAL_MONITORS_NOTE_ID)
+        .and_then(|n| serde_json::from_str(&n.note).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_industry_material_monitors(
+    snap: &mut eve_db::WorldStateSnapshot,
+    monitors: &std::collections::BTreeMap<i64, IndustryMaterialMonitorSub>,
+) {
+    snap.owner_notes.insert(
+        INDUSTRY_MATERIAL_MONITORS_NOTE_ID,
+        eve_db::OwnerNoteRecord {
+            note_id: INDUSTRY_MATERIAL_MONITORS_NOTE_ID,
+            character_id: 0,
+            item_id: 0,
+            label: "industry_material_monitors".into(),
+            note: serde_json::to_string(monitors).unwrap_or_default(),
+            timestamp_unix: 0,
+        },
+    );
+}
+
+/// Emits `OnIndustryMaterials(monitorID, materials)` (`materials = {typeID: remaining_available_qty}`)
+/// per V24 `IndustryService.OnIndustryMaterials` / `Material.update_available` to subscribed monitors
+/// when an industry job consumes materials from the monitored hangar/container.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_industry_materials_consumed(
     ctx: &ServerContext,
     char_id: i64,
-    job_id: i64,
+    _job_id: i64,
+    facility_id: i64,
+    docked_id: i64,
+    job_owner_id: i64,
+    use_corp: bool,
+    input_flag: eve_db::InventoryFlag,
+    input_container_id: Option<i64>,
     consumed: &[(u32, i32)],
 ) {
     if consumed.is_empty() {
         return;
     }
-    let mats: Vec<PyRep> = consumed
+    let mut tids: Vec<u32> = consumed
         .iter()
         .filter(|&&(_, qty)| qty > 0)
-        .map(|&(tid, qty)| {
-            PyRep::keyval([
-                ("typeID", PyRep::Integer(i64::from(tid))),
-                ("quantity", PyRep::Integer(i64::from(qty))),
-                ("missing", PyRep::Integer(0)),
-            ])
-        })
+        .map(|&(tid, _)| tid)
         .collect();
-    if mats.is_empty() {
+    tids.sort_unstable();
+    tids.dedup();
+    if tids.is_empty() {
         return;
     }
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnIndustryMaterials",
-        "charid",
-        vec![PyRep::Integer(job_id), PyRep::List(mats)],
-    );
+    let target_loc = input_container_id.unwrap_or(facility_id);
+    let target_flag = if use_corp {
+        input_flag as i64
+    } else {
+        eve_db::InventoryFlag::Hangar as i64
+    };
+    let target_owner = if use_corp { job_owner_id } else { char_id };
+
+    let matching_subs: Vec<(i64, IndustryMaterialMonitorSub)> = ctx.db.with_snapshot(|snap| {
+        load_industry_material_monitors(snap)
+            .into_iter()
+            .filter(|(_, sub)| {
+                let loc_match = sub.location_id == target_loc
+                    || (input_container_id.is_none() && sub.location_id == docked_id);
+                sub.owner_id == target_owner && loc_match && sub.flag_id == target_flag
+            })
+            .collect()
+    });
+    if matching_subs.is_empty() {
+        return;
+    }
+
+    for (monitor_id, sub) in matching_subs {
+        let can_query_div = if use_corp && (116..=122).contains(&sub.flag_id) {
+            let div_idx = (sub.flag_id as u16) - 116;
+            let query_bit = 1u64 << (20 + div_idx);
+            let take_bit = 1u64 << (13 + div_idx);
+            let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(
+                ctx,
+                sub.owner_id,
+                sub.char_id,
+            );
+            is_ceo
+                || roles == u64::MAX
+                || (roles
+                    & (eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                        | query_bit
+                        | take_bit))
+                    != 0
+        } else {
+            true
+        };
+        if !can_query_div {
+            continue;
+        }
+        let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+            tids.iter()
+                .map(|&tid| {
+                    let avail: i64 = snap
+                        .items
+                        .values()
+                        .filter(|i| {
+                            i.owner_id == sub.owner_id
+                                && i.location_id == sub.location_id
+                                && (i.flag as i64) == sub.flag_id
+                                && i.type_id == tid
+                                && i.quantity > 0
+                                && !i.singleton
+                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                        })
+                        .map(|i| i64::from(i.quantity))
+                        .sum();
+                    (PyRep::Integer(i64::from(tid)), PyRep::Integer(avail))
+                })
+                .collect()
+        });
+        ctx.notify(
+            NotificationTarget::Character(sub.char_id),
+            "OnIndustryMaterials",
+            "charid",
+            vec![PyRep::Integer(monitor_id), PyRep::Dict(entries)],
+        );
+    }
 }
 
 /// Emits `OnLogonSkillsTrained(skillInfos, canTrain)` when offline skill queue catch-up finishes >= 1 skill.
@@ -804,3 +913,4 @@ pub fn handle_batch3_gm_slash_cmd(
         _ => None,
     }
 }
+

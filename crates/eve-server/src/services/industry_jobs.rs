@@ -74,10 +74,9 @@ pub fn handle_industry_jobs(
                 .or_else(|| lookup_first("isCorpJob"))
                 .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
                 .unwrap_or(false);
-            let explicit_owner_id: Option<i64> = lookup_first("ownerID")
-                .or_else(|| lookup_first("corporationID"))
-                .and_then(|v| v.as_i64())
-                .filter(|&id| id > 0);
+            let explicit_owner_id = lookup_first("ownerID").or_else(|| lookup_first("corporationID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
+            let explicit_input_flag = lookup_first("inputFlag").or_else(|| lookup_first("flagID")).and_then(|v| v.as_i64()).and_then(|f| u16::try_from(f).ok()).map(InventoryFlag::from_u16);
+            let raw_input_container = lookup_first("inputLocationID").or_else(|| lookup_first("inputContainerID")).or_else(|| lookup_first("containerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
 
             let (raw_bp_type_id, raw_activity_id, runs_raw) = match args.first() {
                 Some(PyRep::KeyVal(_) | PyRep::Dict(_)) => {
@@ -678,39 +677,82 @@ pub fn handle_industry_jobs(
                     }
                 }
 
-                let mut consumed_materials: Vec<(TypeId, i32)> = Vec::new();
-                let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot,
-                                            mat_tid: TypeId,
-                                            req_qty: i32,
-                                            err_code: &str|
-                 -> Result<(), BridgeRpcError> {
-                    if req_qty <= 0 {
-                        return Ok(());
-                    }
-                    let mut matching_stacks: Vec<(i64, i32)> = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                                && (i.location_id == station_id || i.location_id == docked_id)
-                                && i.type_id == mat_tid
-                                && i.quantity > 0
-                                && !i.singleton
-                                && is_usable_industry_flag(i.flag)
-                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                        })
-                        .map(|i| (i.item_id, i.quantity))
-                        .collect();
-                    matching_stacks.sort_by_key(|(id, _)| *id);
-                    let total_avail: i64 = matching_stacks.iter().map(|(_, q)| i64::from(*q)).sum();
-                    if total_avail < i64::from(req_qty) {
+                let input_container_id = raw_input_container.filter(|&id| id != station_id && id != docked_id);
+                if let Some(cid) = input_container_id {
+                    let Some(cont) = snap.items.get(&cid) else {
                         return Err(BridgeRpcError {
-                            code: err_code.into(),
-                            message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}"),
+                            code: "InvalidInputContainer".into(),
+                            message: format!("Input container {cid} does not exist"),
+                        });
+                    };
+                    if cont.location_id != station_id && cont.location_id != docked_id {
+                        return Err(BridgeRpcError {
+                            code: "InvalidInputContainer".into(),
+                            message: format!(
+                                "Input container {cid} is at location {}, not facility {station_id}",
+                                cont.location_id
+                            ),
                         });
                     }
+                }
+                let effective_input_flag = explicit_input_flag.unwrap_or_else(|| {
+                    if !use_corp {
+                        InventoryFlag::Hangar
+                    } else if let Some(cid) = input_container_id {
+                        snap.items
+                            .get(&cid)
+                            .map(|c| c.flag)
+                            .filter(|f| (116..=122).contains(&(*f as u16)))
+                            .unwrap_or(InventoryFlag::CorpSAG1)
+                    } else if (116..=122).contains(&(bp_rec.flag as u16)) {
+                        bp_rec.flag
+                    } else {
+                        snap.items.values().find(|i| i.owner_id == job_owner_id && (i.location_id == station_id || i.location_id == docked_id) && (116..=122).contains(&(i.flag as u16))).map(|i| i.flag).unwrap_or(InventoryFlag::CorpSAG1)
+                    }
+                });
+                let has_corp_div_take = |snap: &eve_db::WorldStateSnapshot, flag: InventoryFlag| -> bool {
+                    if !use_corp || !(116..=122).contains(&(flag as u16)) {
+                        return true;
+                    }
+                    let div_idx = (flag as u16 - 116) as u64;
+                    let req_role = eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << (13 + div_idx));
+                    session.has_gm_role()
+                        || (session.corp_role & req_role) != 0
+                        || snap.corporations.get(&job_owner_id).is_some_and(|c| {
+                            c.ceo_id == char_id
+                                || c.member_roles
+                                    .get(&char_id)
+                                    .is_some_and(|&r| (r & req_role) != 0)
+                        })
+                        || snap
+                            .corp_role_assignments
+                            .get(&(job_owner_id, char_id))
+                            .is_some_and(|a| (a.roles & req_role) != 0)
+                };
+                if use_corp && (explicit_input_flag.is_some() || input_container_id.is_some()) && !has_corp_div_take(snap, effective_input_flag) {
+                    let div_num = (effective_input_flag as u16).saturating_sub(115);
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: format!(
+                            "Missing corporation hangar division {div_num} Take role"
+                        ),
+                    });
+                }
+                let mut consumed_materials: Vec<(TypeId, i32)> = Vec::new();
+                let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot, mat_tid: TypeId, req_qty: i32, err_code: &str| -> Result<(), BridgeRpcError> {
+                    if req_qty <= 0 { return Ok(()); }
+                    let mut matching_stacks: Vec<(bool, i64, i32)> = snap.items.values().filter(|i| {
+                        let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == docked_id, |cid| i.location_id == cid);
+                        let flag_ok = explicit_input_flag.map_or((i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id)) && is_usable_industry_flag(i.flag) && has_corp_div_take(snap, i.flag), |ef| i.owner_id == job_owner_id && i.flag == ef);
+                        flag_ok && loc_ok && i.type_id == mat_tid && i.quantity > 0 && !i.singleton && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                    }).map(|i| (i.owner_id != job_owner_id || i.flag != effective_input_flag, i.item_id, i.quantity)).collect();
+                    matching_stacks.sort_by_key(|(is_fallback, id, _)| (*is_fallback, *id));
+                    let total_avail: i64 = matching_stacks.iter().map(|(_, _, q)| i64::from(*q)).sum();
+                    if total_avail < i64::from(req_qty) {
+                        return Err(BridgeRpcError { code: err_code.into(), message: format!("Missing {req_qty}x material type {mat_tid} at {station_id}") });
+                    }
                     let mut rem = req_qty;
-                    for (mid, _) in matching_stacks {
+                    for (_, mid, _) in matching_stacks {
                         if rem <= 0 {
                             break;
                         }
@@ -938,12 +980,13 @@ pub fn handle_industry_jobs(
                     },
                 );
                 save_job_cost_meta(snap, jid, &cost_meta);
-                Ok((jid, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_facility_tax_isk, cost_meta))
+                Ok((jid, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_facility_tax_isk, cost_meta, effective_input_flag, input_container_id))
             });
 
             match res {
-                Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta)) => {
+                Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta, eff_in_flag, in_cid)) => {
                     emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
+                    crate::services::notify_emitters_batch3::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)), ("ownerID", PyRep::Integer(cost_meta.owner_id)),
                         ("blueprintID", PyRep::Integer(bp_iid)), ("blueprintItemID", PyRep::Integer(bp_iid)),

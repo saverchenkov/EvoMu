@@ -1,0 +1,682 @@
+//! Live integration tests for newly-closed feature rows (`EvoMu-w34`):
+//! - `feat:admin.gm-tournament`
+//! - `feat:serverops.session-changes`
+//! - `feat:removed.medical-clone-grades`
+//! Plus regression coverage for market-adjusted EIV and warable lookup filtering.
+
+use crate::common;
+use eve_db::{
+    AllianceRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
+    MarketHistoryDayRecord, TrainedSkillRecord, UpwellStructureRecord,
+};
+use eve_machonet::{service_roles, SessionState};
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::{cache_notifications::PendingMachoNotification, ServerContext};
+use std::collections::HashMap;
+
+const PILOT_A: i64 = 90_000_001;
+const PILOT_B: i64 = 90_000_002;
+const JITA_SYSTEM: u32 = 30_000_142;
+const JITA_STATION: i64 = 60_003_760;
+
+async fn login_pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
+    let mut s = SessionState::new(sid);
+    common::login_pilot(ctx, &mut s, user, pass).await;
+    ctx.dispatch_rpc(
+        &mut s,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    s.station_id = Some(JITA_STATION);
+    ctx.advance_secs(12);
+    s
+}
+
+async fn rpc(ctx: &ServerContext, s: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(s, svc, None, method, args, &HashMap::new(), None).await
+}
+
+fn find_notifs<'a>(notifs: &'a [PendingMachoNotification], event: &str) -> Vec<&'a PendingMachoNotification> {
+    notifs.iter().filter(|n| n.event == event).collect()
+}
+
+fn session_change_pair(notif: &PendingMachoNotification, key: &str) -> Option<(PyRep, PyRep)> {
+    let PyRep::Tuple(pair) = notif.args.get(2)?.dict_get(key)? else { return None };
+    (pair.len() == 2).then(|| (pair[0].clone(), pair[1].clone()))
+}
+
+fn make_item(
+    item_id: i64,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    quantity: i32,
+    singleton: bool,
+) -> InventoryItemRecord {
+    InventoryItemRecord {
+        item_id,
+        type_id,
+        owner_id,
+        location_id,
+        flag,
+        quantity,
+        singleton,
+        version: 1,
+        dynamic_attributes: HashMap::new(),
+        source_mutaplasmid_id: None,
+        insured_payout_isk: 0.0,
+        is_blueprint_copy: false,
+        blueprint_runs_remaining: None,
+    }
+}
+
+#[tokio::test]
+async fn test_gm_tournament_match_bans_and_cleanup_grid() {
+    // parity: feat:admin.gm-tournament
+    eve_testkit::attest(&["feat:admin.gm-tournament"]);
+
+    let ctx = ServerContext::new();
+    let mut gm_sess = login_pilot(&ctx, 8901, "demo", "demo-secret", PILOT_A).await;
+    let mut p2_sess = login_pilot(&ctx, 8902, "other", "other-secret", PILOT_B).await;
+
+    // Negative 1: non-GM pilot cannot CreateMatch
+    gm_sess.role = 0;
+    let denied = rpc(
+        &ctx,
+        &mut gm_sess,
+        "tourneyMgr",
+        "CreateMatch",
+        &[PyRep::Integer(1), PyRep::Integer(2401), PyRep::Integer(100), PyRep::Integer(600), PyRep::Integer(0), PyRep::Integer(0)],
+    )
+    .await
+    .expect_err("non-GM CreateMatch must fail");
+    assert!(!denied.code.is_empty());
+
+    // 1. GM creates AT match with Red & Blue teams
+    gm_sess.role = service_roles::ROLE_GMH;
+    let create_rep = rpc(
+        &ctx,
+        &mut gm_sess,
+        "tourneyMgr",
+        "CreateMatch",
+        &[
+            PyRep::Integer(1),
+            PyRep::Tuple(vec![
+                PyRep::Integer(2401),
+                PyRep::Integer(98_000_001),
+                PyRep::Integer(98_000_002),
+                PyRep::Integer(PILOT_A),
+                PyRep::Integer(PILOT_B),
+            ]),
+            PyRep::Integer(100),
+            PyRep::Integer(600),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .expect("GM CreateMatch");
+    let PyRep::Tuple(create_tup) = create_rep else { panic!("expected CreateMatch 3-tuple") };
+    assert_eq!(create_tup[0], PyRep::Integer(2401));
+    let PyRep::List(beacons) = &create_tup[1] else { panic!("expected beacon list") };
+    assert_eq!(beacons.len(), 2);
+    let beacon_1 = beacons[0].as_i64().expect("beacon 1 id");
+
+    // Negative 2: non-referee pilot cannot AddPlayer or CleanupGrid
+    let p2_add_err = rpc(&ctx, &mut p2_sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2401), PyRep::Integer(1), PyRep::Integer(PILOT_B)])
+        .await
+        .expect_err("non-referee AddPlayer must fail");
+    assert_eq!(p2_add_err.code, "AccessDenied");
+    let p2_clean_err = rpc(&ctx, &mut p2_sess, "tourneyMgr", "CleanupGrid", &[PyRep::Integer(2401)])
+        .await
+        .expect_err("non-referee CleanupGrid must fail");
+    assert_eq!(p2_clean_err.code, "AccessDenied");
+
+    // 2. Referee adds Red and Blue pilots
+    assert_eq!(
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2401), PyRep::Integer(0), PyRep::Integer(PILOT_A)]).await.expect("AddPlayer Red"),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2401), PyRep::Integer(1), PyRep::Integer(PILOT_B)]).await.expect("AddPlayer Blue"),
+        PyRep::Bool(true)
+    );
+
+    // 3. BanShip + FinalizeBans enforce ship hull bans during pregame checks
+    assert_eq!(
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "BanShip", &[PyRep::Integer(2401), PyRep::List(vec![PyRep::Integer(587)])]).await.expect("BanShip"),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "FinalizeBans", &[PyRep::Integer(2401)]).await.expect("FinalizeBans"),
+        PyRep::Bool(true)
+    );
+    let post_fin_ban = rpc(&ctx, &mut gm_sess, "tourneyMgr", "BanShip", &[PyRep::Integer(2401), PyRep::List(vec![PyRep::Integer(597)])])
+        .await
+        .expect_err("BanShip after FinalizeBans must fail");
+    assert_eq!(post_fin_ban.code, "TourneyBansFinalized");
+    let post_fin_bantype = rpc(&ctx, &mut gm_sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(2401), PyRep::Integer(0), PyRep::Integer(597)])
+        .await
+        .expect_err("BanShipType after FinalizeBans must fail");
+    assert_eq!(post_fin_bantype.code, "TourneyBansFinalized");
+    let banned_check = rpc(&ctx, &mut gm_sess, "tourneyMgr", "CompletePregameChecks", &[PyRep::Integer(2401)])
+        .await
+        .expect_err("pilot in banned Rifter (587) must fail CompletePregameChecks");
+    assert!(!banned_check.code.is_empty());
+
+    // Switch both pilots to legal Punisher (597) hulls, clear recorded ban errors via OverrideError, and complete pregame
+    ctx.db.with_mut_snapshot(|snap| {
+        for (idx, cid) in [PILOT_A, PILOT_B].into_iter().enumerate() {
+            let sid = 930_000_100 + idx as i64;
+            snap.items.insert(sid, make_item(sid, 597, cid, JITA_STATION, InventoryFlag::Hangar, 1, true));
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.active_ship_id = sid;
+            }
+        }
+    });
+    for cid in [PILOT_A, PILOT_B] {
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "OverrideError", &[PyRep::Integer(2401), PyRep::Integer(cid), PyRep::String(String::new())])
+            .await
+            .expect("OverrideError");
+    }
+    assert_eq!(
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "CompletePregameChecks", &[PyRep::Integer(2401)]).await.expect("CompletePregameChecks"),
+        PyRep::Bool(true)
+    );
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SYSTEM);
+    assert!(sys_handle.get_ball_snapshot(beacon_1).await.unwrap().is_some());
+    rpc(&ctx, &mut gm_sess, "tourneyMgr", "StartCountdown", &[PyRep::Integer(2401)]).await.expect("StartCountdown");
+    rpc(&ctx, &mut gm_sess, "tourneyMgr", "MatchCompleted", &[PyRep::Integer(2401), PyRep::Integer(0)]).await.expect("MatchCompleted");
+    assert!(sys_handle.get_ball_snapshot(beacon_1).await.unwrap().is_none());
+
+    // 4. CleanupGrid removes arena-grid wrecks + cargo from both DB items and live ballpark while preserving ships and off-grid containers
+    let (wreck_id, loot_id, ship_on_grid, offgrid_can_id) = (930_000_500_i64, 930_000_501_i64, 930_000_502_i64, 930_000_503_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(wreck_id, make_item(wreck_id, 26557, PILOT_A, i64::from(JITA_SYSTEM), InventoryFlag::None, 1, true));
+        snap.items.insert(loot_id, make_item(loot_id, 34, PILOT_A, wreck_id, InventoryFlag::Cargo, 1_000, false));
+        snap.items.insert(ship_on_grid, make_item(ship_on_grid, 587, PILOT_A, i64::from(JITA_SYSTEM), InventoryFlag::None, 1, true));
+        snap.items.insert(offgrid_can_id, make_item(offgrid_can_id, 23, PILOT_A, i64::from(JITA_SYSTEM), InventoryFlag::None, 1, true));
+        snap.item_positions.insert(offgrid_can_id, [5_000_000.0, 0.0, 0.0]);
+    });
+    for (bid, tid, gid, x_pos) in [(wreck_id, 26557_u32, 186_u32, 1_500.0), (ship_on_grid, 587_u32, 25_u32, 1_500.0), (offgrid_can_id, 23_u32, 12_u32, 5_000_000.0)] {
+        let _ = sys_handle
+            .spawn_ball_with_meta(
+                eve_destiny::Ball {
+                    id: bid,
+                    type_id: tid,
+                    position: glam::DVec3::new(x_pos, 0.0, 0.0),
+                    velocity: glam::DVec3::ZERO,
+                    max_velocity: 0.0,
+                    inertia: 1.0,
+                    mass: 1_000.0,
+                    radius: 25.0,
+                    speed_fraction: 0.0,
+                    mode: eve_destiny::MovementMode::Stop,
+                },
+                ctx.build_type_combat_state(tid),
+                eve_destiny::SlimItemMeta {
+                    group_id: gid,
+                    category_id: if gid == 25 { 6 } else { 2 },
+                    owner_id: PILOT_A,
+                    char_id: None,
+                    corp_id: -1,
+                    alliance_id: -1,
+                    security_status: 0.0,
+                    is_cloaked: false,
+                },
+            )
+            .await;
+    }
+    assert!(sys_handle.get_ball_snapshot(wreck_id).await.unwrap().is_some());
+
+    assert_eq!(
+        rpc(&ctx, &mut gm_sess, "tourneyMgr", "CleanupGrid", &[PyRep::Integer(2401)]).await.expect("CleanupGrid"),
+        PyRep::Bool(true)
+    );
+    assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&wreck_id) && !s.items.contains_key(&loot_id) && s.items.contains_key(&ship_on_grid) && s.items.contains_key(&offgrid_can_id)));
+    assert!(sys_handle.get_ball_snapshot(wreck_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(ship_on_grid).await.unwrap().is_some());
+    assert!(sys_handle.get_ball_snapshot(offgrid_can_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_session_attribute_changes_propagate_across_location_ship_corp_and_roles() {
+    // parity: feat:serverops.session-changes
+    eve_testkit::attest(&["feat:serverops.session-changes"]);
+
+    let ctx = ServerContext::new();
+    let mut sess_a = login_pilot(&ctx, 8903, "demo", "demo-secret", PILOT_A).await;
+    let mut sess_b = login_pilot(&ctx, 8904, "other", "other-secret", PILOT_B).await;
+
+    // 1. Location propagation: Undock -> in-space session + OnSessionChanged -> CmdDock -> docked session
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    rpc(&ctx, &mut sess_a, "ship", "Undock", &[]).await.expect("Undock");
+    assert_eq!(sess_a.station_id, None);
+    assert_eq!(sess_a.solar_system_id, Some(JITA_SYSTEM));
+    let undock_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let undock_sc = find_notifs(&undock_notifs, "OnSessionChanged");
+    assert!(undock_sc.iter().any(|n| session_change_pair(n, "stationid") == Some((PyRep::Integer(JITA_STATION), PyRep::None))));
+    assert!(rpc(&ctx, &mut sess_a, "jumpCloneSvc", "InstallCloneInStation", &[]).await.is_err());
+
+    ctx.advance_secs(12);
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    rpc(&ctx, &mut sess_a, "beyonce", "CmdDock", &[PyRep::Integer(JITA_STATION)]).await.expect("CmdDock");
+    assert_eq!(sess_a.station_id, Some(JITA_STATION));
+    let dock_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let dock_sc = find_notifs(&dock_notifs, "OnSessionChanged");
+    assert!(dock_sc.iter().any(|n| session_change_pair(n, "stationid") == Some((PyRep::None, PyRep::Integer(JITA_STATION)))));
+
+    // 2. Ship propagation: ship.Board updates session.ship_id, emits OnSessionChanged("shipid"), and syncs character sheet
+    ctx.advance_secs(12);
+    let old_ship_a = sess_a.ship_id.expect("initial ship_id");
+    let slasher_id = 931_000_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(slasher_id, make_item(slasher_id, 585, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true));
+    });
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+    rpc(&ctx, &mut sess_a, "ship", "Board", &[PyRep::Integer(slasher_id)]).await.expect("ship.Board");
+    assert_eq!(sess_a.ship_id, Some(slasher_id));
+    let board_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    let board_sc = find_notifs(&board_notifs, "OnSessionChanged");
+    assert!(board_sc.iter().any(|n| session_change_pair(n, "shipid") == Some((PyRep::Integer(old_ship_a), PyRep::Integer(slasher_id)))));
+    let info_a = rpc(&ctx, &mut sess_a, "charMgr", "GetCharacterInfo", &[]).await.expect("GetCharacterInfo");
+    assert_eq!(info_a.dict_get("shipID"), Some(&PyRep::Integer(slasher_id)));
+    assert_eq!(info_a.dict_get("shipTypeID"), Some(&PyRep::Integer(585)));
+
+    // 3. Corp propagation: PILOT_B joins CEO PILOT_A's player corporation -> OnSessionChanged("corpid") + auto-sync
+    let player_corp_id = 98_500_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = CorporationRecord {
+            corporation_id: player_corp_id,
+            name: "Session Propagation Corp".into(),
+            ticker: "SPROP".into(),
+            ceo_id: PILOT_A,
+            hq_station_id: Some(JITA_STATION),
+            ..Default::default()
+        };
+        corp.members.insert(PILOT_A);
+        corp.member_roles.insert(PILOT_A, u64::MAX);
+        snap.corporations.insert(player_corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.corporation_id = player_corp_id;
+        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_B) {
+            ch.station_id = Some(JITA_STATION);
+        }
+    });
+    sess_a.corporation_id = Some(player_corp_id);
+    sess_a.corp_role = u64::MAX;
+    ctx.advance_secs(12);
+
+    let old_corp_b = sess_b.corporation_id.expect("initial NPC corp");
+    let app_rep = rpc(
+        &ctx,
+        &mut sess_b,
+        "corpRegistry",
+        "InsertApplication",
+        &[PyRep::Integer(player_corp_id), PyRep::String("Applying".into())],
+    )
+    .await
+    .expect("InsertApplication");
+    let app_id = app_rep.dict_get("applicationID").and_then(|v| v.as_i64()).expect("applicationID");
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "UpdateApplicationOffer",
+        &[PyRep::Integer(app_id), PyRep::String("Accepted".into())],
+    )
+    .await
+    .expect("UpdateApplicationOffer Accepted");
+
+    let join_notifs = ctx.drain_notifications_for_char(PILOT_B);
+    let join_sc = find_notifs(&join_notifs, "OnSessionChanged");
+    assert!(join_sc.iter().any(|n| session_change_pair(n, "corpid") == Some((PyRep::Integer(old_corp_b), PyRep::Integer(player_corp_id)))));
+
+    // 4. Roles propagation: unprivileged member denied -> CEO UpdateMember grants role -> OnSessionChanged("corprole") + live sync -> revoke blocks again
+    let corp_fit = PyRep::keyval([
+        ("name", PyRep::String("Doctrine Punisher".into())),
+        ("shipTypeID", PyRep::Integer(597)),
+        ("description", PyRep::String("Role-gated corp fit".into())),
+        ("fitData", PyRep::List(vec![])),
+    ]);
+    assert!(
+        rpc(&ctx, &mut sess_b, "corpFittingMgr", "SaveFitting", &[PyRep::Integer(player_corp_id), corp_fit.clone()])
+            .await
+            .is_err()
+    );
+    assert_eq!(sess_b.corporation_id, Some(player_corp_id));
+
+    let fitting_mgr_role: u64 = 1u64 << 41;
+    let hq_role: u64 = 1u64 << 7;
+    let delayed_hangar_role: u64 = 1u64 << 13; // Hangar Take 1 (24h delayed grant)
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "UpdateMember",
+        &[PyRep::keyval([
+            ("characterID", PyRep::Integer(PILOT_B)),
+            ("roles", PyRep::Integer((fitting_mgr_role | delayed_hangar_role) as i64)),
+            ("rolesAtHQ", PyRep::Integer(hq_role as i64)),
+        ])],
+    )
+    .await
+    .expect("UpdateMember grant");
+
+    let grant_notifs = ctx.drain_notifications_for_char(PILOT_B);
+    let grant_sc = find_notifs(&grant_notifs, "OnSessionChanged");
+    let role_notif = grant_sc
+        .iter()
+        .find(|n| session_change_pair(n, "corprole") == Some((PyRep::Integer(0), PyRep::Integer(fitting_mgr_role as i64))))
+        .expect("OnSessionChanged with immediate corprole");
+    assert_eq!(role_notif.id_type, "charid", "OnSessionChanged must address charid");
+    assert_eq!(role_notif.args[1].dict_get("charid"), Some(&PyRep::Integer(PILOT_B)));
+    assert_eq!(role_notif.args[1].dict_get("corpid"), Some(&PyRep::Integer(player_corp_id)));
+    assert_eq!(role_notif.args[1].dict_get("corprole"), Some(&PyRep::Integer(fitting_mgr_role as i64)));
+    assert_eq!(role_notif.args[1].dict_get("rolesAtHQ"), Some(&PyRep::Integer(hq_role as i64)));
+    assert_eq!(session_change_pair(role_notif, "rolesAtHQ"), Some((PyRep::Integer(0), PyRep::Integer(hq_role as i64))));
+
+    let saved_fid = rpc(&ctx, &mut sess_b, "corpFittingMgr", "SaveFitting", &[PyRep::Integer(player_corp_id), corp_fit.clone()])
+        .await
+        .expect("member live session must pick up granted role")
+        .as_i64()
+        .expect("saved corp fitting id");
+    assert!(saved_fid > 0);
+    assert_eq!(sess_b.corp_role, fitting_mgr_role);
+
+    // Non-Director Fitting Manager can also call corpFittingMgr.UpdateNameAndDescription
+    let renamed = rpc(
+        &ctx,
+        &mut sess_b,
+        "corpFittingMgr",
+        "UpdateNameAndDescription",
+        &[
+            PyRep::Integer(saved_fid),
+            PyRep::Integer(player_corp_id),
+            PyRep::String("Renamed Doctrine Punisher".into()),
+            PyRep::String("Updated by Fitting Manager".into()),
+        ],
+    )
+    .await
+    .expect("Fitting Manager UpdateNameAndDescription");
+    assert_eq!(renamed.dict_get("name"), Some(&PyRep::String("Renamed Doctrine Punisher".into())));
+
+    // Advance 24h so pending delayed hangar role matures and emits OnSessionChanged
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    ctx.advance_secs(86_405);
+    let _ = rpc(&ctx, &mut sess_b, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_B)]).await.expect("GetMember triggers pending grant promotion");
+    let matured_notifs = ctx.drain_notifications_for_char(PILOT_B);
+    let matured_sc = find_notifs(&matured_notifs, "OnSessionChanged");
+    assert!(
+        matured_sc.iter().any(|n| n.id_type == "charid"
+            && session_change_pair(n, "corprole") == Some((PyRep::Integer(fitting_mgr_role as i64), PyRep::Integer((fitting_mgr_role | delayed_hangar_role) as i64)))),
+        "Maturing 24h delayed role grant must emit OnSessionChanged with updated corprole"
+    );
+
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    rpc(
+        &ctx,
+        &mut sess_a,
+        "corpRegistry",
+        "UpdateMember",
+        &[PyRep::keyval([("characterID", PyRep::Integer(PILOT_B)), ("roles", PyRep::Integer(0)), ("rolesAtHQ", PyRep::Integer(0))])],
+    )
+    .await
+    .expect("UpdateMember revoke");
+    let revoke_notifs = ctx.drain_notifications_for_char(PILOT_B);
+    let revoke_sc = find_notifs(&revoke_notifs, "OnSessionChanged");
+    assert!(revoke_sc.iter().any(|n| n.id_type == "charid"
+        && session_change_pair(n, "corprole") == Some((PyRep::Integer((fitting_mgr_role | delayed_hangar_role) as i64), PyRep::Integer(0)))
+        && session_change_pair(n, "rolesAtHQ") == Some((PyRep::Integer(hq_role as i64), PyRep::Integer(0)))));
+    assert!(
+        rpc(&ctx, &mut sess_b, "corpFittingMgr", "SaveFitting", &[PyRep::Integer(player_corp_id), corp_fit])
+            .await
+            .is_err()
+    );
+    assert_eq!(sess_b.corp_role, 0);
+}
+
+#[tokio::test]
+async fn test_medical_clone_grades_removed_free_respawn_zero_sp_loss() {
+    // parity: feat:removed.medical-clone-grades
+    eve_testkit::attest(&["feat:removed.medical-clone-grades"]);
+
+    let ctx = ServerContext::new();
+    let mut sess = login_pilot(&ctx, 8905, "demo", "demo-secret", PILOT_A).await;
+
+    // Seed a 52,000,000 SP veteran pilot (far above pre-Rhea 900,000 SP basic medical clone cap)
+    let initial_balance = IskCents(25_000_000_00);
+    let initial_sp = 52_000_000.0_f64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.balance = initial_balance;
+            ch.skill_points = initial_sp;
+            ch.home_station_id = JITA_STATION;
+            ch.station_id = Some(JITA_STATION);
+        }
+        let smap = snap.skills.entry(PILOT_A).or_default();
+        smap.insert(3300, TrainedSkillRecord { type_id: 3300, level: 5, skill_points: 256_000.0 });
+        smap.insert(3332, TrainedSkillRecord { type_id: 3332, level: 5, skill_points: 512_000.0 });
+    });
+
+    // V24 jumpCloneSvc.GetCloneState exposes jump clones, implants, and cooldown — no medical clone grade/SP cap
+    let clone_state = rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[])
+        .await
+        .expect("GetCloneState");
+    assert!(clone_state.dict_get("clones").is_some());
+    assert!(clone_state.dict_get("cloneGrade").is_none());
+
+    // Negative: home_station.self_destruct_clone while boarded in a non-capsule ship fails
+    let non_pod_err = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", &[])
+        .await
+        .expect_err("self_destruct_clone requires capsule");
+    assert!(!non_pod_err.code.is_empty());
+
+    // Leave ship into Capsule (670) and trigger medical clone activation at home station
+    ctx.advance_secs(12);
+    let capsule_id = rpc(&ctx, &mut sess, "ship", "LeaveShip", &[])
+        .await
+        .expect("LeaveShip")
+        .as_i64()
+        .expect("capsule id");
+    assert_eq!(sess.ship_id, Some(capsule_id));
+    let _ = ctx.drain_notifications_for_char(PILOT_A);
+
+    let respawn_station = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", &[])
+        .await
+        .expect("medical clone activation")
+        .as_i64()
+        .expect("home station id");
+    assert_eq!(respawn_station, JITA_STATION);
+    assert_eq!(find_notifs(&ctx.drain_notifications_for_char(PILOT_A), "OnCloneDestruction").len(), 1);
+
+    // Verify 0 ISK fee and 100% SP + level-V skill preservation
+    let sheet = rpc(&ctx, &mut sess, "charMgr", "GetCharacterInfo", &[])
+        .await
+        .expect("GetCharacterInfo after medical clone respawn");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&PILOT_A).map(|c| c.balance)),
+        Some(initial_balance),
+        "Medical clone respawn must be completely free (0 ISK charged)"
+    );
+    assert_eq!(
+        sheet.dict_get("skillPoints").and_then(|v| v.as_f64()),
+        Some(initial_sp),
+        "Medical clone respawn must preserve 100% of character SP without pre-Rhea grade loss"
+    );
+    let (lvl_3300, lvl_3332) = ctx.db.with_snapshot(|s| {
+        let smap = s.skills.get(&PILOT_A).expect("skills map");
+        (smap[&3300].level, smap[&3332].level)
+    });
+    assert_eq!((lvl_3300, lvl_3332), (5, 5));
+}
+
+#[tokio::test]
+async fn test_eiv_market_adjusted_prices_and_warable_lookup_regressions() {
+    let ctx = ServerContext::new();
+    let mut sess = login_pilot(&ctx, 8906, "demo", "demo-secret", PILOT_A).await;
+
+    let bp = ctx.sde.blueprints.get(&687).cloned().expect("Rifter BP");
+    let baseline_eiv = ctx.db.with_snapshot(|snap| {
+        eve_server::services::industry_pi::industry_facilities_bps::compute_blueprint_eiv_per_run_with_snap(&ctx, Some(snap), &bp, 1)
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.market_history.insert(
+            (10_000_002, 34),
+            (1..=10)
+                .map(|d| MarketHistoryDayRecord {
+                    date: format!("2026-10-{d:02}"),
+                    average: 25.0,
+                    highest: 26.0,
+                    lowest: 24.0,
+                    order_count: 100,
+                    volume: 1_000_000,
+                    open_price: None,
+                    close_price: None,
+                })
+                .collect(),
+        );
+    });
+    let elevated_eiv = ctx.db.with_snapshot(|snap| {
+        eve_server::services::industry_pi::industry_facilities_bps::compute_blueprint_eiv_per_run_with_snap(&ctx, Some(snap), &bp, 1)
+    });
+    assert!(elevated_eiv > baseline_eiv);
+
+    sess.corporation_id = Some(98_000_001);
+    sess.alliance_id = Some(99_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            98_600_001,
+            CorporationRecord {
+                corporation_id: 98_600_001,
+                name: "Standalone WarCitadel Corp".into(),
+                ticker: "SWCC".into(),
+                ceo_id: 90_000_050,
+                alliance_id: None,
+                ..Default::default()
+            },
+        );
+        snap.corporations.insert(
+            98_600_002,
+            CorporationRecord {
+                corporation_id: 98_600_002,
+                name: "Allied WarCitadel Member Corp".into(),
+                ticker: "AWMC".into(),
+                ceo_id: 90_000_051,
+                alliance_id: Some(99_600_002),
+                ..Default::default()
+            },
+        );
+        for (sid, owner) in [(1_000_600_001_001_i64, 98_600_001_i64), (1_000_600_002_001_i64, 98_600_002_i64)] {
+            snap.structures.insert(
+                sid,
+                UpwellStructureRecord {
+                    structure_id: sid,
+                    type_id: 35832,
+                    owner_corp_id: owner,
+                    solar_system_id: JITA_SYSTEM,
+                    name: "WarCitadel Astrahus".into(),
+                    position: [0.0, 0.0, 0.0],
+                    state: "ShieldVulnerable".into(),
+                    quantum_core_installed: true,
+                    fuel_blocks: 100,
+                    shield_hp: 100.0,
+                    armor_hp: 100.0,
+                    hull_hp: 100.0,
+                    reinforced_until_unix: 0,
+                    last_damage_tick: 0,
+                    last_damage_unix: 0,
+                    self_destruct_at_unix: None,
+                },
+            );
+        }
+        snap.alliances.insert(
+            99_600_002,
+            AllianceRecord {
+                alliance_id: 99_600_002,
+                name: "WarCitadel Target Alliance".into(),
+                short_name: "WCTA".into(),
+                executor_corp_id: 98_600_002,
+                member_corp_ids: [98_600_002].into_iter().collect(),
+            },
+        );
+    });
+
+    let PyRep::List(rows) = rpc(
+        &ctx,
+        &mut sess,
+        "lookupSvc",
+        "LookupWarableCorporationsOrAlliances",
+        &[PyRep::String("WarCitadel".into()), PyRep::Bool(false)],
+    )
+    .await
+    .expect("LookupWarableCorporationsOrAlliances") else {
+        panic!("expected List");
+    };
+    let returned_ids: Vec<i64> = rows.iter().filter_map(|r| r.dict_get("ownerID").and_then(|v| v.as_i64())).collect();
+    assert!(returned_ids.contains(&98_600_001));
+    assert!(returned_ids.contains(&99_600_002));
+    assert!(!returned_ids.contains(&98_600_002));
+}
+
+#[tokio::test]
+async fn test_industry_container_division_and_reactor_gates() {
+    let ctx = ServerContext::new();
+    let mut sess = login_pilot(&ctx, 8911, "demo", "demo-secret", PILOT_A).await;
+    let corp_id = 98_700_001_i64;
+    let fm_sag1_only = eve_db::corp_roles::ROLE_FACTORY_MANAGER | (1u64 << 13);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut corp = eve_db::CorporationRecord {
+            corporation_id: corp_id, name: "Gate Corp".into(), ticker: "GATE".into(),
+            ceo_id: PILOT_B, hq_station_id: Some(JITA_STATION), master_wallet: IskCents(100_000_000_00), ..Default::default()
+        };
+        corp.members.insert(PILOT_A);
+        corp.member_roles.insert(PILOT_A, fm_sag1_only);
+        snap.corporations.insert(corp_id, corp);
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) { ch.corporation_id = corp_id; ch.balance = IskCents(100_000_000_00); }
+        snap.items.insert(931_000_001, make_item(931_000_001, 687, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(931_000_002, make_item(931_000_002, 3293, PILOT_A, 60003761, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(931_000_003, make_item(931_000_003, 687, corp_id, JITA_STATION, InventoryFlag::CorpSAG2, 1, true));
+        snap.structures.insert(931_000_010, crate::action_plan_mining::make_structure(931_000_010, corp_id, 35835, 30002813, "Lowsec Athanor", [0.0, 0.0, 0.0]));
+        snap.items.insert(931_000_011, make_item(931_000_011, 35891, corp_id, 931_000_010, InventoryFlag::ServiceSlot0, 1, true));
+        snap.items.insert(931_000_012, make_item(931_000_012, 90274, PILOT_A, 931_000_010, InventoryFlag::Hangar, 1, true));
+    });
+    sess.corporation_id = Some(corp_id);
+    sess.corp_role = fm_sag1_only;
+
+    let remote_err = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
+        ("blueprintItemID", PyRep::Integer(931_000_001)), ("facilityID", PyRep::Integer(JITA_STATION)),
+        ("activityID", PyRep::Integer(1)), ("runs", PyRep::Integer(1)), ("inputContainerID", PyRep::Integer(931_000_002)),
+    ])]).await.expect_err("remote inputContainerID must fail");
+    assert_eq!(remote_err.code, "InvalidInputContainer");
+
+    let div_err = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
+        ("blueprintItemID", PyRep::Integer(931_000_003)), ("facilityID", PyRep::Integer(JITA_STATION)),
+        ("activityID", PyRep::Integer(1)), ("runs", PyRep::Integer(1)),
+        ("useCorp", PyRep::Bool(true)), ("inputFlag", PyRep::Integer(InventoryFlag::CorpSAG2 as i64)),
+    ])]).await.expect_err("unauthorized CorpSAG2 must fail");
+    assert_eq!(div_err.code, "CrpAccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = None; ch.structure_id = Some(931_000_010); ch.solar_system_id = 30002813;
+        }
+    });
+    sess.station_id = None; sess.structure_id = Some(931_000_010); sess.solar_system_id = Some(30002813);
+    let react_err = rpc(&ctx, &mut sess, "industryManager", "InstallJob", &[PyRep::keyval([
+        ("blueprintItemID", PyRep::Integer(931_000_012)), ("facilityID", PyRep::Integer(931_000_010)),
+        ("activityID", PyRep::Integer(9)), ("runs", PyRep::Integer(1)),
+    ])]).await.expect_err("35891 Standup Research Lab I must be rejected for composite reaction");
+    assert_eq!(react_err.code, "CompositeReactorRequired");
+}

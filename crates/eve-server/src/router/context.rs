@@ -982,12 +982,15 @@ impl ServerContext {
                     let time_for_needed = (needed_sp / sp_sec).max(0.0);
                     let max_allowed_sp = if is_alpha { (5_000_000.0 - (current_char_sp + total_sp_gained)).max(0.0) } else { f64::INFINITY };
 
+                    let (existing_lvl, existing_sp) = skills_map.get(&q.type_id).map(|s| (s.level, s.skill_points)).unwrap_or((0, 0.0));
                     if rem_secs >= time_for_needed && needed_sp <= max_allowed_sp {
                         rem_secs = (rem_secs - time_for_needed).max(0.0);
                         total_sp_gained += needed_sp;
-                        skills_map.insert(q.type_id, eve_db::TrainedSkillRecord { type_id: q.type_id, level: q.target_level, skill_points: q.end_sp });
-                        completed_events.push((char_id, q.type_id, q.target_level));
-                        history_to_append.push(eve_db::SkillHistoryEntry { log_date_ft: now_ft, event_type_id: 37, skill_type_id: q.type_id, skill_level: q.target_level, absolute_points: q.end_sp });
+                        let final_lvl = q.target_level.max(existing_lvl);
+                        let final_sp = q.end_sp.max(existing_sp);
+                        skills_map.insert(q.type_id, eve_db::TrainedSkillRecord { type_id: q.type_id, level: final_lvl, skill_points: final_sp });
+                        completed_events.push((char_id, q.type_id, final_lvl));
+                        history_to_append.push(eve_db::SkillHistoryEntry { log_date_ft: now_ft, event_type_id: 37, skill_type_id: q.type_id, skill_level: final_lvl, absolute_points: final_sp });
                     } else {
                         let sp_advance = (rem_secs * sp_sec).min(needed_sp).min(max_allowed_sp);
                         rem_secs = 0.0;
@@ -996,7 +999,7 @@ impl ServerContext {
                         q.started_at_unix = Some(now_unix);
                         total_sp_gained += sp_advance;
 
-                        let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
+                        let current_lvl = existing_lvl;
                         let mut achieved_lvl = current_lvl;
                         if let Some(rank) = skill_type.and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT).copied()) {
                             for lvl in (current_lvl + 1)..=q.target_level {
@@ -1009,9 +1012,9 @@ impl ServerContext {
                         }
                         if achieved_lvl > current_lvl {
                             completed_events.push((char_id, q.type_id, achieved_lvl));
-                            history_to_append.push(eve_db::SkillHistoryEntry { log_date_ft: now_ft, event_type_id: 37, skill_type_id: q.type_id, skill_level: achieved_lvl, absolute_points: q.start_sp });
+                            history_to_append.push(eve_db::SkillHistoryEntry { log_date_ft: now_ft, event_type_id: 37, skill_type_id: q.type_id, skill_level: achieved_lvl, absolute_points: q.start_sp.max(existing_sp) });
                         }
-                        skills_map.insert(q.type_id, eve_db::TrainedSkillRecord { type_id: q.type_id, level: achieved_lvl, skill_points: q.start_sp });
+                        skills_map.insert(q.type_id, eve_db::TrainedSkillRecord { type_id: q.type_id, level: achieved_lvl.max(existing_lvl), skill_points: q.start_sp.max(existing_sp) });
                         remaining_queue.push(q);
                     }
                 }

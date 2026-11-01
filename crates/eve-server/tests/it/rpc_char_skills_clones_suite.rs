@@ -43,6 +43,7 @@ async fn rpc(
 async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
 
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let mut sess = setup_pilot(&ctx, 51_101, char_id).await;
 
@@ -154,6 +155,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     ]);
 
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let mut sess = setup_pilot(&ctx, 51_102, char_id).await;
 
@@ -166,31 +168,9 @@ async fn test_char_skill_injection_and_extraction_invariants() {
             ch.free_skill_points = 100_000.0;
         }
         let skills = snap.skills.entry(char_id).or_default();
-        skills.insert(
-            3300,
-            TrainedSkillRecord {
-                type_id: 3300, // Gunnery (rank 1.0)
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        skills.insert(
-            3301,
-            TrainedSkillRecord {
-                type_id: 3301, // Small Hybrid Turret (rank 1.0)
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        skills.insert(
-            3302,
-            TrainedSkillRecord {
-                type_id: 3302, // Medium Hybrid Turret
-                level: 4,
-                skill_points: 45_255.0,
-            },
-        );
-        // Seed Skill Extractor item (type 40519) in station hangar
+        skills.insert(3300, TrainedSkillRecord { type_id: 3300, level: 5, skill_points: 256_000.0 });
+        skills.insert(3301, TrainedSkillRecord { type_id: 3301, level: 5, skill_points: 256_000.0 });
+        skills.insert(3302, TrainedSkillRecord { type_id: 3302, level: 4, skill_points: 45_255.0 });
         snap.items.insert(
             770_000_001,
             InventoryItemRecord {
@@ -587,6 +567,7 @@ async fn test_jump_clone_destruction_and_state_invariants() {
     ]);
 
     let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let mut sess = setup_pilot(&ctx, 51_103, char_id).await;
 

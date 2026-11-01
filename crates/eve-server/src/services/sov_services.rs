@@ -171,7 +171,7 @@ pub fn emit_sov_structures_updated(ctx: &ServerContext, sys_id: u32, changed_ids
             .collect(),
     );
     ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
+        NotificationTarget::All,
         "OnSolarSystemSovStructuresUpdated",
         "solarsystemid",
         vec![

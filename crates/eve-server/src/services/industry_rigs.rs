@@ -174,3 +174,41 @@ pub fn resolve_structure_rig_bonus(
         resolve_structure_rig_bonuses_full(ctx, snap, facility_id, solar_system_id);
     (mat, time, sec_mult)
 }
+
+/// Resolves a material's adjusted price for EIV calculation (`feat:industry.eiv-adjusted-prices`):
+/// 1. 28-day clamped EMA over `snap.market_history` for `type_id` (matching `/markets/prices/`).
+/// 2. SDE `base_price` fallback (or `10.0` if unset).
+pub fn resolve_material_adjusted_price(
+    ctx: &ServerContext,
+    snap: Option<&eve_db::WorldStateSnapshot>,
+    type_id: eve_sde::TypeId,
+) -> f64 {
+    if let Some(s) = snap {
+        let mut days: Vec<&eve_db::MarketHistoryDayRecord> = s
+            .market_history
+            .iter()
+            .filter(|((_, tid), _)| *tid == type_id)
+            .flat_map(|(_, v)| v.iter())
+            .filter(|h| h.average > 0.0)
+            .collect();
+        if !days.is_empty() {
+            days.sort_by(|a, b| a.date.cmp(&b.date));
+            let recent_28 = &days[days.len().saturating_sub(28)..];
+            let mut rolling_adj = recent_28[0].average;
+            for d in &recent_28[1..] {
+                let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
+                rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
+            }
+            if rolling_adj > 0.0 {
+                return rolling_adj;
+            }
+        }
+    }
+
+    ctx.sde
+        .types
+        .get(&type_id)
+        .map(|t| if t.base_price > 0.0 { t.base_price } else { 10.0 })
+        .unwrap_or(10.0)
+}
+

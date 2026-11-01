@@ -328,6 +328,8 @@ async fn test_tourney_match_lifecycle_and_teams() {
     assert!(sys_handle.get_ball_snapshot(b2).await.unwrap().is_none(), "Beacon 2 must be despawned on MatchCompleted");
 
     // 10. Reset Match clears bans, member list locks, and restores state to Setup
+    assert!(rpc(&ctx, &mut sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(1001), PyRep::Integer(0), PyRep::Integer(620)]).await.is_err(), "BanShipType must be rejected in Completed state");
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "ResetMatch", &[PyRep::Integer(1001)]).await.expect("ResetMatch to Setup"), PyRep::Bool(true));
     rpc(&ctx, &mut sess, "tourneyMgr", "LockMemberList", &[PyRep::Integer(1001), PyRep::Integer(0)]).await.expect("Lock before reset");
     rpc(&ctx, &mut sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(1001), PyRep::Integer(0), PyRep::Integer(620)]).await.expect("Ban before reset");
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "ResetMatch", &[PyRep::Integer(1001)]).await.expect("ResetMatch"), PyRep::Bool(true));
@@ -444,15 +446,7 @@ async fn test_tourney_bans_and_restrictions() {
     .expect("UnBanShipType");
     assert_eq!(unban_rep, PyRep::Bool(true));
 
-    // 7. FinalizeBans excludes banned hulls (e.g. 624 Moa) from QueryShipList(2001)
-    let fin_rep = rpc(&ctx, &mut sess, "tourneyMgr", "FinalizeBans", &[PyRep::Integer(2001)]).await.expect("FinalizeBans");
-    assert_eq!(fin_rep, PyRep::Bool(true));
-    let post_fin_ships = rpc(&ctx, &mut sess, "tourneyMgr", "QueryShipList", &[PyRep::Integer(2001)]).await.expect("QueryShipList after FinalizeBans");
-    let Some(PyRep::List(post_allowed)) = post_fin_ships.dict_get("allowedShipList") else { panic!("expected allowedShipList"); };
-    assert!(!post_allowed.contains(&PyRep::Integer(624)), "Finalized banned hull 624 must be excluded from QueryShipList");
-    assert!(post_allowed.contains(&PyRep::Integer(587)), "Unbanned Rifter 587 must remain in QueryShipList");
-
-    // 8. Drone, Lock, Move, Warp restrictions
+    // 7. Drone, Lock, Move, Warp restrictions
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideDroneRestrict"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideLockRestrict"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideMoveRestrict"), PyRep::Bool(true));
@@ -463,6 +457,14 @@ async fn test_tourney_bans_and_restrictions() {
     assert_eq!(banned_add.unwrap_err().code, "TourneyShipTypeBanned");
     rpc(&ctx, &mut sess, "tourneyMgr", "UnBanShipType", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(587)]).await.expect("UnBanShipType 587");
     rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(P1)]).await.expect("AddPlayer P1 after unban");
+
+    // 8. FinalizeBans excludes banned hulls (e.g. 624 Moa) from QueryShipList(2001) and locks further bans
+    let fin_rep = rpc(&ctx, &mut sess, "tourneyMgr", "FinalizeBans", &[PyRep::Integer(2001)]).await.expect("FinalizeBans");
+    assert_eq!(fin_rep, PyRep::Bool(true));
+    let post_fin_ships = rpc(&ctx, &mut sess, "tourneyMgr", "QueryShipList", &[PyRep::Integer(2001)]).await.expect("QueryShipList after FinalizeBans");
+    let Some(PyRep::List(post_allowed)) = post_fin_ships.dict_get("allowedShipList") else { panic!("expected allowedShipList"); };
+    assert!(!post_allowed.contains(&PyRep::Integer(624)), "Finalized banned hull 624 must be excluded from QueryShipList");
+    assert!(post_allowed.contains(&PyRep::Integer(587)), "Unbanned Rifter 587 must remain in QueryShipList");
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "CompletePregameChecks", &[PyRep::Integer(2001)]).await.unwrap_err().code, "TourneyShipTypeBanned", "Persisted pilot_errors must block CompletePregameChecks until overridden");
     rpc(&ctx, &mut sess, "tourneyMgr", "OverrideError", &[PyRep::Integer(2001), PyRep::Integer(P1), PyRep::String("TourneyShipTypeBanned".into())]).await.expect("OverrideError");
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "CompletePregameChecks", &[PyRep::Integer(2001)]).await.expect("CompletePregameChecks after OverrideError"), PyRep::Bool(true));

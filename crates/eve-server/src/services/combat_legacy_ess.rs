@@ -603,6 +603,9 @@ pub async fn handle_legacy_and_ess(
                                     is_active_suspect: false,
                                 },
                             );
+                            snap.combat_crimewatch_state
+                                .kill_right_expires_unix
+                                .insert(krid, ctx.now_unix().saturating_add(30 * 86_400));
                             Ok::<_, std::convert::Infallible>((kid, krid))
                         })
                         .unwrap();
@@ -898,6 +901,9 @@ pub async fn handle_legacy_and_ess(
                                         is_active_suspect: true,
                                     },
                                 );
+                                snap.combat_crimewatch_state
+                                    .kill_right_expires_unix
+                                    .insert(krid, ctx.now_unix().saturating_add(30 * 86_400));
                             }
                         }
                         if destroyed {

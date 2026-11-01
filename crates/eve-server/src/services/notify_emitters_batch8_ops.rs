@@ -311,6 +311,12 @@ pub fn on_tutorial_skipped(ctx: &ServerContext, char_id: i64) {
         "charid",
         vec![PyRep::Integer(char_id), PyRep::Integer(AIR_NPE_STATE_SKIPPED)],
     );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnTutorialSkipped",
+        "charid",
+        vec![],
+    );
 }
 
 /// Emits `OnOperationTaskSkipped([task_list, includes_current])` in V24 tuple format.

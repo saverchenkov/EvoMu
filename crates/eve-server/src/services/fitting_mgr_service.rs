@@ -4,6 +4,25 @@
 
 use super::*;
 
+/// V24 `appConst.COMMUNITY_FITTING_CORP = 1000282` (`Community Fittings` NPC corporation),
+/// plus legacy curated community owner ID `1`.
+const COMMUNITY_FITTING_CORP_ID: i64 = 1_000_282;
+
+fn is_community_fitting_owner(owner_id: i64) -> bool {
+    owner_id == 1 || owner_id == COMMUNITY_FITTING_CORP_ID
+}
+
+fn can_manage_community_fittings(session: &SessionState) -> bool {
+    session.has_gm_role() || (session.role & eve_machonet::service_roles::ROLE_CONTENT) != 0
+}
+
+fn community_role_denied(action_label: &str) -> BridgeRpcError {
+    BridgeRpcError {
+        code: "AccessDenied".into(),
+        message: format!("{action_label} community fittings requires GM or Content role"),
+    }
+}
+
 fn resolve_and_authorize_fitting_owner(
     ctx: &ServerContext,
     session: &SessionState,
@@ -20,6 +39,12 @@ fn resolve_and_authorize_fitting_owner(
         char_id
     };
     let target_owner = owner_filter.filter(|&oid| oid > 0).unwrap_or(expected_owner);
+    if service == "corpFittingMgr" && is_community_fitting_owner(target_owner) {
+        if !can_manage_community_fittings(session) {
+            return Err(community_role_denied(action_label));
+        }
+        return Ok(target_owner);
+    }
     if target_owner != expected_owner {
         return Err(BridgeRpcError {
             code: "UserError".into(),
@@ -28,7 +53,7 @@ fn resolve_and_authorize_fitting_owner(
     }
     if service.starts_with("corp") && ctx.db.with_snapshot(|s| s.corporations.contains_key(&target_owner)) {
         let (is_ceo, roles) = get_effective_corp_roles(ctx, target_owner, char_id);
-        let has_role = is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 41));
+        let has_role = is_ceo || eve_db::corp_roles::has_role(roles, 1u64 << 41);
         if !has_role {
             return Err(BridgeRpcError {
                 code: "CorpRoleDenied".into(),
@@ -367,7 +392,11 @@ pub(crate) async fn handle_fitting_mgr(
                 "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
                 _ => char_id,
             };
-            if owner_id != expected_owner {
+            if service == "corpFittingMgr" && is_community_fitting_owner(owner_id) {
+                if !can_manage_community_fittings(session) {
+                    return Some(Err(community_role_denied("saving")));
+                }
+            } else if owner_id != expected_owner {
                 return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
             }
 
@@ -375,10 +404,11 @@ pub(crate) async fn handle_fitting_mgr(
                 || service == "allianceFittingMgr"
                 || owner_id != char_id;
             if service == "corpFittingMgr"
+                && !is_community_fitting_owner(owner_id)
                 && ctx.db.with_snapshot(|s| s.corporations.contains_key(&owner_id))
             {
                 let (is_ceo, roles) = get_effective_corp_roles(ctx, owner_id, char_id);
-                let has_role = is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 41));
+                let has_role = is_ceo || eve_db::corp_roles::has_role(roles, 1u64 << 41);
                 if !has_role {
                     return Some(Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
@@ -425,6 +455,9 @@ pub(crate) async fn handle_fitting_mgr(
 
             match save_res {
                 Ok(saved_ids) => {
+                    if is_community_fitting_owner(owner_id) {
+                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                    }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnFittingsUpdated",
@@ -463,8 +496,9 @@ pub(crate) async fn handle_fitting_mgr(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let owner_id = if method == "GetCommunityFittings" {
-                1i64
+            let is_community_query = method == "GetCommunityFittings";
+            let owner_id = if is_community_query {
+                COMMUNITY_FITTING_CORP_ID
             } else {
                 let expected_owner = match service {
                     "corpFittingMgr" => session.corporation_id.unwrap_or(0),
@@ -487,7 +521,13 @@ pub(crate) async fn handle_fitting_mgr(
                 let mut fittings: Vec<_> = snap
                     .saved_fittings
                     .values()
-                    .filter(|f| f.owner_id == owner_id)
+                    .filter(|f| {
+                        if is_community_query {
+                            is_community_fitting_owner(f.owner_id)
+                        } else {
+                            f.owner_id == owner_id
+                        }
+                    })
                     .collect();
                 fittings.sort_by_key(|f| f.fitting_id);
                 fittings
@@ -527,17 +567,45 @@ pub(crate) async fn handle_fitting_mgr(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            // Supports (fittingID, ownerID, name, description) or (fittingID, name, description)
-            let fid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let (owner_filter, new_name, new_desc) = if args.len() >= 4 {
+            // Supports (fittingID, ownerID, name, description), (ownerID, fittingID, name, description), or (fittingID, name, description)
+            let (fid, owner_filter, new_name, new_desc) = if args.len() >= 4 {
+                let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                let (fid, oid) = ctx.db.with_snapshot(|s| {
+                    if s.saved_fittings.contains_key(&a0) {
+                        (a0, a1)
+                    } else if s.saved_fittings.contains_key(&a1)
+                        || is_community_fitting_owner(a0)
+                        || s.corporations.contains_key(&a0)
+                        || s.characters.contains_key(&a0)
+                        || s.alliances.contains_key(&a0)
+                    {
+                        (a1, a0)
+                    } else {
+                        (a0, a1)
+                    }
+                });
                 (
-                    args.get(1).and_then(|a| a.as_i64()),
+                    fid,
+                    Some(oid),
                     args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(),
                     args.get(3).and_then(|a| a.as_str()).unwrap_or("").to_string(),
                 )
             } else {
+                let fid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let inferred_owner = if service == "corpFittingMgr" {
+                    ctx.db.with_snapshot(|s| {
+                        s.saved_fittings
+                            .get(&fid)
+                            .map(|f| f.owner_id)
+                            .filter(|&oid| is_community_fitting_owner(oid))
+                    })
+                } else {
+                    None
+                };
                 (
-                    None,
+                    fid,
+                    inferred_owner,
                     args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string(),
                     args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(),
                 )
@@ -579,6 +647,9 @@ pub(crate) async fn handle_fitting_mgr(
             });
             match res {
                 Ok(owner_id) => {
+                    if is_community_fitting_owner(owner_id) {
+                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                    }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnFittingsUpdated",
@@ -651,6 +722,9 @@ pub(crate) async fn handle_fitting_mgr(
                 );
                 let deleted_list: Vec<PyRep> = deleted_ids.iter().copied().map(PyRep::Integer).collect();
                 if !deleted_list.is_empty() {
+                    if is_community_fitting_owner(target_owner) {
+                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                    }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnManyFittingsDeleted",
@@ -660,14 +734,30 @@ pub(crate) async fn handle_fitting_mgr(
                 }
                 Some(Ok(PyRep::List(deleted_list)))
             } else {
-                // Supports DeleteFitting(ownerID, fittingID) and DeleteFitting(fittingID)
+                // Supports DeleteFitting(ownerID, fittingID), DeleteFitting(fittingID, ownerID), and DeleteFitting(fittingID)
                 let (owner_filter, fid) = if args.len() >= 2 {
-                    (
-                        args.first().and_then(|a| a.as_i64()),
-                        args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-                    )
+                    let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                    let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                    ctx.db.with_snapshot(|s| {
+                        if s.saved_fittings.contains_key(&a0) && !s.saved_fittings.contains_key(&a1) {
+                            (Some(a1), a0)
+                        } else {
+                            (Some(a0), a1)
+                        }
+                    })
                 } else {
-                    (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
+                    let fid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                    let inferred = if service == "corpFittingMgr" {
+                        ctx.db.with_snapshot(|s| {
+                            s.saved_fittings
+                                .get(&fid)
+                                .map(|f| f.owner_id)
+                                .filter(|&oid| is_community_fitting_owner(oid))
+                        })
+                    } else {
+                        None
+                    };
+                    (inferred, fid)
                 };
                 let target_owner = match resolve_and_authorize_fitting_owner(
                     ctx,
@@ -695,6 +785,9 @@ pub(crate) async fn handle_fitting_mgr(
                     })
                     .unwrap();
                 if deleted {
+                    if is_community_fitting_owner(target_owner) {
+                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                    }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnFittingsUpdated",

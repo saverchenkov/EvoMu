@@ -103,6 +103,9 @@ pub async fn handle(
                 let m = store.resolve_match_mut(target_mid)?;
                 let is_capt = m.red_fleet_boss_id == Some(caller_cid) || m.blue_fleet_boss_id == Some(caller_cid);
                 if !is_capt { check_referee_auth(session, caller_cid, m)?; }
+                if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
+                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ships after bans are finalized or match has started".into() });
+                }
                 let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid) && m.red_fleet_boss_id != Some(caller_cid);
                 for &bt in &ban_types {
                     if !m.banned_ships.contains(&bt) { m.banned_ships.push(bt); }
@@ -125,6 +128,9 @@ pub async fn handle(
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
+                if m.bans_finalized || !matches!(m.state, TourneyMatchState::Setup | TourneyMatchState::Banning) {
+                    return Err(BridgeRpcError { code: "TourneyBansFinalized".into(), message: "Cannot ban ship types after bans are finalized or match has started".into() });
+                }
                 let team_bans = if team_idx == 0 { &mut m.banned_ship_types_red } else { &mut m.banned_ship_types_blue };
                 if !team_bans.contains(&ship_type_id) { team_bans.push(ship_type_id); }
                 if !m.banned_ships.contains(&ship_type_id) { m.banned_ships.push(ship_type_id); }
@@ -135,16 +141,56 @@ pub async fn handle(
         ("tourneyMgr", "CleanupGrid") => {
             let caller_cid = require_cid!(session);
             let target_mid = extract_id(args, 0);
+            let match_sys_id = match ctx.db.with_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let m = store.resolve_match_mut(target_mid)?;
+                check_referee_auth(session, caller_cid, m)?;
+                Ok::<i64, BridgeRpcError>(m.solar_system_id)
+            }) {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
+            let ball_positions: std::collections::HashMap<i64, DVec3> = {
+                let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
+                let bp = sys_handle.ballpark.read().unwrap_or_else(|e| e.into_inner());
+                bp.balls.iter().map(|(&id, b)| (id, b.position)).collect()
+            };
             let mut removed_item_ids = Vec::new();
-            let mut match_sys_id = solarsystem_id;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
                 m.grid_cleaned = true;
-                match_sys_id = m.solar_system_id;
+                let mut arena_centers: Vec<DVec3> = m
+                    .arena_centers
+                    .iter()
+                    .map(|&[x, y, z]| DVec3::new(x, y, z))
+                    .collect();
+                let mut beacon_ids = m.beacon_ids.clone();
+                if let Some(arena) = store.arena_systems.get(&match_sys_id) {
+                    beacon_ids.extend(arena.combat_beacons.iter().copied());
+                    beacon_ids.extend(arena.warp_bubbles.iter().copied());
+                }
+                for bid in beacon_ids {
+                    if let Some(&p) = ball_positions.get(&bid) {
+                        arena_centers.push(p);
+                    } else if let Some(&[x, y, z]) = snap.item_positions.get(&bid) {
+                        arena_centers.push(DVec3::new(x, y, z));
+                    }
+                }
                 let sys_items: Vec<i64> = snap.items.values().filter(|it| {
-                    it.location_id == match_sys_id && ctx.sde.types.get(&it.type_id).map(|t| matches!(t.group_id, 12 | 186 | 340 | 448 | 649)).unwrap_or(it.type_id == 26557)
+                    if it.location_id != match_sys_id { return false; }
+                    let gid = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    let is_wreck = gid == 186 || it.type_id == 26557;
+                    let is_unanchored_can = matches!(gid, 12 | 340 | 448 | 649)
+                        && !snap.sp6_lifecycle.space_object_meta.get(&it.item_id).is_some_and(|meta| meta.anchor_completed || meta.anchor_start_unix.is_some());
+                    if !is_wreck && !is_unanchored_can { return false; }
+                    let Some(pos) = ball_positions.get(&it.item_id).copied()
+                        .or_else(|| snap.item_positions.get(&it.item_id).map(|&[x, y, z]| DVec3::new(x, y, z)))
+                    else {
+                        return false;
+                    };
+                    arena_centers.iter().any(|c| c.distance(pos) <= 250_000.0)
                 }).map(|it| it.item_id).collect();
                 for &iid in &sys_items { snap.items.remove(&iid); removed_item_ids.push(iid); }
                 let child_ids: Vec<i64> = snap.items.values().filter(|c| removed_item_ids.contains(&c.location_id)).map(|c| c.item_id).collect();
@@ -238,6 +284,7 @@ pub async fn handle(
                 snap.next_entity_id += 1;
                 let b2 = snap.next_entity_id;
                 m.beacon_ids = vec![b1, b2];
+                m.arena_centers = vec![[-50_000.0, 0.0, 0.0], [50_000.0, 0.0, 0.0]];
                 store.active_match_id = Some(match_id);
                 let beacon_reps: Vec<PyRep> = m.beacon_ids.iter().copied().map(PyRep::Integer).collect();
                 let captain_reps = vec![PyRep::Integer(m.red_fleet_boss_id.unwrap_or(0)), PyRep::Integer(m.blue_fleet_boss_id.unwrap_or(0))];

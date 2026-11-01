@@ -523,7 +523,7 @@ async fn run_industry_jobs_suite() -> (usize, f64, f64, i64, &'static str) {
     assert_eq!(inv_job.dict_get("inventedRuns").and_then(|v| v.as_i64()), Some(2));
 
     let mon = ctx.dispatch_rpc(&mut sess, "industryMonitor", None, "ConnectJob", &[PyRep::Integer(inv_job_id)], &kw, None).await.expect("ConnectJob");
-    assert_eq!(mon.dict_get("connected").and_then(|v| v.as_bool()), Some(true));
+    assert!(matches!(mon, PyRep::Tuple(ref parts) if parts.len() == 2 && parts[0].as_i64().unwrap_or(0) > 0 && matches!(parts[1], PyRep::Dict(_))));
 
     // 2. T3 Ancient Relic Invention (`Intact Hull Section` 30558)
     let t3_job = ctx.dispatch_rpc(&mut sess, "industryManager", None, "InstallJob", &[PyRep::keyval([

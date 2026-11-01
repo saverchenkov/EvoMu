@@ -479,3 +479,5 @@ mod open_feats_b36_part3;
 mod open_feats_b36_part4;
 mod open_feats_b36_part5;
 mod notify_b36_closure;
+mod open_feats_and_rpcs_w34_closure;
+mod notify_w34_closure;

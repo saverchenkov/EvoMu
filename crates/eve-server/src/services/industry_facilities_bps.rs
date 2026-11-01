@@ -366,8 +366,13 @@ pub fn resolve_facility_modifiers_and_system(
 }
 
 /// Computes blueprint Estimated Item Value (EIV) per run from SDE manufacturing or reaction BOM.
-pub fn compute_blueprint_eiv_per_run(
+pub fn compute_blueprint_eiv_per_run(ctx: &ServerContext, bp: &eve_sde::BlueprintInfo, activity_id: u8) -> f64 {
+    compute_blueprint_eiv_per_run_with_snap(ctx, None, bp, activity_id)
+}
+
+pub fn compute_blueprint_eiv_per_run_with_snap(
     ctx: &ServerContext,
+    snap: Option<&eve_db::WorldStateSnapshot>,
     bp: &eve_sde::BlueprintInfo,
     activity_id: u8,
 ) -> f64 {
@@ -388,13 +393,7 @@ pub fn compute_blueprint_eiv_per_run(
     };
     mats.into_iter()
         .map(|(tid, qty)| {
-            // DERIVED: EIV proxy uses SDE base_price as fallback when market adjusted prices are absent.
-            let unit_price = ctx
-                .sde
-                .types
-                .get(&tid)
-                .map(|t| if t.base_price > 0.0 { t.base_price } else { 10.0 })
-                .unwrap_or(10.0);
+            let unit_price = crate::services::industry_pi::industry_rigs::resolve_material_adjusted_price(ctx, snap, tid);
             (qty as f64) * unit_price
         })
         .sum::<f64>()
@@ -477,7 +476,7 @@ pub fn compute_industry_job_costs_for_char(
             message: format!("Blueprint type {bp_type_id} not found in SDE"),
         });
     };
-    let eiv_per_run = compute_blueprint_eiv_per_run(ctx, bp, activity_id);
+    let eiv_per_run = compute_blueprint_eiv_per_run_with_snap(ctx, Some(snap), bp, activity_id);
     let activity_eiv_factor = if matches!(activity_id, 3 | 4 | 5 | 8) { 0.02 } else { 1.0 };
     let total_eiv = eiv_per_run * (runs as f64) * activity_eiv_factor;
     let (_, _, sys_id, _, _, _, structure_cost_modifier) =
