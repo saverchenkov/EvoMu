@@ -37,16 +37,36 @@ async fn test_journey_ship_loss() {
         .expect("InsureShip");
     assert!(ins.dict_get("payoutISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
 
-    // 2. Check insurance contracts & killmails
+    // 2. Check insurance contracts, undock, destroy ship, and verify capsule ejection, insurance payout, wreck, and killmail
     let contracts = call_rpc(&ctx, &mut sess, "insuranceSvc", "GetContracts", &[])
         .await
         .expect("GetContracts");
     let PyRep::List(clist) = contracts else { panic!("expected List from GetContracts") };
     assert_eq!(clist.len(), 1);
+
+    call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
+    let isk_before = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    let sd1 = call_rpc(&ctx, &mut sess, "ship", "SelfDestruct", &[])
+        .await
+        .expect("ship.SelfDestruct start");
+    assert_eq!(sd1.dict_get("countdownStarted"), Some(&PyRep::Bool(true)));
+    ctx.advance_secs(125);
+    let pod_id = ctx.db.with_snapshot(|s| s.characters[&90_000_001].active_ship_id);
+    assert_ne!(pod_id, ship_id, "pilot must be ejected into a capsule after ship destruction");
+    assert_eq!(ctx.db.with_snapshot(|s| s.items[&pod_id].type_id), 670);
+    let wreck_exists = ctx.db.with_snapshot(|s| s.items.values().any(|i| i.type_id == 26557 || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186)));
+    assert!(wreck_exists, "ship destruction must spawn a wreck");
+    let isk_after = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    assert!(isk_after > isk_before, "insurance payout must credit victim wallet");
+
     let kms = call_rpc(&ctx, &mut sess, "charMgr", "GetRecentShipKillsAndLosses", &[PyRep::Integer(10), PyRep::Integer(0)])
         .await
         .expect("GetRecentShipKillsAndLosses");
-    assert!(matches!(kms, PyRep::List(_) | PyRep::Tuple(_) | PyRep::Rowset { .. }));
+    let PyRep::Rowset { rows: km_rows, .. } = kms else {
+        panic!("expected Rowset from GetRecentShipKillsAndLosses");
+    };
+    assert_eq!(km_rows.len(), 1);
+    assert!(format!("{km_rows:?}").contains("90000001"));
 }
 
 #[tokio::test]
@@ -61,27 +81,50 @@ async fn test_journey_clones() {
         .await
         .expect("SelectCharacterID");
 
-    // 1. Install a jump clone
+    // 1. Train Infomorph Psychology (24242) + Cybernetics (3411), plug in implant (9899), install jump clone
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(90_000_001).or_default().insert(
-            24242,
-            eve_db::TrainedSkillRecord { type_id: 24242, level: 2, skill_points: 50_000.0 },
-        );
+        let sk = snap.skills.entry(90_000_001).or_default();
+        sk.insert(24242, eve_db::TrainedSkillRecord { type_id: 24242, level: 2, skill_points: 50_000.0 });
+        sk.insert(3411, eve_db::TrainedSkillRecord { type_id: 3411, level: 2, skill_points: 50_000.0 });
     });
+    let imp_id = ctx.db.add_or_stack_item(90_000_001, 60_003_760, InventoryFlag::Hangar, 9899, 1).unwrap().item_id;
+    call_rpc(&ctx, &mut sess, "dogmaIM", "InjectImplant", &[PyRep::Integer(imp_id)])
+        .await
+        .expect("InjectImplant");
     call_rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStation", &[])
         .await
         .expect("InstallCloneInStation");
+    let jc_id = ctx.db.with_snapshot(|s| s.jump_clones[&90_000_001][0].jump_clone_id);
+
+    // 2. Leave ship into capsule, move to station 60_003_757, jump back to clone in 60_003_760 via CloneJump
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    let active_ship = sess.ship_id.unwrap();
+    call_rpc(&ctx, &mut sess, "ship", "LeaveShip", &[PyRep::Integer(active_ship)])
+        .await
+        .expect("LeaveShip into capsule");
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_757));
+    sess.station_id = Some(60_003_757);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    call_rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", &[PyRep::Integer(jc_id)])
+        .await
+        .expect("CloneJump");
+    assert_eq!(sess.station_id, Some(60_003_760));
     let clone_state = call_rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[])
         .await
         .expect("GetCloneState");
-    assert!(format!("{clone_state:?}").contains("clones"));
+    assert!(format!("{clone_state:?}").contains("jumpCloneID"));
 
-    // 2. Set home station
-    call_rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(60_003_760)])
+    // 3. Set home station via V24 home_station.set_home_station & self-destruct medical clone in capsule
+    call_rpc(&ctx, &mut sess, "home_station", "set_home_station", &[PyRep::Integer(60_003_760)])
         .await
-        .expect("SetHomeStation");
+        .expect("home_station.set_home_station");
     let home = ctx.db.with_snapshot(|s| s.characters[&90_000_001].home_station_id);
     assert_eq!(home, 60_003_760);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    call_rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", &[])
+        .await
+        .expect("home_station.self_destruct_clone");
+    assert_eq!(sess.station_id, Some(60_003_760));
 }
 
 #[tokio::test]
@@ -132,6 +175,10 @@ async fn test_journey_industry() {
         .await
         .expect("CompleteJob");
     assert_eq!(done.dict_get("jobID").and_then(|v| v.as_i64()).unwrap_or(job_id), job_id);
+    assert!(
+        ctx.db.with_snapshot(|s| s.items.values().any(|i| i.owner_id == 90_000_001 && i.type_id == 587)),
+        "CompleteJob must deliver manufactured Rifter (type 587)"
+    );
 }
 
 #[tokio::test]
@@ -240,9 +287,47 @@ async fn test_journey_corporation() {
             c.set_division_balance(1, IskCents::from_isk(2_000_000_000));
         }
     });
-    call_rpc(&ctx, &mut sess1, "officeManager", "RentOffice", &[PyRep::Integer(60_003_760)])
+    // Negative RentOffice checks: remote station, nonexistent station, insufficient role
+    let err_remote = call_rpc(&ctx, &mut sess1, "corpStationMgr", "RentOffice", &[PyRep::Integer(60_003_761)])
+        .await
+        .expect_err("remote station must fail");
+    assert_eq!(err_remote.code, "NotDockedAtStation");
+    let orig_station = sess1.station_id;
+    sess1.station_id = Some(999_999_999);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&90_000_001) {
+            ch.station_id = Some(999_999_999);
+        }
+    });
+    let err_missing = call_rpc(&ctx, &mut sess1, "corpStationMgr", "RentOffice", &[PyRep::Integer(999_999_999)])
+        .await
+        .expect_err("nonexistent station must fail");
+    assert_eq!(err_missing.code, "StationNotFound");
+    sess1.station_id = orig_station;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&90_000_001) {
+            ch.station_id = orig_station;
+        }
+    });
+    let err_role = call_rpc(&ctx, &mut sess2, "corpStationMgr", "RentOffice", &[PyRep::Integer(60_003_760)])
+        .await
+        .expect_err("member without RentOffice role must fail");
+    assert_eq!(err_role.code, "CorpRoleDenied");
+
+    let corp_wallet_before = ctx.db.with_snapshot(|s| s.corporations[&corp_id].division_balance(1));
+    call_rpc(&ctx, &mut sess1, "corpStationMgr", "RentOffice", &[PyRep::Integer(60_003_760)])
         .await
         .expect("RentOffice");
+    ctx.db.with_snapshot(|s| {
+        assert!(
+            s.corporations[&corp_id].division_balance(1) < corp_wallet_before,
+            "RentOffice must debit corporation wallet"
+        );
+        assert!(
+            s.items.values().any(|i| i.owner_id == corp_id && i.location_id == 60_003_760 && i.type_id == 27),
+            "RentOffice must create office item (type 27) at station"
+        );
+    });
 
     let alliance = call_rpc(
         &ctx,

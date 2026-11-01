@@ -124,9 +124,20 @@ async fn test_journey_fleet() {
     // 2. Broadcast & fleet warp
     call_rpc(&ctx, &mut sess1, "ship", "Undock", &[]).await.expect("ship.Undock 1");
     call_rpc(&ctx, &mut sess2, "ship", "Undock", &[]).await.expect("ship.Undock 2");
+    let mut rx_bcast = ctx.notify_tx.subscribe();
     call_rpc(&ctx, &mut sess1, "fleetMgr", "SendBroadcast", &[PyRep::String("AlignSun".into()), PyRep::Integer(0), PyRep::Integer(0)])
         .await
         .expect("SendBroadcast");
+    let mut saw_bcast = false;
+    for _ in 0..32 {
+        let Ok(env) = rx_bcast.try_recv() else { break };
+        let dbg = format!("{env:?}");
+        if dbg.contains("OnFleetBroadcast") && dbg.contains("AlignSun") {
+            saw_bcast = true;
+            break;
+        }
+    }
+    assert!(saw_bcast, "SendBroadcast must emit OnFleetBroadcast with AlignSun");
 }
 
 #[tokio::test]
@@ -152,12 +163,19 @@ async fn test_journey_structures() {
     .expect("AddCorporation");
     let corp_id = created.dict_get("corporationID").and_then(|v| v.as_i64()).expect("corporationID");
     assert_eq!(sess.corporation_id, Some(corp_id));
+    ctx.advance_secs(8 * 86_400);
 
-    // 1. Undock & anchor an Astrahus (type 35832) in space
+    // 1. Undock, jump to Perimeter (30_000_144), & anchor an Astrahus (type 35832) in space
     call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
     let ship_id = sess.ship_id.unwrap();
-    let sys_h = ctx.systems.get_or_spawn(30_000_142);
-    let _ = sys_h.set_ball_position(ship_id, glam::DVec3::new(1_500_000.0, 0.0, 0.0)).await;
+    let PyRep::Tuple(b_tup) = call_rpc(&ctx, &mut sess, "beyonce", "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None]).await.unwrap() else { panic!("beyonce bind") };
+    let bey_bid = b_tup[0].as_i64().unwrap() as u64;
+    let sg = ctx.sde.stargates().values().find(|g| g.from_solar_system_id == 30_000_142 && g.to_solar_system_id == 30_000_144).unwrap();
+    let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(ship_id, sg.position).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(bey_bid), "CmdStargateJump", &[PyRep::Integer(sg.stargate_id as i64)], &HashMap::new(), None).await.expect("CmdStargateJump to Perimeter");
+    let sys_h = ctx.systems.get_or_spawn(30_000_144);
+    let _ = sys_h.set_ball_position(ship_id, glam::DVec3::new(0.0, 5.0e9, 0.0)).await;
     let cit_item = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
@@ -196,6 +214,39 @@ async fn test_journey_structures() {
         .await
         .expect("GetMyDockableStructures");
     assert!(format!("{structs:?}").contains(&struct_id.to_string()));
+
+    // 2. Complete anchoring, dock, insert Quantum Core (56201 -> flag 172), undock, and unanchor
+    let core_id = ctx.db.add_or_stack_item(90_000_001, ship_id, InventoryFlag::Cargo, 56_201, 1).unwrap().item_id;
+    ctx.advance_secs(25 * 3_600);
+    let _ = sys_h.set_ball_position(ship_id, glam::DVec3::new(60_000.0, 5.0e9, 0.0)).await;
+    call_rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("structureDocking.Dock");
+    assert_eq!(sess.structure_id, Some(struct_id));
+    call_rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(core_id), PyRep::Integer(struct_id), PyRep::Integer(172)])
+        .await
+        .expect("Insert Quantum Core");
+    ctx.advance_secs(12);
+    call_rpc(&ctx, &mut sess, "structureDocking", "Undock", &[])
+        .await
+        .expect("structureDocking.Undock");
+    assert!(sess.structure_id.is_none());
+    ctx.advance_secs(1_800);
+    let _ = call_rpc(&ctx, &mut sess, "structureDirectory", "GetStructures", &[]).await;
+    let mut rx_unanchor = ctx.notify_tx.subscribe();
+    call_rpc(&ctx, &mut sess, "structureDeployment", "Unanchor", &[PyRep::Integer(struct_id)])
+        .await
+        .expect("structureDeployment.Unanchor");
+    let mut saw_unanchoring = false;
+    for _ in 0..32 {
+        let Ok(env) = rx_unanchor.try_recv() else { break };
+        let dbg = format!("{env:?}");
+        if dbg.contains("OnStructureStateChanged") && dbg.contains("Unanchoring") {
+            saw_unanchoring = true;
+            break;
+        }
+    }
+    assert!(saw_unanchoring, "Unanchor must emit OnStructureStateChanged(Unanchoring)");
 }
 
 #[tokio::test]
@@ -337,7 +388,8 @@ async fn test_journey_daily_goals_events() {
         ctx.mark_signature_scanned(90_000_001, 30_000_142, sig_id);
     }
     let mut saw_progressed = false;
-    while let Ok(n) = rx.try_recv() {
+    for _ in 0..64 {
+        let Ok(n) = rx.try_recv() else { break };
         if let Some(p) = n.payload {
             if p.normalized_type_name() == "eve_public.dailygoal.api.ProgressedNotice" {
                 saw_progressed = true;
@@ -360,7 +412,10 @@ async fn test_journey_cosmetics_store() {
         .await
         .expect("SelectCharacterID");
 
-    // 1. PLEX Vault balance & NES store purchase via Quasar publicGatewaySvc.SendRequest
+    // 1. PLEX Vault balance & NES store purchase via Quasar publicGatewaySvc.Subscribe + SendRequest
+    call_rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[])
+        .await
+        .expect("publicGatewaySvc.Subscribe");
     let init_plex = ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001));
     assert_eq!(init_plex, 500);
 

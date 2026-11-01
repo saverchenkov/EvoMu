@@ -2,7 +2,10 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, MarketOrderRecord};
-use eve_machonet::{CryptoRequestPacket, SessionState, VersionExchange};
+use eve_machonet::{
+    placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+    CryptoRequestPacket, CryptoServerHandshake, SessionState, VersionExchange,
+};
 use eve_proto::quasar::{EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX};
 use eve_proto::PyRep;
 use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
@@ -67,7 +70,7 @@ async fn test_journey_launch_login() {
             "demo",
             "demo-secret",
             90_000_001,
-            "eve-client",
+            "eveLauncherTQ",
             "https://localhost/callback",
             vec!["publicData".into()],
             challenge,
@@ -77,7 +80,7 @@ async fn test_journey_launch_login() {
         .expect("authorize_pkce");
     let token_bundle = ctx
         .db
-        .exchange_pkce_code(&code, "eve-client", verifier, now)
+        .exchange_pkce_code(&code, "eveLauncherTQ", verifier, now)
         .expect("exchange_pkce_code");
     assert_eq!(token_bundle.token_type, "Bearer");
     assert!(!token_bundle.access_token.is_empty());
@@ -91,31 +94,36 @@ async fn test_journey_launch_login() {
     assert_eq!(hello_items.len(), 7);
     assert_eq!(hello_items[5].as_str(), Some("V24.01@ccp"));
 
-    let ver = VersionExchange {
-        birthday: 170_472,
-        macho_version: 496,
-        user_count: 0,
-        version_number: 24.01,
-        build_version: 3_624_425,
-        project_version: "V24.01@ccp".into(),
-    };
-    write_framed_pyrep(&mut stream, &ver.to_pyrep()).await.unwrap();
-    let crypto_req = CryptoRequestPacket {
-        key_version: "placebo".into(),
-        key_params: HashMap::new(),
-    };
-    write_framed_pyrep(&mut stream, &crypto_req.to_pyrep()).await.unwrap();
+    write_framed_pyrep(&mut stream, &VersionExchange::default().to_pyrep()).await.unwrap();
+    write_framed_pyrep(&mut stream, &CryptoRequestPacket::placebo().to_pyrep()).await.unwrap();
     let crypto_reply = read_framed_pyrep(&mut stream).await.unwrap().unwrap();
     assert_eq!(crypto_reply.as_str(), Some("OK CC"));
 
-    // 3. Authenticate and reach character selection with account's characters listed
+    let sso_challenge = CryptoChallengePacket::new_sso_login(&token_bundle.access_token).to_pyrep();
+    write_framed_pyrep(&mut stream, &sso_challenge).await.unwrap();
+    let pw_ver = read_framed_pyrep(&mut stream).await.unwrap().unwrap();
+    assert_eq!(pw_ver, PyRep::Integer(2));
+    let srv_hs_rep = read_framed_pyrep(&mut stream).await.unwrap().unwrap();
+    let srv_hs = CryptoServerHandshake::from_pyrep(&srv_hs_rep).unwrap();
+    let hs_res = CryptoHandshakeResult {
+        challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+        func_output: Vec::new(),
+        func_result: PyRep::Integer(0),
+    };
+    write_framed_pyrep(&mut stream, &hs_res.to_pyrep()).await.unwrap();
+    let ack = CryptoHandshakeAck::from_pyrep(&read_framed_pyrep(&mut stream).await.unwrap().unwrap())
+        .expect("SSO CryptoHandshakeAck");
+    assert_eq!(ack.user_id, 1);
+    assert_eq!(ack.access_token.as_deref(), Some(token_bundle.access_token.as_str()));
+
+    // 3. Authenticate with SSO JWT token and reach character selection with account's characters listed
     let mut sess = SessionState::new(1);
     let login_res = call_rpc(
         &ctx,
         &mut sess,
         "authentication",
         "Login",
-        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &[PyRep::String("__sso__".into()), PyRep::String(token_bundle.access_token)],
     )
     .await
     .expect("authentication.Login");
@@ -228,75 +236,73 @@ async fn test_journey_station_ui() {
     assert!(format!("{hangar_list:?}").contains("90000001"));
 
     // 3. Fitting
-    let fittings = call_rpc(&ctx, &mut sess, "charFittingMgr", "GetFittings", &[PyRep::Integer(90_000_001)])
-        .await
-        .expect("GetFittings");
-    assert!(matches!(fittings, PyRep::Dict(_)));
+    let fit_kv = PyRep::keyval([("name", PyRep::String("Station UI Fit".into())), ("description", PyRep::String("Station UI test fit".into())), ("shipTypeID", PyRep::Integer(587)), ("fitData", PyRep::List(vec![]))]);
+    call_rpc(&ctx, &mut sess, "charFittingMgr", "SaveFitting", &[PyRep::Integer(90_000_001), fit_kv]).await.expect("SaveFitting");
+    let fittings = call_rpc(&ctx, &mut sess, "charFittingMgr", "GetFittings", &[PyRep::Integer(90_000_001)]).await.expect("GetFittings");
+    let PyRep::Dict(fit_dict) = fittings else { panic!("expected Dict from GetFittings") };
+    assert_eq!(fit_dict.len(), 1);
+    assert!(format!("{fit_dict:?}").contains("Station UI Fit"));
 
     // 4. Market
-    let mkt = call_rpc(&ctx, &mut sess, "marketProxy", "GetMarketGroups", &[])
-        .await
-        .expect("GetMarketGroups");
+    let mkt = call_rpc(&ctx, &mut sess, "marketProxy", "GetMarketGroups", &[]).await.expect("GetMarketGroups");
     assert!(format!("{mkt:?}").contains("marketGroupID"));
 
     // 5. Industry
-    let fac = call_rpc(&ctx, &mut sess, "facilityManager", "GetFacilities", &[])
-        .await
-        .expect("GetFacilities");
+    let fac = call_rpc(&ctx, &mut sess, "facilityManager", "GetFacilities", &[]).await.expect("GetFacilities");
     let PyRep::List(fac_list) = fac else { panic!("expected List from GetFacilities") };
     assert!(!fac_list.is_empty());
 
     // 6. Agency
-    let ops = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(1)])
-        .await
-        .expect("get_category_state");
+    let ops = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(1)]).await.expect("get_category_state");
     assert!(matches!(ops, PyRep::Integer(s) if s >= 0));
 
     // 7. Character Sheet
-    let pub_info = call_rpc(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[PyRep::Integer(90_000_001)])
-        .await
-        .expect("GetPublicInfo3");
+    let pub_info = call_rpc(&ctx, &mut sess, "charMgr", "GetPublicInfo3", &[PyRep::Integer(90_000_001)]).await.expect("GetPublicInfo3");
     assert!(format!("{pub_info:?}").contains("90000001"));
 
     // 8. Skills
-    let sk_handler = call_rpc(&ctx, &mut sess, "skillMgr2", "GetMySkillHandler", &[])
-        .await
-        .expect("GetMySkillHandler");
+    let sk_handler = call_rpc(&ctx, &mut sess, "skillMgr2", "GetMySkillHandler", &[]).await.expect("GetMySkillHandler");
     assert!(bound_id_from_tuple(&sk_handler) > 0);
 
     // 9. Wallet & 10. Journal
-    let bal = call_rpc(&ctx, &mut sess, "account", "GetCashBalance", &[])
-        .await
-        .expect("GetCashBalance");
+    let bal = call_rpc(&ctx, &mut sess, "account", "GetCashBalance", &[]).await.expect("GetCashBalance");
     assert!(bal.as_f64().unwrap_or(0.0) > 0.0);
-    let journal = call_rpc(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[])
-        .await
-        .expect("GetMyJournalDetails");
-    assert!(matches!(journal, PyRep::Tuple(_) | PyRep::Rowset { .. } | PyRep::List(_)));
+    let jita_agent = ctx.sde.agents.values().find(|a| a.solar_system_id == Some(30_000_142) && !matches!(a.agent_type_id, 3 | 6 | 11)).unwrap().clone();
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = jita_agent.station_id);
+    sess.station_id = jita_agent.station_id;
+    let ag_bind = call_rpc(&ctx, &mut sess, "agentMgr", "MachoBindObject", &[PyRep::Integer(jita_agent.agent_id), PyRep::None]).await.expect("agentMgr bind");
+    call_bound_rpc(&ctx, &mut sess, "agentMgr", bound_id_from_tuple(&ag_bind), "DoAction", &[PyRep::Integer(2)]).await.expect("DoAction request mission");
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760));
+    sess.station_id = Some(60_003_760);
+    let journal = call_rpc(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[]).await.expect("GetMyJournalDetails");
+    let PyRep::Tuple(j_parts) = journal else { panic!("expected Tuple from GetMyJournalDetails") };
+    assert_eq!(j_parts.len(), 2);
+    assert!(format!("{j_parts:?}").contains(&jita_agent.agent_id.to_string()));
 
     // 11. Corporation
-    let corp = call_rpc(&ctx, &mut sess, "corpRegistry", "GetCorporation", &[])
-        .await
-        .expect("GetCorporation");
+    let corp = call_rpc(&ctx, &mut sess, "corpRegistry", "GetCorporation", &[]).await.expect("GetCorporation");
     assert!(format!("{corp:?}").contains("corporationID"));
 
     // 12. People & Places (Bookmarks + Contacts)
-    let bms = call_rpc(&ctx, &mut sess, "bookmark", "GetBookmarks", &[])
-        .await
-        .expect("GetBookmarks");
-    assert!(matches!(bms, PyRep::Tuple(_) | PyRep::Rowset { .. } | PyRep::List(_)));
-    let contacts = call_rpc(&ctx, &mut sess, "charMgr", "GetContactList", &[])
-        .await
-        .expect("GetContactList");
-    assert!(matches!(contacts, PyRep::Rowset { .. } | PyRep::Dict(_) | PyRep::KeyVal(_)));
+    call_rpc(&ctx, &mut sess, "bookmark", "BookmarkLocation", &[PyRep::Integer(60_003_760), PyRep::Integer(90_000_001), PyRep::String("Jita Hub BM".into()), PyRep::String("Station bookmark".into())]).await.expect("BookmarkLocation");
+    let bms = call_rpc(&ctx, &mut sess, "bookmark", "GetBookmarks", &[]).await.expect("GetBookmarks");
+    assert!(format!("{bms:?}").contains("Jita Hub BM"));
+    call_rpc(&ctx, &mut sess, "charMgr", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(5.0), PyRep::Bool(true), PyRep::Bool(false), PyRep::String("".into())]).await.expect("AddContact");
+    let contacts = call_rpc(&ctx, &mut sess, "charMgr", "GetContactList", &[]).await.expect("GetContactList");
+    assert!(format!("{contacts:?}").contains("90000002"));
 
     // 13. Mail, 14. Notifications, 15. Calendar
+    call_rpc(&ctx, &mut sess, "mailMgr", "SendMail", &[PyRep::List(vec![PyRep::Integer(90_000_001)]), PyRep::None, PyRep::None, PyRep::String("Station UI Mail".into()), PyRep::String("Welcome to Jita 4-4".into()), PyRep::Bool(false), PyRep::Integer(0), PyRep::None]).await.expect("SendMail");
     let mail = call_rpc(&ctx, &mut sess, "mailMgr", "SyncMail", &[]).await.expect("SyncMail");
-    assert!(!format!("{mail:?}").is_empty());
+    assert!(format!("{mail:?}").contains("Station UI Mail"));
+    ctx.create_character_notification(90_000_002, 90_000_001, 10, 1, "bounty: 50000");
     let notifs = call_rpc(&ctx, &mut sess, "notificationMgr", "GetUnprocessed", &[]).await.expect("GetUnprocessed");
-    assert!(!format!("{notifs:?}").is_empty());
-    let cal = call_rpc(&ctx, &mut sess, "calendarMgr", "GetEventList", &[PyRep::Integer(0), PyRep::Integer(12)]).await.expect("GetEventList");
-    assert!(matches!(cal, PyRep::List(_) | PyRep::Rowset { .. }));
+    let PyRep::ObjectEx { list: notif_rows, .. } = notifs else { panic!("expected ObjectEx CRowset from GetUnprocessed") };
+    assert_eq!(notif_rows.len(), 1);
+    assert!(format!("{notif_rows:?}").contains("bounty: 50000"));
+    call_rpc(&ctx, &mut sess, "calendarMgr", "CreatePersonalEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(60), PyRep::String("Jita Trade Meet".into()), PyRep::String("Market review".into()), PyRep::Integer(0), PyRep::List(vec![])]).await.expect("CreatePersonalEvent");
+    let cal = call_rpc(&ctx, &mut sess, "calendarMgr", "GetEventList", &[]).await.expect("GetEventList");
+    assert!(format!("{cal:?}").contains("Jita Trade Meet"));
 
     // 16. NES Store (Quasar PLEX Vault balance)
     let req = EvePublicRequest {

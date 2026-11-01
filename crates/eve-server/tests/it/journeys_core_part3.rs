@@ -304,32 +304,59 @@ async fn test_journey_missions() {
         .expect("GetAgents");
     assert!(format!("{agents:?}").contains("agentID"));
 
-    call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
     let agent = ctx
         .sde
         .agents
         .values()
-        .find(|a| a.solar_system_id == Some(30_000_142) && !matches!(a.agent_type_id, 3 | 6 | 11))
-        .expect("regular agent in Jita");
+        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 24 && a.solar_system_id.is_some() && a.station_id.is_some())
+        .expect("level 1 security agent")
+        .clone();
     let agent_id = agent.agent_id;
-    let abind = call_rpc(&ctx, &mut sess, "agentMgr", "MachoBindObject", &[PyRep::Integer(agent_id), PyRep::None])
-        .await
-        .expect("agentMgr bind");
-    let abid = match abind {
-        PyRep::Tuple(t) if !t.is_empty() => t[0].as_i64().unwrap_or(1) as u64,
-        other => other.as_i64().unwrap_or(1) as u64,
-    };
-    let req_m = ctx
-        .dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(2)], &HashMap::new(), None)
+    let agent_sys = agent.solar_system_id.unwrap();
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&90_000_001).unwrap();
+        ch.solar_system_id = agent_sys;
+        ch.station_id = agent.station_id;
+    });
+    sess.solar_system_id = Some(agent_sys);
+    sess.station_id = agent.station_id;
+    let req_m = call_rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(agent_id)])
         .await
         .expect("DoAction(RequestMission)");
     let PyRep::KeyVal(ref req_kv) = req_m else { panic!("expected KeyVal from DoAction(2)") };
     let mid = req_kv.get("missionID").and_then(|v| v.as_i64()).expect("missionID");
-    let acc_m = ctx
-        .dispatch_rpc(&mut sess, "agentMgr", Some(abid), "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)], &HashMap::new(), None)
+    let acc_m = call_rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid)])
         .await
         .expect("DoAction(AcceptMission)");
     assert!(matches!(acc_m, PyRep::KeyVal(_)), "DoAction(3) must return mission KeyVal");
+
+    // Complete mission objective and turn in via DoAction(6)
+    let active_agent_id = acc_m.dict_get("agentID").and_then(|v| v.as_i64()).unwrap_or(agent_id);
+    let agent_corp = ctx.sde.agents[&active_agent_id].corporation_id;
+    let (isk_before, lp_before, standing_before) = ctx.db.with_mut_snapshot(|s| {
+        if let Some(m) = s.active_missions.get_mut(&(90_000_001, mid as u32)) {
+            m.npcs_remaining = 0;
+        }
+        let ch = s.characters.get_mut(&90_000_001).unwrap();
+        let isk = ch.balance.0;
+        let lp = ch.loyalty_points.get(&agent_corp).copied().unwrap_or(0);
+        let st = ch.standings.get(&agent_corp).copied().unwrap_or(0.0);
+        (isk, lp, st)
+    });
+    let comp_m = call_rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mid)])
+        .await
+        .expect("DoAction(CompleteMission)");
+    assert!(comp_m.dict_get("iskReward").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert!(comp_m.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let (isk_after, lp_after, standing_after) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&90_000_001];
+        (
+            ch.balance.0,
+            ch.loyalty_points.get(&agent_corp).copied().unwrap_or(0),
+            ch.standings.get(&agent_corp).copied().unwrap_or(0.0),
+        )
+    });
+    assert!(isk_after > isk_before && lp_after > lp_before && standing_after > standing_before);
 
     // 2. Check LP store offers
     let offers = call_rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(1_000_035)])
@@ -406,12 +433,19 @@ async fn test_journey_exploration() {
         .expect("ClickedOnTile");
     assert_eq!(click.dict_get("containerID").and_then(|v| v.as_i64()).unwrap_or(can_id), can_id);
 
-    // 3. D-scan
-    let dscan = call_rpc(&ctx, &mut sess, "scanMgr", "ConeScan", &[PyRep::Real(360.0), PyRep::Real(14.3), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(1.0)])
-        .await
-        .expect("ConeScan");
+    // 3. D-scan (14.3 AU in meters)
+    let dscan = call_rpc(
+        &ctx,
+        &mut sess,
+        "scanMgr",
+        "ConeScan",
+        &[PyRep::Real(360.0), PyRep::Real(14.3 * 149_597_870_700.0), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(1.0)],
+    )
+    .await
+    .expect("ConeScan");
     let PyRep::List(dscan_list) = dscan else { panic!("expected List from ConeScan") };
-    assert!(dscan_list.len() < 10_000);
+    assert!(!dscan_list.is_empty(), "D-scan at 14.3 AU must detect in-space entities");
+    assert!(dscan_list.iter().any(|e| e.dict_get("typeID").and_then(|v| v.as_i64()).unwrap_or(0) > 0));
 }
 
 #[tokio::test]
@@ -429,33 +463,84 @@ async fn test_journey_wormholes_filaments() {
     call_rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("ship.Undock");
     let ship_id = sess.ship_id.unwrap();
 
-    // 1. Abyssal filament
-    let fil_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let id = snap.next_entity_id;
-        snap.items.insert(
-            id,
-            InventoryItemRecord {
-                item_id: id,
-                type_id: 47763, // Calm Electrical Filament
-                owner_id: 90_000_001,
-                location_id: ship_id,
-                flag: InventoryFlag::Cargo,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
+    // 1. Wormhole jump into J-space (31_000_005) and mass deduction check
+    let now_u = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.insert(
+            30_000_142,
+            vec![eve_db::CosmicSignatureRecord {
+                signature_id: "WH-J1".into(),
+                solar_system_id: 30_000_142,
+                sig_group: "Wormhole".into(),
+                type_name: "Unstable Wormhole (K162)".into(),
+                position: [15_000.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(26_272),
+                destination_system_id: Some(31_000_005),
+                created_unix: now_u,
+                lifetime_seconds: 86_400,
+                max_mass_kg: 2_000_000_000.0,
+                remaining_mass_kg: 2_000_000_000.0,
+                max_jump_mass_kg: 375_000_000.0,
+                collapsed: false,
+            }],
         );
-        id
     });
-    let abyss_res = call_rpc(&ctx, &mut sess, "abyssal_content_manager", "ActivateAbyssalKey", &[PyRep::Integer(fil_id)])
+    let _ = call_rpc(&ctx, &mut sess, "scanMgr", "GetSystemScanMgr", &[]).await.expect("GetSystemScanMgr");
+    let wh_item_id = eve_server::services::space_destiny::wormhole_item_id_for_signature(30_000_142, "WH-J1");
+    let _ = ctx
+        .systems
+        .get_or_spawn(30_000_142)
+        .set_ball_position(ship_id, DVec3::new(15_500.0, 0.0, 0.0))
+        .await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    let jump_rep = call_rpc(&ctx, &mut sess, "wormholeMgr", "WormholeJump", &[PyRep::Integer(wh_item_id)])
         .await
-        .expect("ActivateAbyssalKey");
+        .expect("WormholeJump");
+    assert_eq!(sess.solar_system_id, Some(31_000_005));
+    let rem_mass = jump_rep.dict_get("remainingMassKg").and_then(|v| v.as_f64()).unwrap_or(2_000_000_000.0);
+    assert!(rem_mass < 2_000_000_000.0, "wormhole jump must deduct ship mass");
+
+    // Return to Jita (30_000_142) for T0 Tranquil Abyssal (56131) + Needlejack filament journeys
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().solar_system_id = 30_000_142);
+    sess.solar_system_id = Some(30_000_142);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+
+    // 2. V24 Abyssal filament 3-room run via abyssalMgr
+    call_rpc(&ctx, &mut sess, "fleetObjectHandler", "CreateFleet", &[]).await.expect("CreateFleet");
+    let fil_id = ctx.db.add_or_stack_item(90_000_001, ship_id, InventoryFlag::Cargo, 56131, 3).unwrap().item_id;
+    let dep = call_rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(fil_id)])
+        .await
+        .expect("AbyssalEntranceDeployment");
+    let trace_id = dep.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    let enter = call_rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(trace_id)])
+        .await
+        .expect("AbyssalEntranceGateActivation");
     assert_eq!(sess.solar_system_id, Some(32_000_001));
-    assert!(abyss_res.dict_get("npcBallIDs").is_some());
+    let pid = enter.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
+    call_rpc(&ctx, &mut sess, "abyssalMgr", "ClientIsReady", &[]).await.expect("abyssalMgr.ClientIsReady");
+
+    for room_idx in 1..=3_i64 {
+        crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, 90_000_001, (room_idx - 1) as usize).await;
+        let gate_id = 1_895_000_000 + pid * 10 + room_idx;
+        if room_idx < 3 {
+            let adv = call_rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalGateActivation", &[PyRep::Integer(gate_id)])
+                .await
+                .expect("AbyssalGateActivation");
+            assert_eq!(adv.dict_get("room").and_then(|v| v.as_i64()), Some(room_idx + 1));
+        } else {
+            let exit = call_rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEndGateActivation", &[PyRep::Integer(gate_id)])
+                .await
+                .expect("AbyssalEndGateActivation");
+            assert_eq!(exit.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(30_000_142));
+        }
+    }
+    assert_eq!(sess.solar_system_id, Some(30_000_142));
+
+    // 3. Needlejack filament jump to nullsec via randomJumpMgr.ActivateRandomJumpFilament
+    let nj_id = ctx.db.add_or_stack_item(90_000_001, ship_id, InventoryFlag::Cargo, 53977, 1).unwrap().item_id;
+    call_rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(nj_id)])
+        .await
+        .expect("ActivateRandomJumpFilament");
+    assert_ne!(sess.solar_system_id, Some(30_000_142), "Needlejack filament must jump pilot out of origin system");
 }

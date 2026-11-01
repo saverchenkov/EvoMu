@@ -3,7 +3,12 @@
 
 use eve_db::{InventoryFlag, IskCents, MarketOrderRecord};
 use eve_machonet::SessionState;
+use eve_proto::quasar::{
+    encode_string_field, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
+    QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+};
 use eve_proto::PyRep;
+use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
@@ -55,58 +60,104 @@ async fn test_journey_local_chat() {
         .await
         .expect("SelectCharacterID 2");
 
-    let mut rx = ctx.notify_tx.subscribe();
+    // 1. Local channel via V24 XmppChatMgr.ResyncSystemChannelAccess + Quasar eve_public.chat.local.api.*
+    call_rpc(&ctx, &mut sess1, "publicGatewaySvc", "Subscribe", &[]).await.expect("Subscribe 1");
+    call_rpc(&ctx, &mut sess2, "publicGatewaySvc", "Subscribe", &[]).await.expect("Subscribe 2");
+    call_rpc(&ctx, &mut sess1, "XmppChatMgr", "ResyncSystemChannelAccess", &[])
+        .await
+        .expect("ResyncSystemChannelAccess 1");
+    call_rpc(&ctx, &mut sess2, "XmppChatMgr", "ResyncSystemChannelAccess", &[])
+        .await
+        .expect("ResyncSystemChannelAccess 2");
 
-    // 1. Local channel: join, send message from sess1, verify sess2 receives OnLSC
-    let local_ch = PyRep::String("solarsystemid2:30000142".into());
-    call_rpc(&ctx, &mut sess1, "LSC", "JoinChannel", &[local_ch.clone()])
-        .await
-        .expect("JoinChannel local 1");
-    call_rpc(&ctx, &mut sess2, "LSC", "JoinChannel", &[local_ch.clone()])
-        .await
-        .expect("JoinChannel local 2");
-    call_rpc(&ctx, &mut sess1, "LSC", "SendMessage", &[local_ch.clone(), PyRep::String("Hello Jita Local!".into())])
-        .await
-        .expect("SendMessage local");
+    let send_quasar = |type_name: &str, value: Vec<u8>| {
+        let req = EvePublicRequest {
+            issued: Some(GoogleTimestamp { seconds: ctx.now_unix() as i64, nanos: 0 }),
+            correlation_uuid: vec![1, 2, 3, 4],
+            payload: Some(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+                value,
+            }),
+            external_origin: "eve-client".into(),
+            application_instance_uuid: vec![9, 9],
+            authoritative_context: None,
+            trace_context: None,
+        };
+        req.encode_proto()
+    };
 
-    let mut saw_local = false;
-    while let Ok(env) = rx.try_recv() {
-        if format!("{env:?}").contains("Hello Jita Local!") {
-            saw_local = true;
-        }
-    }
-    assert!(saw_local, "second client must receive local chat message");
+    let mem_bytes = send_quasar("eve_public.chat.local.api.GetMembershipListRequest", Vec::new());
+    let mem_rep = call_rpc(&ctx, &mut sess1, "publicGatewaySvc", "SendRequest", &[PyRep::Bytes(mem_bytes)])
+        .await
+        .expect("GetMembershipListRequest");
+    let PyRep::Bytes(mem_rsp_bytes) = mem_rep.dict_get("response_proto").unwrap() else { panic!("response_proto") };
+    let mem_env = EvePublicResponse::decode_proto(mem_rsp_bytes).unwrap();
+    assert_eq!(mem_env.status_code, STATUS_OK);
+    let mem_wm = WireMessage::decode(&mem_env.payload.unwrap().value).unwrap();
+    assert!(mem_wm.fields.iter().filter(|f| f.field_number == 1).count() >= 2);
 
-    // 2. Corp channel
-    let corp_id = sess1.corporation_id.unwrap_or(1_000_035);
-    let corp_ch = PyRep::String(format!("corpid:{corp_id}"));
-    call_rpc(&ctx, &mut sess1, "LSC", "JoinChannel", &[corp_ch.clone()])
+    let mut msg_bytes = Vec::new();
+    encode_string_field(1, "Hello Jita Local!", &mut msg_bytes);
+    let bcast_bytes = send_quasar("eve_public.chat.local.api.BroadcastMessageRequest", msg_bytes);
+    let bcast_rep = call_rpc(&ctx, &mut sess1, "publicGatewaySvc", "SendRequest", &[PyRep::Bytes(bcast_bytes)])
         .await
-        .expect("JoinChannel corp 1");
-    call_rpc(&ctx, &mut sess2, "LSC", "JoinChannel", &[corp_ch.clone()])
-        .await
-        .expect("JoinChannel corp 2");
-    call_rpc(&ctx, &mut sess1, "LSC", "SendMessage", &[corp_ch, PyRep::String("Hello Corp!".into())])
-        .await
-        .expect("SendMessage corp");
+        .expect("BroadcastMessageRequest");
+    let PyRep::Bytes(bcast_rsp_bytes) = bcast_rep.dict_get("response_proto").unwrap() else { panic!("response_proto") };
+    assert_eq!(EvePublicResponse::decode_proto(bcast_rsp_bytes).unwrap().status_code, STATUS_OK);
 
-    // 3. Private channel via XmppChatMgr
-    let priv_rep = call_rpc(&ctx, &mut sess1, "XmppChatMgr", "CreatePrivateChannel", &[PyRep::Integer(90_000_002), PyRep::String("Ops Channel".into())])
-        .await
-        .expect("CreatePrivateChannel");
-    let priv_id = priv_rep.dict_get("channelID").and_then(|v| v.as_str()).unwrap_or("private:1").to_string();
-    call_rpc(&ctx, &mut sess1, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String(priv_id.clone()), PyRep::Integer(90_000_002)])
+    let notices = ctx.quasar_gateway.poll_notices(sess2.session_id);
+    let bcast_notice = notices
+        .iter()
+        .find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.contains("MessageBroadcastNotice")))
+        .expect("second client must receive Quasar MessageBroadcastNotice in local");
+    let b_wm = WireMessage::decode(&bcast_notice.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(
+        b_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str().unwrap().unwrap(),
+        "Hello Jita Local!"
+    );
+
+    // 2. Player-owned / private channel & MOTD via XmppChatMgr
+    let ch_rep = call_rpc(
+        &ctx,
+        &mut sess1,
+        "XmppChatMgr",
+        "CreatePlayerOwnedChannel",
+        &[PyRep::String("OpsChannel".into()), PyRep::None, PyRep::String("Initial MOTD".into())],
+    )
+    .await
+    .expect("CreatePlayerOwnedChannel");
+    let ch_id = ch_rep.dict_get("channelID").and_then(|v| v.as_str()).unwrap().to_string();
+    call_rpc(&ctx, &mut sess1, "XmppChatMgr", "AddCharacterToChannel", &[PyRep::String(ch_id.clone()), PyRep::Integer(90_000_002)])
         .await
         .expect("AddCharacterToChannel");
-    call_rpc(&ctx, &mut sess1, "LSC", "SendMessage", &[PyRep::String(priv_id), PyRep::String("Secret Op".into())])
+    let motd_rep = call_rpc(&ctx, &mut sess1, "XmppChatMgr", "SetMotd", &[PyRep::String(ch_id), PyRep::String("Updated Ops MOTD".into())])
         .await
-        .expect("SendMessage private");
+        .expect("SetMotd");
+    assert_eq!(motd_rep.dict_get("motd").and_then(|v| v.as_str()), Some("Updated Ops MOTD"));
 
-    // 4. Member list
-    let members = call_rpc(&ctx, &mut sess1, "LSC", "GetMembers", &[local_ch])
+    // 3. Fleet + Corp channel sync via XmppChatMgr.ResyncSystemChannelAccess
+    let _flt = call_rpc(&ctx, &mut sess1, "fleetObjectHandler", "CreateFleet", &[]).await.expect("CreateFleet");
+    let fleet_id = sess1.fleet_id.unwrap_or(1);
+    let sync_rep = call_rpc(&ctx, &mut sess1, "XmppChatMgr", "ResyncSystemChannelAccess", &[])
         .await
-        .expect("GetMembers");
-    assert!(format!("{members:?}").contains("90000001"));
+        .expect("ResyncSystemChannelAccess with fleet");
+    let sync_str = format!("{sync_rep:?}");
+    assert!(sync_str.contains(&format!("fleetid:{fleet_id}")) && sync_str.contains("corpid:"));
+
+    // 4. Jump stargate to Perimeter (30_000_144) and verify Local channel membership transitions
+    call_rpc(&ctx, &mut sess1, "ship", "Undock", &[]).await.expect("Undock 1");
+    let ship1 = sess1.ship_id.unwrap();
+    let bey1 = bound_id_from_tuple(&call_rpc(&ctx, &mut sess1, "beyonce", "MachoBindObject", &[PyRep::Integer(30_000_142), PyRep::None]).await.unwrap());
+    let sg = ctx.sde.stargates().values().find(|g| g.from_solar_system_id == 30_000_142 && g.to_solar_system_id == 30_000_144).unwrap();
+    let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(ship1, sg.position).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, 90_000_001);
+    call_bound_rpc(&ctx, &mut sess1, "beyonce", bey1, "CmdStargateJump", &[PyRep::Integer(sg.stargate_id as i64)])
+        .await
+        .expect("CmdStargateJump");
+    let moved_sync = call_rpc(&ctx, &mut sess1, "XmppChatMgr", "ResyncSystemChannelAccess", &[])
+        .await
+        .expect("ResyncSystemChannelAccess in Perimeter");
+    assert_eq!(moved_sync.dict_get("channelID").and_then(|v| v.as_str()), Some("solarsystemid2:30000144"));
 }
 
 #[tokio::test]
@@ -212,7 +263,8 @@ async fn test_journey_skills_training() {
         .expect("GetSkillQueue");
 
     let mut saw_trained = false;
-    while let Ok(env) = rx.try_recv() {
+    for _ in 0..64 {
+        let Ok(env) = rx.try_recv() else { break };
         if format!("{env:?}").contains("OnSkillTrained") {
             saw_trained = true;
         }
@@ -239,6 +291,14 @@ async fn test_journey_skills_training() {
     )
     .await
     .expect("RespecCharacter");
+    ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&90_000_001];
+        assert_eq!(ch.neural.charisma, 22);
+        assert_eq!(ch.neural.intelligence, 22);
+        assert_eq!(ch.neural.memory, 19);
+        assert_eq!(ch.neural.perception, 19);
+        assert_eq!(ch.neural.willpower, 17);
+    });
 }
 
 #[tokio::test]
@@ -359,7 +419,11 @@ async fn test_journey_market_trade() {
     let hist = call_rpc(&ctx, &mut sess1, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(34)])
         .await
         .expect("GetOldPriceHistory");
-    assert!(!format!("{hist:?}").is_empty());
+    let PyRep::ObjectEx { list: hist_rows, .. } = hist else {
+        panic!("expected ObjectEx CRowset from GetOldPriceHistory");
+    };
+    assert!(!hist_rows.is_empty(), "market price history must contain matched trade row");
+    assert!(hist_rows.iter().any(|r| format!("{r:?}").contains("avgPrice")));
 }
 
 #[tokio::test]
@@ -442,9 +506,16 @@ async fn test_journey_contracts() {
     .await
     .expect("CreateContract Auction");
     let c_auc_id = c_auc.dict_get("contractID").and_then(|v| v.as_i64()).or_else(|| c_auc.as_i64()).expect("auction id");
+    let p2_wallet_before = ctx.db.with_snapshot(|s| s.characters[&90_000_002].balance);
     call_rpc(&ctx, &mut sess2, "contractProxy", "PlaceBid", &[PyRep::Integer(c_auc_id), PyRep::Real(600.0), PyRep::Bool(false)])
         .await
         .expect("PlaceBid");
+    ctx.db.with_snapshot(|s| {
+        let auc = &s.contracts[&c_auc_id];
+        assert_eq!(auc.current_bidder_id, Some(90_000_002));
+        assert_eq!(auc.current_bid, IskCents::from_isk(600));
+        assert_eq!(s.characters[&90_000_002].balance.0, p2_wallet_before.0 - IskCents::from_isk(600).0);
+    });
 
     // 3. Courier contract with collateral & delivery
     let c_cour = call_rpc(
