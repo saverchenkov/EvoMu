@@ -139,6 +139,18 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
                 name: "Vanguard Citadel Alliance".into(),
                 short_name: "VCA".into(),
                 executor_corp_id: 98_000_111,
+                member_corp_ids: [98_000_111].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+        snap.corporations.insert(
+            98_000_112,
+            CorporationRecord {
+                corporation_id: 98_000_112,
+                name: "Vanguard Standalone Corp".into(),
+                ticker: "VSC2".into(),
+                ceo_id: 90_000_112,
+                alliance_id: None,
                 ..Default::default()
             },
         );
@@ -150,6 +162,18 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
                 owner_corp_id: 98_000_111,
                 solar_system_id: 30_000_142,
                 name: "Vanguard Fort".into(),
+                state: "ShieldVulnerable".into(),
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_030_000_112,
+            UpwellStructureRecord {
+                structure_id: 1_030_000_112,
+                type_id: 35832, // Astrahus
+                owner_corp_id: 98_000_112,
+                solar_system_id: 30_000_142,
+                name: "Vanguard Standalone Fort".into(),
                 state: "ShieldVulnerable".into(),
                 ..Default::default()
             },
@@ -181,11 +205,15 @@ async fn test_lookup_warable_corps_and_alliances_enforces_structure_eligibility(
         "Alliance with no structure-owning corp must not be warable"
     );
     assert!(
+        !items.iter().any(|w| dict_get(w, "ownerID") == Some(&PyRep::Integer(98_000_111))),
+        "Alliance-member corp must not be warable directly (declare war on its alliance instead)"
+    );
+    assert!(
         items.iter().any(|w| {
-            dict_get(w, "ownerID") == Some(&PyRep::Integer(98_000_111))
+            dict_get(w, "ownerID") == Some(&PyRep::Integer(98_000_112))
                 && dict_get(w, "groupID") == Some(&PyRep::Integer(2))
         }),
-        "Structure-owning corp must be warable"
+        "Standalone structure-owning corp must be warable"
     );
     assert!(
         items.iter().any(|w| {

@@ -394,6 +394,7 @@ async fn test_rpc_lookup_svc_batch() {
                 name: "Federation War Target Alliance".into(),
                 short_name: "FWTA".into(),
                 executor_corp_id: 98_000_077,
+                member_corp_ids: [98_000_077].into_iter().collect(),
                 ..Default::default()
             },
         );
@@ -424,7 +425,7 @@ async fn test_rpc_lookup_svc_batch() {
     assert!(!has_peaceful_alliance, "Alliance with no structure-owning member corps must be excluded");
     assert!(has_target_corp, "Must find warable corp with Upwell structure");
     assert!(has_target_alliance, "Must find warable alliance");
-    assert!(has_corp, "Must find warable target corp with structure");
+    assert!(!has_corp, "Alliance-member corp must not be warable directly (declare war on its alliance instead)");
     assert!(has_alliance, "Must find warable target alliance with structure");
 }
 
