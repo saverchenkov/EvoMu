@@ -945,11 +945,16 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 _ => 15_000,
             };
             let (status, _, _, _) = get_system_frontline_rules(ctx, sys_id);
-            let is_contested_or_vulnerable = ctx.db.with_snapshot(|s| {
+            let (is_contested_or_vulnerable, is_vulnerable_or_lost) = ctx.db.with_snapshot(|s| {
                 s.fw_system_occupations
                     .get(&sys_id)
-                    .map(|o| o.victory_points > 0)
-                    .unwrap_or(false)
+                    .map(|o| {
+                        (
+                            o.victory_points > 0,
+                            o.victory_points >= o.victory_points_threshold,
+                        )
+                    })
+                    .unwrap_or((false, false))
             });
             let supp_lp_mult = crate::services::security_mgr::insurgency_suppression_empire_lp_multiplier(ctx, sys_id, first_fac);
             let offensive_lp = (calculate_fw_lp_reward(base_lp, status) as f64) * supp_lp_mult;
@@ -959,6 +964,8 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 } else {
                     0
                 }
+            } else if is_vulnerable_or_lost {
+                0
             } else {
                 offensive_lp.round() as i64
             };

@@ -1098,8 +1098,7 @@ pub fn activate_ship_emblem_license(
 }
 
 /// Broadcasts MachoNet `OnSlimItemChange` (arity 2), `DestinyEvent::OnSlimItemChange`,
-/// `OnShipCosmeticChanged` (arity 3), and `OnShipCosmeticsChanged` (arity 2) when a pilot
-/// applies or clears a hull SKIN.
+/// and `OnShipCosmeticsChanged` (arity 2) when a pilot applies or clears a hull SKIN.
 // parity: feat:cosmetics.skin-apply
 pub async fn broadcast_ship_skin_cosmetic_change(
     ctx: &crate::router::ServerContext,

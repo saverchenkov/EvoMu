@@ -548,3 +548,42 @@ async fn test_fw_lp_complexes_kills_status_scaling_and_militia_store() {
     });
     assert_eq!(reloaded_lp, lp_remaining);
 }
+
+#[tokio::test]
+async fn test_fw_offensive_lp_zero_when_vulnerable() {
+    // parity: feat:fw.fw-lp
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let (enemy_sys, _front_sys, _cmd_sys, _rear_sys) =
+        crate::fw_warzone_insurgency_closure::setup_warzone_chain(&ctx);
+
+    let mut sess_cal = setup_pilot(&ctx, PILOT_1).await;
+    let cal_ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&PILOT_1).expect("PILOT_1");
+        ch.war_faction_id = Some(500_001); // Caldari militia -> State Protectorate (1000180)
+        ch.loyalty_points.remove(&STATE_PROTECTORATE_CORP);
+        ch.balance = IskCents::from_isk(50_000_000);
+        snap.fw_runtime.direct_enlisted_chars.insert(PILOT_1, 500_001);
+        let occ = snap
+            .fw_system_occupations
+            .get_mut(&enemy_sys)
+            .expect("enemy_sys occupation");
+        occ.victory_points = occ.victory_points_threshold;
+        snap.fw_runtime
+            .system_victory_points
+            .insert(enemy_sys, occ.victory_points_threshold);
+        ch.active_ship_id
+    });
+    sess_cal.war_faction_id = Some(500_001);
+    let cal_guns = 995_100i64;
+    fit_combat_frigate(&ctx, PILOT_1, cal_ship_id, cal_guns);
+    let _ = rpc(&ctx, &mut sess_cal, "crimewatch", "SetSafetyLevel", &[PyRep::Integer(0)]).await;
+
+    let off_vuln_lp =
+        capture_novice_complex_live(&ctx, &mut sess_cal, PILOT_1, cal_ship_id, cal_guns, enemy_sys)
+            .await;
+    assert_eq!(
+        off_vuln_lp, 0,
+        "offensive plexing in a Vulnerable system (victory_points >= threshold) must pay 0 LP"
+    );
+}
