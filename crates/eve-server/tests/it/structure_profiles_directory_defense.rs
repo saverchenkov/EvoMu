@@ -596,6 +596,7 @@ async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
     }
 
     // 3. Neutral pilot enters grid unharmed until firing on the structure -> live combat retaliation!
+    for sid in [920_002, 920_003, 920_004] { let _ = low_sys_h.remove_ball(sid).await; }
     ctx.advance_secs(15);
     let mut att_sess = spawn_and_enter_grid(&ctx, 540, attacker_char, 920_005, lowsec_sys, DVec3::new(12_000.0, 0.0, 0.0)).await;
     let pre_cs = low_sys_h.get_combat_state(920_005).await.unwrap().unwrap();

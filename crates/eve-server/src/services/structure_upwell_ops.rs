@@ -110,6 +110,7 @@ pub struct StructureExtendedState {
     #[serde(default)] pub structure_auto_targets: HashMap<i64, Vec<i64>>,
     #[serde(default)] pub vorton_tether_until_unix: HashMap<i64, u64>,
     #[serde(default)] pub structure_cap_state: HashMap<i64, (f64, u64)>,
+    #[serde(default)] pub structure_auto_shot_cursor: HashMap<i64, usize>,
 }
 
 pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {

@@ -184,10 +184,8 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
         "Freshly cloaked ship (< 15m Cloak Stabilization) MUST be immune to Observatory ping #1"
     );
     let stale_notifs = ctx.drain_notifications_for_char(stale_cloak_cid);
-    assert!(
-        stale_notifs.iter().any(|n| n.event == "OnCloakModuleForceDeactivated"),
-        "Decloaked pilot must receive OnCloakModuleForceDeactivated"
-    );
+    let stale_decloak = stale_notifs.iter().find(|n| n.event == "OnCloakModuleForceDeactivated").expect("Decloaked pilot must receive OnCloakModuleForceDeactivated");
+    assert!(stale_decloak.args.len() == 2 && matches!(stale_decloak.args[0], PyRep::String(_)) && matches!(stale_decloak.args[1], PyRep::Dict(_)), "expected [notifyMsg, notifyArgs]");
 
     // 4. Advance across remaining 11 pings to `deploy_t + 7_805` -> `fresh` stabilization expires at `deploy_t + 1700`,
     //    subsequent pings decloak `fresh`, and the Observatory expires & despawns after 12 pings (2h active)!
@@ -199,10 +197,8 @@ async fn test_mobile_observatory_restrictions_stabilization_and_decloak_pings() 
         "Once 15m Cloak Stabilization expires, subsequent Observatory pings decloak fresh ship"
     );
     let fresh_notifs = ctx.drain_notifications_for_char(fresh_cloak_cid);
-    assert!(
-        fresh_notifs.iter().any(|n| n.event == "OnCloakModuleForceDeactivated"),
-        "Fresh ship pilot must receive OnCloakModuleForceDeactivated once stabilization expires"
-    );
+    let fresh_decloak = fresh_notifs.iter().find(|n| n.event == "OnCloakModuleForceDeactivated").expect("Fresh ship pilot must receive OnCloakModuleForceDeactivated once stabilization expires");
+    assert!(fresh_decloak.args.len() == 2 && matches!(fresh_decloak.args[0], PyRep::String(_)) && matches!(fresh_decloak.args[1], PyRep::Dict(_)));
     assert!(
         ctx.db.with_snapshot(|s| !s.items.contains_key(&845_001)),
         "Mobile Observatory must automatically expire and despawn after 10m deploy + 2h (12 pings)"

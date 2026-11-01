@@ -1179,7 +1179,13 @@ pub fn flush_deployable_side_effects(ctx: &ServerContext) {
             NotificationTarget::Character(n.char_id),
             "OnCloakModuleForceDeactivated",
             "charid",
-            vec![PyRep::Integer(n.ship_id), PyRep::Integer(n.module_id)],
+            vec![
+                PyRep::String("CloakDeactivatedByObservatory".into()),
+                PyRep::Dict(vec![
+                    (PyRep::String("shipID".into()), PyRep::Integer(n.ship_id)),
+                    (PyRep::String("moduleID".into()), PyRep::Integer(n.module_id)),
+                ]),
+            ],
         );
     }
 }

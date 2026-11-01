@@ -542,17 +542,17 @@ async fn test_keepstar_standup_arcing_vorton_projector_chain_and_immobilization(
     assert!((sys_h.get_combat_state(971_090).await.unwrap().unwrap().shield_hp - 5_000_000.0).abs() < 1e-6, "Friendly corp target must be excluded from Vorton chain");
     assert!((sys_h.get_combat_state(971_099).await.unwrap().unwrap().shield_hp - 5_000_000.0).abs() < 1e-6, "Target >20km from chain must be untouched");
 
-    // 3. During the superweapon cycle, gunner is immobilized: cannot re-fire, EjectFromStructure, ReleaseControl, or Undock!
-    ctx.advance_secs(30);
-    assert_eq!(
-        rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)]).await.unwrap_err().code,
-        "ModuleAlreadyCycling"
-    );
-    // 4. Once the cycle completes, gunner can cleanly relinquish control and undock!
-    ctx.advance_secs(485);
+    // 3. During the 30s SDE immobilization (attr 1579), gunner cannot re-fire, EjectFromStructure, or ReleaseControl!
+    ctx.advance_secs(10);
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)]).await.unwrap_err().code, "WeaponCycleImmobilized");
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "EjectFromStructure", &[PyRep::Integer(ks_id)]).await.unwrap_err().code, "GunnerImmobilized");
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(ks_id)]).await.unwrap_err().code, "GunnerImmobilized");
+    // 4. Once the 30s SDE immobilization completes (while 600s cycle is still active), gunner can relinquish control!
+    ctx.advance_secs(25);
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(vorton_mod), PyRep::String("superWeaponVorton".into()), PyRep::Integer(971_000)]).await.unwrap_err().code, "ModuleAlreadyCycling");
     rpc(&ctx, &mut sess, "structureControl", "EjectFromStructure", &[PyRep::Integer(ks_id)])
         .await
-        .expect("EjectFromStructure succeeds after 600s superweapon cycle");
+        .expect("EjectFromStructure succeeds after 30s SDE immobilization");
 }
 
 #[tokio::test]

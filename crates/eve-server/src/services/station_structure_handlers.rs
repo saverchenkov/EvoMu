@@ -820,51 +820,36 @@ pub fn evaluate_station_service_standing_gate(
         .and_then(|m| m.get(&service_id).map(|&req| (owner_corp, req)))
         .or_else(|| owner_fac.and_then(|fid| restrictions.get(&fid)?.get(&service_id).map(|&req| (fid, req))));
 
+    let Some((gate_entity, req_standing)) = fsd_gate else {
+        return Ok(PyRep::Bool(true));
+    };
+
     ctx.db.with_snapshot(|snap| {
-        let sk = snap.skills.get(&char_id);
-        let dip = sk.and_then(|m| m.get(&3357)).map(|s| s.level).unwrap_or(0);
-        let con = sk.and_then(|m| m.get(&3359)).map(|s| s.level).unwrap_or(0);
         let ch = snap.characters.get(&char_id);
-
-        if let Some((gate_entity, req_standing)) = fsd_gate {
-            let eff = if service_id == 23 && ch.is_some_and(|c| snap.corporations.contains_key(&c.corporation_id)) {
-                let cid = ch.map(|c| c.corporation_id).unwrap_or(0);
-                let ceo_id = snap.corporations.get(&cid).map(|cp| cp.ceo_id).unwrap_or(char_id);
-                snap.characters.get(&ceo_id).and_then(|c| c.standings.get(&gate_entity).copied()).unwrap_or(0.0)
-            } else {
-                let raw = ch.and_then(|c| c.standings.get(&gate_entity).copied()).unwrap_or(0.0);
-                effective_standing_with_skills(raw, dip, con)
-            };
-            if eff + 1e-9 < req_standing {
-                return Err(err(
-                    "StandingTooLowForStationService",
-                    format!("Effective standing {eff:.2} toward {gate_entity} is below FSD required {req_standing:.2} for service {service_id} at station {station_id}"),
-                ));
-            }
-            return Ok(PyRep::Bool(true));
-        }
-
-        let raw_corp = ch.and_then(|c| c.standings.get(&owner_corp).copied()).unwrap_or(0.0);
-        let raw_fac = ch.and_then(|c| owner_fac.and_then(|fid| c.standings.get(&fid).copied())).unwrap_or(0.0);
-        let eff_corp = effective_standing_with_skills(raw_corp, dip, con);
-        let eff_fac = effective_standing_with_skills(raw_fac, dip, con);
-        if service_id == 26 {
-            let opposing = owner_fac.and_then(crate::services::fw_services::fw_opposing_faction);
-            let war_fac = ch.and_then(|c| c.war_faction_id);
-            if eff_fac < 0.0 || (opposing.is_some() && war_fac == opposing) {
-                return Err(err(
-                    "StandingTooLowForStationService",
-                    format!("Navy office access denied at station {station_id} (faction standing {eff_fac:.2})"),
-                ));
-            }
-        }
-        let min_standing = if matches!(service_id, 10 | 26) { 0.0 } else { -2.0 };
-        if eff_corp < min_standing || eff_fac < -2.0 {
+        let target_cid = if service_id == 23 && ch.is_some_and(|c| snap.corporations.contains_key(&c.corporation_id)) {
+            let cid = ch.map(|c| c.corporation_id).unwrap_or(0);
+            snap.corporations.get(&cid).map(|cp| cp.ceo_id).unwrap_or(char_id)
+        } else {
+            char_id
+        };
+        let target_ch = snap.characters.get(&target_cid);
+        let raw = target_ch
+            .and_then(|c| c.standings.get(&gate_entity).copied())
+            .unwrap_or(0.0);
+        let has_entry = target_ch.is_some_and(|c| c.standings.contains_key(&gate_entity));
+        let (eff, _, _, _) =
+            crate::services::agents_missions::agents_standings_arcs::compute_effective_standing_breakdown(
+                ctx,
+                snap,
+                target_cid,
+                gate_entity,
+                raw,
+                has_entry,
+            );
+        if eff + 1e-9 < req_standing {
             return Err(err(
                 "StandingTooLowForStationService",
-                format!(
-                    "Character {char_id} effective standing (corp {eff_corp:.2}, faction {eff_fac:.2}) is below required {min_standing:.1} for service {raw_service_id} at station {station_id}"
-                ),
+                format!("Effective standing {eff:.2} toward {gate_entity} is below FSD required {req_standing:.2} for service {service_id} at station {station_id}"),
             ));
         }
         Ok(PyRep::Bool(true))

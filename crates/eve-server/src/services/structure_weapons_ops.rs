@@ -142,16 +142,21 @@ pub async fn trigger_structure_auto_defense_on_grid(
         Vec::new()
     };
 
-    let (targets, volley_dmg): (Vec<(i64, i64)>, DamageVector) = ctx.db.with_mut_snapshot(|snap| {
-        let matched: Vec<(i64, i64)> = candidates
+    let (targets, per_target_dmg): (
+        Vec<(i64, i64)>,
+        std::collections::HashMap<i64, DamageVector>,
+    ) = ctx.db.with_mut_snapshot(|snap| {
+        let mut matched: Vec<(i64, i64)> = candidates
             .into_iter()
             .filter(|&(_, cid)| evaluate_auto_defense_target(ctx, snap, structure_id, cid))
             .collect();
+        matched.sort_by_key(|&(bid, _)| bid);
         let mut ext = load_ext_state(snap);
         ext.structure_auto_targets
             .insert(structure_id, matched.iter().map(|&(bid, _)| bid).collect());
 
-        let mut total_dmg = DamageVector::default();
+        let mut per_target: std::collections::HashMap<i64, DamageVector> =
+            std::collections::HashMap::new();
         if !matched.is_empty() {
             let st_sde = snap
                 .structures
@@ -222,14 +227,18 @@ pub async fn trigger_structure_auto_defense_on_grid(
                     .max(1);
                 ext.standup_module_cycle_until_unix
                     .insert(mod_item.item_id, now_unix.saturating_add(cycle_secs));
-                total_dmg.em += dmg.em;
-                total_dmg.thermal += dmg.thermal;
-                total_dmg.kinetic += dmg.kinetic;
-                total_dmg.explosive += dmg.explosive;
+                let cursor = ext.structure_auto_shot_cursor.entry(structure_id).or_insert(0);
+                let (target_ship_id, _) = matched[*cursor % matched.len()];
+                *cursor = cursor.wrapping_add(1);
+                let entry = per_target.entry(target_ship_id).or_default();
+                entry.em += dmg.em;
+                entry.thermal += dmg.thermal;
+                entry.kinetic += dmg.kinetic;
+                entry.explosive += dmg.explosive;
             }
         }
         save_ext_state(snap, &ext);
-        (matched, total_dmg)
+        (matched, per_target)
     });
 
     for (ship_id, target_char_id) in targets {
@@ -259,7 +268,8 @@ pub async fn trigger_structure_auto_defense_on_grid(
             "charid",
             vec![PyRep::String("otheradd".into()), PyRep::Integer(structure_id)],
         );
-        if volley_dmg.total() > 0.0 {
+        let target_dmg = per_target_dmg.get(&ship_id).copied().unwrap_or_default();
+        if target_dmg.total() > 0.0 {
             if let Some(gunner_char) = pilot_opt {
                 if crate::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
                     ctx,
@@ -275,7 +285,7 @@ pub async fn trigger_structure_auto_defense_on_grid(
                 }
             }
             if let Ok(Some((dealt, _, _))) = sys_handle
-                .apply_damage_with_attacker(ship_id, volley_dmg, pilot_opt.or(Some(structure_id)))
+                .apply_damage_with_attacker(ship_id, target_dmg, pilot_opt.or(Some(structure_id)))
                 .await
             {
                 if dealt > 0.0 {

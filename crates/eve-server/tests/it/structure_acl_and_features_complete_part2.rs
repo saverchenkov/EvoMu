@@ -363,11 +363,9 @@ async fn test_station_standing_check_diplomacy_connections_and_corp_office_gates
     .expect_err("Triglavian docking requires >= -0.05 standing");
     assert_eq!(err_trig_dock.code, "StandingTooLowForStationService");
 
+    // Triglavian (500026) is exempt from Diplomacy/Connections in compute_effective_standing_breakdown:
     ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(pilot1).or_default().insert(
-            3357,
-            eve_db::TrainedSkillRecord { type_id: 3357, level: 1, skill_points: 1_000.0 },
-        );
+        snap.characters.get_mut(&pilot1).unwrap().standings.insert(FACTION_TRIGLAVIAN, 0.0);
     });
     assert_eq!(
         rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(22), PyRep::Integer(STATION_POCHVEN)]).await.unwrap(),
@@ -389,11 +387,7 @@ async fn test_station_standing_check_diplomacy_connections_and_corp_office_gates
     assert_eq!(err_trig_clone.code, "StandingTooLowForStationService");
 
     ctx.db.with_mut_snapshot(|snap| {
-        snap.characters.get_mut(&pilot1).unwrap().standings.insert(FACTION_TRIGLAVIAN, 2.5);
-        snap.skills.entry(pilot1).or_default().insert(
-            3359,
-            eve_db::TrainedSkillRecord { type_id: 3359, level: 3, skill_points: 24_000.0 },
-        );
+        snap.characters.get_mut(&pilot1).unwrap().standings.insert(FACTION_TRIGLAVIAN, 3.1);
     });
     assert_eq!(
         rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(24), PyRep::Integer(STATION_POCHVEN)]).await.unwrap(),
@@ -435,4 +429,88 @@ async fn test_station_standing_check_diplomacy_connections_and_corp_office_gates
         rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(23), PyRep::Integer(STATION_POCHVEN)]).await.unwrap(),
         PyRep::Bool(true),
     );
+}
+
+#[tokio::test]
+async fn test_station_standing_check_allows_when_no_fsd_entry() {
+    // parity: feat:structures.station-standing-check, rpc:corpStationMgr.DoStandingCheckForStationService
+    eve_testkit::attest(&[
+        "feat:structures.station-standing-check",
+        "rpc:corpStationMgr.DoStandingCheckForStationService",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let pilot1 = 90_000_001i64;
+    let mut s1 = login(&ctx, 903, "demo", "demo-secret", pilot1).await;
+    const STATION_JITA_4_4: i64 = 60_003_760;
+
+    let (owner_corp, owner_fac) = ctx
+        .sde
+        .stations
+        .get(&STATION_JITA_4_4)
+        .map(|st| (st.owner_corporation_id, st.owner_faction_id))
+        .expect("Jita 4-4 in SDE");
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&pilot1).unwrap();
+        ch.standings.insert(owner_corp, -5.0);
+        if let Some(fid) = owner_fac {
+            ch.standings.insert(fid, -5.0);
+        }
+    });
+
+    // Jita 4-4 has no entry in stationstandingsrestrictions.fsdbinary: services offered by the station are allowed without invented -2.0/0.0 gates
+    assert_eq!(
+        rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(STATION_JITA_4_4)]).await.unwrap(),
+        PyRep::Bool(true),
+    );
+    assert_eq!(
+        rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(23), PyRep::Integer(STATION_JITA_4_4)]).await.unwrap(),
+        PyRep::Bool(true),
+    );
+}
+
+#[tokio::test]
+async fn test_structure_auto_defense_round_robin_no_volley_multiplication() {
+    // parity: feat:structures.defense-settings
+    eve_testkit::attest(&["feat:structures.defense-settings"]);
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let mut dir_sess = login(&ctx, 560, "demo", "demo-secret", 90_000_001).await;
+    dir_sess.corp_role = 1;
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&90_000_001].corporation_id);
+    let (lowsec_sys, h1, h2) = (30_002_718u32, 90_000_021i64, 90_000_022i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        let base = snap.characters[&90_000_002].clone();
+        for (cid, sid) in [(h1, 921_001i64), (h2, 921_002i64)] {
+            let mut ch = base.clone();
+            ch.character_id = cid; ch.corporation_id = 98_000_599; ch.solar_system_id = lowsec_sys; ch.station_id = None; ch.active_ship_id = sid;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(sid, eve_db::InventoryItemRecord { item_id: sid, type_id: 626, owner_id: cid, location_id: lowsec_sys as i64, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default() });
+            snap.item_positions.insert(sid, [15_000.0, 0.0, 0.0]);
+            snap.corp_contacts.entry(corp_id).or_default().push(eve_db::SocialContactRecord { contact_id: cid, contact_type: "character".into(), standing: -5.0, is_watched: false, is_blocked: false, label_ids: Vec::new() });
+        }
+    });
+    let prof = rpc(&ctx, &mut dir_sess, "structureProfiles", "CreateProfile", &[PyRep::String("RR".into()), PyRep::String("".into())]).await.unwrap().as_i64().unwrap();
+    rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Bool(true), PyRep::Bool(true), PyRep::Real(0.0), PyRep::Bool(true)]), PyRep::Integer(0)])])]).await.unwrap();
+    let st_id = 1_000_000_300_010i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(st_id, eve_db::UpwellStructureRecord { structure_id: st_id, type_id: 35833, owner_corp_id: corp_id, solar_system_id: lowsec_sys, state: eve_server::services::station_structure::structure_lifecycle::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0], ..Default::default() });
+        snap.items.insert(911_001, eve_db::InventoryItemRecord { item_id: 911_001, type_id: 35922, owner_id: corp_id, location_id: st_id, flag: eve_db::InventoryFlag::HiSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
+        snap.items.insert(911_011, eve_db::InventoryItemRecord { item_id: 911_011, type_id: 37847, owner_id: corp_id, location_id: st_id, flag: eve_db::InventoryFlag::HiSlot0, quantity: 10, singleton: false, version: 1, ..Default::default() });
+        snap.module_online_states.insert(911_001, true);
+    });
+    rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(prof)]).await.unwrap();
+    let sys_h = ctx.systems.get_or_spawn(lowsec_sys);
+    for (sid, cid) in [(921_001i64, h1), (921_002i64, h2)] {
+        let _ = sys_h.spawn_ball_with_meta(
+            eve_destiny::Ball { id: sid, type_id: 626, position: glam::DVec3::new(15_000.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 250.0, inertia: 4.0, mass: 11_000_000.0, radius: 130.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
+            ctx.build_ship_combat_state(cid, sid, 626),
+            ctx.build_ship_slim_meta(cid, 626),
+        ).await;
+    }
+    eve_server::services::structure_weapons_ops::trigger_system_structures_auto_defense(&ctx, lowsec_sys).await;
+    let (cs1, cs2) = (sys_h.get_combat_state(921_001).await.unwrap().unwrap(), sys_h.get_combat_state(921_002).await.unwrap().unwrap());
+    let (dmg1, dmg2) = (cs1.max_shield_hp - cs1.shield_hp, cs2.max_shield_hp - cs2.shield_hp);
+    assert!(dmg1 > 0.0 && dmg2 == 0.0, "1 online module must hit only 1 target (got dmg1={dmg1}, dmg2={dmg2})");
 }
