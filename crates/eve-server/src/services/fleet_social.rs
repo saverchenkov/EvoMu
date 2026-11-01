@@ -216,6 +216,14 @@ fn handle_office_manager(
 
         "RentOffice" => {
             let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
+            let is_docked_here = session.station_id == Some(station_id)
+                || session.structure_id == Some(station_id);
+            if !is_docked_here {
+                return Some(Err(BridgeRpcError {
+                    code: "NotDockedAtStation".into(),
+                    message: format!("Pilot must be docked at station or structure {station_id} to rent an office"),
+                }));
+            }
             let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
             let effective_roles = session.corp_role | roles;
             if !is_ceo && !eve_db::corp_roles::has_role(effective_roles, eve_db::corp_roles::ROLE_RENT_OFFICE) {
@@ -226,10 +234,12 @@ fn handle_office_manager(
             }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if station_id <= 0
-                    || (station_id >= 1_000_000_000_000
-                        && !snap.structures.contains_key(&station_id))
-                {
+                let exists = if station_id >= 1_000_000_000_000 {
+                    snap.structures.contains_key(&station_id)
+                } else {
+                    station_id > 0 && ctx.sde.stations.contains_key(&station_id)
+                };
+                if !exists {
                     return Err(BridgeRpcError {
                         code: "StationNotFound".into(),
                         message: format!("Station or structure {station_id} not found"),
@@ -522,7 +532,9 @@ pub async fn handle(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if service == "officeManager" {
-        return handle_office_manager(ctx, session, method, args);
+        if let Some(res) = handle_office_manager(ctx, session, method, args) {
+            return Some(res);
+        }
     }
     // parity: rpc:beyonce.GetFormations
     if service == "beyonce" && method == "GetFormations" {
