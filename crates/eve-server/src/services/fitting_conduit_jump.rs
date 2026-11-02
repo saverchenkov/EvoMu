@@ -753,6 +753,15 @@ pub(super) async fn jump_through_fleet(
     } else {
         random_arrival_position(ctx, beacon.position)
     };
+    let hull_bonus = crate::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(ctx, ship_type_id);
+    let is_covert_bridge = bridger_type.group_id == 898 || required_attr == ATTR_IS_COVERT;
+    let bridge_fatigue_mult = if hull_bonus >= 0.90 {
+        0.10
+    } else if is_covert_bridge {
+        0.25
+    } else {
+        1.0
+    };
     let (cooldown_min, fatigue_min, bound) = relocate_caller(
         ctx,
         session,
@@ -762,7 +771,7 @@ pub(super) async fn jump_through_fleet(
         beacon.solar_system_id,
         pos,
         bridge.distance_ly,
-        pvals[1],
+        bridge_fatigue_mult,
     )
     .await?;
     Ok(JumpOutcome {

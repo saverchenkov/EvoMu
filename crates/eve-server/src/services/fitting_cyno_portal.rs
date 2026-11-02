@@ -742,7 +742,7 @@ pub(super) struct JumpOutcome {
 
 /// Moves a ship and character to `to_sys` at `pos`, ejecting with outward velocity if overlapping a structure.
 // parity: feat:ships.jump-drive-fatigue-accumulation, feat:navigation.jump-arrival-placement
-pub(super) async fn relocate_ship(
+pub async fn relocate_ship(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -757,7 +757,7 @@ pub(super) async fn relocate_ship(
         s.characters
             .get(&char_id)
             .filter(|c| c.jump_fatigue_until_unix > now)
-            .map(|c| ((c.jump_fatigue_until_unix - now) as f64 / 60.0).max(c.jump_fatigue_minutes))
+            .map(|c| (c.jump_fatigue_until_unix - now) as f64 / 60.0)
             .unwrap_or(0.0)
     });
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now, None) {

@@ -477,9 +477,9 @@ pub(crate) fn consume_jump_fuel(
     })
 }
 
-/// Returns the hull's jump fatigue reduction bonus (`0.75` for Black Ops / covert, `0.90` for
-/// industrial / JF / Rorqual / capsule / shuttle, or `1.0 - jumpFatigueMultiplier` from SDE).
-pub(crate) fn ship_fatigue_reduction_bonus(ctx: &ServerContext, ship_type_id: u32) -> f64 {
+/// Returns the hull's self-jump fatigue reduction bonus (`0.75` for Black Ops, `0.90` for
+/// industrial / Industrial Command Ship / JF / Rorqual / capsule / shuttle, or `1.0 - jumpFatigueMultiplier` from SDE).
+pub fn ship_fatigue_reduction_bonus(ctx: &ServerContext, ship_type_id: u32) -> f64 {
     if let Some(mult) = type_attr(ctx, ship_type_id, "jumpFatigueMultiplier") {
         if mult > 0.0 && mult <= 1.0 {
             return (1.0 - mult).clamp(0.0, 0.95);
@@ -487,8 +487,8 @@ pub(crate) fn ship_fatigue_reduction_bonus(ctx: &ServerContext, ship_type_id: u3
     }
     let group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
     match group_id {
-        898 | 830 | 833 | 834 => 0.75,
-        902 | 883 | 28 | 380 | 1202 | 513 | 29 | 31 => 0.90,
+        898 => 0.75,
+        902 | 883 | 28 | 380 | 1202 | 513 | 29 | 31 | 941 => 0.90,
         _ => 0.0,
     }
 }

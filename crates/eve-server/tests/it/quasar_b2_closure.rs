@@ -311,7 +311,7 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
 
 #[tokio::test]
 async fn test_quasar_b2_structure_star_resources_and_space_tags() {
-    // parity: quasar:eveProto/generated/eve/structure/api/requests_pb2.pyj, quasar:eveProto/generated/eve/star/resources/api/requests_pb2.pyj, quasar:eveProto/generated/eve/space/tag/api/admin/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve/structure/api/requests_pb2.pyj, quasar:eveProto/generated/eve/space/tag/api/admin/requests_pb2.pyj
     let ctx = ServerContext::new();
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(2, 1002, 2_112_000_002, 98_000_001);
@@ -331,11 +331,18 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
         Some(b"Jita Trade Citadel".as_slice())
     );
 
-    // Unknown structure returns NOT_FOUND
+    // Unknown, unauthorized private, and destroyed structures return NOT_FOUND
     let mut bad_struct = Vec::new();
     encode_id_field(1, 9_999_999, &mut bad_struct);
-    let bad_srsp = quasar_rpc(&ctx, &mut sess, "eve.structure.api.GetRequest", bad_struct).await;
-    assert_eq!(bad_srsp.status_code, STATUS_NOT_FOUND);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.structure.api.GetRequest", bad_struct).await.status_code, STATUS_NOT_FOUND);
+    let mut outsider = make_session(20, 1020, 2_112_000_020, 98_000_999);
+    let mut priv_req = Vec::new();
+    encode_id_field(1, 1_030_000_000_001, &mut priv_req);
+    assert_eq!(quasar_rpc(&ctx, &mut outsider, "eve.structure.api.GetRequest", priv_req.clone()).await.status_code, STATUS_NOT_FOUND);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&1_030_000_000_001) { st.state = "Destroyed".to_string(); }
+    });
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.structure.api.GetRequest", priv_req).await.status_code, STATUS_NOT_FOUND);
 
     // 2. eve.star.resources.api.GetPowerProductionRequest -> STATUS_NOT_IMPLEMENTED (DATA GAP)
     let mut star_req = Vec::new();
@@ -578,7 +585,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
 
 #[tokio::test]
 async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
-    // parity: quasar:eveProto/generated/eve/sovereignty/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/activitydefensemodifier/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/resource/planet/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve/sovereignty/api/requests_pb2.pyj, quasar:eveProto/generated/eve/sovereignty/activitydefensemodifier/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(4, 1004, 2_112_000_004, 98_000_001);
@@ -671,4 +678,7 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
         let rsp = quasar_rpc(&ctx, &mut sess, req_type, Vec::new()).await;
         assert_eq!(rsp.status_code, STATUS_NOT_IMPLEMENTED, "{req_type}");
     }
+    let mut overflow_sys = Vec::new();
+    encode_id_field(1, 30_002_537 + (1u64 << 32), &mut overflow_sys);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.sovereignty.api.GetClaimRequest", overflow_sys).await.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
 }

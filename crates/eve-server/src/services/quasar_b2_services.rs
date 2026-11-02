@@ -48,30 +48,48 @@ fn encode_timestamp(field_num: u32, seconds: u64, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &sub, out);
 }
 
-fn extract_u64(msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
+fn extract_u64_checked(msg: &DynamicQuasarMessage, field_num: u32) -> Result<Option<u64>, (u32, String)> {
     match msg.get(field_num) {
         Some(DynamicValue::Message(sub)) => match sub.get(1) {
-            Some(DynamicValue::Message(inner)) => extract_u64(inner, 1),
-            Some(DynamicValue::Uint64(n)) => *n,
-            Some(DynamicValue::Uint32(n)) => *n as u64,
-            Some(DynamicValue::Int64(n)) => *n as u64,
-            Some(DynamicValue::Int32(n)) => *n as u64,
-            None => {
-                let sys = extract_u64(sub, 2);
-                if sys > 0 {
-                    sys
-                } else {
-                    0
-                }
-            }
-            _ => 0,
+            Some(DynamicValue::Message(inner)) => extract_u64_checked(inner, 1),
+            Some(DynamicValue::Uint64(n)) => Ok(Some(*n)),
+            Some(DynamicValue::Uint32(n)) => Ok(Some(u64::from(*n))),
+            Some(DynamicValue::Int64(n)) => u64::try_from(*n)
+                .map(Some)
+                .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
+            Some(DynamicValue::Int32(n)) => u64::try_from(*n)
+                .map(Some)
+                .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
+            None => extract_u64_checked(sub, 2),
+            _ => Ok(None),
         },
-        Some(DynamicValue::Uint64(n)) => *n,
-        Some(DynamicValue::Uint32(n)) => *n as u64,
-        Some(DynamicValue::Int64(n)) => *n as u64,
-        Some(DynamicValue::Int32(n)) => *n as u64,
-        _ => 0,
+        Some(DynamicValue::Uint64(n)) => Ok(Some(*n)),
+        Some(DynamicValue::Uint32(n)) => Ok(Some(u64::from(*n))),
+        Some(DynamicValue::Int64(n)) => u64::try_from(*n)
+            .map(Some)
+            .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
+        Some(DynamicValue::Int32(n)) => u64::try_from(*n)
+            .map(Some)
+            .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
+        _ => Ok(None),
     }
+}
+
+fn extract_required_u64(msg: &DynamicQuasarMessage, field_num: u32, what: &str) -> Result<u64, (u32, String)> {
+    match extract_u64_checked(msg, field_num)? {
+        Some(v) if v > 0 => Ok(v),
+        _ => Err((STATUS_BAD_REQUEST, format!("Missing {what}"))),
+    }
+}
+
+fn extract_required_u32(msg: &DynamicQuasarMessage, field_num: u32, what: &str) -> Result<u32, (u32, String)> {
+    let v = extract_required_u64(msg, field_num, what)?;
+    u32::try_from(v).map_err(|_| (STATUS_BAD_REQUEST, format!("Invalid {what}")))
+}
+
+fn extract_required_i64(msg: &DynamicQuasarMessage, field_num: u32, what: &str) -> Result<i64, (u32, String)> {
+    let v = extract_required_u64(msg, field_num, what)?;
+    i64::try_from(v).map_err(|_| (STATUS_BAD_REQUEST, format!("Invalid {what}")))
 }
 
 fn active_char_id(ctx: &AuthoritativeContext) -> Result<u64, (u32, String)> {
@@ -151,13 +169,32 @@ pub fn register_handlers(
     let db_st1 = Arc::clone(&db);
     router.register_handler(
         "eve.structure.api.GetRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let structure_id = extract_u64(msg, 1);
-            if structure_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing structure identifier".to_string()));
-            }
+        Arc::new(move |ctx, _any, msg| {
+            let is_admin = require_admin_role(ctx).is_ok();
+            let cid = if is_admin {
+                ctx.active_character.as_ref().map(|c| i64::from(c.sequential)).unwrap_or(0)
+            } else {
+                i64::try_from(active_char_id(ctx)?)
+                    .map_err(|_| (STATUS_UNAUTHORIZED, "Invalid character".to_string()))?
+            };
+            let structure_id = extract_required_i64(msg, 1, "structure identifier")?;
             let rec = db_st1
-                .with_snapshot(|snap| snap.structures.get(&(structure_id as i64)).cloned())
+                .with_snapshot(|snap| {
+                    let st = snap.structures.get(&structure_id)?;
+                    if st.state == "Destroyed" {
+                        return None;
+                    }
+                    if !is_admin
+                        && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                            snap,
+                            st.structure_id,
+                            cid,
+                        )
+                    {
+                        return None;
+                    }
+                    Some(st.clone())
+                })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Structure not found".to_string()))?;
             let mut attrs = Vec::new();
             encode_id_msg(1, u64::from(rec.type_id), &mut attrs);
@@ -182,21 +219,19 @@ pub fn register_handlers(
     );
 
     // 7. eve.stargate.lock.api.* -> snap.zarzakh_gate_locks (Zarzakh = 30_100_000)
-    const ZARZAKH_SOLAR_SYSTEM_ID: u64 = 30_100_000;
+    const ZARZAKH_SOLAR_SYSTEM_ID: u32 = 30_100_000;
 
     let db_gl1 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.GetRequest",
         Arc::new(move |ctx, _any, msg| {
             let cid = active_char_id(ctx)?;
-            let req_cid = extract_u64(msg, 1);
-            if req_cid != 0 && req_cid != cid as u64 {
-                return Err((STATUS_FORBIDDEN, "Character mismatch".to_string()));
+            if let Some(req_cid) = extract_u64_checked(msg, 1)? {
+                if req_cid != 0 && req_cid != cid {
+                    return Err((STATUS_FORBIDDEN, "Character mismatch".to_string()));
+                }
             }
-            let sys_id = extract_u64(msg, 2);
-            if sys_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
-            }
+            let sys_id = extract_required_u32(msg, 2, "solarsystem")?;
             if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
                 return Err((STATUS_NOT_FOUND, "No active stargate lock".to_string()));
             }
@@ -220,7 +255,7 @@ pub fn register_handlers(
         "eve.stargate.lock.api.GetRestrictedSystemsRequest",
         Arc::new(move |_ctx, _any, _msg| {
             let mut out = Vec::new();
-            encode_id_msg(1, ZARZAKH_SOLAR_SYSTEM_ID, &mut out);
+            encode_id_msg(1, u64::from(ZARZAKH_SOLAR_SYSTEM_ID), &mut out);
             Ok(any("eve.stargate.lock.api.GetRestrictedSystemsResponse", out))
         }),
     );
@@ -230,15 +265,13 @@ pub fn register_handlers(
         "eve.stargate.lock.api.ValidateJumpRequest",
         Arc::new(move |ctx, _any, msg| {
             let cid = active_char_id(ctx)?;
-            let req_cid = extract_u64(msg, 1);
-            if req_cid != 0 && req_cid != cid as u64 {
-                return Err((STATUS_FORBIDDEN, "Character mismatch".to_string()));
+            if let Some(req_cid) = extract_u64_checked(msg, 1)? {
+                if req_cid != 0 && req_cid != cid {
+                    return Err((STATUS_FORBIDDEN, "Character mismatch".to_string()));
+                }
             }
-            let sys_id = extract_u64(msg, 2);
-            let gate_id = extract_u64(msg, 3);
-            if sys_id == 0 || gate_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing solarsystem or gate".to_string()));
-            }
+            let sys_id = extract_required_u32(msg, 2, "solarsystem")?;
+            let gate_id = extract_required_u64(msg, 3, "gate")?;
             let mut out = Vec::new();
             if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
                 encode_varint_field(1, 1, &mut out);
@@ -272,16 +305,13 @@ pub fn register_handlers(
         "eve.stargate.lock.api.DeleteCommanded",
         Arc::new(move |ctx, _any, msg| {
             require_admin_role(ctx)?;
-            let cid = extract_u64(msg, 2);
-            let sys_id = extract_u64(msg, 3);
-            if cid == 0 || sys_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing character or solarsystem".to_string()));
-            }
+            let cid = extract_required_i64(msg, 2, "character")?;
+            let sys_id = extract_required_u32(msg, 3, "solarsystem")?;
             if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
                 return Err((STATUS_NOT_FOUND, "Stargate lock not found".to_string()));
             }
             let removed = db_gl4.with_mut_snapshot(|snap| {
-                snap.zarzakh_gate_locks.remove(&(cid as i64)).is_some()
+                snap.zarzakh_gate_locks.remove(&cid).is_some()
             });
             if !removed {
                 return Err((STATUS_NOT_FOUND, "Stargate lock not found".to_string()));
@@ -295,17 +325,14 @@ pub fn register_handlers(
     router.register_handler(
         "eve.sovereignty.api.GetClaimRequest",
         Arc::new(move |_ctx, _any, msg| {
-            let sys_id = extract_u64(msg, 1);
-            if sys_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing solar_system".to_string()));
-            }
+            let sys_id = extract_required_u32(msg, 1, "solar_system")?;
             let claim = db_sov1.with_snapshot(|snap| {
                 snap.system_states
-                    .get(&(sys_id as u32))
+                    .get(&sys_id)
                     .and_then(|st| st.sov_alliance_id)
                     .map(|alliance_id| {
                         let hub = snap.structures.values().find(|s| {
-                            s.solar_system_id == sys_id as u32
+                            s.solar_system_id == sys_id
                                 && snap.sov_runtime.sov_hubs.contains_key(&s.structure_id)
                         });
                         let hub_id = hub.map(|s| s.structure_id as u64).unwrap_or(0);
@@ -387,16 +414,13 @@ pub fn register_handlers(
     router.register_handler(
         "eve.sovereignty.activitydefensemodifier.api.GetLevelRequest",
         Arc::new(move |_ctx, _any, msg| {
-            let sys_id = extract_u64(msg, 1);
-            if sys_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
-            }
-            if !sde_adm.solar_systems.contains_key(&(sys_id as u32)) {
+            let sys_id = extract_required_u32(msg, 1, "solarsystem")?;
+            if !sde_adm.solar_systems.contains_key(&sys_id) {
                 return Err((STATUS_NOT_FOUND, "Solar system not found".to_string()));
             }
             let level = db_adm.with_snapshot(|snap| {
                 snap.system_states
-                    .get(&(sys_id as u32))
+                    .get(&sys_id)
                     .map(|st| {
                         let adm = crate::services::sov_services::calculate_adm(
                             st.military_index,

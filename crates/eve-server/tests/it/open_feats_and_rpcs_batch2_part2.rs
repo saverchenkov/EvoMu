@@ -640,3 +640,37 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
         "wallet balance must increase by net mission ISK + bonus after corp tax"
     );
 }
+
+#[tokio::test]
+async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
+    // parity: feat:navigation.jump-fatigue-formula
+    let ctx = ServerContext::new();
+    ctx.seed_demo_world_fixtures();
+    // 1. Verify -90% hull classes including Industrial Command Ships (group 941: Orca 28606, Porpoise 42244)
+    // and -75% Black Ops (Panther 22428) vs 0% combat/covert self-jump
+    for tid in [28606_u32, 42244, 670, 672, 648, 12729, 12753, 20185, 28846, 28352] {
+        let bonus = eve_server::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(&ctx, tid);
+        assert!((bonus - 0.90).abs() < 1e-6, "type {tid} must have -90% fatigue reduction, got {bonus}");
+    }
+    assert!((eve_server::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(&ctx, 22428) - 0.75).abs() < 1e-6);
+
+    // 2. Partial real-time + offline decay on fleet-cyno/bridge path (relocate_ship) & 5h/30m caps
+    let char_id = 90_000_001_i64;
+    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
+    let (cd1, fat1) = eve_server::services::fitting::fitting_cyno_portal::relocate_ship(&ctx, char_id, ship_id, 30_000_142, 30_000_204, glam::DVec3::ZERO, 5.0, 1.0).await.expect("jump 1");
+    assert!((cd1 - 6.0).abs() < 1e-6 && (fat1 - 60.0).abs() < 1e-6);
+    // Advance 600s (10 min) simulating offline/real-time decay -> remaining fatigue = 50 min, next 5 LY jump = 50 * 6 = 300 min (5h cap)
+    ctx.advance_time_seconds(600);
+    let (cd2, fat2) = eve_server::services::fitting::fitting_cyno_portal::relocate_ship(&ctx, char_id, ship_id, 30_000_204, 30_000_142, glam::DVec3::ZERO, 5.0, 1.0).await.expect("jump 2");
+    assert!((cd2 - 6.0).abs() < 1e-6 && (fat2 - 300.0).abs() < 1e-6, "post-decay jump must use decayed 50m -> 300m, got {fat2}");
+    // Advance 1800s (30 min past cooldown, 270 min fatigue remaining) -> next jump cooldown = 270/10 = 27m, fatigue capped at 300m
+    ctx.advance_time_seconds(1_800);
+    let (cd3, fat3) = eve_server::services::fitting::fitting_cyno_portal::relocate_ship(&ctx, char_id, ship_id, 30_000_142, 30_000_204, glam::DVec3::ZERO, 5.0, 1.0).await.expect("jump 3");
+    assert!((cd3 - 27.0).abs() < 1e-6 && (fat3 - 300.0).abs() < 1e-6, "cooldown must reflect decayed 270m/10 = 27m, got {cd3}");
+
+    // 3. Black Ops covert bridge (-75%) vs Titan bridge (0% for non-industrial, -90% for Industrial Command Ship)
+    let (_, fat_blops_bridge) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 8.0, 0.75);
+    let (_, fat_titan_bridge) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 8.0, 0.0);
+    let (_, fat_orca_bridge) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 8.0, 0.90);
+    assert!((fat_blops_bridge - 30.0).abs() < 1e-6 && (fat_titan_bridge - 90.0).abs() < 1e-6 && (fat_orca_bridge - 18.0).abs() < 1e-6);
+}
