@@ -524,15 +524,9 @@ pub fn handle_structure_compression_mgr(
                         ),
                     });
                 }
-                let now_u = ctx.now_unix();
-                let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-                if !crate::services::station_structure::structure_upwell_ops::apply_pending_profile_applications(&mut ext, now_u).is_empty() {
-                    crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
-                }
-                let comp_acl_ok = crate::services::station_structure_handlers::resolve_character_service_tax_bps(snap, &ext, structure_id, char_id, 3, 0).is_some();
                 if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                    snap, structure_id, char_id, now_u,
-                ) || !comp_acl_ok {
+                    snap, structure_id, char_id,
+                ) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: format!(
@@ -722,15 +716,9 @@ pub fn handle_structure_compression_mgr(
                         ),
                     });
                 }
-                let now_u = ctx.now_unix();
-                let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-                if !crate::services::station_structure::structure_upwell_ops::apply_pending_profile_applications(&mut ext, now_u).is_empty() {
-                    crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
-                }
-                let comp_acl_ok = crate::services::station_structure_handlers::resolve_character_service_tax_bps(snap, &ext, structure_id, char_id, 3, 0).is_some();
                 if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                    snap, structure_id, char_id, now_u,
-                ) || !comp_acl_ok {
+                    snap, structure_id, char_id,
+                ) {
                     return Err(BridgeRpcError {
                         code: "AccessDenied".into(),
                         message: format!(

@@ -122,6 +122,10 @@ async fn test_b36_progression_notifications() {
     let (&real_op, &client_task) = op_defs
         .op_tasks
         .iter()
+        .filter(|(oid, _)| {
+            op_defs.op_prerequisites.get(oid).is_none_or(|p| p.is_empty())
+                && op_defs.op_tree_parents.get(oid).is_none_or(|p| p.is_empty())
+        })
         .find_map(|(op, ts)| {
             ts.iter()
                 .find(|t| op_defs.client_completable_tasks.contains(t))

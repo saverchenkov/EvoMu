@@ -193,28 +193,36 @@ pub fn handle_industry_jobs(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);
-                if snap.structures.contains_key(&station_id) {
-                    let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
-                    if !crate::services::station_structure::structure_upwell_ops::apply_pending_profile_applications(&mut ext, now_unix).is_empty() {
-                        crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
-                    }
-                    let ind_svc_id = match activity_id { 1 => 4, 3 | 4 | 5 => 5, 8 => 6, 9 => 7, _ => 4 };
-                    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(snap, station_id, char_id, now_unix)
-                        || crate::services::station_structure_handlers::resolve_character_service_tax_bps(snap, &ext, station_id, char_id, ind_svc_id, 0).is_none()
-                    {
-                        return Err(BridgeRpcError { code: "IndustryServiceAccessDenied".into(), message: format!("Character {char_id} is denied industry service access on structure {station_id}") });
-                    }
-                }
-                let is_alpha_clone = snap.characters.get(&char_id).is_some_and(|ch| ch.clone_grade <= 1);
+                let is_alpha_clone = snap
+                    .characters
+                    .get(&char_id)
+                    .is_some_and(|ch| ch.clone_grade <= 1);
                 let (fac_type_id, _, fac_sys_id, _, mat_mod, time_mod, _) =
-                    resolve_facility_modifiers_and_system(ctx, snap, station_id).unwrap_or((1529, 1000035, 30000142, 10000002, 1.0, 1.0, 1.0));
+                    resolve_facility_modifiers_and_system(ctx, snap, station_id).unwrap_or((
+                        1529, 1000035, 30000142, 10000002, 1.0, 1.0, 1.0,
+                    ));
                 if activity_id == 9 {
                     if !matches!(fac_type_id, 35835 | 35836) {
-                        return Err(BridgeRpcError { code: "FacilityDoesNotSupportReactions".into(), message: format!("Facility {station_id} (type {fac_type_id}) does not support Reactions (requires Athanor 35835 or Tatara 35836)") });
+                        return Err(BridgeRpcError {
+                            code: "FacilityDoesNotSupportReactions".into(),
+                            message: format!(
+                                "Facility {station_id} (type {fac_type_id}) does not support Reactions (requires Athanor 35835 or Tatara 35836)"
+                            ),
+                        });
                     }
-                    let fac_sec = ctx.sde.solar_systems.get(&fac_sys_id).map(|s| s.security_status).unwrap_or(1.0);
+                    let fac_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&fac_sys_id)
+                        .map(|s| s.security_status)
+                        .unwrap_or(1.0);
                     if fac_sec >= 0.45 {
-                        return Err(BridgeRpcError { code: "ReactionsForbiddenInHighSec".into(), message: format!("Reactions cannot be run in high-sec (system {fac_sys_id} sec {fac_sec:.2} >= 0.45)") });
+                        return Err(BridgeRpcError {
+                            code: "ReactionsForbiddenInHighSec".into(),
+                            message: format!(
+                                "Reactions cannot be run in high-sec (system {fac_sys_id} sec {fac_sec:.2} >= 0.45)"
+                            ),
+                        });
                     }
                     let react_prod_tid = bp.activities.get("reaction").or_else(|| bp.activities.get("9"))
                         .and_then(|a| a.products.first()).map(|p| p.type_id).unwrap_or(bp.product_type_id);

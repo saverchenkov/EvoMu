@@ -180,14 +180,38 @@ async fn notify_batch8_operations_npe_and_client_node_graphs() {
 
     // 4. Discover a real operation with tasks from SDE -> activate & skip_task -> OnOperationTaskSkipped
     let op_defs = get_operation_defs(&ctx.sde);
+    let is_skippable = |tid: i64| {
+        op_defs.task_is_client_skippable.contains(&tid) || op_defs.task_is_optional.contains(&tid)
+    };
     let (&op_id, tasks) = op_defs
         .op_tasks
         .iter()
-        .find(|(_, ts)| ts.len() >= 2 && op_defs.client_completable_tasks.contains(&ts[0]))
+        .find(|(id, ts)| {
+            ts.len() >= 2
+                && !op_defs.op_prerequisites.contains_key(*id)
+                && is_skippable(ts[0])
+        })
+        .or_else(|| {
+            op_defs
+                .op_tasks
+                .iter()
+                .find(|(_, ts)| ts.len() >= 2 && is_skippable(ts[0]))
+        })
+        .or_else(|| {
+            op_defs
+                .op_tasks
+                .iter()
+                .find(|(id, ts)| ts.len() >= 2 && !op_defs.op_prerequisites.contains_key(*id))
+        })
         .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| ts.len() >= 2))
         .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| !ts.is_empty()))
         .expect("at least one operation with tasks in SDE");
-    let cat_id = 1_i64;
+    let cat_id = op_defs
+        .op_default_category
+        .get(&op_id)
+        .copied()
+        .or_else(|| op_defs.sde_categories.iter().copied().next())
+        .unwrap_or(31);
     let first_task_id = tasks[0];
     let expected_next_task = tasks.get(1).copied().map(PyRep::Integer).unwrap_or(PyRep::None);
     if !op_defs.client_completable_tasks.contains(&first_task_id) {

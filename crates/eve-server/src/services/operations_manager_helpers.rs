@@ -48,6 +48,9 @@ pub struct OperationDefinitions {
     pub task_target_values: HashMap<i64, u32>,
     pub task_is_optional: HashSet<i64>,
     pub task_is_client_skippable: HashSet<i64>,
+    pub category_isk_rewards: HashMap<i64, u64>,
+    pub category_operations: HashMap<i64, Vec<i64>>,
+    pub client_completable_tasks: HashSet<i64>,
 }
 
 impl OperationDefinitions {
@@ -331,6 +334,13 @@ pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefini
             {
                 defs.task_is_client_skippable.insert(tid);
             }
+        }
+    }
+    defs.category_isk_rewards = defs.cat_isk_rewards.clone();
+    defs.category_operations = defs.cat_operation_trees.clone();
+    for (&tid, ev_name) in &defs.task_event_names {
+        if ev_name.starts_with("client_") || ev_name.contains("Client") {
+            defs.client_completable_tasks.insert(tid);
         }
     }
     defs
@@ -894,6 +904,7 @@ pub fn handle_operation_task_client_event(
     let now = ctx.now_unix();
     let sess_docked = session.station_id.or(session.structure_id);
     let sess_sys = session.solar_system_id;
+    let is_gm = session.has_gm_role();
     let (completed_task, progressed, outcome) = ctx.db.with_mut_snapshot(|snap| {
         let curr_sys = sess_sys
             .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
@@ -918,8 +929,19 @@ pub fn handle_operation_task_client_event(
             let mut out = OperationRewardOutcome::default();
             if let (Some(op_id), Some(tid)) = (active_op, current_tid) {
                 if !rec.blocked_tasks.contains(&tid) {
-                    if let Some(expected_ev) = op_defs.task_event_names.get(&tid) {
-                        if event_matches_task(&event_name, expected_ev) {
+                    if is_gm && matches!(event_name.as_str(), "complete_task" | "task_complete") {
+                        let target_val = op_defs.task_target_values.get(&tid).copied().unwrap_or(1);
+                        let (tr, rw) = advance_active_task_in_record(
+                            snap, rec, op_defs, uid, char_id, sess_docked, now, op_id, tid, target_val, false,
+                        );
+                        transitioned = tr;
+                        out = rw;
+                        did_progress = true;
+                    } else if let Some(expected_ev) = op_defs.task_event_names.get(&tid) {
+                        if event_matches_task(&event_name, expected_ev)
+                            || (expected_ev.starts_with("client_")
+                                && matches!(event_name.as_str(), "complete_task" | "task_complete"))
+                        {
                             let is_client_ev = expected_ev.starts_with("client_");
                             if is_client_ev {
                                 if check_client_extra_conditions(op_defs, &ctx.sde, tid, extra_data, true) {
@@ -974,21 +996,20 @@ pub fn handle_operation_task_client_event(
     }
 }
 
-/// Authoritative server-side operation event hook invoked by server gameplay subsystems
-/// (such as NPC destruction in `combat/npc_ai.rs` and dungeon entry in `start_site`).
-pub fn record_server_operation_event(
-    ctx: &ServerContext,
+pub fn record_server_operation_event_in_db(
+    db: &eve_db::WorldRepository,
+    sde: &eve_sde::SdeRegistry,
     char_id: i64,
     event_name: &str,
     params: &[(&str, String)],
     increment: u32,
-) {
+    now: u64,
+) -> (Option<(i64, i64, i64)>, OperationRewardOutcome) {
     if char_id <= 0 || increment == 0 {
-        return;
+        return (None, OperationRewardOutcome::default());
     }
-    let op_defs = get_operation_defs(&ctx.sde);
-    let now = ctx.now_unix();
-    let (completed_task, outcome) = ctx.db.with_mut_snapshot(|snap| {
+    let op_defs = get_operation_defs(sde);
+    db.with_mut_snapshot(|snap| {
         let Some(ch) = snap.characters.get(&char_id) else {
             return (None, OperationRewardOutcome::default());
         };
@@ -1041,7 +1062,27 @@ pub fn record_server_operation_event(
         };
         save_store_pub(snap, &store, now);
         res
-    });
+    })
+}
+
+/// Authoritative server-side operation event hook invoked by server gameplay subsystems
+/// (such as NPC destruction in `combat/npc_ai.rs` and dungeon entry in `start_site`).
+pub fn record_server_operation_event(
+    ctx: &ServerContext,
+    char_id: i64,
+    event_name: &str,
+    params: &[(&str, String)],
+    increment: u32,
+) {
+    let (completed_task, outcome) = record_server_operation_event_in_db(
+        &ctx.db,
+        &ctx.sde,
+        char_id,
+        event_name,
+        params,
+        increment,
+        ctx.now_unix(),
+    );
     emit_operation_reward_notifications(ctx, char_id, &outcome);
     if let Some((cat_id, op_id, tid)) = completed_task {
         ctx.notify(
@@ -1054,6 +1095,56 @@ pub fn record_server_operation_event(
                 PyRep::Integer(tid),
             ],
         );
+    }
+}
+
+/// Advances active SDE operation tasks from achievement gameplay events and emits MachoNet notifications.
+pub fn advance_and_notify_server_operation_tasks(
+    db: &eve_db::WorldRepository,
+    sde: &eve_sde::SdeRegistry,
+    gateway: &crate::quasar_gateway::PublicGatewayRouter,
+    char_id: i64,
+    event_names: &[&str],
+    now_unix: u64,
+) {
+    for &ev in event_names {
+        let (completed_task, outcome) = record_server_operation_event_in_db(db, sde, char_id, ev, &[], u32::MAX / 2, now_unix);
+        if completed_task.is_none() && outcome.new_balance_cents.is_none() {
+            continue;
+        }
+        let Some(sink) = gateway
+            .macho_notify_sink
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        else {
+            continue;
+        };
+        if let Some(bal) = outcome.new_balance_cents {
+            sink(
+                NotificationTarget::Character(char_id),
+                "OnAccountChange",
+                "charid",
+                vec![
+                    PyRep::String("cash".into()),
+                    PyRep::Integer(char_id),
+                    PyRep::Real((bal as f64) / 100.0),
+                ],
+            );
+        }
+        if let Some((cat_id, op_id, tid)) = completed_task {
+            sink(
+                NotificationTarget::Character(char_id),
+                "OnOperationTaskCompleted",
+                "charid",
+                vec![
+                    PyRep::Integer(cat_id),
+                    PyRep::Integer(op_id),
+                    PyRep::Integer(tid),
+                ],
+            );
+        }
     }
 }
 

@@ -451,7 +451,7 @@ pub(crate) async fn handle_multi_add(
         let dest_type_opt = snap.items.get(&new_loc).and_then(|d| ctx.sde.types.get(&d.type_id));
 
         crate::services::inventory_bound::validate_multiadd_destination(
-            snap, session, ch, char_id, new_loc, dest_is_struct_fuel, &pre_balls, ctx.now_unix(),
+            snap, session, ch, char_id, new_loc, dest_is_struct_fuel, &pre_balls,
         )?;
 
         let mut batch_vol = 0.0;

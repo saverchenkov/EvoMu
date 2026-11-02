@@ -32,8 +32,8 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    // Upwell lifecycle timers and delayed profile applications are evaluated lazily before structure RPCs.
-    if service.starts_with("structure") || service == "ownerGroupManager" {
+    // Upwell lifecycle timers are evaluated lazily before any structure RPC is served.
+    if service.starts_with("structure") {
         structure_lifecycle::sync_all_structures(ctx);
     }
     match (service, method) {
@@ -523,7 +523,6 @@ pub async fn handle(
             }
             let invuln_end_ft = ctx.now_blueos_filetime_ticks() + 300_000_000;
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["undockFromStation"], 1, ctx.now_unix(), &ctx.quasar_gateway);
-            crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, "undockFromStation", &[], 1);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnInvulunOnUndockingUpdated",

@@ -1295,3 +1295,69 @@ pub async fn check_deadspace_mwd_disallowed(
     }
     Ok(())
 }
+
+pub fn register_sde_operation_dungeon_instance(
+    ctx: &ServerContext,
+    owner_char_id: i64,
+    sys_id: u32,
+    dungeon_id: u32,
+) -> i64 {
+    let base_pos = [0.0, 0.0, 0.0];
+    let existing = with_dungeon_runtime_store(ctx, |store| {
+        store.instances.values().find_map(|inst| {
+            (!inst.completed
+                && !inst.despawned
+                && inst.solar_system_id == sys_id
+                && inst.dungeon_id == dungeon_id)
+                .then_some(inst.instance_id)
+        })
+    });
+    if let Some(inst_id) = existing {
+        return inst_id;
+    }
+    let sde_dungeon = ctx.sde.dungeons.get(&dungeon_id);
+    let dungeon_name = sde_dungeon
+        .map(|d| d.name.trim().to_string())
+        .unwrap_or_else(|| format!("Operation Dungeon {dungeon_id}"));
+    let disallow_mwd = sde_dungeon.is_some_and(|d| matches!(d.archetype_id, Some(3 | 4 | 6 | 8 | 24 | 51)));
+    let rooms = build_sde_deadspace_rooms(ctx, sys_id, dungeon_id, &dungeon_name, base_pos, false);
+    let total_rooms = rooms.len().max(1) as u8;
+    let room_id = rooms.first().map(|r| r.room_id).unwrap_or(i64::from(dungeon_id) * 100 + 1);
+    let now = ctx.now_unix();
+    let inst_id = with_dungeon_runtime_store(ctx, |store| {
+        let id = store.next_instance_id;
+        store.next_instance_id += 1;
+        store.instances.insert(
+            id,
+            DungeonRuntimeInstance {
+                instance_id: id,
+                dungeon_id,
+                dungeon_name: dungeon_name.clone(),
+                category: "Operation".to_string(),
+                archetype: dungeon_name.clone(),
+                solar_system_id: sys_id,
+                owner_char_id,
+                base_position: base_pos,
+                disallow_mwd,
+                entry_gate_ball_id: None,
+                entry_gate_pos: None,
+                entry_gate_locked: false,
+                current_room_index: 1,
+                rooms,
+                completed: false,
+                despawned: false,
+                created_unix: now,
+                active_objective_id: 0,
+                completed_task_ids: Vec::new(),
+                last_completed_task_id: None,
+            },
+        );
+        id
+    });
+    let expiry_ft = unix_to_filetime_ticks(now.saturating_add(86_400));
+    emit_dungeon_progression_notifications(
+        ctx, owner_char_id, sys_id, "Operation", &dungeon_name, i64::from(dungeon_id),
+        inst_id, room_id, base_pos, 1, total_rooms, false, expiry_ft,
+    );
+    inst_id
+}

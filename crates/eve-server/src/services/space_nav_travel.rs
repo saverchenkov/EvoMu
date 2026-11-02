@@ -58,13 +58,11 @@ pub(crate) fn structure_access_allowed(
     char_id: i64,
     _char_corp_id: i64,
     st: &UpwellStructureRecord,
-    now_unix: u64,
 ) -> bool {
     crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
         snap,
         st.structure_id,
         char_id,
-        now_unix,
     )
 }
 
@@ -119,7 +117,7 @@ pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id
                     && crate::services::station_structure::structure_lifecycle::is_operational(&st.state)
                     && crate::services::station_structure::structure_lifecycle::power_state(ctx, snap, &ext, st, now)
                         != crate::services::station_structure::structure_lifecycle::PowerState::Abandoned
-                    && structure_access_allowed(snap, char_id, corp_id, st, now)
+                    && structure_access_allowed(snap, char_id, corp_id, st)
             })
             .filter_map(|st| {
                 let range = crate::services::station_structure::structure_lifecycle::tether_range_m(ctx, st.type_id);

@@ -576,7 +576,6 @@ pub(crate) fn validate_multiadd_destination(
     new_loc: i64,
     dest_is_struct_fuel: bool,
     pre_balls: &HashMap<i64, (glam::DVec3, f64)>,
-    now_unix: u64,
 ) -> Result<(), BridgeRpcError> {
     if !dest_is_struct_fuel {
         if let Some(st) = snap.structures.get(&new_loc) {
@@ -588,7 +587,7 @@ pub(crate) fn validate_multiadd_destination(
             }
             if st.owner_corp_id != ch.corporation_id
                 && !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                    snap, new_loc, char_id, now_unix,
+                    snap, new_loc, char_id,
                 )
             {
                 return Err(BridgeRpcError {

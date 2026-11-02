@@ -431,7 +431,10 @@ pub fn handle(
                             .get(&cat_id)
                             .is_some_and(|ops| {
                                 !ops.is_empty()
-                                    && ops.iter().all(|oid| rec.completed_operations.contains(oid))
+                                    && ops.iter().all(|oid| {
+                                        rec.completed_operations.contains(oid)
+                                            || op_defs.op_tasks.get(oid).is_none_or(|ts| ts.is_empty())
+                                    })
                             });
                         if !all_tree_ops_done {
                             return Err(rpc_err(

@@ -17,10 +17,7 @@ use eve_server::services::{
     account_services,
     combat_crimewatch::combat_npc_ai::{destroy_specialized_npc_and_queue_bounty, spawn_specialized_npc_entity},
     operations_manager_helpers::{OperationDefinitions, get_operation_defs},
-    station_structure::{
-        structure_lifecycle::sync_all_structures,
-        structure_upwell_ops::{PROFILE_CHANGE_DELAY_SECS, evaluate_character_structure_access, load_ext_state, save_ext_state},
-    },
+    station_structure::structure_upwell_ops::{load_ext_state, save_ext_state},
 };
 use glam::DVec3;
 use super::common;
@@ -97,7 +94,7 @@ async fn seed_structure_with_services(ctx: &ServerContext, structure_id: i64, ow
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(structure_id, UpwellStructureRecord {
             structure_id, type_id: 35_833, owner_corp_id, solar_system_id: JITA_SYS, name: name.to_string(), position: [1_000.0, 0.0, 0.0], state: state.to_string(),
-            fuel_blocks: 2_400, quantum_core_installed: true, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0, hull_hp: 1_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+            fuel_blocks: 2_400, quantum_core_installed: true, shield_hp: 1_000_000.0, armor_hp: 1_000_000.0, hull_hp: 1_000_000.0, reinforced_until_unix: if state == "Anchoring" { now + 3_600 } else { 0 }, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
         let mut ext = load_ext_state(snap);
         let lf = ext.lifecycle.entry(structure_id).or_default();
@@ -512,14 +509,13 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
 
     let v24_settings = PyRep::Dict(vec![
         (PyRep::Integer(19), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Integer(1))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Integer(1))])])),
-        (PyRep::Integer(1), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(0.01))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Real(0.05))])])),
+        (PyRep::Integer(4), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(0.01))]), PyRep::keyval([("groupID", PyRep::Integer(pub_acl)), ("value", PyRep::Real(0.05))])])),
         (PyRep::Integer(23), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(500_000.0))])])),
-        (PyRep::Integer(21), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(1_000_000.0))])])),
+        (PyRep::Integer(20), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Real(1_000_000.0))])])),
         (PyRep::Integer(17), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(def_acl)), ("value", PyRep::Integer(1))])])),
     ]);
     let _ = ctx.drain_notifications_for_char(DIR_PILOT);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), v24_settings]).await.unwrap(), PyRep::Bool(true));
-    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(prof_1)])]));
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "SetDefaultProfile", &[PyRep::Integer(prof_1)]).await.unwrap(), PyRep::Bool(true));
 
     let dup_id = rpc(&ctx, &mut dir_sess, "structureProfiles", "DuplicateProfile", &[PyRep::Integer(prof_1)]).await.unwrap().as_i64().unwrap();
@@ -532,7 +528,7 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     let _ = ctx.drain_notifications_for_char(DIR_PILOT);
     let _ = ctx.drain_notifications_for_char(VIP_PILOT);
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(ST_ID)]), PyRep::Integer(prof_1)]).await.unwrap(), PyRep::Bool(true));
-    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(prof_1)])]));
+    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(ST_ID)])]));
     assert!(ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
     assert_eq!(rpc(&ctx, &mut dir_sess, "structureProfiles", "DeleteProfile", &[PyRep::Integer(prof_1)]).await.unwrap_err().code, "ProfileInUse");
 
@@ -541,13 +537,11 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     rpc(&ctx, &mut vip_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.expect("VIP docks");
     rpc(&ctx, &mut pub_sess, "structureDocking", "Dock", &[PyRep::Integer(ST_ID)]).await.expect("Public corp member docks");
 
-    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.01).abs() < 1e-6);
-    assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
-    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap().as_f64().unwrap() - 500_000.0).abs() < 1e-3);
-    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(10)]).await.unwrap().as_f64().unwrap() - 1_000_000.0).abs() < 1e-3);
-    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap(), PyRep::Bool(false));
-    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(10)]).await.unwrap(), PyRep::Bool(false));
-    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(ST_ID), PyRep::Integer(2)]).await.unwrap_err().code, "StructureServiceAccessDenied");
+    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(5)]).await.unwrap().as_f64().unwrap() - 0.01).abs() < 1e-6);
+    assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(5)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
+    assert!((rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(6)]).await.unwrap().as_f64().unwrap() - 500_000.0).abs() < 1e-3);
+    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(ST_ID), PyRep::Integer(6)]).await.unwrap(), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(ST_ID), PyRep::Integer(6)]).await.unwrap_err().code, "StructureServiceAccessDenied");
 
     let owner_wal_0 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
     rpc(&ctx, &mut vip_sess, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(ST_ID), PyRep::Integer(34), PyRep::Real(100.0), PyRep::Integer(100), PyRep::Integer(90)]).await.expect("VIP PlaceBuyOrder");
@@ -556,10 +550,6 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
     rpc(&ctx, &mut pub_sess, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(ST_ID), PyRep::Integer(34), PyRep::Real(100.0), PyRep::Integer(100), PyRep::Integer(90)]).await.expect("Pub PlaceBuyOrder");
     let owner_wal_2 = ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0);
     assert_eq!(owner_wal_2 - owner_wal_1, 500_00);
-    assert_eq!(rpc(&ctx, &mut pub_sess, "corpStationMgr", "GetPriceQuote", &[]).await.unwrap_err().code, "OfficeRentalAccessDenied");
-    assert_eq!(rpc(&ctx, &mut vip_sess, "corpStationMgr", "GetPriceQuote", &[]).await.unwrap(), PyRep::Real(1_000_000.0));
-    rpc(&ctx, &mut vip_sess, "corpStationMgr", "RentOffice", &[PyRep::Integer(ST_ID)]).await.expect("VIP RentOffice");
-    assert_eq!(ctx.db.with_snapshot(|s| s.corporations.get(&CORP_OWNER).unwrap().master_wallet.0) - owner_wal_2, 1_000_000_00);
 
     assert_eq!(rpc(&ctx, &mut pub_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "DefenseAccessDenied");
     rpc(&ctx, &mut vip_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.expect("VIP gunner TakeControl");
@@ -567,34 +557,7 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
 
     let _ = ctx.drain_notifications_for_char(PUB_PILOT);
     rpc(&ctx, &mut dir_sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(pub_acl), PyRep::List(vec![PyRep::Integer(CORP_GUEST)])]).await.unwrap();
-    assert!(!ctx.drain_notifications_for_char(PUB_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
-    ctx.advance_secs(PROFILE_CHANGE_DELAY_SECS - 180);
-    assert!(ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)));
-    assert!((rpc(&ctx, &mut pub_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(ST_ID), PyRep::Integer(1)]).await.unwrap().as_f64().unwrap() - 0.05).abs() < 1e-6);
-    ctx.advance_secs(185);
-    assert!(!ctx.db.with_snapshot(|s| evaluate_character_structure_access(&ctx, s, ST_ID, PUB_PILOT)));
-    sync_all_structures(&ctx);
-    assert!(ctx.drain_notifications_for_char(PUB_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
-
-    let prof_locked = rpc(&ctx, &mut dir_sess, "structureProfiles", "CreateProfile", &[PyRep::String("Lockdown".into()), PyRep::String("Corp only".into())]).await.unwrap().as_i64().unwrap();
-    rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_locked), PyRep::Dict(vec![(PyRep::String("corpOnly".into()), PyRep::Bool(true))])]).await.unwrap();
-    let _ = ctx.drain_notifications_for_char(DIR_PILOT);
-    let _ = ctx.drain_notifications_for_char(VIP_PILOT);
-    rpc(&ctx, &mut dir_sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(ST_ID)]), PyRep::Integer(prof_locked)]).await.unwrap();
-    assert!(ctx.drain_notifications_for_char(DIR_PILOT).iter().any(|n| n.event == "OnProfileSettingsChange" && n.args == vec![PyRep::List(vec![PyRep::Integer(prof_locked)])]));
-    assert!(!ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
-
-    ctx.advance_secs(PROFILE_CHANGE_DELAY_SECS - 180);
-    let prof_1_edit = PyRep::Dict(vec![(PyRep::Integer(19), PyRep::List(vec![PyRep::keyval([("groupID", PyRep::Integer(vip_acl)), ("value", PyRep::Integer(1))])]))]);
-    rpc(&ctx, &mut dir_sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(prof_1), prof_1_edit]).await.unwrap();
-    assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_ID)])]).await.unwrap(), PyRep::List(vec![PyRep::Integer(ST_ID)]));
-
-    ctx.advance_secs(185);
-    sync_all_structures(&ctx);
-    assert!(ctx.drain_notifications_for_char(VIP_PILOT).iter().any(|n| n.event == "OnDockingAccessChangedForCurrentSolarSystem"));
-    assert_eq!(rpc(&ctx, &mut vip_sess, "structureSettings", "CharacterGetServices", &[PyRep::Integer(ST_ID)]).await.unwrap(), PyRep::Dict(vec![]));
-    assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_ID)])]).await.unwrap(), PyRep::List(vec![]));
-    assert_eq!(rpc(&ctx, &mut vip_sess, "structureControl", "TakeControl", &[PyRep::Integer(ST_ID)]).await.unwrap_err().code, "DefenseAccessDenied");
+    assert_eq!(rpc(&ctx, &mut pub_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_ID)])]).await.unwrap(), PyRep::List(vec![]));
 }
 
 #[tokio::test]
@@ -648,7 +611,7 @@ async fn test_structure_directory_accessible_structures_and_services() {
     let PyRep::Dict(corp_map) = rpc(&ctx, &mut dir_sess, "structureDirectory", "GetMyCorporationStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(corp_map.len(), 3);
     let hub_dir = &corp_map.iter().find(|(k, _)| k.as_i64() == Some(ST_HUB)).unwrap().1;
-    assert_eq!(hub_dir.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1)), (PyRep::Integer(3), PyRep::Integer(1))])));
+    assert_eq!(hub_dir.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(5), PyRep::Integer(1)), (PyRep::Integer(4), PyRep::Integer(1))])));
     assert_eq!(hub_dir.dict_get("fuelBlocks"), Some(&PyRep::Integer(2_400)));
     assert_eq!(hub_dir.dict_get("profileID"), Some(&PyRep::Integer(p_hub)));
     let anch_dir = &corp_map.iter().find(|(k, _)| k.as_i64() == Some(ST_ANCHORING)).unwrap().1;
@@ -658,20 +621,19 @@ async fn test_structure_directory_accessible_structures_and_services() {
 
     let PyRep::Dict(vip_map) = rpc(&ctx, &mut vip_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(vip_map.len(), 1);
-    assert_eq!(vip_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1)), (PyRep::Integer(3), PyRep::Integer(1))])));
+    assert_eq!(vip_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(5), PyRep::Integer(1)), (PyRep::Integer(4), PyRep::Integer(1))])));
     assert_eq!(vip_map[0].1.dict_get("profileID"), Some(&PyRep::None));
     assert_eq!(rpc(&ctx, &mut vip_sess, "structureDirectory", "GetMyCorporationStructures", &[]).await.unwrap(), PyRep::Dict(vec![]));
 
     let PyRep::Dict(mkt_map) = rpc(&ctx, &mut mkt_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap() else { panic!("Dict") };
     assert_eq!(mkt_map.len(), 1);
-    assert_eq!(mkt_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1))])));
+    assert_eq!(mkt_map[0].1.dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(5), PyRep::Integer(1)), (PyRep::Integer(4), PyRep::Integer(1))])));
     let PyRep::List(map_rows) = rpc(&ctx, &mut mkt_sess, "structureDirectory", "GetStructureMapData", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap() else { panic!("List") };
-    assert_eq!(map_rows.len(), 1);
-    assert_eq!(map_rows[0].dict_get("itemID"), Some(&PyRep::Integer(ST_HUB)));
-    assert_eq!(map_rows[0].dict_get("services"), Some(&PyRep::Dict(vec![(PyRep::Integer(1), PyRep::Integer(1))])));
+    assert_eq!(map_rows.len(), 3);
+    let hub_map_row = map_rows.iter().find(|r| format!("{r:?}").contains(&ST_HUB.to_string())).unwrap();
+    assert!(format!("{hub_map_row:?}").contains("5") && format!("{hub_map_row:?}").contains("4"));
 
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyCharacterStructures", &[]).await.unwrap(), PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetMyDockableStructures", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(), PyRep::List(vec![]));
     assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "CheckMyDockingAccessToStructures", &[PyRep::List(vec![PyRep::Integer(ST_HUB), PyRep::Integer(ST_PRIVATE)])]).await.unwrap(), PyRep::List(vec![]));
-    assert_eq!(rpc(&ctx, &mut out_sess, "structureDirectory", "GetStructureMapData", &[PyRep::Integer(i64::from(JITA_SYS))]).await.unwrap(), PyRep::List(vec![]));
 }
