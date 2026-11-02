@@ -508,6 +508,12 @@ async fn light_cyno(
     if sys_id == 30_100_000 {
         return Err(err("CynoDisallowedInZarzakh", "Cynosural fields cannot be lit in Zarzakh"));
     }
+    if is_ship_cyno_active(ctx, ship_id) {
+        return Err(err(
+            "CannotLightCynoInSystem",
+            "A cynosural field is already active on this ship",
+        ));
+    }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Active ship type unknown"))?;
     if !hull_allowed(ctx, mod_type, ship_type) {
@@ -592,9 +598,7 @@ async fn light_cyno(
             ));
         }
     }
-    let fuel_qty = if is_covert {
-        0
-    } else {
+    let fuel_qty = {
         let raw_base = type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY);
         let role_mult = if ship_type.effect_ids.contains(&3526) {
             (1.0 + type_attr(ctx, ship_type, 1296) / 100.0).max(0.0)
@@ -604,6 +608,8 @@ async fn light_cyno(
         let cft_mult = 1.0 - 0.10 * (cft_lvl.min(5) as f64);
         let min_floor = if type_attr(ctx, mod_type, ATTR_IS_INDUSTRIAL_CYNO) > 0.0 {
             400.0
+        } else if role_mult == 0.0 {
+            0.0
         } else {
             1.0
         };

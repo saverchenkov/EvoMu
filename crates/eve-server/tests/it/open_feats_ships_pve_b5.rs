@@ -194,8 +194,6 @@ async fn put_in_space(
 
 #[tokio::test]
 async fn test_blockade_runner_cargo_scan_immunity_and_frigate_escape_bay() {
-    // parity: feat:ships.blockade-runner-cargo-scan-immunity
-    // parity: feat:ships.frigate-escape-bay
     let ctx = new_ctx();
     let mut s1 = setup_pilot(&ctx, PILOT_1).await;
     let mut s2 = setup_pilot(&ctx, PILOT_2).await;
@@ -334,8 +332,6 @@ async fn test_blockade_runner_cargo_scan_immunity_and_frigate_escape_bay() {
 
 #[tokio::test]
 async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
-    // parity: feat:ships.cynosural-beacon-spawning
-    // parity: feat:ships.covert-cyno-beacon
     let ctx = new_ctx();
     let mut s1 = setup_pilot(&ctx, PILOT_1).await;
     let mut s2 = setup_pilot(&ctx, PILOT_2).await;
@@ -403,8 +399,8 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
             .unwrap_or(0)
     });
     assert_eq!(
-        ozone_after_covert, 500,
-        "Covert Cyno must consume 0 Liquid Ozone in V24.01"
+        ozone_after_covert, 495,
+        "Falcon (-80% role bonus) with CFT V (-50%) consumes 5 Liquid Ozone (50 * 0.2 * 0.5)"
     );
 
     // Verify jump fatigue accumulation
@@ -416,12 +412,12 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
         }
     });
 
-    // Verify Titan Jump Portal generator bridge to standard cyno
-    let std_cyno_mod = 210_007;
+    // Verify concurrent cyno activation on the same ship is rejected
+    let dup_cyno_mod = 210_009;
     grant_skills(&ctx, PILOT_1, CYNO);
     seed_item(
         &ctx,
-        std_cyno_mod,
+        dup_cyno_mod,
         CYNO,
         PILOT_1,
         beacon_ship,
@@ -429,9 +425,58 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
         1,
     );
     ctx.db.with_mut_snapshot(|s| {
-        s.module_online_states.insert(std_cyno_mod, true);
+        s.module_online_states.insert(dup_cyno_mod, true);
     });
     ctx.invalidate_ship_fitting(beacon_ship);
+    let dup_err = rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(dup_cyno_mod),
+            PyRep::String("cynosuralGeneration".into()),
+        ],
+    )
+    .await
+    .expect_err("concurrent cyno on same ship must be rejected");
+    assert_eq!(dup_err.code, "CannotLightCynoInSystem");
+
+    // Verify Titan Jump Portal generator bridge to standard cyno on a separate ship
+    let std_beacon_ship = 210_008;
+    let std_cyno_mod = 210_007;
+    put_in_space(
+        &ctx,
+        &mut s1,
+        PILOT_1,
+        std_beacon_ship,
+        FALCON,
+        lowsec_sys,
+        DVec3::new(5_000.0, 0.0, 0.0),
+    )
+    .await;
+    seed_item(
+        &ctx,
+        std_cyno_mod,
+        CYNO,
+        PILOT_1,
+        std_beacon_ship,
+        InventoryFlag::HiSlot0,
+        1,
+    );
+    seed_item(
+        &ctx,
+        210_010,
+        16_273,
+        PILOT_1,
+        std_beacon_ship,
+        InventoryFlag::Cargo,
+        500,
+    );
+    ctx.db.with_mut_snapshot(|s| {
+        s.module_online_states.insert(std_cyno_mod, true);
+    });
+    ctx.invalidate_ship_fitting(std_beacon_ship);
     let std_cyno_res = rpc(
         &ctx,
         &mut s1,
@@ -493,9 +538,6 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
 
 #[tokio::test]
 async fn test_rnd_research_agents_datacore_purchase_and_storyline_counter() {
-    // parity: feat:pve.research-agent-access-requirements
-    // parity: feat:pve.research-agent-rp-formula
-    // parity: feat:pve.datacore-purchase
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, PILOT_1).await;
     sess.station_id = Some(RND_STATION_ID);
