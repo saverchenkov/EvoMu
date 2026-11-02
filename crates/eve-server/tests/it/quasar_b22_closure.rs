@@ -315,7 +315,9 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     encode_string_field(2, "B22 Line", &mut save_req);
     let save_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", save_req).await;
     assert_eq!(save_rsp.status_code, STATUS_OK, "{}", save_rsp.status_message);
-    let draft_uuid = bytes_field(&sub(&wm(&save_rsp.payload.unwrap().value), 1), 1);
+    let save_wm = wm(&save_rsp.payload.unwrap().value);
+    let draft_uuid = bytes_field(&sub(&save_wm, 1), 1);
+    let skin_id_bytes = bytes_field(&sub(&save_wm, 2), 1);
 
     let mut other = sess(61_005, OTHER, 98_000_002, JITA, 0);
     let mut shared_req = id_req(1, PILOT as u64);
@@ -329,18 +331,27 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     let owner_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
     assert_eq!(owner_rsp.status_code, STATUS_OK);
 
-    // Mark draft shared; now OTHER can fetch it
-    {
-        let cos_state = eve_server::services::quasar_cosmetics_services::QuasarCosmeticsState::from_db(ctx.db.clone());
-        let mut cos_data = cos_state.data.write().unwrap();
-        if let Some(dmap) = cos_data.saved_drafts.get_mut(&(PILOT as u32)) {
-            for rec in dmap.values_mut() {
-                rec.shared = true;
-            }
-        }
-        drop(cos_data);
-        cos_state.sync_to_db();
-    }
+    // Non-owner cannot share PILOT's draft; owner shares via thirdparty.api.Shared, then OTHER can fetch it
+    let mut share_req = Vec::new();
+    encode_bytes_field(1, &skin_id_bytes, &mut share_req);
+    let non_owner_share = rpc(
+        &ctx,
+        &mut other,
+        "eve_public.cosmetic.ship.skin.thirdparty.api.Shared",
+        share_req.clone(),
+    )
+    .await;
+    assert_eq!(non_owner_share.status_code, STATUS_FORBIDDEN);
+
+    let owner_share = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.cosmetic.ship.skin.thirdparty.api.Shared",
+        share_req,
+    )
+    .await;
+    assert_eq!(owner_share.status_code, STATUS_OK, "{}", owner_share.status_message);
+
     let shared_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req).await;
     assert_eq!(shared_rsp.status_code, STATUS_OK, "{}", shared_rsp.status_message);
 

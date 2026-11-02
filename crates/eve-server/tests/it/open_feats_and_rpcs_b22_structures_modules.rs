@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::open_feats_and_rpcs_b22::{rpc, select_pilot, PILOT_1, PILOT_2};
+use crate::open_feats_and_rpcs_b22::{field, rpc, select_pilot, PILOT_1, PILOT_2};
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -301,6 +301,7 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
     let mod_left = 77_103_002_i64;
     let mod_center = 77_103_003_i64;
     let mod_right = 77_103_004_i64;
+    let mod_dist2 = 77_103_006_i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&PILOT_1) {
             c.station_id = None;
@@ -322,10 +323,11 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
             },
         );
         for (mid, flag, tid) in [
-            (mod_high, InventoryFlag::HiSlot0, 2873),    // 125mm Gatling AutoCannon I
-            (mod_left, InventoryFlag::MedSlot0, 3242),   // Warp Scrambler I
-            (mod_center, InventoryFlag::MedSlot1, 440),  // 5MN Microwarpdrive I
-            (mod_right, InventoryFlag::MedSlot2, 527),   // Stasis Webifier I
+            (mod_high, InventoryFlag::HiSlot0, 2873),    // 125mm Gatling AutoCannon I (flag 27, high rack)
+            (mod_left, InventoryFlag::MedSlot0, 3242),   // Warp Scrambler I (flag 19, dist 1)
+            (mod_center, InventoryFlag::MedSlot1, 440),  // 5MN Microwarpdrive I (flag 20, overloaded)
+            (mod_right, InventoryFlag::MedSlot2, 527),   // Stasis Webifier I (flag 21, dist 1)
+            (mod_dist2, InventoryFlag::MedSlot3, 399),   // Small Shield Booster I (flag 22, dist 2)
         ] {
             snap.items.insert(
                 mid,
@@ -378,7 +380,12 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(ship_id)])
         .await
         .expect("ShipOnlineModules");
-    let _ = rpc(
+    let base_max_vel = ctx
+        .get_or_rebuild_ship_fitting(PILOT_1, ship_id)
+        .expect("base fit")
+        .ship
+        .get_attribute(eve_dogma::attr_ids::MAX_VELOCITY, &ctx.sde);
+    let ovl_rsp = rpc(
         &ctx,
         &mut s1,
         "dogmaIM",
@@ -387,6 +394,18 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
     )
     .await
     .expect("dogmaIM.Overload");
+    let ovl_max_vel = match field(&ovl_rsp, "effectiveMaxVelocity") {
+        PyRep::Real(v) => v,
+        _ => ctx
+            .get_or_rebuild_ship_fitting(PILOT_1, ship_id)
+            .expect("overloaded fit")
+            .ship
+            .get_attribute(eve_dogma::attr_ids::MAX_VELOCITY, &ctx.sde),
+    };
+    assert!(
+        ovl_max_vel > base_max_vel * 1.2,
+        "Overloaded 5MN MWD must apply +50% propulsion speed overload bonus (base={base_max_vel}, ovl={ovl_max_vel})"
+    );
 
     // Step SystemActor across 4 MWD cycles (40s) so rack heat builds and propagates damage
     for _ in 0..4 {
@@ -394,7 +413,7 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
         jita_handle.step_manual(10.0).await.expect("step overheat cycle");
     }
 
-    let (med_heat, dmg_left, dmg_center, dmg_right, dmg_high) = ctx.db.with_snapshot(|snap| {
+    let (med_heat, dmg_left, dmg_center, dmg_right, dmg_dist2, dmg_high) = ctx.db.with_snapshot(|snap| {
         let mh = snap
             .transient_item_attributes
             .get(&ship_id)
@@ -404,32 +423,31 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
         let dl = snap.items.get(&mod_left).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         let dc = snap.items.get(&mod_center).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         let dr = snap.items.get(&mod_right).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
+        let d2 = snap.items.get(&mod_dist2).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         let dh = snap.items.get(&mod_high).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
-        (mh, dl, dc, dr, dh)
+        (mh, dl, dc, dr, d2, dh)
     });
-    assert!(med_heat > 0.0, "Mid rack heat (attr 1176) must increase on SystemActor cycle boundary");
+    let expected_heat = 1.0 - (-0.04_f64 * 40.0).exp();
+    assert!(
+        (med_heat - expected_heat).abs() < 1e-6,
+        "Mid rack heat (attr 1176) must match exponential formula 1 - exp(-0.04 * 40): got {med_heat}, expected {expected_heat}"
+    );
     assert!(dmg_center > 0.0, "Overloaded center MWD must take heat damage");
     assert!(dmg_left > 0.0 && dmg_right > 0.0, "Adjacent mid-rack modules must take propagated heat damage");
-    assert_eq!(dmg_high, 0.0, "Unheated high rack module must take 0 heat damage");
-
-    // Verify Thermodynamics level 4 reduces heat damage vs level 0
-    let mut fit_lvl4 = ctx.get_or_rebuild_ship_fitting(PILOT_1, ship_id).expect("fit lvl4");
-    let rep_lvl4 = eve_server::services::fitting_cycles_overheat::apply_overheat_cycle_to_fit(
-        &ctx, PILOT_1, &mut fit_lvl4, mod_center, 0.0,
-    )
-    .expect("heat report lvl4");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(sk) = snap.skills.get_mut(&PILOT_1) {
-            sk.remove(&28164);
-        }
-    });
-    let mut fit_lvl0 = ctx.get_or_rebuild_ship_fitting(PILOT_1, ship_id).expect("fit lvl0");
-    let rep_lvl0 = eve_server::services::fitting_cycles_overheat::apply_overheat_cycle_to_fit(
-        &ctx, PILOT_1, &mut fit_lvl0, mod_center, 0.0,
-    )
-    .expect("heat report lvl0");
+    assert!((dmg_left - dmg_right).abs() < 1e-9, "Symmetric distance-1 slots must take equal heat damage");
+    let expected_falloff = (-0.5_f64).exp();
     assert!(
-        rep_lvl4.module_damage < rep_lvl0.module_damage,
-        "Thermodynamics IV must reduce overheat damage vs Thermodynamics 0"
+        ((dmg_dist2 / dmg_right) - expected_falloff).abs() < 1e-6,
+        "Slot-distance 2 vs 1 heat damage ratio must equal exp(-0.5): got {}, expected {expected_falloff}",
+        dmg_dist2 / dmg_right
+    );
+    assert_eq!(dmg_high, 0.0, "Unheated high rack module must take 0 heat damage across rack boundary");
+
+    // Verify Thermodynamics level 4 gives exactly 0.8x heat damage vs level 0
+    let dmg_thermo4 = eve_dogma::thermodynamics::effective_heat_damage(19.0, 4);
+    let dmg_thermo0 = eve_dogma::thermodynamics::effective_heat_damage(19.0, 0);
+    assert!(
+        (dmg_thermo4 - 0.8 * dmg_thermo0).abs() < 1e-9,
+        "Thermodynamics IV must give exactly 0.8x overheat damage of level 0 (lvl4={dmg_thermo4}, lvl0={dmg_thermo0})"
     );
 }
