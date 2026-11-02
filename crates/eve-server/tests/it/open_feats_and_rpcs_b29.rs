@@ -118,6 +118,24 @@ async fn rpc(
         .unwrap_or_else(|e| panic!("{svc}.{method} failed: {} {}", e.code, e.message))
 }
 
+fn pyrep_contains_int(rep: &PyRep, target: i64) -> bool {
+    match rep {
+        PyRep::Integer(v) => *v == target,
+        PyRep::Tuple(items) | PyRep::List(items) => {
+            items.iter().any(|x| pyrep_contains_int(x, target))
+        }
+        PyRep::Dict(entries) => entries
+            .iter()
+            .any(|(k, v)| pyrep_contains_int(k, target) || pyrep_contains_int(v, target)),
+        PyRep::KeyVal(entries) => entries.iter().any(|(_, v)| pyrep_contains_int(v, target)),
+        PyRep::Rowset { rows, .. } => rows
+            .iter()
+            .any(|row| row.iter().any(|x| pyrep_contains_int(x, target))),
+        PyRep::Object { args, .. } => pyrep_contains_int(args, target),
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn test_b29_corp_governance_durability_and_persistence() {
     // parity: feat:lifecycle.corp-governance-durable
@@ -150,11 +168,15 @@ async fn test_b29_corp_governance_durability_and_persistence() {
         )
         .await;
         let corp_id = add_corp.dict_get("corporationID").and_then(|v| v.as_i64()).or_else(|| add_corp.as_i64()).unwrap();
-    eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_1);
+        eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT_1);
 
         let mut sess2 = login_select(&ctx, 9102, "other", "other-secret", PILOT_2).await;
         let app_res = rpc(&ctx, &mut sess2, "corpRegistry", "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Join".into())]).await;
-        let app_id = app_res.dict_get("applicationID").and_then(|v| v.as_i64()).unwrap_or(1);
+        let app_id = app_res
+            .dict_get("applicationID")
+            .and_then(|v| v.as_i64())
+            .or_else(|| app_res.as_i64())
+            .expect("applicationID");
         rpc(&ctx, &mut sess1, "corpRegistry", "UpdateApplicationOffer", &[PyRep::Integer(app_id), PyRep::String("Accepted".into())]).await;
 
         rpc(
@@ -178,7 +200,10 @@ async fn test_b29_corp_governance_durability_and_persistence() {
         )
         .await;
         let medal_res = rpc(&ctx, &mut sess1, "corporationSvc", "CreateMedal", &[PyRep::String("B29 Star".into()), PyRep::String("Awarded".into()), PyRep::List(vec![])]).await;
-        let medal_id = medal_res.as_i64().unwrap_or(1);
+        let medal_id = medal_res
+            .as_i64()
+            .or_else(|| medal_res.dict_get("medalID").and_then(|v| v.as_i64()))
+            .expect("medal_id");
         rpc(&ctx, &mut sess1, "corporationSvc", "GiveMedalToCharacters", &[PyRep::Integer(medal_id), PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::String("Service".into())]).await;
 
         let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
@@ -192,17 +217,28 @@ async fn test_b29_corp_governance_durability_and_persistence() {
     {
         let (ctx2, _clock2) = open_ctx(&db_path, t0 + 60);
         let mut sess1 = login_select(&ctx2, 9103, "demo", "demo-secret", PILOT_1).await;
+        let mut sess2 = login_select(&ctx2, 9104, "other", "other-secret", PILOT_2).await;
         let emp = rpc(&ctx2, &mut sess1, "corporationSvc", "GetEmploymentRecord", &[PyRep::Integer(PILOT_2)]).await;
-        assert!(!matches!(emp, PyRep::None));
+        assert!(pyrep_contains_int(&emp, corp_id), "GetEmploymentRecord must contain corp_id {corp_id}: {emp:?}");
         let audit = rpc(&ctx2, &mut sess1, "corpmgr", "AuditMember", &[PyRep::Integer(PILOT_2)]).await;
-        assert!(!matches!(audit, PyRep::None));
-        let medals = rpc(&ctx2, &mut sess1, "corporationSvc", "GetMedalsReceived", &[PyRep::Integer(PILOT_2)]).await;
-        assert!(!matches!(medals, PyRep::None));
+        assert!(
+            pyrep_contains_int(&audit, PILOT_2)
+                && pyrep_contains_int(&audit, (hangar_role | eve_db::corp_roles::ROLE_ACCOUNTANT) as i64),
+            "AuditMember must contain role change for PILOT_2: {audit:?}"
+        );
+        let medals = rpc(&ctx2, &mut sess2, "corporationSvc", "GetMedalsReceived", &[PyRep::Integer(PILOT_2)]).await;
+        assert!(
+            pyrep_contains_int(&medals, medal_id) && pyrep_contains_int(&medals, PILOT_2),
+            "GetMedalsReceived must contain medal_id {medal_id} for PILOT_2: {medals:?}"
+        );
         ctx2.db.with_snapshot(|snap| {
             let gov = snap.corp_governance.get(&corp_id).expect("corp_governance");
             assert_eq!(gov.titles.get(&1).map(|t| t.0.as_str()), Some("Quartermaster"));
             assert!(gov.pending_role_grants.contains_key(&PILOT_2));
             assert!(gov.medals.iter().any(|m| m.0 == medal_id));
+            assert!(gov.medal_recipients.iter().any(|r| r.0 == medal_id && r.1 == PILOT_2));
+            let corp = snap.corporations.get(&corp_id).expect("corp");
+            assert!(corp.members.contains(&PILOT_2));
         });
     }
     let _ = std::fs::remove_file(&db_path);
@@ -241,6 +277,15 @@ async fn test_b29_corp_invite_join_kick_quit_lifecycle() {
         ch3.name = "Third B29".into();
         ch3.station_id = Some(60_003_760);
         snap.characters.insert(PILOT_3, ch3);
+
+        // Place PILOT_2 in seeded player corp 98_000_001 so old-corp removal is unconditionally verified.
+        if let Some(ch2) = snap.characters.get_mut(&PILOT_2) {
+            ch2.corporation_id = 98_000_001;
+        }
+        if let Some(old_corp) = snap.corporations.get_mut(&98_000_001) {
+            old_corp.members.insert(PILOT_2);
+            old_corp.member_roles.insert(PILOT_2, 0);
+        }
     });
 
     let mut sess1 = login_select(&ctx, 9201, "demo", "demo-secret", PILOT_1).await;
@@ -269,9 +314,9 @@ async fn test_b29_corp_invite_join_kick_quit_lifecycle() {
     assert_eq!(sess2.corporation_id, Some(corp_id));
     ctx.db.with_snapshot(|s| {
         assert!(s.corporations[&corp_id].members.contains(&PILOT_2));
-        if let Some(old_c) = s.corporations.get(&old_corp_p2) {
-            assert!(!old_c.members.contains(&PILOT_2));
-        }
+        let old_c = s.corporations.get(&old_corp_p2).expect("old player corp in snapshot");
+        assert!(!old_c.members.contains(&PILOT_2));
+        assert!(!old_c.member_roles.contains_key(&PILOT_2));
     });
 
     ctx.drain_notifications_for_char(PILOT_2);
@@ -331,7 +376,22 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
         let (ctx2, _clock2) = open_ctx(&db_path, t0 + 30);
         let mut sess1 = login_select(&ctx2, 9302, "demo", "demo-secret", PILOT_1).await;
         let states = rpc(&ctx2, &mut sess1, "crimewatch", "GetClientStates", &[]).await;
-        assert!(!matches!(states, PyRep::None));
+        let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
+        if let PyRep::Tuple(top) = &states {
+            assert_eq!(top.len(), 4, "GetClientStates must return 4-tuple: {states:?}");
+            if let PyRep::Tuple(timers) = &top[0] {
+                assert_eq!(
+                    timers.get(3),
+                    Some(&PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(crim_exp))])),
+                    "criminal timer must report code 301 with original expiry"
+                );
+            } else {
+                panic!("expected timers tuple, got {:?}", top[0]);
+            }
+            assert_eq!(top[3], PyRep::Integer(0), "safety level 0 (Red) must persist across restart");
+        } else {
+            panic!("expected GetClientStates tuple, got {states:?}");
+        }
         ctx2.db.with_snapshot(|snap| {
             assert_eq!(snap.zarzakh_gate_locks.get(&PILOT_1), Some(&(30_100_001, t0 + 3600)));
         });
@@ -404,10 +464,19 @@ async fn test_b29_drones_and_fighters_space_lifecycle() {
         ctx.advance_secs(12);
         ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(60_003_760)], &kw, None).await.expect("Dock");
         ctx.dispatch_rpc(&mut f_sess, "stationSvc", None, "Dock", &[PyRep::Integer(60_003_760)], &kw, None).await.expect("Carrier Dock");
-        assert!(ctx.active_fighters.read().unwrap().values().all(|f| f.is_abandoned));
+        {
+            let fighters = ctx.active_fighters.read().unwrap();
+            assert!(!fighters.is_empty(), "active_fighters must not be empty");
+            assert!(fighters.values().all(|f| f.is_abandoned), "launched fighters must be abandoned on carrier dock");
+        }
 
         let _ = ctx.dispatch_rpc(&mut sess, "entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(drone_ball_1)])], &kw, None).await;
-        assert_eq!(ctx.db.get_item(drone_1).unwrap().location_id, sys_id as i64);
+        let d1_after_dock = ctx.db.get_item(drone_1).unwrap();
+        assert_eq!(d1_after_dock.location_id, sys_id as i64);
+        let d1_abandoned = eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+            rt.active_drones_in_space.get(&drone_ball_1).map(|d| d.is_abandoned)
+        });
+        assert_eq!(d1_abandoned, Some(true), "drone must be marked is_abandoned on dock");
         (pos, drone_ball_1)
     };
 
@@ -440,13 +509,18 @@ async fn test_b29_fleet_grace_invite_and_death_courier_lifecycle() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-    common::pin_clock(&ctx);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch3 = snap.characters.get(&PILOT_2).cloned().expect("PILOT_2");
+        ch3.character_id = PILOT_3;
+        ch3.name = "Offline Fleet Target".into();
+        snap.characters.insert(PILOT_3, ch3);
+    });
     let mut s1 = login_select(&ctx, 9501, "demo", "demo-secret", PILOT_1).await;
     let mut s2 = login_select(&ctx, 9502, "other", "other-secret", PILOT_2).await;
 
     let fid = rpc(&ctx, &mut s1, "fleetMgr", "CreateFleet", &[]).await.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
-    let offline_err = rpc_res(&ctx, &mut s1, "fleetObjectHandler", "Invite", &[PyRep::Integer(99_999_999), PyRep::None, PyRep::None, PyRep::Integer(4)]).await;
-    assert!(offline_err.is_err());
+    let offline_err = rpc_res(&ctx, &mut s1, "fleetObjectHandler", "Invite", &[PyRep::Integer(PILOT_3), PyRep::None, PyRep::None, PyRep::Integer(4)]).await;
+    assert!(offline_err.is_err(), "inviting an existing offline character must fail");
 
     rpc(&ctx, &mut s1, "fleetObjectHandler", "Invite", &[PyRep::Integer(PILOT_2), PyRep::None, PyRep::None, PyRep::Integer(4)]).await;
     ctx.advance_secs(FLEET_INVITE_EXPIRY_SECS + 5);
