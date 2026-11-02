@@ -48,31 +48,45 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
     });
 
     let kw = HashMap::new();
-    let res = ctx
+    let deploy_res = ctx
         .dispatch_rpc(
             &mut sess,
-            "abyssal_content_manager",
+            "abyssalMgr",
             None,
-            "ActivateAbyssalKey",
+            "AbyssalEntranceDeployment",
             &[PyRep::Integer(700_101)],
             &kw,
             None,
         )
         .await
-        .expect("ActivateAbyssalKey");
-    assert_eq!(dict_get(&res, "suspectFlagOnExit").and_then(|v| v.as_bool()), Some(true));
+        .expect("AbyssalEntranceDeployment");
+    let trace_ball_id = dict_get(&deploy_res, "traceBallID")
+        .and_then(|v| v.as_i64())
+        .expect("traceBallID");
+    let _enter_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "AbyssalEntranceGateActivation",
+            &[PyRep::Integer(trace_ball_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AbyssalEntranceGateActivation");
 
     let now = ctx.now_unix();
     assert!(
-        !ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(now),
-        "T4+ Abyssal filament must NOT set suspect flag on entry"
+        ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(now),
+        "T6 Abyssal filament MUST set suspect flag on deployment in 0.7 high-sec"
     );
 
     let evacuated = evacuate_abyssal_pockets_for_downtime(&ctx);
     assert_eq!(evacuated, 1);
     assert!(
         ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(now),
-        "T4+ Abyssal filament MUST set suspect flag on exit from 0.5-0.7 high-sec"
+        "T6 Abyssal filament MUST retain suspect flag on exit from 0.7 high-sec"
     );
 }
 

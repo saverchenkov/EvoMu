@@ -1,4 +1,4 @@
-//! Live integration tests for Batch 23 `notify:` closure (12 notifications).
+//! Live integration tests for Batch 23 notifications.
 
 #![forbid(unsafe_code)]
 
@@ -7,9 +7,6 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::notify_emitters_b23::{
-    JUMP_QUEUE_LIMITS_BLOB_KEY, JUMP_QUEUE_STATE_BLOB_KEY,
-};
 use eve_server::services::pve_dungeon_runtime::{
     check_dungeon_triggers, with_dungeon_runtime_store_db, DungeonRuntimeInstance,
     DungeonRuntimeObject, DungeonRuntimeRoom, DungeonTrigger, DungeonTriggerAction,
@@ -326,18 +323,8 @@ async fn b23_dungeon_triggers_and_camera_interest_notifications() {
 }
 
 #[tokio::test]
-async fn b23_fleet_escalation_decloak_and_jump_queue_notifications() {
-    let mut ctx = ServerContext::new();
-    std::sync::Arc::make_mut(&mut ctx.sde).jumps.insert(
-        50_001_248,
-        eve_sde::StargateJump {
-            stargate_id: 50_001_248,
-            from_solar_system_id: SYS_JITA,
-            to_solar_system_id: SYS_PERIMETER,
-            destination_stargate_id: 50_001_249,
-            position: DVec3::ZERO,
-        },
-    );
+async fn b23_fleet_escalation_and_decloak_notifications() {
+    let ctx = ServerContext::new();
     let ship_a = 700_010_i64;
     let mut sess_a = setup_pilot_in_space(&ctx, PILOT_A, ship_a, 587, false).await;
 

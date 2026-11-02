@@ -366,9 +366,9 @@ async fn test_b23_weapon_timer_scope_and_pvp_logoff_renewal() {
     let fil_err = ctx
         .dispatch_rpc(
             &mut sess,
-            "abyssal_content_manager",
+            "abyssalMgr",
             None,
-            "ActivateAbyssalKey",
+            "AbyssalEntranceDeployment",
             &[PyRep::Integer(47_765)],
             &kw,
             None,

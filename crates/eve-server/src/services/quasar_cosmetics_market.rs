@@ -438,6 +438,30 @@ fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, us
     })
 }
 
+fn paragon_hub_tax_pct(st: &CosmeticsMarketState, cid: u32, target: &ListingTargetRecord) -> u64 {
+    match target {
+        ListingTargetRecord::Character(_) => {
+            let cust_acq = st.db.with_snapshot(|s| {
+                s.skills
+                    .get(&(cid as i64))
+                    .and_then(|m| m.get(&81368))
+                    .map(|sk| sk.level as u64)
+                    .unwrap_or(0)
+                    .min(5)
+            });
+            30_u64.saturating_sub(cust_acq)
+        }
+        ListingTargetRecord::Corporation(_) | ListingTargetRecord::Alliance(_) => {
+            let (reduction, _) = paragon_hub_skill_reductions(st, cid);
+            10_u64.saturating_sub(reduction)
+        }
+        ListingTargetRecord::Public => {
+            let (reduction, _) = paragon_hub_skill_reductions(st, cid);
+            20_u64.saturating_sub(reduction)
+        }
+    }
+}
+
 fn market_get_tax_rate(
     st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
@@ -445,9 +469,7 @@ fn market_get_tax_rate(
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
-    let (reduction, _) = paragon_hub_skill_reductions(st, cid);
-    let base_rate: u64 = if target.is_branded() { 10 } else { 20 };
-    let rate_units: i64 = base_rate.saturating_sub(reduction).max(1) as i64;
+    let rate_units: i64 = paragon_hub_tax_pct(st, cid, &target) as i64;
     let mut tr = Vec::new();
     encode_sint_field(1, rate_units, &mut tr);
     encode_sint_field(2, 0, &mut tr);
@@ -1065,9 +1087,7 @@ fn skin_initiate_purchase(
         }
     };
 
-    let (seller_tax_red, _) = paragon_hub_skill_reductions(st, listing.seller_id);
-    let base_tax_pct: u64 = if listing.branded { 10 } else { 20 };
-    let tax_pct: u64 = base_tax_pct.saturating_sub(seller_tax_red).max(1);
+    let tax_pct: u64 = paragon_hub_tax_pct(st, listing.seller_id, &listing.target);
     let Some(tier_u32) = st.skin_tier_for_hex(&listing.skin_hex) else {
         rollback_listing_qty(st, &listing, quantity);
         return Err((

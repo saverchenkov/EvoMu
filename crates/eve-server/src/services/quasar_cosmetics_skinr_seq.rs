@@ -16,7 +16,6 @@ use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
     STATUS_NOT_FOUND,
 };
-use eve_db::IskCents;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
     DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage,
@@ -634,21 +633,22 @@ fn induction_time_disc_pct(lvl: u32) -> u32 {
 
 fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u32, u32, usize) {
     let Some(c) = cid else {
-        return (0, 0, 5);
+        return (0, 0, 1);
     };
     state.db.with_snapshot(|s| {
         let Some(sk_map) = s.skills.get(&(c as i64)) else {
-            return (0, 0, 5);
+            return (0, 0, 1);
         };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0);
-        let price_disc = ((lvl(81044) + lvl(81045) + lvl(81363) + lvl(81376)) * 2).min(25);
+        // No skill reduces PLEX sequencing cost in EVE SKINR
+        let price_disc = 0;
         let sde_ind_disc = induction_time_disc_pct(lvl(81377))
             + induction_time_disc_pct(lvl(81372))
             + induction_time_disc_pct(lvl(81373))
             + induction_time_disc_pct(lvl(81374));
-        let legacy_dur_disc = (lvl(81040) + lvl(81041) + lvl(81042) + lvl(81043) + lvl(3395)) * 3;
+        let legacy_dur_disc = (lvl(81040) + lvl(81041) + lvl(81042) + lvl(81043)) * 3;
         let dur_disc = (sde_ind_disc + legacy_dur_disc).min(60);
-        let max_jobs = 5 + (lvl(81046) + lvl(81047) + lvl(81366) * 2 + lvl(81367) * 2) as usize;
+        let max_jobs = 1 + (lvl(81046) + lvl(81047) + lvl(81366) * 2 + lvl(81367) * 2) as usize;
         (price_disc, dur_disc, max_jobs)
     })
 }
@@ -991,14 +991,25 @@ fn handle_job_initiate(
         }
     }
 
-    // Check and debit ISK fee + award Paragon EverMarks only for validated SKINR design layouts
-    let fee = IskCents::from_isk(10_000);
+    let comp_ids: Vec<u32> = required_comps.iter().map(|&(c, _)| c).collect();
+    let (_pts, tier_level) = state.catalog.compute_points_and_tier(&comp_ids);
+    let min_pts = state
+        .catalog
+        .tier_thresholds
+        .get(&tier_level)
+        .copied()
+        .unwrap_or(0);
+    let unit_plex_cents = ((tier_level as u64) * 1_500).saturating_add(min_pts as u64 * 2);
+    let total_plex_cost = i64::try_from(unit_plex_cents.saturating_mul(u64::from(licenses_qty)))
+        .unwrap_or(i64::MAX);
+
+    // Check and debit PLEX sequencing cost + award Paragon EverMarks only for validated SKINR design layouts
     let award_evermarks = !slots.is_empty() && !required_comps.is_empty();
     let mut insufficient_funds = false;
     state.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
-            if let Some(rem) = ch.balance.checked_sub(fee) {
-                ch.balance = rem;
+            if let Some(rem_plex) = ch.plex_balance.checked_sub(total_plex_cost) {
+                ch.plex_balance = rem_plex;
                 if award_evermarks {
                     let em_reward = 500_i64.saturating_mul(i64::from(licenses_qty));
                     let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
@@ -1019,11 +1030,9 @@ fn handle_job_initiate(
     });
     if insufficient_funds {
         queue_job_failed_notice(cid, &preview_uuid, 3, now);
-        return Err((STATUS_BAD_REQUEST, "Insufficient funds for SKINR sequencing".into()));
+        return Err((STATUS_BAD_REQUEST, "Insufficient PLEX for SKINR sequencing".into()));
     }
 
-    let comp_ids: Vec<u32> = required_comps.iter().map(|&(c, _)| c).collect();
-    let (_pts, tier_level) = state.catalog.compute_points_and_tier(&comp_ids);
     let base_secs = (tier_level as u64) * 3_600;
     let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
 

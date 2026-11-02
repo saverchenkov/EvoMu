@@ -16,9 +16,7 @@ use std::collections::HashMap;
 
 use crate::router::cache_notifications::PendingMachoNotification;
 use crate::router::{NotificationTarget, ServerContext};
-use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::SolarSystemId;
-use serde::{Deserialize, Serialize};
+use eve_proto::PyRep;
 use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
@@ -80,29 +78,7 @@ pub fn emit_operations_server_fsd_reload(ctx: &ServerContext, char_id: i64) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Fleet Escalation Notification
-// ---------------------------------------------------------------------------
-
-/// Emits `OnFleetEscalatingPathMessage(charID, dungeonTemplateID)` (`2` args, `id_type = "fleetid"`).
-pub fn emit_fleet_escalating_path_message(
-    ctx: &ServerContext,
-    fleet_id: i64,
-    killer_char_id: i64,
-    expedition_dungeon_id: u32,
-) {
-    ctx.notify(
-        NotificationTarget::Fleet(fleet_id),
-        "OnFleetEscalatingPathMessage",
-        "fleetid",
-        vec![
-            PyRep::Integer(killer_char_id),
-            PyRep::Integer(i64::from(expedition_dungeon_id)),
-        ],
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 3. Forced Decloak Notification
+// 2. Forced Decloak Notification
 // ---------------------------------------------------------------------------
 
 /// Emits `OnCloakModuleForceDeactivated(notifyMsg, notifyArgs)` (`2` args, `id_type = "charid"`).
@@ -294,97 +270,4 @@ pub fn emit_dungeon_trigger_music_core(
             PyRep::Integer(music_trigger_id),
         ],
     );
-}
-
-// ---------------------------------------------------------------------------
-// 5. Stargate Jump Queue Notification
-// ---------------------------------------------------------------------------
-
-pub const JUMP_QUEUE_LIMITS_BLOB_KEY: &str = "jump_queue_limits";
-pub const JUMP_QUEUE_STATE_BLOB_KEY: &str = "jump_queue_state";
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct JumpQueueSystemState {
-    pub queued_chars: Vec<i64>,
-    pub granted_keys: HashMap<i64, i64>,
-}
-
-/// Emits `OnJumpQueueUpdate(solarSystemID, space, queue, jumpKeys, keyLife)` (`5` args, `id_type = "charid"`).
-pub fn emit_jump_queue_update(
-    ctx: &ServerContext,
-    char_id: i64,
-    sys_id: SolarSystemId,
-    space: i64,
-    queue: Vec<i64>,
-    jump_keys: Vec<i64>,
-    key_life: i64,
-) {
-    let queue_rep = queue.into_iter().map(PyRep::Integer).collect();
-    let keys = jump_keys.into_iter().map(PyRep::Integer).collect();
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnJumpQueueUpdate",
-        "charid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Integer(space),
-            PyRep::List(queue_rep),
-            PyRep::List(keys),
-            PyRep::Integer(key_life),
-        ],
-    );
-}
-
-/// Checks if `dest_sys` has an active jump-queue capacity limit; if full, enqueues `char_id`,
-/// emits `OnJumpQueueUpdate`, and returns `Err(UserError("JumpQueueActive"))`.
-pub fn try_enqueue_jump_queue(
-    ctx: &ServerContext,
-    char_id: i64,
-    dest_sys: SolarSystemId,
-    now_unix: u64,
-) -> Result<(), BridgeRpcError> {
-    let outcome = ctx.db.with_mut_snapshot(|snap| {
-        let limits: HashMap<SolarSystemId, usize> = snap
-            .service_state_blobs
-            .get(JUMP_QUEUE_LIMITS_BLOB_KEY)
-            .and_then(|b| serde_json::from_str(b).ok())
-            .unwrap_or_default();
-        let Some(&cap) = limits.get(&dest_sys) else {
-            return None;
-        };
-        let active_in_dest = snap
-            .characters
-            .values()
-            .filter(|c| c.solar_system_id == dest_sys && c.active_ship_id > 0)
-            .count();
-        if active_in_dest < cap {
-            return None;
-        }
-        let mut all_queues: HashMap<SolarSystemId, JumpQueueSystemState> = snap
-            .service_state_blobs
-            .get(JUMP_QUEUE_STATE_BLOB_KEY)
-            .and_then(|b| serde_json::from_str(b).ok())
-            .unwrap_or_default();
-        let entry = all_queues.entry(dest_sys).or_default();
-        if !entry.queued_chars.contains(&char_id) {
-            entry.queued_chars.push(char_id);
-        }
-        let queued_chars = entry.queued_chars.clone();
-        let key = entry
-            .granted_keys
-            .get(&char_id)
-            .copied()
-            .unwrap_or_else(|| (now_unix as i64).saturating_add(60));
-        if let Ok(json) = serde_json::to_string(&all_queues) {
-            snap.service_state_blobs
-                .insert(JUMP_QUEUE_STATE_BLOB_KEY.to_string(), json);
-        }
-        Some((0_i64, queued_chars, vec![key], 60_i64))
-    });
-
-    if let Some((space, queued_chars, keys, key_life)) = outcome {
-        emit_jump_queue_update(ctx, char_id, dest_sys, space, queued_chars, keys, key_life);
-        return Err(BridgeRpcError::user_error("JumpQueueActive"));
-    }
-    Ok(())
 }
