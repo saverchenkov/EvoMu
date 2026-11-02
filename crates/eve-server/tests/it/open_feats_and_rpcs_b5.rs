@@ -220,7 +220,7 @@ async fn test_localization_server_and_user_svc_session_created() {
     let ctx = new_ctx();
     let mut gm_sess = setup_pilot(&ctx, PILOT_1, ROLE_GMH | ROLE_CONTENT).await;
 
-    let toggle_err = rpc(
+    let toggle_ok = rpc(
         &ctx,
         &mut gm_sess,
         "localizationServer",
@@ -228,8 +228,8 @@ async fn test_localization_server_and_user_svc_session_created() {
         &[PyRep::Bool(true)],
     )
     .await
-    .expect_err("boolean toggle must fail");
-    assert_eq!(toggle_err.code, "UnimplementedRPC");
+    .expect("boolean toggle must succeed for GM");
+    assert_eq!(toggle_ok, PyRep::Bool(true));
 
     let wrap_err = rpc(
         &ctx,
@@ -242,7 +242,7 @@ async fn test_localization_server_and_user_svc_session_created() {
         )])],
     )
     .await
-    .expect_err("UpdateLocalizationQAWrap fail-closed");
+    .expect_err("UpdateLocalizationQAWrap dict overload fail-closed");
     assert_eq!(wrap_err.code, "UnimplementedRPC");
 
     let reload_res = rpc(

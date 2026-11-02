@@ -623,67 +623,50 @@ pub fn handle_update_localization_qa_wrap(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
-    let bool_arg = args.first().and_then(|a| {
-        a.as_bool().or_else(|| match a {
-            PyRep::Integer(0) => Some(false),
-            PyRep::Integer(1) => Some(true),
-            _ => None,
-        })
-    });
-    if let Some(enabled) = bool_arg {
-        let key_id = session.character_id.unwrap_or(session.session_id as i64);
-        ctx.db.with_mut_snapshot(|snap| {
-            let mut map: BTreeMap<i64, bool> = snap
-                .service_state_blobs
-                .get("localization:qa_wrap_sessions")
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            map.insert(key_id, enabled);
-            if let Ok(json) = serde_json::to_string(&map) {
-                snap.service_state_blobs
-                    .insert("localization:qa_wrap_sessions".into(), json);
-            }
-        });
-        return Ok(PyRep::Bool(enabled));
-    }
-    let qa_roles = eve_db::service_roles::ROLE_GMH
+    let qa_roles = eve_machonet::service_roles::ROLE_QA
+        | eve_db::service_roles::ROLE_GMH
         | eve_db::service_roles::ROLE_GML
         | eve_machonet::service_roles::ROLE_PROGRAMMER
         | eve_db::service_roles::ROLE_CONTENT;
     if !session.has_gm_role() && (session.role & qa_roles) == 0 {
         return Err(err(
             "RoleRequired",
-            "localizationServer.UpdateLocalizationQAWrap requires GM or Content/Programmer role",
+            "localizationServer.UpdateLocalizationQAWrap requires QA, GM, or Content/Programmer role",
         ));
     }
-    let Some(PyRep::Dict(entries)) = args.first() else {
+    let Some(enabled) = args.first().and_then(|a| {
+        a.as_bool().or_else(|| match a {
+            PyRep::Integer(0) => Some(false),
+            PyRep::Integer(1) => Some(true),
+            _ => None,
+        })
+    }) else {
         return Err(err(
-            "InvalidArgument",
-            "UpdateLocalizationQAWrap requires a boolean flag or dict of overrides",
+            "UnimplementedRPC",
+            "UpdateLocalizationQAWrap requires a boolean enableQaWrap flag",
         ));
     };
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let mut overrides: BTreeMap<i64, String> = snap
-            .owner_notes
-            .get(&LOCALIZATION_NOTE_ID)
-            .and_then(|n| serde_json::from_str(&n.note).ok())
+    let key_id = session.character_id.unwrap_or(session.session_id as i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut map: BTreeMap<i64, bool> = snap
+            .service_state_blobs
+            .get("localization:qa_wrap_sessions")
+            .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
-        for (k, v) in entries {
-            if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
-                overrides.insert(msg_id, text.to_string());
+        if enabled {
+            if map.len() >= 256 && !map.contains_key(&key_id) {
+                if let Some(first_k) = map.keys().next().copied() {
+                    map.remove(&first_k);
+                }
             }
+            map.insert(key_id, true);
+        } else {
+            map.remove(&key_id);
         }
-        snap.owner_notes.insert(
-            LOCALIZATION_NOTE_ID,
-            eve_db::OwnerNoteRecord {
-                note_id: LOCALIZATION_NOTE_ID,
-                character_id: 0,
-                item_id: 0,
-                label: "localization_overrides".into(),
-                note: serde_json::to_string(&overrides).unwrap_or_default(),
-                timestamp_unix: 0,
-            },
-        );
-        Ok(PyRep::Bool(true))
-    })
+        if let Ok(json) = serde_json::to_string(&map) {
+            snap.service_state_blobs
+                .insert("localization:qa_wrap_sessions".into(), json);
+        }
+    });
+    Ok(PyRep::Bool(enabled))
 }

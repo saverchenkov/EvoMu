@@ -261,7 +261,6 @@ pub fn handle(
             }
             let sde_types_len = ctx.sde.types.len() as u64;
             let sde_systems_len = ctx.sde.solar_systems.len() as u64;
-            let active_systems_len = (ctx.systems.active_systems_count() as u64).max(1);
             let active_sessions_len = ctx
                 .session_closers
                 .read()
@@ -279,7 +278,7 @@ pub fn handle(
                 state.active = true;
                 state.runs_started += 1;
                 state.total_requests += 1;
-                state.systems_stepped += stepped_ticks.max(1) * active_systems_len;
+                state.systems_stepped += u64::from(stepped_ticks > 0);
                 state.ticks_executed += stepped_ticks;
                 state.sde_types_sampled = sde_types_len;
                 state.sde_solar_systems_sampled = sde_systems_len;

@@ -128,7 +128,7 @@ async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map(
         &[PyRep::String("Welcome to Tranquility".into())]
     );
 
-    // 6. UpdateLocalizationQAWrap remains fail-closed (UnimplementedRPC) and does not emit OnUpdateLocalizationTextCache
+    // 6. UpdateLocalizationQAWrap rejects unprivileged caller and succeeds for GM without emitting OnUpdateLocalizationTextCache
     assert!(rpc(
         &ctx,
         &mut sess_a,
@@ -139,7 +139,7 @@ async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map(
     .await
     .is_err());
 
-    let qa_err = rpc(
+    let qa_ok = rpc(
         &ctx,
         &mut sess_gm,
         "localizationServer",
@@ -147,8 +147,8 @@ async fn notify_batch9_ccp_notification_server_msg_localization_and_service_map(
         &[PyRep::Bool(true)],
     )
     .await
-    .unwrap_err();
-    assert_eq!(qa_err.code, "UnimplementedRPC");
+    .expect("GM UpdateLocalizationQAWrap(true)");
+    assert_eq!(qa_ok, PyRep::Bool(true));
     let loc_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
     assert!(!loc_notifs.iter().any(|(e, _)| e == "OnUpdateLocalizationTextCache"));
 }

@@ -181,7 +181,7 @@ async fn test_e4_sde_facility_bonuses_taxes_and_job_cost() {
     assert!((cost_meta.scc_surcharge_isk - (cost_meta.eiv_isk * 0.04 * 100.0).round() / 100.0).abs() < 0.02);
 }
 
-// parity: feat:industry.capital-construction-restrictions, feat:industry.blueprint-me-research, feat:lifecycle.industry-pause-and-many, plan:E-4, notify:OnIndustryMaterials
+// parity: feat:industry.capital-construction-restrictions, feat:industry.blueprint-me-research, feat:lifecycle.industry-pause-and-many, plan:E-4
 #[tokio::test]
 async fn test_e4_capital_shipyard_restrictions_and_exponential_research() {
     let ctx = setup_test_context();

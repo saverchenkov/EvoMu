@@ -123,22 +123,39 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(proxy_traces.is_some(), "alert_proxy_traces must be persisted");
     assert!(proxy_traces.unwrap().contains("777888"));
 
-    // 3. rpc:localizationServer.UpdateLocalizationQAWrap (persists overrides and returns Bool(true))
-    let mut overrides = Vec::new();
-    overrides.push((PyRep::Integer(99991), PyRep::String("Overridden QA String".into())));
-    let qa_wrap_res = ctx
+    // 3. rpc:localizationServer.UpdateLocalizationQAWrap (role-gated boolean toggle + GetAllTextChanges wrapping)
+    let mut unpriv_loc_sess = SessionState::new(902_099);
+    common::login_pilot(&ctx, &mut unpriv_loc_sess, "other", "other-secret").await;
+    unpriv_loc_sess.role = 0;
+    let unpriv_qa_err = ctx
         .dispatch_rpc(
-            &mut sess1,
+            &mut unpriv_loc_sess,
             "localizationServer",
             None,
             "UpdateLocalizationQAWrap",
-            &[PyRep::Dict(overrides)],
+            &[PyRep::Bool(true)],
             &kw,
             None,
         )
         .await
-        .expect("UpdateLocalizationQAWrap overrides");
-    assert_eq!(qa_wrap_res, PyRep::Bool(true));
+        .expect_err("unprivileged UpdateLocalizationQAWrap must fail with RoleRequired");
+    assert_eq!(unpriv_qa_err.code, "RoleRequired");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(99991_i64, "Overridden QA String".to_string());
+        snap.owner_notes.insert(
+            -8_960_000_000_000,
+            eve_db::OwnerNoteRecord {
+                note_id: -8_960_000_000_000,
+                character_id: 0,
+                item_id: 0,
+                label: "localization_overrides".into(),
+                note: serde_json::to_string(&overrides).unwrap(),
+                timestamp_unix: 0,
+            },
+        );
+    });
 
     // Enable QA wrap for sess1 and verify GetAllTextChanges wraps localized strings
     assert_eq!(
@@ -156,6 +173,14 @@ async fn test_rpc_missing_batch3_part1() {
     assert_eq!(
         ctx.dispatch_rpc(&mut sess1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Bool(false)], &kw, None).await.expect("UpdateLocalizationQAWrap(false)"),
         PyRep::Bool(false)
+    );
+    let unwrapped_changes = ctx.dispatch_rpc(&mut sess1, "localizationServer", None, "GetAllTextChanges", &[], &kw, None).await.expect("GetAllTextChanges unwrapped");
+    assert_eq!(
+        match &unwrapped_changes {
+            PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_i64() == Some(99991)).map(|(_, v)| v),
+            _ => None,
+        },
+        Some(&PyRep::String("Overridden QA String".into()))
     );
 
     // 4. rpc:localizationServer.ReloadFSDPickle
