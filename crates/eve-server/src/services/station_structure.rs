@@ -297,6 +297,19 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(
+                ctx,
+                char_id,
+                ctx.now_unix(),
+                None,
+            ) {
+                if active_timer.reason == "podding" {
+                    return Some(Err(BridgeRpcError {
+                        code: "SessionChangeInProgress".into(),
+                        message: "Cannot undock while pod-respawn session-change timer is active".into(),
+                    }));
+                }
+            }
             if let Err(e) = ctx.db.with_snapshot(|snap| {
                 crate::services::structure_standup_weapons::ensure_gunner_not_immobilized(snap, char_id, ctx.now_unix())
             }) {

@@ -454,6 +454,9 @@ impl PublicGatewayRouter {
 
         // 8. Batch 2 Quasar handlers
         crate::services::quasar_b2_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+
+        // 9. Batch 29 Quasar Domain & Space/Tag/Tale/Dungeon Services
+        crate::services::quasar_b29_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
@@ -536,12 +539,14 @@ impl PublicGatewayRouter {
 
     pub fn requires_admin_role(normalized_type_name: &str) -> bool {
         normalized_type_name.contains(".admin.")
+            || normalized_type_name.starts_with("eve.content.orchestrator.")
             || matches!(
                 normalized_type_name,
                 "eve.entitlement.user.api.GrantRequest"
                     | "eve.plex.vault.assetholding.operation.api.DepositRequest"
                     | "eve.plex.vault.assetholding.operation.api.WithdrawRequest"
                     | "eve.fulfillment.api.DeliverItemRequest"
+                    | "eve.cosmetic.market.component.listing.api.GetAllRequest"
             )
     }
 
