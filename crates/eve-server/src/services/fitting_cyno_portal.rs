@@ -788,7 +788,7 @@ pub(super) struct JumpOutcome {
 
 /// Moves a ship and character to `to_sys` at `pos`, ejecting with outward velocity if overlapping a structure.
 // parity: feat:ships.jump-drive-fatigue-accumulation, feat:navigation.jump-arrival-placement
-pub(super) async fn relocate_ship(
+pub async fn relocate_ship(
     ctx: &ServerContext,
     char_id: i64,
     ship_id: i64,
@@ -803,7 +803,7 @@ pub(super) async fn relocate_ship(
         s.characters
             .get(&char_id)
             .filter(|c| c.jump_fatigue_until_unix > now)
-            .map(|c| ((c.jump_fatigue_until_unix - now) as f64 / 60.0).max(c.jump_fatigue_minutes))
+            .map(|c| (c.jump_fatigue_until_unix - now) as f64 / 60.0)
             .unwrap_or(0.0)
     });
     if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now, None) {
@@ -838,6 +838,17 @@ pub(super) async fn relocate_ship(
         }
         snap.character_last_jump_unix.insert(char_id, now);
     });
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnJumpTimersUpdated",
+        "charid",
+        vec![
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + cd_secs)),
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + fat_secs)),
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now)),
+            PyRep::Bool(true),
+        ],
+    );
     if let Ok(mut bmap) = ctx.bound_objects.write() {
         for entry in bmap.values_mut() {
             if entry.character_id == char_id && entry.service == "beyonce" {

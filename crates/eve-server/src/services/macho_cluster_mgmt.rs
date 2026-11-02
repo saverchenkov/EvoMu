@@ -545,13 +545,15 @@ pub fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+            let proc_name = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            let is_gm_or_admin =
+                session.has_gm_role() || (session.role & eve_db::service_roles::ROLE_ADMIN) != 0;
+            if proc_name != "zcluster.Attacks_Insert" && !is_gm_or_admin {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),
                 }));
             }
-            let proc_name = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let result = match proc_name {
                 "zcluster.Nodes_PolarisID" => PyRep::Integer(1),
                 "zuser.Users_SelectByRole" => {
@@ -572,28 +574,67 @@ pub fn handle(
                     }
                 }
                 "zcluster.Attacks_Insert" => {
-                    ctx.db.with_mut_snapshot(|snap| {
+                    if args.len() > 8 {
+                        return Some(Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "InvalidArguments".into(),
+                        }));
+                    }
+                    let bounded_args: Vec<String> = args
+                        .iter()
+                        .map(|a| {
+                            let s = format!("{a:?}");
+                            if s.len() > 256 {
+                                s[..256].to_string()
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
+                    let now_u = ctx.now_unix();
+                    let uid = session.user_id;
+                    let rate_limited = ctx.db.with_mut_snapshot(|snap| {
                         let mut attacks: Vec<serde_json::Value> = snap
                             .service_state_blobs
                             .get("cluster_attacks")
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or_default();
+                        let recent_for_user = attacks
+                            .iter()
+                            .filter(|e| {
+                                e.get("user_id").and_then(|v| v.as_u64()) == uid
+                                    && now_u.saturating_sub(
+                                        e.get("timestamp_unix").and_then(|v| v.as_u64()).unwrap_or(0),
+                                    ) < 60
+                            })
+                            .count();
+                        if recent_for_user >= 16 {
+                            return true;
+                        }
                         if attacks.len() >= 256 {
                             attacks.drain(0..attacks.len().saturating_sub(255));
                         }
                         attacks.push(serde_json::json!({
-                            "args": format!("{args:?}"),
-                            "timestamp_unix": ctx.now_unix(),
+                            "user_id": uid,
+                            "args": bounded_args,
+                            "timestamp_unix": now_u,
                         }));
                         if let Ok(json) = serde_json::to_string(&attacks) {
                             snap.service_state_blobs.insert("cluster_attacks".into(), json);
                         }
+                        false
                     });
+                    if rate_limited {
+                        return Some(Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "RateLimited".into(),
+                        }));
+                    }
                     PyRep::None
                 }
                 _ => {
                     return Some(Err(BridgeRpcError {
-                        code: "UserError".into(),
+                        code: "UnimplementedRPC".into(),
                         message: "InvalidProcedure".into(),
                     }));
                 }

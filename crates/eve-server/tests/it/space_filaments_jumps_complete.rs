@@ -398,7 +398,7 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
         .find(|n| n.event == "OnJumpTimersUpdated")
         .expect("jump must emit OnJumpTimersUpdated");
     assert_eq!(jt_notif.id_type, "charid");
-    assert_eq!(jt_notif.args, vec![PyRep::Integer(act_ft), PyRep::Integer(fat_ft), PyRep::Integer(upd_ft)]);
+    assert_eq!(jt_notif.args, vec![PyRep::Integer(act_ft), PyRep::Integer(fat_ft), PyRep::Integer(upd_ft), PyRep::Bool(true)]);
 
     // Activation cooldown blocks an immediate second jump.
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT);

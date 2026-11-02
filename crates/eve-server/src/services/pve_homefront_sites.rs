@@ -32,21 +32,34 @@ pub fn ensure_homefront_sites_for_system_locked(
         return;
     }
 
-    // Candidate SDE archetype 70 dungeons for Empire Homefront Operations
-    let candidate_dids: &[u32] = &[
-        10346, // Abyssal Artifact Recovery
-        10347, // Raid: Hall of Sacrifice
-        10238, // Emergency Aid: Holy Mission
-        10309, // Suspicious Signal: Secure the Intel
-        10368, // Suspicious Signal: Stop the Sabotage
-        10369, // Suspicious Signal: Stop the Siphon
-        10373, // Emergency Aid: Convoy
-        10381, // Dread Assault: Occupied Industry
-    ];
+    // Dynamically query SDE archetype 70 dungeons for Empire Homefront Operations
+    let mut candidate_dids: Vec<u32> = ctx
+        .sde
+        .dungeons
+        .values()
+        .filter(|d| d.archetype_id == Some(70))
+        .map(|d| d.dungeon_id)
+        .collect();
+    candidate_dids.sort_unstable();
+    if candidate_dids.is_empty() {
+        reg.homefront_sites.insert(sys_id, Vec::new());
+        return;
+    }
+
+    let rng = crate::rng::MechanicRng::seeded(
+        (sys_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ctx.now_unix(),
+    );
+    let idx1 = (rng.try_next_u64().unwrap_or(sys_id as u64) as usize) % candidate_dids.len();
+    let idx2 = if candidate_dids.len() > 1 {
+        let step = 1 + ((rng.try_next_u64().unwrap_or(1) as usize) % (candidate_dids.len() - 1));
+        (idx1 + step) % candidate_dids.len()
+    } else {
+        idx1
+    };
 
     let base_inst = (sys_id as i64) * 1000;
-    let did1 = candidate_dids[(sys_id as usize) % candidate_dids.len()];
-    let did2 = candidate_dids[((sys_id as usize) + 3) % candidate_dids.len()];
+    let did1 = candidate_dids[idx1];
+    let did2 = candidate_dids[idx2];
     let d1_name = ctx
         .sde
         .dungeons
@@ -128,7 +141,6 @@ pub fn handle_get_homefront_site_instances(
     };
 
     let reply = with_pve_special_reg(ctx, |reg| {
-        ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
         let mut by_dungeon: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         if let Some(list) = reg.homefront_sites.get(&sys_id) {
             for s in list {

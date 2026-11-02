@@ -450,6 +450,9 @@ impl PublicGatewayRouter {
 
         // 7. Quasar Character & Progression Track (Q-4) handlers
         crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db), Arc::clone(&self.progression));
+
+        // 8. Batch 2 Quasar handlers
+        crate::services::quasar_b2_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
