@@ -699,6 +699,14 @@ pub fn maybe_abort_safe_logoff_on_action(
     char_id: i64,
     reason_code: &str,
 ) -> bool {
+    let has_active_logoff = with_sp6_state(&ctx.db, |st| {
+        st.safe_logoffs
+            .get(&char_id)
+            .is_some_and(|entry| !entry.completed)
+    });
+    if !has_active_logoff {
+        return false;
+    }
     let aborted = with_mut_sp6_state(&ctx.db, |st, _snap| {
         if let Some(entry) = st.safe_logoffs.get(&char_id) {
             if !entry.completed {
