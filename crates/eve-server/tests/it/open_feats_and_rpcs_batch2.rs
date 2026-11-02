@@ -544,11 +544,13 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
     assert!((cd_ind - 2.0).abs() < 1e-6, "Industrial -90% on 10 LY -> 1 effective LY -> 2 min cooldown");
     assert!((fat_ind - 20.0).abs() < 1e-6, "Industrial -90% on 10 LY -> 20 min fatigue");
 
-    // 30m cooldown cap directly in compute_jump_fatigue_and_cooldown_minutes
+    // 30m cooldown cap & unclamped pre-jump fatigue/10 > (1+L): 120 min over 4 LY -> max(5, 12) = 12 min
     let (capped_cd, capped_fat) =
         eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(300.0, 35.0, 0.0);
-    assert!((capped_cd - 30.0).abs() < 1e-6, "Jump activation cooldown must be capped at 30 min");
-    assert!((capped_fat - 300.0).abs() < 1e-6, "Jump fatigue must be capped at 300 min");
+    assert!((capped_cd - 30.0).abs() < 1e-6 && (capped_fat - 300.0).abs() < 1e-6);
+    let (unclamped_cd, unclamped_fat) =
+        eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(120.0, 4.0, 0.0);
+    assert!((unclamped_cd - 12.0).abs() < 1e-6 && (unclamped_fat - 300.0).abs() < 1e-6);
 
     // End-to-end jump via structureCynoBeaconMgr.CmdJumpToStructureBeacon + jumpTimers.GetTimers + clock advancement
     let jump_beacon_id = 1_040_000_007_801_i64;
@@ -560,6 +562,7 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
             .map(|c| (c.active_ship_id, c.corporation_id))
             .unwrap_or((100_000_001, 98_000_001))
     });
+    let jdc_type_id = ctx.sde.types.values().find(|t| t.name == "Jump Drive Calibration").map(|t| t.type_id).unwrap_or(3456);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = 30_000_142;
@@ -590,6 +593,7 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
                 self_destruct_at_unix: None,
             },
         );
+        snap.skills.entry(char_id).or_default().insert(jdc_type_id, eve_db::TrainedSkillRecord { type_id: jdc_type_id, level: 5, skill_points: 1_280_000.0 });
         snap.items.insert(
             jump_fuel_item_id,
             eve_db::InventoryItemRecord {
@@ -598,7 +602,7 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
                 owner_id: char_id,
                 location_id: jump_ship_id,
                 flag: eve_db::InventoryFlag::SpecializedFuelBay,
-                quantity: 5_000,
+                quantity: 50_000,
                 singleton: false,
                 ..Default::default()
             },
@@ -623,46 +627,46 @@ async fn test_navigation_jump_fatigue_cloak_and_thera_e2e() {
     sess.ship_id = Some(jump_ship_id);
     sess.solar_system_id = Some(30_000_142);
 
-    ctx.dispatch_rpc(
-        &mut sess,
-        "structureCynoBeaconMgr",
-        None,
-        "CmdJumpToStructureBeacon",
-        &[
-            PyRep::Integer(jump_dest_sys_id as i64),
-            PyRep::Integer(jump_beacon_id),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("CmdJumpToStructureBeacon must compute and record jump fatigue & cooldown");
+    async fn get_timers(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, kw: &HashMap<String, PyRep>) -> (i64, i64, i64) {
+        let res = ctx.dispatch_rpc(sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], kw, None).await.expect("GetTimers");
+        let PyRep::KeyVal(e) = res else { panic!("GetTimers must return KeyVal") };
+        (e.get("jumpActivation").and_then(PyRep::as_i64).unwrap_or(0), e.get("jumpFatigue").and_then(PyRep::as_i64).unwrap_or(0), e.get("lastUpdated").and_then(PyRep::as_i64).unwrap_or(0))
+    }
+    ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(jump_dest_sys_id as i64), PyRep::Integer(jump_beacon_id)], &kw, None).await.expect("carrier jump");
+    let (act_ticks, fat_ticks, upd_ticks) = get_timers(&ctx, &mut sess, char_id, &kw).await;
+    assert!(act_ticks > upd_ticks && fat_ticks > act_ticks, "Active cooldown & fatigue must be in future");
 
-    let timers = ctx
-        .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], &kw, None)
-        .await
-        .expect("jumpTimers.GetTimers");
-    let PyRep::KeyVal(entries) = &timers else {
-        panic!("GetTimers must return KeyVal");
-    };
-    let act_ticks = entries.get("jumpActivation").and_then(PyRep::as_i64).unwrap_or(0);
-    let fat_ticks = entries.get("jumpFatigue").and_then(PyRep::as_i64).unwrap_or(0);
-    let upd_ticks = entries.get("lastUpdated").and_then(PyRep::as_i64).unwrap_or(0);
-    assert!(act_ticks > upd_ticks, "Active cooldown must be in the future");
-    assert!(fat_ticks > act_ticks, "Active fatigue must exceed cooldown");
-
-    // Advance clock past fatigue expiry and verify decay via GetTimers
+    // Partial real-time decay check (300s) then full expiry (7200s)
+    ctx.advance_time_seconds(300);
+    let (_, mid_fat, mid_upd) = get_timers(&ctx, &mut sess, char_id, &kw).await;
+    assert!(mid_fat > mid_upd && mid_fat == fat_ticks, "Fatigue timestamp remains fixed while now advances");
     ctx.advance_time_seconds(7_200);
-    let timers_decayed = ctx
-        .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(char_id)], &kw, None)
-        .await
-        .expect("jumpTimers.GetTimers after decay");
-    let PyRep::KeyVal(dec_entries) = &timers_decayed else {
-        panic!("GetTimers must return KeyVal");
-    };
-    let dec_fat = dec_entries.get("jumpFatigue").and_then(PyRep::as_i64).unwrap_or(0);
+    let (_, dec_fat, _) = get_timers(&ctx, &mut sess, char_id, &kw).await;
     let now_filetime = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
     assert!(dec_fat < now_filetime, "Expired fatigue must be in the past after clock advancement");
+
+    // Live jump RPCs on -75% hull (Black Ops 22428) and -90% hull (Jump Freighter 28846)
+    let mut hull_fatigues = Vec::new();
+    for hull_type_id in [22428_u32, 28846_u32] {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = 30_000_142;
+                ch.jump_cooldown_until_unix = 0;
+                ch.jump_fatigue_until_unix = 0;
+                ch.jump_fatigue_minutes = 0.0;
+            }
+            if let Some(item) = snap.items.get_mut(&jump_ship_id) { item.type_id = hull_type_id; }
+            if let Some(fuel) = snap.items.get_mut(&jump_fuel_item_id) { fuel.type_id = if hull_type_id == 28846 { 17889 } else { 16274 }; fuel.quantity = 50_000; }
+        });
+        sess.solar_system_id = Some(30_000_142);
+        let _ = jita_handle.spawn_ball(eve_destiny::Ball { id: jump_ship_id, type_id: hull_type_id, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO, max_velocity: 85.0, inertia: 0.04, mass: 1_230_000_000.0, radius: 1_600.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }).await;
+        ctx.dispatch_rpc(&mut sess, "structureCynoBeaconMgr", None, "CmdJumpToStructureBeacon", &[PyRep::Integer(jump_dest_sys_id as i64), PyRep::Integer(jump_beacon_id)], &kw, None).await.expect("hull jump");
+        let (h_act, h_fat, h_upd) = get_timers(&ctx, &mut sess, char_id, &kw).await;
+        assert!(h_act > h_upd && h_fat > h_act);
+        hull_fatigues.push(h_fat - h_upd);
+        ctx.advance_time_seconds(7_200);
+    }
+    assert!(hull_fatigues[0] < (fat_ticks - upd_ticks) && hull_fatigues[1] < hull_fatigues[0], "-75% and -90% hulls must reduce live jump fatigue");
 
     // 2. Thera (31_000_005) NPC stations in SDE
     let thera_stations: Vec<_> = ctx

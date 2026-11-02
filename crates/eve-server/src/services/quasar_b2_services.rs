@@ -1,23 +1,15 @@
 //! `quasar_b2_services` — Batch 2 Quasar V24.01 Protobuf Gateway Handlers.
 //!
-//! Implements state-backed Quasar handlers for:
-//! 1. `eve_public.ship.unlock.*` (`GetPendingNotificationsRequest`, `ClaimRewardRequest`)
-//! 2. `eve.ship.api.*` (`CanJumpStarterSpaceShipCasterRequest`)
-//! 3. `eve.starterspace.api.*` (`CanJumpShipCasterRequest`)
-//! 4. `eve.structure.api.*` (`GetRequest`)
-//! 5. `eve.star.resources.api.*` (`GetPowerProductionRequest`)
-//! 6. `eve.space.tag.admin.api.*` (`ApplyRequest`, `RemoveRequest`)
-//! 7. `eve.stargate.lock.api.*` (`GetRequest`, `GetRestrictedSystemsRequest`, `ValidateJumpRequest`, `DeleteCommanded`)
-//! 8. `eve.sovereignty.api.*` (`GetClaimRequest`, `GetVersionManifestRequest`, `GetAllClaimsRequest`)
-//! 9. `eve.sovereignty.activitydefensemodifier.api.*` (`GetLevelRequest`)
-//! 10. `eve.sovereignty.resource.star.api.*` (`GetAllConfigurationsRequest`)
-//! 11. `eve.sovereignty.resource.planet.api.*` (`GetDefinitionsConfigurationRequest`, `GetAllDefinitionsRequest`, `GetDefinitionsVersionRequest`, `GetAllConfigurationsRequest`)
+//! Wired directly to `WorldSnapshot` (`structures`, `zarzakh_gate_locks`,
+//! `system_states`, `sov_runtime`, `service_state_blobs["cluster_misc_state"]`)
+//! and `SdeRegistry`. Equinox star/planet resource handlers return
+//! `STATUS_NOT_IMPLEMENTED` (`DATA GAP` in `docs/BLOCKERS.md`).
 
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
-    STATUS_UNAUTHORIZED,
+    STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -25,87 +17,9 @@ use eve_proto::quasar::{
     DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-const BLOB_KEY: &str = "quasar_b2_state";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructureRecord {
-    pub structure_id: u64,
-    pub type_id: u64,
-    pub solar_system_id: u64,
-    pub corporation_id: u64,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StargateLockRecord {
-    pub character_id: u64,
-    pub solar_system_id: u64,
-    pub gate_id: u64,
-    pub expiry_unix: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SovClaimRecord {
-    pub solar_system_id: u64,
-    pub alliance_id: u64,
-    pub corporation_id: u64,
-    pub hub_id: u64,
-    pub claimed_at_unix: u64,
-    pub is_capital: bool,
-    pub military_index: i32,
-    pub industrial_index: i32,
-    pub strategic_index: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StarResourceConfig {
-    pub star_id: u64,
-    pub power: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanetResourceConfig {
-    pub planet_id: u64,
-    pub power: u64,
-    pub workforce: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct QuasarB2State {
-    pub ship_unlock_pending: BTreeMap<u64, Vec<u64>>,
-    pub ship_unlock_claimed: BTreeMap<u64, Vec<u64>>,
-    pub starter_caster_blocked: BTreeSet<u64>,
-    pub structures: BTreeMap<u64, StructureRecord>,
-    pub star_power_production: BTreeMap<u64, u64>,
-    pub space_tags: BTreeMap<u64, BTreeMap<String, Option<u64>>>,
-    pub stargate_locks: BTreeMap<String, StargateLockRecord>,
-    pub restricted_systems: Vec<u64>,
-    pub sov_claims: BTreeMap<u64, SovClaimRecord>,
-    pub adm_levels: BTreeMap<u64, u64>,
-    pub star_resource_configs: Vec<StarResourceConfig>,
-    pub planet_resource_configs: Vec<PlanetResourceConfig>,
-}
-
-pub fn load_state(db: &WorldRepository) -> QuasarB2State {
-    db.with_snapshot(|s| {
-        s.quasar_state_blobs
-            .get(BLOB_KEY)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default()
-    })
-}
-
-pub fn save_state(db: &WorldRepository, state: &QuasarB2State) {
-    if let Ok(json) = serde_json::to_string(state) {
-        db.with_mut_snapshot(|s| {
-            s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
-        });
-    }
-}
+const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
 
 fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
     GoogleAny {
@@ -143,7 +57,6 @@ fn extract_u64(msg: &DynamicQuasarMessage, field_num: u32) -> u64 {
             Some(DynamicValue::Int64(n)) => *n as u64,
             Some(DynamicValue::Int32(n)) => *n as u64,
             None => {
-                // Handle eve.space.location.Identifier (field 2 = constellation -> field 2 = solar_system)
                 let sys = extract_u64(sub, 2);
                 if sys > 0 {
                     sys
@@ -169,57 +82,45 @@ fn active_char_id(ctx: &AuthoritativeContext) -> Result<u64, (u32, String)> {
         .ok_or_else(|| (STATUS_UNAUTHORIZED, "Active character required".to_string()))
 }
 
+fn has_starter_launchers(db: &WorldRepository) -> bool {
+    db.with_snapshot(|snap| {
+        if let Some(json) = snap.service_state_blobs.get(MISC_STATE_BLOB_KEY) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json) {
+                if let Some(arr) = val.get("starter_launchers").and_then(|v| v.as_array()) {
+                    return !arr.is_empty();
+                }
+            }
+        }
+        !crate::services::cluster_macho_misc_services::derived_starter_launchers().is_empty()
+    })
+}
+
 pub fn register_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
     sde: Arc<SdeRegistry>,
 ) {
-    // 1. eve_public.ship.unlock.GetPendingNotificationsRequest
-    let db_su1 = Arc::clone(&db);
+    // 1. eve_public.ship.unlock.*
     router.register_handler(
         "eve_public.ship.unlock.GetPendingNotificationsRequest",
         Arc::new(move |ctx, _any, _msg| {
-            let cid = active_char_id(ctx)?;
-            let st = load_state(&db_su1);
-            let pending = st
-                .ship_unlock_pending
-                .get(&cid)
-                .cloned()
-                .unwrap_or_default();
-            let mut out = Vec::new();
-            for ship_type_id in pending {
-                encode_id_msg(1, ship_type_id, &mut out);
-            }
-            Ok(any("eve_public.ship.unlock.GetPendingNotificationsResponse", out))
+            let _cid = active_char_id(ctx)?;
+            Ok(any(
+                "eve_public.ship.unlock.GetPendingNotificationsResponse",
+                Vec::new(),
+            ))
         }),
     );
 
-    // 1b. eve_public.ship.unlock.ClaimRewardRequest
-    let db_su2 = Arc::clone(&db);
     router.register_handler(
         "eve_public.ship.unlock.ClaimRewardRequest",
         Arc::new(move |ctx, _any, msg| {
-            let cid = active_char_id(ctx)?;
+            let _cid = active_char_id(ctx)?;
             let ship_type_id = extract_u64(msg, 1);
             if ship_type_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing unlocked_ship_type".to_string()));
             }
-            let mut st = load_state(&db_su2);
-            let pending = st
-                .ship_unlock_pending
-                .get_mut(&cid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Ship unlock reward not pending".to_string()))?;
-            let pos = pending
-                .iter()
-                .position(|&id| id == ship_type_id)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Ship unlock reward not pending".to_string()))?;
-            pending.remove(pos);
-            st.ship_unlock_claimed
-                .entry(cid)
-                .or_default()
-                .push(ship_type_id);
-            save_state(&db_su2, &st);
-            Ok(any("eve_public.ship.unlock.ClaimRewardResponse", Vec::new()))
+            Err((STATUS_NOT_FOUND, "Ship unlock reward not pending".to_string()))
         }),
     );
 
@@ -228,9 +129,8 @@ pub fn register_handlers(
     router.register_handler(
         "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
         Arc::new(move |ctx, _any, _msg| {
-            let cid = active_char_id(ctx)?;
-            let st = load_state(&db_sc1);
-            let can_jump = !st.starter_caster_blocked.contains(&cid);
+            let _cid = active_char_id(ctx)?;
+            let can_jump = has_starter_launchers(&db_sc1);
             let mut out = Vec::new();
             encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
             Ok(any("eve.ship.api.CanJumpStarterSpaceShipCasterResponse", out))
@@ -243,16 +143,20 @@ pub fn register_handlers(
         "eve.starterspace.api.CanJumpShipCasterRequest",
         Arc::new(move |ctx, _any, _msg| {
             let cid = active_char_id(ctx)?;
-            let st = load_state(&db_ss1);
-            let has_lock = st.stargate_locks.values().any(|l| l.character_id == cid);
-            let can_jump = !st.starter_caster_blocked.contains(&cid) && !has_lock;
+            let now = ctx.now_unix();
+            let has_lock = db_ss1.with_snapshot(|snap| {
+                snap.zarzakh_gate_locks
+                    .get(&(cid as i64))
+                    .is_some_and(|&(_, exp)| exp > now)
+            });
+            let can_jump = has_starter_launchers(&db_ss1) && !has_lock;
             let mut out = Vec::new();
             encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
             Ok(any("eve.starterspace.api.CanJumpShipCasterResponse", out))
         }),
     );
 
-    // 4. eve.structure.api.GetRequest
+    // 4. eve.structure.api.GetRequest -> snap.structures
     let db_st1 = Arc::clone(&db);
     router.register_handler(
         "eve.structure.api.GetRequest",
@@ -261,15 +165,13 @@ pub fn register_handlers(
             if structure_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing structure identifier".to_string()));
             }
-            let st = load_state(&db_st1);
-            let rec = st
-                .structures
-                .get(&structure_id)
+            let rec = db_st1
+                .with_snapshot(|snap| snap.structures.get(&(structure_id as i64)).cloned())
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Structure not found".to_string()))?;
             let mut attrs = Vec::new();
-            encode_id_msg(1, rec.type_id, &mut attrs);
-            encode_id_msg(2, rec.solar_system_id, &mut attrs);
-            encode_id_msg(3, rec.corporation_id, &mut attrs);
+            encode_id_msg(1, u64::from(rec.type_id), &mut attrs);
+            encode_id_msg(2, u64::from(rec.solar_system_id), &mut attrs);
+            encode_id_msg(3, rec.owner_corp_id as u64, &mut attrs);
             encode_string_field(4, &rec.name, &mut attrs);
             let mut out = Vec::new();
             encode_bytes_field(1, &attrs, &mut out);
@@ -277,28 +179,18 @@ pub fn register_handlers(
         }),
     );
 
-    // 5. eve.star.resources.api.GetPowerProductionRequest
-    let db_sr1 = Arc::clone(&db);
+    // 5. eve.star.resources.api.GetPowerProductionRequest (DATA GAP -> STATUS_NOT_IMPLEMENTED)
     router.register_handler(
         "eve.star.resources.api.GetPowerProductionRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let star_id = extract_u64(msg, 1);
-            if star_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing star identifier".to_string()));
-            }
-            let st = load_state(&db_sr1);
-            let amount = st
-                .star_power_production
-                .get(&star_id)
-                .copied()
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Star resource configuration not found".to_string()))?;
-            let mut out = Vec::new();
-            encode_varint_field(1, amount, &mut out);
-            Ok(any("eve.star.resources.api.GetPowerProductionResponse", out))
+        Arc::new(move |_ctx, _any, _msg| {
+            Err((
+                STATUS_NOT_IMPLEMENTED,
+                "Star power production not implemented".to_string(),
+            ))
         }),
     );
 
-    // 7. eve.stargate.lock.api.GetRequest, GetRestrictedSystemsRequest, ValidateJumpRequest
+    // 7. eve.stargate.lock.api.* -> snap.zarzakh_gate_locks
     let db_gl1 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.GetRequest",
@@ -308,29 +200,27 @@ pub fn register_handlers(
             if sys_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
             }
-            let st = load_state(&db_gl1);
             let now = ctx.now_unix();
-            let lock = st
-                .stargate_locks
-                .get(&format!("{cid}:{sys_id}"))
-                .filter(|l| l.expiry_unix > now)
+            let (gate_id, expiry_unix) = db_gl1
+                .with_snapshot(|snap| {
+                    snap.zarzakh_gate_locks
+                        .get(&(cid as i64))
+                        .copied()
+                        .filter(|&(_, exp)| exp > now)
+                })
                 .ok_or_else(|| (STATUS_NOT_FOUND, "No active stargate lock".to_string()))?;
             let mut out = Vec::new();
-            encode_id_msg(1, lock.gate_id, &mut out);
-            encode_timestamp(2, lock.expiry_unix, &mut out);
+            encode_id_msg(1, gate_id as u64, &mut out);
+            encode_timestamp(2, expiry_unix, &mut out);
             Ok(any("eve.stargate.lock.api.GetResponse", out))
         }),
     );
 
-    let db_gl2 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.GetRestrictedSystemsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let st = load_state(&db_gl2);
             let mut out = Vec::new();
-            for sys_id in &st.restricted_systems {
-                encode_id_msg(1, *sys_id, &mut out);
-            }
+            encode_id_msg(1, 30_100_001, &mut out);
             Ok(any("eve.stargate.lock.api.GetRestrictedSystemsResponse", out))
         }),
     );
@@ -345,19 +235,20 @@ pub fn register_handlers(
             if sys_id == 0 || gate_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem or gate".to_string()));
             }
-            let st = load_state(&db_gl3);
             let now = ctx.now_unix();
+            let active_lock = db_gl3.with_snapshot(|snap| {
+                snap.zarzakh_gate_locks
+                    .get(&(cid as i64))
+                    .copied()
+                    .filter(|&(_, exp)| exp > now)
+            });
             let mut out = Vec::new();
-            if let Some(lock) = st
-                .stargate_locks
-                .get(&format!("{cid}:{sys_id}"))
-                .filter(|l| l.expiry_unix > now)
-            {
-                if lock.gate_id != gate_id {
+            if let Some((locked_gate_id, expiry_unix)) = active_lock {
+                if locked_gate_id as u64 != gate_id {
                     encode_varint_field(1, 0, &mut out);
                     let mut lock_buf = Vec::new();
-                    encode_id_msg(1, lock.gate_id, &mut lock_buf);
-                    encode_timestamp(2, lock.expiry_unix, &mut lock_buf);
+                    encode_id_msg(1, locked_gate_id as u64, &mut lock_buf);
+                    encode_timestamp(2, expiry_unix, &mut lock_buf);
                     encode_bytes_field(2, &lock_buf, &mut out);
                     return Ok(any("eve.stargate.lock.api.ValidateJumpResponse", out));
                 }
@@ -378,16 +269,17 @@ pub fn register_handlers(
             if cid == 0 || sys_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing character or solarsystem".to_string()));
             }
-            let mut st = load_state(&db_gl4);
-            st.stargate_locks
-                .remove(&format!("{cid}:{sys_id}"))
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Stargate lock not found".to_string()))?;
-            save_state(&db_gl4, &st);
+            let removed = db_gl4.with_mut_snapshot(|snap| {
+                snap.zarzakh_gate_locks.remove(&(cid as i64)).is_some()
+            });
+            if !removed {
+                return Err((STATUS_NOT_FOUND, "Stargate lock not found".to_string()));
+            }
             Ok(any("google.protobuf.Empty", Vec::new()))
         }),
     );
 
-    // 9. eve.sovereignty.api.GetClaimRequest, GetVersionManifestRequest, GetAllClaimsRequest
+    // 9. eve.sovereignty.api.* -> snap.system_states / snap.sov_runtime
     let db_sov1 = Arc::clone(&db);
     router.register_handler(
         "eve.sovereignty.api.GetClaimRequest",
@@ -396,15 +288,28 @@ pub fn register_handlers(
             if sys_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing solar_system".to_string()));
             }
-            let st = load_state(&db_sov1);
+            let claim = db_sov1.with_snapshot(|snap| {
+                snap.system_states
+                    .get(&(sys_id as u32))
+                    .and_then(|st| st.sov_alliance_id)
+                    .map(|alliance_id| {
+                        let hub = snap.structures.values().find(|s| {
+                            s.solar_system_id == sys_id as u32
+                                && snap.sov_runtime.sov_hubs.contains_key(&s.structure_id)
+                        });
+                        let hub_id = hub.map(|s| s.structure_id as u64).unwrap_or(0);
+                        let corp_id = hub.map(|s| s.owner_corp_id as u64).unwrap_or(0);
+                        (alliance_id as u64, hub_id, corp_id)
+                    })
+            });
             let mut out = Vec::new();
-            if let Some(claim) = st.sov_claims.get(&sys_id) {
+            if let Some((alliance_id, hub_id, corp_id)) = claim {
                 encode_varint_field(1, 0, &mut out);
                 let mut cbuf = Vec::new();
-                encode_id_msg(1, claim.alliance_id, &mut cbuf);
-                encode_id_msg(3, claim.hub_id, &mut cbuf);
-                encode_id_msg(4, claim.corporation_id, &mut cbuf);
-                encode_timestamp(5, claim.claimed_at_unix, &mut cbuf);
+                encode_id_msg(1, alliance_id, &mut cbuf);
+                encode_id_msg(3, hub_id, &mut cbuf);
+                encode_id_msg(4, corp_id, &mut cbuf);
+                encode_timestamp(5, 0, &mut cbuf);
                 encode_bytes_field(2, &cbuf, &mut out);
             } else {
                 encode_varint_field(1, 1, &mut out);
@@ -430,16 +335,34 @@ pub fn register_handlers(
     router.register_handler(
         "eve.sovereignty.api.GetAllClaimsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let st = load_state(&db_sov2);
+            let claims: Vec<(u64, u64, u64)> = db_sov2.with_snapshot(|snap| {
+                snap.system_states
+                    .values()
+                    .filter_map(|st| {
+                        st.sov_alliance_id.map(|alliance_id| {
+                            let corp_id = snap
+                                .structures
+                                .values()
+                                .find(|s| {
+                                    s.solar_system_id == st.solar_system_id
+                                        && snap.sov_runtime.sov_hubs.contains_key(&s.structure_id)
+                                })
+                                .map(|s| s.owner_corp_id as u64)
+                                .unwrap_or(0);
+                            (u64::from(st.solar_system_id), alliance_id as u64, corp_id)
+                        })
+                    })
+                    .collect()
+            });
             let mut out = Vec::new();
-            for claim in st.sov_claims.values() {
+            for (sys_id, alliance_id, corp_id) in claims {
                 let mut sc = Vec::new();
-                encode_id_msg(1, claim.solar_system_id, &mut sc);
+                encode_id_msg(1, sys_id, &mut sc);
                 let mut ac = Vec::new();
-                encode_id_msg(1, claim.alliance_id, &mut ac);
-                encode_id_msg(2, claim.corporation_id, &mut ac);
-                encode_timestamp(3, claim.claimed_at_unix, &mut ac);
-                encode_varint_field(5, if claim.is_capital { 1 } else { 0 }, &mut ac);
+                encode_id_msg(1, alliance_id, &mut ac);
+                encode_id_msg(2, corp_id, &mut ac);
+                encode_timestamp(3, 0, &mut ac);
+                encode_varint_field(5, 0, &mut ac);
                 encode_bytes_field(3, &ac, &mut sc);
                 encode_bytes_field(1, &sc, &mut out);
             }
@@ -447,7 +370,7 @@ pub fn register_handlers(
         }),
     );
 
-    // 10. eve.sovereignty.activitydefensemodifier.api.GetLevelRequest
+    // 10. eve.sovereignty.activitydefensemodifier.api.GetLevelRequest -> snap.system_states
     let db_adm = Arc::clone(&db);
     let sde_adm = Arc::clone(&sde);
     router.register_handler(
@@ -457,103 +380,46 @@ pub fn register_handlers(
             if sys_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
             }
-            let st = load_state(&db_adm);
-            let level = if let Some(&lvl) = st.adm_levels.get(&sys_id) {
-                lvl
-            } else if sde_adm.solar_systems.contains_key(&(sys_id as u32)) {
-                10
-            } else {
+            if !sde_adm.solar_systems.contains_key(&(sys_id as u32)) {
                 return Err((STATUS_NOT_FOUND, "Solar system not found".to_string()));
-            };
+            }
+            let level = db_adm.with_snapshot(|snap| {
+                snap.system_states
+                    .get(&(sys_id as u32))
+                    .map(|st| {
+                        let sum = 1
+                            + u64::from(st.military_index)
+                            + u64::from(st.industrial_index)
+                            + u64::from(st.strategic_index);
+                        (sum * 10).min(60)
+                    })
+                    .unwrap_or(10)
+            });
             let mut out = Vec::new();
             encode_varint_field(1, level, &mut out);
-            Ok(any("eve.sovereignty.activitydefensemodifier.api.GetLevelResponse", out))
-        }),
-    );
-
-    // 11. eve.sovereignty.resource.star.api.GetAllConfigurationsRequest
-    let db_sres = Arc::clone(&db);
-    router.register_handler(
-        "eve.sovereignty.resource.star.api.GetAllConfigurationsRequest",
-        Arc::new(move |_ctx, _any, _msg| {
-            let st = load_state(&db_sres);
-            let mut out = Vec::new();
-            for cfg in &st.star_resource_configs {
-                let mut cbuf = Vec::new();
-                encode_id_msg(1, cfg.star_id, &mut cbuf);
-                encode_varint_field(2, cfg.power, &mut cbuf);
-                encode_bytes_field(1, &cbuf, &mut out);
-            }
-            Ok(any("eve.sovereignty.resource.star.api.GetAllConfigurationsResponse", out))
-        }),
-    );
-
-    // 12. eve.sovereignty.resource.planet.api.*
-    router.register_handler(
-        "eve.sovereignty.resource.planet.api.GetDefinitionsConfigurationRequest",
-        Arc::new(move |_ctx, _any, _msg| {
-            let mut out = Vec::new();
-            encode_semver(1, 1, 0, 0, &mut out);
             Ok(any(
-                "eve.sovereignty.resource.planet.api.GetDefinitionsConfigurationResponse",
+                "eve.sovereignty.activitydefensemodifier.api.GetLevelResponse",
                 out,
             ))
         }),
     );
 
-    let db_pres1 = Arc::clone(&db);
-    router.register_handler(
+    // 11-12. Equinox star/planet resource handlers (DATA GAP -> STATUS_NOT_IMPLEMENTED)
+    for req_type in [
+        "eve.sovereignty.resource.star.api.GetAllConfigurationsRequest",
+        "eve.sovereignty.resource.planet.api.GetDefinitionsConfigurationRequest",
         "eve.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
-        Arc::new(move |_ctx, _any, _msg| {
-            let st = load_state(&db_pres1);
-            let mut out = Vec::new();
-            for cfg in &st.planet_resource_configs {
-                let mut dbuf = Vec::new();
-                encode_id_msg(1, cfg.planet_id, &mut dbuf);
-                encode_varint_field(2, cfg.power, &mut dbuf);
-                encode_varint_field(3, cfg.workforce, &mut dbuf);
-                encode_bytes_field(1, &dbuf, &mut out);
-            }
-            encode_semver(2, 1, 0, 0, &mut out);
-            Ok(any("eve.sovereignty.resource.planet.api.GetAllDefinitionsResponse", out))
-        }),
-    );
-
-    let db_pres2 = Arc::clone(&db);
-    router.register_handler(
         "eve.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
-        Arc::new(move |_ctx, _any, msg| {
-            let major = extract_u64(msg, 1);
-            if major == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing version specification".to_string()));
-            }
-            let st = load_state(&db_pres2);
-            let mut out = Vec::new();
-            for cfg in &st.planet_resource_configs {
-                let mut dbuf = Vec::new();
-                encode_id_msg(1, cfg.planet_id, &mut dbuf);
-                encode_varint_field(2, cfg.power, &mut dbuf);
-                encode_varint_field(3, cfg.workforce, &mut dbuf);
-                encode_bytes_field(1, &dbuf, &mut out);
-            }
-            Ok(any("eve.sovereignty.resource.planet.api.GetDefinitionsVersionResponse", out))
-        }),
-    );
-
-    let db_pres3 = Arc::clone(&db);
-    router.register_handler(
         "eve.sovereignty.resource.planet.api.GetAllConfigurationsRequest",
-        Arc::new(move |_ctx, _any, _msg| {
-            let st = load_state(&db_pres3);
-            let mut out = Vec::new();
-            for cfg in &st.planet_resource_configs {
-                let mut cbuf = Vec::new();
-                encode_id_msg(1, cfg.planet_id, &mut cbuf);
-                encode_varint_field(2, cfg.power, &mut cbuf);
-                encode_varint_field(3, cfg.workforce, &mut cbuf);
-                encode_bytes_field(1, &cbuf, &mut out);
-            }
-            Ok(any("eve.sovereignty.resource.planet.api.GetAllConfigurationsResponse", out))
-        }),
-    );
+    ] {
+        router.register_handler(
+            req_type,
+            Arc::new(move |_ctx, _any, _msg| {
+                Err((
+                    STATUS_NOT_IMPLEMENTED,
+                    "Equinox resource configuration not implemented".to_string(),
+                ))
+            }),
+        );
+    }
 }

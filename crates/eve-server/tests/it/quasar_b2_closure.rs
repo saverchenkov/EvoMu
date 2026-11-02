@@ -7,67 +7,79 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
-    STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_OK, STATUS_UNAUTHORIZED,
+    STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b2_services::{
-    load_state, save_state, PlanetResourceConfig, QuasarB2State, SovClaimRecord,
-    StarResourceConfig, StargateLockRecord, StructureRecord,
-};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn seed_quasar_b2_fixtures(ctx: &ServerContext) {
-    let mut state = QuasarB2State::default();
-    state
-        .ship_unlock_pending
-        .insert(2_112_000_001, vec![587, 597]);
-    state.structures.insert(
-        1_030_000_000_001,
-        StructureRecord {
-            structure_id: 1_030_000_000_001,
-            type_id: 35832, // Astrahus
-            solar_system_id: 30_000_142,
-            corporation_id: 98_000_001,
-            name: "Jita Trade Citadel".to_string(),
-        },
-    );
-    state.star_power_production.insert(40_009_041, 4_250);
-    state.stargate_locks.insert(
-        format!("{}:{}", 2_112_000_001u64, 30_000_142u64),
-        StargateLockRecord {
-            character_id: 2_112_000_001,
-            solar_system_id: 30_000_142,
-            gate_id: 50_001_248,
-            expiry_unix: ctx.now_unix() + 3_600,
-        },
-    );
-    state.restricted_systems = vec![30_000_142, 30_100_001];
-    state.sov_claims.insert(
-        30_002_537,
-        SovClaimRecord {
-            solar_system_id: 30_002_537,
-            alliance_id: 99_000_001,
-            corporation_id: 98_000_001,
-            hub_id: 1_040_000_000_001,
-            claimed_at_unix: 1_700_000_000,
-            is_capital: true,
-            military_index: 5,
-            industrial_index: 4,
-            strategic_index: 5,
-        },
-    );
-    state.adm_levels.insert(30_002_537, 60);
-    state.star_resource_configs = vec![StarResourceConfig {
-        star_id: 40_009_041,
-        power: 4_250,
-    }];
-    state.planet_resource_configs = vec![PlanetResourceConfig {
-        planet_id: 40_009_042,
-        power: 1_200,
-        workforce: 8_500,
-    }];
-    save_state(&ctx.db, &state);
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(
+            1_030_000_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_030_000_000_001,
+                type_id: 35832, // Astrahus
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_000_142,
+                name: "Jita Trade Citadel".to_string(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.zarzakh_gate_locks
+            .insert(2_112_000_001, (50_001_248, now + 3_600));
+        snap.system_states.insert(
+            30_002_537,
+            eve_db::SystemDynamicState {
+                solar_system_id: 30_002_537,
+                dbs_multiplier: 1.0,
+                sov_alliance_id: Some(99_000_001),
+                military_index: 5,
+                industrial_index: 4,
+                strategic_index: 5,
+                ..Default::default()
+            },
+        );
+        snap.structures.insert(
+            1_040_000_000_001,
+            eve_db::UpwellStructureRecord {
+                structure_id: 1_040_000_000_001,
+                type_id: 32458, // Sovereignty Hub
+                owner_corp_id: 98_000_001,
+                solar_system_id: 30_002_537,
+                name: "Sov Hub".to_string(),
+                position: [0.0, 0.0, 0.0],
+                state: "ShieldVulnerable".to_string(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+        snap.sov_runtime.sov_hubs.insert(
+            1_040_000_000_001,
+            eve_db::PersistedSovHubData {
+                hub_id: 1_040_000_000_001,
+                ..Default::default()
+            },
+        );
+    });
 }
 
 static CORR_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -215,6 +227,10 @@ fn first_bytes(fields: &[(u32, RawField)], field_num: u32) -> Option<&[u8]> {
     })
 }
 
+fn decode_nested_id(fields: &[(u32, RawField)], field_num: u32) -> Option<u64> {
+    first_bytes(fields, field_num).and_then(|b| first_varint(&parse_raw_proto(b), 1))
+}
+
 #[tokio::test]
 async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     // parity: quasar:eveProto/generated/eve_public/ship/unlock/requests_pb2.pyj, quasar:eveProto/generated/eve/ship/api/requests_pb2.pyj, quasar:eveProto/generated/eve/starterspace/api/requests_pb2.pyj
@@ -222,7 +238,7 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(1, 1001, 2_112_000_001, 98_000_001);
 
-    // 1. GetPendingNotificationsRequest returns initial pending ship types [587, 597]
+    // 1. GetPendingNotificationsRequest returns empty pending list
     let rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -235,38 +251,28 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     assert!(payload
         .type_url
         .ends_with("eve_public.ship.unlock.GetPendingNotificationsResponse"));
-    let fields = parse_raw_proto(&payload.value);
-    assert_eq!(fields.len(), 2);
+    assert!(parse_raw_proto(&payload.value).is_empty());
 
-    // 2. ClaimRewardRequest removes 587 and persists
+    // 2. ClaimRewardRequest validates missing ID (400) and non-pending reward (404)
+    let bad_claim = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.ship.unlock.ClaimRewardRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(bad_claim.status_code, STATUS_BAD_REQUEST);
+
     let mut claim_req = Vec::new();
     encode_id_field(1, 587, &mut claim_req);
     let claim_rsp = quasar_rpc(
         &ctx,
         &mut sess,
         "eve_public.ship.unlock.ClaimRewardRequest",
-        claim_req.clone(),
-    )
-    .await;
-    assert_eq!(claim_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        load_state(&ctx.db)
-            .ship_unlock_claimed
-            .get(&2_112_000_001)
-            .cloned()
-            .unwrap_or_default(),
-        vec![587]
-    );
-
-    // Claiming 587 again returns NOT_FOUND
-    let claim_again = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.ship.unlock.ClaimRewardRequest",
         claim_req,
     )
     .await;
-    assert_eq!(claim_again.status_code, STATUS_NOT_FOUND);
+    assert_eq!(claim_rsp.status_code, STATUS_NOT_FOUND);
 
     // 3. CanJumpStarterSpaceShipCasterRequest & CanJumpShipCasterRequest
     let mut caster_req = Vec::new();
@@ -284,17 +290,37 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
         Some(1)
     );
 
-    // Character 2_112_000_001 has a stargate lock, so starterspace CanJumpShipCasterRequest returns false (0)
+    // Character 2_112_000_001 has a zarzakh_gate_lock, so starterspace CanJumpShipCasterRequest returns false (0)
     let r2 = quasar_rpc(
         &ctx,
         &mut sess,
         "eve.starterspace.api.CanJumpShipCasterRequest",
-        caster_req,
+        caster_req.clone(),
     )
     .await;
     assert_eq!(r2.status_code, STATUS_OK);
     assert_eq!(
         first_varint(&parse_raw_proto(&r2.payload.unwrap().value), 1),
+        Some(0)
+    );
+
+    // Emptying starter_launchers in cluster_misc_state disables CanJumpStarterSpaceShipCasterRequest
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(
+            "cluster_misc_state".to_string(),
+            r#"{"starter_launchers":[]}"#.to_string(),
+        );
+    });
+    let r3 = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
+        caster_req,
+    )
+    .await;
+    assert_eq!(r3.status_code, STATUS_OK);
+    assert_eq!(
+        first_varint(&parse_raw_proto(&r3.payload.unwrap().value), 1),
         Some(0)
     );
 
@@ -317,13 +343,16 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(2, 1002, 2_112_000_002, 98_000_001);
 
-    // 1. eve.structure.api.GetRequest
+    // 1. eve.structure.api.GetRequest -> wired to snap.structures
     let mut struct_req = Vec::new();
     encode_id_field(1, 1_030_000_000_001, &mut struct_req);
     let srsp = quasar_rpc(&ctx, &mut sess, "eve.structure.api.GetRequest", struct_req).await;
     assert_eq!(srsp.status_code, STATUS_OK);
     let sfields = parse_raw_proto(&srsp.payload.unwrap().value);
     let attrs = parse_raw_proto(first_bytes(&sfields, 1).unwrap());
+    assert_eq!(decode_nested_id(&attrs, 1), Some(35832));
+    assert_eq!(decode_nested_id(&attrs, 2), Some(30_000_142));
+    assert_eq!(decode_nested_id(&attrs, 3), Some(98_000_001));
     assert_eq!(
         first_bytes(&attrs, 4),
         Some(b"Jita Trade Citadel".as_slice())
@@ -335,7 +364,7 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
     let bad_srsp = quasar_rpc(&ctx, &mut sess, "eve.structure.api.GetRequest", bad_struct).await;
     assert_eq!(bad_srsp.status_code, STATUS_NOT_FOUND);
 
-    // 2. eve.star.resources.api.GetPowerProductionRequest
+    // 2. eve.star.resources.api.GetPowerProductionRequest -> STATUS_NOT_IMPLEMENTED (DATA GAP)
     let mut star_req = Vec::new();
     encode_id_field(1, 40_009_041, &mut star_req);
     let starrsp = quasar_rpc(
@@ -345,11 +374,7 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
         star_req,
     )
     .await;
-    assert_eq!(starrsp.status_code, STATUS_OK);
-    assert_eq!(
-        first_varint(&parse_raw_proto(&starrsp.payload.unwrap().value), 1),
-        Some(4_250)
-    );
+    assert_eq!(starrsp.status_code, STATUS_NOT_IMPLEMENTED);
 
     // 3. eve.space.tag.admin.api.ApplyRequest & RemoveRequest (handled by quasar_space_domain)
     let jita = ctx.sde.solar_systems.get(&30_000_142).expect("Jita in SDE");
@@ -416,7 +441,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(3, 1003, 2_112_000_001, 98_000_001);
 
-    // 1. GetRestrictedSystemsRequest
+    // 1. GetRestrictedSystemsRequest -> Zarzakh (30_100_001)
     let restr_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -425,9 +450,10 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     )
     .await;
     assert_eq!(restr_rsp.status_code, STATUS_OK);
-    assert_eq!(parse_raw_proto(&restr_rsp.payload.unwrap().value).len(), 2);
+    let restr_fields = parse_raw_proto(&restr_rsp.payload.unwrap().value);
+    assert_eq!(decode_nested_id(&restr_fields, 1), Some(30_100_001));
 
-    // 2. GetRequest returns active lock on gate 50_001_248
+    // 2. GetRequest returns active lock on gate 50_001_248 + expiry timestamp
     let mut get_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut get_req);
     encode_id_field(2, 30_000_142, &mut get_req);
@@ -439,8 +465,11 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     )
     .await;
     assert_eq!(get_rsp.status_code, STATUS_OK);
+    let gfields = parse_raw_proto(&get_rsp.payload.unwrap().value);
+    assert_eq!(decode_nested_id(&gfields, 1), Some(50_001_248));
+    assert!(decode_nested_id(&gfields, 2).unwrap_or(0) > ctx.now_unix());
 
-    // 3. ValidateJumpRequest on a different gate returns allowed = false (0)
+    // 3. ValidateJumpRequest on a different gate returns allowed = false (0) + lock details
     let mut val_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut val_req);
     encode_id_field(2, 30_000_142, &mut val_req);
@@ -453,10 +482,10 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     )
     .await;
     assert_eq!(val_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        first_varint(&parse_raw_proto(&val_rsp.payload.unwrap().value), 1),
-        Some(0)
-    );
+    let vfields = parse_raw_proto(&val_rsp.payload.unwrap().value);
+    assert_eq!(first_varint(&vfields, 1), Some(0));
+    let lock_sub = parse_raw_proto(first_bytes(&vfields, 2).unwrap());
+    assert_eq!(decode_nested_id(&lock_sub, 1), Some(50_001_248));
 
     // 4. DeleteCommanded requires admin role, then removes the lock, after which ValidateJumpRequest allows jump (1)
     let mut del_req = Vec::new();
@@ -490,6 +519,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
         val_req.clone(),
     )
     .await;
+    assert_eq!(val_after.status_code, STATUS_OK);
     assert_eq!(
         first_varint(&parse_raw_proto(&val_after.payload.unwrap().value), 1),
         Some(1)
@@ -513,6 +543,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
         val_req,
     )
     .await;
+    assert_eq!(expired_val.status_code, STATUS_OK);
     assert_eq!(
         first_varint(&parse_raw_proto(&expired_val.payload.unwrap().value), 1),
         Some(1)
@@ -526,16 +557,19 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(4, 1004, 2_112_000_004, 98_000_001);
 
-    // 1. GetClaimRequest (claimed system 30_002_537 vs unclaimed 30_000_142)
+    // 1. GetClaimRequest (claimed system 30_002_537)
     let mut claim_req = Vec::new();
     encode_id_field(1, 30_002_537, &mut claim_req);
     let crsp = quasar_rpc(&ctx, &mut sess, "eve.sovereignty.api.GetClaimRequest", claim_req).await;
     assert_eq!(crsp.status_code, STATUS_OK);
     let cfields = parse_raw_proto(&crsp.payload.unwrap().value);
     assert_eq!(first_varint(&cfields, 1), Some(0));
-    assert!(first_bytes(&cfields, 2).is_some());
+    let cbuf = parse_raw_proto(first_bytes(&cfields, 2).unwrap());
+    assert_eq!(decode_nested_id(&cbuf, 1), Some(99_000_001));
+    assert_eq!(decode_nested_id(&cbuf, 3), Some(1_040_000_000_001));
+    assert_eq!(decode_nested_id(&cbuf, 4), Some(98_000_001));
 
-    // GetVersionManifestRequest & GetAllClaimsRequest
+    // GetVersionManifestRequest
     let mrsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -544,7 +578,11 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
     )
     .await;
     assert_eq!(mrsp.status_code, STATUS_OK);
+    let mfields = parse_raw_proto(&mrsp.payload.unwrap().value);
+    let manifest = parse_raw_proto(first_bytes(&mfields, 1).unwrap());
+    assert_eq!(manifest.len(), 6);
 
+    // GetAllClaimsRequest
     let all_claims = quasar_rpc(
         &ctx,
         &mut sess,
@@ -553,8 +591,14 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
     )
     .await;
     assert_eq!(all_claims.status_code, STATUS_OK);
+    let all_fields = parse_raw_proto(&all_claims.payload.unwrap().value);
+    let sc = parse_raw_proto(first_bytes(&all_fields, 1).unwrap());
+    assert_eq!(decode_nested_id(&sc, 1), Some(30_002_537));
+    let ac = parse_raw_proto(first_bytes(&sc, 3).unwrap());
+    assert_eq!(decode_nested_id(&ac, 1), Some(99_000_001));
+    assert_eq!(decode_nested_id(&ac, 2), Some(98_000_001));
 
-    // 2. GetLevelRequest (ADM)
+    // 2. GetLevelRequest (ADM) -> wired to snap.system_states
     let mut adm_req = Vec::new();
     encode_id_field(1, 30_002_537, &mut adm_req);
     let adm_rsp = quasar_rpc(
@@ -570,51 +614,15 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
         Some(60)
     );
 
-    // 3. Star & Planet resource configurations and definitions
-    let sres_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
+    // 3. Equinox star & planet resource handlers -> STATUS_NOT_IMPLEMENTED (DATA GAP)
+    for req_type in [
         "eve.sovereignty.resource.star.api.GetAllConfigurationsRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(sres_rsp.status_code, STATUS_OK);
-
-    let pcfg_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
         "eve.sovereignty.resource.planet.api.GetDefinitionsConfigurationRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(pcfg_rsp.status_code, STATUS_OK);
-
-    let pdef_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
         "eve.sovereignty.resource.planet.api.GetAllDefinitionsRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(pdef_rsp.status_code, STATUS_OK);
-
-    let pall_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.sovereignty.resource.planet.api.GetAllConfigurationsRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(pall_rsp.status_code, STATUS_OK);
-
-    // Bad version request returns STATUS_BAD_REQUEST
-    let bad_ver = quasar_rpc(
-        &ctx,
-        &mut sess,
         "eve.sovereignty.resource.planet.api.GetDefinitionsVersionRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(bad_ver.status_code, STATUS_BAD_REQUEST);
-    let _ = save_state;
+        "eve.sovereignty.resource.planet.api.GetAllConfigurationsRequest",
+    ] {
+        let rsp = quasar_rpc(&ctx, &mut sess, req_type, Vec::new()).await;
+        assert_eq!(rsp.status_code, STATUS_NOT_IMPLEMENTED, "{req_type}");
+    }
 }
