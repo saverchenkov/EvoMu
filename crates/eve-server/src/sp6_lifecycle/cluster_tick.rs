@@ -1197,6 +1197,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     });
     crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
+    crate::services::mining_b33::tick_phased_asteroid_fields(ctx, now_unix).await;
     ctx.advance_skill_queues(1.0);
 
     ctx.db.with_mut_snapshot(|snap| {

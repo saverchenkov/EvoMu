@@ -609,43 +609,21 @@ async fn test_b33_mercenary_den_activities_and_notices_closure() {
 }
 
 #[tokio::test]
-async fn test_b33_star_resources_and_skyhook_admin_closure() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
+async fn test_b33_skyhook_admin_closure() {
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
     let ctx = ServerContext::new();
     let cid = 90_000_050i64;
     let corp_id = 1_000_009i64;
     let skyhook_id = 1_070_000_001i64;
     let sys_id = 30_000_142u32;
     let mut sess = make_session(8, 50, cid, corp_id, true);
-    let mut unauth = SessionState::new(9);
 
     ctx.db.with_mut_snapshot(|snap| {
         seed_char(snap, cid, 50, corp_id, sys_id);
         seed_structure(snap, skyhook_id, corp_id, sys_id, TYPE_ORBITAL_SKYHOOK);
     });
 
-    // 1. Star resource configurations
-    let r_unauth = quasar_rpc(
-        &ctx,
-        &mut unauth,
-        "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(r_unauth.status_code, STATUS_UNAUTHORIZED);
-
-    let r_stars = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(r_stars.status_code, STATUS_OK);
-    let dyn_stars = decode_dyn(&ctx, &r_stars);
-    assert!(dyn_stars.get(1).is_some());
-
-    // 2. Skyhook admin ScheduleTheftVulnerabilityWindowRequest
+    // Skyhook admin ScheduleTheftVulnerabilityWindowRequest
     let now = ctx.now_unix();
     let mut bad_win = Vec::new();
     encode_u64_id(1, skyhook_id as u64, &mut bad_win);

@@ -528,6 +528,9 @@ pub(crate) async fn ship_drop(
                 if (t.group_id == 361 || disallow_in_empire) && sys_sec > 0.0 {
                     return Err(err("UserError", format!("Item {} cannot be deployed in empire space (system security {sys_sec:.2} > 0.0)", t.name)));
                 }
+                if t.type_id == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR && sys_sec >= 0.45 {
+                    return Err(err("CannotDeployInHighSec", "Mobile Phase Anchor can only be deployed in low-sec or null-sec space"));
+                }
                 if let Some(&max_sec) = t.default_attributes.get(&1032) {
                     if sys_sec > max_sec + 1e-4 {
                         return Err(err("UserError", format!("Item {} cannot be anchored in security {sys_sec:.2} > max {max_sec:.2}", t.name)));
@@ -625,6 +628,9 @@ pub(crate) async fn ship_drop(
                 },
             )
             .await;
+        if tid == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR {
+            crate::services::mining_b33::on_mobile_phase_anchor_deployed(ctx, sys_id);
+        }
     }
     let mut map: HashMap<i64, Vec<PyRep>> = HashMap::new();
     for &(orig_id, launched_id, _, _) in &dropped_items {

@@ -152,6 +152,7 @@ mod notify_mail_emission;
 mod notify_real_emitters_batch2;
 mod notify_space_sov_fleet_emission;
 mod open_feats_and_rpcs_b33;
+mod open_feats_and_rpcs_b33_part2;
 mod npc_spawns_pve_closure;
 mod npc_spawns_pve_closure_part2;
 mod planetary_interaction_complete;
