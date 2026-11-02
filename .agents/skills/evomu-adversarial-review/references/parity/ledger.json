@@ -1,6 +1,6 @@
 {
  "version": 1,
- "row_count": 5744,
+ "row_count": 5748,
  "rows": [
   {
    "id": "rpc:FastCheckoutService.BuyOffer",
@@ -62195,7 +62195,22 @@
     "wiki:AIR_New_Player_Experience",
     "client:storylines/client/airnpe.pyj"
    ],
-   "plan_task": null
+   "plan_task": "E-7"
+  },
+  {
+   "id": "feat:pve.air-npe-nodegraph-runner",
+   "category": "feat",
+   "title": "AIR NPE server-side node-graph runner & pocket orchestrator",
+   "acceptance": "Server executes AIR NPE node graphs, spawns NPE dungeon pockets and moves new characters into them, pushes OnStartClientNodeGraph / OnClientNodeGraphUpdate / OnClientNodeGraphMessage / OnAirNpeStateChanged notifications, and completes or skips cleanly.",
+   "na_allowed": false,
+   "attest_ok": false,
+   "domain": "pve",
+   "sources": [
+    "client:storylines/client/airnpe.pyj",
+    "client:nodegraph/client/",
+    "spec:04_pve_narrative_dungeons.md"
+   ],
+   "plan_task": "E-7"
   },
   {
    "id": "feat:pve.operations-tutorial",
@@ -62208,7 +62223,7 @@
    "sources": [
     "client:monolith_task_tracker/client/eventHandler.pyj"
    ],
-   "plan_task": null
+   "plan_task": "E-7"
   },
   {
    "id": "feat:pve.opportunities",
@@ -67887,7 +67902,7 @@
    "sources": [
     "wiki:Server_downtime"
    ],
-   "plan_task": "SP-7"
+   "plan_task": null
   },
   {
    "id": "feat:serverops.daily-jobs",
@@ -67900,7 +67915,7 @@
    "sources": [
     "wiki:Server_downtime"
    ],
-   "plan_task": "SP-7"
+   "plan_task": null
   },
   {
    "id": "feat:serverops.persistence",
@@ -72275,6 +72290,14 @@
    "category": "plan",
    "title": "E-6",
    "acceptance": "Canonical task E-6 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:E-7",
+   "category": "plan",
+   "title": "E-7",
+   "acceptance": "Canonical task E-7 meets every 'Done when' criterion in action_plan.md.",
    "na_allowed": false,
    "attest_ok": false
   },

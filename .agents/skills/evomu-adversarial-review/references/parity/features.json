@@ -4325,7 +4325,19 @@
     "wiki:AIR_New_Player_Experience",
     "client:storylines/client/airnpe.pyj"
    ],
-   "plan_task": null
+   "plan_task": "E-7"
+  },
+  {
+   "id": "feat:pve.air-npe-nodegraph-runner",
+   "domain": "pve",
+   "title": "AIR NPE server-side node-graph runner & pocket orchestrator",
+   "acceptance": "Server executes AIR NPE node graphs, spawns NPE dungeon pockets and moves new characters into them, pushes OnStartClientNodeGraph / OnClientNodeGraphUpdate / OnClientNodeGraphMessage / OnAirNpeStateChanged notifications, and completes or skips cleanly.",
+   "sources": [
+    "client:storylines/client/airnpe.pyj",
+    "client:nodegraph/client/",
+    "spec:04_pve_narrative_dungeons.md"
+   ],
+   "plan_task": "E-7"
   },
   {
    "id": "feat:pve.operations-tutorial",
@@ -4335,7 +4347,7 @@
    "sources": [
     "client:monolith_task_tracker/client/eventHandler.pyj"
    ],
-   "plan_task": null
+   "plan_task": "E-7"
   },
   {
    "id": "feat:pve.opportunities",
