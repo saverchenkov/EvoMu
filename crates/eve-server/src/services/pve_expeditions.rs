@@ -165,6 +165,7 @@ pub async fn create_escalation_expedition_core(
             created_at_sec: ts,
             expires_at_sec: ts + 86_400,
             dungeons_entered: vec![source_dungeon_id],
+            // DERIVED: synthetic expedition journal template message ID (no SDE escalation message table)
             journal_entry_template_id: 280_001,
         };
         reg.escalations_by_char.entry(char_id).or_default().push(e.clone());

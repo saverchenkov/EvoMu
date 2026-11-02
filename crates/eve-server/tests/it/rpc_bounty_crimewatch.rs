@@ -567,7 +567,7 @@ async fn test_crimewatch_security_and_duels() {
         .values()
         .find_map(|st| {
             let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
-            (0.0 < sec && sec < 0.45).then_some(st.station_id)
+            (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
         })
         .unwrap_or(60_099_999);
     s1.station_id = Some(sec_office_st);
@@ -597,6 +597,7 @@ async fn test_crimewatch_security_and_duels() {
         );
     });
 
+    s1.station_id = Some(sec_office_st);
     let apply_rep = ctx
         .dispatch_rpc(
             &mut s1,
@@ -640,7 +641,7 @@ async fn test_crimewatch_security_and_duels() {
         panic!("Expected PyRowset from GetSecurityStatusTransactions");
     };
     assert!(!rows.is_empty(), "Security status transaction log must not be empty");
-    assert!(columns.contains(&"oldSecurityStatus".into()));
-    assert!(columns.contains(&"newSecurityStatus".into()));
+    assert!(columns.contains(&"eventDate".into()));
+    assert!(columns.contains(&"newValue".into()));
     assert!(columns.contains(&"modification".into()));
 }

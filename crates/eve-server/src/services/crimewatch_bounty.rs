@@ -653,15 +653,24 @@ pub fn handle_apply_tags_for_sec_status(
         };
         (t, q)
     } else if args.len() == 1 {
-        let t = if cur_sec < -8.0 {
-            33138
+        let candidates: &[u32] = if cur_sec < -8.0 {
+            &[33138, 35661, 35514]
         } else if cur_sec < -5.0 {
-            33139
+            &[33139, 35662, 35515]
         } else if cur_sec < -2.0 {
-            33140
+            &[33140, 35663, 35516]
         } else {
-            33141
+            &[33141, 35664, 35517]
         };
+        let t = ctx
+            .db
+            .with_snapshot(|s| {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|&cid| s.items.values().any(|i| i.owner_id == char_id && i.type_id == cid && i.quantity > 0))
+            })
+            .unwrap_or(candidates[0]);
         let Some(q) = args[0]
             .as_i64()
             .and_then(|v| i32::try_from(v).ok())
@@ -689,6 +698,7 @@ pub fn handle_apply_tags_for_sec_status(
         }));
     };
 
+    // DERIVED: CONCORD Security Office tag processing fees per security band
     let band_opt = match tag_type_id {
         33138 | 35661 | 35514 => Some((-10.0, -8.0, 1_000_000_i64)),
         33139 | 35662 | 35515 => Some((-8.0, -5.0, 2_000_000_i64)),
@@ -704,6 +714,16 @@ pub fn handle_apply_tags_for_sec_status(
     };
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|ch| ch.station_id == Some(station_id))
+        {
+            return Err(BridgeRpcError {
+                code: "NotDockedInStation".into(),
+                message: "Character is not docked at this station".into(),
+            });
+        }
         let cur_sec = snap
             .characters
             .get(&char_id)
@@ -733,7 +753,11 @@ pub fn handle_apply_tags_for_sec_status(
                 message: "Insufficient ISK for CONCORD Security Office tag processing fee".into(),
             });
         };
-        let ship_id_opt = session.ship_id;
+        let ship_id_opt = session.ship_id.filter(|sid| {
+            snap.items
+                .get(sid)
+                .is_some_and(|s| s.location_id == station_id)
+        });
         let tag_item_id = snap
             .items
             .values()

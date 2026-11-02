@@ -1336,8 +1336,9 @@ pub async fn activate_command_burst(
                 st.is_criminal(now_unix_burst) || st.is_suspect(now_unix_burst)
             } || (crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
                 && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    let hle = rt.limited_engagements.get(&char_id);
                     rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
-                        m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp)
+                        m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp && !hle.is_some_and(|h| h.get(&pid).is_some_and(|&he| now_unix_burst <= he)))
                     })
                 })) || ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&member_char_id).is_some_and(|rec| rec.security_status <= -4.95)

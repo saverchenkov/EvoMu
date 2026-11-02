@@ -141,11 +141,11 @@ async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
         (SYS_09_JITA, FIL_T4_ELEC, Some("FilamentDisallowedInHighSec"), false),
         (SYS_09_JITA, FIL_T0_ELEC, None, false),
         (SYS_08_LASHESIH, FIL_T3_ELEC, None, false),
-        (SYS_08_LASHESIH, FIL_T4_ELEC, None, true),
+        (SYS_08_LASHESIH, FIL_T4_ELEC, None, false),
         (SYS_07_ORDIZE, FIL_T4_ELEC, None, false),
-        (SYS_07_ORDIZE, FIL_T5_ELEC, None, true),
+        (SYS_07_ORDIZE, FIL_T5_ELEC, None, false),
         (SYS_06_SOOMA, FIL_T5_ELEC, None, false),
-        (SYS_06_SOOMA, FIL_T6_ELEC, None, true),
+        (SYS_06_SOOMA, FIL_T6_ELEC, None, false),
         (SYS_05_CHIDAH, FIL_T6_ELEC, None, false),
         (SYS_LOW_TAMA, FIL_T6_ELEC, None, false),
     ];
@@ -169,8 +169,8 @@ async fn test_abyssal_highsec_tiers_suspect_and_activation_restrictions() {
             None => {
                 let rep = res.expect("allowed deployment");
                 let _trace_id = rep.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
-                let is_sus = ctx.crimewatch.read().unwrap().is_suspect(char_id, ctx.now_unix());
-                assert_eq!(is_sus, expected_suspect, "suspect mismatch for sys {sys_id} fil {fil_tid}");
+                let sus_on_exit = rep.dict_get("suspectFlagOnExit") == Some(&PyRep::Bool(true));
+                assert_eq!(sus_on_exit, expected_suspect, "suspect mismatch for sys {sys_id} fil {fil_tid}");
             }
         }
     }
@@ -399,11 +399,11 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
     assert!(rows.iter().any(|r| r.first().and_then(|v| v.as_i64()) == Some(fg_trace)), "Trace visible on D-scan");
 
     let ent_fg1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(fg_trace)], &kw, None).await.expect("FG 1");
-    let _ = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(fg_trace)], &kw, None).await.expect("FG 2");
+    let ent_fg2 = ctx.dispatch_rpc(&mut sess2, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(fg_trace)], &kw, None).await.expect("FG 2");
     let _ = ctx.dispatch_rpc(&mut sess3, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(fg_trace)], &kw, None).await.expect("FG 3");
     let e_fg4 = ctx.dispatch_rpc(&mut sess4, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(fg_trace)], &kw, None).await.unwrap_err();
     assert_eq!(e_fg4.code, "TraceShipLimitReached");
-    assert!(ctx.crimewatch.read().unwrap().is_suspect(char2, ctx.now_unix()), "Fleetmate receives Suspect flag on high-sec Suspect trace entry");
+    assert_eq!(ent_fg2.dict_get("suspectFlagOnExit"), Some(&PyRep::Bool(true)), "Fleetmate receives Suspect flag on exit from high-sec Suspect trace");
 
     let fg_pid = ent_fg1.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
     let fg_cache_id = 1_896_000_000 + fg_pid * 10 + 1;
@@ -437,6 +437,7 @@ async fn test_abyssal_entry_ship_limits_coop_and_trace_lifecycle() {
     assert!(ret_pos.distance(base2) <= 2_000.0, "Exiting ship returns to origin location (dist = {})", ret_pos.distance(base2));
 
     // 4. 20-minute timer expiry destroys both ship AND capsule (670) and respawns pilot at home station
+    ctx.crimewatch.write().unwrap().states.remove(&char1);
     let base3 = DVec3::new(20_000_000.0, 2.0e9, 0.0);
     move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 621, sys_id, base3).await;
     seed_cargo_item(&ctx, 720_100_040, FIL_T1_ELEC, char1, ship1, 1);

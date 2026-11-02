@@ -905,7 +905,10 @@ async fn handle_cmd_stargate_jump(
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
     let dest_sec = ctx.sde.solar_systems.get(&dest_sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let is_capsule_jump = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false));
-    if dest_sec >= 0.45 && !is_capsule_jump {
+    if dest_sec >= 0.45
+        && !is_capsule_jump
+        && !crate::services::combat_crimewatch::is_concord_suppressed_in_system(ctx, dest_sys_id)
+    {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(char_id);
         if st.is_criminal(now_unix) && st.pending_concord_arrival.is_none() {

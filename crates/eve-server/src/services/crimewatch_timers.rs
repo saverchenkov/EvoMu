@@ -123,7 +123,7 @@ pub fn evaluate_remote_assistance_legality(
     let rec_is_criminal = rec_state.is_criminal(now_unix);
     let rec_is_suspect = rec_state.is_suspect(now_unix);
 
-    let res = if rec_is_criminal {
+    let res = if rec_is_criminal && sys_sec > 0.0 {
         let _ = cw.handle_criminal_remote_assistance(
             helper_char_id,
             recipient_char_id,
@@ -816,24 +816,34 @@ pub async fn handle_crimewatch(
             let rows: Vec<Vec<PyRep>> = txs
                 .into_iter()
                 .map(|t| {
+                    // DERIVED: logConst.eventSecStatus* enum IDs for V24 GetSecurityStatusTransactions
+                    let event_type_id = match t.reason.as_str() {
+                        "Clone Soldier Security Tag" | "eventSecStatusHandInTags" => 1_i64,
+                        "NPC Pirate Bounty" | "eventSecStatusKillPirateNpc" => 2_i64,
+                        "Illegal PvP Aggression" | "eventSecStatusIllegalAggression" => 3_i64,
+                        _ => 4_i64,
+                    };
+                    let event_date = crate::sp6_lifecycle::unix_to_filetime(t.timestamp_unix);
                     vec![
-                        PyRep::Integer(t.timestamp_unix as i64),
-                        PyRep::Real(t.old_sec),
-                        PyRep::Real(t.new_sec),
-                        PyRep::Real(t.delta),
-                        PyRep::String(t.reason),
+                        PyRep::Integer(event_date),
+                        PyRep::Integer(event_type_id),
                         PyRep::Integer(t.solar_system_id as i64),
+                        PyRep::Real(t.delta),
+                        PyRep::Real(t.new_sec),
+                        PyRep::None,
+                        PyRep::None,
                     ]
                 })
                 .collect();
             Some(Ok(PyRep::rowset(
                 vec![
-                    "timestamp",
-                    "oldSecurityStatus",
-                    "newSecurityStatus",
+                    "eventDate",
+                    "eventTypeID",
+                    "locationID",
                     "modification",
-                    "reason",
-                    "solarSystemID",
+                    "newValue",
+                    "otherOwnerID",
+                    "otherTypeID",
                 ],
                 rows,
             )))

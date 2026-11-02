@@ -488,11 +488,22 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     }
 
     // 5. Sequencing job cap: 5 active jobs succeed, 6th rejected with 400
+    use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
+    let mut seq_layout = Vec::new();
+    let mut seq_tid = Vec::new();
+    encode_varint_field(1, 587, &mut seq_tid);
+    encode_bytes_field(2, &seq_tid, &mut seq_layout);
+    encode_varint_field(3, 1, &mut seq_layout);
+    let mut seq_init = Vec::new();
+    encode_string_field(1, "Cap Test SKIN", &mut seq_init);
+    encode_string_field(2, "Cap Line", &mut seq_init);
+    encode_bytes_field(3, &seq_layout, &mut seq_init);
+    encode_varint_field(5, 1, &mut seq_init);
     for _ in 0..5 {
-        let r = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", Vec::new(), true);
+        let r = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", seq_init.clone(), true);
         assert_eq!(r.status_code, STATUS_OK);
     }
-    let r_cap = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", Vec::new(), true);
+    let r_cap = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", seq_init, true);
     assert_eq!(r_cap.status_code, 400, "6th sequencing job must exceed cap");
     let r_done = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest", Vec::new(), true);
     assert_eq!(r_done.status_code, STATUS_OK);

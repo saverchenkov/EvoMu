@@ -1177,4 +1177,12 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
             );
         }
     }
+    if in_abyssal {
+        if let Some((cloak_item_id, _)) = active_cloak {
+            let _: Result<(), ()> = ctx.db.try_with_mut_snapshot(|snap| {
+                snap.module_active_states.remove(&cloak_item_id);
+                Ok(())
+            });
+        }
+    }
 }

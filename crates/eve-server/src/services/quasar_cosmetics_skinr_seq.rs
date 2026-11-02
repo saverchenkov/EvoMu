@@ -943,19 +943,9 @@ fn handle_job_initiate(
                 return Err(e);
             }
         }
-    } else if !raw.is_empty() {
+    } else {
         queue_job_failed_notice(cid, &preview_uuid, 1, now);
         return Err((STATUS_BAD_REQUEST, "InitiateRequest missing valid layout".into()));
-    } else {
-        let default_hull = state.db.with_snapshot(|s| {
-            s.characters
-                .get(&(cid as i64))
-                .and_then(|c| s.items.get(&c.active_ship_id))
-                .map(|it| it.type_id)
-                .filter(|tid| state.sde.types.get(tid).map(|t| t.category_id) == Some(CATEGORY_SHIP))
-                .unwrap_or(DEFAULT_SHIP_TYPE_ID)
-        });
-        (default_hull, 1, Vec::new(), Vec::new())
     };
 
     if let Some(DynamicValue::Repeated(kind_vals)) = dyn_msg.get(4) {
@@ -1039,6 +1029,32 @@ fn handle_job_initiate(
 
     let (job_uuid, job_rec) = {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+        let active_count = data
+            .sequencing_jobs
+            .values()
+            .filter(|j| j.sequencer_id == cid && j.is_active())
+            .count();
+        let next_uuid = job_seq_to_uuid(data.next_job_seq);
+        let cap_ok = required_comps.iter().all(|&(comp_id, is_pat)| {
+            let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
+            data.infinite_licenses.contains_key(&key)
+                || data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0) >= licenses_qty as u64
+        });
+        if active_count >= max_jobs || !cap_ok {
+            drop(data);
+            state.db.with_mut_snapshot(|s| {
+                if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
+                    ch.plex_balance = ch.plex_balance.saturating_add(total_plex_cost);
+                    if award_evermarks {
+                        let em_reward = 500_i64.saturating_mul(i64::from(licenses_qty));
+                        let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
+                        *cur = cur.saturating_sub(em_reward);
+                    }
+                }
+            });
+            queue_job_failed_notice(cid, &next_uuid, 3, now);
+            return Err((STATUS_BAD_REQUEST, "SKINR sequencing capacity or license limit exceeded".into()));
+        }
         for &(comp_id, is_pat) in &required_comps {
             let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
             if !data.infinite_licenses.contains_key(&key) {

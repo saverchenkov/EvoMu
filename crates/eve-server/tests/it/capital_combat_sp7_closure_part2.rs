@@ -368,27 +368,16 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     .expect_err("Trainer tag must be refused at -6.0 sec status");
     assert!(!wrong_band_err.code.is_empty());
 
-    // 2. Negotiator tag (35664) at -0.3 caps at 0.0 (cannot raise sec status above 0.0)
+    // 2. Negotiator tag (35664) at -0.3 raises security status by +0.5 to +0.2 (capped at +0.5)
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.security_status = -0.3;
-        }
+        if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; ch.station_id = sess.station_id; }
+        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = sec_office_st; }
     });
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut sess,
-        "crimewatch",
-        "ApplyTagsForSecStatus",
-        &[PyRep::Integer(35_664), PyRep::Integer(2)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("Negotiator tag at -0.3");
+    let _ = dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35_664), PyRep::Integer(2)], &HashMap::new())
+        .await
+        .expect("Negotiator tag at -0.3");
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));
-    assert!(
-        sec_post_tag > -0.3 && sec_post_tag <= 0.0,
-        "Clone soldier tags must raise security status from -0.3 and cap at 0.0 (got {sec_post_tag})"
-    );
+    assert!((sec_post_tag - 0.2).abs() < 1e-6, "Clone soldier tags must raise security status from -0.3 by +0.5 to 0.2 (got {sec_post_tag})");
 
     // 3. Real belt, mission, and incursion NPC kills through live combat/death pipeline cap at +5.0
     ctx.db.with_mut_snapshot(|s| {

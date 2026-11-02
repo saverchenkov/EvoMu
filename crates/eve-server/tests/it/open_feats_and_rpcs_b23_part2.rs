@@ -338,12 +338,33 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     sess.user_id = Some(952_430);
     sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 
-    // 1. R-B23-01: SKINR InitiateRequest debits whole PLEX (15 PLEX for Tier 1, not 1,500)
-    let init_rsp = quasar_rpc(
+    // 1. R-B23-01: SKINR InitiateRequest rejects empty payload and debits whole PLEX (17 PLEX for Tier 1, not 1,700)
+    let empty_rsp = quasar_rpc(
         &ctx,
         &mut sess,
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
         Vec::new(),
+    )
+    .await;
+    assert_eq!(empty_rsp.status_code, 400, "Empty InitiateRequest must be rejected");
+
+    use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
+    let mut layout = Vec::new();
+    let mut r_tid = Vec::new();
+    encode_varint_field(1, 587, &mut r_tid);
+    encode_bytes_field(2, &r_tid, &mut layout);
+    encode_varint_field(3, 1, &mut layout);
+    let mut init_req = Vec::new();
+    encode_string_field(1, "B23 Test SKIN", &mut init_req);
+    encode_string_field(2, "B23 Line", &mut init_req);
+    encode_bytes_field(3, &layout, &mut init_req);
+    encode_varint_field(5, 1, &mut init_req);
+
+    let init_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        init_req.clone(),
     )
     .await;
     assert_eq!(init_rsp.status_code, STATUS_OK);
@@ -361,7 +382,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         &ctx,
         &mut sess,
         "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
-        Vec::new(),
+        init_req,
     )
     .await;
     assert_eq!(init_rsp2.status_code, STATUS_OK);
