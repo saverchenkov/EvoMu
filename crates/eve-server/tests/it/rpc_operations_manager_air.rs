@@ -261,7 +261,14 @@ async fn test_operations_tutorial_and_categories() {
 
     // Complete SDE operation 157 tasks [344 (skipped in space), 345, 346], then complete category 31
     call_rpc(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(cat_id), PyRep::Integer(157), PyRep::Integer(344)]).await.unwrap();
-    call_rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.unwrap();
+    ctx.advance_secs(15);
+    let sid = sess.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters[&PILOT_AIR].active_ship_id));
+    let prev_st = sess.station_id;
+    sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_AIR).unwrap().station_id = Some(60_003_760));
+    call_rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(sid)]).await.unwrap();
+    sess.station_id = prev_st;
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_AIR).unwrap().station_id = prev_st);
     let mut ed_346 = HashMap::new();
     ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
     ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.unwrap();
@@ -458,8 +465,15 @@ async fn test_operations_tasks_sites_and_events() {
     let start_rep = call_rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(43)]).await.expect("start_site valid dungeon 43");
     assert_eq!(start_rep, PyRep::Bool(true));
 
-    // 6. Process client event: complete SDE tasks 345 (shipBoarded) and 346 (client_agencyContentExpanded)
-    assert_eq!(call_rpc(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.expect("task 345"), PyRep::Bool(true));
+    // 6. Authoritative ship.Board completes task 345, then client_agencyContentExpanded completes task 346
+    ctx.advance_secs(15);
+    let sid = sess.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters[&PILOT_AIR].active_ship_id));
+    let prev_st = sess.station_id;
+    sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_AIR).unwrap().station_id = Some(60_003_760));
+    call_rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(sid)]).await.expect("task 345");
+    sess.station_id = prev_st;
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&PILOT_AIR).unwrap().station_id = prev_st);
     let mut ed_346 = HashMap::new();
     ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
     let event_rep = ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.expect("task 346");

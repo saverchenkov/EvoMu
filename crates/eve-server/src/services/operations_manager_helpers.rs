@@ -553,13 +553,16 @@ pub fn grant_category_completion_rewards(
     out
 }
 
-pub fn emit_operation_reward_notifications(
-    ctx: &ServerContext,
+pub fn emit_operation_reward_notifications_with_sink<F>(
+    sde: &eve_sde::SdeRegistry,
+    sink: F,
     char_id: i64,
     outcome: &OperationRewardOutcome,
-) {
+) where
+    F: Fn(NotificationTarget, &str, &str, Vec<PyRep>),
+{
     if let Some(bal_cents) = outcome.new_balance_cents {
-        ctx.notify(
+        sink(
             NotificationTarget::Character(char_id),
             "OnAccountChange",
             "charid",
@@ -571,13 +574,11 @@ pub fn emit_operation_reward_notifications(
         );
     }
     for &(item_id, type_id, loc_id, qty) in &outcome.created_hangar_items {
-        let (group_id, category_id) = ctx
-            .sde
+        let (group_id, category_id) = sde
             .types
             .get(&type_id)
             .map(|t| {
-                let cid = ctx
-                    .sde
+                let cid = sde
                     .groups
                     .get(&t.group_id)
                     .map(|g| g.category_id)
@@ -585,7 +586,7 @@ pub fn emit_operation_reward_notifications(
                 (t.group_id, cid)
             })
             .unwrap_or((0, 0));
-        ctx.notify(
+        sink(
             NotificationTarget::Character(char_id),
             "OnItemChange",
             "charid",
@@ -607,13 +608,28 @@ pub fn emit_operation_reward_notifications(
         );
     }
     if outcome.enqueued_redeem_tokens {
-        ctx.notify(
+        sink(
             NotificationTarget::Character(char_id),
             "OnRedeemingTokensUpdated",
             "charid",
             vec![],
         );
     }
+}
+
+pub fn emit_operation_reward_notifications(
+    ctx: &ServerContext,
+    char_id: i64,
+    outcome: &OperationRewardOutcome,
+) {
+    emit_operation_reward_notifications_with_sink(
+        &ctx.sde,
+        |target, event, id_type, args| {
+            ctx.notify(target, event, id_type, args);
+        },
+        char_id,
+        outcome,
+    );
 }
 
 fn event_matches_task(event_name: &str, expected_ev: &str) -> bool {
@@ -681,161 +697,6 @@ fn check_client_extra_conditions(
         }
     }
     true
-}
-
-fn type_matches_task_conds(
-    sde: &eve_sde::SdeRegistry,
-    conds: Option<&HashMap<String, Vec<String>>>,
-    type_id: u32,
-) -> bool {
-    let Some(conds) = conds else {
-        return true;
-    };
-    if let Some(allowed_tids) = conds.get("typeID") {
-        let ts = type_id.to_string();
-        if !allowed_tids.is_empty() && !allowed_tids.iter().any(|a| a == &ts) {
-            return false;
-        }
-    }
-    if let Some(allowed_gids) = conds.get("groupID") {
-        if !allowed_gids.is_empty() {
-            let gid = sde.types.get(&type_id).map(|t| t.group_id).unwrap_or(0);
-            let gs = gid.to_string();
-            if !allowed_gids.iter().any(|a| a == &gs) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn verify_task_against_server_state(
-    snap: &eve_db::WorldStateSnapshot,
-    sde: &eve_sde::SdeRegistry,
-    op_defs: &OperationDefinitions,
-    rec: &CharacterOperationsRecord,
-    char_id: i64,
-    sess_docked: Option<i64>,
-    curr_sys: u32,
-    tid: i64,
-    expected_ev: &str,
-) -> Option<u32> {
-    let ch = snap.characters.get(&char_id)?;
-    let is_docked = sess_docked.or(ch.station_id).or(ch.structure_id).is_some();
-    let conds = op_defs.task_event_conditions.get(&tid);
-    match expected_ev {
-        "dockInStation" => is_docked.then_some(1),
-        "undockFromStation" => (!is_docked).then_some(1),
-        "shipBoarded" => {
-            let ship = snap.items.get(&ch.active_ship_id)?;
-            if ship.owner_id != char_id || ship.type_id == 670 {
-                return None;
-            }
-            type_matches_task_conds(sde, conds, ship.type_id).then_some(1)
-        }
-        "dungeonEntered" => {
-            if is_docked || rec.active_operation_system_id != Some(curr_sys) {
-                return None;
-            }
-            let d_id = rec.active_dungeon_id?;
-            if let Some(allowed_dids) = conds.and_then(|c| c.get("dungeonID")) {
-                let ds = d_id.to_string();
-                if !allowed_dids.is_empty() && !allowed_dids.iter().any(|a| a == &ds) {
-                    return None;
-                }
-            }
-            Some(1)
-        }
-        "fitItemCount" => {
-            let ship_id = ch.active_ship_id;
-            if ship_id <= 0 {
-                return None;
-            }
-            let count: u32 = snap
-                .items
-                .values()
-                .filter(|item| {
-                    if item.location_id != ship_id {
-                        return false;
-                    }
-                    let f = item.flag as i32;
-                    let is_fit_slot =
-                        (11..=34).contains(&f) || (92..=94).contains(&f) || (125..=132).contains(&f);
-                    if !is_fit_slot {
-                        return false;
-                    }
-                    let is_charge = sde
-                        .types
-                        .get(&item.type_id)
-                        .and_then(|t| sde.groups.get(&t.group_id))
-                        .is_some_and(|g| g.category_id == 8);
-                    !is_charge && type_matches_task_conds(sde, conds, item.type_id)
-                })
-                .map(|item| item.quantity.max(1) as u32)
-                .sum();
-            (count > 0).then_some(count)
-        }
-        "loadChargesCount" => {
-            let ship_id = ch.active_ship_id;
-            if ship_id <= 0 {
-                return None;
-            }
-            let qty: u32 = snap
-                .items
-                .values()
-                .filter(|item| {
-                    let f = item.flag as i32;
-                    if item.location_id != ship_id || !(11..=34).contains(&f) {
-                        return false;
-                    }
-                    let is_charge = sde
-                        .types
-                        .get(&item.type_id)
-                        .and_then(|t| sde.groups.get(&t.group_id))
-                        .is_some_and(|g| g.category_id == 8);
-                    is_charge && type_matches_task_conds(sde, conds, item.type_id)
-                })
-                .map(|item| item.quantity.max(0) as u32)
-                .sum();
-            (qty > 0).then_some(qty)
-        }
-        "skillTrainingStarted" => snap
-            .skill_queues
-            .get(&char_id)
-            .is_some_and(|q| !q.is_empty())
-            .then_some(1),
-        "timesWarped" | "warpToLocation" => crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap)
-            .characters_warped
-            .contains(&char_id)
-            .then_some(1),
-        "moduleActivate" | "activateModule" | "moduleActivated" | "activateShipModule" => snap
-            .module_active_states
-            .iter()
-            .any(|&mid| {
-                snap.items.get(&mid).is_some_and(|i| {
-                    i.location_id == ch.active_ship_id && type_matches_task_conds(sde, conds, i.type_id)
-                })
-            })
-            .then_some(1),
-        "lootItemCount" => {
-            let ship_id = ch.active_ship_id;
-            if ship_id <= 0 {
-                return None;
-            }
-            let qty: u32 = snap
-                .items
-                .values()
-                .filter(|item| {
-                    item.location_id == ship_id
-                        && item.flag == eve_db::InventoryFlag::Cargo
-                        && type_matches_task_conds(sde, conds, item.type_id)
-                })
-                .map(|item| item.quantity.max(1) as u32)
-                .sum();
-            (qty > 0).then_some(qty)
-        }
-        _ => None,
-    }
 }
 
 fn advance_active_task_in_record(
@@ -938,33 +799,18 @@ pub fn handle_operation_task_client_event(
                         out = rw;
                         did_progress = true;
                     } else if let Some(expected_ev) = op_defs.task_event_names.get(&tid) {
-                        if event_matches_task(&event_name, expected_ev)
-                            || (expected_ev.starts_with("client_")
-                                && matches!(event_name.as_str(), "complete_task" | "task_complete"))
+                        if expected_ev.starts_with("client_")
+                            && (event_matches_task(&event_name, expected_ev)
+                                || matches!(event_name.as_str(), "complete_task" | "task_complete"))
+                            && check_client_extra_conditions(op_defs, &ctx.sde, tid, extra_data, true)
                         {
-                            let is_client_ev = expected_ev.starts_with("client_");
-                            if is_client_ev {
-                                if check_client_extra_conditions(op_defs, &ctx.sde, tid, extra_data, true) {
-                                    let prev = rec.task_progress.get(&tid).copied().unwrap_or(0);
-                                    let (tr, rw) = advance_active_task_in_record(
-                                        snap, rec, op_defs, uid, char_id, sess_docked, now, op_id, tid, prev.saturating_add(1), false,
-                                    );
-                                    transitioned = tr;
-                                    out = rw;
-                                    did_progress = true;
-                                }
-                            } else if check_client_extra_conditions(op_defs, &ctx.sde, tid, extra_data, false) {
-                                if let Some(verified_val) = verify_task_against_server_state(
-                                    snap, &ctx.sde, op_defs, rec, char_id, sess_docked, curr_sys, tid, expected_ev,
-                                ) {
-                                    let (tr, rw) = advance_active_task_in_record(
-                                        snap, rec, op_defs, uid, char_id, sess_docked, now, op_id, tid, verified_val, true,
-                                    );
-                                    transitioned = tr;
-                                    out = rw;
-                                    did_progress = true;
-                                }
-                            }
+                            let prev = rec.task_progress.get(&tid).copied().unwrap_or(0);
+                            let (tr, rw) = advance_active_task_in_record(
+                                snap, rec, op_defs, uid, char_id, sess_docked, now, op_id, tid, prev.saturating_add(1), false,
+                            );
+                            transitioned = tr;
+                            out = rw;
+                            did_progress = true;
                         }
                     }
                 }
@@ -1098,6 +944,81 @@ pub fn record_server_operation_event(
     }
 }
 
+/// Authoritative `invbroker.Add` gameplay hook for fitting modules, loading charges, and looting wrecks/containers in space.
+pub fn record_invbroker_add_operation_event(
+    ctx: &ServerContext,
+    char_id: i64,
+    orig_source_loc_id: i64,
+    new_loc: i64,
+    flag: eve_db::InventoryFlag,
+    type_id: u32,
+    qty: i32,
+) {
+    let (gid, cid) = ctx
+        .sde
+        .types
+        .get(&type_id)
+        .map(|t| (t.group_id, t.category_id))
+        .unwrap_or((0, 0));
+    let params = [
+        ("typeID", type_id.to_string()),
+        ("groupID", gid.to_string()),
+        ("categoryID", cid.to_string()),
+    ];
+    let flag_u16 = flag as u16;
+    if matches!(flag_u16, 11..=34 | 125..=132) {
+        let dest_is_ship = ctx.db.with_snapshot(|snap| {
+            snap.items
+                .get(&new_loc)
+                .and_then(|s| ctx.sde.types.get(&s.type_id))
+                .is_some_and(|t| t.category_id == 6)
+        });
+        if dest_is_ship {
+            if cid == 8 {
+                record_server_operation_event(
+                    ctx,
+                    char_id,
+                    "loadChargesCount",
+                    &params,
+                    qty.max(1) as u32,
+                );
+            } else {
+                record_server_operation_event(ctx, char_id, "fitItemCount", &params, 1);
+            }
+        }
+        return;
+    }
+    if flag == eve_db::InventoryFlag::Cargo && orig_source_loc_id != new_loc && orig_source_loc_id > 0 {
+        let from_space_wreck_or_container = ctx.db.with_snapshot(|snap| {
+            let dest_is_ship = snap
+                .items
+                .get(&new_loc)
+                .and_then(|s| ctx.sde.types.get(&s.type_id))
+                .is_some_and(|t| t.category_id == 6);
+            if !dest_is_ship {
+                return false;
+            }
+            snap.items.get(&orig_source_loc_id).is_some_and(|src| {
+                let in_space = (30_000_000..=32_999_999).contains(&src.location_id);
+                let src_t = ctx.sde.types.get(&src.type_id);
+                in_space
+                    && src_t.is_some_and(|t| {
+                        t.category_id == 22 || matches!(t.group_id, 12 | 186 | 340 | 448 | 649)
+                    })
+            })
+        });
+        if from_space_wreck_or_container {
+            record_server_operation_event(
+                ctx,
+                char_id,
+                "lootItemCount",
+                &params,
+                qty.max(1) as u32,
+            );
+        }
+    }
+}
+
 /// Advances active SDE operation tasks from achievement gameplay events and emits MachoNet notifications.
 pub fn advance_and_notify_server_operation_tasks(
     db: &eve_db::WorldRepository,
@@ -1105,11 +1026,19 @@ pub fn advance_and_notify_server_operation_tasks(
     gateway: &crate::quasar_gateway::PublicGatewayRouter,
     char_id: i64,
     event_names: &[&str],
+    params: &[(&str, String)],
+    delta: u64,
     now_unix: u64,
 ) {
+    let inc = u32::try_from(delta).unwrap_or(u32::MAX);
     for &ev in event_names {
-        let (completed_task, outcome) = record_server_operation_event_in_db(db, sde, char_id, ev, &[], u32::MAX / 2, now_unix);
-        if completed_task.is_none() && outcome.new_balance_cents.is_none() {
+        let (completed_task, outcome) =
+            record_server_operation_event_in_db(db, sde, char_id, ev, params, inc, now_unix);
+        if completed_task.is_none()
+            && outcome.new_balance_cents.is_none()
+            && outcome.created_hangar_items.is_empty()
+            && !outcome.enqueued_redeem_tokens
+        {
             continue;
         }
         let Some(sink) = gateway
@@ -1121,18 +1050,7 @@ pub fn advance_and_notify_server_operation_tasks(
         else {
             continue;
         };
-        if let Some(bal) = outcome.new_balance_cents {
-            sink(
-                NotificationTarget::Character(char_id),
-                "OnAccountChange",
-                "charid",
-                vec![
-                    PyRep::String("cash".into()),
-                    PyRep::Integer(char_id),
-                    PyRep::Real((bal as f64) / 100.0),
-                ],
-            );
-        }
+        emit_operation_reward_notifications_with_sink(sde, &*sink, char_id, &outcome);
         if let Some((cat_id, op_id, tid)) = completed_task {
             sink(
                 NotificationTarget::Character(char_id),

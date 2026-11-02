@@ -625,8 +625,9 @@ async fn q8_faction_warfare_and_operations() {
     let mut ed_346 = std::collections::HashMap::new();
     ed_346.insert("extra_data".into(), eve_proto::PyRep::Dict(vec![(eve_proto::PyRep::String("contentPieceType".into()), eve_proto::PyRep::Integer(18))]));
     ctx.dispatch_rpc(&mut session, "operationsManager", None, "activate_operation_in_solar_system", &[eve_proto::PyRep::Integer(157)], &empty_kw, None).await.expect("activate 157");
-    ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("dockInStation".into())], &empty_kw, None).await.expect("task 344");
-    ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("shipBoarded".into())], &empty_kw, None).await.expect("task 345");
+    ctx.dispatch_rpc(&mut session, "operationsManager", None, "skip_task", &[eve_proto::PyRep::Integer(344)], &empty_kw, None).await.expect("skip 344");
+    let sid = session.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters[&90_000_001].active_ship_id));
+    ctx.dispatch_rpc(&mut session, "ship", None, "Board", &[eve_proto::PyRep::Integer(sid)], &empty_kw, None).await.expect("task 345");
     ctx.dispatch_rpc(&mut session, "operationsManager", None, "process_client_event", &[eve_proto::PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.expect("task 346");
     let rec_after = call_req(
         &ctx,

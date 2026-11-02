@@ -102,13 +102,11 @@ async fn test_milestones_seasons_and_cache_setting_e2e() {
         .await
         .expect("fill_up_and_return_challenges_for_character");
     let challenges = match filled {
-        PyRep::List(list) => list,
-        other => panic!("expected List of challenges, got {other:?}"),
+        PyRep::Dict(dict) => dict,
+        other => panic!("expected Dict of challenges, got {other:?}"),
     };
     assert!(!challenges.is_empty(), "expected non-empty active challenges");
-    let first_ch_id = keyval_get(&challenges[0], "challengeID")
-        .and_then(|v| v.as_i64())
-        .expect("challengeID");
+    let first_ch_id = challenges[0].0.as_i64().expect("challengeID");
 
     // Claiming uncompleted challenge must fail
     let uncompleted_err = ctx

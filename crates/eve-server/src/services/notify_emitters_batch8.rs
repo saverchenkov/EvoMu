@@ -946,6 +946,23 @@ pub(crate) fn handle_load_ammo(
     );
     emit_charge_and_bank_ammo_loaded(ctx, char_id, ship_id, &all_target_modules);
     ctx.invalidate_ship_fitting(ship_id);
+    let (charge_gid, charge_cid) = ctx
+        .sde
+        .types
+        .get(&charge_type_id)
+        .map(|t| (t.group_id, t.category_id))
+        .unwrap_or((0, 0));
+    crate::services::operations_manager_helpers::record_server_operation_event(
+        ctx,
+        char_id,
+        "loadChargesCount",
+        &[
+            ("typeID", charge_type_id.to_string()),
+            ("groupID", charge_gid.to_string()),
+            ("categoryID", charge_cid.to_string()),
+        ],
+        total_needed.max(1) as u32,
+    );
 
     Ok(PyRep::keyval([
         ("reloadTimeMs", PyRep::Real(reload_time_ms)),

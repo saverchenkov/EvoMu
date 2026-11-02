@@ -217,7 +217,15 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     // 1a (`F-04` regression): 1 Hz `NpcSpawnManager::handle_npc_destroyed` in null-sec splits bounties into
     // `ess_main_bank` + `ess_reserve_bank` and records `pilot_c` in `ess_main_bank_contributors`!
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let first_belt_rat = *ctx.npc_spawns.read().unwrap()[&sys_id].entities.keys().next().unwrap();
+    let first_belt_rat = ctx
+        .npc_spawns
+        .read()
+        .unwrap()[&sys_id]
+        .entities
+        .values()
+        .find(|e| e.bounty_isk > 0.0)
+        .map(|e| e.ball_id)
+        .expect("bounty belt rat");
     let belt_rat_bounty = ctx
         .npc_spawns
         .write()

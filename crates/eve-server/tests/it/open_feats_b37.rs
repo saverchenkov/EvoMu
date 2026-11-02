@@ -117,14 +117,18 @@ fn pick_sde_type_matching(ctx: &ServerContext, conds: &HashMap<String, Vec<Strin
     default_tid
 }
 
-fn insert_ship_item(ctx: &ServerContext, char_id: i64, type_id: u32, flag: InventoryFlag, qty: i32, active: bool) {
-    ctx.db.with_mut_snapshot(|s| {
-        let ship_id = s.characters.get(&char_id).unwrap().active_ship_id;
-        s.next_entity_id += 1;
-        let id = s.next_entity_id;
-        s.items.insert(id, InventoryItemRecord { item_id: id, type_id, owner_id: char_id, location_id: ship_id, flag, quantity: qty, singleton: qty == 1, version: 1, ..Default::default() });
-        if active { s.module_active_states.insert(id); }
-    });
+async fn ensure_dock_state(ctx: &ServerContext, sess: &mut SessionState, want_dock: bool) {
+    if want_dock && sess.station_id.is_none() {
+        ctx.advance_secs(15);
+        let sid = sess.ship_id.unwrap();
+        let sys = ctx.systems.get_or_spawn(JITA_SYS);
+        let st_pos = sys.get_ball_snapshot(JITA_STATION).await.ok().flatten().map(|b| b.1.position).unwrap_or(DVec3::ZERO);
+        let _ = sys.set_ball_position(sid, st_pos).await;
+        rpc(ctx, sess, "stationSvc", "Dock", &[PyRep::Integer(JITA_STATION)]).await.unwrap();
+    } else if !want_dock && sess.station_id.is_some() {
+        ctx.advance_secs(15);
+        rpc(ctx, sess, "stationSvc", "Undock", &[]).await.unwrap();
+    }
 }
 
 async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, cat_id: i64, op_id: i64) {
@@ -144,67 +148,109 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
             for _ in 0..target { rpc_kw(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev.clone())], &kw).await.unwrap(); }
             continue;
         }
-        let saved_dock = sess.station_id;
+        let saved_dock = sess.station_id.is_some();
         match ev.as_str() {
-            "dockInStation" => {
-                sess.station_id = Some(JITA_STATION); sess.structure_id = None;
-                ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = Some(JITA_STATION));
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("dockInStation".into())]).await.unwrap();
-            }
-            "undockFromStation" => {
-                sess.station_id = None; sess.structure_id = None;
-                ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = None);
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("undockFromStation".into())]).await.unwrap();
-            }
+            "dockInStation" => { ensure_dock_state(ctx, sess, false).await; ensure_dock_state(ctx, sess, true).await; }
+            "undockFromStation" => { ensure_dock_state(ctx, sess, true).await; ensure_dock_state(ctx, sess, false).await; }
             "shipBoarded" => {
                 let stid = pick_sde_type_matching(ctx, &conds, 587);
-                sess.station_id = Some(JITA_STATION);
-                let sid = ctx.db.with_mut_snapshot(|s| {
-                    s.characters.get_mut(&char_id).unwrap().station_id = Some(JITA_STATION);
-                    s.next_entity_id += 1;
-                    let id = s.next_entity_id;
-                    s.items.insert(id, InventoryItemRecord { item_id: id, type_id: stid, owner_id: char_id, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() });
-                    id
-                });
+                ensure_dock_state(ctx, sess, true).await;
+                let sid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: stid, owner_id: char_id, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() }); id });
                 ctx.advance_secs(15);
                 rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(sid)]).await.unwrap();
             }
             "dungeonEntered" => {
-                sess.station_id = None; sess.structure_id = None;
-                ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = None);
+                ensure_dock_state(ctx, sess, false).await;
                 let site_id = defs.op_site_ids.get(&op_id).copied().or_else(|| conds.get("dungeonID").and_then(|v| v.first()).and_then(|s| s.parse::<i64>().ok())).unwrap_or(1);
                 rpc(ctx, sess, "operationsManager", "start_site", &[PyRep::Integer(op_id), PyRep::Integer(site_id)]).await.unwrap();
             }
             "fitItemCount" => {
+                ensure_dock_state(ctx, sess, true).await;
                 let mtid = pick_sde_type_matching(ctx, &conds, 439);
-                for i in 0..target { insert_ship_item(ctx, char_id, mtid, InventoryFlag::from_u16(11 + (i as u16 % 8)), 1, false); }
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("fitItemCount".into())]).await.unwrap();
+                ctx.db.with_mut_snapshot(|s| {
+                    if let Some(sid) = sess.ship_id { s.items.retain(|_, it| !(it.location_id == sid && matches!(it.flag as i64, 11..=34 | 92..=94))); }
+                    let sk = s.skills.entry(char_id).or_default();
+                    for (tid, _) in ctx.sde.required_skills_for_type(mtid).into_iter().chain(ctx.sde.required_skills_for_type(587)) {
+                        sk.entry(tid).or_insert(eve_db::TrainedSkillRecord { type_id: tid, level: 5, skill_points: 256_000.0 });
+                    }
+                });
+                let mut sid = sess.ship_id.unwrap();
+                ctx.invalidate_ship_fitting(sid);
+                let loc = sess.station_id.unwrap_or(sid);
+                let flag = if sess.station_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::Cargo };
+                for _ in 0..target {
+                    let mid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: mtid, owner_id: char_id, location_id: loc, flag, quantity: 1, singleton: false, version: 1, ..Default::default() }); id });
+                    let (mut fitted, mut last_err) = (false, None);
+                    for f in (27_i64..=34).chain(19..=26).chain(11..=18).chain(92..=94) {
+                        match rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(mid), PyRep::Integer(sid), PyRep::Integer(f)]).await {
+                            Ok(_) => { fitted = true; break; }
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                    if !fitted {
+                        let bsid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: 587, owner_id: char_id, location_id: JITA_STATION, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default() }); id });
+                        ctx.advance_secs(15);
+                        rpc(ctx, sess, "ship", "Board", &[PyRep::Integer(bsid)]).await.unwrap();
+                        sid = sess.ship_id.unwrap();
+                        for f in (27_i64..=34).chain(19..=26).chain(11..=18).chain(92..=94) {
+                            match rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(mid), PyRep::Integer(sid), PyRep::Integer(f)]).await {
+                                Ok(_) => { fitted = true; break; }
+                                Err(e) => last_err = Some(e),
+                            }
+                        }
+                    }
+                    assert!(fitted, "failed to fit module {mtid} onto ship {sid}: {last_err:?}");
+                }
             }
             "loadChargesCount" => {
-                insert_ship_item(ctx, char_id, pick_sde_type_matching(ctx, &conds, 182), InventoryFlag::HiSlot0, target as i32, false);
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("loadChargesCount".into())]).await.unwrap();
+                let ctid = pick_sde_type_matching(ctx, &conds, 222);
+                let sid = sess.ship_id.unwrap();
+                let loc = sess.station_id.unwrap_or(sid);
+                let flag = if sess.station_id.is_some() { InventoryFlag::Hangar } else { InventoryFlag::Cargo };
+                let mut loaded = false;
+                for try_tid in [ctid, 222, 182, 252, 209] {
+                    let cid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: try_tid, owner_id: char_id, location_id: loc, flag, quantity: target as i32, singleton: false, version: 1, ..Default::default() }); id });
+                    if rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(cid), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::HiSlot0 as i64)]).await.is_ok() { loaded = true; break; }
+                }
+                assert!(loaded, "failed to load charges onto ship {sid}");
             }
             "skillTrainingStarted" => {
-                ctx.db.with_mut_snapshot(|s| s.skill_queues.entry(char_id).or_default().push(eve_db::SkillQueueEntry { type_id: 3_300, target_level: 1, start_sp: 0.0, end_sp: 250.0, duration_seconds: 600.0, started_at_unix: Some(1_700_000_000) }));
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("skillTrainingStarted".into())]).await.unwrap();
+                let sk_tid = conds.get("typeID").and_then(|v| v.first()).and_then(|s| s.parse::<u32>().ok()).unwrap_or(3_300);
+                rpc(ctx, sess, "skillMgr2", "SaveSkillQueue", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(i64::from(sk_tid)), PyRep::Integer(5)])])]).await.unwrap();
             }
             "timesWarped" | "warpToLocation" => {
-                ctx.db.with_mut_snapshot(|s| {
-                    let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(s);
-                    if !ext.characters_warped.contains(&char_id) { ext.characters_warped.push(char_id); }
-                    eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(s, &ext);
-                });
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev)]).await.unwrap();
+                ensure_dock_state(ctx, sess, false).await;
+                let sid = sess.ship_id.unwrap();
+                let sys = ctx.systems.get_or_spawn(JITA_SYS);
+                let _ = sys.set_ball_position(sid, DVec3::new(1_000_000_000.0, 0.0, 0.0)).await;
+                rpc(ctx, sess, "beyonce", "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(JITA_STATION), PyRep::Real(0.0)]).await.unwrap();
             }
             "moduleActivate" | "activateModule" | "moduleActivated" | "activateShipModule" => {
-                insert_ship_item(ctx, char_id, pick_sde_type_matching(ctx, &conds, 439), InventoryFlag::MedSlot0, 1, true);
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String(ev)]).await.unwrap();
+                let mtid = pick_sde_type_matching(ctx, &conds, 439);
+                let sid = sess.ship_id.unwrap();
+                let mid = ctx.db.with_mut_snapshot(|s| { s.next_entity_id += 1; let id = s.next_entity_id; s.items.insert(id, InventoryItemRecord { item_id: id, type_id: mtid, owner_id: char_id, location_id: sid, flag: InventoryFlag::MedSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() }); id });
+                ctx.invalidate_ship_fitting(sid);
+                ensure_dock_state(ctx, sess, false).await;
+                rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(mid), PyRep::String("online".into())]).await.unwrap();
             }
             "lootItemCount" => {
-                insert_ship_item(ctx, char_id, pick_sde_type_matching(ctx, &conds, 34), InventoryFlag::Cargo, target as i32, false);
-                rpc(ctx, sess, "operationsManager", "process_client_event", &[PyRep::String("lootItemCount".into())]).await.unwrap();
+                ensure_dock_state(ctx, sess, false).await;
+                let sid = sess.ship_id.unwrap();
+                let ltid = pick_sde_type_matching(ctx, &conds, 34);
+                let (wreck_id, loot_id) = ctx.db.with_mut_snapshot(|s| {
+                    s.next_entity_id += 1; let wid = s.next_entity_id;
+                    s.items.insert(wid, InventoryItemRecord { item_id: wid, type_id: 26_557, owner_id: char_id, location_id: i64::from(JITA_SYS), flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default() });
+                    s.next_entity_id += 1; let lid = s.next_entity_id;
+                    s.items.insert(lid, InventoryItemRecord { item_id: lid, type_id: ltid, owner_id: char_id, location_id: wid, flag: InventoryFlag::Cargo, quantity: target as i32, singleton: false, version: 1, ..Default::default() });
+                    (wid, lid)
+                });
+                let sys = ctx.systems.get_or_spawn(JITA_SYS);
+                let ship_pos = sys.get_ball_snapshot(sid).await.ok().flatten().map(|b| b.1.position).unwrap_or(DVec3::ZERO);
+                let _ = sys.spawn_ball(eve_destiny::Ball { id: wreck_id, type_id: 26_557, position: ship_pos + DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 100.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }).await;
+                rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(loot_id), PyRep::Integer(sid), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.unwrap();
             }
             "somethingExplode" | "destroyHostileNPC" | "entityGroupDestroyed" => {
+                ensure_dock_state(ctx, sess, false).await;
                 let npc_tid = pick_sde_type_matching(ctx, &conds, 10_042);
                 for _ in 0..target {
                     let bid = spawn_specialized_npc_entity(ctx, JITA_SYS, npc_tid, "BeltRat", 0, DVec3::ZERO).await;
@@ -213,8 +259,7 @@ async fn complete_op_authoritatively(ctx: &ServerContext, sess: &mut SessionStat
             }
             other => panic!("Unhandled SDE operation task event: {other}"),
         }
-        sess.station_id = saved_dock;
-        ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&char_id).unwrap().station_id = saved_dock);
+        ensure_dock_state(ctx, sess, saved_dock).await;
     }
 }
 
@@ -246,7 +291,8 @@ async fn unlock_prereqs_for_op(ctx: &ServerContext, sess: &mut SessionState, cha
     let defs = get_operation_defs(&ctx.sde);
     let PyRep::List(dl) = rpc(ctx, sess, "operationsManager", "get_operations_completed_at_least_once", &[]).await.unwrap() else { panic!("List") };
     let (mut done, mut candidates, mut stack) = (dl.iter().filter_map(|x| x.as_i64()).collect::<HashSet<i64>>(), Vec::new(), vec![target_op]);
-    while let Some(cur) = stack.pop() {
+    for _ in 0..=defs.op_prerequisites.len() + defs.op_tree_parents.len() {
+        let Some(cur) = stack.pop() else { break; };
         for &p in defs.op_prerequisites.get(&cur).into_iter().flatten().chain(defs.op_tree_parents.get(&cur).into_iter().flatten()) {
             if !candidates.contains(&p) { candidates.push(p); stack.push(p); }
         }
@@ -254,10 +300,7 @@ async fn unlock_prereqs_for_op(ctx: &ServerContext, sess: &mut SessionState, cha
     for _ in 0..candidates.len().max(1) {
         if defs.are_prerequisites_met(target_op, &done) { return; }
         for &oid in &candidates {
-            if !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) {
-                complete_op_authoritatively(ctx, sess, char_id, cat_id, oid).await;
-                done.insert(oid);
-            }
+            if !done.contains(&oid) && defs.are_prerequisites_met(oid, &done) { complete_op_authoritatively(ctx, sess, char_id, cat_id, oid).await; done.insert(oid); }
         }
     }
 }
@@ -350,8 +393,7 @@ async fn test_operations_tutorial_tasks_categories_progress_and_rewards() {
     assert_eq!(ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION).count()), items_after);
 
     let mut sess2 = login_demo_pilot(&ctx, PILOT_2).await;
-    sess2.station_id = None;
-    ctx.db.with_mut_snapshot(|s| { let ch = s.characters.get_mut(&PILOT_2).unwrap(); ch.station_id = None; ch.home_station_id = 0; });
+    ensure_dock_state(&ctx, &mut sess2, false).await;
     unlock_prereqs_for_op(&ctx, &mut sess2, PILOT_2, rw_op_cat, rw_item_op).await;
     let uid2 = sess2.user_id.unwrap();
     let toks_before = ctx.db.with_snapshot(|s| account_services::load_store(s).redeem_tokens.get(&uid2).map_or(0, Vec::len));
@@ -422,6 +464,7 @@ async fn test_seasonal_login_campaign_active_claim_and_history() {
 
     let _ = ctx.drain_notifications_for_char(PILOT_1);
     assert_eq!(rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "claim_reward", &[]).await.unwrap(), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnItemChange"), "docked seasonal claim must emit OnItemChange");
     assert!(ctx.db.with_snapshot(|s| s.items.values().any(|i| i.owner_id == PILOT_1 && i.location_id == JITA_STATION && i.type_id == 87_900)));
     assert!(!ctx.db.with_snapshot(|s| s.items.values().any(|i| i.owner_id == PILOT_1 && i.type_id == 49_809)));
     assert!(!ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnRedeemingTokensUpdated"));

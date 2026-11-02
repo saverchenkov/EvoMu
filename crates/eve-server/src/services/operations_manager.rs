@@ -705,7 +705,7 @@ pub fn handle(
         }
 
         ("operationsManager", "skip_task") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (uid, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -722,6 +722,7 @@ pub fn handle(
             let call_op_id = if args.len() >= 3 { args.get(1).and_then(|a| a.as_i64()) } else { None };
             let is_gm = session.has_gm_role();
             let sess_sys = session.solar_system_id;
+            let sess_docked = session.station_id.or(session.structure_id);
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let curr_sys = sess_sys
@@ -779,18 +780,33 @@ pub fn handle(
                                     || op_defs.task_is_optional.contains(t)
                             })
                     });
-                    if op_done {
-                        rec.completed_operations.insert(op_id);
-                    }
-                    (cat_id, op_id)
+                    let newly_completed_op = op_done && rec.completed_operations.insert(op_id);
+                    let rw_outcome = if newly_completed_op {
+                        grant_task_and_operation_rewards(
+                            snap,
+                            rec,
+                            &op_defs,
+                            uid,
+                            char_id,
+                            sess_docked,
+                            now,
+                            op_id,
+                            None,
+                            true,
+                        )
+                    } else {
+                        OperationRewardOutcome::default()
+                    };
+                    (cat_id, op_id, rw_outcome)
                 };
                 save_store(snap, &store, now);
                 Ok(out)
             });
-            let (cat_id, op_id) = match res {
+            let (cat_id, op_id, rw_outcome) = match res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            emit_operation_reward_notifications(ctx, char_id, &rw_outcome);
             crate::services::notify_emitters_batch8_ops::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),

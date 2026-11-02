@@ -245,7 +245,9 @@ async fn test_notify_sweep_operations_survey_and_market() {
     call(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(344)]).await;
     let task_notif = take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationTaskCompleted");
     assert_eq!(task_notif.get(2), Some(&PyRep::Integer(344)));
-    call(&ctx, &mut sess, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await;
+    ctx.advance_secs(15);
+    let ship_id = sess.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters[&P1].active_ship_id));
+    call(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await;
     let mut ed_346 = HashMap::new();
     ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
     let _ = ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await;

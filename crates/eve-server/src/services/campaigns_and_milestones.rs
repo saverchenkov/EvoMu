@@ -739,7 +739,7 @@ fn handle_seasonal_login_claim_reward(
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     let sess_docked = session.station_id.or(session.structure_id);
 
-    let (rep, enqueued_redeem_tokens) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (rep, outcome) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         let sched = active_scheduled_seasonal(&ext, now)
             .ok_or_else(|| err("NoActiveCampaign", "No seasonal campaign is currently active"))?;
@@ -798,9 +798,13 @@ fn handle_seasonal_login_claim_reward(
         }
 
         let mut delivered_any = false;
+        let mut created_hangar_items: Vec<(i64, u32, i64, u32)> = Vec::new();
         for retro_idx in &retro_indices {
             if let Some(rw) = campaign.omega_rewards.get(retro_idx) {
-                deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                if let Some(loc_id) = docked_station_id {
+                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                }
                 delivered_any = true;
             }
         }
@@ -816,11 +820,17 @@ fn handle_seasonal_login_claim_reward(
                 ));
             }
             if let Some(rw) = alpha_rw {
-                deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                if let Some(loc_id) = docked_station_id {
+                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                }
                 delivered_any = true;
             }
             if let Some(rw) = omega_rw {
-                deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                if let Some(loc_id) = docked_station_id {
+                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                }
                 delivered_any = true;
             }
             claimed_new_today = true;
@@ -844,16 +854,20 @@ fn handle_seasonal_login_claim_reward(
         }
         save_cosmetics_ui_state(snap, &ext);
 
-        Ok((PyRep::Bool(true), delivered_any && docked_station_id.is_none()))
+        Ok((
+            PyRep::Bool(true),
+            crate::services::operations_manager_helpers::OperationRewardOutcome {
+                created_hangar_items,
+                enqueued_redeem_tokens: delivered_any && docked_station_id.is_none(),
+                ..Default::default()
+            },
+        ))
     })?;
-    if enqueued_redeem_tokens {
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnRedeemingTokensUpdated",
-            "charid",
-            vec![],
-        );
-    }
+    crate::services::operations_manager_helpers::emit_operation_reward_notifications(
+        ctx,
+        char_id,
+        &outcome,
+    );
     Ok(rep)
 }
 

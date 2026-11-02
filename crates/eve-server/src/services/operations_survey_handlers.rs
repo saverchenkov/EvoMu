@@ -10,6 +10,7 @@ use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use super::operations_manager::{CharacterOperationsRecord, load_store_pub, save_store_pub};
+use super::operations_manager_helpers::{emit_operation_reward_notifications, OperationRewardOutcome};
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -444,17 +445,14 @@ pub fn handle_survey_claim_rewards(
 ) -> Result<PyRep, BridgeRpcError> {
     let (uid, char_id) = ServerContext::require_character(session)?;
     let explicit_survey_id = args.first().and_then(|a| a.as_i64());
+    let sess_docked = session.station_id.or(session.structure_id);
     let now = ctx.now_unix();
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let (rep, created_hangar_items, enqueued_redeem_tokens) = ctx.db.try_with_mut_snapshot(|snap| {
         let delivery_loc = snap
             .characters
             .get(&char_id)
             .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))
-            .map(|c| {
-                c.station_id
-                    .or(c.structure_id)
-                    .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
-            })?;
+            .map(|c| sess_docked.or_else(|| c.station_id.or(c.structure_id)))?;
         let mut store = load_store_pub(snap);
         let catalog = combined_survey_catalog(&ctx.sde, &store.custom_surveys);
         let item_rewards = {
@@ -504,6 +502,8 @@ pub fn handle_survey_claim_rewards(
             survey.item_rewards.clone()
         };
         save_store_pub(snap, &store, now);
+        let mut created_items = Vec::new();
+        let mut enqueued_tokens = false;
         for (type_id, amount) in item_rewards {
             if amount == 0 {
                 continue;
@@ -529,6 +529,7 @@ pub fn handle_survey_claim_rewards(
                         blueprint_runs_remaining: None,
                     },
                 );
+                created_items.push((item_id, type_id, loc_id, amount));
             } else {
                 crate::services::account_services::enqueue_redeem_token_in_snapshot(
                     snap,
@@ -539,8 +540,16 @@ pub fn handle_survey_claim_rewards(
                     None,
                     None,
                 );
+                enqueued_tokens = true;
             }
         }
-        Ok(PyRep::Bool(true))
-    })
+        Ok((PyRep::Bool(true), created_items, enqueued_tokens))
+    })?;
+    let outcome = OperationRewardOutcome {
+        created_hangar_items,
+        enqueued_redeem_tokens,
+        ..Default::default()
+    };
+    emit_operation_reward_notifications(ctx, char_id, &outcome);
+    Ok(rep)
 }
