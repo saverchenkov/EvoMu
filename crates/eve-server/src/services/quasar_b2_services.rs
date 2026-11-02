@@ -8,8 +8,8 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
-    STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
+    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -100,27 +100,18 @@ pub fn register_handlers(
     db: Arc<WorldRepository>,
     sde: Arc<SdeRegistry>,
 ) {
-    // 1. eve_public.ship.unlock.*
+    // 1. eve_public.ship.unlock.* (DATA GAP -> STATUS_NOT_IMPLEMENTED)
     router.register_handler(
         "eve_public.ship.unlock.GetPendingNotificationsRequest",
-        Arc::new(move |ctx, _any, _msg| {
-            let _cid = active_char_id(ctx)?;
-            Ok(any(
-                "eve_public.ship.unlock.GetPendingNotificationsResponse",
-                Vec::new(),
-            ))
+        Arc::new(move |_ctx, _any, _msg| {
+            Err((STATUS_NOT_IMPLEMENTED, "Not implemented".to_string()))
         }),
     );
 
     router.register_handler(
         "eve_public.ship.unlock.ClaimRewardRequest",
-        Arc::new(move |ctx, _any, msg| {
-            let _cid = active_char_id(ctx)?;
-            let ship_type_id = extract_u64(msg, 1);
-            if ship_type_id == 0 {
-                return Err((STATUS_BAD_REQUEST, "Missing unlocked_ship_type".to_string()));
-            }
-            Err((STATUS_NOT_FOUND, "Ship unlock reward not pending".to_string()))
+        Arc::new(move |_ctx, _any, _msg| {
+            Err((STATUS_NOT_IMPLEMENTED, "Not implemented".to_string()))
         }),
     );
 
@@ -190,15 +181,24 @@ pub fn register_handlers(
         }),
     );
 
-    // 7. eve.stargate.lock.api.* -> snap.zarzakh_gate_locks
+    // 7. eve.stargate.lock.api.* -> snap.zarzakh_gate_locks (Zarzakh = 30_100_000)
+    const ZARZAKH_SOLAR_SYSTEM_ID: u64 = 30_100_000;
+
     let db_gl1 = Arc::clone(&db);
     router.register_handler(
         "eve.stargate.lock.api.GetRequest",
         Arc::new(move |ctx, _any, msg| {
             let cid = active_char_id(ctx)?;
+            let req_cid = extract_u64(msg, 1);
+            if req_cid != 0 && req_cid != cid as u64 {
+                return Err((STATUS_FORBIDDEN, "Character mismatch".to_string()));
+            }
             let sys_id = extract_u64(msg, 2);
             if sys_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem".to_string()));
+            }
+            if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
+                return Err((STATUS_NOT_FOUND, "No active stargate lock".to_string()));
             }
             let now = ctx.now_unix();
             let (gate_id, expiry_unix) = db_gl1
@@ -220,7 +220,7 @@ pub fn register_handlers(
         "eve.stargate.lock.api.GetRestrictedSystemsRequest",
         Arc::new(move |_ctx, _any, _msg| {
             let mut out = Vec::new();
-            encode_id_msg(1, 30_100_001, &mut out);
+            encode_id_msg(1, ZARZAKH_SOLAR_SYSTEM_ID, &mut out);
             Ok(any("eve.stargate.lock.api.GetRestrictedSystemsResponse", out))
         }),
     );
@@ -230,10 +230,19 @@ pub fn register_handlers(
         "eve.stargate.lock.api.ValidateJumpRequest",
         Arc::new(move |ctx, _any, msg| {
             let cid = active_char_id(ctx)?;
+            let req_cid = extract_u64(msg, 1);
+            if req_cid != 0 && req_cid != cid as u64 {
+                return Err((STATUS_FORBIDDEN, "Character mismatch".to_string()));
+            }
             let sys_id = extract_u64(msg, 2);
             let gate_id = extract_u64(msg, 3);
             if sys_id == 0 || gate_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing solarsystem or gate".to_string()));
+            }
+            let mut out = Vec::new();
+            if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
+                encode_varint_field(1, 1, &mut out);
+                return Ok(any("eve.stargate.lock.api.ValidateJumpResponse", out));
             }
             let now = ctx.now_unix();
             let active_lock = db_gl3.with_snapshot(|snap| {
@@ -242,7 +251,6 @@ pub fn register_handlers(
                     .copied()
                     .filter(|&(_, exp)| exp > now)
             });
-            let mut out = Vec::new();
             if let Some((locked_gate_id, expiry_unix)) = active_lock {
                 if locked_gate_id as u64 != gate_id {
                     encode_varint_field(1, 0, &mut out);
@@ -268,6 +276,9 @@ pub fn register_handlers(
             let sys_id = extract_u64(msg, 3);
             if cid == 0 || sys_id == 0 {
                 return Err((STATUS_BAD_REQUEST, "Missing character or solarsystem".to_string()));
+            }
+            if sys_id != ZARZAKH_SOLAR_SYSTEM_ID {
+                return Err((STATUS_NOT_FOUND, "Stargate lock not found".to_string()));
             }
             let removed = db_gl4.with_mut_snapshot(|snap| {
                 snap.zarzakh_gate_locks.remove(&(cid as i64)).is_some()
@@ -387,11 +398,12 @@ pub fn register_handlers(
                 snap.system_states
                     .get(&(sys_id as u32))
                     .map(|st| {
-                        let sum = 1
-                            + u64::from(st.military_index)
-                            + u64::from(st.industrial_index)
-                            + u64::from(st.strategic_index);
-                        (sum * 10).min(60)
+                        let adm = crate::services::sov_services::calculate_adm(
+                            st.military_index,
+                            st.industrial_index,
+                            st.strategic_index,
+                        );
+                        (adm * 10.0).round() as u64
                     })
                     .unwrap_or(10)
             });

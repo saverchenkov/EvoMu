@@ -7,7 +7,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
-    STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_OK, STATUS_UNAUTHORIZED,
+    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
@@ -233,46 +233,19 @@ fn decode_nested_id(fields: &[(u32, RawField)], field_num: u32) -> Option<u64> {
 
 #[tokio::test]
 async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
-    // parity: quasar:eveProto/generated/eve_public/ship/unlock/requests_pb2.pyj, quasar:eveProto/generated/eve/ship/api/requests_pb2.pyj, quasar:eveProto/generated/eve/starterspace/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve/ship/api/requests_pb2.pyj, quasar:eveProto/generated/eve/starterspace/api/requests_pb2.pyj
     let ctx = ServerContext::new();
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(1, 1001, 2_112_000_001, 98_000_001);
 
-    // 1. GetPendingNotificationsRequest returns empty pending list
-    let rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
+    // 1. eve_public.ship.unlock.* -> STATUS_NOT_IMPLEMENTED (DATA GAP)
+    for req_type in [
         "eve_public.ship.unlock.GetPendingNotificationsRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(rsp.status_code, STATUS_OK);
-    let payload = rsp.payload.expect("payload");
-    assert!(payload
-        .type_url
-        .ends_with("eve_public.ship.unlock.GetPendingNotificationsResponse"));
-    assert!(parse_raw_proto(&payload.value).is_empty());
-
-    // 2. ClaimRewardRequest validates missing ID (400) and non-pending reward (404)
-    let bad_claim = quasar_rpc(
-        &ctx,
-        &mut sess,
         "eve_public.ship.unlock.ClaimRewardRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(bad_claim.status_code, STATUS_BAD_REQUEST);
-
-    let mut claim_req = Vec::new();
-    encode_id_field(1, 587, &mut claim_req);
-    let claim_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.ship.unlock.ClaimRewardRequest",
-        claim_req,
-    )
-    .await;
-    assert_eq!(claim_rsp.status_code, STATUS_NOT_FOUND);
+    ] {
+        let rsp = quasar_rpc(&ctx, &mut sess, req_type, Vec::new()).await;
+        assert_eq!(rsp.status_code, STATUS_NOT_IMPLEMENTED, "{req_type}");
+    }
 
     // 3. CanJumpStarterSpaceShipCasterRequest & CanJumpShipCasterRequest
     let mut caster_req = Vec::new();
@@ -441,7 +414,7 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     seed_quasar_b2_fixtures(&ctx);
     let mut sess = make_session(3, 1003, 2_112_000_001, 98_000_001);
 
-    // 1. GetRestrictedSystemsRequest -> Zarzakh (30_100_001)
+    // 1. GetRestrictedSystemsRequest -> Zarzakh (30_100_000)
     let restr_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -451,12 +424,36 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     .await;
     assert_eq!(restr_rsp.status_code, STATUS_OK);
     let restr_fields = parse_raw_proto(&restr_rsp.payload.unwrap().value);
-    assert_eq!(decode_nested_id(&restr_fields, 1), Some(30_100_001));
+    assert_eq!(decode_nested_id(&restr_fields, 1), Some(30_100_000));
 
-    // 2. GetRequest returns active lock on gate 50_001_248 + expiry timestamp
+    // 2. GetRequest on non-restricted Jita (30_000_142) returns STATUS_NOT_FOUND; Zarzakh (30_100_000) returns active lock
+    let mut jita_get_req = Vec::new();
+    encode_id_field(1, 2_112_000_001, &mut jita_get_req);
+    encode_id_field(2, 30_000_142, &mut jita_get_req);
+    let jita_get_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.stargate.lock.api.GetRequest",
+        jita_get_req,
+    )
+    .await;
+    assert_eq!(jita_get_rsp.status_code, STATUS_NOT_FOUND);
+
+    let mut mismatch_get_req = Vec::new();
+    encode_id_field(1, 2_112_999_999, &mut mismatch_get_req);
+    encode_id_field(2, 30_100_000, &mut mismatch_get_req);
+    let mismatch_get_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.stargate.lock.api.GetRequest",
+        mismatch_get_req,
+    )
+    .await;
+    assert_eq!(mismatch_get_rsp.status_code, 403);
+
     let mut get_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut get_req);
-    encode_id_field(2, 30_000_142, &mut get_req);
+    encode_id_field(2, 30_100_000, &mut get_req);
     let get_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -469,10 +466,27 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     assert_eq!(decode_nested_id(&gfields, 1), Some(50_001_248));
     assert!(decode_nested_id(&gfields, 2).unwrap_or(0) > ctx.now_unix());
 
-    // 3. ValidateJumpRequest on a different gate returns allowed = false (0) + lock details
+    // 3. ValidateJumpRequest on Jita (30_000_142) returns allowed = true (1); Zarzakh (30_100_000) on a different gate returns allowed = false (0) + lock details
+    let mut jita_val_req = Vec::new();
+    encode_id_field(1, 2_112_000_001, &mut jita_val_req);
+    encode_id_field(2, 30_000_142, &mut jita_val_req);
+    encode_id_field(3, 50_001_999, &mut jita_val_req);
+    let jita_val_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.stargate.lock.api.ValidateJumpRequest",
+        jita_val_req,
+    )
+    .await;
+    assert_eq!(jita_val_rsp.status_code, STATUS_OK);
+    assert_eq!(
+        first_varint(&parse_raw_proto(&jita_val_rsp.payload.unwrap().value), 1),
+        Some(1)
+    );
+
     let mut val_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut val_req);
-    encode_id_field(2, 30_000_142, &mut val_req);
+    encode_id_field(2, 30_100_000, &mut val_req);
     encode_id_field(3, 50_001_999, &mut val_req);
     let val_rsp = quasar_rpc(
         &ctx,
@@ -487,10 +501,22 @@ async fn test_quasar_b2_stargate_locks_and_delete_command() {
     let lock_sub = parse_raw_proto(first_bytes(&vfields, 2).unwrap());
     assert_eq!(decode_nested_id(&lock_sub, 1), Some(50_001_248));
 
-    // 4. DeleteCommanded requires admin role, then removes the lock, after which ValidateJumpRequest allows jump (1)
+    // 4. DeleteCommanded requires admin role, returns STATUS_NOT_FOUND for Jita, then removes Zarzakh lock
+    let mut jita_del_req = Vec::new();
+    encode_id_field(2, 2_112_000_001, &mut jita_del_req);
+    encode_id_field(3, 30_000_142, &mut jita_del_req);
+    let jita_del_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.stargate.lock.api.DeleteCommanded",
+        jita_del_req,
+    )
+    .await;
+    assert_eq!(jita_del_rsp.status_code, STATUS_NOT_FOUND);
+
     let mut del_req = Vec::new();
     encode_id_field(2, 2_112_000_001, &mut del_req);
-    encode_id_field(3, 30_000_142, &mut del_req);
+    encode_id_field(3, 30_100_000, &mut del_req);
 
     let mut non_admin = make_session(33, 1033, 2_112_000_001, 98_000_001);
     non_admin.role = 0;
@@ -598,20 +624,40 @@ async fn test_quasar_b2_sovereignty_claims_adm_and_resources() {
     assert_eq!(decode_nested_id(&ac, 1), Some(99_000_001));
     assert_eq!(decode_nested_id(&ac, 2), Some(98_000_001));
 
-    // 2. GetLevelRequest (ADM) -> wired to snap.system_states
+    // 2. GetLevelRequest (ADM) -> wired to snap.system_states via calculate_adm
     let mut adm_req = Vec::new();
     encode_id_field(1, 30_002_537, &mut adm_req);
     let adm_rsp = quasar_rpc(
         &ctx,
         &mut sess,
         "eve.sovereignty.activitydefensemodifier.api.GetLevelRequest",
-        adm_req,
+        adm_req.clone(),
     )
     .await;
     assert_eq!(adm_rsp.status_code, STATUS_OK);
     assert_eq!(
         first_varint(&parse_raw_proto(&adm_rsp.payload.unwrap().value), 1),
         Some(60)
+    );
+
+    // Non-saturated index combination (1, 2, 1) -> 1.0 + 0.6 + 1.2 + 0.4 = 3.2 -> 32
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.system_states.get_mut(&30_002_537).unwrap();
+        st.military_index = 1;
+        st.industrial_index = 2;
+        st.strategic_index = 1;
+    });
+    let adm_non_sat = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve.sovereignty.activitydefensemodifier.api.GetLevelRequest",
+        adm_req,
+    )
+    .await;
+    assert_eq!(adm_non_sat.status_code, STATUS_OK);
+    assert_eq!(
+        first_varint(&parse_raw_proto(&adm_non_sat.payload.unwrap().value), 1),
+        Some(32)
     );
 
     // 3. Equinox star & planet resource handlers -> STATUS_NOT_IMPLEMENTED (DATA GAP)
