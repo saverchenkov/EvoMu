@@ -330,6 +330,52 @@ pub(crate) async fn handle_module_cycles(
 
             // Interdiction Sphere Launcher (`group_id == 589`, e.g., `Interdiction Sphere Launcher I` `22782`)
             if mod_type.group_id == 589 {
+                if session.station_id.is_some() || session.structure_id.is_some() {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipDocked".into(),
+                        message: "Cannot activate Interdiction Sphere Launcher while docked".into(),
+                    }));
+                }
+                let ship_cloaked = sys
+                    .get_combat_state(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cs| cs.is_cloaked || cs.cloak_original_max_velocity.is_some())
+                    || ctx.db.with_snapshot(|s| {
+                        s.items.values().any(|it| {
+                            it.location_id == ship_id
+                                && s.module_active_states.contains(&it.item_id)
+                                && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 330)
+                        })
+                    });
+                if ship_cloaked {
+                    return Some(Err(BridgeRpcError::user_error("CannotActivateCloaked")));
+                }
+                if sys
+                    .get_combat_state(ship_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cs| cs.is_tethered)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "CantActivateWhileTethered".into(),
+                        message: "Cannot activate Interdiction Sphere Launcher while tethered".into(),
+                    }));
+                }
+                if let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() {
+                    if matches!(
+                        ship_ball.mode,
+                        eve_destiny::MovementMode::Warp { phase, .. }
+                            if phase != eve_destiny::WarpPhase::Aligning
+                    ) {
+                        return Some(Err(BridgeRpcError {
+                            code: "CantActivateInWarp".into(),
+                            message: "Cannot activate Interdiction Sphere Launcher while in warp".into(),
+                        }));
+                    }
+                }
                 return Some(
                     crate::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
                         ctx,

@@ -2,7 +2,7 @@
 
 use crate::{
     Ball, BallId, Ballpark, DamageVector, DestinyEvent, GridBubble, MovementMode, SlimItemMeta,
-    WarpBubble, WarpBubbleMgr, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS,
+    WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS,
     DECLOAK_DISTANCE_METERS, GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
 };
 use glam::DVec3;
@@ -661,6 +661,12 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
+        if matches!(
+            self.balls[&ball_id].mode,
+            MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning
+        ) {
+            return Err("CantActivateInWarp: Cannot micro jump while in warp".into());
+        }
         if self.is_immobile_structure_or_static(ball_id) {
             return Err("StructureCannotNavigate: Static or Upwell structure balls cannot micro jump".into());
         }
@@ -726,6 +732,12 @@ impl Ballpark {
     ) -> Result<Vec<BallId>, String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
+        }
+        if matches!(
+            self.balls[&ball_id].mode,
+            MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning
+        ) {
+            return Err("CantActivateInWarp: Cannot activate micro jump field while in warp".into());
         }
         if self.is_immobile_structure_or_static(ball_id) {
             return Err("StructureCannotNavigate: Static or Upwell structure balls cannot activate micro jump field".into());
@@ -1125,7 +1137,7 @@ impl Ballpark {
         true
     }
 
-    pub fn set_mode(&mut self, ball_id: BallId, mode: MovementMode) -> Result<(), String> {
+    pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
@@ -1195,7 +1207,30 @@ impl Ballpark {
                 }
             }
 
-            // Clear target locks on warp initiation (bubble interception is evaluated at warp entry)
+            // Check bubble interception along the warp path
+            if let MovementMode::Warp {
+                origin,
+                ref mut destination,
+                ref mut total_distance,
+                ..
+            } = mode
+            {
+                let is_nullified = self
+                    .combat_states
+                    .get(&ball_id)
+                    .map(|cs| cs.is_interdiction_nullified)
+                    .unwrap_or(false);
+                if !is_nullified {
+                    if let Some((_bid, intercept_pos)) =
+                        self.warp_bubble_mgr.check_interception(origin, *destination)
+                    {
+                        *destination = intercept_pos;
+                        *total_distance = (*destination - origin).length();
+                    }
+                }
+            }
+
+            // Clear target locks on warp initiation
             if matches!(mode, MovementMode::Warp { .. }) {
                 if let Some(locks) = self.target_locks.remove(&ball_id) {
                     for l in locks {

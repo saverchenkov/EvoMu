@@ -275,6 +275,11 @@ pub async fn handle_use_warp_vector(
     )?;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
+        &sys_handle,
+        ship_id,
+    )
+    .await?;
     let is_scrambled = sys_handle.is_ball_scrambled_sync(ship_id)
         || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
         || sys_handle

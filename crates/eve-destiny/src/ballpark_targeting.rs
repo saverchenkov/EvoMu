@@ -272,6 +272,16 @@ impl Ballpark {
                 if matches!(group_a, 6 | 7 | 8 | 9 | 1971) || matches!(group_b, 6 | 7 | 8 | 9 | 1971) {
                     continue;
                 }
+                let is_upwell_a = matches!(group_a, 1404..=1410 | 1657 | 2016 | 2017)
+                    || self
+                        .ball_slim_meta
+                        .get(&id_a)
+                        .is_some_and(|m| m.category_id == 65);
+                let is_upwell_b = matches!(group_b, 1404..=1410 | 1657 | 2016 | 2017)
+                    || self
+                        .ball_slim_meta
+                        .get(&id_b)
+                        .is_some_and(|m| m.category_id == 65);
                 let is_station_or_struct_b =
                     matches!(group_b, 15 | 1404..=1410 | 1657 | 2016 | 2017)
                         || self
@@ -377,8 +387,10 @@ impl Ballpark {
                             bumped_dynamic_ids.insert(id_a);
                             collision_events.push((id_a, id_b));
                         }
-                        if let Some(ba) = self.balls.get_mut(&id_a) {
-                            ba.position += normal * overlap;
+                        if !is_upwell_b || v_rel < 0.0 {
+                            if let Some(ba) = self.balls.get_mut(&id_a) {
+                                ba.position += normal * overlap;
+                            }
                         }
                     } else if is_static_a && !is_static_b {
                         if v_rel < 0.0 {
@@ -388,8 +400,10 @@ impl Ballpark {
                             bumped_dynamic_ids.insert(id_b);
                             collision_events.push((id_a, id_b));
                         }
-                        if let Some(bb) = self.balls.get_mut(&id_b) {
-                            bb.position -= normal * overlap;
+                        if !is_upwell_a || v_rel < 0.0 {
+                            if let Some(bb) = self.balls.get_mut(&id_b) {
+                                bb.position -= normal * overlap;
+                            }
                         }
                     }
 

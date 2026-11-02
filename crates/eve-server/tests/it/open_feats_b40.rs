@@ -210,7 +210,7 @@ pub(crate) fn fit_tactical_sabre(ctx: &ServerContext, char_id: i64, ship_id: i64
             (gun_id, 486u32, InventoryFlag::HiSlot0, 1, true),
             (ammo_id, 185u32, InventoryFlag::HiSlot0, 10_000, false),
             (bub_id, 22_782u32, InventoryFlag::HiSlot1, 1, true),
-            (probe_id, 22_778u32, InventoryFlag::HiSlot1, 20, false),
+            (probe_id, 22_778u32, InventoryFlag::HiSlot1, 3, false),
             (rep_id, 11_355u32, InventoryFlag::HiSlot2, 1, true),
             (web_id, 526u32, InventoryFlag::MedSlot0, 1, true),
             (scram_id, 447u32, InventoryFlag::MedSlot1, 1, true),

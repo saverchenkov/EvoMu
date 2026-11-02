@@ -151,12 +151,10 @@ pub async fn activate_interdiction_sphere_launcher(
         });
     }
 
-    let (current_tick, ship_pos) = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(tk, b)| (tk, b.position))
+    let ball_snap = sys.get_ball_snapshot(ship_id).await.ok().flatten();
+    let (current_tick, ship_pos) = ball_snap
+        .as_ref()
+        .map(|(tk, b)| (*tk, b.position))
         .unwrap_or((0, DVec3::ZERO));
     let now_unix = ctx.now_unix_secs();
     let cadence_s = mod_type
@@ -379,6 +377,12 @@ pub async fn activate_interdiction_sphere_launcher(
                     },
                 );
             }
+        }
+        if ball_snap.is_none() {
+            return Err(BridgeRpcError {
+                code: "ShipNotInSpace".into(),
+                message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+            });
         }
         let mut rem = 0;
         if let Some(ci) = snap.items.get_mut(&charge_item_id) {
