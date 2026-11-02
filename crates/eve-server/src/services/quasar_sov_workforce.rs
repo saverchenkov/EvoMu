@@ -93,7 +93,10 @@ fn can_relay_export(
             queue.push_back(*tsys);
         }
     }
-    while let Some(cur_sys) = queue.pop_front() {
+    for _ in 0..transit_hubs.len() {
+        let Some(cur_sys) = queue.pop_front() else {
+            break;
+        };
         let reach = systems_within_jumps(sde, cur_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
         if reach.contains_key(&imp_sys) {
             return true;
