@@ -119,10 +119,14 @@ async fn test_b36_progression_notifications() {
     // Negative check 1 (`F-02`): NPE `operationsManager` emits `OnOperationTaskCompleted` ONLY —
     // never dungeon `ProgressionService` `OnProgressionTaskCompleted` / `OnProgressionAdvanced`!
     let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
-    let (&real_op, _) = op_defs
+    let (&real_op, &client_task) = op_defs
         .op_tasks
         .iter()
-        .find(|(_, ts)| ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
+        .find_map(|(op, ts)| {
+            ts.iter()
+                .find(|t| op_defs.client_completable_tasks.contains(t))
+                .map(|t| (op, t))
+        })
         .expect("SDE operation with client-completable tasks");
     let _ = ctx
         .dispatch_rpc(
@@ -142,7 +146,7 @@ async fn test_b36_progression_notifications() {
             "operationsManager",
             None,
             "process_client_event",
-            &[PyRep::String("complete_task".into())],
+            &[PyRep::String("complete_task".into()), PyRep::Integer(client_task)],
             &kw,
             None,
         )
