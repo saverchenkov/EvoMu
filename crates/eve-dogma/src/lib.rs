@@ -558,6 +558,13 @@ impl DogmaExpressionNode {
                                     return;
                                 }
                             }
+                            if let Some(req_attr) = &filter_node.arg1 {
+                                if let Some(req_aid) = req_attr.attribute_id {
+                                    if target.get_attribute(req_aid, sde) <= 0.0 {
+                                        return;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -849,7 +856,20 @@ pub fn compile_modifier_spec_to_vm(
 pub fn compile_effect_to_vm(effect: &DogmaEffectType, is_remove: bool) -> Option<DogmaExpressionNode> {
     let mut tree: Option<DogmaExpressionNode> = None;
     for spec in &effect.modifiers {
-        let node = compile_modifier_spec_to_vm(spec, is_remove)?;
+        let mut node = compile_modifier_spec_to_vm(spec, is_remove)?;
+        // SDE effect 2008 (`cynosuralDurationBonus`) applies only to covert cynosural generators (`isCovert` attr 1252 > 0).
+        if effect.effect_id == 2008 {
+            if let Some(filter_node) = node.arg1.as_deref_mut() {
+                filter_node.arg1 = Some(Box::new(DogmaExpressionNode {
+                    opcode: DogmaVmOpcode::DefAttribute,
+                    value_f64: None,
+                    attribute_id: Some(1252),
+                    operator: None,
+                    arg1: None,
+                    arg2: None,
+                }));
+            }
+        }
         tree = Some(match tree {
             None => node,
             Some(prev) => DogmaExpressionNode {

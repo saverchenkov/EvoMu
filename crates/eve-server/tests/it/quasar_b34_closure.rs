@@ -560,6 +560,26 @@ async fn test_b34_solarsystem_bounty_npc_and_ess_bank_closure() {
         .iter()
         .any(|n| n.normalized_type_name() == "eve.solarsystem.bounty.bank.SolarSystemPersisted"));
 
+    // Sub-1.0 ApplyMultiplierFactorRequest (50% -> 0.50 with proto3-omitted units == 0)
+    let mut sub_req = Vec::new();
+    encode_bytes_field(1, &s_bytes, &mut sub_req);
+    encode_varint_field(2, 50, &mut sub_req);
+    let mut sub_det = Vec::new();
+    encode_varint_field(2, 500_000_000, &mut sub_det);
+    encode_bytes_field(3, &sub_det, &mut sub_req);
+    let sub_rsp = quasar_rpc(&ctx, &mut sess, "eve.solarsystem.bounty.npc.ApplyMultiplierFactorRequest", sub_req).await;
+    assert_eq!(sub_rsp.status_code, STATUS_OK);
+    let sub_notices = drain_notices(&mut rx);
+    let sub_calc = sub_notices.iter().find(|n| n.normalized_type_name() == "eve.solarsystem.bounty.npc.MultiplierFactorCalculated").expect("sub-1.0 MultiplierFactorCalculated");
+    let sub_dyn = reg.decode_dynamic("eve.solarsystem.bounty.npc.MultiplierFactorCalculated", &sub_calc.value).expect("decode sub-1.0");
+    assert_eq!(sub_dyn.get(2), Some(&DynamicValue::Uint32(50)));
+    if let Some(DynamicValue::Message(det_m)) = sub_dyn.get(3) {
+        assert_eq!(det_m.get(1), None);
+        assert_eq!(det_m.get(2), Some(&DynamicValue::Uint32(500_000_000)));
+    } else {
+        panic!("expected determined submessage");
+    }
+
     // Test ESS MainBank & ReserveBank notices through real essMgr.AttemptLinkToMainBank flow (B34-F-07)
     let nullsec_sys: u32 = 30_004_759;
     let ess_ball_id: i64 = 800_001;

@@ -973,7 +973,7 @@ pub fn register_handlers(
             let input_pct = extract_u32_field(dyn_msg, 2).unwrap_or(100);
             let (units, nanos) = if let Some(DynamicValue::Message(det)) = dyn_msg.get(3) {
                 (
-                    extract_u64_field(det, 1).unwrap_or(1),
+                    extract_u64_field(det, 1).unwrap_or(0),
                     extract_u32_field(det, 2).unwrap_or(0),
                 )
             } else {

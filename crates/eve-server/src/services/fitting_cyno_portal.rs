@@ -570,9 +570,7 @@ async fn light_cyno(
         ));
     }
     let base_dur_ms = type_attr(ctx, mod_type, attr_ids::DURATION);
-    let duration_ms = if ship_type_id == 44996 && !is_covert {
-        base_dur_ms
-    } else if mod_vals[0] > 0.0 {
+    let duration_ms = if mod_vals[0] > 0.0 {
         mod_vals[0]
     } else {
         base_dur_ms
