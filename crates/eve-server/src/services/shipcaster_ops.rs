@@ -79,7 +79,7 @@ async fn emit_beacon_slim_item_change(ctx: &ServerContext, old_pad: &LandingPadR
     let sys = ctx.systems.get_or_spawn(new_pad.solar_system_id);
     let _ = sys.change_slim_item(new_pad.item_id, SlimItemMeta {
         group_id, category_id, owner_id: i64::from(new_pad.faction_id), char_id: None,
-        corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false,
+        corp_id: 0, alliance_id: -1, security_status: 0.0, is_cloaked: false, ..Default::default()
     }).await;
 }
 
@@ -116,6 +116,7 @@ async fn spawn_or_replace_pad_ball(ctx: &ServerContext, pad: &LandingPadRecord) 
                 alliance_id: -1,
                 security_status: 0.0,
                 is_cloaked: false,
+                ..Default::default()
             },
         )
         .await;
