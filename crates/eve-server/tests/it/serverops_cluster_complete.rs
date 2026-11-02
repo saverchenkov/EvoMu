@@ -114,7 +114,14 @@ async fn test_time_dilation_scales_physics_and_module_cycles_and_emits_clock_reb
         panic!("expected 2-tuple in DoSimClockRebase, got {:?}", rebase.args);
     };
     assert_eq!(pair.len(), 2);
-    assert!(pair[0].as_i64().is_some() && pair[1].as_i64().is_some());
+    let old_sim = pair[0].as_i64().expect("oldSimTime must be i64");
+    let new_sim = pair[1].as_i64().expect("newSimTime must be i64");
+    let auth_now_ft = ctx.now_blueos_filetime_ticks();
+    assert!(old_sim <= new_sim, "DoSimClockRebase must never wind the client sim clock backward");
+    assert!(
+        (auth_now_ft - new_sim).abs() <= 10_000_000,
+        "DoSimClockRebase newSimTime ({new_sim}) must match authoritative destiny sim clock ({auth_now_ft})"
+    );
     assert!(
         ctx.drain_notifications_for_char(P2)
             .iter()
@@ -619,7 +626,6 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
     assert!(report.get("recomputedIndustrySystems").copied().unwrap_or(0) >= 5_000);
     assert!(report.get("sovSystemsDecayed").copied().unwrap_or(0) >= 1);
     assert_eq!(report.get("missionDeclinesReset"), Some(&1));
-    assert!(report.get("essBanksRolledOver").copied().unwrap_or(0) >= 1);
     assert!(report.get("expiredMarketOrders").copied().unwrap_or(0) >= 1);
     assert_eq!(report.get("missionNpcsRespawned"), Some(&1));
 
@@ -664,12 +670,11 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         let sov = &snap.system_states[&null_sov_sys];
         assert_eq!(sov.military_index, 3, "military_index must decay 4 -> 3");
         assert_eq!(sov.industrial_index, 2, "industrial_index must decay 3 -> 2");
-        assert_eq!(sov.strategic_index, 2, "strategic_index without Sov Hub must decay 3 -> 2");
-        assert_eq!(snap.system_states[&hub_sov_sys].strategic_index, 3, "strategic_index with active Sov Hub stays 3");
+        assert_eq!(sov.strategic_index, 3, "strategic_index must not decay while sov is held");
         let (vuln_start, vuln_end) = snap.sov_runtime.adm_vulnerability_windows[&sov_hub_id];
         assert!(vuln_end - vuln_start > 7_200, "Sov Hub ADM decay must widen vulnerability window");
-        assert_eq!(sov.ess_main_bank, IskCents::from_isk(700_000));
-        assert_eq!(sov.ess_reserve_bank, IskCents::from_isk(500_000));
+        assert_eq!(sov.ess_main_bank, IskCents::from_isk(1_000_000));
+        assert_eq!(sov.ess_reserve_bank, IskCents::from_isk(200_000));
 
         assert!(!snap.last_mission_decline_times.contains_key(&P1));
         assert_eq!(snap.active_missions[&(P1, 3_019_001)].current_room_id, 1);

@@ -362,6 +362,47 @@ async fn test_shipcaster_and_starter_travel_closure() {
     let staging_sys: u32 = 30045324; // Onnamon (Caldari FW HQ)
     let starter_launcher_id: i64 = 105_000_117;
 
+    // Deploy & build 2 Caldari FW shipcaster beacons in lowsec warzone systems (30002811, 30002813)
+    for (idx, war_sys) in [30002811_u32, 30002813_u32].into_iter().enumerate() {
+        let pos = DVec3::new(100_000.0 + (idx as f64) * 5_000.0, 0.0, 0.0);
+        sess.station_id = None;
+        sess.ship_id = Some(ship_id);
+        sess.solar_system_id = Some(war_sys);
+        spawn_test_ship(&ctx, &ctx.systems.get_or_spawn(war_sys), char_id, ship_id, 601, pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+        let cid = ctx.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&char_id) {
+                ch.war_faction_id = Some(500_001);
+                ch.solar_system_id = war_sys;
+                ch.station_id = None;
+            }
+            if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = war_sys as i64; }
+            s.next_entity_id += 1;
+            let cid = s.next_entity_id;
+            s.items.insert(cid, InventoryItemRecord {
+                item_id: cid, type_id: 75933, owner_id: char_id, location_id: ship_id,
+                flag: InventoryFlag::Cargo, quantity: 1, ..Default::default()
+            });
+            cid
+        });
+        let launched = rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::List(vec![PyRep::Integer(cid)]), PyRep::Real(pos.x), PyRep::Real(pos.y), PyRep::Real(pos.z)]).await.expect("LaunchForSelf");
+        let pad_id = match launched { PyRep::List(v) => kv_i64(&v[0], "itemID"), _ => 0 };
+        let reqs = eve_server::services::cluster_macho_misc_services::with_misc_state(&ctx, |st| {
+            st.landing_pads.iter().find(|p| p.item_id == pad_id).map(|p| p.required_materials.clone()).unwrap_or_default()
+        });
+        let mat_dict: Vec<(PyRep, PyRep)> = ctx.db.with_mut_snapshot(|s| {
+            reqs.into_iter().map(|(tid, qty)| {
+                s.next_entity_id += 1;
+                let iid = s.next_entity_id;
+                s.items.insert(iid, InventoryItemRecord {
+                    item_id: iid, type_id: tid, owner_id: char_id, location_id: ship_id,
+                    flag: InventoryFlag::Cargo, quantity: qty as i32, ..Default::default()
+                });
+                (PyRep::Integer(i64::from(tid)), PyRep::Integer(i64::from(qty)))
+            }).collect()
+        });
+        rpc(&ctx, &mut sess, "beyonce", "CallComponentFromClient", &[PyRep::Integer(pad_id), PyRep::String("underConstruction".into()), PyRep::String("DepositItemsFromShip".into()), PyRep::Dict(mat_dict)]).await.expect("DepositItemsFromShip");
+    }
+
     // 1. GetAllLandingPads
     let all_pads_rep = rpc(
         &ctx,
@@ -375,7 +416,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
     let PyRep::List(all_pads) = all_pads_rep else {
         panic!("Expected List");
     };
-    assert_eq!(all_pads.len(), 8);
+    assert_eq!(all_pads.len(), 2);
     for pad in &all_pads {
         assert!(kv_i64(pad, "itemID") > 0);
         assert!(kv_i64(pad, "solarSystemID") > 0);
@@ -384,30 +425,24 @@ async fn test_shipcaster_and_starter_travel_closure() {
     }
 
     // 2. GetFactionLandingPads
-    let mut caldari_active_pad_id = 0_i64;
-    let mut caldari_active_warzone_sys = 0_u32;
-    for fid in &[500001, 500002, 500003, 500004] {
-        let fpad_rep = rpc(
-            &ctx,
-            &mut sess,
-            "shipCasterLandingPadMgr",
-            "GetFactionLandingPads",
-            &[PyRep::Integer(*fid)],
-        )
-        .await
-        .expect("GetFactionLandingPads");
-        let PyRep::List(fpads) = fpad_rep else {
-            panic!("Expected List");
-        };
-        assert_eq!(fpads.len(), 2);
-        assert_eq!(kv_i64(&fpads[0], "factionID"), *fid);
-        let linked: Vec<&PyRep> = fpads.iter().filter(|p| kv_bool(p, "isLinked")).collect();
-        assert_eq!(linked.len(), 1);
-        if *fid == 500001 {
-            caldari_active_pad_id = kv_i64(linked[0], "itemID");
-            caldari_active_warzone_sys = kv_i64(linked[0], "solarSystemID") as u32;
-        }
-    }
+    let fpad_rep = rpc(
+        &ctx,
+        &mut sess,
+        "shipCasterLandingPadMgr",
+        "GetFactionLandingPads",
+        &[PyRep::Integer(500001)],
+    )
+    .await
+    .expect("GetFactionLandingPads");
+    let PyRep::List(fpads) = fpad_rep else {
+        panic!("Expected List");
+    };
+    assert_eq!(fpads.len(), 2);
+    assert_eq!(kv_i64(&fpads[0], "factionID"), 500001);
+    let linked: Vec<&PyRep> = fpads.iter().filter(|p| kv_bool(p, "isLinked")).collect();
+    assert_eq!(linked.len(), 2);
+    let caldari_active_pad_id = kv_i64(linked[0], "itemID");
+    let caldari_active_warzone_sys = kv_i64(linked[0], "solarSystemID") as u32;
     let empty_pads = rpc(
         &ctx,
         &mut sess,
@@ -447,10 +482,12 @@ async fn test_shipcaster_and_starter_travel_closure() {
     sess.station_id = None;
     sess.ship_id = Some(ship_id);
     sess.solar_system_id = Some(starter_sys);
+    let now_rookie = ctx.now_unix().saturating_sub(86_400);
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&char_id) {
             ch.solar_system_id = starter_sys;
             ch.station_id = None;
+            ch.create_date_unix = now_rookie;
         }
         if let Some(ship) = s.items.get_mut(&ship_id) {
             ship.type_id = 601; // Ibis frigate
@@ -513,7 +550,10 @@ async fn test_shipcaster_and_starter_travel_closure() {
     });
 
     // 5. CmdJumpThroughStarterShipcaster
-    // Negative test (a): Out of range boundary check (5.1km > SHIPCASTER_MAX_RANGE_M 5.0km from launcher at 300km)
+    // Negative test (a): Out of range boundary check (5.1km > SHIPCASTER_MAX_RANGE_M 5.0km from launcher)
+    let starter_pos = eve_server::services::cluster_macho_misc_services::with_misc_state(&ctx, |st| {
+        st.starter_launchers.iter().find(|l| l.solar_system_id == starter_sys).map(|l| l.position).unwrap()
+    });
     let handle_starter = ctx.systems.get_or_spawn(starter_sys);
     spawn_test_ship(
         &ctx,
@@ -521,7 +561,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
         char_id,
         ship_id,
         601,
-        DVec3::new(300_000.0, 5_100.0, 0.0),
+        starter_pos + DVec3::new(0.0, 5_100.0, 0.0),
     )
     .await;
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
@@ -539,7 +579,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
     // Negative test (b): Session-change timer active at valid in-range boundary (4.9km <= 5.0km)
     assert!(
         handle_starter
-            .set_ball_position(ship_id, DVec3::new(300_000.0, 4_900.0, 0.0))
+            .set_ball_position(ship_id, starter_pos + DVec3::new(0.0, 4_900.0, 0.0))
             .await
     );
     let now_unix = ctx.now_unix();
@@ -588,6 +628,9 @@ async fn test_shipcaster_and_starter_travel_closure() {
     });
 
     // 6. CmdJumpThroughShipcaster (Interstellar FW shipcaster)
+    let (origin_launcher_id, origin_pos) = eve_server::services::cluster_macho_misc_services::with_misc_state(&ctx, |st| {
+        st.launchers.iter().find(|l| l.faction_id == 500001).map(|l| (l.item_id, l.position)).unwrap()
+    });
     let handle_staging = ctx.systems.get_or_spawn(staging_sys);
     spawn_test_ship(
         &ctx,
@@ -595,7 +638,7 @@ async fn test_shipcaster_and_starter_travel_closure() {
         char_id,
         ship_id,
         601,
-        DVec3::new(198_000.0, 0.0, 0.0),
+        origin_pos + DVec3::new(1_000.0, 0.0, 0.0),
     )
     .await;
 
@@ -606,17 +649,15 @@ async fn test_shipcaster_and_starter_travel_closure() {
         }
     });
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
-
-    let origin_launcher_id = 105_000_001;
     let jump_fw = rpc(
         &ctx,
         &mut sess,
         "shipcasterTravelMgr",
         "CmdJumpThroughShipcaster",
         &[
-            PyRep::Integer(caldari_active_pad_id),
-            PyRep::Integer(caldari_active_pad_id),
             PyRep::Integer(origin_launcher_id),
+            PyRep::Integer(i64::from(caldari_active_warzone_sys)),
+            PyRep::Integer(caldari_active_pad_id),
         ],
     )
     .await

@@ -7,7 +7,7 @@
 use crate::router::{NotificationTarget, ServerContext};
 use super::wallet_services_ext::{save_json_note, sweep_expired_raffles};
 use super::wallet_serverops::process_due_automatic_bills;
-use eve_db::{IskCents, MarketHistoryDayRecord, WorldStateSnapshot};
+use eve_db::{MarketHistoryDayRecord, WorldStateSnapshot};
 use eve_proto::PyRep;
 use eve_sde::SolarSystemId;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,7 @@ fn unix_to_filetime(unix_secs: u64) -> i64 {
     (unix_secs as i64 + 11_644_473_600).saturating_mul(10_000_000)
 }
 
+/// DERIVED: Heuristic constellation-to-worker-node mapping (`workers[(constellation_id as usize) % pool_len]`).
 fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: SolarSystemId, workers: &[u32]) -> u32 {
     let pool_len = workers.len().max(1);
     let key = ctx
@@ -58,31 +59,23 @@ fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: Solar
     workers[(key as usize) % pool_len]
 }
 
-fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, old_factor: f64, new_factor: f64) {
+fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _old_factor: f64, _new_factor: f64) {
     let now_unix = ctx.now_unix();
-    let now_ft = unix_to_filetime(now_unix);
-    let sim_elapsed_ticks = (ctx.systems.get_system_sim_elapsed(solar_system_id) * 10_000_000.0).round() as i64;
+    let new_sim_ft = ctx.now_blueos_filetime_ticks();
     let (old_sim_ft, new_sim_ft) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let (prev_wall_unix, prev_sim_ft) = cn
+        let prev_sim_ft = cn
             .sim_clock_anchoring
             .get(&solar_system_id)
-            .copied()
-            .unwrap_or((now_unix, now_ft.saturating_add(sim_elapsed_ticks)));
-        let wall_delta_ticks = (now_unix.saturating_sub(prev_wall_unix) as i64).saturating_mul(10_000_000);
-        let old_projected = prev_sim_ft.saturating_add(((wall_delta_ticks as f64) * old_factor).round() as i64);
-        // Rebase new simulated clock anchor cleanly so client interpolates at `new_factor` without jump discontinuities
-        let rebased = if old_projected == prev_sim_ft {
-            now_ft.saturating_add(((sim_elapsed_ticks as f64) * new_factor).round() as i64)
-        } else {
-            old_projected.saturating_add(((10_000_000.0) * (new_factor - old_factor)).round() as i64)
-        };
-        cn.sim_clock_anchoring.insert(solar_system_id, (now_unix, rebased));
-        (old_projected, rebased)
+            .map(|&(_, ft)| ft)
+            .unwrap_or(new_sim_ft);
+        let old_ft = prev_sim_ft.min(new_sim_ft);
+        cn.sim_clock_anchoring.insert(solar_system_id, (now_unix, new_sim_ft));
+        (old_ft, new_sim_ft)
     };
     // parity: notify:DoSimClockRebase
     ctx.notify(
@@ -182,6 +175,25 @@ pub fn get_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32) -> f64 
     })
 }
 
+/// Enables or disables automatic background load-induced Time Dilation (`auto_tidi_enabled`, default `false`).
+pub fn set_auto_cluster_tidi_enabled(ctx: &ServerContext, enabled: bool) {
+    let mut cn = ctx
+        .systems
+        .cluster_nodes
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    cn.auto_tidi_enabled = enabled;
+}
+
+/// Returns whether automatic background load-induced Time Dilation is enabled.
+pub fn is_auto_cluster_tidi_enabled(ctx: &ServerContext) -> bool {
+    ctx.systems
+        .cluster_nodes
+        .read()
+        .map(|cn| cn.auto_tidi_enabled)
+        .unwrap_or(false)
+}
+
 /// Configures the per-worker-node active load threshold above which automatic Time Dilation engages.
 pub fn set_cluster_node_load_threshold(ctx: &ServerContext, threshold: usize) {
     let mut cn = ctx
@@ -192,7 +204,7 @@ pub fn set_cluster_node_load_threshold(ctx: &ServerContext, threshold: usize) {
     cn.node_load_tidi_threshold = threshold.max(1);
 }
 
-/// Computes Time Dilation factor (`0.10..=1.0`) from aggregate worker-node load units.
+/// DERIVED: Computes Time Dilation factor (`0.10..=1.0`) from aggregate worker-node load units.
 pub fn compute_tidi_from_node_load(load_units: usize, threshold: usize) -> f64 {
     let cap = threshold.max(1) as f64;
     if (load_units as f64) <= cap {
@@ -547,6 +559,17 @@ pub fn step_downtime_countdown_warnings(ctx: &ServerContext, now_unix: u64) -> V
     newly_crossed
 }
 
+/// Returns true if a downtime countdown warning was emitted for the UTC day containing `now_unix`.
+pub fn has_downtime_countdown_armed_for_day(ctx: &ServerContext, now_unix: u64) -> bool {
+    let day_key = now_unix / 86_400;
+    ctx.db.with_snapshot(|snap| {
+        load_downtime_state(snap)
+            .emitted_warnings_by_day
+            .get(&day_key)
+            .is_some_and(|v| !v.is_empty())
+    })
+}
+
 /// Enters active cluster downtime shutdown: emits `OnClusterShutdownInitiated`, marks
 /// `shutdown_in_progress = true` (rejecting non-GM `authentication.Login` with `ClusterShuttingDown`),
 /// disconnects active non-GM transport sessions, and releases non-GM online session locks (`feat:serverops.downtime`).
@@ -751,8 +774,12 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
 
     let expired_raffles = sweep_expired_raffles(ctx) as i64;
     let auto_paid_bills = process_due_automatic_bills(ctx) as i64;
-    let evacuated_abyssal = crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx);
     crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
+    let evacuated_abyssal = if is_1100_utc_window {
+        crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx)
+    } else {
+        0
+    };
     let (npc_wrecks_cleaned, mission_npcs_respawned) =
         crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
     let wormhole_sites_despawned =
@@ -890,12 +917,10 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
         }
 
-        // 5. Sovereignty Index Decay across ALL 3 indices (military, industrial, strategic) + ADM vulnerability rollover + ESS daily rollover
-        let mut sov_hub_systems: BTreeSet<u32> = BTreeSet::new();
+        // 5. Sovereignty Index Decay across military & industrial indices + ADM vulnerability rollover + stale ESS link cleanup
         let mut sov_hubs_by_sys: HashMap<u32, Vec<(i64, u32)>> = HashMap::new();
         for s in snap.structures.values() {
             if s.type_id == super::sov_services::TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed" {
-                sov_hub_systems.insert(s.solar_system_id);
                 if let Some((start_s, end_s)) = snap
                     .sov_runtime
                     .adm_vulnerability_windows
@@ -913,7 +938,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
         }
         let mut sov_cnt = 0_i64;
-        let mut ess_cnt = 0_i64;
+        let ess_cnt = 0_i64;
         let mut decayed_hubs: Vec<(i64, u32)> = Vec::new();
         let mut changed_sov: Vec<(u32, HashMap<String, i64>)> = Vec::new();
         for (&sys_id, sov) in snap.system_states.iter_mut() {
@@ -927,12 +952,6 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                     sov.industrial_index -= 1;
                     decayed_here = true;
                 }
-                // Strategic index decays when above baseline unless reinforced by an active Sovereignty Hub
-                // or claimed within the last 24h; if elevated above 1 without a Sov Hub, decays by 1.
-                if sov.strategic_index > 1 && !sov_hub_systems.contains(&sys_id) {
-                    sov.strategic_index -= 1;
-                    decayed_here = true;
-                }
             } else {
                 if sov.military_index > 0 {
                     sov.military_index -= 1;
@@ -940,10 +959,6 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                 }
                 if sov.industrial_index > 0 {
                     sov.industrial_index -= 1;
-                    decayed_here = true;
-                }
-                if sov.strategic_index > 0 {
-                    sov.strategic_index -= 1;
                     decayed_here = true;
                 }
             }
@@ -960,25 +975,6 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                         ("strategicIndex".into(), i64::from(sov.strategic_index)),
                     ]),
                 ));
-            }
-            // Clear stale ESS link timers and roll 30% of unlinked ESS Main Bank into Reserve Bank on daily maintenance
-            if sov
-                .ess_link_started_tick
-                .is_some_and(|started| now.saturating_sub(started) >= 600)
-            {
-                sov.ess_linked_character_id = None;
-                sov.ess_link_started_tick = None;
-            }
-            if sov.ess_linked_character_id.is_none() && sov.ess_main_bank.0 > 0 {
-                let to_reserve = IskCents((sov.ess_main_bank.0 * 30) / 100);
-                if to_reserve.0 > 0 {
-                    sov.ess_main_bank = sov.ess_main_bank.checked_sub(to_reserve).unwrap_or(IskCents(0));
-                    sov.ess_reserve_bank = sov
-                        .ess_reserve_bank
-                        .checked_add(to_reserve)
-                        .unwrap_or(sov.ess_reserve_bank);
-                    ess_cnt += 1;
-                }
             }
         }
 

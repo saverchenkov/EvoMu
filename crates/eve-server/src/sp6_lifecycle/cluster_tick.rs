@@ -1157,8 +1157,10 @@ pub fn on_advance_secs(ctx: &ServerContext, prev_unix: u64, secs: u64) {
 pub async fn tick_background_cluster(ctx: &ServerContext) {
     let now_unix = ctx.now_unix();
     let _ = crate::services::serverops_cluster::step_downtime_countdown_warnings(ctx, now_unix);
-    let _ = crate::services::serverops_cluster::rebalance_overloaded_worker_nodes(ctx);
-    let _ = crate::services::serverops_cluster::recompute_cluster_node_tidi(ctx);
+    if crate::services::serverops_cluster::is_auto_cluster_tidi_enabled(ctx) {
+        let _ = crate::services::serverops_cluster::rebalance_overloaded_worker_nodes(ctx);
+        let _ = crate::services::serverops_cluster::recompute_cluster_node_tidi(ctx);
+    }
     let dt_sec = ctx.systems.downtime_utc_secs_of_day();
     let now_day_idx = now_unix.saturating_sub(dt_sec) / 86_400;
     let crossed_downtime = with_mut_sp6_state(&ctx.db, |st, _snap| match st.last_downtime_day_idx {
@@ -1173,7 +1175,15 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         _ => false,
     });
     if crossed_downtime {
-        let _ = crate::services::serverops_cluster::start_daily_downtime_window(ctx);
+        let sec_of_day = now_unix % 86_400;
+        if sec_of_day >= dt_sec
+            && sec_of_day < dt_sec.saturating_add(900)
+            && crate::services::serverops_cluster::has_downtime_countdown_armed_for_day(ctx, now_unix)
+        {
+            let _ = crate::services::serverops_cluster::start_daily_downtime_window(ctx);
+        } else {
+            let _ = crate::services::serverops_cluster::execute_daily_maintenance_jobs(ctx);
+        }
     } else {
         let _ = crate::services::serverops_cluster::maybe_complete_scheduled_downtime_restart(ctx, now_unix);
     }

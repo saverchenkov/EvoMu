@@ -147,8 +147,8 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
     assert_eq!(attack_ok, PyRep::None);
     let unpriv_users_err = ctx.dispatch_rpc(&mut player_sess, "DB2", None, "CallProc", &[PyRep::String("zuser.Users_SelectByRole".into()), PyRep::Integer(0)], &kw, None).await.expect_err("non-GM client must be rejected on zuser.Users_SelectByRole");
     assert_eq!(unpriv_users_err.message, "NotAuthorized");
-    let debug_exec_err = ctx.dispatch_rpc(&mut player_sess, "debug", None, "Exec", &[PyRep::String("status".into())], &kw, None).await.expect_err("non-GM debug.Exec must be rejected");
-    assert_eq!(debug_exec_err.message, "NotAuthorized");
+    let debug_exec_err = ctx.dispatch_rpc(&mut player_sess, "debug", None, "Exec", &[PyRep::String("status".into())], &kw, None).await.expect_err("debug.Exec must be rejected");
+    assert_eq!(debug_exec_err.code, "UnimplementedRPC");
 
     // 5. raffleMgr.QA_SeedRaffles
     let seeded = ctx
