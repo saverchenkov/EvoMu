@@ -49,41 +49,37 @@ pub fn handle_pi_orbital_registry(
                     message: "GetSettingsInfo requires planetID".into(),
                 }));
             };
-            let (orbital_id_opt, planet_id, cfg) = ctx.db.with_snapshot(|snap| {
-                let (oid, pid) = resolve_orbital_and_planet(snap, raw_id);
-                let cfg = load_orbital_settings(snap, pid).unwrap_or(OrbitalCustomsSettings {
+            let cfg = ctx.db.with_snapshot(|snap| {
+                let (_, pid) = resolve_orbital_and_planet(snap, raw_id);
+                load_orbital_settings(snap, pid).unwrap_or(OrbitalCustomsSettings {
                     planet_id: pid,
                     ..Default::default()
-                });
-                (oid, pid, cfg)
+                })
             });
-            Some(Ok(PyRep::keyval([
-                ("orbitalID", PyRep::Integer(orbital_id_opt.unwrap_or(planet_id))),
-                ("planetID", PyRep::Integer(planet_id)),
-                ("orbitalTypeID", PyRep::Integer(cfg.orbital_type_id as i64)),
-                ("ownerCorpID", PyRep::Integer(cfg.owner_corp_id)),
-                ("corporationTaxRate", PyRep::Real(cfg.corporation_tax_rate)),
-                ("allianceTaxRate", PyRep::Real(cfg.alliance_tax_rate)),
+            // V24 client `OrbitalConfigurationWindow.ApplyAttributes` unpacks 6-tuple:
+            // `(selectedHour, taxRateValues, standingLevel, allowAlliance, allowStandings, selectedAcl)`.
+            let tax_rate_values = PyRep::keyval([
+                ("corporation", PyRep::Real(cfg.corporation_tax_rate)),
+                ("alliance", PyRep::Real(cfg.alliance_tax_rate)),
+                ("standingHigh", PyRep::Real(cfg.standing_high_tax_rate)),
+                ("standingGood", PyRep::Real(cfg.standing_good_tax_rate)),
                 (
-                    "standingHighTaxRate",
-                    PyRep::Real(cfg.standing_high_tax_rate),
-                ),
-                (
-                    "standingGoodTaxRate",
-                    PyRep::Real(cfg.standing_good_tax_rate),
-                ),
-                (
-                    "standingNeutralTaxRate",
+                    "standingNeutral",
                     PyRep::Real(cfg.standing_neutral_tax_rate),
                 ),
-                ("standingBadTaxRate", PyRep::Real(cfg.standing_bad_tax_rate)),
+                ("standingBad", PyRep::Real(cfg.standing_bad_tax_rate)),
                 (
-                    "standingHorribleTaxRate",
+                    "standingHorrible",
                     PyRep::Real(cfg.standing_horrible_tax_rate),
                 ),
-                ("allowAlliance", PyRep::Bool(cfg.allow_alliance)),
-                ("allowStandings", PyRep::Bool(cfg.allow_standings)),
-                ("minimumStanding", PyRep::Real(cfg.minimum_standing)),
+            ]);
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                tax_rate_values,
+                PyRep::Real(cfg.minimum_standing),
+                PyRep::Bool(cfg.allow_alliance),
+                PyRep::Bool(cfg.allow_standings),
+                PyRep::None,
             ])))
         }
 
@@ -152,10 +148,14 @@ pub fn handle_pi_orbital_registry(
                         cfg.orbital_type_id = otid as TypeId;
                     }
                 }
-                // Parse either V24 `(orbitalID, selectedHour, taxRateValues, standingValue, allowAlliance, allowStandings)` or KeyVal/kwargs
+                // Parse either V24 `(orbitalID, selectedHour, taxRateValues, standingLevel, allowAlliance, allowStandings, selectedAcl)` or KeyVal/kwargs
                 let tax_rep = args
                     .get(2)
-                    .or_else(|| args.get(1))
+                    .filter(|v| matches!(v, PyRep::KeyVal(_) | PyRep::Dict(_)))
+                    .or_else(|| {
+                        args.get(1)
+                            .filter(|v| matches!(v, PyRep::KeyVal(_) | PyRep::Dict(_)))
+                    })
                     .or_else(|| kwargs.get("taxRateValues"));
                 if let Some(PyRep::KeyVal(kv)) = tax_rep {
                     if let Some(v) = kv.get("corporation").and_then(|x| x.as_f64()) {
@@ -204,6 +204,7 @@ pub fn handle_pi_orbital_registry(
                     .get(3)
                     .and_then(|a| a.as_f64())
                     .or_else(|| kwargs.get("minimumStanding").and_then(|v| v.as_f64()))
+                    .or_else(|| kwargs.get("standingLevel").and_then(|v| v.as_f64()))
                 {
                     cfg.minimum_standing = st_val.clamp(-10.0, 10.0);
                 }

@@ -282,8 +282,13 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
         "CrpAccessDenied"
     );
     let _ = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "UpdateSettings", &[
-        PyRep::Integer(orbital_id), PyRep::Integer(18), tax_kv, PyRep::Real(1.0), PyRep::Bool(true), PyRep::Bool(true),
+        PyRep::Integer(orbital_id), PyRep::Integer(18), tax_kv, PyRep::Real(1.0), PyRep::Bool(true), PyRep::Bool(true), PyRep::None,
     ]).await;
+    let info_rep = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "GetSettingsInfo", &[PyRep::Integer(orbital_id)]).await;
+    let PyRep::Tuple(info_t) = &info_rep else { panic!("GetSettingsInfo 6-tuple") };
+    assert_eq!(info_t.len(), 6);
+    assert!(info_t[0].as_i64().is_some() && matches!(info_t[1], PyRep::KeyVal(_)) && info_t[2].as_f64() == Some(1.0));
+    assert_eq!((info_t[3].as_bool(), info_t[4].as_bool(), &info_t[5]), (Some(true), Some(true), &PyRep::None));
 
     let (addr, _router, handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0").await.expect("spawn ESI");
     let spec = OpenApiSpec::pinned();
