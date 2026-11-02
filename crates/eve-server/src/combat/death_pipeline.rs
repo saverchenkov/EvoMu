@@ -737,7 +737,7 @@ pub fn execute_death_pipeline_sync_inner(
     crate::services::notify_emitters_batch6::emit_kill_notification(ctx, victim_char_id);
     crate::services::notify_emitters_batch6::emit_kill_notification(ctx, attacker_char_id);
     if !is_pod {
-        crate::services::notify_emitters_batch6::emit_ship_death(ctx, victim_char_id);
+        crate::services::notify_emitters_b30::emit_ship_death(ctx, victim_char_id);
     }
 
     if is_pod {

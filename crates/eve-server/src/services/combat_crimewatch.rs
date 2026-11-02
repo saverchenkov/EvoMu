@@ -350,6 +350,7 @@ pub struct CombatRuntimeState {
     pub limited_engagements: HashMap<i64, HashMap<i64, u64>>,
     pub npc_timers: HashMap<i64, u64>,
     pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64, i64)>,
+    pub crimewatch_timer_triggered_at: HashMap<i64, [u64; 5]>,
     pub active_drones_in_space: HashMap<i64, DroneSpaceState>,
     pub drone_next_ready_unix: HashMap<i64, u64>,
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,

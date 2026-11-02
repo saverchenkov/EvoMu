@@ -140,4 +140,8 @@ pub struct Sp6PersistedState {
     pub space_object_meta: HashMap<i64, PersistedSpaceObjectMeta>,
     #[serde(default)]
     pub missions_awaiting_downtime_respawn: Vec<(i64, u32)>,
+    #[serde(default)]
+    pub mission_initial_npc_counts: HashMap<String, u32>,
+    #[serde(default)]
+    pub mission_initial_npc_types: HashMap<String, Vec<u32>>,
 }

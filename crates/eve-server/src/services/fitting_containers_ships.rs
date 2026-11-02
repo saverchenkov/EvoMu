@@ -40,6 +40,8 @@ impl Default for ShipAccessConfig {
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct ContainerShipRuntimeState {
     pub container_passwords: HashMap<i64, String>,
+    #[serde(default)]
+    pub container_config_passwords: HashMap<i64, String>,
     pub unlocked_containers: HashSet<(i64, i64)>,
     pub alsc_locked_items: HashSet<i64>,
     pub alsc_logs: HashMap<i64, Vec<AlscLogEntry>>,
@@ -48,6 +50,16 @@ pub(crate) struct ContainerShipRuntimeState {
     pub insurance_contracts: HashMap<i64, InsuranceContractRecord>,
     #[serde(default)]
     pub ship_passwords: HashMap<i64, String>,
+}
+
+impl ContainerShipRuntimeState {
+    pub fn get_container_password(&self, cid: i64, which: i64) -> Option<&str> {
+        (if which == 2 { &self.container_config_passwords } else { &self.container_passwords }).get(&cid).map(String::as_str)
+    }
+    pub fn set_container_password(&mut self, cid: i64, which: i64, pw: String) {
+        let map = if which == 2 { &mut self.container_config_passwords } else { &mut self.container_passwords };
+        if pw.is_empty() { map.remove(&cid); } else { map.insert(cid, pw); }
+    }
 }
 
 pub(crate) fn read_container_ship_state_snap(snap: &eve_db::WorldStateSnapshot) -> ContainerShipRuntimeState {
@@ -274,7 +286,7 @@ pub(crate) fn can_character_access_ship_bay_snap(
 
 
 
-fn resolve_corp_container_log_target(
+pub(crate) fn resolve_corp_container_log_target(
     snap: &eve_db::WorldStateSnapshot,
     container_id: i64,
 ) -> Option<(i64, i32, i64, String)> {
@@ -878,60 +890,14 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "SetPassword") | ("invbroker", "ALSCConfigSet") | ("invbroker", "ConfigureALSC") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
-            let password = args.get(1).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str()))
-                .or_else(|| kwargs.get("password").and_then(|v| v.as_str())).or_else(|| args.first().and_then(|a| a.as_str())).unwrap_or("").to_string();
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let cont_res = ctx.db.with_snapshot(|snap| {
-                let Some(item) = snap.items.get(&container_id) else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Secure container {container_id} not found or not owned") });
-                };
-                if item.owner_id != char_id {
-                    let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
-                    if corp_id == 0 || item.owner_id != corp_id {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Secure container {container_id} not found or not owned") });
-                    }
-                    if session.corp_role == 0 && !is_ceo {
-                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to configure corp container password".into() });
-                    }
-                }
-                let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
-                if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
-                    return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to configure password".into() });
-                }
-                let grp = ctx.sde.types.get(&item.type_id).map(|t| t.group_id).unwrap_or(0);
-                Ok((item.type_id, grp))
-            });
-            let (tid, grp_id) = match cont_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if matches!(grp_id, 12 | 649) {
-                return Some(Err(BridgeRpcError { code: "ContainerDoesNotSupportPassword".into(), message: format!("Container {container_id} (group {grp_id}) does not support passwords") }));
-            }
-            let now_unix = ctx.now_unix_secs();
-            write_container_ship_state(ctx, |st| {
-                st.unlocked_containers.retain(|&(a, b)| a != container_id && b != container_id);
-                st.container_passwords.insert(container_id, password.clone());
-                st.unlocked_containers.insert((container_id, char_id));
-                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-            });
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
-                    snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
-                        logged_at_unix: now_unix, container_id, container_type_id: tid as i32, character_id: char_id,
-                        location_id: loc_id, location_flag: loc_flag, action: "set_password".into(), password_type: Some("config".into()),
-                        type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
-                    });
-                }
-            });
-            if method == "SetPassword" { crate::services::notify_emitters_batch9::emit_password_changed(ctx, char_id, container_id, tid); }
-            crate::services::notify_emitters_batch3::emit_invalidate_cache_for_locations(ctx, crate::router::NotificationTarget::Character(char_id), &[container_id]);
-            Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordSet", PyRep::Bool(!password.is_empty()))])))
+            Some(crate::services::notify_emitters_b30::handle_set_password(ctx, session, bound_entry, method, args, kwargs).await)
         }
 
         ("invbroker", "ALSCConfigGet") => {
             let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let container_id = args.first().and_then(|a| a.as_i64()).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
-            let has_pw = read_container_ship_state(ctx).container_passwords.get(&container_id).is_some_and(|p| !p.is_empty());
+            let st = read_container_ship_state(ctx);
+            let has_pw = st.get_container_password(container_id, 1).is_some() || st.get_container_password(container_id, 2).is_some();
             Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordRequired", PyRep::Bool(has_pw)), ("hasPassword", PyRep::Bool(has_pw))])))
         }
 

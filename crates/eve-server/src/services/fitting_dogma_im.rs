@@ -675,19 +675,38 @@ pub(crate) async fn handle_dogma_im(
             let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "RemoveTarget requires targetID".into() }));
             };
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_target_lock(ship_id, target_id).await;
-            }
+            let (removed, sys_id_opt) = match (session.station_id, session.solar_system_id) {
+                (None, Some(sys_id)) => {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    (sys.remove_target_lock(ship_id, target_id).await.unwrap_or(false), Some(sys_id))
+                }
+                _ => (false, None),
+            };
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, Some(target_id));
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnTarget",
-                "charid",
-                vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
-            );
-            let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
+            if removed {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnTarget",
+                    "charid",
+                    vec![PyRep::Integer(target_id), PyRep::String("lost".into())],
+                );
+                let _ = ctx.notify_target_events(char_id, &[("lost", target_id, "")]);
+                if let (Some(sys_id), Some(target_char)) = (
+                    sys_id_opt,
+                    ctx.db.with_snapshot(|s| {
+                        let oid = s.items.get(&target_id)?.owner_id;
+                        if oid != char_id && s.characters.get(&oid).is_some_and(|c| c.station_id.is_none() && c.solar_system_id == sys_id_opt.unwrap_or(0)) {
+                            Some(oid)
+                        } else {
+                            None
+                        }
+                    }),
+                ) {
+                    let _ = sys_id;
+                    let _ = ctx.notify_target_events(target_char, &[("otherlost", ship_id, "")]);
+                }
+            }
             Some(Ok(PyRep::Integer(target_id)))
         }
 
@@ -699,12 +718,39 @@ pub(crate) async fn handle_dogma_im(
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError { code: "NoActiveShip".into(), message: "No active ship in session".into() }));
             };
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.clear_target_locks(ship_id).await;
-            }
+            let (cleared_targets, sys_id_opt) = match (session.station_id, session.solar_system_id) {
+                (None, Some(sys_id)) => {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    let prior = sys.get_target_locks(ship_id).await.unwrap_or_default();
+                    let _ = sys.clear_target_locks(ship_id).await;
+                    let locked_ids: Vec<i64> = prior.into_iter().filter(|l| l.locked).map(|l| l.target_id).collect();
+                    (locked_ids, Some(sys_id))
+                }
+                _ => (Vec::new(), None),
+            };
             crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, None);
             crate::services::combat_weapons_spool::clear_entropic_spools_on_target_unlock(ctx, ship_id, char_id, None);
+            if let Some(sys_id) = sys_id_opt {
+                if !cleared_targets.is_empty() {
+                    let target_chars: Vec<i64> = ctx.db.with_snapshot(|s| {
+                        cleared_targets
+                            .iter()
+                            .filter_map(|tid| {
+                                let oid = s.items.get(tid)?.owner_id;
+                                if oid != char_id && s.characters.get(&oid).is_some_and(|c| c.station_id.is_none() && c.solar_system_id == sys_id) {
+                                    Some(oid)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    });
+                    for target_char in target_chars {
+                        let _ = ctx.notify_target_events(target_char, &[("otherlost", ship_id, "")]);
+                    }
+                    let _ = ctx.notify_target_events(char_id, &[("clear", 0, "")]);
+                }
+            }
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTargetClear",

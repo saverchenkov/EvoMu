@@ -441,7 +441,7 @@ async fn r5_228_229_230_233_fleet_warp_conduit_hierarchy_trash_and_alsc_cache() 
     let st_inv_t = ctx.bind_object(&sess_target, "invbroker", station_id).expect("bind station inv");
     let _ = ctx.dispatch_rpc(&mut sess_target, "invbroker", Some(st_inv_t), "Add", &[PyRep::Integer(locked_trit), PyRep::Integer(station_id)], &kw_pw, None).await;
     // Now boss changes password -> must invalidate target_id's unlocked_containers entry
-    ctx.dispatch_rpc(&mut sess_boss, "invbroker", None, "SetPassword", &[PyRep::Integer(alsc_id), PyRep::String("newpass".into())], &kw, None)
+    ctx.dispatch_rpc(&mut sess_boss, "invbroker", None, "SetPassword", &[PyRep::Integer(alsc_id), PyRep::String("newpass".into()), PyRep::String("oldpass".into())], &kw, None)
         .await
         .expect("SetPassword newpass");
     let err_need_pw = ctx

@@ -315,7 +315,7 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     let ctx = new_ctx();
     let (ship_a, ship_b) = (940_000_101_i64, 940_000_102_i64);
     let mut sess_a = login_in_space(&ctx, 9_411, "demo", "demo-secret", PILOT_A, ship_a, 587, SYS_JITA, DVec3::ZERO).await;
-    let _sess_b = login_in_space(&ctx, 9_412, "other", "other-secret", PILOT_B, ship_b, 587, SYS_JITA, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let mut sess_b = login_in_space(&ctx, 9_412, "other", "other-secret", PILOT_B, ship_b, 587, SYS_JITA, DVec3::new(1_000.0, 0.0, 0.0)).await;
 
     let mod_id = 940_000_110_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -424,6 +424,13 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
     );
 
     // 9. OnMultiEvent: dogmaIM.AddTarget & RemoveTarget
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = None;
+        }
+    });
+    sess_a.station_id = None;
+
     // Negative 9a: AddTarget with missing targetID fails
     assert!(rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[]).await.is_err());
 
@@ -447,19 +454,37 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .step_manual(10.0)
         .await
         .expect("step_manual");
-    let target_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    let locker_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
+    assert_eq!(
+        locker_notifs.iter().filter(|(e, _)| e == "OnMultiEvent").count(),
+        1,
+        "expected exactly one OnMultiEvent on locker after lock completion"
+    );
+    assert_eq!(
+        find_notif(&locker_notifs, "OnMultiEvent"),
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnTarget".into()),
+                PyRep::String("add".into()),
+                PyRep::Integer(ship_b),
+                PyRep::String(String::new()),
+            ]),
+            PyRep::Integer(0),
+        ])])]
+    );
+    let target_notifs = drain_all(&ctx, &mut sess_b, PILOT_B);
     assert_eq!(
         target_notifs.iter().filter(|(e, _)| e == "OnMultiEvent").count(),
         1,
-        "expected exactly one OnMultiEvent after lock completion"
+        "expected exactly one OnMultiEvent on targeted pilot after lock completion"
     );
     assert_eq!(
         find_notif(&target_notifs, "OnMultiEvent"),
         &[PyRep::List(vec![PyRep::Tuple(vec![
             PyRep::Tuple(vec![
                 PyRep::String("OnTarget".into()),
-                PyRep::String("add".into()),
-                PyRep::Integer(ship_b),
+                PyRep::String("otheradd".into()),
+                PyRep::Integer(ship_a),
                 PyRep::String(String::new()),
             ]),
             PyRep::Integer(0),
