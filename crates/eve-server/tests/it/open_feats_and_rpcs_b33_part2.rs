@@ -317,8 +317,10 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
     let mut p = pilot(
         RORQUAL,
         &[
-            (3_428, 4), // Target Management IV
-            (3_429, 5), // Long Range Targeting V
+            (3_429, 4), // Target Management IV
+            (3_430, 0), // Advanced Target Management 0
+            (3_428, 5), // Long Range Targeting V
+            (3_431, 5), // Signature Analysis V
             (3_392, 5), // Mechanics V
             (3_394, 5), // Hull Upgrades V
             (3_416, 5), // Shield Operation V
@@ -398,7 +400,7 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
         "Active Auto Targeting System I must automatically initiate target locks on hostile targets"
     );
 
-    // Repeating cycle tick must auto-lock a hostile NPC arriving after activation while still ignoring neutral ship
+    // Repeating cycle tick must auto-lock a hostile NPC arriving after activation while ignoring neutral ship & friendly remote repairer
     let late_npc_id = 9_500_101_i64;
     sys_handle.spawn_ball_with_meta(
         Ball {
@@ -408,10 +410,68 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
         eve_destiny::CombatState::default(),
         eve_destiny::SlimItemMeta { group_id: 550, category_id: 11, owner_id: 500_010, ..Default::default() },
     ).await.unwrap();
+    // Friendly remote repairer active on p.ship_id must NOT be auto-locked as hostile
+    let friendly_rep_ship = 9_500_102_i64;
+    p.ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(friendly_rep_ship, InventoryItemRecord {
+            item_id: friendly_rep_ship, type_id: PORPOISE, owner_id: 9_500_998, location_id: i64::from(JITA),
+            flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+    });
+    sys_handle.spawn_ball_with_meta(
+        Ball {
+            id: friendly_rep_ship, type_id: PORPOISE, position: p.ship_pos + DVec3::new(4_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta { group_id: 941, category_id: 6, owner_id: 9_500_998, ..Default::default() },
+    ).await.unwrap();
+    sys_handle.add_module_cycle(eve_server::system_actor::ActiveModuleCycle {
+        ship_id: friendly_rep_ship, module_id: 9_500_901, module_type_id: ARAR_MEDIUM, owner_char_id: Some(9_500_998),
+        effect_name: "remoteArmorRepairFalloff".into(), target_id: Some(p.ship_id), repeat: 1, duration_s: 12.0,
+        remote_armor_amount: 100.0, remote_optimal: 10_000.0, remote_falloff: 10_000.0, ..Default::default()
+    }).await.unwrap();
     sys_handle.step_manual(11.0).await.unwrap();
     let cycle_locks = sys_handle.get_target_locks(p.ship_id).await.unwrap();
-    assert!(cycle_locks.iter().any(|l| l.target_id == late_npc_id), "Repeating Auto Targeting System cycle must lock late-arriving hostile NPC");
+    let late_lock = cycle_locks.iter().find(|l| l.target_id == late_npc_id).expect("Repeating Auto Targeting System cycle must lock late-arriving hostile NPC");
+    let expected_lock_ms = eve_destiny::combat::compute_lock_time_seconds(fit.ship.get_attribute(564, &p.ctx.sde).max(1.0), 50.0) * 1000.0;
+    assert!((late_lock.lock_time_ms - expected_lock_ms).abs() < 1e-3, "ATS must use ship scanResolution ({expected_lock_ms}ms), got {}", late_lock.lock_time_ms);
     assert!(!cycle_locks.iter().any(|l| l.target_id == neutral_ship_id), "Repeating Auto Targeting System cycle must not lock neutral player ship");
+    assert!(!cycle_locks.iter().any(|l| l.target_id == friendly_rep_ship), "Repeating Auto Targeting System cycle must not lock friendly remote repairer");
+
+    // Null-sec passive neutral player is NOT auto-locked; active offensive aggressor IS auto-locked on initial activation
+    let null_sys: u32 = 30_004_759;
+    let null_handle = p.ctx.systems.get_or_spawn(null_sys);
+    let (null_neutral_id, null_aggressor_id) = (9_500_103_i64, 9_500_104_i64);
+    p.ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&CHAR_ID) { ch.solar_system_id = null_sys; }
+        for (sid, oid) in [(null_neutral_id, 9_500_997_i64), (null_aggressor_id, 9_500_996_i64)] {
+            s.items.insert(sid, InventoryItemRecord {
+                item_id: sid, type_id: PORPOISE, owner_id: oid, location_id: i64::from(null_sys),
+                flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1, ..Default::default()
+            });
+        }
+    });
+    for (sid, x) in [(p.ship_id, 0.0), (null_neutral_id, 5_000.0), (null_aggressor_id, 6_000.0)] {
+        null_handle.spawn_ball(Ball {
+            id: sid, type_id: PORPOISE, position: DVec3::new(x, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }).await.unwrap();
+    }
+    null_handle.add_module_cycle(eve_server::system_actor::ActiveModuleCycle {
+        ship_id: null_aggressor_id, module_id: 9_500_902, module_type_id: 527, owner_char_id: Some(9_500_996),
+        effect_name: "warpScrambleForEntity".into(), target_id: Some(p.ship_id), repeat: 1, duration_s: 10.0, ..Default::default()
+    }).await.unwrap();
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ats_id)]).await;
+    let null_ats = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(ats_id)]).await.unwrap();
+    let null_locked_ids: Vec<i64> = dict_get(&null_ats, "autoLockingTargetIDs").and_then(|v| match v {
+        PyRep::List(l) => Some(l.iter().filter_map(|x| x.as_i64()).collect()),
+        _ => None,
+    }).unwrap_or_default();
+    assert!(!null_locked_ids.contains(&null_neutral_id), "ATS must NOT auto-lock passive neutral player in null-sec");
+    assert!(null_locked_ids.contains(&null_aggressor_id), "ATS must auto-lock active offensive aggressor on initial activation");
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ats_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&CHAR_ID) { ch.solar_system_id = JITA; } });
 
     // 2. ARSB consumes cap booster charge instead of capacitor while loaded, falls back to capacitor when unloaded, and reloads in 60s
     let target_ship_id = neutral_ship_id;

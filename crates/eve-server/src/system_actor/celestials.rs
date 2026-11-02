@@ -1216,6 +1216,31 @@ impl SystemHandle {
             .any(|c| c.ship_id == ship_id && c.is_overloaded)
     }
 
+    pub fn active_offensive_aggressors_on_sync(
+        &self,
+        target_ship_id: BallId,
+        sde: Option<&eve_sde::SdeRegistry>,
+    ) -> Vec<BallId> {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_module_cycles
+            .iter()
+            .filter(|c| {
+                c.target_id == Some(target_ship_id)
+                    && c.ship_id != target_ship_id
+                    && crate::services::mining_b33::is_offensive_aggressor_cycle(c, sde)
+            })
+            .map(|c| c.ship_id)
+            .collect()
+    }
+
+    pub fn has_active_industrial_core_sync(&self, ship_id: BallId) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_module_cycles.iter().any(|c| {
+            c.ship_id == ship_id
+                && matches!(c.module_type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591)
+        })
+    }
+
     pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
         let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
         let mut cancelled = Vec::new();

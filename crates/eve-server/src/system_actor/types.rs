@@ -99,6 +99,7 @@ pub struct ActiveModuleCycle {
     pub is_auto_targeter: bool,
     pub auto_target_max_range: f64,
     pub auto_target_max_locks: usize,
+    pub auto_target_scan_res: f64,
     pub crystal_volatility_chance: f64,
     pub crystal_volatility_damage: f64,
     pub is_overloaded: bool,

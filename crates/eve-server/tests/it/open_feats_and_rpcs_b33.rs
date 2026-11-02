@@ -34,6 +34,9 @@ const BURST_II: u32 = 43_551;
 const CHARGE_FIELD: u32 = 42_829;
 const CHARGE_OPTIMIZATION: u32 = 42_830;
 const CHARGE_PRESERVATION: u32 = 42_831;
+const CHARGE_EFFICIENCY: u32 = 90_733;
+const SURVEY_SCANNER_I: u32 = 444;
+const BURST_I: u32 = 42_528;
 const PORPOISE: u32 = 42_244;
 const ORCA: u32 = 28_606;
 const ROKH: u32 = 24_688;
@@ -135,7 +138,7 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
     let (ice_upg_1, ice_upg_2, ice_rig_id) = (9_100_021_i64, 9_100_022_i64, 9_100_023_i64);
     let mut p_ice = pilot(
         HULK,
-        &[(3_386, 5), (11_395, 5), (16_281, 5), (17_940, 5), (22_551, 5), (22_552, 5), (3_429, 5), (3_426, 5), (3_413, 5)],
+        &[(3_386, 5), (11_395, 5), (16_281, 5), (17_940, 5), (22_551, 5), (22_552, 5), (22_578, 4), (3_429, 5), (3_426, 5), (3_413, 5)],
         &[
             (ice_harv_id, ICE_HARVESTER_I, InventoryFlag::HiSlot0),
             (ice_upg_1, ICE_HARVESTER_UPGRADE_II, InventoryFlag::LoSlot0),
@@ -153,6 +156,12 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
     let base_ice_dur = p_ice.ctx.sde.types.get(&ICE_HARVESTER_I).unwrap().default_attributes[&73];
     let ice_dur = fit_ice.get_module_effective_attribute(ice_harv_id, 73, &p_ice.ctx.sde);
     assert!(ice_dur < base_ice_dur * 0.60, "Ice Harvester duration ({ice_dur}) must be reduced by skill+2xUpgrade+Hulk+rig+Yeti from {base_ice_dur}");
+    p_ice.ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(ice_upg_2, false); });
+    p_ice.ctx.invalidate_ship_fitting(p_ice.ship_id);
+    let ice_dur_1_upg = p_ice.ctx.get_or_rebuild_ship_fitting(CHAR_ID, p_ice.ship_id).unwrap().get_module_effective_attribute(ice_harv_id, 73, &p_ice.ctx.sde);
+    assert!(ice_dur < ice_dur_1_upg, "Second Ice Harvester Upgrade II (stackable=1) must further reduce duration ({ice_dur} < {ice_dur_1_upg})");
+    p_ice.ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(ice_upg_2, true); });
+    p_ice.ctx.invalidate_ship_fitting(p_ice.ship_id);
     let ice_rock_id = 9_200_099_i64;
     rock(&p_ice, ice_rock_id, BLUE_ICE, 100, 500.0).await;
     lock(&mut p_ice, ice_rock_id).await;
@@ -205,6 +214,7 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
     let hulk_merc_id = 9_200_098_i64;
     rock(&p_ice, hulk_merc_id, MERCOXIT, 10_000, 500.0).await;
     lock(&mut p_ice, hulk_merc_id).await;
+    assert!(activate(&mut p_ice, ice_harv_id, hulk_merc_id).await.is_err(), "Ice Harvester must be refused on ore");
     p_ice.ctx.db.with_mut_snapshot(|s| {
         s.items.remove(&ice_harv_id);
         s.module_online_states.remove(&ice_harv_id);
@@ -276,19 +286,78 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
         eve_server::services::mining_cycle::dbuff_multiplier(ctx, sid, &miner_type, attr)
     };
 
-    // 4a. Field Enhancement charge: boosts range (54), ignores out-of-range & non-fleet; 60s reload on charge switch
+    // 4a. Field Enhancement charge: boosts range (54) on Miner/Strip/Ice/Survey Scanner without squaring; timed expiry
+    let survey_id = 9_100_033_i64;
+    insert_item(&p.ctx, survey_id, SURVEY_SCANNER_I, CHAR_ID, p.ship_id, InventoryFlag::MedSlot0, 1);
+    p.ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(survey_id, true); });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
     let charge_item_id = 9_100_030_i64;
-    insert_item(&p.ctx, charge_item_id, CHARGE_FIELD, CHAR_ID, p.ship_id, InventoryFlag::HiSlot1, 5);
+    insert_item(&p.ctx, charge_item_id, CHARGE_FIELD, CHAR_ID, p.ship_id, InventoryFlag::HiSlot1, 8);
     let burst_rep = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap();
     assert_eq!(dict_get(&burst_rep, "chargeTypeID"), Some(&PyRep::Integer(i64::from(CHARGE_FIELD))));
     let buff_dur = dict_get(&burst_rep, "buffDurationSeconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
     assert!((buff_dur - 112.5).abs() < 1e-4, "Mining Foreman V + Mindlink must scale burst duration to 112.5s, got {buff_dur}");
-    assert_eq!(p.ctx.db.with_snapshot(|s| s.items.get(&charge_item_id).map(|i| i.quantity).unwrap_or(0)), 4);
+    assert_eq!(p.ctx.db.with_snapshot(|s| s.items.get(&charge_item_id).map(|i| i.quantity).unwrap_or(0)), 7);
 
-    assert!(dbuff(&p.ctx, in_range_sid, 54) > 1.5, "In-range fleet member must receive Field Enhancement range boost");
+    let range_mult = dbuff(&p.ctx, in_range_sid, 54);
+    assert!(range_mult > 2.0 && range_mult < 3.5, "In-range fleet member must receive Field Enhancement range boost ({range_mult})");
     assert!((dbuff(&p.ctx, out_range_sid, 54) - 1.0).abs() < 1e-6, "Out-of-range ship must not receive burst");
     assert!((dbuff(&p.ctx, non_fleet_sid, 54) - 1.0).abs() < 1e-6, "Non-fleet bystander must not receive burst");
-    assert!((dbuff(&p.ctx, in_range_sid, 73) - 1.0).abs() < 1e-6);
+    let strip_t = p.ctx.sde.types.get(&STRIP_MINER_I).unwrap();
+    let ice_t = p.ctx.sde.types.get(&ICE_HARVESTER_I).unwrap();
+    assert!((eve_server::services::mining_cycle::dbuff_multiplier(&p.ctx, in_range_sid, strip_t, 54) - range_mult).abs() < 1e-6);
+    assert!((eve_server::services::mining_cycle::dbuff_multiplier(&p.ctx, in_range_sid, ice_t, 54) - range_mult).abs() < 1e-6);
+
+    // Survey Scanner range uses single range_mult (not squared)
+    let survey_t = p.ctx.sde.types.get(&SURVEY_SCANNER_I).unwrap();
+    let survey_range_mult = eve_server::services::mining_cycle::dbuff_multiplier(&p.ctx, p.ship_id, survey_t, 54);
+    let survey_near = 9_200_201_i64;
+    let survey_too_far = 9_200_202_i64;
+    rock(&p, survey_near, VELDSPAR, 5_000, 15_000.0 * survey_range_mult * 0.90).await;
+    rock(&p, survey_too_far, VELDSPAR, 5_000, 15_000.0 * survey_range_mult * 1.15).await;
+    let scan_rep = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(survey_id)]).await.unwrap();
+    let scanned_ids: Vec<i64> = dict_get(&scan_rep, "asteroids").and_then(|v| match v {
+        PyRep::List(items) => Some(items.iter().filter_map(|e| dict_get(e, "asteroidID").and_then(|x| x.as_i64())).collect()),
+        _ => None,
+    }).unwrap_or_default();
+    assert!(scanned_ids.contains(&survey_near) && !scanned_ids.contains(&survey_too_far), "Survey Scanner must boost range once without squaring: {scanned_ids:?}");
+
+    // Timed buff expiry check
+    p.ctx.clock().advance_secs(60);
+    assert!((dbuff(&p.ctx, in_range_sid, 54) - range_mult).abs() < 1e-6, "Buff must remain active before expires_at_unix");
+    p.ctx.clock().advance_secs(60);
+    assert!((dbuff(&p.ctx, in_range_sid, 54) - 1.0).abs() < 1e-6, "Buff must expire after buffDurationSeconds");
+
+    // 4b. Isolated strength scaling: T1 vs T2 (+25%), Mining Director (+10%/lvl), Mindlink (+25%), Industrial Core (+10%)
+    let full_str = dict_get(&burst_rep, "buffStrength").and_then(|v| v.as_f64()).unwrap();
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&ind_core_id); });
+    let no_core_str = dict_get(&rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap(), "buffStrength").and_then(|v| v.as_f64()).unwrap();
+    assert!((full_str / no_core_str - 1.10).abs() < 1e-4, "Large Ind Core I must scale strength by 1.10x");
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| { s.active_implants.remove(&CHAR_ID); });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
+    let no_mind_str = dict_get(&rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap(), "buffStrength").and_then(|v| v.as_f64()).unwrap();
+    assert!((no_core_str / no_mind_str - 1.25).abs() < 1e-4, "Foreman Mindlink must scale strength by 1.25x");
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| { if let Some(sk) = s.skills.get_mut(&CHAR_ID).and_then(|m| m.get_mut(&22_552)) { sk.level = 1; } });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
+    let dir1_str = dict_get(&rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap(), "buffStrength").and_then(|v| v.as_f64()).unwrap();
+    assert!((no_mind_str / dir1_str - (1.5 / 1.1)).abs() < 1e-4, "Mining Director V vs I must scale by 1.5/1.1");
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| {
+        if let Some(it) = s.items.get_mut(&burst_id) { it.type_id = BURST_I; }
+        if let Some(sk) = s.skills.get_mut(&CHAR_ID).and_then(|m| m.get_mut(&22_552)) { sk.level = 5; }
+        s.active_implants.entry(CHAR_ID).or_default().push(FOREMAN_MINDLINK);
+        s.module_active_states.insert(ind_core_id);
+    });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
+    let t1_str = dict_get(&rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap(), "buffStrength").and_then(|v| v.as_f64()).unwrap();
+    assert!((full_str / t1_str - 1.25).abs() < 1e-4, "T2 Burst must scale strength by 1.25x over T1 Burst");
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| { if let Some(it) = s.items.get_mut(&burst_id) { it.type_id = BURST_II; } s.items.remove(&charge_item_id); });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
+    p.ctx.clock().advance_secs(120);
 
     // 4b. Optimization charge: reduces duration (73) & capacitorNeed (6) on live mining cycle; no range/volatility
     let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
@@ -319,11 +388,18 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
     let boosted_cap_used = cap_before_boosted - sys_handle.get_combat_state(in_range_sid).await.unwrap().unwrap().capacitor;
     assert!(boosted_cap_used < unboosted_cap_used * 0.75, "Boosted mining cycle cap ({boosted_cap_used}) must be reduced vs unboosted ({unboosted_cap_used})");
 
-    // 4c. Equipment Preservation charge: reduces crystal volatility (783), does NOT grant range or duration
+    // 4c. Efficiency charge (90733): boosts crit chance (5967) & lowers residue (3154); Preservation (42831): lowers volatility (783)
     let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
     p.ctx.db.with_mut_snapshot(|s| { s.items.remove(&9_100_031); });
     p.ctx.clock().advance_secs(120);
-    insert_item(&p.ctx, 9_100_032, CHARGE_PRESERVATION, CHAR_ID, p.ship_id, InventoryFlag::HiSlot1, 3);
+    insert_item(&p.ctx, 9_100_032, CHARGE_EFFICIENCY, CHAR_ID, p.ship_id, InventoryFlag::HiSlot1, 3);
+    let _ = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap();
+    assert!(dbuff(&p.ctx, in_range_sid, 5967) > 1.5, "Efficiency charge must boost mining crit chance (5967)");
+    assert!(dbuff(&p.ctx, in_range_sid, 3154) < 0.70, "Efficiency charge must reduce mining residue probability (3154)");
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
+    p.ctx.db.with_mut_snapshot(|s| { s.items.remove(&9_100_032); });
+    p.ctx.clock().advance_secs(120);
+    insert_item(&p.ctx, 9_100_034, CHARGE_PRESERVATION, CHAR_ID, p.ship_id, InventoryFlag::HiSlot1, 3);
     let _ = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap();
     assert!(dbuff(&p.ctx, in_range_sid, 783) < 0.70, "Preservation charge must reduce crystal volatility >= 30%");
     assert!((dbuff(&p.ctx, in_range_sid, 54) - 1.0).abs() < 1e-6);
@@ -416,20 +492,25 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
     .expect("Null-sec Phased Asteroid Field must spawn");
     assert!(!field.beacon_spawned && !field.phased_in);
     null_sys_handle
-        .spawn_ball(Ball {
-            id: pris_ast_id,
-            type_id: PRISMATICITE,
-            position: ast_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 1.0,
-            mass: 1e9,
-            radius: 250.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
+        .spawn_asteroid(
+            eve_server::system_actor::AsteroidState {
+                asteroid_id: pris_ast_id, belt_id: 0, type_id: PRISMATICITE,
+                initial_units: 50_000, remaining_units: 50_000, unit_volume: 16.0, depleted: false, respawn_at_tick: None,
+            },
+            Ball {
+                id: pris_ast_id, type_id: PRISMATICITE, position: ast_pos, velocity: DVec3::ZERO,
+                max_velocity: 0.0, inertia: 1.0, mass: 1e9, radius: 250.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+            },
+        )
         .await
         .unwrap();
+    let other_pris_id = 9_300_011_i64;
+    p.ctx.db.with_mut_snapshot(|s| {
+        s.asteroids.insert(other_pris_id, eve_db::AsteroidRecord {
+            asteroid_id: other_pris_id, solar_system_id: NULL_SYS, belt_id: 0, type_id: PRISMATICITE,
+            quantity: 25_000, initial_quantity: 25_000, position: (ast_pos.x + 5_000.0, ast_pos.y, ast_pos.z), radius: 250.0,
+        });
+    });
 
     // Breached Prismaticite mines at 10% efficiency before Mobile Phase Anchor is deployed & powered
     rpc(&mut p, "dogmaIM", None, "AddTarget", &[PyRep::Integer(pris_ast_id)]).await.expect("AddTarget");
@@ -477,15 +558,24 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
             velocity: DVec3::ZERO, max_velocity: 150.0, inertia: 1.0, mass: 1e7, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         }).await.unwrap();
     }
-    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
-    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 0.10).abs() < 1e-6);
-
     null_sys_handle.spawn_ball(Ball {
         id: porp2_ship, type_id: PORPOISE, position: p.ship_pos + DVec3::new(6_000.0, 0.0, 0.0),
         velocity: DVec3::ZERO, max_velocity: 150.0, inertia: 1.0, mass: 1e7, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await.unwrap();
+    // Without active Industrial Cores, ICS hulls in range do NOT connect
     eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
-    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 1.0).abs() < 1e-6);
+    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_asteroid(&p.ctx, NULL_SYS, pris_ast_id, PRISMATICITE) - 0.10).abs() < 1e-6);
+
+    // Activating Industrial Cores on Porpoise #1 + Orca + Porpoise #2 connects (35 + 50 + 35 = 120 >= 100)
+    p.ctx.db.with_mut_snapshot(|s| {
+        for (idx, sid) in [porp1_ship, orca_ship, porp2_ship].into_iter().enumerate() {
+            let cid = 9_300_300 + idx as i64;
+            s.items.insert(cid, InventoryItemRecord { item_id: cid, type_id: LARGE_IND_CORE_I, owner_id: CHAR_ID, location_id: sid, flag: InventoryFlag::HiSlot0, quantity: 1, singleton: true, ..Default::default() });
+            s.module_active_states.insert(cid);
+        }
+    });
+    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_asteroid(&p.ctx, NULL_SYS, pris_ast_id, PRISMATICITE) - 1.0).abs() < 1e-6);
 
     // Moving Porpoise #2 beyond 50 km tether range drops energy to 85 < 100 and reverts phased_in
     assert!(null_sys_handle.set_ball_position(porp2_ship, p.ship_pos + DVec3::new(60_000.0, 0.0, 0.0)).await);
@@ -511,6 +601,7 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
     p.ctx.clock().advance_secs(7_201);
     eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
     assert_eq!(p.ctx.db.with_snapshot(|s| s.asteroids.get(&pris_ast_id).map(|a| a.quantity).unwrap_or(-1)), 0);
+    assert_eq!(p.ctx.db.with_snapshot(|s| s.asteroids.get(&other_pris_id).map(|a| a.quantity).unwrap_or(-1)), 25_000, "Collapse must not wipe unrelated Prismaticite");
 
     // 4. Unrefined Mineral reaction (requires online Standup Composite Reactor I 45537) & live reprocessingSvc.Reprocess variable batches
     let (athanor_id, bp_id) = (1_000_000_099_001_i64, 9_300_200_i64);
@@ -553,32 +644,26 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
 
     // Reprocess multiple batches of Prismaticite & produced Unrefined Tritanium via live reprocessingSvc.Reprocess
     let (mut seen_minerals, mut pris_qtys, mut unref_qtys) = (HashSet::new(), HashSet::new(), HashSet::new());
-    for batch in 0..8i64 {
-        let pris_batch_id = 9_300_300 + batch;
-        let unref_batch_id = 9_300_400 + batch;
-        insert_item(&p.ctx, pris_batch_id, PRISMATICITE, CHAR_ID, athanor_id, InventoryFlag::Hangar, 100);
-        insert_item(&p.ctx, unref_batch_id, UNREFINED_TRITANIUM, CHAR_ID, athanor_id, InventoryFlag::Hangar, 100);
-        let before_minerals: std::collections::HashMap<u32, i32> = p.ctx.db.with_snapshot(|s| {
+    let hangar_minerals = |ctx: &eve_server::router::ServerContext| {
+        ctx.db.with_snapshot(|s| {
             let mut m = HashMap::new();
             for it in s.items.values().filter(|i| i.location_id == athanor_id && ((34..=40).contains(&i.type_id) || i.type_id == 11_399)) {
                 *m.entry(it.type_id).or_insert(0) += it.quantity;
             }
             m
-        });
+        })
+    };
+    for batch in 0..8i64 {
+        let pris_batch_id = 9_300_300 + batch;
+        let unref_batch_id = 9_300_400 + batch;
+        insert_item(&p.ctx, pris_batch_id, PRISMATICITE, CHAR_ID, athanor_id, InventoryFlag::Hangar, 100);
+        insert_item(&p.ctx, unref_batch_id, UNREFINED_TRITANIUM, CHAR_ID, athanor_id, InventoryFlag::Hangar, 100);
+        let before_minerals = hangar_minerals(&p.ctx);
         let _ = rpc(&mut p, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(pris_batch_id)]).await.unwrap();
-        p.ctx.db.with_snapshot(|s| {
-            let mut after = HashMap::new();
-            for it in s.items.values().filter(|i| i.location_id == athanor_id && ((34..=40).contains(&i.type_id) || i.type_id == 11_399)) {
-                *after.entry(it.type_id).or_insert(0) += it.quantity;
-            }
-            for (tid, qty) in after {
-                let delta = qty - before_minerals.get(&tid).copied().unwrap_or(0);
-                if delta > 0 {
-                    seen_minerals.insert(tid);
-                    pris_qtys.insert(delta);
-                }
-            }
-        });
+        for (tid, qty) in hangar_minerals(&p.ctx) {
+            let delta = qty - before_minerals.get(&tid).copied().unwrap_or(0);
+            if delta > 0 { seen_minerals.insert(tid); pris_qtys.insert(delta); }
+        }
         let trit_before: i32 = p.ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == athanor_id && i.type_id == 34).map(|i| i.quantity).sum());
         let _ = rpc(&mut p, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(unref_batch_id)]).await.unwrap();
         let trit_after: i32 = p.ctx.db.with_snapshot(|s| s.items.values().filter(|i| i.location_id == athanor_id && i.type_id == 34).map(|i| i.quantity).sum());

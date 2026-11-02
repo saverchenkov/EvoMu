@@ -957,6 +957,8 @@ pub struct PhasedAsteroidFieldState {
     pub mobile_phase_anchor_energy: u32,
     #[serde(default)]
     pub connected_ship_ids: Vec<i64>,
+    #[serde(default)]
+    pub asteroid_ids: Vec<i64>,
 }
 
 impl PhasedAsteroidFieldState {
@@ -970,6 +972,7 @@ impl PhasedAsteroidFieldState {
             phased_in: false,
             mobile_phase_anchor_energy: 0,
             connected_ship_ids: Vec::new(),
+            asteroid_ids: Vec::new(),
         }
     }
 

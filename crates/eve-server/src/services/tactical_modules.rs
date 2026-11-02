@@ -531,8 +531,8 @@ pub async fn activate_auto_targeting_system(
 
     let ship_max = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
     let skills = ctx.character_skill_levels(char_id);
-    let tm_lvl = skills.get(&3428).copied().unwrap_or(0);
-    let atm_lvl = skills.get(&3431).copied().unwrap_or(0);
+    let tm_lvl = skills.get(&3429).copied().unwrap_or(0);
+    let atm_lvl = skills.get(&3430).copied().unwrap_or(0);
     let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl);
     let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).min(hostile_range);
     let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
@@ -552,6 +552,7 @@ pub async fn activate_auto_targeting_system(
         mems
     });
 
+    let active_aggressors = sys.active_offensive_aggressors_on_sync(ship_id, Some(&ctx.sde));
     let mut candidates: Vec<(i64, f64, f64)> = Vec::new();
     for b in &all_balls {
         if b.id == ship_id || current_locks.iter().any(|l| l.target_id == b.id) {
@@ -561,7 +562,7 @@ pub async fn activate_auto_targeting_system(
         if dist > max_range {
             continue;
         }
-        if super::mining_b33::is_auto_target_hostile_ball(ctx, sys, char_id, ship_id, b, &fleet_members).await {
+        if super::mining_b33::is_auto_target_hostile_ball(ctx, sys, char_id, ship_id, b, &fleet_members, &active_aggressors).await {
             candidates.push((b.id, dist, b.radius.max(35.0)));
         }
     }
@@ -1227,7 +1228,8 @@ pub async fn activate_command_burst(
             if dbuff_id > 0 {
                 let mod_val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
                 let mult = c_type.default_attributes.get(&mult_attr).copied().unwrap_or(0.0);
-                raw_buffs.push((dbuff_id, if mod_val < 0.0 { mod_val } else { mult * total_strength_mult }));
+                let val = if mod_val < 0.0 { mod_val * (1.0 + ind_core_strength_bonus) } else { mult * total_strength_mult };
+                raw_buffs.push((dbuff_id, val));
             }
         }
     }

@@ -912,9 +912,10 @@ pub(crate) async fn handle_module_cycles(
             let auto_target_max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).min(hostile_range);
             let ship_max_locks = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
             let skills = ctx.character_skill_levels(char_id);
-            let tm_lvl = skills.get(&3428).copied().unwrap_or(0);
-            let atm_lvl = skills.get(&3431).copied().unwrap_or(0);
+            let tm_lvl = skills.get(&3429).copied().unwrap_or(0);
+            let atm_lvl = skills.get(&3430).copied().unwrap_or(0);
             let auto_target_max_locks = eve_dogma::compute_effective_max_locked_targets(ship_max_locks, tm_lvl, atm_lvl);
+            let auto_target_scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
 
             let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
             let reactivation_delay_s = if react_delay_ms > 0.0 { react_delay_ms / 1000.0 } else { 0.0 };
@@ -1209,6 +1210,7 @@ pub(crate) async fn handle_module_cycles(
                 is_auto_targeter,
                 auto_target_max_range,
                 auto_target_max_locks,
+                auto_target_scan_res,
                 crystal_volatility_chance,
                 crystal_volatility_damage,
                 max_effective_range_m: if target_id_opt.is_some() {

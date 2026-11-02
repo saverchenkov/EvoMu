@@ -134,15 +134,10 @@ pub(crate) async fn handle_survey_scanner_activation(
 ) -> PyRep {
     let mut scan_range = mod_state.get_attribute(197, &ctx.sde);
     if scan_range <= 0.0 {
-        scan_range = mod_type
-            .default_attributes
-            .get(&197)
-            .copied()
-            .or_else(|| mod_type.default_attributes.get(&54).copied())
-            .unwrap_or(15_000.0);
+        scan_range = mod_type.default_attributes.get(&197).or_else(|| mod_type.default_attributes.get(&54)).copied().unwrap_or(15_000.0);
     }
-    scan_range *= crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 197)
-        * crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 54);
+    let m197 = crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 197);
+    scan_range *= if (m197 - 1.0).abs() > 1e-9 { m197 } else { crate::services::mining_cycle::dbuff_multiplier(ctx, ship_id, mod_type, 54) };
     let mut ship_pos = DVec3::ZERO;
     if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
         ship_pos = ship_ball.position;
