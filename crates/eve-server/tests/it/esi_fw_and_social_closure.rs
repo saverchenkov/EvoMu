@@ -441,7 +441,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
             vic.user_id = 2;
             vic.security_status = 5.0;
         }
-        for &tag_type in &[35661_u32, 35662, 35663, 35664] {
+        for &tag_type in &[33138_u32, 33139, 33140, 33141] {
             snap.next_entity_id += 1;
             let iid = snap.next_entity_id;
             snap.items.insert(
@@ -594,7 +594,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         &mut sess,
         "crimewatch",
         "ApplyTagsForSecStatus",
-        &[PyRep::Integer(35661), PyRep::Integer(1)],
+        &[PyRep::Real(-8.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
     )
     .await;
     assert!(
@@ -611,23 +611,36 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         ch.balance
     });
 
-    for (start_sec, valid_tag, invalid_tag, req_qty, expected_sec) in [
-        (-9.0_f64, 35661_i64, 35662_i64, 1_i64, -8.5_f64), // Trainer: -10 to -8
-        (-6.5_f64, 35662_i64, 35663_i64, 1_i64, -6.0_f64), // Recruiter: -8 to -5
-        (-3.5_f64, 35663_i64, 35664_i64, 1_i64, -3.0_f64), // Transporter: -5 to -2
-        (-0.2_f64, 35664_i64, 35661_i64, 5_i64, 0.3_f64),  // Negotiator: -2 to 0 (1 effective tag gives full +0.5 -> 0.3)
+    for (start_sec, valid_tag, invalid_tag, req_qty, target_sec, expected_sec) in [
+        (-9.0_f64, 33138_i64, 33139_i64, 1_i64, -8.5_f64, -8.5_f64), // Trainer: -10 to -8
+        (-6.5_f64, 33139_i64, 33140_i64, 1_i64, -6.0_f64, -6.0_f64), // Recruiter: -8 to -5
+        (-3.5_f64, 33140_i64, 33141_i64, 1_i64, -3.0_f64, -3.0_f64), // Transporter: -5 to -2
+        (-0.2_f64, 33141_i64, 33138_i64, 5_i64, 0.0_f64, 0.0_f64),   // Negotiator: -2 to 0 (capped at 0.0)
     ] {
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.security_status = start_sec;
             }
         });
-        let bad = rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(invalid_tag), PyRep::Integer(1)]).await;
+        let bad = rpc(
+            &ctx,
+            &mut sess,
+            "crimewatch",
+            "ApplyTagsForSecStatus",
+            &[PyRep::Real(target_sec), PyRep::Dict(vec![(PyRep::Integer(invalid_tag), PyRep::Integer(1))])],
+        )
+        .await;
         assert!(bad.unwrap_err().contains("SecurityTagBandMismatch"));
 
-        let ok = rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(valid_tag), PyRep::Integer(req_qty)])
-            .await
-            .expect("ApplyTagsForSecStatus");
+        let ok = rpc(
+            &ctx,
+            &mut sess,
+            "crimewatch",
+            "ApplyTagsForSecStatus",
+            &[PyRep::Real(target_sec), PyRep::Dict(vec![(PyRep::Integer(valid_tag), PyRep::Integer(req_qty))])],
+        )
+        .await
+        .expect("ApplyTagsForSecStatus");
         let new_sec = match field(&ok, "newSecurityStatus") {
             PyRep::Real(v) => v,
             other => panic!("expected Real newSecurityStatus, got {other:?}"),
@@ -636,21 +649,60 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     }
     // Reject i64->i32 overflow / negative tag quantities and negative tag type IDs (`R-20261101-P0-01`)
     for bad_qty in [4_294_966_296_i64, 2_147_483_648_i64, 0_i64, -5_i64] {
-        let err = rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(bad_qty)]).await;
-        assert!(err.unwrap_err().contains("InvalidTagQuantity"));
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.security_status = -0.5;
+            }
+        });
+        let err = rpc(
+            &ctx,
+            &mut sess,
+            "crimewatch",
+            "ApplyTagsForSecStatus",
+            &[PyRep::Real(0.0), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(bad_qty))])],
+        )
+        .await;
+        assert!(err.unwrap_err().contains("InvalidQuantity"));
     }
-    assert!(rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(-1), PyRep::Integer(1)]).await.unwrap_err().contains("InvalidSecurityTagType"));
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "crimewatch",
+            "ApplyTagsForSecStatus",
+            &[PyRep::Real(0.0), PyRep::Dict(vec![(PyRep::Integer(-1), PyRep::Integer(1))])],
+        )
+        .await
+        .unwrap_err()
+        .contains("InvalidSecurityTagType")
+    );
 
     // Tag at 0.0 is refused (cannot raise above 0.0)
-    assert!(rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await.unwrap_err().contains("SecurityTagBandMismatch"));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = 0.0;
+        }
+    });
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "crimewatch",
+            "ApplyTagsForSecStatus",
+            &[PyRep::Real(0.0), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])],
+        )
+        .await
+        .unwrap_err()
+        .contains("InvalidTargetSecurityStatus")
+    );
 
-    // Verify derived placeholder ISK fee charged for 4 effective tags (1M + 2M + 3M + 4M = 10M ISK, 4 Negotiator tags preserved, journal logged)
+    // Verify derived placeholder ISK fee charged for 4 effective tags (1M + 2M + 5M + 10M = 18M ISK, 4 Negotiator tags preserved, journal logged)
     let (bal_after_tags, rem_neg_tags, has_tag_journal) = ctx.db.with_snapshot(|s| {
-        let rem = s.items.values().filter(|i| i.owner_id == char_id && i.type_id == 35664).map(|i| i.quantity).sum::<i32>();
-        let j = s.wallet_journal.iter().any(|w| w.character_id == char_id && w.entry_type == "SecurityTagFee" && w.amount == IskCents::from_isk(-4_000_000));
+        let rem = s.items.values().filter(|i| i.owner_id == char_id && i.type_id == 33141).map(|i| i.quantity).sum::<i32>();
+        let j = s.wallet_journal.iter().any(|w| w.character_id == char_id && w.entry_type == "SecurityTagProcessing" && w.amount == IskCents::from_isk(-10_000_000));
         (s.characters[&char_id].balance, rem, j)
     });
-    assert_eq!(bal_before_tags.0 - bal_after_tags.0, IskCents::from_isk(10_000_000).0);
+    assert_eq!(bal_before_tags.0 - bal_after_tags.0, IskCents::from_isk(18_000_000).0);
     assert_eq!(rem_neg_tags, 4, "excess tags above 0.0 cap must not be consumed");
     assert!(has_tag_journal, "SecurityTagFee wallet journal entry must be recorded");
 
@@ -673,6 +725,6 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     assert_eq!(row0.get("locationID"), Some(&&PyRep::Integer(lowsec_sys_id as i64)));
     assert_eq!(row0.get("modification"), Some(&&PyRep::Real(0.5)));
     assert_eq!(row0.get("newValue"), Some(&&PyRep::Real(-8.5)));
-    assert_eq!(row0.get("otherOwnerID"), Some(&&PyRep::Integer(1_000_125)));
-    assert_eq!(row0.get("otherTypeID"), Some(&&PyRep::Integer(35661)));
+    assert_eq!(row0.get("otherOwnerID"), Some(&&PyRep::None));
+    assert_eq!(row0.get("otherTypeID"), Some(&&PyRep::None));
 }

@@ -523,34 +523,17 @@ pub async fn activate_auto_targeting_system(
     char_id: i64,
     ship_id: i64,
     module_id: i64,
-    mod_type: &InvType,
+    _mod_type: &InvType,
     mod_state: &DogmaItemState,
     fit: &ShipFittingEngine,
 ) -> Result<PyRep, BridgeRpcError> {
-    let cap_need = mod_state.get_attribute(6, &ctx.sde);
     let hostile_range = mod_state.get_attribute(143, &ctx.sde).max(50_000.0);
 
-    if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
-        if cs.capacitor + 1e-4 < cap_need {
-            return Err(BridgeRpcError {
-                code: "NotEnoughCapacitor".into(),
-                message: format!("Insufficient capacitor for {}: need {cap_need:.1} GJ", mod_type.name),
-            });
-        }
-        let _ = sys.set_capacitor(ship_id, (cs.capacitor - cap_need).max(0.0)).await;
-    }
-
     let ship_max = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
-    let auto_tgt_bonus = mod_type
-        .default_attributes
-        .get(&235)
-        .or_else(|| mod_type.default_attributes.get(&193))
-        .copied()
-        .unwrap_or(2.0)
-        .round() as usize;
-    let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
-    let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
-    let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + auto_tgt_bonus;
+    let skills = ctx.character_skill_levels(char_id);
+    let tm_lvl = skills.get(&3428).copied().unwrap_or(0);
+    let atm_lvl = skills.get(&3431).copied().unwrap_or(0);
+    let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl);
     let max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).min(hostile_range);
     let scan_res = fit.ship.get_attribute(attr_ids::SCAN_RESOLUTION, &ctx.sde).max(1.0);
 

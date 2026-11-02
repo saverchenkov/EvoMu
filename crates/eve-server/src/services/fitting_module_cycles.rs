@@ -224,10 +224,6 @@ pub(crate) async fn handle_module_cycles(
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
                 return Some(crate::services::tactical_modules::activate_target_spectrum_breaker(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state).await);
             }
-            if mod_type.group_id == 96 {
-                let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
-                return Some(crate::services::tactical_modules::activate_auto_targeting_system(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit).await);
-            }
 
             if let Some(res) =
                 handle_cyno_generator_activation(ctx, &sys, char_id, ship_id, sys_id, module_id, mod_type).await
@@ -912,12 +908,13 @@ pub(crate) async fn handle_module_cycles(
 
             // Auto-Targeting System (`group_id == 96`, `1182`/`1436`, `feat:modules.auto-targeting-system`)
             let is_auto_targeter = mod_type.group_id == 96;
-            let auto_target_max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde);
-            let auto_tgt_bonus = mod_type.default_attributes.get(&193).copied().unwrap_or(2.0).round() as usize;
-            let ship_max_locks = (fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize) + auto_tgt_bonus;
-            let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
-            let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
-            let auto_target_max_locks = eve_dogma::compute_effective_max_locked_targets(ship_max_locks, tm_lvl, atm_lvl) + auto_tgt_bonus;
+            let hostile_range = mod_state.get_attribute(143, &ctx.sde).max(50_000.0);
+            let auto_target_max_range = fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).min(hostile_range);
+            let ship_max_locks = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
+            let skills = ctx.character_skill_levels(char_id);
+            let tm_lvl = skills.get(&3428).copied().unwrap_or(0);
+            let atm_lvl = skills.get(&3431).copied().unwrap_or(0);
+            let auto_target_max_locks = eve_dogma::compute_effective_max_locked_targets(ship_max_locks, tm_lvl, atm_lvl);
 
             let react_delay_ms = mod_state.get_attribute(669, &ctx.sde);
             let reactivation_delay_s = if react_delay_ms > 0.0 { react_delay_ms / 1000.0 } else { 0.0 };
@@ -1338,6 +1335,8 @@ pub(crate) async fn handle_module_cycles(
 
             if let Some(res) = build_specialized_module_result(method, &fit, ctx, module_id, mod_type, hic_bubble_radius_m, warp_scramble_points, active_burst_charge_tid) {
                 Some(Ok(res))
+            } else if is_auto_targeter {
+                Some(crate::services::tactical_modules::activate_auto_targeting_system(ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit).await)
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
                 Some(Ok(handle_survey_scanner_activation(ctx, &sys, sys_id, char_id, ship_id, module_id, mod_type, &mod_state).await))
             } else {

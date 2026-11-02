@@ -321,6 +321,10 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
 
     // Without calling GetAllActiveRequest first:
     // 1. CompleteEarlyRequest on an already-elapsed job must reject and deduct 0 PLEX.
+    let plex_before_early = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&PILOT).map(|c| c.plex_balance))
+        .unwrap_or(0);
     let early_res = rpc(
         &ctx,
         &mut s,
@@ -333,7 +337,7 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
         .db
         .with_snapshot(|snap| snap.characters.get(&PILOT).map(|c| c.plex_balance))
         .unwrap_or(0);
-    assert_eq!(plex_after, 100, "Naturally elapsed job must not deduct 5 PLEX on CompleteEarlyRequest");
+    assert_eq!(plex_after, plex_before_early, "Naturally elapsed job must not deduct 5 PLEX on CompleteEarlyRequest");
 
     // 2. GetOwnedRequest must already include the newly sequenced SKIN license.
     let owned_res = rpc(

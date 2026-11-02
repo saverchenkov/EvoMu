@@ -209,6 +209,7 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     let far_id = 100_001_521i64;
     seed_test_item(&ctx, victim_id, 587, victim_char_id, sys_id as i64, InventoryFlag::None, 1);
     seed_test_item(&ctx, far_id, 587, victim_char_id, sys_id as i64, InventoryFlag::None, 1);
+    ctx.crimewatch.write().unwrap().get_or_create(victim_char_id).criminal_flag_until_unix = ctx.now_unix() + 900;
     sys.spawn_ball_with_combat(
         Ball {
             id: victim_id,

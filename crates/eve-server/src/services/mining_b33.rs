@@ -34,13 +34,15 @@ pub fn is_prismaticite_ore(sde: &SdeRegistry, type_id: TypeId) -> bool {
             .is_some_and(|t| t.name.contains("Prismaticite"))
 }
 
-/// Derives Mobile Phase Anchor energy output for an Industrial Command Ship hull from `sde`:
-/// - Group `883` (Capital Industrial Ship, e.g. Rorqual `28352`) -> `100`
-/// - Group `941` (Industrial Command Ship): Orca (`28606`) -> `50`, Porpoise (`42244`) -> `35`
+/// DERIVED: Mobile Phase Anchor energy output per Industrial Command Ship hull (absent from
+/// `evomu_sde.sqlite`, derived from EVE Online Mobile Phase Anchor mechanics):
+/// - SDE Group `883` (Capital Industrial Ship, e.g. Rorqual `28352`) -> `100`
+/// - SDE Group `941` (Industrial Command Ship): Orca (`28606`) -> `50`, Porpoise (`42244`) -> `35`
 pub fn ics_energy_for_type(sde: &SdeRegistry, ship_type_id: TypeId) -> u32 {
     let Some(t) = sde.types.get(&ship_type_id) else {
         return 0;
     };
+    // DERIVED: 100 / 50 / 35 ICS energy constants keyed by SDE group/type
     match t.group_id {
         883 => 100,
         941 if ship_type_id == 28_606 || t.name.contains("Orca") => 50,
@@ -49,7 +51,8 @@ pub fn ics_energy_for_type(sde: &SdeRegistry, ship_type_id: TypeId) -> u32 {
     }
 }
 
-/// Returns `true` if `solar_system_id` is low-sec or null-sec K-space (security < 0.45).
+/// Returns `true` if `solar_system_id` is low-sec or null-sec K-space (security < 0.45,
+/// excluding wormhole/abyssal space `31_000_000..=32_999_999` and Pochven `region_id == 10_000_070`).
 pub fn is_low_or_null_kspace(ctx: &ServerContext, solar_system_id: u32) -> bool {
     if (31_000_000..=32_999_999).contains(&solar_system_id) {
         return false;
@@ -57,7 +60,7 @@ pub fn is_low_or_null_kspace(ctx: &ServerContext, solar_system_id: u32) -> bool 
     ctx.sde
         .solar_systems
         .get(&solar_system_id)
-        .is_some_and(|s| s.security_status < 0.45)
+        .is_some_and(|s| s.security_status < 0.45 && s.region_id != 10_000_070)
 }
 
 fn load_phased_fields(snap: &WorldStateSnapshot) -> HashMap<u32, PhasedAsteroidFieldState> {
@@ -387,6 +390,95 @@ pub async fn on_mobile_phase_anchor_deployed(
     }
 }
 
+async fn reconcile_phased_field_connections(ctx: &ServerContext, solar_system_id: u32) {
+    let candidates: Vec<(i64, u32, Vec<i64>)> = ctx.db.with_snapshot(|snap| {
+        let anchors: Vec<(i64, i64)> = snap
+            .items
+            .values()
+            .filter(|i| {
+                i.location_id == i64::from(solar_system_id)
+                    && i.type_id == TYPE_MOBILE_PHASE_ANCHOR
+                    && i.quantity > 0
+            })
+            .map(|i| (i.item_id, i.owner_id))
+            .collect();
+        if anchors.is_empty() {
+            return Vec::new();
+        }
+        snap.characters
+            .values()
+            .filter(|c| {
+                c.solar_system_id == solar_system_id
+                    && c.station_id.is_none()
+                    && c.structure_id.is_none()
+                    && c.active_ship_id > 0
+            })
+            .filter_map(|c| {
+                let sh = snap.items.get(&c.active_ship_id)?;
+                if sh.location_id != i64::from(solar_system_id) {
+                    return None;
+                }
+                let energy = ics_energy_for_type(&ctx.sde, sh.type_id);
+                if energy == 0 {
+                    return None;
+                }
+                let matching_anchors: Vec<i64> = anchors
+                    .iter()
+                    .filter(|&&(_, anchor_owner)| {
+                        c.character_id == anchor_owner
+                            || snap.fleets.values().any(|fl| {
+                                fl.members.contains(&anchor_owner)
+                                    && fl.members.contains(&c.character_id)
+                            })
+                    })
+                    .map(|&(aid, _)| aid)
+                    .collect();
+                (!matching_anchors.is_empty()).then_some((c.active_ship_id, energy, matching_anchors))
+            })
+            .collect()
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let mut connected_ships: Vec<i64> = Vec::new();
+    let mut total_energy: u32 = 0;
+    for (ship_id, energy, anchor_ids) in candidates {
+        if connected_ships.contains(&ship_id) {
+            continue;
+        }
+        let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await else {
+            continue;
+        };
+        if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+            continue;
+        }
+        let mut tethered = false;
+        for anchor_id in anchor_ids {
+            if let Ok(Some((_, anchor_ball))) = sys_handle.get_ball_snapshot(anchor_id).await {
+                if anchor_ball.position.distance(ship_ball.position) <= ANCHOR_TETHER_RANGE_M {
+                    tethered = true;
+                    break;
+                }
+            }
+        }
+        if tethered {
+            connected_ships.push(ship_id);
+            total_energy = total_energy.saturating_add(energy);
+        }
+    }
+
+    let snapshot_clone = ctx.db.with_mut_snapshot(|snap| {
+        let mut fields = load_phased_fields(snap);
+        if let Some(field) = fields.get_mut(&solar_system_id) {
+            field.connected_ship_ids = connected_ships;
+            field.mobile_phase_anchor_energy = total_energy;
+            field.phased_in = !field.collapsed && total_energy >= 100;
+            persist_phased_fields(snap, &fields);
+        }
+        fields
+    });
+    sync_ctx_phased_fields(ctx, snapshot_clone);
+}
+
 /// Periodic cluster tick for active Phased Asteroid Fields (`MN-08`).
 pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
     let (elapsed_secs, sys_ids) = ctx.db.with_mut_snapshot(|snap| {
@@ -401,6 +493,9 @@ pub async fn tick_phased_asteroid_fields(ctx: &ServerContext, now_unix: u64) {
         let ids: Vec<u32> = fields.keys().copied().collect();
         (now_unix.saturating_sub(prev), ids)
     });
+    for &sys_id in &sys_ids {
+        reconcile_phased_field_connections(ctx, sys_id).await;
+    }
     if elapsed_secs == 0 {
         return;
     }
@@ -486,14 +581,15 @@ pub fn ensure_command_burst_hull_allowed(
 }
 
 /// Returns `true` if `ball` is a genuinely hostile/aggressing target for Auto-Targeting System:
-/// an NPC entity (`category_id == 11`), or a non-fleet player ship whose pilot is criminal/suspect,
-/// has a limited engagement with `char_id`, has outlaw security status (`<= -5.0`), or is actively
-/// locking/locked onto `ship_id`. Unaggressing neutral player ships in high-sec are never auto-locked.
+/// an NPC entity (`category_id == 11`), a non-fleet capsuleer in null-sec/wormhole space (`<= 0.0`),
+/// or a non-fleet capsuleer with active combat aggression against `char_id`/`ship_id` (criminal
+/// flag, active limited engagement, or active offensive/EWAR projection). Unaggressed outlaws,
+/// suspects, and passive yellow target lockers in high-sec/low-sec are never auto-locked.
 pub async fn is_auto_target_hostile_ball(
     ctx: &ServerContext,
-    sys: &crate::system_actor::SystemHandle,
+    _sys: &crate::system_actor::SystemHandle,
     char_id: i64,
-    ship_id: i64,
+    _ship_id: i64,
     ball: &eve_destiny::Ball,
     fleet_members: &[i64],
 ) -> bool {
@@ -508,15 +604,16 @@ pub async fn is_auto_target_hostile_ball(
     ) {
         return false;
     }
-    let (owner, owner_sec) = ctx.db.with_snapshot(|s| {
+    let (owner, sys_sec) = ctx.db.with_snapshot(|s| {
         let own = s.items.get(&ball.id).map(|i| i.owner_id).unwrap_or(0);
-        let sec = s.characters.get(&own).map(|c| c.security_status).unwrap_or(0.0);
+        let sid = s.characters.get(&char_id).map(|c| c.solar_system_id).unwrap_or(0);
+        let sec = ctx.sde.solar_systems.get(&sid).map(|sys| sys.security_status).unwrap_or(0.0);
         (own, sec)
     });
-    if owner == 0 || owner == char_id || fleet_members.contains(&owner) {
+    if owner != 0 && (owner == char_id || fleet_members.contains(&owner)) {
         return false;
     }
-    if owner_sec <= -5.0 {
+    if sys_sec <= 0.0 {
         return true;
     }
     let now_unix = ctx.now_unix();
@@ -524,15 +621,69 @@ pub async fn is_auto_target_hostile_ball(
         .crimewatch
         .read()
         .ok()
-        .is_some_and(|cw| {
-            cw.states.get(&owner).is_some_and(|st| st.is_criminal(now_unix) || st.is_suspect(now_unix))
-        });
+        .is_some_and(|cw| cw.states.get(&owner).is_some_and(|st| st.is_criminal(now_unix)))
+        || (owner != 0
+            && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.has_limited_engagement_with(char_id, owner, now_unix)
+            }));
     if crimewatch_hostile {
         return true;
     }
-    sys.get_target_locks(ball.id)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .any(|l| l.target_id == ship_id)
+    false
+}
+
+/// Evaluates a repeating Auto-Targeting System cycle tick inside `ballpark`, locking only
+/// hostile NPCs (`category_id == 11`) or ships with active offensive cycles targeting `ship_id`
+/// while obeying normal lock-time rules (`locked = false`, `lock_time_ms > 0.0`).
+pub fn run_auto_targeter_ballpark_tick(
+    ballpark: &mut eve_destiny::Ballpark,
+    ship_id: eve_destiny::BallId,
+    max_range: f64,
+    max_locks: usize,
+    aggressors: &[eve_destiny::BallId],
+) {
+    let Some(ship_pos) = ballpark.balls.get(&ship_id).map(|b| b.position) else {
+        return;
+    };
+    let existing_locks = ballpark.get_target_locks(ship_id);
+    let mut lock_count = existing_locks.len();
+    let mut candidates: Vec<(eve_destiny::BallId, f64, f64)> = ballpark
+        .balls
+        .values()
+        .filter_map(|b| {
+            let dist = (b.position - ship_pos).length();
+            if b.id == ship_id
+                || ballpark.is_static_ball(b.id)
+                || dist > max_range
+                || existing_locks.iter().any(|l| l.target_id == b.id)
+            {
+                return None;
+            }
+            let is_hostile = match ballpark.ball_slim_meta(b.id) {
+                Some(m) if m.category_id == 11 => true,
+                Some(m) if m.category_id == 6 => aggressors.contains(&b.id),
+                Some(_) => false,
+                None => aggressors.contains(&b.id),
+            };
+            is_hostile.then(|| (b.id, dist, b.radius.max(35.0)))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (cand_id, _dist, sig) in candidates {
+        if lock_count >= max_locks {
+            break;
+        }
+        let lock_time_ms = eve_destiny::combat::compute_lock_time_seconds(300.0, sig) * 1000.0;
+        ballpark.add_target_lock(
+            ship_id,
+            eve_destiny::TargetLock {
+                target_id: cand_id,
+                lock_time_ms,
+                remaining_lock_ms: lock_time_ms,
+                locked: false,
+                max_range_m: Some(max_range),
+            },
+        );
+        lock_count += 1;
+    }
 }

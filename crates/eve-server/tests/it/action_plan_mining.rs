@@ -304,20 +304,46 @@ async fn test_action_plan_c5_mn01_to_mn07_mining_data_belts_lasers_holds_crystal
     assert!((mlu_cycle.mining_amount_m3 - published_yield).abs() / published_yield < 0.001, "Server-computed dogma yield {} must match published {}", mlu_cycle.mining_amount_m3, published_yield);
     assert_eq!(mlu_cycle.units_delivered, 3_522, "Server-computed Strip Miner I + 2 MLU II delivers 3,522 Veldspar units");
 
-    // plan:MN-07 implants (Highwall MX-1005 22535 +5% & Michi's Excavation Augmentor 20700 +5%) and Mining Foreman Burst II (43551) charges (42830 Optimization, 42829 Field Enhancement)
-    let (burst_opt, burst_fld) = (800_000_524i64, 800_000_527i64);
+    // plan:MN-07 implants (Highwall MX-1005 22535 +5% & Michi's Excavation Augmentor 20700 +5%) and Mining Foreman Burst II (43551) charges (42830 Optimization, 42829 Field Enhancement) from fleetmate Porpoise (42244)
+    let cmd_proc_tid = ctx
+        .sde
+        .types
+        .iter()
+        .find_map(|(&tid, t)| {
+            (t.effect_ids.contains(&6766) && t.default_attributes.get(&1547) == Some(&2.0)).then_some(tid)
+        })
+        .unwrap();
+    let (burst_opt, burst_fld, booster_cid, booster_ship) = (800_000_524i64, 800_000_527i64, 800_000_528i64, 800_000_529i64);
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_implants.entry(char_id).or_default().extend([22_535, 20_700]);
         let sk = snap.skills.entry(char_id).or_default();
-        for sid in [3_348u32, 22_536, 22_552] { sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 }); }
-        snap.items.insert(burst_opt, make_item(burst_opt, 43_551, char_id, ship_id, InventoryFlag::HiSlot1, 1, true));
-        snap.items.insert(800_000_525, make_item(800_000_525, 42_830, char_id, ship_id, InventoryFlag::HiSlot1, 10, false));
-        snap.items.insert(burst_fld, make_item(burst_fld, 43_551, char_id, ship_id, InventoryFlag::HiSlot2, 1, true));
-        snap.items.insert(800_000_526, make_item(800_000_526, 42_829, char_id, ship_id, InventoryFlag::HiSlot2, 10, false));
+        for sid in [3_348u32, 3_426, 3_413, 22_536, 22_552] { sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 }); }
+        let mut b_char = snap.characters[&char_id].clone();
+        b_char.character_id = booster_cid;
+        b_char.name = "Booster".into();
+        b_char.active_ship_id = booster_ship;
+        b_char.station_id = None;
+        b_char.solar_system_id = 30_000_142;
+        snap.characters.insert(booster_cid, b_char);
+        snap.skills.insert(booster_cid, snap.skills[&char_id].clone());
+        snap.items.insert(booster_ship, make_item(booster_ship, 22_446, booster_cid, 30_000_142, InventoryFlag::None, 1, true));
+        snap.items.insert(800_000_531, make_item(800_000_531, 1_229, booster_cid, booster_ship, InventoryFlag::LoSlot0, 1, true));
+        snap.items.insert(800_000_532, make_item(800_000_532, cmd_proc_tid, booster_cid, booster_ship, InventoryFlag::RigSlot0, 1, true));
+        snap.items.insert(800_000_533, make_item(800_000_533, cmd_proc_tid, booster_cid, booster_ship, InventoryFlag::RigSlot1, 1, true));
+        snap.items.insert(burst_opt, make_item(burst_opt, 43_551, booster_cid, booster_ship, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(800_000_525, make_item(800_000_525, 42_830, booster_cid, booster_ship, InventoryFlag::HiSlot0, 10, false));
+        snap.items.insert(burst_fld, make_item(burst_fld, 43_551, booster_cid, booster_ship, InventoryFlag::HiSlot1, 1, true));
+        snap.items.insert(800_000_526, make_item(800_000_526, 42_829, booster_cid, booster_ship, InventoryFlag::HiSlot1, 10, false));
+        snap.fleets.insert(800_000_530, eve_db::FleetRecord { fleet_id: 800_000_530, boss_id: booster_cid, members: vec![booster_cid, char_id], ..Default::default() });
     });
-    ctx.invalidate_ship_fitting(ship_id);
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_opt), PyRep::String("moduleBonusWarfareLinkMining".into())], &kw, None).await.expect("Activate Optimization Burst");
-    ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_fld), PyRep::String("moduleBonusWarfareLinkMining".into())], &kw, None).await.expect("Activate Field Burst");
+    jita.spawn_ball(Ball { id: booster_ship, type_id: 22_446, position: rock_pos + DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 150.0, inertia: 1.0, mass: 20e6, radius: 150.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await.unwrap();
+    ctx.invalidate_ship_fitting(booster_ship);
+    let mut booster_sess = sess.clone();
+    booster_sess.character_id = Some(booster_cid);
+    booster_sess.ship_id = Some(booster_ship);
+    let _ = ctx.dispatch_rpc(&mut booster_sess, "dogmaIM", None, "SetModuleOnline", &[PyRep::Integer(booster_ship), PyRep::Integer(burst_fld)], &kw, None).await;
+    ctx.dispatch_rpc(&mut booster_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_opt), PyRep::String("moduleBonusWarfareLinkMining".into())], &kw, None).await.expect("Activate Optimization Burst");
+    ctx.dispatch_rpc(&mut booster_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_fld), PyRep::String("moduleBonusWarfareLinkMining".into())], &kw, None).await.expect("Activate Field Burst");
     let max_cap = jita.get_combat_state(ship_id).await.unwrap().unwrap().max_capacitor;
     jita.set_capacitor(ship_id, max_cap).await.unwrap();
     jita.spawn_ball(Ball { id: ship_id, type_id: 17478, position: rock_pos + DVec3::new(1000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 130.0, inertia: 1.0, mass: 20e6, radius: 150.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await.unwrap();

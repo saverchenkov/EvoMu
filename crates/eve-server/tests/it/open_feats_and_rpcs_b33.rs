@@ -444,9 +444,10 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
     let breached_units = breached_outcomes[0].units_delivered;
     assert!(breached_units > 0);
 
-    // 2. Deploy Mobile Phase Anchor (90037) via ship.Drop; foreign anchor must not block; ICS balls required within 50 km
+    // 2. Deploy Mobile Phase Anchor (90037) via ship.Drop; reject WH/Pochven; live tick reconciles ICS ships within 50 km
     let (porp1_ship, orca_ship, porp2_ship) = (9_300_031_i64, 9_300_032_i64, 9_300_033_i64);
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp1_ship).await, None, "Must refuse ICS without deployed anchor & ball");
+    assert!(!eve_server::services::mining_b33::is_low_or_null_kspace(&p.ctx, 31_000_005), "Wormhole space must reject Mobile Phase Anchor");
+    assert!(!eve_server::services::mining_b33::is_low_or_null_kspace(&p.ctx, 30_001_445), "Pochven must reject Mobile Phase Anchor");
 
     insert_item(&p.ctx, 9_300_019, MOBILE_PHASE_ANCHOR, 9_999_999, i64::from(NULL_SYS), InventoryFlag::None, 1);
     let anchor_cargo_id = 9_300_020_i64;
@@ -470,18 +471,28 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
             fleet_id: 9_300_200, boss_id: CHAR_ID, members: vec![CHAR_ID, 9_300_131, 9_300_132, 9_300_133], ..Default::default()
         });
     });
-    for (sid, tid, offset) in [(porp1_ship, PORPOISE, 2_000.0), (orca_ship, ORCA, 4_000.0), (porp2_ship, PORPOISE, 6_000.0)] {
+    for (sid, tid, offset) in [(porp1_ship, PORPOISE, 2_000.0), (orca_ship, ORCA, 4_000.0)] {
         null_sys_handle.spawn_ball(Ball {
             id: sid, type_id: tid, position: p.ship_pos + DVec3::new(offset, 0.0, 0.0),
             velocity: DVec3::ZERO, max_velocity: 150.0, inertia: 1.0, mass: 1e7, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         }).await.unwrap();
     }
+    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 0.10).abs() < 1e-6);
 
-    // Re-connecting the same Porpoise ship_id twice must not double-count energy (35 + 50 + 35 = 120 >= 100)
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp1_ship).await, Some(false));
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp1_ship).await, Some(false));
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, orca_ship).await, Some(false));
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp2_ship).await, Some(true));
+    null_sys_handle.spawn_ball(Ball {
+        id: porp2_ship, type_id: PORPOISE, position: p.ship_pos + DVec3::new(6_000.0, 0.0, 0.0),
+        velocity: DVec3::ZERO, max_velocity: 150.0, inertia: 1.0, mass: 1e7, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await.unwrap();
+    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 1.0).abs() < 1e-6);
+
+    // Moving Porpoise #2 beyond 50 km tether range drops energy to 85 < 100 and reverts phased_in
+    assert!(null_sys_handle.set_ball_position(porp2_ship, p.ship_pos + DVec3::new(60_000.0, 0.0, 0.0)).await);
+    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
+    assert!((eve_server::services::mining_b33::phased_field_efficiency_for_ore(&p.ctx, NULL_SYS, PRISMATICITE) - 0.10).abs() < 1e-6);
+    assert!(null_sys_handle.set_ball_position(porp2_ship, p.ship_pos + DVec3::new(6_000.0, 0.0, 0.0)).await);
+    eve_server::services::mining_b33::tick_phased_asteroid_fields(&p.ctx, p.ctx.now_unix_secs()).await;
 
     let phased_outcomes = advance(&p, 46).await;
     let phased_units = phased_outcomes[0].units_delivered;

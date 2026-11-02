@@ -388,10 +388,30 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
     }).await.unwrap();
     let ats_rep = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(ats_id)]).await.unwrap();
     assert_eq!(
+        dict_get(&ats_rep, "maxLockedTargets").and_then(|v| v.as_i64()).unwrap_or(0),
+        6,
+        "Auto Targeting System I must obey Target Management IV skill cap (2 + 4 = 6, no double-counted +2)"
+    );
+    assert_eq!(
         dict_get(&ats_rep, "lockingCount").and_then(|v| v.as_i64()).unwrap_or(0),
         1,
         "Active Auto Targeting System I must automatically initiate target locks on hostile targets"
     );
+
+    // Repeating cycle tick must auto-lock a hostile NPC arriving after activation while still ignoring neutral ship
+    let late_npc_id = 9_500_101_i64;
+    sys_handle.spawn_ball_with_meta(
+        Ball {
+            id: late_npc_id, type_id: ANGEL_ROGUE_NPC, position: p.ship_pos + DVec3::new(7_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta { group_id: 550, category_id: 11, owner_id: 500_010, ..Default::default() },
+    ).await.unwrap();
+    sys_handle.step_manual(11.0).await.unwrap();
+    let cycle_locks = sys_handle.get_target_locks(p.ship_id).await.unwrap();
+    assert!(cycle_locks.iter().any(|l| l.target_id == late_npc_id), "Repeating Auto Targeting System cycle must lock late-arriving hostile NPC");
+    assert!(!cycle_locks.iter().any(|l| l.target_id == neutral_ship_id), "Repeating Auto Targeting System cycle must not lock neutral player ship");
 
     // 2. ARSB consumes cap booster charge instead of capacitor while loaded, falls back to capacitor when unloaded, and reloads in 60s
     let target_ship_id = neutral_ship_id;

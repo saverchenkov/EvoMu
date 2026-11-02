@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::system_actor::*;
-use eve_destiny::{BallId, Ballpark, MovementMode, TargetLock};
+use eve_destiny::{BallId, Ballpark, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -238,6 +238,12 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
+    let mut auto_target_aggressors: HashMap<BallId, Vec<BallId>> = HashMap::new();
+    for c in active_module_cycles.iter() {
+        if let Some(tid) = c.target_id.filter(|&tid| tid != c.ship_id) {
+            auto_target_aggressors.entry(tid).or_default().push(c.ship_id);
+        }
+    }
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
@@ -375,38 +381,10 @@ pub(crate) fn step_cycles_and_capacitor(
 
             // 1c. Auto-Targeting System (`feat:modules.auto-targeting-system`)
             if cycle.is_auto_targeter {
-                if let Some(ship_ball) = ballpark.balls.get(&cycle.ship_id) {
-                    let ship_pos = ship_ball.position;
-                    let existing_locks = ballpark.get_target_locks(cycle.ship_id);
-                    let mut lock_count = existing_locks.len();
-                    let candidates: Vec<BallId> = ballpark
-                        .balls
-                        .values()
-                        .filter(|b| {
-                            b.id != cycle.ship_id
-                                && !ballpark.is_static_ball(b.id)
-                                && (b.position - ship_pos).length() <= cycle.auto_target_max_range
-                                && !existing_locks.iter().any(|l| l.target_id == b.id)
-                        })
-                        .map(|b| b.id)
-                        .collect();
-                    for cand_id in candidates {
-                        if lock_count >= cycle.auto_target_max_locks {
-                            break;
-                        }
-                        ballpark.add_target_lock(
-                            cycle.ship_id,
-                            TargetLock {
-                                target_id: cand_id,
-                                lock_time_ms: 0.0,
-                                remaining_lock_ms: 0.0,
-                                locked: true,
-                                max_range_m: Some(cycle.auto_target_max_range),
-                            },
-                        );
-                        lock_count += 1;
-                    }
-                }
+                let agg = auto_target_aggressors.get(&cycle.ship_id).map(|v| v.as_slice()).unwrap_or(&[]);
+                crate::services::mining_b33::run_auto_targeter_ballpark_tick(
+                    ballpark, cycle.ship_id, cycle.auto_target_max_range, cycle.auto_target_max_locks, agg,
+                );
             }
 
             // 2. Target interactions: damage, cap drain, Nosferatu cap transfer, remote shield/armor/hull/cap (`DG-4`, `DG-5`)

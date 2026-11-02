@@ -351,6 +351,7 @@ async fn test_command_bursts_dbuff_aggregation_and_system_wide_effects() {
             ch.solar_system_id = sys_id;
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 37483;
             sh.location_id = sys_id as i64;
             sh.flag = InventoryFlag::None;
         }
@@ -364,7 +365,7 @@ async fn test_command_bursts_dbuff_aggregation_and_system_wide_effects() {
         .spawn_ball(
             Ball {
                 id: ship_id,
-                type_id: 587,
+                type_id: 37483,
                 position: DVec3::ZERO,
                 velocity: DVec3::ZERO,
                 max_velocity: 350.0,
@@ -612,6 +613,7 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
             ch.solar_system_id = sys_id;
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.type_id = 37483;
             sh.location_id = sys_id as i64;
             sh.flag = InventoryFlag::None;
         }
@@ -625,7 +627,7 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
         .spawn_ball(
             Ball {
                 id: ship_id,
-                type_id: 587,
+                type_id: 37483,
                 position: DVec3::ZERO,
                 velocity: DVec3::ZERO,
                 max_velocity: 350.0,

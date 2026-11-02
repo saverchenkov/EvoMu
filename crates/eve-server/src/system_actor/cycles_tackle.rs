@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use eve_destiny::{BallId, Ballpark, MovementMode, TargetLock};
+use eve_destiny::{BallId, Ballpark, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -469,41 +469,6 @@ pub(crate) fn handle_add_module_cycle(
                     s_entry.insert(aid, 0.85);
                 }
             });
-        }
-    }
-    if cycle.is_auto_targeter {
-        if let Some(ship_ball) = ballpark.balls.get(&cycle.ship_id) {
-            let ship_pos = ship_ball.position;
-            let existing_locks = ballpark.get_target_locks(cycle.ship_id);
-            let mut lock_count = existing_locks.len();
-            let candidates: Vec<BallId> = ballpark
-                .balls
-                .values()
-                .filter(|b| {
-                    b.id != cycle.ship_id
-                        && !ballpark.is_static_ball(b.id)
-                        && (b.position - ship_pos).length()
-                            <= cycle.auto_target_max_range
-                        && !existing_locks.iter().any(|l| l.target_id == b.id)
-                })
-                .map(|b| b.id)
-                .collect();
-            for cand_id in candidates {
-                if lock_count >= cycle.auto_target_max_locks {
-                    break;
-                }
-                ballpark.add_target_lock(
-                    cycle.ship_id,
-                    TargetLock {
-                        target_id: cand_id,
-                        lock_time_ms: 0.0,
-                        remaining_lock_ms: 0.0,
-                        locked: true,
-                        max_range_m: Some(cycle.auto_target_max_range),
-                    },
-                );
-                lock_count += 1;
-            }
         }
     }
     if cycle.grants_interdiction_nullification {

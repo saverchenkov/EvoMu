@@ -194,7 +194,7 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
         .types
         .iter()
         .find_map(|(&tid, t)| {
-            if t.group_id != 1770 || t.name.contains(" II") || t.name.contains("Presidential") {
+            if t.group_id != 1770 || t.name.contains(" II") || t.name.contains("Presidential") || t.name.contains("Expedition") || t.name.contains("Mining Foreman") {
                 return None;
             }
             let cg = t.default_attributes.get(&604).copied()? as u32;
@@ -205,6 +205,9 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
     let burst_mod_id: i64 = 700_201;
     let burst_charge_id: i64 = 700_202;
     ctx.db.with_mut_snapshot(|s| {
+        if let Some(sh) = s.items.get_mut(&ship_a) {
+            sh.type_id = 37480;
+        }
         s.items.insert(burst_mod_id, item_rec(burst_mod_id, burst_mod_tid, pilot_a, ship_a, InventoryFlag::HiSlot0, 1, true));
         s.items.insert(burst_charge_id, item_rec(burst_charge_id, burst_charge_tid, pilot_a, ship_a, InventoryFlag::HiSlot0, 10, false));
         s.module_online_states.insert(burst_mod_id, true);
@@ -233,6 +236,9 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
     let burst_mod_id2: i64 = 700_203;
     let burst_charge_id2: i64 = 700_204;
     ctx.db.with_mut_snapshot(|s| {
+        if let Some(sh) = s.items.get_mut(&ship_logi) {
+            sh.type_id = 37480;
+        }
         s.items.insert(burst_mod_id2, item_rec(burst_mod_id2, burst_mod_tid, neutral_logi, ship_logi, InventoryFlag::HiSlot0, 1, true));
         s.items.insert(burst_charge_id2, item_rec(burst_charge_id2, burst_charge_tid, neutral_logi, ship_logi, InventoryFlag::HiSlot0, 10, false));
         s.module_online_states.insert(burst_mod_id2, true);
