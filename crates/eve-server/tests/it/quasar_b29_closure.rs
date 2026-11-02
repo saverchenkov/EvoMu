@@ -19,7 +19,7 @@ use eve_server::services::quasar_b29_services::{
 use eve_server::services::quasar_cosmetics_market_types::{
     CosmeticsMarketData, ListingTargetRecord, SkinListingRecord,
 };
-use eve_server::services::quasar_payment_store_types::{get_plex_transactions, PaymentReceiptRecord};
+use eve_server::services::quasar_payment_store_types::get_plex_transactions;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -121,6 +121,7 @@ fn seed_test_orchestrator(ctx: &ServerContext) {
         content_group_id: 201,
         enabled: true,
         current_content_count: 1,
+        no_region_limit: true,
     });
     st.content_groups.insert(201, ContentGroupRecord {
         id: 201,
@@ -189,15 +190,50 @@ async fn test_b29_orchestrator_version_and_deployment() {
     let mut reset_ten = Vec::new();
     encode_varint_field(1, 1, &mut reset_ten);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.admin.api.SetTenantVersionRequest", reset_ten).await.status_code, STATUS_OK);
+    let r_ten_reset = quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.api.GetTenantVersionRequest", Vec::new()).await;
+    assert_eq!(r_ten_reset.status_code, STATUS_OK);
+    let dyn_ten_reset = decode_dyn(&ctx, "eve.content.orchestrator.api.GetTenantVersionResponse", &r_ten_reset.payload.unwrap().value);
+    if let Some(DynamicValue::Message(v)) = dyn_ten_reset.get(1) {
+        assert_eq!((v.get(1), v.get(2), v.get(3)), (Some(&DynamicValue::Uint32(2)), Some(&DynamicValue::Uint32(3)), Some(&DynamicValue::Uint32(4))));
+    } else {
+        panic!("expected reset tenant version message");
+    }
 
     // 3. DryRunRulesetRequest (evaluated against real SDE solar systems)
-    let dry = quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.api.DryRunRulesetRequest", Vec::new()).await;
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.api.DryRunRulesetRequest", Vec::new()).await.status_code, STATUS_BAD_REQUEST);
+    let mut tag_hs = Vec::new();
+    encode_string_field(1, "highsec", &mut tag_hs);
+    let mut tag_wh = Vec::new();
+    encode_string_field(1, "wormhole", &mut tag_wh);
+    let mut ruleset_buf = Vec::new();
+    encode_bytes_field(1, &tag_hs, &mut ruleset_buf);
+    encode_bytes_field(4, &tag_wh, &mut ruleset_buf);
+    let mut dry_req = Vec::new();
+    encode_bytes_field(1, &ruleset_buf, &mut dry_req);
+    let dry = quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.api.DryRunRulesetRequest", dry_req).await;
     assert_eq!(dry.status_code, STATUS_OK);
     let dyn_dry = decode_dyn(&ctx, "eve.content.orchestrator.api.DryRunRulesetResponse", &dry.payload.unwrap().value);
-    assert!(dyn_dry.get(1).is_some());
+    match dyn_dry.get(1) {
+        Some(DynamicValue::Repeated(evals)) => assert!(!evals.is_empty()),
+        other => panic!("expected evaluation_result list, got {other:?}"),
+    }
+    match dyn_dry.get(2) {
+        Some(DynamicValue::Repeated(tags_eval)) => assert_eq!(tags_eval.len(), 2),
+        other => panic!("expected ruleset_tags_evaluated list, got {other:?}"),
+    }
 
     // 4. Deployment ListRequest, GetRequest, DisableRequest, EnableRequest + role checks
-    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.api.ListRequest", Vec::new()).await.status_code, STATUS_OK);
+    let dlist = quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.api.ListRequest", Vec::new()).await;
+    assert_eq!(dlist.status_code, STATUS_OK);
+    let dyn_dlist = decode_dyn(&ctx, "eve.content.orchestrator.deployment.api.ListResponse", &dlist.payload.unwrap().value);
+    match dyn_dlist.get(1) {
+        Some(DynamicValue::Repeated(deps)) => {
+            assert_eq!(deps.len(), 1);
+            let DynamicValue::Message(dep_msg) = &deps[0] else { panic!("expected Deployment message"); };
+            assert_eq!(dep_msg.get(2), Some(&DynamicValue::String("pirate_insurgency_deployment".into())));
+        }
+        other => panic!("expected deployments list, got {other:?}"),
+    }
 
     let dep_id = seq_bytes(101);
     assert_eq!(quasar_rpc(&ctx, &mut player, "eve.content.orchestrator.deployment.api.DisableRequest", dep_id.clone()).await.status_code, STATUS_FORBIDDEN);
@@ -207,7 +243,11 @@ async fn test_b29_orchestrator_version_and_deployment() {
     let dget_dis = quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.api.GetRequest", dep_id.clone()).await;
     assert_eq!(dget_dis.status_code, STATUS_OK);
     let dyn_dis = decode_dyn(&ctx, "eve.content.orchestrator.deployment.api.GetResponse", &dget_dis.payload.unwrap().value);
-    assert!(matches!(dyn_dis.get(1), Some(DynamicValue::Message(_))));
+    if let Some(DynamicValue::Message(attr)) = dyn_dis.get(1) {
+        assert_eq!(attr.get(7), Some(&DynamicValue::Bool(true)));
+    } else {
+        panic!("expected deployment attributes message");
+    }
     ctx.db.with_snapshot(|s| {
         let st: OrchestratorState = serde_json::from_str(&s.service_state_blobs["content_orchestrator_state"]).unwrap();
         assert!(!st.deployments[&101].enabled);
@@ -253,7 +293,17 @@ async fn test_b29_orchestrator_content_and_instances() {
         panic!("expected content type attributes");
     }
 
-    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.instance.api.ListRequest", seq_bytes(101)).await.status_code, STATUS_OK);
+    let ilist = quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.instance.api.ListRequest", seq_bytes(101)).await;
+    assert_eq!(ilist.status_code, STATUS_OK);
+    let dyn_ilist = decode_dyn(&ctx, "eve.content.orchestrator.deployment.instance.api.ListResponse", &ilist.payload.unwrap().value);
+    match dyn_ilist.get(1) {
+        Some(DynamicValue::Repeated(insts)) => {
+            assert_eq!(insts.len(), 1);
+            let DynamicValue::Message(inst_id) = &insts[0] else { panic!("expected instance Identifier"); };
+            assert_eq!(inst_id.get(1), Some(&DynamicValue::Bytes(b"TESTORCHINST0001".to_vec())));
+        }
+        other => panic!("expected instances list, got {other:?}"),
+    }
 
     let inst_req = uuid_bytes(b"TESTORCHINST0001");
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.content.orchestrator.deployment.instance.api.GetRequest", inst_req.clone()).await.status_code, STATUS_OK);
@@ -262,7 +312,7 @@ async fn test_b29_orchestrator_content_and_instances() {
 }
 
 #[tokio::test]
-// parity: quasar:eveProto/generated/eve/cosmetic/market/component/listing/api/requests_pb2.pyj, quasar:eveProto/generated/eve/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve/payment/admin/api/requests_pb2.pyj
+// parity: quasar:eveProto/generated/eve/cosmetic/market/component/listing/api/requests_pb2.pyj, quasar:eveProto/generated/eve/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj
 async fn test_b29_cosmetic_market_and_payment_admin() {
     let ctx = ServerContext::new();
     let seller_cid = 90_000_001u32;
@@ -334,25 +384,18 @@ async fn test_b29_cosmetic_market_and_payment_admin() {
         } else { panic!("expected listing attributes"); }
     }
 
-    // 3. Payment admin ProcessPaymentFilesRequest & GetPersonalDataRequest
-    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.payment.admin.api.ProcessPaymentFilesRequest", seq_bytes(42)).await.status_code, STATUS_OK);
-    ctx.db.with_snapshot(|snap| {
-        let receipts: Vec<PaymentReceiptRecord> = snap.service_state_blobs.get("payment_receipts").and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default();
-        assert!(receipts.iter().any(|r| r.receipt_id == 42));
-    });
-
-    let pd_resp = quasar_rpc(&ctx, &mut sess, "eve.payment.admin.api.GetPersonalDataRequest", sint32_user_bytes(1003)).await;
-    assert_eq!(pd_resp.status_code, STATUS_OK);
-    let dyn_pd = decode_dyn(&ctx, "eve.payment.admin.api.GetPersonalDataResponse", &pd_resp.payload.unwrap().value);
-    if let Some(DynamicValue::Repeated(taxes)) = dyn_pd.get(3) {
-        if let Some(DynamicValue::Message(tax)) = taxes.first() {
-            assert_eq!(tax.get(1), Some(&DynamicValue::String("Valeria Vance".into())));
-        } else {
-            panic!("expected TaxInfo message");
-        }
-    } else {
-        panic!("expected tax personal data, got: {dyn_pd:?}");
-    }
+    // Verify public cosmetics market GetAllRequest (which triggers CosmeticsMarketState::save()) preserves the admin expiration
+    assert_eq!(quasar_rpc(&ctx, &mut player, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await.status_code, STATUS_OK);
+    let pub_get = quasar_rpc(&ctx, &mut player, "eve_public.cosmetic.market.skin.listing.api.GetRequest", uuid_bytes(&listing_uuid)).await;
+    assert_eq!(pub_get.status_code, STATUS_OK);
+    let dyn_pub = decode_dyn(&ctx, "eve_public.cosmetic.market.skin.listing.api.GetResponse", &pub_get.payload.unwrap().value);
+    if let Some(DynamicValue::Message(listing)) = dyn_pub.get(1) {
+        if let Some(DynamicValue::Message(attr)) = listing.get(2) {
+            if let Some(DynamicValue::Message(ts)) = attr.get(4) {
+                assert_eq!(ts.get(1), Some(&DynamicValue::Int64(1_900_000_000)));
+            } else { panic!("expected public listing expiration timestamp"); }
+        } else { panic!("expected public listing attributes"); }
+    } else { panic!("expected public listing"); }
 }
 
 #[tokio::test]

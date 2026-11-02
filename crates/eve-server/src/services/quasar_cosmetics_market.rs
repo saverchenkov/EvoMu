@@ -76,13 +76,11 @@ impl CosmeticsMarketState {
     }
 
     fn sync_from_blob(&self) {
-        let needs_sync = self
-            .data
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .component_listings
-            .is_empty();
-        if !needs_sync {
+        let (comp_empty, skin_empty) = {
+            let d = self.data.read().unwrap_or_else(|e| e.into_inner());
+            (d.component_listings.is_empty(), d.skin_listings.is_empty())
+        };
+        if !comp_empty && !skin_empty {
             return;
         }
         let persisted: Option<CosmeticsMarketData> = self.db.with_snapshot(|s| {
@@ -91,10 +89,13 @@ impl CosmeticsMarketState {
                 .and_then(|j| serde_json::from_str(j).ok())
         });
         if let Some(p) = persisted {
-            if !p.component_listings.is_empty() {
+            if !p.component_listings.is_empty() || !p.skin_listings.is_empty() {
                 let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
                 for (k, v) in p.component_listings {
                     data.component_listings.entry(k).or_insert(v);
+                }
+                for (k, v) in p.skin_listings {
+                    data.skin_listings.entry(k).or_insert(v);
                 }
                 if data.next_seq < p.next_seq {
                     data.next_seq = p.next_seq;
@@ -1215,10 +1216,11 @@ fn skin_initiate_purchase(
     ))
 }
 
-fn skin_admin_set_expiration(
+fn skin_admin_set_expiration_with_resp(
     st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
+    resp_type: &'static str,
 ) -> HandlerResult {
     require_admin_role(ctx)?;
     let _cid = require_char(ctx)?;
@@ -1228,6 +1230,7 @@ fn skin_admin_set_expiration(
         .and_then(|m| m.get(1))
         .and_then(as_u64)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing expiration timestamp".to_string()))?;
+    st.sync_from_blob();
     {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(rec) = data.skin_listings.get_mut(&hex(&uuid)) else {
@@ -1236,10 +1239,33 @@ fn skin_admin_set_expiration(
         rec.expires_unix = expires_unix;
     }
     st.save();
-    Ok(any(
+    Ok(any(resp_type, Vec::new()))
+}
+
+fn skin_admin_set_expiration(
+    st: &CosmeticsMarketState,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+) -> HandlerResult {
+    skin_admin_set_expiration_with_resp(
+        st,
+        ctx,
+        msg,
         "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
-        Vec::new(),
-    ))
+    )
+}
+
+fn skin_admin_set_expiration_eve(
+    st: &CosmeticsMarketState,
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+) -> HandlerResult {
+    skin_admin_set_expiration_with_resp(
+        st,
+        ctx,
+        msg,
+        "eve.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
+    )
 }
 
 /// Registers the state-backed Paragon Hub Cosmetic Market handlers.
@@ -1306,5 +1332,9 @@ pub fn register(
     reg(
         "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest",
         skin_admin_set_expiration,
+    );
+    reg(
+        "eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest",
+        skin_admin_set_expiration_eve,
     );
 }

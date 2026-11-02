@@ -413,12 +413,6 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
                 cw.states.get(&PILOT_3).map(|c| c.suspect_flag_until_unix).unwrap_or(0),
             )
         };
-        let cw_states = ctx.crimewatch.read().unwrap().states.clone();
-        ctx.db.with_mut_snapshot(|snap| {
-            for (cid, st) in cw_states {
-                snap.crimewatch_states.insert(cid, st);
-            }
-        });
         assert!(ce > t0 && se > t0, "expected ce > t0 ({ce} vs {t0}) and se > t0 ({se} vs {t0})");
         (ce, se, zz_gate_in, zz_jump.destination_stargate_id)
     };
@@ -429,21 +423,18 @@ async fn test_b29_crimewatch_persist_restart_and_movement_restrictions() {
         let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
         let mut s1 = setup_pilot_in_space(&ctx2, 9305, PILOT_1, 1_000_009, 86_300_001, 603, jita, DVec3::new(100_000.0, 0.0, 0.0)).await;
         let st1 = rpc(&ctx2, &mut s1, "crimewatch", "GetClientStates", &[]).await;
-        if let PyRep::Tuple(top) = &st1 {
-            assert_eq!(top[3], PyRep::Integer(0));
-            if let PyRep::Tuple(timers) = &top[0] {
-                assert_eq!(timers.get(3), Some(&PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(crim_exp))])));
-            }
-        }
+        let PyRep::Tuple(top) = &st1 else { panic!("expected Tuple from GetClientStates, got {st1:?}"); };
+        assert_eq!(top[3], PyRep::Integer(0));
+        let PyRep::Tuple(timers) = &top[0] else { panic!("expected timers Tuple, got {:?}", top[0]); };
+        assert_eq!(timers.get(3), Some(&PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(unix_to_ft(crim_exp))])));
+
         let mut s3 = SessionState::new(9306);
         s3.user_id = Some(30);
         s3.character_id = Some(PILOT_3);
         let st3 = rpc(&ctx2, &mut s3, "crimewatch", "GetClientStates", &[]).await;
-        if let PyRep::Tuple(top) = &st3 {
-            if let PyRep::Tuple(timers) = &top[0] {
-                assert!(timers.contains(&PyRep::Tuple(vec![PyRep::Integer(302), PyRep::Integer(unix_to_ft(susp_exp))])));
-            }
-        }
+        let PyRep::Tuple(top3) = &st3 else { panic!("expected Tuple from GetClientStates, got {st3:?}"); };
+        let PyRep::Tuple(timers3) = &top3[0] else { panic!("expected timers Tuple, got {:?}", top3[0]); };
+        assert!(timers3.contains(&PyRep::Tuple(vec![PyRep::Integer(302), PyRep::Integer(unix_to_ft(susp_exp))])));
         ctx2.db.with_snapshot(|snap| {
             assert!(!snap.kill_rights.is_empty());
             assert_eq!(snap.zarzakh_gate_locks.get(&PILOT_4).map(|(g, _)| *g), Some(zz_allowed_gate));
@@ -648,11 +639,18 @@ async fn test_b29_fleet_grace_invite_and_death_courier_lifecycle() {
     ctx.drain_notifications_for_char(PILOT_4);
     rpc(&ctx, &mut s4_pod, "ship", "SelfDestruct", &[]).await;
     ctx.advance_secs(125);
-    let _ = rpc_res(&ctx, &mut s4_pod, "ship", "SelfDestruct", &[]).await;
+    if ctx.db.with_snapshot(|s| s.characters[&PILOT_4].station_id.is_none()) {
+        rpc(&ctx, &mut s4_pod, "ship", "SelfDestruct", &[]).await;
+    } else {
+        s4_pod.station_id = ctx.db.with_snapshot(|s| s.characters[&PILOT_4].station_id);
+    }
     let pod_notifs = ctx.drain_notifications_for_char(PILOT_4);
     assert!(session_changed_has_field(&pod_notifs, "stationid", 60_003_760));
     assert_eq!(s4_pod.station_id, Some(60_003_760));
-    let _ = rpc_res(&ctx, &mut s4_pod, "stationSvc", "Undock", &[PyRep::Integer(60_003_760)]).await;
+    let undock_err = rpc_res(&ctx, &mut s4_pod, "stationSvc", "Undock", &[PyRep::Integer(60_003_760)])
+        .await
+        .expect_err("immediate Undock after pod respawn must be rejected");
+    assert_eq!(undock_err.code, "SessionChangeInProgress");
 
     // Courier #2 deadline failure while in space -> Failed with collateral, wrap NOT teleported to start station
     ctx.advance_secs(15);

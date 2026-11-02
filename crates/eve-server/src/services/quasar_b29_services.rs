@@ -11,7 +11,7 @@ use crate::quasar_gateway::{
 };
 use crate::services::quasar_cosmetics_market::seed_component_listings_if_empty;
 use crate::services::quasar_cosmetics_market_types::CosmeticsMarketData;
-use crate::services::quasar_payment_store_types::{record_plex_transaction, PaymentReceiptRecord};
+use crate::services::quasar_payment_store_types::record_plex_transaction;
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_fixed64_field, encode_string_field, encode_varint_field,
@@ -68,6 +68,10 @@ impl SemVerSpec {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentRecord {
     pub id: u64,
@@ -76,6 +80,8 @@ pub struct DeploymentRecord {
     pub content_group_id: u64,
     pub enabled: bool,
     pub current_content_count: u32,
+    #[serde(default = "default_true")]
+    pub no_region_limit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +215,45 @@ fn encode_uuid_id(field_num: u32, uuid: &[u8], out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &sub, out);
 }
 
+fn extract_tag_list(msg: &DynamicQuasarMessage, field_num: u32) -> Vec<String> {
+    match msg.get(field_num) {
+        Some(DynamicValue::Repeated(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                DynamicValue::Message(m) => {
+                    let s = get_string(m, 1).trim().to_string();
+                    (!s.is_empty()).then_some(s)
+                }
+                _ => None,
+            })
+            .collect(),
+        Some(DynamicValue::Message(m)) => {
+            let s = get_string(m, 1).trim().to_string();
+            if s.is_empty() { Vec::new() } else { vec![s] }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn system_matches_tag(sid: u32, info: &eve_sde::SolarSystem, tag: &str) -> bool {
+    match tag {
+        "highsec" => info.security_status >= 0.45,
+        "lowsec" => (0.05..0.45).contains(&info.security_status),
+        "nullsec" => info.security_status < 0.05 && sid < 31_000_000,
+        "wormhole" => sid >= 31_000_000,
+        other => {
+            if let Some(rest) = other.strip_prefix("region:") {
+                rest.parse::<u32>().is_ok_and(|id| id == info.region_id)
+            } else if let Some(rest) = other.strip_prefix("constellation:") {
+                rest.parse::<u32>().is_ok_and(|id| id == info.constellation_id)
+            } else if let Some(rest) = other.strip_prefix("sid:") {
+                rest.parse::<u32>().is_ok_and(|id| id == sid)
+            } else {
+                other.parse::<u32>().is_ok_and(|id| id == sid)
+            }
+        }
+    }
+}
 fn encode_space_location_solar_system(
     field_num: u32,
     sys_id: u32,
@@ -320,42 +365,96 @@ fn register_orchestrator_handlers(
         router.register_handler(
             "eve.content.orchestrator.api.DryRunRulesetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let raw_tag = match dyn_msg.get(1) {
-                    Some(DynamicValue::Message(rs)) => get_string(rs, 1),
-                    _ => String::new(),
+                let Some(DynamicValue::Message(rs)) = dyn_msg.get(1) else {
+                    return Err((STATUS_BAD_REQUEST, "Ruleset is required".into()));
                 };
-                let tag_name = if raw_tag.trim().is_empty() {
-                    "highsec".to_string()
-                } else {
-                    raw_tag.trim().to_string()
-                };
+                let inc_all = extract_tag_list(rs, 1);
+                let inc_any = extract_tag_list(rs, 2);
+                let exc_all = extract_tag_list(rs, 3);
+                let exc_any = extract_tag_list(rs, 4);
+                if inc_all.is_empty() && inc_any.is_empty() && exc_all.is_empty() && exc_any.is_empty() {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        "Ruleset must specify at least one tag".into(),
+                    ));
+                }
+
+                let mut all_tags: Vec<String> = Vec::new();
+                for t in inc_all
+                    .iter()
+                    .chain(inc_any.iter())
+                    .chain(exc_all.iter())
+                    .chain(exc_any.iter())
+                {
+                    if !all_tags.contains(t) {
+                        all_tags.push(t.clone());
+                    }
+                }
+
                 let mut sys_ids: Vec<u32> = sde_dry.solar_systems.keys().copied().collect();
                 sys_ids.sort_unstable();
-                let matched_sys = sys_ids.into_iter().find_map(|sid| {
-                    let info = sde_dry.solar_systems.get(&sid)?;
-                    let ok = match tag_name.as_str() {
-                        "highsec" => info.security_status >= 0.45,
-                        "lowsec" => (0.05..0.45).contains(&info.security_status),
-                        "nullsec" => info.security_status < 0.05 && sid < 31_000_000,
-                        "wormhole" => sid >= 31_000_000,
-                        other => other.parse::<u32>().is_ok_and(|id| id == sid),
+
+                let mut matched_locations: Vec<(u32, u32, Vec<String>)> = Vec::new();
+                let mut tag_locations: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+
+                for sid in sys_ids {
+                    let Some(info) = sde_dry.solar_systems.get(&sid) else {
+                        continue;
                     };
-                    ok.then_some((sid, info.constellation_id))
-                });
-                let Some((sys_id, const_id)) = matched_sys else {
+                    for t in &all_tags {
+                        if system_matches_tag(sid, info, t) {
+                            let locs = tag_locations.entry(t.clone()).or_default();
+                            if locs.len() < 10 {
+                                locs.push((sid, info.constellation_id));
+                            }
+                        }
+                    }
+                    let ok_inc_all = inc_all.iter().all(|t| system_matches_tag(sid, info, t));
+                    let ok_inc_any = inc_any.is_empty()
+                        || inc_any.iter().any(|t| system_matches_tag(sid, info, t));
+                    let ok_exc_all = exc_all.is_empty()
+                        || !exc_all.iter().all(|t| system_matches_tag(sid, info, t));
+                    let ok_exc_any = !exc_any.iter().any(|t| system_matches_tag(sid, info, t));
+                    if ok_inc_all && ok_inc_any && ok_exc_all && ok_exc_any && matched_locations.len() < 10 {
+                        let matched_tags: Vec<String> = all_tags
+                            .iter()
+                            .filter(|t| system_matches_tag(sid, info, t))
+                            .cloned()
+                            .collect();
+                        matched_locations.push((sid, info.constellation_id, matched_tags));
+                    }
+                }
+
+                if matched_locations.is_empty() {
                     return Err((
                         STATUS_NOT_FOUND,
-                        format!("No SDE solar system matches ruleset tag '{tag_name}'"),
+                        "No SDE solar system matches ruleset".into(),
                     ));
-                };
-                let mut eval_buf = Vec::new();
-                encode_space_location_solar_system(1, sys_id, const_id, &mut eval_buf);
-                let mut tid = Vec::new();
-                encode_string_field(1, &tag_name, &mut tid);
-                encode_bytes_field(2, &tid, &mut eval_buf);
+                }
 
                 let mut out = Vec::new();
-                encode_bytes_field(1, &eval_buf, &mut out);
+                for (sys_id, const_id, tags) in &matched_locations {
+                    let mut eval_buf = Vec::new();
+                    encode_space_location_solar_system(1, *sys_id, *const_id, &mut eval_buf);
+                    for t in tags {
+                        let mut tid = Vec::new();
+                        encode_string_field(1, t, &mut tid);
+                        encode_bytes_field(2, &tid, &mut eval_buf);
+                    }
+                    encode_bytes_field(1, &eval_buf, &mut out);
+                }
+                for t in &all_tags {
+                    let mut lft_buf = Vec::new();
+                    let mut tid = Vec::new();
+                    encode_string_field(1, t, &mut tid);
+                    encode_bytes_field(1, &tid, &mut lft_buf);
+                    if let Some(locs) = tag_locations.get(t) {
+                        for (sys_id, const_id) in locs {
+                            encode_space_location_solar_system(2, *sys_id, *const_id, &mut lft_buf);
+                        }
+                    }
+                    encode_bytes_field(2, &lft_buf, &mut out);
+                }
                 Ok(any_resp(
                     "eve.content.orchestrator.api.DryRunRulesetResponse",
                     out,
@@ -401,6 +500,7 @@ fn register_orchestrator_handlers(
                 encode_string_field(1, &dep.name, &mut attr_buf);
                 encode_seq_id(2, dep.content_group_id, &mut attr_buf);
                 encode_varint_field(6, dep.current_content_count as u64, &mut attr_buf);
+                encode_varint_field(7, u64::from(dep.no_region_limit), &mut attr_buf);
                 let mut out = Vec::new();
                 encode_bytes_field(1, &attr_buf, &mut out);
                 Ok(any_resp(
@@ -629,46 +729,6 @@ fn register_commerce_admin_handlers(
 
     // 9. eve.cosmetic.market.skin.listing.api.admin.* -> canonical CosmeticsMarketData
     {
-        let db1 = Arc::clone(&db);
-        router.register_handler(
-            "eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let uuid = get_bytes(dyn_msg, 1);
-                if uuid.is_empty() {
-                    return Err((STATUS_BAD_REQUEST, "listing uuid required".into()));
-                }
-                let expires_unix = match dyn_msg.get(2) {
-                    Some(DynamicValue::Message(ts)) => get_u64(ts, 1),
-                    _ => 0,
-                };
-                let updated = db1.with_mut_snapshot(|snap| {
-                    let mut data: CosmeticsMarketData = snap
-                        .quasar_state_blobs
-                        .get(BLOB_COSMETICS_MARKET)
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or_default();
-                    let found = data.skin_listings.values_mut().find(|l| l.uuid.as_slice() == uuid.as_slice());
-                    if let Some(listing) = found {
-                        listing.expires_unix = expires_unix;
-                        if let Ok(json) = serde_json::to_string(&data) {
-                            snap.quasar_state_blobs
-                                .insert(BLOB_COSMETICS_MARKET.to_string(), json);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                });
-                if !updated {
-                    return Err((STATUS_NOT_FOUND, "Skin listing not found".into()));
-                }
-                Ok(any_resp(
-                    "eve.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
-                    Vec::new(),
-                ))
-            }),
-        );
-
         let db2 = Arc::clone(&db);
         router.register_handler(
             "eve.cosmetic.market.skin.listing.api.admin.GetAllListedByCharacterRequest",
@@ -709,88 +769,7 @@ fn register_commerce_admin_handlers(
         );
     }
 
-    // 10. eve.payment.admin.api.* -> canonical payment_receipts + accounts/characters
-    {
-        let db1 = Arc::clone(&db);
-        router.register_handler(
-            "eve.payment.admin.api.ProcessPaymentFilesRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let merchant_id = get_u64(dyn_msg, 1);
-                if merchant_id == 0 {
-                    return Err((STATUS_BAD_REQUEST, "merchant identifier required".into()));
-                }
-                let uid = ctx.effective_user_id().unwrap_or(0) as u64;
-                let now_unix = ctx.now_unix();
-                db1.with_mut_snapshot(|snap| {
-                    let mut receipts: Vec<PaymentReceiptRecord> = snap
-                        .service_state_blobs
-                        .get("payment_receipts")
-                        .and_then(|j| serde_json::from_str(j).ok())
-                        .unwrap_or_default();
-                    if !receipts.iter().any(|r| r.receipt_id == merchant_id) {
-                        receipts.push(PaymentReceiptRecord {
-                            receipt_id: merchant_id,
-                            user_id: uid,
-                            offer_id: format!("merchant-{merchant_id}"),
-                            amount_in_cents: 0,
-                            currency: "USD".to_string(),
-                            timestamp_unix: now_unix,
-                        });
-                        if let Ok(s) = serde_json::to_string(&receipts) {
-                            snap.service_state_blobs
-                                .insert("payment_receipts".to_string(), s);
-                        }
-                    }
-                });
-                Ok(any_resp(
-                    "eve.payment.admin.api.ProcessPaymentFilesResponse",
-                    Vec::new(),
-                ))
-            }),
-        );
-
-        let db2 = Arc::clone(&db);
-        router.register_handler(
-            "eve.payment.admin.api.GetPersonalDataRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let user_id = get_u64(dyn_msg, 1);
-                if user_id == 0 {
-                    return Err((STATUS_BAD_REQUEST, "user identifier required".into()));
-                }
-                let resolved = db2.with_snapshot(|snap| {
-                    let acc = snap.accounts.values().find(|a| a.user_id == user_id)?;
-                    let ch = snap.characters.values().find(|c| c.user_id == user_id);
-                    let display_name = ch
-                        .map(|c| c.name.clone())
-                        .unwrap_or_else(|| acc.username.clone());
-                    let region_code = ch
-                        .map(|c| format!("REG-{}", c.region_id))
-                        .unwrap_or_else(|| "UNASSIGNED".to_string());
-                    Some((display_name, region_code))
-                });
-                let Some((display_name, region_code)) = resolved else {
-                    return Err((STATUS_NOT_FOUND, format!("User {user_id} not found")));
-                };
-                let mut tax_buf = Vec::new();
-                encode_string_field(1, &display_name, &mut tax_buf);
-                encode_string_field(5, &region_code, &mut tax_buf);
-
-                let mut bill_buf = Vec::new();
-                encode_string_field(1, &display_name, &mut bill_buf);
-                encode_string_field(6, &region_code, &mut bill_buf);
-
-                let mut out = Vec::new();
-                encode_bytes_field(3, &tax_buf, &mut out);
-                encode_bytes_field(4, &bill_buf, &mut out);
-                Ok(any_resp(
-                    "eve.payment.admin.api.GetPersonalDataResponse",
-                    out,
-                ))
-            }),
-        );
-    }
-
-    // 11. eve.store.sale.admin.* -> canonical store_failed_fulfillments + plex_balances
+    // 10. eve.store.sale.admin.* -> canonical store_failed_fulfillments + plex_balances
     {
         let db1 = Arc::clone(&db);
         router.register_handler(
