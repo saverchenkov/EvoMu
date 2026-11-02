@@ -699,6 +699,10 @@ fn handle_macho_net(
             Some(Ok(PyRep::Dict(entries)))
         }
 
+        "GetEjabberdAddress" => {
+            Some(Ok(PyRep::String("127.0.0.1".into())))
+        }
+
         "GetGlobalConfig" => {
             let (cluster_name, cluster_mode) = ctx
                 .cluster_state

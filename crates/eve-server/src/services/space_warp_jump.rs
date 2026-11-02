@@ -197,6 +197,16 @@ async fn handle_cmd_warp_to_stuff(
         })
         .unwrap_or(default_min_range)
         .clamp(0.0, 100_000.0);
+    tracing::info!(
+        char_id,
+        sys_id,
+        ship_id,
+        stuff_type,
+        target_id,
+        ?target_str_opt,
+        min_range,
+        "CmdWarpToStuff request"
+    );
     let handle = ctx.systems.get_or_spawn(sys_id);
     sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
