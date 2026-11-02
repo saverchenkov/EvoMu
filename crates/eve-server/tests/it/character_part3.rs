@@ -241,6 +241,7 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
             &vec![
                 "locationID",
                 "locationName",
+                "solarSystemID",
                 "x",
                 "y",
                 "z",
@@ -248,9 +249,50 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
             ]
         );
         assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].len(), 7);
     } else {
         panic!("Expected TupleSet from GetMultiLocationsEx");
     }
+
+    let single_loc_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "config",
+            None,
+            "GetLocationsEx",
+            &[PyRep::List(vec![PyRep::Integer(30_000_142)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("config.GetLocationsEx");
+    assert_eq!(single_loc_rep.row_count(), Some(1));
+
+    let all_skills = ctx
+        .dispatch_rpc(&mut sess, "skillMgr2", None, "GetAllSkills", &[], &kw, None)
+        .await
+        .expect("skillMgr2.GetAllSkills");
+    assert!(matches!(all_skills, PyRep::Dict(_)));
+
+    let worth = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetAssetWorth", &[], &kw, None)
+        .await
+        .expect("charMgr.GetAssetWorth");
+    assert!(matches!(worth, PyRep::Real(_)));
+
+    let skins_two_arg = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipCosmeticsMgr",
+            None,
+            "GetLicencedSkinsForShipType",
+            &[PyRep::Integer(2110000001), PyRep::Integer(587)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("shipCosmeticsMgr.GetLicencedSkinsForShipType(char_id, type_id)");
+    assert!(matches!(skins_two_arg, PyRep::List(_)));
 
     let stations_rep = eve_server::services::config_service::get_multi_station_ex(
         &ctx,

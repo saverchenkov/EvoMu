@@ -431,7 +431,15 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:cosmetics.skin-licenses
         ("shipCosmeticsMgr", "GetLicencedSkins") => Some(handle_get_licensed_skins(ctx, session, None)),
         ("shipCosmeticsMgr", "GetLicencedSkinsForShipType") => {
-            let ship_type = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok());
+            let ship_type = if args.len() >= 2 {
+                args.get(1)
+                    .and_then(|a| a.as_i64())
+                    .and_then(|v| u32::try_from(v).ok())
+            } else {
+                args.first()
+                    .and_then(|a| a.as_i64())
+                    .and_then(|v| u32::try_from(v).ok())
+            };
             match ship_type {
                 Some(t) if ctx.sde.types.get(&t).map(|ty| ty.category_id == 6).unwrap_or(false) => Some(handle_get_licensed_skins(ctx, session, Some(t))),
                 _ => Some(Err(err("InvalidShipTypeForSkin", "GetLicencedSkinsForShipType requires a ship typeID present in the SDE"))),

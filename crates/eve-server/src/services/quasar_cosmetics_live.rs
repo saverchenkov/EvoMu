@@ -1187,6 +1187,7 @@ pub async fn broadcast_ship_skin_cosmetic_change(
                     is_cloaked,
                     skin_id: new_sid,
                     skin_material_set_id: new_mat,
+                    jump_target: None,
                 },
             )
             .await;

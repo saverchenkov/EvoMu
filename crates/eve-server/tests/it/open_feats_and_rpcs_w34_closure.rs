@@ -232,6 +232,7 @@ async fn test_gm_tournament_match_bans_and_cleanup_grid() {
                     is_cloaked: false,
                     skin_id: None,
                     skin_material_set_id: None,
+                    jump_target: None,
                 },
             )
             .await;

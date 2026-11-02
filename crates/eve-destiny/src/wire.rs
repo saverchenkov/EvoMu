@@ -624,6 +624,16 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
             zero_of_five.clone(),
         ));
         entries.push(("localSuppressionStageAndMaximum", zero_of_five));
+        let jump_list = meta
+            .jump_target
+            .map(|(dest_gate_id, dest_sys_id)| {
+                vec![PyRep::keyval([
+                    ("toCelestialID", PyRep::Integer(dest_gate_id)),
+                    ("locationID", PyRep::Integer(i64::from(dest_sys_id))),
+                ])]
+            })
+            .unwrap_or_default();
+        entries.push(("jumps", PyRep::List(jump_list)));
     }
     if meta.group_id == 988 {
         // DERIVED: V24.01 `wormhole.py:21` (`Assemble`) passes `self.slimItem.nebulaType`

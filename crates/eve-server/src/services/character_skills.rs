@@ -305,6 +305,61 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        ("skillMgr2", "GetAllSkills") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            catch_up_skill_queue(ctx, char_id);
+            let entries = ctx.db.with_snapshot(|snap| {
+                let (clone_grade, race_id) = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| (c.clone_grade, c.race_id))
+                    .unwrap_or((2, 1));
+                snap.skills
+                    .get(&char_id)
+                    .map(|m| {
+                        m.values()
+                            .map(|s| {
+                                let active_lvl = if clone_grade <= 1 {
+                                    s.level.min(alpha_skill_cap_for_character(
+                                        &ctx.sde, race_id, s.type_id,
+                                    ))
+                                } else {
+                                    s.level
+                                };
+                                let rank = ctx
+                                    .sde
+                                    .types
+                                    .get(&s.type_id)
+                                    .and_then(|t| {
+                                        t.default_attributes
+                                            .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                                            .copied()
+                                    })
+                                    .unwrap_or(1.0);
+                                (
+                                    PyRep::Integer(s.type_id as i64),
+                                    PyRep::keyval([
+                                        ("typeID", PyRep::Integer(s.type_id as i64)),
+                                        ("skillLevel", PyRep::Integer(s.level as i64)),
+                                        ("trainedSkillLevel", PyRep::Integer(s.level as i64)),
+                                        ("effectiveSkillLevel", PyRep::Integer(active_lvl as i64)),
+                                        ("activeSkillLevel", PyRep::Integer(active_lvl as i64)),
+                                        ("virtualSkillLevel", PyRep::Integer(active_lvl as i64)),
+                                        ("skillPoints", PyRep::Real(s.skill_points)),
+                                        ("trainedSkillPoints", PyRep::Real(s.skill_points)),
+                                        ("skillRank", PyRep::Real(rank)),
+                                    ]),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Some(Ok(PyRep::Dict(entries)))
+        }
         ("skillMgr2", "GetSkills") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

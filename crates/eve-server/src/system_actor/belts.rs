@@ -40,6 +40,12 @@ pub fn populate_system_celestials(
             .map(|t| t.mass)
             .filter(|&m| m > 0.0)
             .unwrap_or(1.0e18);
+        let jump_target = if cel.group_id == 10 {
+            sde.stargate(cel.celestial_id)
+                .map(|j| (j.destination_stargate_id, j.to_solar_system_id))
+        } else {
+            None
+        };
         ballpark.add_static_ball_with_meta(
             Ball {
                 id: cel.celestial_id,
@@ -61,7 +67,9 @@ pub fn populate_system_celestials(
                 corp_id: -1,
                 alliance_id: -1,
                 security_status: 0.0,
-                is_cloaked: false, ..Default::default()
+                is_cloaked: false,
+                jump_target,
+                ..Default::default()
             },
         );
     }
@@ -98,7 +106,9 @@ pub fn populate_system_celestials(
                     corp_id: -1,
                     alliance_id: -1,
                     security_status: 0.0,
-                    is_cloaked: false, ..Default::default()
+                    is_cloaked: false,
+                    jump_target: Some((jump.destination_stargate_id, jump.to_solar_system_id)),
+                    ..Default::default()
                 },
             );
         }

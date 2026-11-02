@@ -123,6 +123,7 @@ impl ServerContext {
             }
             "skillMgr2" | "charMgr" | "jumpCloneSvc" => {
                 Some(object_id) == session.character_id
+                    || session.solar_system_id.map(|s| s as i64) == Some(object_id)
                     || session.station_id == Some(object_id)
                     || session.structure_id == Some(object_id)
                     || object_id == 0
@@ -774,6 +775,7 @@ impl ServerContext {
             is_cloaked: false,
             skin_id,
             skin_material_set_id,
+            jump_target: None,
         }
     }
 

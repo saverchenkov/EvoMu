@@ -213,7 +213,7 @@ pub fn emit_signal_tracker_full_state_for_system(
                                 ("instanceID", PyRep::Integer((idx + 1) as i64)),
                                 ("siteID", PyRep::String(a.anomaly_id.clone())),
                                 ("targetID", PyRep::String(a.anomaly_id.clone())),
-                                ("dungeonID", PyRep::None),
+                                ("dungeonID", PyRep::Integer(0)),
                                 ("dungeonName", PyRep::String(a.name.clone())),
                                 ("dungeonNameID", PyRep::None),
                                 ("anomalyType", PyRep::String(a.anomaly_type.clone())),
@@ -228,6 +228,7 @@ pub fn emit_signal_tracker_full_state_for_system(
                                 ("typeID", PyRep::None),
                                 ("expiryTime", PyRep::None),
                                 ("isSiteExpired", PyRep::Bool(false)),
+                                ("allowedTypes", PyRep::None),
                                 (
                                     "position",
                                     PyRep::Tuple(vec![

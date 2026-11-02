@@ -1289,6 +1289,26 @@ pub fn handle_contacts(
             }
         }
 
+        ("charMgr", "GetAssetWorth") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let total_worth = ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .values()
+                    .filter(|it| it.owner_id == char_id)
+                    .map(|it| {
+                        let unit_price = ctx
+                            .sde
+                            .types
+                            .get(&it.type_id)
+                            .map(|t| t.base_price)
+                            .unwrap_or(0.0);
+                        unit_price * (it.quantity.max(1) as f64)
+                    })
+                    .sum::<f64>()
+            });
+            Some(Ok(PyRep::Real(total_worth)))
+        }
+
         // parity: feat:character.home-station
         ("home_station", "get_home_station_candidates") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

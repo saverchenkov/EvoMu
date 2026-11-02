@@ -238,7 +238,7 @@ pub fn handle(
             )))
         }
 
-        ("config", "GetMultiLocationsEx") => {
+        ("config", "GetLocationsEx") | ("config", "GetMultiLocationsEx") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
@@ -260,6 +260,7 @@ pub fn handle(
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(reg.name.clone()),
+                            PyRep::None,
                             PyRep::Real(reg.center[0]),
                             PyRep::Real(reg.center[1]),
                             PyRep::Real(reg.center[2]),
@@ -272,6 +273,7 @@ pub fn handle(
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(con.name.clone()),
+                            PyRep::None,
                             PyRep::Real(con.center[0]),
                             PyRep::Real(con.center[1]),
                             PyRep::Real(con.center[2]),
@@ -284,21 +286,22 @@ pub fn handle(
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(sys.name.clone()),
+                            PyRep::Integer(id),
                             PyRep::Real(sys.galactic_pos_ly[0]),
                             PyRep::Real(sys.galactic_pos_ly[1]),
                             PyRep::Real(sys.galactic_pos_ly[2]),
                             PyRep::None,
                         ]);
-                    } else if let Some(st) = ctx
+                    } else if let Some((sys, st)) = ctx
                         .sde
                         .solar_systems
                         .values()
-                        .flat_map(|s| &s.stations)
-                        .find(|st| st.station_id == id)
+                        .find_map(|s| s.stations.iter().find(|st| st.station_id == id).map(|st| (s, st)))
                     {
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(st.name.clone()),
+                            PyRep::Integer(i64::from(sys.solar_system_id)),
                             PyRep::Real(st.position.x),
                             PyRep::Real(st.position.y),
                             PyRep::Real(st.position.z),
@@ -314,6 +317,7 @@ pub fn handle(
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(dest_name),
+                            PyRep::Integer(i64::from(jmp.from_solar_system_id)),
                             PyRep::Real(jmp.position.x),
                             PyRep::Real(jmp.position.y),
                             PyRep::Real(jmp.position.z),
@@ -323,6 +327,7 @@ pub fn handle(
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(st.name.clone()),
+                            PyRep::Integer(i64::from(st.solar_system_id)),
                             PyRep::Real(st.position[0]),
                             PyRep::Real(st.position[1]),
                             PyRep::Real(st.position[2]),
@@ -332,6 +337,7 @@ pub fn handle(
                         rows.push(vec![
                             PyRep::Integer(id),
                             PyRep::String(cel.name.clone()),
+                            PyRep::Integer(i64::from(cel.solar_system_id)),
                             PyRep::Real(cel.position.x),
                             PyRep::Real(cel.position.y),
                             PyRep::Real(cel.position.z),
@@ -350,6 +356,13 @@ pub fn handle(
                                 .get(&item.type_id)
                                 .map(|t| t.name.clone())
                                 .unwrap_or_else(|| format!("Item {id}"));
+                            let sol_rep = if (30_000_000..=39_999_999).contains(&item.location_id) {
+                                PyRep::Integer(item.location_id)
+                            } else if let Some(sys_id) = session.solar_system_id {
+                                PyRep::Integer(i64::from(sys_id))
+                            } else {
+                                PyRep::None
+                            };
                             let (ix, iy, iz) = if let Some(st) = ctx
                                 .sde
                                 .solar_systems
@@ -375,6 +388,7 @@ pub fn handle(
                             rows.push(vec![
                                 PyRep::Integer(id),
                                 PyRep::String(name),
+                                sol_rep,
                                 PyRep::Real(ix),
                                 PyRep::Real(iy),
                                 PyRep::Real(iz),
@@ -388,6 +402,7 @@ pub fn handle(
                 vec![
                     "locationID",
                     "locationName",
+                    "solarSystemID",
                     "x",
                     "y",
                     "z",
