@@ -280,6 +280,10 @@ pub fn emit_signal_tracker_full_state_for_system(
                         ("sigGroup", PyRep::String(s.sig_group.clone())),
                         ("typeName", PyRep::String(s.type_name.clone())),
                         ("scanStrength", PyRep::Real(s.signal_strength)),
+                        ("difficulty", PyRep::Integer(1)),
+                        ("dungeonID", PyRep::None),
+                        ("archetypeID", PyRep::None),
+                        ("deviation", PyRep::Real(0.0)),
                         (
                             "position",
                             PyRep::Tuple(vec![
