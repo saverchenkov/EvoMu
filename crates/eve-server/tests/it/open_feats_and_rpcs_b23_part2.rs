@@ -35,11 +35,12 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
         .types
         .keys()
         .copied()
-        .find(|&tid| {
+        .filter(|&tid| {
             eve_server::services::pve_special_sites_abyssal::classify_abyssal_filament(tid)
-                .is_some_and(|(tier, _)| tier >= 4)
+                .is_some_and(|(tier, _)| tier == 6)
         })
-        .unwrap_or(47_890);
+        .min()
+        .unwrap_or(56_139);
 
     ctx.db.with_mut_snapshot(|s| {
         s.items.insert(
@@ -367,13 +368,61 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     let plex_after2 = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
     assert_eq!(plex_after2, 67, "10% discounted Tier 1 SKINR sequencing must debit 16 whole PLEX (83 - 16 = 67)");
 
-    // 2. R-B23-03: ApplyTagsForSecStatus rejects High-Sec Jita, charges ISK, and preserves excess tags
+    // 2. R-B23-04: ApplyTagsForSecStatus rejects High-Sec Jita & qty <= 0, accepts SDE 33141 at Security Office, charges ISK, records journal, crosses 0.0, and preserves excess tags
     let kw = HashMap::new();
     sess.station_id = Some(60_003_760);
     let jita_err = ctx
-        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(35661), PyRep::Integer(1)], &kw, None)
+        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(33141), PyRep::Integer(1)], &kw, None)
         .await
         .expect_err("High-Sec Jita must be rejected for Security Office tag turn-in");
     assert_eq!(jita_err.code, "SecurityOfficeRequired");
+
+    let sec_office_station = ctx
+        .sde
+        .stations
+        .iter()
+        .find_map(|(&sid, st)| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            ((0.0 < sec && sec < 0.45)
+                && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, sid, 27))
+            .then_some(sid)
+        })
+        .expect("Low-sec station with CONCORD/DED Security Office service (27) in SDE");
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
+            ch.station_id = Some(sec_office_station);
+        }
+    });
+    sess.station_id = Some(sec_office_station);
+
+    let zero_err = ctx
+        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(33141), PyRep::Integer(0)], &kw, None)
+        .await
+        .expect_err("Zero quantity must be rejected");
+    assert_eq!(zero_err.code, "InvalidQuantity");
+
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&(cid as i64)).unwrap();
+        ch.security_status = -0.1;
+        ch.balance = eve_db::IskCents::from_isk(25_000_000);
+        s.items.insert(
+            700_999,
+            item_rec(700_999, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 3, false),
+        );
+    });
+    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(33141), PyRep::Integer(3)], &kw, None)
+        .await
+        .expect("ApplyTagsForSecStatus with SDE Clone Soldier Negotiator Tag (33141)");
+
+    ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&(cid as i64)];
+        assert!((ch.security_status - 0.4).abs() < 1e-6, "Final Negotiator tag must cross 0.0 to +0.4, got {}", ch.security_status);
+        assert_eq!(ch.balance, eve_db::IskCents::from_isk(15_000_000), "Must debit 10M ISK for 1 tag");
+        assert_eq!(s.items.get(&700_999).map(|i| i.quantity), Some(2), "Must preserve 2 excess tags");
+        assert!(
+            s.wallet_journal.iter().any(|e| e.character_id == (cid as i64) && e.entry_type == "SecurityTagProcessing"),
+            "Must record SecurityTagProcessing wallet journal entry"
+        );
+    });
 }
 

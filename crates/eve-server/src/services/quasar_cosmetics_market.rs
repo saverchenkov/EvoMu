@@ -204,8 +204,8 @@ fn put_uuid(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) {
 
 fn put_isk(field: u32, units: u64, out: &mut Vec<u8>) {
     let mut b = Vec::new();
-    encode_varint_field(1, units, &mut b);
-    encode_varint_field(2, 0, &mut b);
+    encode_sint_field(1, i64::try_from(units).unwrap_or(i64::MAX), &mut b);
+    encode_sint_field(2, 0, &mut b);
     encode_bytes_field(field, &b, out);
 }
 
@@ -635,7 +635,19 @@ fn component_initiate_purchase(
         let location_id = ch
             .station_id
             .or(ch.structure_id)
-            .unwrap_or(ch.home_station_id.max(60_003_760));
+            .unwrap_or_else(|| {
+                if st.skinr.sde.stations.contains_key(&ch.home_station_id) {
+                    ch.home_station_id
+                } else {
+                    st.skinr
+                        .sde
+                        .stations
+                        .keys()
+                        .copied()
+                        .min()
+                        .unwrap_or(ch.home_station_id)
+                }
+            });
         let item_id = s
             .items
             .keys()

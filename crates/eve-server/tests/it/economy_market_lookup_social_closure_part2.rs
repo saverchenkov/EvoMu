@@ -565,7 +565,7 @@ async fn test_star_map_data_feeds_and_fw_zone_upgrades() {
     assert!(matches!(complex_rows.first(), Some(PyRep::DBRow { columns, .. }) if columns.len() == 4 && columns[0].0 == "solarSystemID" && columns[3].0 == "dungeonName"));
 
     let now_unix = ctx.now_unix();
-    let mk_esc = |id: i64, cid: i64, did: u32, name: &str, sys: u32, step: u8| eve_server::services::pve_exploration::EscalatingPathEntry { instance_id: id, character_id: cid, source_dungeon_id: 1001, expedition_dungeon_id: did, expedition_name: name.into(), destination_solar_system_id: sys, step_index: step, total_steps: 4, journal_text: name.into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001] };
+    let mk_esc = |id: i64, cid: i64, did: u32, name: &str, sys: u32, step: u8| eve_server::services::pve_exploration::EscalatingPathEntry { instance_id: id, character_id: cid, source_dungeon_id: 1001, expedition_dungeon_id: did, expedition_name: name.into(), destination_solar_system_id: sys, step_index: step, total_steps: 4, journal_text: name.into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001], journal_entry_template_id: 280_000 + u32::from(step) };
     eve_server::services::pve_exploration::with_pve_exploration_reg_db(&ctx.db, now_unix, |reg| {
         reg.escalations_by_char.entry(90_000_001).or_default().push(mk_esc(910_001, 90_000_001, 2001, "Caller Escalation", 30_000_142, 2));
         reg.escalations_by_char.entry(90_000_002).or_default().push(mk_esc(910_002, 90_000_002, 2002, "Other Pilot Escalation", 30_002_187, 1));

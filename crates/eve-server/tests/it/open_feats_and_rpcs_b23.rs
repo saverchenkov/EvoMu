@@ -141,7 +141,10 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
     ).await;
     assert_eq!(rsp_owned.status_code, STATUS_OK);
     let wm_owned = WireMessage::decode(&rsp_owned.payload.as_ref().unwrap().value).expect("decode owned");
-    let listing_uuid = bytes(&sub(&sub(&wm_owned, 1), 1), 1);
+    let owned_listing = sub(&wm_owned, 1);
+    let listing_uuid = bytes(&sub(&owned_listing, 1), 1);
+    let listing_price_isk = sub(&sub(&owned_listing, 2), 5);
+    assert_eq!(varint(&listing_price_isk, 1), Some(1_000_000 * 2)); // sint64 ZigZag-encoded
     let seller_bal_before_sale = ctx
         .db
         .with_snapshot(|s| s.characters[&(seller_cid as i64)].balance.0);
@@ -257,10 +260,14 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             &kw,
             None,
         ).await
-        .expect("Negotiator tag capped at 0.0");
-    assert_eq!(
-        dict_get(&cap_tag, "newSecurityStatus").and_then(|v| v.as_f64()),
-        Some(0.0)
+        .expect("Negotiator tag crosses 0.0 to +0.3");
+    assert!(
+        (dict_get(&cap_tag, "newSecurityStatus")
+            .and_then(|v| v.as_f64())
+            .unwrap()
+            - 0.3)
+            .abs()
+            < 1e-6
     );
     // 3. Faction police thresholds per system security & pod vs ship
     assert_eq!(faction_police_sec_threshold(1.0), Some(-2.0));

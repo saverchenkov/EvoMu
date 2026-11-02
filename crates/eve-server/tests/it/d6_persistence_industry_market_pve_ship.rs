@@ -332,15 +332,18 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
     let base_time: u64 = 1_760_100_000;
     let hack_sig_id = format!("DAT-{JITA_SYSTEM_ID}");
     let dat_pos = [-32_000_000.0, 28_000_000.0, -10_000_000.0];
-    let trace_origin = [145_000.0, -75_000.0, 42_000.0];
+    let trace_origin = [2_000_000.0, -75_000.0, 42_000.0];
 
     let (s2_id, r1_balls): (i64, Vec<i64>) = {
         let ctx = open_ctx_at(&path, base_time);
         let s2 = ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
             let (s1, s2) = (snap.characters[&P1].active_ship_id, snap.characters[&P2].active_ship_id);
-            snap.items.insert(920_001, make_item(920_001, 47763, P1, s1, InventoryFlag::Cargo, 5, false));
-            snap.items.insert(920_002, make_item(920_002, 47763, P2, s2, InventoryFlag::Cargo, 5, false));
+            if let Some(ship2) = snap.items.get_mut(&s2) {
+                ship2.type_id = 621; // Cruiser for 1-filament solo Abyssal deployment
+            }
+            snap.items.insert(920_001, make_item(920_001, 56134, P1, s1, InventoryFlag::Cargo, 5, false));
+            snap.items.insert(920_002, make_item(920_002, 56134, P2, s2, InventoryFlag::Cargo, 5, false));
             snap.items.insert(920_003, make_item(920_003, 22175, P1, s1, InventoryFlag::MedSlot0, 1, true));
             s2
         });
@@ -357,6 +360,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         call(&ctx, &mut sess_p1, "stationSvc", "Undock", &[]).await.expect("Undock P1");
         call(&ctx, &mut sess_p2, "stationSvc", "Undock", &[]).await.expect("Undock P2");
         ctx.db.with_mut_snapshot(|snap| { snap.item_positions.insert(s2, trace_origin); });
+        let _ = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).set_ball_position(s2, glam::DVec3::from_array(trace_origin)).await;
 
         call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await.expect("GetCombatAnomalyInstances");
         call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetSignatureInstances", &[]).await.expect("GetSignatureInstances");
@@ -397,7 +401,9 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = JITA_SYSTEM_ID; });
         assert_eq!(inc_step.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));
 
-        let act2 = call(&ctx, &mut sess_p2, "abyssal_content_manager", "ActivateAbyssalKey", &[PyRep::Integer(47763)]).await.expect("ActivateAbyssalKey P2");
+        let dep2 = call(&ctx, &mut sess_p2, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(920_002)]).await.expect("AbyssalEntranceDeployment P2");
+        let trace2 = dep2.dict_get("traceBallID").and_then(|v| v.as_i64()).expect("traceBallID P2");
+        let act2 = call(&ctx, &mut sess_p2, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(trace2)]).await.expect("AbyssalEntranceGateActivation P2");
         let r1_balls: Vec<i64> = match act2.dict_get("npcBallIDs") { Some(PyRep::List(l)) => l.iter().filter_map(|b| b.as_i64()).collect(), _ => vec![] };
         assert!(!r1_balls.is_empty());
         (s2, r1_balls)
@@ -426,7 +432,13 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
             let d = (p2_pos[i] - trace_origin[i]).abs();
             assert!((500.0..=5_000.0).contains(&d), "Downtime evacuation offset axis {i} must be 500..=5000m from trace origin, got {d}");
         }
-        call(&ctx, &mut sess_p2, "abyssal_content_manager", "ActivateAbyssalKey", &[PyRep::Integer(47763)]).await.expect("ActivateAbyssalKey P2 #2");
+        if let Some(b) = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).ballpark.write().unwrap().balls.get_mut(&s2_id) {
+            b.mode = eve_destiny::MovementMode::Stop;
+        }
+        let _ = ctx.systems.get_or_spawn(JITA_SYSTEM_ID).set_ball_position(s2_id, glam::DVec3::from_array(trace_origin)).await;
+        let dep2_b = call(&ctx, &mut sess_p2, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(920_002)]).await.expect("AbyssalEntranceDeployment P2 #2");
+        let trace2_b = dep2_b.dict_get("traceBallID").and_then(|v| v.as_i64()).expect("traceBallID P2 #2");
+        call(&ctx, &mut sess_p2, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(trace2_b)]).await.expect("AbyssalEntranceGateActivation P2 #2");
 
         let passive_probe = PyRep::List(vec![PyRep::List(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)])]);
         let scan_after = call(&ctx, &mut sess_p1, "scanMgr", "RequestScans", &[PyRep::Real(1_000.0), PyRep::Real(1.0), passive_probe]).await.expect("RequestScans after restart");

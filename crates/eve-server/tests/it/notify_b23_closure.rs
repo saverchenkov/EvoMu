@@ -348,6 +348,7 @@ async fn b23_fleet_escalation_and_decloak_notifications() {
         created_at_sec: 1_700_000_000,
         expires_at_sec: 1_700_086_400,
         dungeons_entered: vec![],
+        journal_entry_template_id: 280_001,
     };
     notify_pve_destruction_events(
         &ctx.db,
@@ -385,7 +386,7 @@ async fn b23_fleet_escalation_and_decloak_notifications() {
     let fleet_esc = find_notif(&notifs, "OnFleetEscalatingPathMessage");
     assert_eq!(fleet_esc.len(), 2);
     assert_eq!(fleet_esc[0].as_i64(), Some(PILOT_A));
-    assert_eq!(fleet_esc[1].as_i64(), Some(2002));
+    assert_eq!(fleet_esc[1].as_i64(), Some(280_001));
 
     // 2. OnCloakModuleForceDeactivated:
     let cloak_type_id = ctx

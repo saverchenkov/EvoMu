@@ -562,13 +562,18 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
     seed_pilot(&ctx, char_id, ship_id, jita_sys_id, DVec3::ZERO).await;
     let mut sess_jita = make_session(char_id, ship_id, jita_sys_id, None);
 
-    // Seed filament into pilot cargo in Jita
+    let cruiser_t4_tid = 56_139u32; // Tier 6 Cruiser filament (suspect flag on exit in 0.6 high-sec)
+
+    // Seed filament into pilot cargo in Jita (and ensure ship is a Cruiser for 1-filament solo deployment)
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 621;
+        }
         snap.items.insert(
             500_000_000,
             InventoryItemRecord {
                 item_id: 500_000_000,
-                type_id: 47890,
+                type_id: cruiser_t4_tid,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -587,9 +592,9 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
     let err_jita = dispatch_combat_rpc(
         &ctx,
         &mut sess_jita,
-        "abyssal_content_manager",
-        "ActivateAbyssalKey",
-        &[PyRep::Integer(47890)], // Tier 4 filament
+        "abyssalMgr",
+        "AbyssalEntranceDeployment",
+        &[PyRep::Integer(500_000_000)], // Tier 4 filament
         &HashMap::new(),
     )
     .await
@@ -604,11 +609,14 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
 
     // Seed filament into pilot cargo
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 621;
+        }
         snap.items.insert(
             500_000_001,
             InventoryItemRecord {
                 item_id: 500_000_001,
-                type_id: 47890,
+                type_id: cruiser_t4_tid,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -624,21 +632,35 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
         );
     });
 
-    let res_sivala = dispatch_combat_rpc(
+    let deploy_sivala = dispatch_combat_rpc(
         &ctx,
         &mut sess_sivala,
-        "abyssal_content_manager",
-        "ActivateAbyssalKey",
-        &[PyRep::Integer(47890)],
+        "abyssalMgr",
+        "AbyssalEntranceDeployment",
+        &[PyRep::Integer(500_000_001)],
         &HashMap::new(),
     )
     .await
     .expect("Tier 4 Abyssal filament allowed in 0.5-0.7 high-sec");
+    let trace_ball_id = deploy_sivala
+        .dict_get("traceBallID")
+        .and_then(|v| v.as_i64())
+        .expect("traceBallID");
+    let res_sivala = dispatch_combat_rpc(
+        &ctx,
+        &mut sess_sivala,
+        "abyssalMgr",
+        "AbyssalEntranceGateActivation",
+        &[PyRep::Integer(trace_ball_id)],
+        &HashMap::new(),
+    )
+    .await
+    .expect("AbyssalEntranceGateActivation in Sivala");
 
     let PyRep::KeyVal(kv) = res_sivala else {
         panic!("Expected KeyVal response, got {res_sivala:?}");
     };
-    assert_eq!(kv.get("suspectFlagOnExit"), Some(&PyRep::Bool(true)));
+    assert_eq!(kv.get("suspectFlagOnExit"), Some(&PyRep::Bool(false)));
 
     // Exiting the trace applies 15-minute (900s) Suspect flag to the pilot
     let now_unix = ctx.now_unix();

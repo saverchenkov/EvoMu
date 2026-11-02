@@ -595,7 +595,7 @@ pub fn notify_pve_destruction_events(
         if let Some((fid, members)) = fleet_info {
             let f_args = vec![
                 PyRep::Integer(killer_char_id),
-                PyRep::Integer(i64::from(esc.expedition_dungeon_id)),
+                PyRep::Integer(i64::from(esc.effective_journal_entry_template_id())),
             ];
             let (f_pkt, f_mpkt) = crate::router::ServerContext::build_macho_notification_packet(
                 fid,
