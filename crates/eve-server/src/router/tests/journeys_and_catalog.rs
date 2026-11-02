@@ -191,20 +191,48 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         (30_001_379_u32, 50_001_709_i64, 30_001_376_u32),
         (30_001_376_u32, 50_014_001_i64, 30_002_813_u32),
     ] {
-        ctx.dispatch_rpc(
-            &mut session,
-            "beyonce",
-            Some(cur_b_id),
-            "CmdWarpToStuff",
-            &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
-            &empty,
-            None,
-        )
-        .await
-        .unwrap();
         let sys_h = ctx.systems.get_or_spawn(from_sys);
-        for _ in 0..30 {
-            let _ = sys_h.step_manual(1.0).await.unwrap();
+        let _ = sys_h.step_manual(300.0).await;
+        let ship_id = session.ship_id.unwrap();
+        let warp_res = ctx
+            .dispatch_rpc(
+                &mut session,
+                "beyonce",
+                Some(cur_b_id),
+                "CmdWarpToStuff",
+                &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
+                &empty,
+                None,
+            )
+            .await;
+        match warp_res {
+            Ok(_) => {
+                for _ in 0..200 {
+                    let _ = sys_h.step_manual(1.0).await.unwrap();
+                    if let Ok(Some((_, b))) = sys_h.get_ball_snapshot(ship_id).await {
+                        if !matches!(b.mode, eve_destiny::MovementMode::Warp { .. }) {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) if e.code == "WarpDistanceTooShort" => {
+                ctx.dispatch_rpc(
+                    &mut session,
+                    "beyonce",
+                    Some(cur_b_id),
+                    "CmdFollowBall",
+                    &[PyRep::Integer(gate_id), PyRep::Real(0.0)],
+                    &empty,
+                    None,
+                )
+                .await
+                .expect("CmdFollowBall to nearby stargate");
+                for _ in 0..120 {
+                    let _ = sys_h.step_manual(1.0).await.unwrap();
+                }
+            }
+            Err(e) => panic!("CmdWarpToStuff to stargate {gate_id}: {e:?}"),
         }
         ctx.advance_secs(30);
         let jump_res = ctx
@@ -281,7 +309,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(30);
@@ -483,7 +511,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(30);

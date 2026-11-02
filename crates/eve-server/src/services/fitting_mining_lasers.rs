@@ -81,6 +81,28 @@ pub(crate) async fn handle_mining_and_deactivate(
             let mut removed_cycle_delay = None;
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
+                if sys.is_module_mjd_or_mjfg_spooling_sync(ship_id, module_id) {
+                    return Some(Err(BridgeRpcError {
+                        code: "CantDeactivateWhileSpooling".into(),
+                        message: "Cannot deactivate Micro Jump Drive or Micro Jump Field Generator while spooling".into(),
+                    }));
+                }
+                let is_cap_mjfg = mod_type_opt
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .is_some_and(|t| t.group_id == 1533 && t.name.contains("Capital"));
+                if is_cap_mjfg
+                    && sys
+                        .get_combat_state(ship_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|cs| cs.mjfg_spool_remaining_s > 0.0)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "CantDeactivateWhileSpooling".into(),
+                        message: "Cannot deactivate Capital Micro Jump Field Generator while spooling".into(),
+                    }));
+                }
                 removed_cycle_delay = sys.remove_module_cycle(ship_id, module_id).await.ok().flatten();
             }
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
@@ -227,25 +249,29 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "No active ship in session".into(),
                 }));
             };
-            if let Some(sys_id) = session.solar_system_id {
+            let was_cycling = if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.update_module_overload(ship_id, module_id, false).await;
-            }
+                sys.update_module_overload(ship_id, module_id, false).await.unwrap_or(false)
+            } else {
+                false
+            };
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(fm) = fit.modules.get_mut(&module_id) {
-                if fm.state == eve_dogma::ModuleState::Overloaded {
-                    fm.state = eve_dogma::ModuleState::Active;
+            if !was_cycling {
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    if fm.state == eve_dogma::ModuleState::Overloaded {
+                        fm.state = eve_dogma::ModuleState::Online;
+                    }
+                }
+                fit.recalculate_stats(&ctx.sde);
+                ctx.store_ship_fitting(ship_id, fit.clone());
+                if let Some(sys_id) = session.solar_system_id {
+                    crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
                 }
             }
-            fit.recalculate_stats(&ctx.sde);
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-            ctx.store_ship_fitting(ship_id, fit);
-            if let Some(sys_id) = session.solar_system_id {
-                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-            }
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -297,7 +323,18 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }
             };
             let overloaded = method == "OverloadRack";
-            let mut affected_modules = Vec::new();
+            if overloaded
+                && session
+                    .solar_system_id
+                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_any_active_nanite_repair_sync(ship_id))
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotOverheatWhileRepairing".into(),
+                    message: "UserError: Cannot overheat modules while in-space Nanite Repair Paste repair is active".into(),
+                }));
+            }
+            let mut notified_modules = Vec::new();
+            let mut cycling_modules = Vec::new();
             for (&mid, fm) in fit.modules.iter_mut() {
                 let r_idx = match fm.flag_id {
                     27..=34 => 0,
@@ -305,26 +342,47 @@ pub(crate) async fn handle_mining_and_deactivate(
                     11..=18 => 2,
                     _ => continue,
                 };
-                if r_idx == target_rack_idx && fm.state != eve_dogma::ModuleState::Offline {
-                    affected_modules.push(mid);
-                    if overloaded && fm.state == eve_dogma::ModuleState::Active {
+                if r_idx != target_rack_idx || fm.state == eve_dogma::ModuleState::Offline {
+                    continue;
+                }
+                if overloaded {
+                    if fm.state == eve_dogma::ModuleState::Online {
                         fm.state = eve_dogma::ModuleState::Overloaded;
-                    } else if !overloaded && fm.state == eve_dogma::ModuleState::Overloaded {
-                        fm.state = eve_dogma::ModuleState::Active;
+                        notified_modules.push(mid);
+                    } else if fm.state == eve_dogma::ModuleState::Active {
+                        cycling_modules.push(mid);
+                        notified_modules.push(mid);
+                    }
+                } else if fm.state == eve_dogma::ModuleState::Overloaded {
+                    cycling_modules.push(mid);
+                    notified_modules.push(mid);
+                }
+            }
+            if let Some(sys_id) = session.solar_system_id {
+                let sys = ctx.systems.get_or_spawn(sys_id);
+                for &mid in &cycling_modules {
+                    let was_cycling = sys.update_module_overload(ship_id, mid, overloaded).await.unwrap_or(false);
+                    if !overloaded && !was_cycling {
+                        if let Some(fm) = fit.modules.get_mut(&mid) {
+                            if fm.state == eve_dogma::ModuleState::Overloaded {
+                                fm.state = eve_dogma::ModuleState::Online;
+                            }
+                        }
+                    }
+                }
+            } else if !overloaded {
+                for &mid in &cycling_modules {
+                    if let Some(fm) = fit.modules.get_mut(&mid) {
+                        if fm.state == eve_dogma::ModuleState::Overloaded {
+                            fm.state = eve_dogma::ModuleState::Online;
+                        }
                     }
                 }
             }
             fit.recalculate_stats(&ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
-
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                for &mid in &affected_modules {
-                    let _ = sys.update_module_overload(ship_id, mid, overloaded).await;
-                }
-            }
             let notif_name = if overloaded { "OnHeatAdded" } else { "OnHeatRemoved" };
-            for &mid in &affected_modules {
+            for &mid in &notified_modules {
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     notif_name,
@@ -338,7 +396,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 ("overloaded", PyRep::Bool(overloaded)),
                 (
                     "moduleIDs",
-                    PyRep::List(affected_modules.into_iter().map(PyRep::Integer).collect()),
+                    PyRep::List(notified_modules.into_iter().map(PyRep::Integer).collect()),
                 ),
             ])))
         }
@@ -376,6 +434,12 @@ pub(crate) async fn handle_mining_and_deactivate(
                 return Some(Err(BridgeRpcError {
                     code: "ModuleAlreadyRepairing".into(),
                     message: format!("Module {module_id} is already undergoing nanite repair"),
+                }));
+            }
+            if sys.has_active_overloaded_cycle_sync(ship_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotRepairWhileOverloaded".into(),
+                    message: "UserError: Cannot initiate Nanite Repair Paste repair while another module on the ship is overloaded".into(),
                 }));
             }
 
@@ -468,7 +532,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 nanite_interfacing_lvl,
             );
 
-            let deduct_res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+            let deduct_res: Result<i32, BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(m_item) = snap.items.get(&module_id) else {
                     return Err(BridgeRpcError {
                         code: "ModuleNotFound".into(),
@@ -486,40 +550,44 @@ pub(crate) async fn handle_mining_and_deactivate(
                         ),
                     });
                 }
-                let paste_item_id = snap
+                let initial_deduct = if session.solar_system_id.is_some() {
+                    1_i32.min(paste_needed.max(1))
+                } else {
+                    paste_needed.max(1)
+                };
+                let avail: i32 = snap
                     .items
                     .values()
-                    .find(|i| {
+                    .filter(|i| {
                         i.owner_id == char_id
                             && i.location_id == ship_id
                             && i.flag == InventoryFlag::Cargo
                             && i.type_id == 28668
-                            && i.quantity >= paste_needed
+                            && i.quantity > 0
                             && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     })
-                    .map(|i| i.item_id);
-                let Some(pid) = paste_item_id else {
+                    .map(|i| i.quantity)
+                    .sum();
+                if avail < initial_deduct {
                     return Err(BridgeRpcError {
                         code: "NotEnoughNanitePaste".into(),
                         message: format!(
-                            "Need {paste_needed} Nanite Repair Paste (type 28668) in ship cargo"
+                            "Need {initial_deduct} Nanite Repair Paste (type 28668) in ship cargo"
                         ),
                     });
-                };
-                let mut rem = 0;
-                if let Some(p_item) = snap.items.get_mut(&pid) {
-                    p_item.quantity -= paste_needed;
-                    p_item.version += 1;
-                    rem = p_item.quantity;
                 }
-                if rem == 0 {
-                    snap.items.remove(&pid);
-                }
-                Ok(())
+                let taken = crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
+                    snap,
+                    char_id,
+                    ship_id,
+                    initial_deduct,
+                );
+                Ok(taken)
             });
-            if let Err(e) = deduct_res {
-                return Some(Err(e));
-            }
+            let initial_consumed = match deduct_res {
+                Ok(c) => c,
+                Err(e) => return Some(Err(e)),
+            };
 
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
@@ -529,7 +597,8 @@ pub(crate) async fn handle_mining_and_deactivate(
                         ship_id,
                         module_id,
                         initial_damage_hp: cur_dmg,
-                        paste_reserved: paste_needed,
+                        paste_total_needed: paste_needed.max(1),
+                        paste_consumed_so_far: initial_consumed,
                         duration_s,
                         elapsed_s: 0.0,
                     })
@@ -556,7 +625,8 @@ pub(crate) async fn handle_mining_and_deactivate(
 
             Some(Ok(PyRep::keyval([
                 ("moduleID", PyRep::Integer(module_id)),
-                ("pasteConsumed", PyRep::Integer(paste_needed as i64)),
+                ("pasteConsumed", PyRep::Integer(initial_consumed as i64)),
+                ("totalPasteRequired", PyRep::Integer(paste_needed.max(1) as i64)),
                 ("damageToRepair", PyRep::Real(cur_dmg)),
                 ("repairRateHpPerSec", PyRep::Real(repair_rate_hp_per_s)),
             ])))
@@ -591,8 +661,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 {
                     stopped = true;
                     rem_dmg_out = rem_dmg;
-                    paste_refunded = refund;
-                    ctx.db.with_mut_snapshot(|snap| {
+                    paste_refunded = ctx.db.with_mut_snapshot(|snap| {
                         if let Some(m_item) = snap.items.get_mut(&module_id) {
                             if rem_dmg <= 1e-6 {
                                 m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
@@ -600,46 +669,13 @@ pub(crate) async fn handle_mining_and_deactivate(
                                 m_item.dynamic_attributes.insert(attr_ids::DAMAGE, rem_dmg);
                             }
                         }
-                        if refund > 0 {
-                            let existing_pid = snap
-                                .items
-                                .values()
-                                .find(|i| {
-                                    i.owner_id == char_id
-                                        && i.location_id == ship_id
-                                        && i.flag == InventoryFlag::Cargo
-                                        && i.type_id == 28668
-                                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                                })
-                                .map(|i| i.item_id);
-                            if let Some(pid) = existing_pid {
-                                if let Some(p_item) = snap.items.get_mut(&pid) {
-                                    p_item.quantity += refund;
-                                    p_item.version += 1;
-                                }
-                            } else {
-                                snap.next_entity_id += 1;
-                                let new_id = snap.next_entity_id;
-                                snap.items.insert(
-                                    new_id,
-                                    eve_db::InventoryItemRecord {
-                                        item_id: new_id,
-                                        type_id: 28668,
-                                        owner_id: char_id,
-                                        location_id: ship_id,
-                                        flag: InventoryFlag::Cargo,
-                                        quantity: refund,
-                                        singleton: false,
-                                        version: 1,
-                                        dynamic_attributes: HashMap::new(),
-                                        source_mutaplasmid_id: None,
-                                        insured_payout_isk: 0.0,
-                                        is_blueprint_copy: false,
-                                        blueprint_runs_remaining: None,
-                                    },
-                                );
-                            }
-                        }
+                        crate::services::tactical_module_mechanics::refund_paste_to_cargo_capped_in_snap(
+                            snap,
+                            &ctx.sde,
+                            char_id,
+                            ship_id,
+                            refund,
+                        )
                     });
                     ctx.invalidate_ship_fitting(ship_id);
                 }

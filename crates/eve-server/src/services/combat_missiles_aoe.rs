@@ -648,7 +648,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                 let mut hit_ball_ids = Vec::new();
                 let mut illegal_capsuleer_hits: Vec<(i64, bool)> = Vec::new();
                 for b in all_balls {
-                    let is_probe_b = ctx.sde.types.get(&b.type_id).is_some_and(|t| matches!(t.group_id, 479 | 492 | 548));
+                    let is_probe_b = ctx.sde.types.get(&b.type_id).is_some_and(|t| matches!(t.group_id, 479 | 492 | 548 | 4088));
                     let is_drone_b = ctx.sde.types.get(&b.type_id).and_then(|t| ctx.sde.groups.get(&t.group_id)).is_some_and(|g| g.category_id == 18);
                     let is_targetable = is_combatant_ship_or_entity_ball(ctx, b.id, b.type_id) || is_drone_b || is_probe_b;
                     if b.id == ship_id || !is_targetable || destroyed_missile_ids.contains(&b.id) {

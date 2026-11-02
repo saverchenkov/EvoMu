@@ -481,33 +481,9 @@ pub async fn handle(
                         ctx.sde.types.get(&item.type_id),
                         ctx.sde.types.get(&ship_item.type_id),
                     ) {
-                        if mod_t.group_id == 1672 {
-                            let hull_ok = matches!(
-                                ship_t.group_id,
-                                27 | 30 | 485 | 513 | 547 | 659 | 883 | 898 | 900 | 902 | 941 | 1538 | 4594
-                            );
-                            if !hull_ok {
-                                return Err(BridgeRpcError {
-                                    code: "CanNotFitModuleToShip".into(),
-                                    message: format!(
-                                        "UserError: Heavy Stasis Grappler cannot be fitted to {} (group {})",
-                                        ship_t.name, ship_t.group_id
-                                    ),
-                                });
-                            }
-                            let already_grappler = snap.items.values().any(|i| {
-                                i.location_id == new_loc
-                                    && i.item_id != item_id
-                                    && matches!(i.flag as u16, 11..=34)
-                                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 1672)
-                            });
-                            if already_grappler {
-                                return Err(BridgeRpcError {
-                                    code: "MaxGroupFitted".into(),
-                                    message: "UserError: Maximum of 1 Heavy Stasis Grappler can be fitted per ship".into(),
-                                });
-                            }
-                        }
+                        crate::services::tactical_module_mechanics::validate_module_fitting_constraints(
+                            ctx, snap, new_loc, item_id, mod_t, ship_t,
+                        )?;
                     }
                     let (char_dock, char_sys, active_ship_id) = snap
                         .characters

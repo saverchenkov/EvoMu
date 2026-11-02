@@ -1222,6 +1222,25 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                     deactivate_repeating_cycle_after_action(ctx, &sys, Some(char_id), ship_id, module_id, &effect_name).await;
                 }
             }
+            crate::system_actor::PendingCycleAction::SyncOverloadState { char_id, ship_id, module_id, is_overloaded } => {
+                if let Some(cid) = char_id.or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id))) {
+                    if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(cid, ship_id) {
+                        if let Some(fm) = fit.modules.get_mut(&module_id).filter(|m| m.state != eve_dogma::ModuleState::Offline) {
+                            fm.state = if is_overloaded { eve_dogma::ModuleState::Overloaded } else { eve_dogma::ModuleState::Active };
+                        }
+                        fit.recalculate_stats(&ctx.sde);
+                        ctx.store_ship_fitting(ship_id, fit);
+                        crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
+                    }
+                }
+            }
+            crate::system_actor::PendingCycleAction::InvalidateShipFitting { char_id, ship_id } => {
+                ctx.ship_fittings.write().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+                if let Some(cid) = char_id.or_else(|| ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.owner_id))) {
+                    let _ = ctx.get_or_rebuild_ship_fitting(cid, ship_id);
+                    crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, cid, sys_id, ship_id).await;
+                }
+            }
         }
     }
 }

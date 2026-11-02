@@ -1270,6 +1270,7 @@ pub async fn handle(
             });
             Some(Ok(events_rep))
         }
+
         ("pvpFilamentMgr", "GetActiveEvents") => {
             let now_i64 = now_unix as i64;
             let active_rep = with_pvp_store_events(ctx, |store| {

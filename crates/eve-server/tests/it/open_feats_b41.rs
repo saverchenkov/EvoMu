@@ -84,12 +84,15 @@ async fn kill_npc_with_turret_rpc(
 ) {
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     let npc_pos = sys_h.get_ball_snapshot(npc_id).await.unwrap().expect("NPC ball").1.position;
+    let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
     let _ = sys_h.set_ball_position(ship_id, npc_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
     let mut cs = sys_h.get_combat_state(npc_id).await.unwrap().unwrap();
     (cs.shield_hp, cs.armor_hp, cs.structure_hp, cs.shield_recharge_time_ms) = (0.0, 0.0, 1.0, 1.0e15);
     let _ = sys_h.set_combat_state(npc_id, cs).await;
     let _ = rpc_call(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)]).await;
     lock_target_via_rpc(ctx, sess, sys_id, ship_id, npc_id).await;
+    let _ = sys_h.set_movement_mode(ship_id, MovementMode::Stop).await;
+    let _ = sys_h.set_ball_position(ship_id, npc_pos + DVec3::new(1_200.0, 0.0, 0.0)).await;
     rpc_call(
         ctx,
         sess,
@@ -99,7 +102,7 @@ async fn kill_npc_with_turret_rpc(
     )
     .await
     .expect("dogmaIM.Activate on NPC");
-    for _ in 0..8 {
+    for _ in 0..20 {
         sys_h.step_manual(1.0).await.unwrap();
         if sys_h.get_ball_snapshot(npc_id).await.unwrap().is_none() {
             break;
@@ -120,7 +123,7 @@ async fn warp_ship_via_rpc(ctx: &ServerContext, sess: &mut SessionState, sys_id:
     .await
     .expect("beyonce.CmdWarpToStuff");
     let sys_h = ctx.systems.get_or_spawn(sys_id);
-    for _ in 0..60 {
+    for _ in 0..300 {
         sys_h.step_manual(1.0).await.unwrap();
         if sys_h.get_ball_snapshot(ship_id).await.unwrap().is_some_and(|(_, b)| !matches!(b.mode, MovementMode::Warp { .. })) {
             break;

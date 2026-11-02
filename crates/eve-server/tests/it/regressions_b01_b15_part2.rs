@@ -108,6 +108,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
             .bind_object(sess_ref, "beyonce", sys_id as i64)
             .expect("bind beyonce");
         let handle = ctx_ref.systems.get_or_spawn(sys_id);
+        let _ = handle.step_manual(300.0).await;
         let warp_res = ctx_ref
             .dispatch_rpc(
                 sess_ref,
@@ -121,8 +122,14 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
             .await;
         match warp_res {
             Ok(_) => {
-                for _ in 0..40 {
+                let ship_id = sess_ref.ship_id.unwrap();
+                for _ in 0..200 {
                     let _ = handle.step_manual(1.0).await.unwrap();
+                    if let Ok(Some((_, b))) = handle.get_ball_snapshot(ship_id).await {
+                        if !matches!(b.mode, eve_destiny::MovementMode::Warp { .. }) {
+                            break;
+                        }
+                    }
                 }
             }
             Err(e) if e.code == "WarpDistanceTooShort" => {
@@ -145,7 +152,7 @@ async fn test_blocking_findings_b01_to_b15_tama_structure_and_clone_regressions(
                     )
                     .await
                     .expect("CmdGotoDirection to nearby stargate");
-                for _ in 0..9 {
+                for _ in 0..120 {
                     let _ = handle.step_manual(1.0).await.unwrap();
                 }
                 ctx_ref

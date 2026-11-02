@@ -639,26 +639,10 @@ impl ServerContext {
         ) {
             return res;
         }
-        if let Some(res) = services::macho_cluster_mgmt::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::macho_cluster_mgmt::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = Box::pin(services::auth_cache::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ))
-        .await
-        {
+        if let Some(res) = Box::pin(services::auth_cache::handle(self, session, effective_service, method, args, kwargs)).await {
             if (effective_service, method) == ("authentication", "Login") && res.is_ok() {
                 if let Some(uid) = session.user_id {
                     services::account_services::on_login(self, uid);
@@ -666,81 +650,25 @@ impl ServerContext {
             }
             return res;
         }
-        if let Some(res) = Box::pin(services::client_login::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-            caller_trace,
-        ))
-        .await
-        {
+        if let Some(res) = Box::pin(services::client_login::handle(self, session, effective_service, method, args, kwargs, caller_trace)).await {
             return res;
         }
-        if let Some(res) = services::inventory_bound::handle(
-            self,
-            session,
-            bound_entry.as_ref(),
-            effective_service,
-            method,
-            args,
-            caller_trace,
-        ) {
+        if let Some(res) = services::inventory_bound::handle(self, session, bound_entry.as_ref(), effective_service, method, args, caller_trace) {
             return res;
         }
-        if let Some(res) = Box::pin(services::corp_registry_ops::handle_corp_hangar_invbroker(
-            self,
-            session,
-            bound_entry.as_ref(),
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ))
-        .await
-        {
+        if let Some(res) = Box::pin(services::corp_registry_ops::handle_corp_hangar_invbroker(self, session, bound_entry.as_ref(), effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = services::character_expert_systems::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::character_expert_systems::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::character_skill_ops::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::character_skill_ops::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::character_certificates::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::character_certificates::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::character_skills::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::character_skills::handle(self, session, effective_service, method, args, kwargs) {
             if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
                 if let Some(cid) = session.character_id {
                     services::character_skill_ops::migrate_obsolete_skills_for_character(self, cid);
@@ -750,6 +678,7 @@ impl ServerContext {
                     }
                     services::market_contracts::sweep_and_notify_expired_for_char(self, cid);
                     services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
+                    services::nav_warp_interdiction::sync_waypoints_on_login(self, cid);
                     if let Some(st_id) = session.station_id {
                         services::notify_emitters_batch5::emit_char_station_notification(self, cid, st_id, true);
                     }

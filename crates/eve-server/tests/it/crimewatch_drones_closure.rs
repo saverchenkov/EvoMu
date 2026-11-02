@@ -314,7 +314,7 @@ async fn test_crimewatch_criminal_wreck_and_jetcan_auto_abandon_all_sec_bands() 
     let gate_pos = DVec3::new(975_370_690_560.0, -4_693_133_598_720.0, -389_298_954_240.0);
     let (ns_crim, ns_pod_c, ns_loot) = (92_300_001, 92_300_002, 92_300_003);
     let (ns_crim_s, ns_pod_s, ns_loot_s) = (82_300_001, 82_300_002, 82_300_003);
-    let mut ns_crim_sess = spawn_pilot(&ctx, 521, ns_crim, 1_000_009, ns_crim_s, 596, kaira, gate_pos).await;
+    let mut ns_crim_sess = spawn_pilot(&ctx, 521, ns_crim, 1_000_009, ns_crim_s, 596, kaira, gate_pos + DVec3::new(100.0, 0.0, 0.0)).await;
     let _ns_pod_sess = spawn_pilot(&ctx, 522, ns_pod_c, 1_000_010, ns_pod_s, 670, kaira, gate_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
     fit_online(&ctx, ns_crim, ns_crim_s, 82_300_101, 447, InventoryFlag::MedSlot0, None);
     seed_item(&ctx, 82_300_200, 34, ns_crim, ns_crim_s, InventoryFlag::Cargo, 40, false);

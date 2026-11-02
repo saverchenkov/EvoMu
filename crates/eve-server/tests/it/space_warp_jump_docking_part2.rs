@@ -242,7 +242,21 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     .await
     .expect("CmdWarpToStuff at 30 km minRange");
 
-    let expected_landing = station_pos - DVec3::new(min_range, 0.0, 0.0);
+    let station_radius = ctx
+        .sde
+        .types
+        .get(&ctx.sde.stations[&60003760].station_type_id)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .unwrap_or(0.0);
+    let expected_landing = station_pos
+        - DVec3::new(
+            station_radius
+                + eve_server::services::nav_warp_interdiction::STATION_DOCKING_RING_STANDOFF_M
+                + min_range,
+            0.0,
+            0.0,
+        );
     let mut saw_accel = false;
     let mut saw_decel_and_tested_smartbomb = false;
     for _ in 0..40 {

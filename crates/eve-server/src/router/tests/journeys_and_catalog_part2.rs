@@ -21,6 +21,14 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     ctx.dispatch_rpc(session, "beyonce", Some(cur_b_id), "CmdStop", &[], &empty, None)
         .await
         .unwrap();
+    if let (Some(ship_id), Ok(Some((_, convoy_ball)))) = (
+        session.ship_id,
+        jita_handle.get_ball_snapshot(800_000_001).await,
+    ) {
+        jita_handle
+            .set_ball_position(ship_id, convoy_ball.position + glam::DVec3::new(1_000.0, 0.0, 0.0))
+            .await;
+    }
 
     // E2E-17 (while in space in Jita): Living World 3-Tier LOD Materialization (auto-triggered on Undock), Convoy Combat Destruction, & +15% NPC Price Spike
     let non_gm_mat = crate::services::cosmetics_events::materialize_system_lod2(
@@ -80,7 +88,7 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     )
     .await
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(30);
@@ -142,7 +150,7 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
         let npc_ball_id = acc_mkv.get("spawnedNpcBallID").unwrap().as_i64().unwrap();
         ctx.set_invention_roll_override(Some(0.001));
         let mut destroyed = false;
-        for _ in 0..30 {
+        for _ in 0..200 {
             for _ in 0..4 {
                 let _ = perim_handle.step_manual(1.0).await.unwrap();
             }
@@ -230,7 +238,7 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     )
     .await
     .unwrap();
-    for _ in 0..30 {
+    for _ in 0..200 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
     ctx.advance_secs(30);
@@ -300,6 +308,13 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     ctx.dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &empty, None)
         .await
         .unwrap();
+    if let (Some(s1_ship), Some(s2_ship)) = (session.ship_id, sess2.ship_id) {
+        if let Ok(Some((_, s1_ball))) = jita_handle.get_ball_snapshot(s1_ship).await {
+            jita_handle
+                .set_ball_position(s2_ship, s1_ball.position + glam::DVec3::new(1_000.0, 0.0, 0.0))
+                .await;
+        }
+    }
 
     for _ in 0..4 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
@@ -364,6 +379,13 @@ pub(super) async fn run_e2e_09_to_12(ctx: &ServerContext, session: &mut SessionS
     ctx.dispatch_rpc(&mut sess2, "beyonce", Some(b_sess2), "CmdStop", &[], &empty, None)
         .await
         .unwrap();
+    if let (Some(s1_ship), Some(s2_ship)) = (session.ship_id, sess2.ship_id) {
+        if let Ok(Some((_, s2_ball))) = jita_handle.get_ball_snapshot(s2_ship).await {
+            jita_handle
+                .set_ball_position(s1_ship, s2_ball.position + glam::DVec3::new(1_000.0, 0.0, 0.0))
+                .await;
+        }
+    }
     let mut legal_destroyed = false;
     for _ in 0..120 {
         for _ in 0..4 {

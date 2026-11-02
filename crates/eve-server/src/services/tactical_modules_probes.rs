@@ -97,28 +97,69 @@ pub struct PendingWubbleProbe {
 pub struct ActiveWubbleDebuff {
     pub remaining_s: f64,
     pub velocity_multiplier: f64,
-    pub base_max_velocity: f64,
 }
 
-/// Registers a newly launched Stasis Webification Probe (`56748`) with a `3.0s` arming delay.
-pub fn register_launched_wubble_probe(ctx: &ServerContext, probe_id: i64, solar_system_id: u32, position: DVec3, radius_m: f64) {
+/// Returns active Stasis Webification Probe velocity multipliers (`0.05..=1.0`) currently affecting balls in `ballpark`.
+pub fn active_wubble_multipliers_for_ballpark(
+    ballpark: &Ballpark,
+) -> std::collections::HashMap<i64, f64> {
+    ballpark
+        .active_wubble_multipliers
+        .iter()
+        .map(|(&ball_id, &mult)| (ball_id, mult))
+        .collect()
+}
+
+/// Registers a newly launched Stasis Webification Probe (`56748`) using SDE `speedFactor` (`20`),
+/// `doomsdayWarningDuration` (`2262`), `doomsdayAOERange` (`2279`), and `doomsdayAOEDuration` (`2280`).
+pub fn register_launched_wubble_probe(
+    ctx: &ServerContext,
+    probe_id: i64,
+    probe_type_id: u32,
+    solar_system_id: u32,
+    position: DVec3,
+    fallback_radius_m: f64,
+) {
+    let probe_sde = ctx.sde.types.get(&probe_type_id);
+    let radius_m = probe_sde
+        .and_then(|t| t.default_attributes.get(&2279).copied())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(fallback_radius_m);
+    let arming_s = probe_sde
+        .and_then(|t| t.default_attributes.get(&2262).copied())
+        .map(|ms| (ms / 1000.0).max(0.0))
+        .unwrap_or(2.0);
+    let duration_s = probe_sde
+        .and_then(|t| t.default_attributes.get(&2280).copied())
+        .map(|ms| (ms / 1000.0).max(1.0))
+        .unwrap_or(30.0);
+    let velocity_multiplier = probe_sde
+        .and_then(|t| t.default_attributes.get(&20).copied())
+        .map(|sf| (1.0 + sf / 100.0).clamp(0.05, 1.0))
+        .unwrap_or(0.80);
+
     let db_key = tactical_modules::db_ptr_key(&ctx.db);
-    ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).pending_wubble_probes.push((
-        db_key,
-        PendingWubbleProbe {
-            probe_id,
-            solar_system_id,
-            position,
-            radius_m,
-            remaining_arming_s: 3.0,
-            duration_s: 30.0,
-            velocity_multiplier: 0.70,
-            detonated: false,
-        },
-    ));
+    ctx.tactical_state
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .pending_wubble_probes
+        .push((
+            db_key,
+            PendingWubbleProbe {
+                probe_id,
+                solar_system_id,
+                position,
+                radius_m,
+                remaining_arming_s: arming_s,
+                duration_s,
+                velocity_multiplier,
+                detonated: false,
+            },
+        ));
 }
 
-/// Advances pending Stasis Webification Probes (3s arming delay) and active 30s non-stacking wubble debuffs.
+/// Advances pending Stasis Webification Probes and active non-stacking wubble debuffs without
+/// overwriting `ball.max_velocity` directly (`reconcile_tackle_and_bubbles` composes them non-destructively).
 pub fn step_wubble_probes_and_debuffs(
     ballpark: &mut Ballpark,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
@@ -134,61 +175,71 @@ pub fn step_wubble_probes_and_debuffs(
 
     let ship_ids: Vec<i64> = ballpark.balls.keys().copied().collect();
     for sid in &ship_ids {
-        let mut expired_base = None;
-        if let Some(debuff) = st.active_wubble_debuffs.get_mut(&(db_key, *sid)) {
+        let expired = if let Some(debuff) = st.active_wubble_debuffs.get_mut(&(db_key, *sid)) {
             debuff.remaining_s -= dt;
-            if debuff.remaining_s <= 1e-6 {
-                expired_base = Some(debuff.base_max_velocity);
-            }
-        }
-        if let Some(base_vel) = expired_base {
+            debuff.remaining_s <= 1e-6
+        } else {
+            false
+        };
+        if expired {
             st.active_wubble_debuffs.remove(&(db_key, *sid));
-            if let Some(ball) = ballpark.balls.get_mut(sid) {
-                ball.max_velocity = base_vel;
-            }
         }
     }
 
-    let mut idx = 0;
-    while idx < st.pending_wubble_probes.len() {
-        if st.pending_wubble_probes[idx].0 != db_key {
-            idx += 1;
+    let mut dead_or_detonated_ids = Vec::new();
+    let pending = std::mem::take(&mut st.pending_wubble_probes);
+    let mut kept_pending = Vec::with_capacity(pending.len());
+    for (k, mut probe) in pending {
+        if k != db_key || probe.solar_system_id != ballpark.solar_system_id {
+            kept_pending.push((k, probe));
             continue;
         }
-        st.pending_wubble_probes[idx].1.remaining_arming_s -= dt;
-        if st.pending_wubble_probes[idx].1.remaining_arming_s <= 1e-6 {
-            let (_, probe) = st.pending_wubble_probes.remove(idx);
-            let eligible_sids: Vec<i64> = ballpark
-                .balls
-                .iter()
-                .filter_map(|(&sid, ball)| {
-                    if is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), sid, ball.type_id)
-                        && (ball.position - probe.position).length() <= probe.radius_m
-                    {
-                        Some(sid)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for sid in eligible_sids {
-                if let Some(ball) = ballpark.balls.get_mut(&sid) {
-                    if let Some(existing) = st.active_wubble_debuffs.get_mut(&(db_key, sid)) {
-                        existing.remaining_s = probe.duration_s;
-                        ball.max_velocity = existing.base_max_velocity * probe.velocity_multiplier;
-                    } else {
-                        let base_vel = ball.max_velocity;
-                        ball.max_velocity = base_vel * probe.velocity_multiplier;
-                        st.active_wubble_debuffs.insert((db_key, sid), ActiveWubbleDebuff {
+        let probe_alive = ballpark.balls.contains_key(&probe.probe_id)
+            && ballpark
+                .combat_states
+                .get(&probe.probe_id)
+                .is_none_or(|cs| cs.structure_hp > 0.0);
+        if !probe_alive {
+            st.active_interdiction_probes
+                .remove(&(db_key, probe.probe_id));
+            dead_or_detonated_ids.push(probe.probe_id);
+            continue;
+        }
+        probe.remaining_arming_s -= dt;
+        if probe.remaining_arming_s <= 1e-6 {
+            for (&sid, ball) in &ballpark.balls {
+                if is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), sid, ball.type_id)
+                    && (ball.position - probe.position).length() <= probe.radius_m
+                {
+                    st.active_wubble_debuffs.insert(
+                        (db_key, sid),
+                        ActiveWubbleDebuff {
                             remaining_s: probe.duration_s,
                             velocity_multiplier: probe.velocity_multiplier,
-                            base_max_velocity: base_vel,
-                        });
-                    }
+                        },
+                    );
                 }
             }
+            st.active_interdiction_probes
+                .remove(&(db_key, probe.probe_id));
+            dead_or_detonated_ids.push(probe.probe_id);
         } else {
-            idx += 1;
+            kept_pending.push((k, probe));
         }
+    }
+    st.pending_wubble_probes = kept_pending;
+
+    ballpark.active_wubble_multipliers.clear();
+    for sid in &ship_ids {
+        if let Some(debuff) = st.active_wubble_debuffs.get(&(db_key, *sid)) {
+            ballpark
+                .active_wubble_multipliers
+                .insert(*sid, debuff.velocity_multiplier);
+        }
+    }
+    drop(st);
+    for pid in dead_or_detonated_ids {
+        ballpark.remove_warp_bubble(pid);
+        let _ = ballpark.remove_ball(pid);
     }
 }

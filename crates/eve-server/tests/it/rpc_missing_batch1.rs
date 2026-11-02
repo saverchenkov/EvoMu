@@ -447,6 +447,14 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
         max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 50.0,
         speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
     }).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(vector_id, eve_db::InventoryItemRecord {
+            item_id: vector_id, type_id: 77_825, owner_id: char_id, location_id: ship_id,
+            flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1,
+            dynamic_attributes: std::collections::HashMap::new(), source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+        });
+    });
 
     let mut sess = SessionState::new(81_003);
     sess.user_id = Some(700);
@@ -512,7 +520,7 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
     sys_handle.try_remove_warp_bubble(888_001);
 
     let missing_vec = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(888_888_888)]).await;
-    assert!(matches!(missing_vec, Err(e) if e.code == "VectorItemNotFound"));
+    assert!(matches!(missing_vec, Err(e) if e.code == "InvalidVectorItem"));
 
     let vec_res = call_rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", &[PyRep::Integer(vector_id)]).await.expect("warpVectorMgr.UseVector");
     assert_eq!(dict_get(&vec_res, "shipID"), Some(&PyRep::Integer(ship_id)));

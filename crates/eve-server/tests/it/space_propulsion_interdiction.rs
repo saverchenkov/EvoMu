@@ -233,10 +233,13 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     // 2a. Launch Interdiction Sphere Probe Variants (`feat:modules.interdiction-sphere`, `feat:modules.interdiction-probe-variants`)
     let mut first_probe_bubble_id = 0_i64;
     for (idx, probe_type_id) in [22778_u32, 34260, 41402].into_iter().enumerate() {
+        for _ in 0..5 {
+            let _ = null_handle.tick().await;
+        }
         ctx.db.with_mut_snapshot(|snap| {
             let c = snap.items.get_mut(&charge_item_id).unwrap();
             c.type_id = probe_type_id;
-            c.quantity = 5;
+            c.quantity = 3;
         });
         let launch_res = ctx
             .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_item_id)], &kw, None)
@@ -315,7 +318,25 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     assert_eq!(akv["anchoringDelaySeconds"], PyRep::Real(120.0));
     assert_eq!(akv["bubbleRadius"], PyRep::Real(5_000.0));
     // Step 120s deploy timer so the Mobile Small Warp Disruptor I bubble activates in space
+    // (Note: the initial 120s Warp Disrupt Probe at 25,000 km also expires after 120s; launch a fresh 22778 probe at 25,000 km for catch/drag test)
     null_handle.step_manual(120.0).await.expect("Complete 120s deploy timer");
+    null_handle.set_ball_position(ship_id, sphere_bubble_pos).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&ship_id).unwrap().type_id = 22456;
+        if let Some(c) = snap.items.get_mut(&charge_item_id) {
+            c.type_id = 22778;
+            c.quantity = 3;
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let fresh_launch = ctx
+        .dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(launcher_item_id)], &kw, None)
+        .await
+        .expect("Launch fresh 120s Warp Disrupt Probe at 25,000 km");
+    if let PyRep::KeyVal(fkv) = fresh_launch {
+        first_probe_bubble_id = fkv.get("probeID").unwrap().as_i64().unwrap();
+    }
+    null_handle.step_manual(3.0).await.expect("Arm fresh 120s Warp Disrupt Probe");
 
     // 3. Verify non-nullified warp is dragged/stopped by bubble, and Interdiction Nullifier (`58919`, `feat:modules.interdiction-nullifier`) bypasses bubbles
     ctx.db.with_mut_snapshot(|snap| {
@@ -329,7 +350,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     ctx.invalidate_ship_fitting(ship_id);
     let warp_start = DVec3::new(15_000_000.0, 0.0, 0.0);
     let warp_dest_cel_id = 88_999;
-    let warp_dest_pos = DVec3::new(40_000_000.0, 0.0, 0.0);
+    let warp_dest_pos = DVec3::new(25_130_000.0, 0.0, 0.0);
     null_handle
         .spawn_ball(Ball {
             id: warp_dest_cel_id,
@@ -359,6 +380,21 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     .await
     .expect("CmdWarpToStuff without nullifier");
 
+    for _ in 0..10 {
+        let (_, b) = null_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(
+            b.mode,
+            MovementMode::Warp {
+                phase: eve_destiny::WarpPhase::Accelerating
+                    | eve_destiny::WarpPhase::Cruising
+                    | eve_destiny::WarpPhase::Decelerating,
+                ..
+            } | MovementMode::Stop
+        ) {
+            break;
+        }
+        let _ = null_handle.step_manual(1.0).await.unwrap();
+    }
     let (_, caught_ball) = null_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let MovementMode::Warp { destination: caught_dest, .. } = caught_ball.mode else {
         panic!("Expected ship in Warp mode");
@@ -369,9 +405,9 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
         caught_dest.x
     );
 
-    // Reset ship inside bubble at 25,000 km -> cannot warp without nullifier, CAN warp once nullifier activated
+    // Reset ship inside bubble at 24,980 km -> cannot warp without nullifier, CAN warp once nullifier activated
     let (_, mut reset_ball) = null_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-    reset_ball.position = sphere_bubble_pos;
+    reset_ball.position = DVec3::new(24_980_000.0, 0.0, 0.0);
     reset_ball.mode = MovementMode::Stop;
     null_handle.spawn_ball(reset_ball.clone()).await.unwrap();
 
@@ -409,7 +445,7 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     let MovementMode::Warp { destination: nullified_dest, .. } = nullified_ball.mode else {
         panic!("Expected ship in Warp mode");
     };
-    assert!((nullified_dest.x - 40_000_000.0).abs() < 1.0);
+    assert!((nullified_dest.x - 25_130_000.0).abs() < 1.0);
 
     let _ = null_handle.remove_warp_bubble(first_probe_bubble_id).await;
     let _ = null_handle.remove_warp_bubble(mobile_bubble_id).await;

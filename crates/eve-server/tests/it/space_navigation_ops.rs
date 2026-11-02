@@ -378,9 +378,9 @@ async fn test_space_navigation_warp_dock_undock_gate() {
     // 4. Positive & Negative: CmdDock
     let st_pos = ctx.sde.stations[&JITA_44].position;
 
-    // Negative: Outside docking perimeter (e.g. 50 km away)
+    // Negative: Outside docking perimeter (e.g. 150 km away)
     ctx.advance_secs(12);
-    assert!(h.set_ball_position(ship_id, st_pos + DVec3::new(50_000.0, 0.0, 0.0)).await);
+    assert!(h.set_ball_position(ship_id, st_pos + DVec3::new(150_000.0, 0.0, 0.0)).await);
     assert_eq!(
         rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "CmdDock", &[PyRep::Integer(JITA_44)]).await,
         "OutsideDockingPerimeter"

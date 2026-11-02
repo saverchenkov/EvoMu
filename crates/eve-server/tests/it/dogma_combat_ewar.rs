@@ -414,7 +414,7 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     .await
     .expect("Deactivate Heavy Stasis Grappler II");
 
-    // Lock far_id at 25 km and activate Heavy Stasis Grappler II -> decays to -15% floor (365 * 0.85 = 310.25)
+    // Lock far_id at 25 km and activate Heavy Stasis Grappler II -> decays across falloffEffectiveness without artificial -15% floor
     sys.add_target_lock(
         ship_id,
         TargetLock {
@@ -446,8 +446,8 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     let (_, far_ball_grap_25km) = sys.get_ball_snapshot(far_id).await.unwrap().unwrap();
     assert!(
         far_ball_grap_25km.max_velocity > victim_ball_grap_1km.max_velocity
-            && far_ball_grap_25km.max_velocity <= 365.0 * 0.85 + 0.5,
-        "Heavy Stasis Grappler II at 25 km must decay across falloffEffectiveness and clamp at >=15% web floor, got {}",
+            && far_ball_grap_25km.max_velocity < 365.0,
+        "Heavy Stasis Grappler II at 25 km must decay across falloffEffectiveness without artificial -15% floor, got {}",
         far_ball_grap_25km.max_velocity
     );
     ctx.dispatch_rpc(

@@ -30,6 +30,9 @@ pub(crate) struct EwarCapitalPrep {
     pub remote_falloff: f64,
     pub mutadaptive_spool_step: f64,
     pub mutadaptive_spool_max: f64,
+    pub grappler_optimal_m: f64,
+    pub grappler_falloff_m: f64,
+    pub grappler_speed_factor_pct: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -120,6 +123,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                 }
                 let mut target_velocity_multiplier: Option<f64> = None;
+                let mut grappler_optimal_m = 0.0;
+                let mut grappler_falloff_m = 0.0;
+                let mut grappler_speed_factor_pct = 0.0;
                 let mut immobilize_self = false;
                 let mut self_disallow_assistance = false;
                 let mut self_ewar_immune = false;
@@ -610,10 +616,10 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         let att = eve_dogma::compute_falloff_attenuation(distance_m, max_range, falloff);
                         let raw_sf = mod_state.get_attribute(20, &ctx.sde);
                         let eff_sf = if mod_type.group_id == 1672 {
-                            // Heavy Stasis Grappler (`feat:modules.heavy-stasis-grappler-falloff`):
-                            // Decays across optimal (1 km) and falloffEffectiveness (8-10 km) down to a -15% floor
+                            // Heavy Stasis Grappler (`feat:modules.stasis-grappler-mechanics`):
+                            // Full speedFactor within optimal (1 km), decaying across falloffEffectiveness (8-15 km) to 0%
                             if distance_m <= max_range + 3.0 * falloff.max(1.0) {
-                                (raw_sf * att).min(-15.0)
+                                raw_sf * att
                             } else {
                                 0.0
                             }
@@ -622,6 +628,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         };
                         target_velocity_multiplier = Some((1.0 + eff_sf / 100.0).clamp(0.05, 1.0));
                         if mod_type.group_id == 1672 {
+                            grappler_optimal_m = max_range;
+                            grappler_falloff_m = falloff;
+                            grappler_speed_factor_pct = raw_sf;
                             proj_mod_state.base_attributes.insert(20, eff_sf);
                             proj_mod_state.base_attributes.insert(54, 1_000_000_000.0);
                             proj_mod_state.modifiers.retain(|mm| mm.target_attribute_id != 20);
@@ -727,10 +736,30 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                             remote_shield_amount = mod_state.get_attribute(68, &ctx.sde) * ov_m * rr_imp_m;
                         }
                         325 | 2018 | 1698 => {
-                            remote_armor_amount = mod_state.get_attribute(84, &ctx.sde) * ov_m * rr_imp_m;
                             if mod_type.group_id == 2018 {
-                                mutadaptive_spool_step = mod_type.default_attributes.get(&2796).copied().unwrap_or(0.10);
-                                mutadaptive_spool_max = mod_type.default_attributes.get(&2797).copied().unwrap_or(1.50);
+                                let base_state = if m.dynamic_attribute_overrides.contains_key(&84) {
+                                    let mut clean_fit = fit.clone();
+                                    if let Some(fm) = clean_fit.modules.get_mut(&module_id) {
+                                        fm.dynamic_attribute_overrides.remove(&84);
+                                    }
+                                    clean_fit.build_effective_module_state(
+                                        module_id,
+                                        m.type_id,
+                                        is_overloaded,
+                                        &ctx.sde,
+                                    )
+                                } else {
+                                    mod_state.clone()
+                                };
+                                remote_armor_amount =
+                                    base_state.get_attribute(84, &ctx.sde) * ov_m * rr_imp_m;
+                                mutadaptive_spool_step =
+                                    mod_type.default_attributes.get(&2796).copied().unwrap_or(0.10);
+                                mutadaptive_spool_max =
+                                    mod_type.default_attributes.get(&2797).copied().unwrap_or(1.50);
+                            } else {
+                                remote_armor_amount =
+                                    mod_state.get_attribute(84, &ctx.sde) * ov_m * rr_imp_m;
                             }
                         }
                         585 => {
@@ -850,6 +879,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
         remote_falloff,
         mutadaptive_spool_step,
         mutadaptive_spool_max,
+        grappler_optimal_m,
+        grappler_falloff_m,
+        grappler_speed_factor_pct,
     }))
 }
 
@@ -966,4 +998,348 @@ pub(crate) fn emit_committed_ewar_and_system_wide_notifications(
             ewar_args,
         );
     }
+}
+
+pub(crate) async fn handle_load_ammo(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
+    let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
+    if !owns_ship {
+        return Err(BridgeRpcError {
+            code: "ShipOwnershipViolation".into(),
+            message: format!("Ship {ship_id} is not owned by character {char_id}"),
+        });
+    }
+    let requested_module_ids: Vec<i64> = match args.get(1) {
+        Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
+        Some(v) => v.as_i64().into_iter().collect(),
+        None => Vec::new(),
+    };
+    let charge_item_ids: Vec<i64> = match args.get(2) {
+        Some(PyRep::List(v) | PyRep::Tuple(v)) => v.iter().filter_map(|x| x.as_i64()).collect(),
+        Some(v) => v.as_i64().into_iter().collect(),
+        None => Vec::new(),
+    };
+
+    let Some(&first_charge_id) = charge_item_ids.first() else {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "LoadAmmo requires charge itemID".into(),
+        });
+    };
+
+    let charge_check = ctx.db.with_snapshot(|snap| {
+        let Some(stack) = snap.items.get(&first_charge_id) else {
+            return Err(BridgeRpcError {
+                code: "ItemNotFound".into(),
+                message: format!("Charge item {first_charge_id} not found"),
+            });
+        };
+        if stack.owner_id != char_id {
+            return Err(BridgeRpcError {
+                code: "ItemOwnershipViolation".into(),
+                message: format!("Charge item {first_charge_id} is not owned by character {char_id}"),
+            });
+        }
+        let current_dock = session.station_id.or(session.structure_id).or_else(|| {
+            snap.characters
+                .get(&char_id)
+                .and_then(|c| c.station_id.or(c.structure_id))
+        });
+        let in_ship_ammo_hold = stack.owner_id == char_id
+            && stack.quantity > 0
+            && stack.flag != InventoryFlag::Locked
+            && stack.location_id == ship_id
+            && matches!(
+                stack.flag,
+                InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold
+            )
+            && snap.is_ship_colocated_with_character(char_id, ship_id, current_dock)
+            && !snap.is_item_locked_in_contract_or_job(first_charge_id);
+        if !snap.is_item_consumable_by(stack, char_id, current_dock, Some(ship_id))
+            && !in_ship_ammo_hold
+        {
+            return Err(BridgeRpcError {
+                code: "AmmoNotReachable".into(),
+                message: format!("Charge item {first_charge_id} must be unlocked in your current station hangar or active ship cargo/ammo hold and not in a contract"),
+            });
+        }
+        Ok((stack.type_id, stack.quantity))
+    });
+    let (charge_type_id, avail_qty) = charge_check?;
+    let charge_vol = ctx
+        .sde
+        .types
+        .get(&charge_type_id)
+        .map(|t| t.volume.max(0.0001))
+        .unwrap_or(0.0025);
+
+    let all_target_modules: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        let mut out = Vec::new();
+        for &req_id in &requested_module_ids {
+            let resolved_mod_id = if snap.items.contains_key(&req_id) {
+                req_id
+            } else if let Some(found) = snap
+                .items
+                .values()
+                .find(|i| i.owner_id == char_id && i.location_id == ship_id && (i.flag as i64) == req_id)
+            {
+                found.item_id
+            } else {
+                req_id
+            };
+            if let Some(bank) = snap.weapon_banks.get(&ship_id).and_then(|b| b.get(&resolved_mod_id))
+            {
+                for &m in bank {
+                    if !out.contains(&m) {
+                        out.push(m);
+                    }
+                }
+            } else if !out.contains(&resolved_mod_id) {
+                out.push(resolved_mod_id);
+            }
+        }
+        out
+    });
+    if all_target_modules.is_empty() {
+        return Ok(PyRep::None);
+    }
+
+    for &mod_id in &all_target_modules {
+        let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) else {
+            return Err(BridgeRpcError {
+                code: "ModuleNotFound".into(),
+                message: format!("Target module {mod_id} not found"),
+            });
+        };
+        if mod_item.owner_id != char_id
+            || mod_item.location_id != ship_id
+            || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
+        {
+            return Err(BridgeRpcError {
+                code: "ModuleOwnershipViolation".into(),
+                message: format!("Target module {mod_id} is not fitted on ship {ship_id} owned by character {char_id}"),
+            });
+        }
+        if let (Some(wt), Some(ct)) = (
+            ctx.sde.types.get(&mod_item.type_id),
+            ctx.sde.types.get(&charge_type_id),
+        ) {
+            let aar_paste_ok = matches!(wt.group_id, 1199 | 1698) && ct.type_id == 28668;
+            let cap_booster_ok = matches!(wt.group_id, 76 | 1156 | 1697)
+                && ct.group_id == 87
+                && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+            let wubble_probe_ok = wt.group_id == 589
+                && matches!(ct.group_id, 548 | 4088)
+                && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+            if !ServerContext::is_charge_compatible_with_weapon(wt, ct)
+                && !aar_paste_ok
+                && !cap_booster_ok
+                && !wubble_probe_ok
+            {
+                return Err(BridgeRpcError {
+                    code: "IncompatibleAmmo".into(),
+                    message: format!("Charge {} is incompatible with weapon {}", ct.name, wt.name),
+                });
+            }
+            if matches!(ct.group_id, 482 | 663) {
+                ctx.db.with_snapshot(|snap| {
+                    ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, charge_type_id)
+                })?;
+            }
+        }
+    }
+
+    let mut reload_time_ms = 10_000.0;
+    let mut first_mod_group_id = 0u32;
+    let mut per_mod_caps: Vec<(i64, i32)> = Vec::with_capacity(all_target_modules.len());
+    for (idx, &mod_id) in all_target_modules.iter().enumerate() {
+        let mut cap_rounds = 1i32;
+        if let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) {
+            if let Some(mod_t) = ctx.sde.types.get(&mod_item.type_id) {
+                if idx == 0 {
+                    first_mod_group_id = mod_t.group_id;
+                    if let Some(&rt) = mod_t.default_attributes.get(&1795) {
+                        reload_time_ms = rt;
+                    }
+                    if mod_t.group_id == 1770 {
+                        let cbs_lvl = ctx
+                            .character_skill_levels(char_id)
+                            .get(&43728)
+                            .copied()
+                            .unwrap_or(0)
+                            .min(5);
+                        reload_time_ms = 60_000.0 * (1.0 - 0.10 * (cbs_lvl as f64));
+                    }
+                }
+                let cap = mod_t.capacity.max(0.0);
+                if cap > 0.0 {
+                    cap_rounds = (cap / charge_vol).floor() as i32;
+                }
+            }
+        }
+        if cap_rounds <= 0 {
+            cap_rounds = 1;
+        }
+        per_mod_caps.push((mod_id, cap_rounds));
+    }
+
+    let num_mods = all_target_modules.len() as i32;
+    if avail_qty < num_mods {
+        return Err(BridgeRpcError {
+            code: "InsufficientQuantity".into(),
+            message: format!("Need at least {num_mods} charges, but only {avail_qty} available in stack"),
+        });
+    }
+    let fair_share = (avail_qty / num_mods).max(1);
+    let mut mod_allocations: Vec<(i64, i32)> = Vec::with_capacity(per_mod_caps.len());
+    let mut total_needed = 0i32;
+    for &(mod_id, cap_rounds) in &per_mod_caps {
+        let alloc = cap_rounds.min(fair_share).max(1);
+        mod_allocations.push((mod_id, alloc));
+        total_needed += alloc;
+    }
+
+    let cargo_cap_opt = ctx
+        .get_or_rebuild_ship_fitting(char_id, ship_id)
+        .ok()
+        .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
+        .filter(|&c| c > 0.0)
+        .or_else(|| {
+            ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .get(&ship_id)
+                    .and_then(|s| ctx.sde.types.get(&s.type_id))
+                    .map(|t| t.capacity)
+                    .filter(|&c| c > 0.0)
+            })
+        });
+
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if let Some(cargo_cap) = cargo_cap_opt {
+            let source_in_cargo = snap
+                .items
+                .get(&first_charge_id)
+                .is_some_and(|s| s.location_id == ship_id && s.flag == InventoryFlag::Cargo);
+            let current_cargo_used: f64 = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
+                .map(|i| {
+                    let v = ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.0);
+                    v * (i.quantity as f64)
+                })
+                .sum();
+            let removed_from_cargo_vol = if source_in_cargo {
+                charge_vol * (total_needed as f64)
+            } else {
+                0.0
+            };
+            let mut unloaded_to_cargo_vol = 0.0;
+            for &(mod_id, _) in &mod_allocations {
+                if let Some(mod_item) = snap.items.get(&mod_id) {
+                    let slot_flag = mod_item.flag;
+                    for prev in snap.items.values().filter(|i| {
+                        i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id
+                    }) {
+                        let pv = ctx.sde.types.get(&prev.type_id).map(|t| t.volume).unwrap_or(0.0);
+                        unloaded_to_cargo_vol += pv * (prev.quantity as f64);
+                    }
+                }
+            }
+            if unloaded_to_cargo_vol > 0.0
+                && (current_cargo_used - removed_from_cargo_vol + unloaded_to_cargo_vol)
+                    > cargo_cap + 1e-4
+            {
+                return Err(BridgeRpcError {
+                    code: "NotEnoughCargoSpace".into(),
+                    message: format!(
+                        "Not enough cargo space on ship {ship_id} to unload existing charges ({unloaded_to_cargo_vol:.1} m³ needed)"
+                    ),
+                });
+            }
+        }
+
+        if let Some(stack) = snap.items.get_mut(&first_charge_id) {
+            if stack.quantity > total_needed {
+                stack.quantity -= total_needed;
+                stack.version += 1;
+            } else {
+                snap.items.remove(&first_charge_id);
+            }
+        }
+        for &(mod_id, alloc_qty) in &mod_allocations {
+            let Some(mod_item) = snap.items.get(&mod_id).cloned() else {
+                continue;
+            };
+            if mod_item.owner_id != char_id
+                || mod_item.location_id != ship_id
+                || !matches!(mod_item.flag as u16, 11..=34 | 125..=132)
+            {
+                continue;
+            }
+            let slot_flag = mod_item.flag;
+            let prev_charges: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| i.location_id == ship_id && i.flag == slot_flag && i.item_id != mod_id)
+                .map(|i| i.item_id)
+                .collect();
+            for pid in prev_charges {
+                if let Some(pi) = snap.items.get_mut(&pid) {
+                    pi.flag = InventoryFlag::Cargo;
+                }
+            }
+            snap.next_entity_id += 1;
+            let new_charge_id = snap.next_entity_id;
+            snap.items.insert(
+                new_charge_id,
+                eve_db::InventoryItemRecord {
+                    item_id: new_charge_id,
+                    type_id: charge_type_id,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: slot_flag,
+                    quantity: alloc_qty,
+                    singleton: false,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        }
+        Ok(())
+    })?;
+
+    let is_in_space = session.station_id.is_none() && session.structure_id.is_none();
+    let is_script = ctx.sde.types.get(&charge_type_id).is_some_and(|t| t.group_id == 908);
+    if is_in_space && !is_script && first_mod_group_id != 481 && reload_time_ms > 0.0 {
+        let reload_secs = (reload_time_ms / 1000.0).ceil() as u64;
+        set_modules_reload_until(ctx, &all_target_modules, ctx.now_unix_secs() + reload_secs);
+    }
+
+    let _ = ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnChargeBeingLoadedToModule",
+        "charid",
+        vec![
+            PyRep::List(all_target_modules.iter().map(|&id| PyRep::Integer(id)).collect()),
+            PyRep::Integer(charge_type_id as i64),
+            PyRep::Real(reload_time_ms),
+        ],
+    );
+
+    ctx.invalidate_ship_fitting(ship_id);
+
+    Ok(PyRep::keyval([
+        ("reloadTimeMs", PyRep::Real(reload_time_ms)),
+        ("totalLoaded", PyRep::Integer(total_needed as i64)),
+    ]))
 }

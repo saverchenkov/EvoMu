@@ -130,23 +130,29 @@ impl Ballpark {
             }
 
             if let MovementMode::Warp {
-                destination,
+                mut destination,
                 warp_speed_au_s,
                 mut phase,
                 mut elapsed_warp_time,
                 origin,
-                total_distance,
+                mut total_distance,
             } = ball.mode.clone()
             {
-                let is_nullified = self
+                let is_nullified_or_shuttle = self.ball_group_ids.get(&ball.id) == Some(&31)
+                    || self
+                        .combat_states
+                        .get(&ball.id)
+                        .is_some_and(|cs| cs.is_interdiction_nullified);
+                let is_emergency_warp = self
                     .combat_states
                     .get(&ball.id)
-                    .map(|cs| cs.is_interdiction_nullified)
-                    .unwrap_or(false);
-                // While still sub-warp aligning, entering or sitting in a bubble aborts alignment immediately.
+                    .is_some_and(|cs| cs.is_emergency_warping);
+                // While still sub-warp aligning, entering or sitting in a bubble aborts alignment immediately,
+                // except for shuttles, active Interdiction Nullifiers, and disconnect emergency warps.
                 // Once in the warp tunnel (Accelerating/Cruising/Decelerating), newly anchored bubbles do not yank ships mid-flight.
                 if phase == WarpPhase::Aligning
-                    && !is_nullified
+                    && !is_nullified_or_shuttle
+                    && !is_emergency_warp
                     && self.warp_bubble_mgr.is_scrambled_at(ball.position)
                 {
                     ball.velocity = DVec3::ZERO;
@@ -157,6 +163,21 @@ impl Ballpark {
                 }
 
                 let was_aligning = phase == WarpPhase::Aligning;
+                let mut pre_intercepted = false;
+                if !is_nullified_or_shuttle && phase == WarpPhase::Aligning {
+                    let to_dest = destination - ball.position;
+                    let warp_dir = to_dest.normalize_or_zero();
+                    let align_threshold = ball.max_velocity * (0.75 - 1e-12);
+                    if warp_dir != DVec3::ZERO && ball.velocity.dot(warp_dir) >= align_threshold {
+                        if let Some((_bid, intercept_pos)) =
+                            self.warp_bubble_mgr.check_interception(origin, destination)
+                        {
+                            destination = intercept_pos;
+                            total_distance = (intercept_pos - origin).length();
+                            pre_intercepted = true;
+                        }
+                    }
+                }
                 let exited = step_warp_ball(
                     ball,
                     dt,
@@ -167,7 +188,7 @@ impl Ballpark {
                     &mut phase,
                     &mut elapsed_warp_time,
                 );
-                if !is_nullified && was_aligning && phase != WarpPhase::Aligning {
+                if !is_nullified_or_shuttle && !pre_intercepted && was_aligning && phase != WarpPhase::Aligning {
                     if let Some((_bid, intercept_pos)) =
                         self.warp_bubble_mgr.check_interception(origin, destination)
                     {
@@ -214,152 +235,8 @@ impl Ballpark {
             }
         }
 
-        // Collision bounce physics (`Destiny::Ball::Collision`, `SP-4`)
-        let ball_keys: Vec<BallId> = self.balls.keys().copied().collect();
-        let mut collision_events = Vec::new();
-        let restitution = 0.8;
-
-        for i in 0..ball_keys.len() {
-            let id_a = ball_keys[i];
-            let is_static_a = self.is_static_ball(id_a)
-                || matches!(self.balls[&id_a].mode, MovementMode::Miniball);
-
-            for j in (i + 1)..ball_keys.len() {
-                let id_b = ball_keys[j];
-                let is_static_b = self.is_static_ball(id_b)
-                    || matches!(self.balls[&id_b].mode, MovementMode::Miniball);
-
-                // Skip static-static collisions and self/sibling miniball collisions (`_destiny.so` `0x2a3cb..0x2a3dd`)
-                if is_static_a && is_static_b {
-                    continue;
-                }
-                let mb_parent_a = self.miniball_states.get(&id_a).map(|m| m.parent_id);
-                let mb_parent_b = self.miniball_states.get(&id_b).map(|m| m.parent_id);
-                if mb_parent_a == Some(id_b)
-                    || mb_parent_b == Some(id_a)
-                    || (mb_parent_a.is_some() && mb_parent_a == mb_parent_b)
-                {
-                    continue;
-                }
-
-                // Celestial spheres, stargates, stations, intangible field bubbles, and mushroom shockwaves do not have elastic bounce collision physics
-                if matches!(
-                    self.balls[&id_a].mode,
-                    MovementMode::Field | MovementMode::Mushroom
-                ) || matches!(
-                    self.balls[&id_b].mode,
-                    MovementMode::Field | MovementMode::Mushroom
-                ) {
-                    continue;
-                }
-                let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
-                let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                if matches!(group_a, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1408 | 1657 | 1971 | 1980 | 1981)
-                    || matches!(group_b, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1408 | 1657 | 1971 | 1980 | 1981)
-                {
-                    continue;
-                }
-
-                // Jump-cloaked / cloaked ships cannot be bumped (`feat:navigation.jump-cloak-immunities`, `SP-4`)
-                if self.combat_states.get(&id_a).is_some_and(|cs| {
-                    let mut c = cs.clone();
-                    c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0 || c.is_cloaked
-                }) || self.combat_states.get(&id_b).is_some_and(|cs| {
-                    let mut c = cs.clone();
-                    c.sync_action_breaks();
-                    c.gate_cloak_remaining_ticks > 0 || c.is_cloaked
-                }) {
-                    continue;
-                }
-
-                let (pos_a, rad_a, mass_a, vel_a) = {
-                    let b = &self.balls[&id_a];
-                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
-                };
-                let (pos_b, rad_b, mass_b, vel_b) = {
-                    let b = &self.balls[&id_b];
-                    (b.position, b.radius, b.mass.max(1.0), b.velocity)
-                };
-
-                if rad_a > 50_000.0 || rad_b > 50_000.0 {
-                    continue;
-                }
-
-                let delta = pos_a - pos_b;
-                let dist = delta.length();
-                let min_dist = rad_a + rad_b;
-
-                if matches!(self.balls[&id_a].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
-                    || matches!(self.balls[&id_b].mode, MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning)
-                {
-                    continue;
-                }
-
-                if dist < min_dist {
-                    let normal = if dist > 1e-4 {
-                        delta / dist
-                    } else {
-                        DVec3::X
-                    };
-                    let overlap = min_dist - dist;
-                    let v_rel = (vel_a - vel_b).dot(normal);
-
-                    if !is_static_a && !is_static_b {
-                        // Dynamic vs dynamic
-                        if v_rel < 0.0 {
-                            let total_inv_mass = (1.0 / mass_a) + (1.0 / mass_b);
-                            let impulse = -(1.0 + restitution) * v_rel / total_inv_mass;
-                            if let Some(ba) = self.balls.get_mut(&id_a) {
-                                ba.velocity += normal * (impulse / mass_a);
-                            }
-                            if let Some(bb) = self.balls.get_mut(&id_b) {
-                                bb.velocity -= normal * (impulse / mass_b);
-                            }
-                        }
-                        let total_mass = mass_a + mass_b;
-                        if let Some(ba) = self.balls.get_mut(&id_a) {
-                            ba.position += normal * (overlap * (mass_b / total_mass));
-                        }
-                        if let Some(bb) = self.balls.get_mut(&id_b) {
-                            bb.position -= normal * (overlap * (mass_a / total_mass));
-                        }
-                    } else if !is_static_a && is_static_b {
-                        // Dynamic A vs Static B
-                        if v_rel < 0.0 {
-                            if let Some(ba) = self.balls.get_mut(&id_a) {
-                                ba.velocity -= normal * ((1.0 + restitution) * v_rel);
-                            }
-                        }
-                        if let Some(ba) = self.balls.get_mut(&id_a) {
-                            ba.position += normal * overlap;
-                        }
-                    } else if is_static_a && !is_static_b {
-                        // Static A vs Dynamic B
-                        if v_rel < 0.0 {
-                            if let Some(bb) = self.balls.get_mut(&id_b) {
-                                bb.velocity += normal * ((1.0 + restitution) * v_rel);
-                            }
-                        }
-                        if let Some(bb) = self.balls.get_mut(&id_b) {
-                            bb.position -= normal * overlap;
-                        }
-                    }
-
-                    collision_events.push((id_a, id_b));
-                }
-            }
-        }
-
-        for (id_a, id_b) in collision_events {
-            let ev = DestinyEvent::Collision {
-                ball_a: id_a,
-                ball_b: id_b,
-            };
-            // `Collision` is not a V24 DoDestinyUpdate action (the client resolves bumps in its own
-            // destiny tick), so it stays simulation-internal and is never queued onto the wire.
-            self.pending_events.push(ev);
-        }
+        // Collision bounce physics (`Destiny::Ball::Collision`, `SP-4`, `feat:navigation.collision-bumping`)
+        self.step_collision_bumping();
 
         // Gate cloak, post-warp invulnerability, and undock invulnerability decay and break on active movement (`SP-3`, `SP-4`, `SP-5`)
         let mut gate_decloaked = Vec::new();
@@ -784,6 +661,7 @@ impl Ballpark {
 
         for ball_id in warp_exit_stops {
             if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+                cs.is_emergency_warping = false;
                 cs.warp_exit_invulnerable_remaining_ticks = 10;
                 cs.undock_invulnerable_remaining_ticks =
                     cs.undock_invulnerable_remaining_ticks.max(10);
@@ -1237,7 +1115,7 @@ pub(crate) fn step_warp_ball(
     }
 
     if *phase == WarpPhase::Aligning {
-        let align_threshold = ball.max_velocity * 0.75;
+        let align_threshold = ball.max_velocity * (0.75 - 1e-12);
         let forward_speed = ball.velocity.dot(warp_dir);
         if forward_speed < align_threshold {
             let goal_vel = warp_dir * ball.max_velocity;

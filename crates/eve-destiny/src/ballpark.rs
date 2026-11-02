@@ -2,7 +2,7 @@
 
 use crate::{
     Ball, BallId, Ballpark, DamageVector, DestinyEvent, GridBubble, MovementMode, SlimItemMeta,
-    WarpBubble, WarpBubbleMgr, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS,
+    WarpBubble, WarpBubbleMgr, WarpPhase, BUBBLE_RADIUS_METERS, BUBBLE_TRANSITION_THRESHOLD_METERS,
     DECLOAK_DISTANCE_METERS, GRID_WALL_EXPANSION_THRESHOLD_METERS, MAX_GRID_EXTENT_METERS,
 };
 use glam::DVec3;
@@ -76,6 +76,8 @@ impl Ballpark {
             formation_states: BTreeMap::new(),
             ball_harmonics: BTreeMap::new(),
             ball_wormhole_stages: BTreeMap::new(),
+            base_webbed_max_velocity: BTreeMap::new(),
+            active_wubble_multipliers: BTreeMap::new(),
         }
     }
 
@@ -437,6 +439,8 @@ impl Ballpark {
         self.miniball_states.remove(&ball_id);
         self.formation_states.remove(&ball_id);
         self.ball_harmonics.remove(&ball_id);
+        self.base_webbed_max_velocity.remove(&ball_id);
+        self.active_wubble_multipliers.remove(&ball_id);
         self.target_locks.remove(&ball_id);
         for locks in self.target_locks.values_mut() {
             locks.retain(|l| l.target_id != ball_id);
@@ -583,38 +587,17 @@ impl Ballpark {
         }
     }
 
-    pub fn is_ball_scrambled(&self, ball_id: BallId) -> bool {
-        let is_nullified = self
-            .combat_states
-            .get(&ball_id)
-            .map(|cs| cs.is_interdiction_nullified)
-            .unwrap_or(false);
-        if let Some(cs) = self.combat_states.get(&ball_id) {
-            if cs.is_warp_scrambled() {
-                return true;
-            }
-        }
-        if !is_nullified {
-            if let Some(ball) = self.balls.get(&ball_id) {
-                if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn set_interdiction_nullified(&mut self, ball_id: BallId, nullified: bool) -> bool {
-        if let Some(cs) = self.combat_states.get_mut(&ball_id) {
-            cs.is_interdiction_nullified = nullified;
-            true
-        } else {
-            false
-        }
-    }
-
     /// Deploys an interdiction sphere (e.g. from an interdictor probe or HIC bubble) (`feat:modules.interdiction-sphere`).
     pub fn add_interdiction_sphere(&mut self, id: BallId, position: DVec3, radius: f64) -> bool {
+        let r = radius.max(1.0);
+        if let Some(existing) = self.balls.get_mut(&id) {
+            existing.position = position;
+            existing.radius = r;
+            existing.mode = MovementMode::Field;
+            self.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(id, position, r));
+            return true;
+        }
         let ball = Ball {
             id,
             type_id: 22634, // Warp Disruption Probe / Interdiction Sphere
@@ -623,7 +606,7 @@ impl Ballpark {
             max_velocity: 0.0,
             inertia: 1.0,
             mass: 10_000.0,
-            radius: radius.max(1.0),
+            radius: r,
             speed_fraction: 0.0,
             mode: MovementMode::Field,
         };
@@ -678,14 +661,19 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
+        if matches!(
+            self.balls[&ball_id].mode,
+            MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning
+        ) {
+            return Err("CantActivateInWarp: Cannot micro jump while in warp".into());
+        }
         if self.is_immobile_structure_or_static(ball_id) {
             return Err("StructureCannotNavigate: Static or Upwell structure balls cannot micro jump".into());
         }
-        if self.is_ball_scrambled(ball_id)
-            || self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_mwd_mjd_disabled)
+        if self
+            .combat_states
+            .get(&ball_id)
+            .is_some_and(|cs| cs.is_mwd_mjd_disabled)
         {
             return Err("WarpScrambled: Cannot activate micro jump drive while warp scrambled".into());
         }
@@ -745,14 +733,19 @@ impl Ballpark {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
+        if matches!(
+            self.balls[&ball_id].mode,
+            MovementMode::Warp { phase, .. } if phase != WarpPhase::Aligning
+        ) {
+            return Err("CantActivateInWarp: Cannot activate micro jump field while in warp".into());
+        }
         if self.is_immobile_structure_or_static(ball_id) {
             return Err("StructureCannotNavigate: Static or Upwell structure balls cannot activate micro jump field".into());
         }
-        if self.is_ball_scrambled(ball_id)
-            || self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_mwd_mjd_disabled)
+        if self
+            .combat_states
+            .get(&ball_id)
+            .is_some_and(|cs| cs.is_mwd_mjd_disabled)
         {
             return Err(
                 "WarpScrambled: Cannot activate micro jump field generator while warp scrambled"
@@ -788,9 +781,6 @@ impl Ballpark {
                         .get(&other_id)
                         .map(|cs| cs.disallow_assistance)
                         .unwrap_or(false);
-                if self.is_ball_scrambled(other_id) && !is_bastioned_marauder {
-                    return None;
-                }
                 if let Some(cs) = self.combat_states.get(&other_id) {
                     let mut c = cs.clone();
                     c.sync_action_breaks();
@@ -906,6 +896,7 @@ impl Ballpark {
     pub fn deactivate_cloak(&mut self, ball_id: BallId) -> bool {
         let mut was_cloaked = false;
         let mut was_gate_cloak = false;
+        let mut restored_max_vel = None;
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
             if cs.is_cloaked || cs.gate_cloak_remaining_ticks > 0 {
                 was_cloaked = true;
@@ -914,8 +905,16 @@ impl Ballpark {
                 cs.is_covert_cloak = false;
                 cs.gate_cloak_remaining_ticks = 0;
                 cs.cloak_stabilization_remaining_s = 0.0;
+                restored_max_vel = cs.cloak_original_max_velocity.take();
                 if !was_gate_cloak && cs.cloak_configured_targeting_delay_s > 0.0 {
                     cs.decloak_targeting_delay_remaining_s = cs.cloak_configured_targeting_delay_s;
+                }
+            }
+        }
+        if let Some(orig_v) = restored_max_vel {
+            if let Some(ball) = self.balls.get_mut(&ball_id) {
+                if orig_v > 0.0 {
+                    ball.max_velocity = orig_v;
                 }
             }
         }
@@ -1030,7 +1029,20 @@ impl Ballpark {
             let stay_in_old = old_gid
                 .and_then(|gid| self.grids.get(&gid))
                 .is_some_and(|g| g.contains(new_position));
-            if !stay_in_old {
+            let pos_ev = DestinyEvent::SetBallPosition {
+                ball_id,
+                position: new_position.to_array(),
+            };
+            self.pending_events.push(pos_ev.clone());
+            if stay_in_old {
+                if let Some(gid) = old_gid {
+                    self.queue_event_for_grid_observers(gid, None, &pos_ev);
+                }
+            } else {
+                self.observer_events
+                    .entry(ball_id)
+                    .or_default()
+                    .push(pos_ev);
                 let old_members: Vec<BallId> = old_gid
                     .and_then(|gid| self.grids.get(&gid))
                     .map(|g| {
@@ -1125,7 +1137,7 @@ impl Ballpark {
         true
     }
 
-    pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
+    pub fn set_mode(&mut self, ball_id: BallId, mode: MovementMode) -> Result<(), String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
@@ -1169,7 +1181,18 @@ impl Ballpark {
 
         // Reject warp if scrambled or cloaked with a non-covert cloaking device (`feat:modules.cloak-prototype`, `feat:modules.covert-ops-cloak`)
         if matches!(mode, MovementMode::Warp { .. }) {
-            if self.is_ball_scrambled(ball_id) {
+            let is_emergency_warp = self
+                .combat_states
+                .get(&ball_id)
+                .is_some_and(|cs| cs.is_emergency_warping);
+            let is_scrambled = if is_emergency_warp {
+                self.combat_states
+                    .get(&ball_id)
+                    .is_some_and(|cs| cs.is_warp_scrambled())
+            } else {
+                self.is_ball_scrambled(ball_id)
+            };
+            if is_scrambled {
                 return Err(
                     "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect"
                         .to_string(),
@@ -1184,27 +1207,8 @@ impl Ballpark {
                 }
             }
 
-            // Check bubble interception along the warp path
-            if let MovementMode::Warp {
-                origin,
-                ref mut destination,
-                ref mut total_distance,
-                ..
-            } = mode
-            {
-                let is_nullified = self
-                    .combat_states
-                    .get(&ball_id)
-                    .map(|cs| cs.is_interdiction_nullified)
-                    .unwrap_or(false);
-                if !is_nullified {
-                    if let Some((_bid, intercept_pos)) =
-                        self.warp_bubble_mgr.check_interception(origin, *destination)
-                    {
-                        *destination = intercept_pos;
-                        *total_distance = (*destination - origin).length();
-                    }
-                }
+            // Clear target locks on warp initiation
+            if matches!(mode, MovementMode::Warp { .. }) {
                 if let Some(locks) = self.target_locks.remove(&ball_id) {
                     for l in locks {
                         self.pending_events.push(DestinyEvent::OnTarget {
@@ -1219,6 +1223,9 @@ impl Ballpark {
 
         let mut uncloaked = false;
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            if !matches!(mode, MovementMode::Warp { .. }) {
+                cs.is_emergency_warping = false;
+            }
             cs.undock_invulnerable_remaining_ticks = 0;
             cs.warp_exit_invulnerable_remaining_ticks = 0;
             cs.sync_invuln_with_undock_timer = false;

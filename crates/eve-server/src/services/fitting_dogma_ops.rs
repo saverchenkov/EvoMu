@@ -561,6 +561,18 @@ pub(crate) async fn handle_dogma_ops(
             let mut failed = Vec::new();
             let mut skipped = Vec::new();
 
+            let in_space_overheating = session.station_id.is_none()
+                && session.structure_id.is_some() == false
+                && session
+                    .solar_system_id
+                    .is_some_and(|sid| ctx.systems.get_or_spawn(sid).has_active_overloaded_cycle_sync(ship_id));
+            if in_space_overheating {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotRepairWhileOverheating".into(),
+                    message: "UserError: Cannot initiate in-space Nanite Repair Paste repair while modules are overheating".into(),
+                }));
+            }
+
             for module_id in mod_ids {
                 let (is_valid, is_active, cur_dmg, max_hp, mod_tid, thermo_lvl, nanite_op_lvl, nanite_interfacing_lvl) =
                     ctx.db.with_snapshot(|snap| {
@@ -626,28 +638,30 @@ pub(crate) async fn handle_dogma_ops(
                         nanite_interfacing_lvl,
                     );
 
+                let initial_paste = 1_i32.min(paste_needed.max(1));
                 let deduct_ok = ctx.db.try_with_mut_snapshot(|snap| {
-                    let paste_item_id = snap
+                    let avail: i32 = snap
                         .items
                         .values()
-                        .find(|i| {
+                        .filter(|i| {
                             i.owner_id == char_id
                                 && i.location_id == ship_id
                                 && i.flag == InventoryFlag::Cargo
                                 && i.type_id == 28668
-                                && i.quantity >= paste_needed
+                                && i.quantity > 0
                                 && !snap.is_item_locked_in_contract_or_job(i.item_id)
                         })
-                        .map(|i| i.item_id);
-                    let Some(pid) = paste_item_id else {
+                        .map(|i| i.quantity)
+                        .sum();
+                    if avail < initial_paste {
                         return Err(());
-                    };
-                    if let Some(p_item) = snap.items.get_mut(&pid) {
-                        p_item.quantity -= paste_needed;
-                        if p_item.quantity == 0 {
-                            snap.items.remove(&pid);
-                        }
                     }
+                    crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
+                        snap,
+                        char_id,
+                        ship_id,
+                        initial_paste,
+                    );
                     Ok(())
                 });
 
@@ -658,7 +672,8 @@ pub(crate) async fn handle_dogma_ops(
                             ship_id,
                             module_id,
                             initial_damage_hp: cur_dmg,
-                            paste_reserved: paste_needed,
+                            paste_total_needed: paste_needed.max(1),
+                            paste_consumed_so_far: initial_paste,
                             duration_s,
                             elapsed_s: 0.0,
                         })
@@ -832,6 +847,20 @@ fn get_item_attribute_value(
     attr_id: u16,
 ) -> f64 {
     if item_id == active_ship_id && active_ship_id > 0 {
+        if matches!(attr_id, 1175 | 1176 | 1177) {
+            if let Some(live_heat) = ctx.db.with_snapshot(|snap| {
+                snap.transient_item_attributes
+                    .get(&item_id)
+                    .and_then(|tr| tr.get(&attr_id).copied())
+                    .or_else(|| {
+                        snap.items
+                            .get(&item_id)
+                            .and_then(|it| it.dynamic_attributes.get(&attr_id).copied())
+                    })
+            }) {
+                return live_heat;
+            }
+        }
         if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, item_id) {
             return fit.ship.get_attribute(attr_id, &ctx.sde);
         }
@@ -840,7 +869,12 @@ fn get_item_attribute_value(
         if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(char_id, active_ship_id) {
             if let Some(fm) = fit.modules.get(&item_id) {
                 if attr_id == attr_ids::DAMAGE {
-                    return fm.damage_hp;
+                    return ctx.db.with_snapshot(|snap| {
+                        snap.items
+                            .get(&item_id)
+                            .map(|it| it.dynamic_attributes.get(&attr_ids::DAMAGE).copied().unwrap_or(0.0))
+                            .unwrap_or(fm.damage_hp)
+                    });
                 }
                 if attr_id == attr_ids::HP_STRUCT {
                     return fm.max_hp;
@@ -910,6 +944,11 @@ fn get_all_item_attributes(
                 for (&aid, &v) in &t.default_attributes {
                     map.entry(aid).or_insert(v);
                 }
+            }
+            if !it.dynamic_attributes.contains_key(&attr_ids::DAMAGE)
+                && item_id != active_ship_id
+            {
+                map.insert(attr_ids::DAMAGE, 0.0);
             }
             for (&aid, &v) in &it.dynamic_attributes {
                 map.insert(aid, v);

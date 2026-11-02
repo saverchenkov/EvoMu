@@ -411,7 +411,7 @@ pub async fn handle(
                             .get(&st.station_type_id)
                             .map(|t| t.radius)
                             .unwrap_or(30_000.0);
-                        let offset = (st_radius * 0.015 + ship_type.radius).clamp(500.0, 2_000.0);
+                        let offset = st_radius + ship_type.radius + 500.0;
                         (st.position + dir * offset, dir)
                     })
                     .unwrap_or_else(|| (DVec3::new(100_000.0, 0.0, 0.0), DVec3::X))
@@ -714,13 +714,38 @@ pub async fn handle(
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
             }
+            let sde_target_radius = if is_structure {
+                ctx.db
+                    .with_snapshot(|snap| snap.structures.get(&dock_id).map(|s| s.type_id))
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .map(|t| t.radius)
+                    .filter(|&r| r > 0.0)
+                    .unwrap_or(0.0)
+            } else {
+                ctx.sde
+                    .stations
+                    .get(&dock_id)
+                    .and_then(|st| ctx.sde.types.get(&st.station_type_id))
+                    .map(|t| t.radius)
+                    .filter(|&r| r > 0.0)
+                    .unwrap_or(0.0)
+            };
+            let target_radius = handle
+                .get_ball_snapshot(dock_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.radius)
+                .filter(|&r| r > 0.0)
+                .unwrap_or(sde_target_radius);
             let dist = ball.position.distance(target_pos);
-            if dist > 2_500.0 {
+            if dist > target_radius + 2_500.0 {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideDockingPerimeter".into(),
                     message: format!(
-                        "Ship is {:.1} m from docking perimeter (must be <= 2500 m)",
-                        dist
+                        "Ship is {:.1} m from docking target (must be <= {:.1} m)",
+                        dist,
+                        target_radius + 2_500.0
                     ),
                 }));
             }
@@ -766,6 +791,9 @@ pub async fn handle(
                     }
                     crate::services::space_destiny::record_session_change_timer(
                         ctx, char_id, now_unix, sys_id, 0, "dock",
+                    );
+                    crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
+                        ctx, char_id, dock_id,
                     );
                     let sess_rep = PyRep::keyval([
                         ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),

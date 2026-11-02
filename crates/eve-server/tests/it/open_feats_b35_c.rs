@@ -330,9 +330,10 @@ async fn test_b35_15_interdiction_nullification_module() {
 
     // 2. Origin bubble + Destination drag/catch bubble along warp vector to planet 40301369
     let target_celestial_id = 40301369;
-    let planet_pos = ctx.sde.celestials_in_system(NULL_SYS).into_iter().find(|c| c.celestial_id == target_celestial_id).unwrap().position;
+    let planet = ctx.sde.celestials_in_system(NULL_SYS).into_iter().find(|c| c.celestial_id == target_celestial_id).unwrap();
+    let planet_pos = planet.position;
     let warp_dir = planet_pos.normalize();
-    let drag_bubble_pos = planet_pos - warp_dir * 120_000.0; // Catch bubble 120km short of planet!
+    let drag_bubble_pos = planet_pos - warp_dir * (planet.radius + 2_500.0 + 120_000.0); // Catch bubble 120km short of planet warp-in point!
     let _ = sys.add_warp_bubble(999_888, DVec3::ZERO, 20_000.0).await;
     let _ = sys.add_warp_bubble(999_889, drag_bubble_pos, 20_000.0).await;
 

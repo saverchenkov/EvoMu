@@ -1254,6 +1254,24 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
             PyRep::String("SetBallRadius".into()),
             PyRep::Tuple(vec![PyRep::Integer(*ball_id), PyRep::Real(*radius)]),
         ]),
+        DestinyEvent::SetBallPosition { ball_id, position } => PyRep::Tuple(vec![
+            PyRep::String("SetBallPosition".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::Real(position[0]),
+                PyRep::Real(position[1]),
+                PyRep::Real(position[2]),
+            ]),
+        ]),
+        DestinyEvent::SetBallVelocity { ball_id, velocity } => PyRep::Tuple(vec![
+            PyRep::String("SetBallVelocity".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::Real(velocity[0]),
+                PyRep::Real(velocity[1]),
+                PyRep::Real(velocity[2]),
+            ]),
+        ]),
         DestinyEvent::OnAudioActivated => PyRep::Tuple(vec![
             PyRep::String("OnAudioActivated".into()),
             PyRep::Tuple(Vec::new()),

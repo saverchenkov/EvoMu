@@ -92,6 +92,7 @@ pub(crate) fn step_cycles_and_capacitor(
     base_core_strengths: &HashMap<BallId, i32>,
     sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    mechanic_rng_opt: &Option<Arc<crate::rng::MechanicRng>>,
     tactical_state: &std::sync::RwLock<crate::services::tactical_modules::TacticalModulesState>,
     pending_cycle_actions: &mut Vec<PendingCycleAction>,
     dt: f64,
@@ -105,32 +106,22 @@ pub(crate) fn step_cycles_and_capacitor(
         tactical_state,
         dt,
     );
+    crate::services::tactical_module_mechanics::step_interdiction_probes_lifetime(
+        ballpark,
+        db_opt,
+        tactical_state,
+        dt,
+    );
 
-    // Exponential rack heat dissipation when no modules in a rack are overloaded (`feat:dogma.heat-rack-thermodynamics`)
-    let ship_ids_with_heat: Vec<BallId> = ship_rack_heat.keys().copied().collect();
-    for sid in ship_ids_with_heat {
-        let Some(racks) = ship_rack_heat.get_mut(&sid) else { continue };
-        let mut changed = false;
-        for (r_idx, rack_val) in racks.iter_mut().enumerate() {
-            let has_ovl = active_module_cycles.iter().any(|c| c.ship_id == sid && c.rack_idx == r_idx && c.is_overloaded);
-            if !has_ovl && *rack_val > 0.0 {
-                *rack_val = eve_dogma::thermodynamics::step_rack_heat(*rack_val, 0.0, 0.01, dt);
-                if *rack_val < 1e-6 { *rack_val = 0.0; }
-                changed = true;
-            }
-        }
-        if changed {
-            let heat_snap = *racks;
-            if let Some(db_ref) = db_opt {
-                db_ref.with_mut_snapshot(|snap| {
-                    let entry = snap.transient_item_attributes.entry(sid).or_default();
-                    entry.insert(1177, heat_snap[0]);
-                    entry.insert(1176, heat_snap[1]);
-                    entry.insert(1175, heat_snap[2]);
-                });
-            }
-        }
-    }
+    // Per-tick rack heat generation (`sum(heatAbsorbtionRateModifier)` * evaluated `heatGenerationMultiplier`)
+    // and passive exponential dissipation (`feat:modules.overheat-rack-heat-generation`)
+    crate::services::tactical_module_mechanics::step_rack_heat_per_tick(
+        ship_rack_heat,
+        active_module_cycles,
+        sde_opt,
+        db_opt,
+        dt,
+    );
 
     // Upwell structure tethering gradually repairs fitted module heat damage (including burned-out modules, leaving them offline) (`feat:modules.nanite-repair-paste-in-space`)
     // DERIVED: 2.0 HP/s gradual tether heat-damage repair rate (Overheating.md:151 'heat damage ... is slowly repaired')
@@ -155,18 +146,44 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
-    // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`)
+    // Advance in-space Nanite Repair Paste jobs (`feat:modules.nanite-repair-paste-in-space`):
+    // consume paste incrementally per tick and halt cleanly if cargo paste is exhausted mid-repair.
     active_nanite_repairs.retain_mut(|nr| {
         if !ballpark.balls.contains_key(&nr.ship_id)
             || active_module_cycles.iter().any(|c| c.ship_id == nr.ship_id && c.module_id == nr.module_id)
         {
             return false;
         }
-        nr.elapsed_s += dt;
-        let done = nr.elapsed_s + 1e-6 >= nr.duration_s;
-        let rem_dmg = if done { 0.0 } else { nr.initial_damage_hp * (1.0 - nr.elapsed_s / nr.duration_s.max(0.1)).clamp(0.0, 1.0) };
-        if let Some(db_ref) = db_opt {
+        let next_elapsed = (nr.elapsed_s + dt).min(nr.duration_s);
+        let next_progress = (next_elapsed / nr.duration_s.max(0.1)).clamp(0.0, 1.0);
+        let total_needed = nr.paste_total_needed.max(1);
+        let target_consumed = ((total_needed as f64) * next_progress - 1e-9)
+            .ceil()
+            .clamp(1.0, total_needed as f64) as i32;
+        let mut halted_for_paste = false;
+        let mut effective_progress = next_progress;
+        if let Some(db_ref) = db_opt.as_ref().filter(|db| !db.is_write_locked_by_current_thread()) {
             db_ref.with_mut_snapshot(|snap| {
+                if target_consumed > nr.paste_consumed_so_far {
+                    let delta = target_consumed - nr.paste_consumed_so_far;
+                    let taken = crate::services::tactical_module_mechanics::deduct_paste_from_cargo_in_snap(
+                        snap,
+                        nr.char_id,
+                        nr.ship_id,
+                        delta,
+                    );
+                    nr.paste_consumed_so_far += taken;
+                    if taken < delta {
+                        halted_for_paste = true;
+                        effective_progress = ((nr.paste_consumed_so_far as f64) / (total_needed as f64)).clamp(0.0, 1.0);
+                    }
+                }
+                let done_now = !halted_for_paste && (next_elapsed + 1e-6 >= nr.duration_s);
+                let rem_dmg = if done_now {
+                    0.0
+                } else {
+                    nr.initial_damage_hp * (1.0 - effective_progress).clamp(0.0, 1.0)
+                };
                 if let Some(m_item) = snap.items.get_mut(&nr.module_id) {
                     if rem_dmg <= 1e-6 {
                         m_item.dynamic_attributes.remove(&eve_sde::attr_ids::DAMAGE);
@@ -176,7 +193,12 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             });
         }
-        !done
+        if halted_for_paste {
+            nr.elapsed_s = nr.duration_s * effective_progress;
+            return false;
+        }
+        nr.elapsed_s = next_elapsed;
+        nr.elapsed_s + 1e-6 < nr.duration_s
     });
 
     pending_anchoring_disruptors.retain_mut(|d| {
@@ -216,14 +238,6 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
 
-    // Count overloaded modules per (ship_id, rack_idx)
-    let mut overloaded_counts: HashMap<(BallId, usize), usize> = HashMap::new();
-    for c in active_module_cycles.iter() {
-        if c.is_overloaded {
-            *overloaded_counts.entry((c.ship_id, c.rack_idx)).or_insert(0) += 1;
-        }
-    }
-
     let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
@@ -241,6 +255,49 @@ pub(crate) fn step_cycles_and_capacitor(
             if target_ball.is_none() || target_warping || out_of_range {
                 finished_indices.push(idx);
                 continue;
+            }
+            if cycle.target_velocity_multiplier.is_some() {
+                if let (Some(sb), Some(tb)) = (source_ball, target_ball) {
+                    let is_grappler = cycle.grappler_speed_factor_pct != 0.0
+                        || sde_opt
+                            .as_ref()
+                            .and_then(|sde| sde.types.get(&cycle.module_type_id))
+                            .is_some_and(|t| t.group_id == 1672);
+                    if is_grappler {
+                        let dist = (sb.position - tb.position).length();
+                        let sde_mt = sde_opt.as_ref().and_then(|sde| sde.types.get(&cycle.module_type_id));
+                        let opt = if cycle.grappler_optimal_m > 0.0 {
+                            cycle.grappler_optimal_m
+                        } else {
+                            sde_mt.and_then(|mt| mt.default_attributes.get(&54).copied()).unwrap_or(1_000.0)
+                        };
+                        let fo = if cycle.grappler_falloff_m > 0.0 {
+                            cycle.grappler_falloff_m
+                        } else {
+                            sde_mt
+                                .and_then(|mt| {
+                                    mt.default_attributes
+                                        .get(&2044)
+                                        .copied()
+                                        .or_else(|| mt.default_attributes.get(&158).copied())
+                                })
+                                .unwrap_or(8_000.0)
+                        };
+                        let raw_sf = if cycle.grappler_speed_factor_pct != 0.0 {
+                            cycle.grappler_speed_factor_pct
+                        } else {
+                            sde_mt.and_then(|mt| mt.default_attributes.get(&20).copied()).unwrap_or(-80.0)
+                        };
+                        let att = eve_dogma::compute_falloff_attenuation(dist, opt, fo);
+                        let eff_sf = if dist <= opt + 3.0 * fo.max(1.0) {
+                            raw_sf * att
+                        } else {
+                            0.0
+                        };
+                        cycle.target_velocity_multiplier =
+                            Some((1.0 + eff_sf / 100.0).clamp(0.05, 1.0));
+                    }
+                }
             }
         }
         cycle.elapsed_s += dt;
@@ -300,9 +357,8 @@ pub(crate) fn step_cycles_and_capacitor(
 
             // 1b. Micro Jump Drive / Field Generator translation upon spool-up completion (`feat:modules.micro-jump-drive`)
             if let Some(jump_dist) = cycle.mjd_jump_distance_m {
-                let scrambled = ballpark.is_ball_scrambled(cycle.ship_id)
-                    || ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
-                if !scrambled {
+                let mjd_disabled = ballpark.combat_states.get(&cycle.ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
+                if !mjd_disabled {
                     if let Some((radius_m, max_ships, max_caps)) = cycle.mjfg_field_params {
                         let _ = ballpark.micro_jump_field_with_capitals(
                             cycle.ship_id,
@@ -426,11 +482,9 @@ pub(crate) fn step_cycles_and_capacitor(
                         }
                         let effective_transfer = cycle.cap_transfer_target * att;
                         if let Some((src_cap, src_max_cap)) = src_cap_info {
-                            let src_pct = if src_max_cap > 0.0 { src_cap / src_max_cap } else { 1.0 };
-                            let tgt_pct = if cs.max_capacitor > 0.0 { cs.capacitor / cs.max_capacitor } else { 0.0 };
                             if is_sleeper_target
                                 || cycle.nosferatu_blood_raider_override
-                                || (src_pct < tgt_pct && cs.capacitor > 0.0)
+                                || (src_cap < cs.capacitor && cs.capacitor > 0.0)
                             {
                                 let transferred = effective_transfer
                                     .min(if is_sleeper_target {
@@ -497,120 +551,19 @@ pub(crate) fn step_cycles_and_capacitor(
                 }
             }
             if cycle.is_overloaded {
-                let ovl_in_rack = overloaded_counts
-                    .get(&(cycle.ship_id, cycle.rack_idx))
-                    .copied()
-                    .unwrap_or(1)
-                    .max(1);
-                let racks = ship_rack_heat.entry(cycle.ship_id).or_insert([0.0; 3]);
-                let r_idx = cycle.rack_idx.min(2);
-                racks[r_idx] = eve_dogma::thermodynamics::step_rack_heat(
-                    racks[r_idx],
-                    0.04 * (ovl_in_rack as f64),
-                    0.01,
-                    cycle.duration_s,
+                crate::services::tactical_module_mechanics::apply_overheat_rack_and_damage_on_cycle(
+                    cycle,
+                    ship_rack_heat,
+                    sde_opt,
+                    db_opt,
+                    mechanic_rng_opt,
+                    &mut burned_out,
+                    &mut burned_ship_modules,
                 );
-                let current_rack_heat = racks[r_idx];
-                let heat_snap = *racks;
-                if let Some(db_ref) = db_opt {
-                    db_ref.with_mut_snapshot(|snap| {
-                        let owner_id = snap
-                            .items
-                            .get(&cycle.ship_id)
-                            .map(|i| i.owner_id)
-                            .unwrap_or(0);
-                        let thermo_lvl = snap
-                            .skills
-                            .get(&owner_id)
-                            .and_then(|sk| sk.get(&28164))
-                            .map(|r| r.level)
-                            .unwrap_or(0);
-                        let eff_dmg = eve_dogma::thermodynamics::effective_heat_damage(
-                            cycle.heat_damage_per_cycle,
-                            thermo_lvl,
-                        );
-                        let entry = snap.transient_item_attributes.entry(cycle.ship_id).or_default();
-                        entry.insert(1177, heat_snap[0]);
-                        entry.insert(1176, heat_snap[1]);
-                        entry.insert(1175, heat_snap[2]);
-                        let active_flag = snap
-                            .items
-                            .get(&cycle.module_id)
-                            .map(|i| i.flag as u16)
-                            .unwrap_or(0);
-                        if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
-                            let cur_dmg = m_item
-                                .dynamic_attributes
-                                .get(&eve_sde::attr_ids::DAMAGE)
-                                .copied()
-                                .unwrap_or(0.0);
-                            let max_hp = m_item
-                                .dynamic_attributes
-                                .get(&eve_sde::attr_ids::HP_STRUCT)
-                                .copied()
-                                .unwrap_or(40.0);
-                            let next_dmg = (cur_dmg + eff_dmg).min(max_hp);
-                            m_item
-                                .dynamic_attributes
-                                .insert(eve_sde::attr_ids::DAMAGE, next_dmg);
-                            if next_dmg >= max_hp - 1e-6 {
-                                burned_out = true;
-                            }
-                        }
-                        if burned_out {
-                            snap.module_online_states.insert(cycle.module_id, false);
-                            snap.module_active_states.remove(&cycle.module_id);
-                        }
-                        // Slot-distance-attenuated heat bleed onto adjacent modules in the same rack
-                        if active_flag >= 11 && current_rack_heat > 0.0 {
-                            let adj_ids: Vec<(i64, u16)> = snap
-                                .items
-                                .values()
-                                .filter(|i| {
-                                    i.location_id == cycle.ship_id
-                                        && i.item_id != cycle.module_id
-                                        && match (r_idx, i.flag as u16) {
-                                            (0, 27..=34) => true,
-                                            (1, 19..=26) => true,
-                                            (2, 11..=18) => true,
-                                            _ => false,
-                                        }
-                                })
-                                .map(|i| (i.item_id, i.flag as u16))
-                                .collect();
-                            for (adj_id, adj_flag) in adj_ids {
-                                let dist = (adj_flag as isize - active_flag as isize).unsigned_abs();
-                                let att = eve_dogma::thermodynamics::heat_distance_attenuation(dist, 0.5);
-                                let bleed_dmg = eff_dmg * current_rack_heat * att * 0.5;
-                                if bleed_dmg > 1e-4 {
-                                    let mut adj_burned = false;
-                                    if let Some(adj_item) = snap.items.get_mut(&adj_id) {
-                                        let cur = adj_item
-                                            .dynamic_attributes
-                                            .get(&eve_sde::attr_ids::DAMAGE)
-                                            .copied()
-                                            .unwrap_or(0.0);
-                                        let max_hp = adj_item
-                                            .dynamic_attributes
-                                            .get(&eve_sde::attr_ids::HP_STRUCT)
-                                            .copied()
-                                            .unwrap_or(40.0);
-                                        let next = (cur + bleed_dmg).min(max_hp);
-                                        adj_item
-                                            .dynamic_attributes
-                                            .insert(eve_sde::attr_ids::DAMAGE, next);
-                                        if next >= max_hp - 1e-6 {
-                                            adj_burned = true;
-                                        }
-                                    }
-                                    if adj_burned {
-                                        snap.module_online_states.insert(adj_id, false);
-                                        snap.module_active_states.remove(&adj_id);
-                                        burned_ship_modules.push((cycle.ship_id, adj_id));
-                                    }
-                                }
-                            }
-                        }
+                if burned_out {
+                    pending_cycle_actions.push(PendingCycleAction::InvalidateShipFitting {
+                        char_id: cycle.owner_char_id,
+                        ship_id: cycle.ship_id,
                     });
                 }
             }
@@ -942,6 +895,20 @@ pub(crate) fn step_cycles_and_capacitor(
                 if stop_cycle {
                     finished_indices.push(idx);
                 } else {
+                    if let Some(next_ovl) = cycle.pending_overloaded.take() {
+                        crate::system_actor::cycles_tackle::apply_overload_transition_to_cycle(
+                            cycle,
+                            next_ovl,
+                            ballpark,
+                            sde_opt,
+                        );
+                        pending_cycle_actions.push(PendingCycleAction::SyncOverloadState {
+                            char_id: cycle.owner_char_id,
+                            ship_id: cycle.ship_id,
+                            module_id: cycle.module_id,
+                            is_overloaded: next_ovl,
+                        });
+                    }
                     if matches!(mod_grp, 72 | 80 | 353 | 650) {
                         if let Some(cid) = cycle.owner_char_id {
                             pending_cycle_actions.push(PendingCycleAction::RepeatCycleStart {
@@ -1021,6 +988,14 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
     for (burned_ship_id, burned_mod_id) in burned_ship_modules {
+        let burned_char_id = active_module_cycles
+            .iter()
+            .find(|c| c.ship_id == burned_ship_id)
+            .and_then(|c| c.owner_char_id);
+        pending_cycle_actions.push(PendingCycleAction::InvalidateShipFitting {
+            char_id: burned_char_id,
+            ship_id: burned_ship_id,
+        });
         for (other_idx, c) in active_module_cycles.iter().enumerate() {
             if c.ship_id == burned_ship_id && c.module_id == burned_mod_id {
                 finished_indices.push(other_idx);
@@ -1039,25 +1014,27 @@ pub(crate) fn step_cycles_and_capacitor(
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
         emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
     }
-        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
+    reconcile_tackle_and_bubbles(
+        ballpark,
+        active_module_cycles,
+        base_scramble_strengths,
+        base_core_strengths,
+        db_opt,
+        deactivation_hook,
+    );
     destroyed_balls
 }
 
 pub(crate) fn cleanup_removed_module_cycle(ballpark: &mut Ballpark, removed: &ActiveModuleCycle, db_opt: &Option<Arc<eve_db::WorldRepository>>) {
     if let Some(orig_v) = removed.original_max_velocity {
-        if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
+        if let Some(bv) = ballpark.base_webbed_max_velocity.get_mut(&removed.ship_id) {
+            *bv = orig_v;
+        } else if let Some(ball) = ballpark.balls.get_mut(&removed.ship_id) {
             ball.max_velocity = orig_v;
         }
         if removed.effect_name.starts_with("cloaking") {
             if let Some(cs) = ballpark.combat_states.get_mut(&removed.ship_id) {
                 cs.cloak_original_max_velocity = None;
-            }
-        }
-    }
-    if let Some(orig_tv) = removed.target_original_max_velocity {
-        if let Some(tid) = removed.target_id {
-            if let Some(t_ball) = ballpark.balls.get_mut(&tid) {
-                t_ball.max_velocity = orig_tv;
             }
         }
     }
@@ -1165,6 +1142,8 @@ pub(crate) fn remove_non_warp_ship_module_cycles(
             active_module_cycles,
             base_scramble_strengths,
             base_core_strengths,
+            db_opt,
+            deactivation_hook,
         );
         for removed in &removed_cycles {
             emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
@@ -1186,8 +1165,7 @@ pub(crate) fn remove_all_ship_module_cycles(
         .is_some_and(|db| db.is_write_locked_by_current_thread());
     let effective_db = if reentrant_db { &None } else { db_opt };
     let mut removed_cycles = Vec::new();
-    let mut i = 0;
-    while i < active_module_cycles.len() {
+    for i in (0..active_module_cycles.len()).rev() {
         if active_module_cycles[i].ship_id == ship_id || active_module_cycles[i].target_id == Some(ship_id) {
             let removed = active_module_cycles.swap_remove(i);
             cleanup_removed_module_cycle(ballpark, &removed, effective_db);
@@ -1197,8 +1175,6 @@ pub(crate) fn remove_all_ship_module_cycles(
                 })
             });
             removed_cycles.push((removed, char_id));
-        } else {
-            i += 1;
         }
     }
     if let Some(db_ref) = effective_db {
@@ -1211,7 +1187,14 @@ pub(crate) fn remove_all_ship_module_cycles(
         });
     }
     if !removed_cycles.is_empty() {
-        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+            effective_db,
+            if reentrant_db { None } else { deactivation_hook },
+        );
         if !reentrant_db {
             for (removed, _) in &removed_cycles {
                 emit_cycle_deactivation(removed, ballpark, effective_db, deactivation_hook);
@@ -1287,7 +1270,7 @@ impl SystemHandle {
         let mut destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
-            sde_opt, db_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
+            sde_opt, db_opt, mechanic_rng_opt, tactical_state, pending_cycle_actions, dt, deact_hook_guard.as_ref(),
         );
         destroyed.extend(sup_dead.into_iter().chain(pg_dead).map(|bid| (bid, None)));
         let zk_dead = crate::services::space_navigation_advanced::step_zarzakh_gravity_hazard_in_ballpark(
@@ -1296,6 +1279,12 @@ impl SystemHandle {
         destroyed.extend(zk_dead.into_iter().map(|bid| (bid, None)));
         let mut death_futs = Vec::new();
         for &(target_ball_id, owner_char_id) in &destroyed {
+            crate::services::tactical_module_mechanics::on_probe_ball_removed_in_actor(
+                &mut bp,
+                db_opt,
+                tactical_state,
+                target_ball_id,
+            );
             if let Some(db) = db_opt.as_ref() {
                 crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_in_ballpark(&mut bp, db, self.solar_system_id, target_ball_id);
             }

@@ -260,6 +260,12 @@ pub struct CombatState {
     /// Capacitor recorded on the previous 1 Hz step to detect MJFG activation on Command Destroyers.
     #[serde(default)]
     pub last_step_capacitor: Option<f64>,
+    /// True when a Capital Micro Jump Field Generator (`83485`) is active on a Capital ship.
+    #[serde(default)]
+    pub is_capital_mjfg: bool,
+    /// True during a disconnect emergency warp so warp bubbles do not block or catch logoff warps (`feat:navigation.warp-bubble-drag-and-catch`).
+    #[serde(default)]
+    pub is_emergency_warping: bool,
     /// Active turret tracking speed multiplier (e.g., Abyssal Multibody Tracking Pylon `1.8`).
     #[serde(default = "default_one_f64")]
     pub tracking_speed_multiplier: f64,
@@ -319,6 +325,8 @@ impl Default for CombatState {
             mjfg_spool_remaining_s: 0.0,
             mjfg_original_sig_radius: None,
             last_step_capacitor: None,
+            is_capital_mjfg: false,
+            is_emergency_warping: false,
             tracking_speed_multiplier: 1.0,
             shield_boost_multiplier: 1.0,
             rng_state: default_combat_rng_state(),
@@ -694,6 +702,14 @@ pub enum DestinyEvent {
         ball_id: BallId,
         radius: f64,
     },
+    SetBallPosition {
+        ball_id: BallId,
+        position: [f64; 3],
+    },
+    SetBallVelocity {
+        ball_id: BallId,
+        velocity: [f64; 3],
+    },
     AddBalls {
         balls: Vec<Ball>,
     },
@@ -891,14 +907,17 @@ impl WarpBubble {
         let t0 = proj - thc; // entry point along ray
         let t1 = proj + thc; // exit point along ray
 
-        // If origin is already inside the bubble
+        // Stop/catch bubble (within 500 km in front of destination) or drag bubble (within 500 km behind destination):
+        // Check segment overlap of bubble chord [t0, t1] with [max(0, dist - 500_000.0), dist + 500_000.0].
+        let win_start = (dist - 500_000.0).max(0.0);
+        let win_end = dist + 500_000.0;
+        if t1 < win_start || t0 > win_end {
+            return None;
+        }
         if t0 <= 0.0 && t1 >= 0.0 {
             return Some(origin);
         }
-
-        // Stop bubble (in front of destination): t0 > 0 and t0 <= dist
-        // Drag bubble (behind destination inline, within 500 km = 500,000 m): t0 > dist and (t0 - dist) <= 500_000.0
-        if t0 > 0.0 && (t0 <= dist || (t0 - dist) <= 500_000.0) {
+        if t0 > 0.0 {
             Some(origin + dir_norm * t0)
         } else {
             None
@@ -999,6 +1018,9 @@ pub struct Ballpark {
     pub ball_harmonics: BTreeMap<BallId, i32>,
     #[serde(default)]
     pub ball_wormhole_stages: BTreeMap<BallId, (i64, f64)>,
+    pub base_webbed_max_velocity: BTreeMap<BallId, f64>,
+    #[serde(skip, default)]
+    pub active_wubble_multipliers: BTreeMap<BallId, f64>,
 }
 
 impl Ballpark {

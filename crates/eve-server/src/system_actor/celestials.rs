@@ -418,23 +418,43 @@ impl SystemHandle {
             .any(|c| c.ship_id == ship_id && c.module_id == module_id)
     }
 
+    pub fn has_active_mjd_or_mjfg_spool_sync(&self, ship_id: BallId) -> bool {
+        self.actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.mjd_jump_distance_m.is_some())
+    }
+
+    pub fn is_module_mjd_or_mjfg_spooling_sync(&self, ship_id: BallId, module_id: i64) -> bool {
+        self.actor_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.module_id == module_id && c.mjd_jump_distance_m.is_some())
+    }
+
     pub fn cancel_ship_nanite_repairs_sync(&self, ship_id: BallId, refund_paste: bool) {
-        let (cancelled, db_opt) = {
+        let (cancelled, db_opt, sde_opt) = {
             let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
             let mut cancelled = Vec::new();
             st.active_nanite_repairs.retain(|r| {
                 if r.ship_id == ship_id {
                     let frac = (r.elapsed_s / r.duration_s.max(0.001)).clamp(0.0, 1.0);
                     let rem_dmg = (r.initial_damage_hp * (1.0 - frac)).max(0.0);
-                    let paste_used = ((r.paste_reserved as f64) * frac).ceil() as i32;
-                    let refund = (r.paste_reserved - paste_used.clamp(0, r.paste_reserved)).max(0);
+                    let paste_used = ((r.paste_total_needed as f64) * frac).ceil() as i32;
+                    let refund = (r.paste_consumed_so_far
+                        - paste_used.clamp(0, r.paste_consumed_so_far))
+                    .max(0);
                     cancelled.push((r.char_id, r.module_id, rem_dmg, refund));
                     false
                 } else {
                     true
                 }
             });
-            (cancelled, st.db_opt.clone())
+            (cancelled, st.db_opt.clone(), st.sde_opt.clone())
         };
         if !cancelled.is_empty() {
             if let Some(db) = db_opt {
@@ -449,30 +469,14 @@ impl SystemHandle {
                                 }
                             }
                             if refund_paste && refund > 0 {
-                                if let Some(pid) = snap.items.values().find(|i| {
-                                    i.owner_id == char_id
-                                        && i.location_id == ship_id
-                                        && i.flag == eve_db::InventoryFlag::Cargo
-                                        && i.type_id == 28668
-                                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                                }).map(|i| i.item_id) {
-                                    if let Some(p_item) = snap.items.get_mut(&pid) {
-                                        p_item.quantity += refund;
-                                        p_item.version += 1;
-                                    }
-                                } else {
-                                    snap.next_entity_id += 1;
-                                    let new_id = snap.next_entity_id;
-                                    snap.items.insert(new_id, eve_db::InventoryItemRecord {
-                                        item_id: new_id,
-                                        type_id: 28668,
-                                        owner_id: char_id,
-                                        location_id: ship_id,
-                                        flag: eve_db::InventoryFlag::Cargo,
-                                        quantity: refund,
-                                        singleton: false,
-                                        ..Default::default()
-                                    });
+                                if let Some(ref sde) = sde_opt {
+                                    crate::services::tactical_module_mechanics::refund_paste_to_cargo_capped_in_snap(
+                                        snap,
+                                        sde,
+                                        char_id,
+                                        ship_id,
+                                        refund,
+                                    );
                                 }
                             }
                         }
@@ -1193,6 +1197,39 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
+    pub fn has_any_active_nanite_repair_sync(&self, ship_id: BallId) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_nanite_repairs.iter().any(|r| r.ship_id == ship_id)
+    }
+
+    pub fn is_module_being_nanite_repaired_sync(&self, ship_id: BallId, module_id: i64) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_nanite_repairs
+            .iter()
+            .any(|r| r.ship_id == ship_id && r.module_id == module_id)
+    }
+
+    pub fn has_active_overloaded_cycle_sync(&self, ship_id: BallId) -> bool {
+        let st = self.actor_state.read().unwrap_or_else(|e| e.into_inner());
+        st.active_module_cycles
+            .iter()
+            .any(|c| c.ship_id == ship_id && c.is_overloaded)
+    }
+
+    pub fn cancel_nanite_repairs_for_ship_sync(&self, ship_id: BallId) -> Vec<ActiveNaniteRepair> {
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let mut cancelled = Vec::new();
+        let all = std::mem::take(&mut st.active_nanite_repairs);
+        for job in all {
+            if job.ship_id == ship_id {
+                cancelled.push(job);
+            } else {
+                st.active_nanite_repairs.push(job);
+            }
+        }
+        cancelled
+    }
+
     pub async fn record_incoming_armor_damage(
         &self,
         ship_id: BallId,
@@ -1305,4 +1342,3 @@ pub(crate) fn persist_landed_warps_in_db(
         }
     });
 }
-

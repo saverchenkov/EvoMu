@@ -256,6 +256,25 @@ async fn ensure_ship_not_immobilized(
     Ok(())
 }
 
+pub(crate) async fn ensure_not_mjd_spooling(
+    handle: &crate::system_actor::SystemHandle,
+    ship_id: i64,
+) -> Result<(), BridgeRpcError> {
+    let cap_mjfg_spooling = handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.mjfg_spool_remaining_s > 0.0);
+    if handle.has_active_mjd_or_mjfg_spool_sync(ship_id) || cap_mjfg_spooling {
+        return Err(BridgeRpcError {
+            code: "CantMoveWhileModuleActive".into(),
+            message: "Cannot steer ship while Micro Jump Drive or Micro Jump Field Generator is spooling".into(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) async fn emit_cloak_transition(ctx: &ServerContext, sys_id: u32, ship_id: i64, cloaked: bool) {
     let handle = ctx.systems.get_or_spawn(sys_id);
     let _ = handle
@@ -306,6 +325,7 @@ pub(crate) async fn handle_cmd_goto_point(
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
         .goto_point(ship_id, DVec3::new(x, y, z))
@@ -692,6 +712,7 @@ pub(crate) async fn handle_cmd_goto_direction(
         });
     };
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     handle
@@ -727,6 +748,7 @@ pub(crate) async fn handle_cmd_stop(
         });
     };
     let handle = ctx.systems.get_or_spawn(sys_id);
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
@@ -794,6 +816,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
         });
     }
     let handle = ctx.systems.get_or_spawn(sys_id);
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
         code: "DestinyCommandFailed".into(),
         message: e,
@@ -891,6 +914,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
         MovementMode::Follow { target_id, range }
     };
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
@@ -993,6 +1017,7 @@ pub(crate) async fn handle_cmd_align_to(
     let dir = (target_pos - current_ball.position).normalize_or_zero();
     let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
+    ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;

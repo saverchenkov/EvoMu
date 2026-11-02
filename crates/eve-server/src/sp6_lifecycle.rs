@@ -873,14 +873,24 @@ pub async fn handle_character_logoff_or_disconnect(
         .map(|s| s.security_status)
         .unwrap_or(0.5);
     let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
+    let is_point_scrambled = sys_handle
+        .get_combat_state(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|cs| cs.is_warp_scrambled());
     let is_scrambled = in_abyssal
-        || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+        || is_point_scrambled
         || (sys_sec >= 0.45 && crim_until > now_unix);
 
     // Emergency warp is prohibited while warp-scrambled, in Abyssal space, as a highsec criminal,
     // or under an active Weapons timer (`feat:account.logout`, `plan:SP-6`).
     let emergency_warp_dest = if !is_scrambled && weap_until <= now_unix {
         let dest = compute_emergency_warp_destination(current_pos, char_id, ship_id);
+        if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
+            cs.is_emergency_warping = true;
+            let _ = sys_handle.set_combat_state(ship_id, cs).await;
+        }
         let _ = sys_handle
             .set_movement_mode(ship_id, MovementMode::new_warp(current_pos, dest, warp_speed_au_s))
             .await;
@@ -977,10 +987,13 @@ pub fn reconnect_character_in_space_sync(
     // capacitor, tackle warp scrambles, and combat status instead of resetting to origin or defaults.
     // If the ship emergency-warped off grid, automatically initiate a return warp back to the pre-disconnect grid spot.
     if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
-        if let Some(orig_arr) = pre_warp_pos_opt {
-            let orig_pos = DVec3::from_array(orig_arr);
-            if existing_pos.distance(orig_pos) > 10_000.0 {
-                if let Ok(mut bp) = sys_handle.ballpark.write() {
+        if let Ok(mut bp) = sys_handle.ballpark.write() {
+            if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+                cs.is_emergency_warping = false;
+            }
+            if let Some(orig_arr) = pre_warp_pos_opt {
+                let orig_pos = DVec3::from_array(orig_arr);
+                if existing_pos.distance(orig_pos) > 10_000.0 {
                     let _ = bp.set_mode(ship_id, MovementMode::new_warp(existing_pos, orig_pos, warp_speed));
                 }
             }

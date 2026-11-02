@@ -203,12 +203,11 @@ pub async fn check_and_spawn_faction_police(
 }
 
 /// NPC customs contraband scan and enforcement in high-security space
-/// (`feat:ships.blockade-runner-cargo-scan-immunity`, `feat:attributes.booster-highsec-contraband`).
+/// (`feat:attributes.booster-highsec-contraband`).
 ///
 /// Note: Blockade Runners (`group 1202`, `cargoScanResistance == 100%`) are immune to player Cargo Scanners (`group 47`),
 /// but NPC customs authorities in high-sec still scan and detect contraband cargo inside Blockade Runners.
 /// Enforces confiscation of contraband items/boosters in cargo, wallet fines, and faction standing loss.
-// parity: feat:ships.blockade-runner-cargo-scan-immunity
 pub fn scan_and_enforce_highsec_contraband(
     ctx: &ServerContext,
     solar_system_id: SolarSystemId,

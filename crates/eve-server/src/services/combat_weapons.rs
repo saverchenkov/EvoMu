@@ -148,6 +148,20 @@ pub async fn handle_weapons(
             }
 
             let is_overloaded = method == "Overload";
+            if let Some(tid) = target_id_opt.filter(|&t| t > 0) {
+                if crate::services::tactical_module_mechanics::is_untargetable_interdiction_probe(
+                    ctx,
+                    &sys_handle,
+                    tid,
+                )
+                .await
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidTarget".into(),
+                        message: "Interdiction probes cannot be targeted directly; use area-of-effect weapons".into(),
+                    }));
+                }
+            }
             if matches!(
                 mod_type.group_id,
                 52 | 65 | 68 | 71 | 72 | 201 | 208 | 291 | 379 | 862 | 74 | 55 | 53 | 1986 | 4060 | 506..=511 | 524 | 1674 | 4500 | 4805 | 4807
