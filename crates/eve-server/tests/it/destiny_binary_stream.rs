@@ -1337,6 +1337,15 @@ fn test_warp_bubble_interception_stop_and_drag() {
 
     park.set_mode(ship_id, MovementMode::new_warp(origin, target_destination, 3.0))
         .expect("set warp mode");
+    for _ in 0..10 {
+        park.step(1.0);
+        if !matches!(
+            park.balls[&ship_id].mode,
+            MovementMode::Warp { phase: WarpPhase::Aligning, .. }
+        ) {
+            break;
+        }
+    }
     let MovementMode::Warp { destination, .. } = park.balls[&ship_id].mode else {
         panic!("Ship must be in Warp mode");
     };
@@ -1357,6 +1366,15 @@ fn test_warp_bubble_interception_stop_and_drag() {
     park.set_ball_position(ship_id, origin);
     park.set_mode(ship_id, MovementMode::new_warp(origin, target_destination, 3.0))
         .expect("set warp with drag bubble");
+    for _ in 0..10 {
+        park.step(1.0);
+        if !matches!(
+            park.balls[&ship_id].mode,
+            MovementMode::Warp { phase: WarpPhase::Aligning, .. }
+        ) {
+            break;
+        }
+    }
     let MovementMode::Warp { destination: drag_dest, .. } = park.balls[&ship_id].mode else {
         panic!("Ship must be in Warp mode");
     };

@@ -587,6 +587,9 @@ async fn test_journey_undock_navigate() {
         PyRep::Tuple(t) if !t.is_empty() => t[0].as_i64().unwrap_or(1),
         _ => bm.dict_get("bookmarkID").and_then(|v| v.as_i64()).unwrap_or(1),
     };
+    call_bound_rpc(&ctx, &mut sess, "beyonce", bey_bid, "CmdStop", &[])
+        .await
+        .expect("CmdStop before bookmark warp");
     let _ = sys_h.set_ball_position(ship_id, glam::DVec3::new(500_000.0, 0.0, 0.0)).await;
     call_bound_rpc(&ctx, &mut sess, "beyonce", bey_bid, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(bm_id), PyRep::Real(0.0)])
         .await

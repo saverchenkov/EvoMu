@@ -409,8 +409,32 @@ async fn test_nanite_repair_and_overload_cross_module_lockout() {
 #[tokio::test]
 async fn test_interdiction_probe_excess_return_full_cargo_rejected() {
     let ctx = build_ctx();
+    let sys_id = 30_004_608;
+    let origin = DVec3::new(60_000_000_000.0, 0.0, 0.0);
     let (char_id, ship_id, launcher_id) = (94_082, 84_082, 75_811);
-    let mut sess = seed_pilot(&ctx, char_id, ship_id, 22_456, 30_004_608, false);
+    let (char_b, ship_b) = (94_083, 84_083);
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 22_456, sys_id, false);
+    let _sess_b = seed_pilot(&ctx, char_b, ship_b, 587, sys_id, false);
+    spawn_in_space(&ctx, char_id, ship_id, 22_456, sys_id, origin).await;
+    spawn_in_space(&ctx, char_b, ship_b, 587, sys_id, origin + DVec3::new(2_000.0, 0.0, 0.0)).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, mut b_snap) = sys.get_ball_snapshot(ship_b).await.unwrap().unwrap();
+    b_snap.velocity = DVec3::new(100.0, 0.0, 0.0);
+    b_snap.mode = MovementMode::new_warp(
+        origin + DVec3::new(2_000.0, 0.0, 0.0),
+        origin + DVec3::new(20_000_000.0, 0.0, 0.0),
+        3.0,
+    );
+    sys.spawn_ball_with_meta(
+        b_snap,
+        ctx.build_ship_combat_state(char_b, ship_b, 587),
+        ctx.build_ship_slim_meta(char_b, 587),
+    )
+    .await
+    .unwrap();
+    let _ = sys.get_set_state(ship_b).await.unwrap();
+    let _ = sys.drain_observer_updates(ship_b).await.unwrap();
+
     give_item(&ctx, launcher_id, 22_782, char_id, ship_id, InventoryFlag::HiSlot0, 1);
     give_item(&ctx, 75_812, 22_778, char_id, ship_id, InventoryFlag::HiSlot0, 4);
     give_item(&ctx, 75_813, 34, char_id, ship_id, InventoryFlag::Cargo, 100_000);
@@ -418,4 +442,53 @@ async fn test_interdiction_probe_excess_return_full_cargo_rejected() {
     rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", vec![PyRep::Integer(ship_id), PyRep::Integer(launcher_id)]).await.unwrap();
     let err = rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(launcher_id)]).await.unwrap_err();
     assert_eq!(err.code, "NotEnoughCargoSpace");
+
+    let (_tick, obs_evs, _rep) = sys.drain_observer_updates(ship_b).await.unwrap();
+    assert!(
+        !obs_evs.iter().any(|e| matches!(e, eve_destiny::DestinyEvent::AddBalls2 { .. })),
+        "Rejected probe launch must emit zero AddBalls2 events"
+    );
+    let (_, post_b) = sys.get_ball_snapshot(ship_b).await.unwrap().unwrap();
+    assert!(
+        matches!(post_b.mode, MovementMode::Warp { phase: eve_destiny::WarpPhase::Aligning, .. }),
+        "Rejected probe launch must not disturb nearby Aligning ship: got {:?}",
+        post_b.mode
+    );
+    assert!((post_b.velocity.x - 100.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_prealigned_warp_bubble_interception_no_overshoot() {
+    let ctx = build_ctx();
+    let sys_id = 30_004_608;
+    let origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
+    let (char_id, ship_id) = (94_084, 84_084);
+    let _sess = seed_pilot(&ctx, char_id, ship_id, 11_198, sys_id, false);
+    spawn_in_space(&ctx, char_id, ship_id, 11_198, sys_id, origin).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let (_, mut ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    ball.velocity = DVec3::new(ball.max_velocity * 0.80, 0.0, 0.0);
+    ball.mode = MovementMode::new_warp(origin, origin + DVec3::new(200_000.0, 0.0, 0.0), 10.0);
+    sys.spawn_ball_with_meta(
+        ball,
+        ctx.build_ship_combat_state(char_id, ship_id, 11_198),
+        ctx.build_ship_slim_meta(char_id, 11_198),
+    )
+    .await
+    .unwrap();
+    sys.add_interdiction_sphere(999_001, origin + DVec3::new(100_000.0, 0.0, 0.0), 20_000.0)
+        .await
+        .unwrap();
+
+    let _ = sys.step_manual(1.0).await.unwrap();
+    let (_, post) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let edge_x = origin.x + 80_000.0;
+    assert!(
+        post.position.x <= edge_x + 1e-3,
+        "Pre-aligned ship must not overshoot catch bubble edge ({edge_x}) on Tick 1: got {}",
+        post.position.x
+    );
+    if let MovementMode::Warp { destination, .. } = post.mode {
+        assert!((destination.x - edge_x).abs() < 1e-3);
+    }
 }

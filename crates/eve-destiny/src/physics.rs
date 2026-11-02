@@ -130,12 +130,12 @@ impl Ballpark {
             }
 
             if let MovementMode::Warp {
-                destination,
+                mut destination,
                 warp_speed_au_s,
                 mut phase,
                 mut elapsed_warp_time,
                 origin,
-                total_distance,
+                mut total_distance,
             } = ball.mode.clone()
             {
                 let is_nullified_or_shuttle = self.ball_group_ids.get(&ball.id) == Some(&31)
@@ -158,6 +158,21 @@ impl Ballpark {
                 }
 
                 let was_aligning = phase == WarpPhase::Aligning;
+                let mut pre_intercepted = false;
+                if !bubble_immune && phase == WarpPhase::Aligning {
+                    let to_dest = destination - ball.position;
+                    let warp_dir = to_dest.normalize_or_zero();
+                    let align_threshold = ball.max_velocity * (0.75 - 1e-12);
+                    if warp_dir != DVec3::ZERO && ball.velocity.dot(warp_dir) >= align_threshold {
+                        if let Some((_bid, intercept_pos)) =
+                            self.warp_bubble_mgr.check_interception(origin, destination)
+                        {
+                            destination = intercept_pos;
+                            total_distance = (intercept_pos - origin).length();
+                            pre_intercepted = true;
+                        }
+                    }
+                }
                 let exited = step_warp_ball(
                     ball,
                     dt,
@@ -168,7 +183,7 @@ impl Ballpark {
                     &mut phase,
                     &mut elapsed_warp_time,
                 );
-                if !bubble_immune && was_aligning && phase != WarpPhase::Aligning {
+                if !bubble_immune && !pre_intercepted && was_aligning && phase != WarpPhase::Aligning {
                     if let Some((_bid, intercept_pos)) =
                         self.warp_bubble_mgr.check_interception(origin, destination)
                     {

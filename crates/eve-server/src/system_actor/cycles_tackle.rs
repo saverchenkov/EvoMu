@@ -517,7 +517,7 @@ pub(crate) fn handle_update_module_overload(
     active_module_cycles: &mut Vec<ActiveModuleCycle>,
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
-    sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
+    _sde_opt: &Option<Arc<eve_sde::SdeRegistry>>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     deactivation_hook: Option<&ModuleDeactivationHook>,
     ship_id: BallId,

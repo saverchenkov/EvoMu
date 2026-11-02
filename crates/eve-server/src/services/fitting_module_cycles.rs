@@ -636,7 +636,7 @@ pub(crate) async fn handle_module_cycles(
                             )))
                 {
                     let rep = crate::services::fitting_cycles_overheat::handle_active_overload_toggle(
-                        ctx, &sys, char_id, ship_id, module_id, fit,
+                        ctx, &sys, char_id, ship_id, module_id, fit, already_active,
                     ).await;
                     return Some(Ok(rep));
                 }

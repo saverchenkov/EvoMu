@@ -380,6 +380,21 @@ async fn test_sp2_grid_bubble_splitting_interdiction_and_nullifier() {
     .await
     .expect("CmdWarpToStuff without nullifier");
 
+    for _ in 0..10 {
+        let (_, b) = null_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+        if matches!(
+            b.mode,
+            MovementMode::Warp {
+                phase: eve_destiny::WarpPhase::Accelerating
+                    | eve_destiny::WarpPhase::Cruising
+                    | eve_destiny::WarpPhase::Decelerating,
+                ..
+            } | MovementMode::Stop
+        ) {
+            break;
+        }
+        let _ = null_handle.step_manual(1.0).await.unwrap();
+    }
     let (_, caught_ball) = null_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
     let MovementMode::Warp { destination: caught_dest, .. } = caught_ball.mode else {
         panic!("Expected ship in Warp mode");

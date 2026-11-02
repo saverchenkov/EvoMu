@@ -266,10 +266,10 @@ impl Ballpark {
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                // Asteroid Belt (`group 9`) and Abyssal Spatial Hazard Clouds (`group 1971`)
-                // are volumetric markers that must not eject ships flying inside them;
-                // solid celestial hulls (`group 6` Star, `group 7` Planet, `group 8` Moon) collide normally.
-                if matches!(group_a, 9 | 1971) || matches!(group_b, 9 | 1971) {
+                // Star (`group 6`), Asteroid Belt (`group 9`), and Abyssal Spatial Hazard Clouds (`group 1971`)
+                // are volumetric/system-origin markers that must not eject ships;
+                // solid celestial hulls (`group 7` Planet, `group 8` Moon), stations, structures, and gates collide normally.
+                if matches!(group_a, 6 | 9 | 1971) || matches!(group_b, 6 | 9 | 1971) {
                     continue;
                 }
                 let is_station_or_struct_b =
@@ -347,6 +347,9 @@ impl Ballpark {
                         DVec3::X
                     };
                     let overlap = min_dist - dist;
+                    if (is_static_a || is_static_b) && overlap > 5_000.0 {
+                        continue;
+                    }
                     let v_rel = (vel_a - vel_b).dot(normal);
 
                     if !is_static_a && !is_static_b {

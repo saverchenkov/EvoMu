@@ -151,11 +151,13 @@ pub async fn activate_interdiction_sphere_launcher(
         });
     }
 
-    let ball_snap = sys.get_ball_snapshot(ship_id).await.ok().flatten();
-    let (current_tick, ship_pos) = ball_snap
-        .as_ref()
-        .map(|(tk, b)| (*tk, b.position))
-        .unwrap_or((0, DVec3::ZERO));
+    let Some((current_tick, ship_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
+        });
+    };
+    let ship_pos = ship_ball.position;
     let now_unix = ctx.now_unix_secs();
     let cadence_s = mod_type
         .default_attributes
@@ -239,11 +241,180 @@ pub async fn activate_interdiction_sphere_launcher(
         .map(|t| t.group_id)
         .unwrap_or(if is_wubble_probe { 4088 } else { 548 });
 
-    // Pre-allocate probe entity ID and spawn the ball/sphere BEFORE consuming charges (`S-8` atomicity).
-    let probe_id = ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        snap.next_entity_id
-    });
+    let (probe_id, remaining_in_launcher, auto_reloaded, ship_items_backup) =
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let (cur_qty, cur_tid) = match snap.items.get(&charge_item_id) {
+                Some(ci)
+                    if ci.location_id == ship_id
+                        && (ci.flag as u16) == m.flag_id
+                        && ci.quantity > 0 =>
+                {
+                    (ci.quantity, ci.type_id)
+                }
+                _ => {
+                    return Err(BridgeRpcError {
+                        code: "NoProbesLoaded".into(),
+                        message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded"
+                            .into(),
+                    });
+                }
+            };
+            let ship_items_backup: Vec<(i64, InventoryItemRecord)> = snap
+                .items
+                .iter()
+                .filter(|(_, it)| it.location_id == ship_id)
+                .map(|(&k, v)| (k, v.clone()))
+                .collect();
+            // Return any excess charges above launcher capacity back to Cargo instead of destroying them.
+            if cur_qty > max_probes_in_launcher {
+                let excess = cur_qty - max_probes_in_launcher;
+                let probe_vol = ctx
+                    .sde
+                    .types
+                    .get(&cur_tid)
+                    .map(|t| t.volume.max(1e-6))
+                    .unwrap_or(1.0);
+                let free_m3 = ship_free_cargo_m3_in_snap(snap, &ctx.sde, ship_id);
+                let max_fit = ((free_m3 + 1e-9) / probe_vol).floor().max(0.0) as i32;
+                if max_fit < excess {
+                    return Err(BridgeRpcError {
+                        code: "NotEnoughCargoSpace".into(),
+                        message: format!(
+                            "Not enough cargo space to return {excess} excess probe(s) (free: {free_m3:.2} m3)"
+                        ),
+                    });
+                }
+                if let Some(ci) = snap.items.get_mut(&charge_item_id) {
+                    ci.quantity = max_probes_in_launcher;
+                    ci.version += 1;
+                }
+                let existing_cargo_id = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
+                            && i.flag == InventoryFlag::Cargo
+                            && i.type_id == cur_tid
+                            && !i.singleton
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                    })
+                    .map(|i| i.item_id);
+                if let Some(cid) = existing_cargo_id {
+                    if let Some(c_item) = snap.items.get_mut(&cid) {
+                        c_item.quantity += excess;
+                        c_item.version += 1;
+                    }
+                } else {
+                    snap.next_entity_id += 1;
+                    let excess_id = snap.next_entity_id;
+                    snap.items.insert(
+                        excess_id,
+                        InventoryItemRecord {
+                            item_id: excess_id,
+                            type_id: cur_tid,
+                            owner_id: char_id,
+                            location_id: ship_id,
+                            flag: InventoryFlag::Cargo,
+                            quantity: excess,
+                            singleton: false,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        },
+                    );
+                }
+            }
+            let mut rem = 0;
+            if let Some(ci) = snap.items.get_mut(&charge_item_id) {
+                ci.quantity = (ci.quantity - 1).max(0);
+                ci.version += 1;
+                rem = ci.quantity;
+            }
+            if rem == 0 {
+                snap.items.remove(&charge_item_id);
+            }
+            let mut reloaded_qty = 0;
+            if rem == 0 {
+                let cargo_probe_opt = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && i.location_id == ship_id
+                            && i.flag == InventoryFlag::Cargo
+                            && i.quantity > 0
+                            && i.type_id == probe_type_id
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                    })
+                    .or_else(|| {
+                        snap.items.values().find(|i| {
+                            i.owner_id == char_id
+                                && i.location_id == ship_id
+                                && i.flag == InventoryFlag::Cargo
+                                && i.quantity > 0
+                                && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                                && ctx
+                                    .sde
+                                    .types
+                                    .get(&i.type_id)
+                                    .is_some_and(|t| matches!(t.group_id, 548 | 4088))
+                        })
+                    })
+                    .map(|i| (i.item_id, i.type_id));
+                if let Some((cargo_id, reload_tid)) = cargo_probe_opt {
+                    let r_vol = ctx
+                        .sde
+                        .types
+                        .get(&reload_tid)
+                        .map(|t| t.volume.max(0.1))
+                        .unwrap_or(probe_vol);
+                    let r_cap = (launcher_cap / r_vol).floor().max(1.0) as i32;
+                    let mut take = 0;
+                    let mut cargo_rem = 0;
+                    if let Some(c_item) = snap.items.get_mut(&cargo_id) {
+                        take = c_item.quantity.min(r_cap);
+                        c_item.quantity -= take;
+                        c_item.version += 1;
+                        cargo_rem = c_item.quantity;
+                    }
+                    if cargo_rem == 0 {
+                        snap.items.remove(&cargo_id);
+                    }
+                    if take > 0 {
+                        snap.next_entity_id += 1;
+                        let slot_stack_id = snap.next_entity_id;
+                        snap.items.insert(
+                            slot_stack_id,
+                            InventoryItemRecord {
+                                item_id: slot_stack_id,
+                                type_id: reload_tid,
+                                owner_id: char_id,
+                                location_id: ship_id,
+                                flag: InventoryFlag::from_u16(m.flag_id),
+                                quantity: take,
+                                singleton: false,
+                                version: 1,
+                                dynamic_attributes: HashMap::new(),
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: false,
+                                blueprint_runs_remaining: None,
+                            },
+                        );
+                        rem = take;
+                        reloaded_qty = take;
+                    }
+                }
+            }
+            snap.next_entity_id += 1;
+            let probe_id = snap.next_entity_id;
+            Ok((probe_id, rem, reloaded_qty, ship_items_backup))
+        })?;
+
     let probe_ball = Ball {
         id: probe_id,
         type_id: probe_type_id,
@@ -284,6 +455,12 @@ pub async fn activate_interdiction_sphere_launcher(
         )
         .await
     {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.retain(|_, it| it.location_id != ship_id);
+            for (k, v) in ship_items_backup {
+                snap.items.insert(k, v);
+            }
+        });
         return Err(BridgeRpcError {
             code: "SystemActorError".into(),
             message: e,
@@ -292,189 +469,18 @@ pub async fn activate_interdiction_sphere_launcher(
     if !is_wubble_probe {
         if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
             let _ = sys.remove_ball(probe_id).await;
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.items.retain(|_, it| it.location_id != ship_id);
+                for (k, v) in ship_items_backup {
+                    snap.items.insert(k, v);
+                }
+            });
             return Err(BridgeRpcError {
                 code: "SystemActorError".into(),
                 message: e,
             });
         }
     }
-
-    let consume_res: Result<(i32, i32), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
-        let (cur_qty, cur_tid) = match snap.items.get(&charge_item_id) {
-            Some(ci)
-                if ci.location_id == ship_id
-                    && (ci.flag as u16) == m.flag_id
-                    && ci.quantity > 0 =>
-            {
-                (ci.quantity, ci.type_id)
-            }
-            _ => {
-                return Err(BridgeRpcError {
-                    code: "NoProbesLoaded".into(),
-                    message: "Interdiction Sphere Launcher has no Warp Disrupt Probe loaded".into(),
-                });
-            }
-        };
-        // Return any excess charges above launcher capacity back to Cargo instead of destroying them.
-        if cur_qty > max_probes_in_launcher {
-            let excess = cur_qty - max_probes_in_launcher;
-            let probe_vol = ctx
-                .sde
-                .types
-                .get(&cur_tid)
-                .map(|t| t.volume.max(1e-6))
-                .unwrap_or(1.0);
-            let free_m3 = ship_free_cargo_m3_in_snap(snap, &ctx.sde, ship_id);
-            let max_fit = ((free_m3 + 1e-9) / probe_vol).floor().max(0.0) as i32;
-            if max_fit < excess {
-                return Err(BridgeRpcError {
-                    code: "NotEnoughCargoSpace".into(),
-                    message: format!(
-                        "Not enough cargo space to return {excess} excess probe(s) (free: {free_m3:.2} m3)"
-                    ),
-                });
-            }
-            if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-                ci.quantity = max_probes_in_launcher;
-                ci.version += 1;
-            }
-            let existing_cargo_id = snap
-                .items
-                .values()
-                .find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == ship_id
-                        && i.flag == InventoryFlag::Cargo
-                        && i.type_id == cur_tid
-                        && !i.singleton
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                })
-                .map(|i| i.item_id);
-            if let Some(cid) = existing_cargo_id {
-                if let Some(c_item) = snap.items.get_mut(&cid) {
-                    c_item.quantity += excess;
-                    c_item.version += 1;
-                }
-            } else {
-                snap.next_entity_id += 1;
-                let excess_id = snap.next_entity_id;
-                snap.items.insert(
-                    excess_id,
-                    InventoryItemRecord {
-                        item_id: excess_id,
-                        type_id: cur_tid,
-                        owner_id: char_id,
-                        location_id: ship_id,
-                        flag: InventoryFlag::Cargo,
-                        quantity: excess,
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    },
-                );
-            }
-        }
-        if ball_snap.is_none() {
-            return Err(BridgeRpcError {
-                code: "ShipNotInSpace".into(),
-                message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
-            });
-        }
-        let mut rem = 0;
-        if let Some(ci) = snap.items.get_mut(&charge_item_id) {
-            ci.quantity = (ci.quantity - 1).max(0);
-            ci.version += 1;
-            rem = ci.quantity;
-        }
-        if rem == 0 {
-            snap.items.remove(&charge_item_id);
-        }
-        let mut reloaded_qty = 0;
-        if rem == 0 {
-            let cargo_probe_opt = snap
-                .items
-                .values()
-                .find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == ship_id
-                        && i.flag == InventoryFlag::Cargo
-                        && i.quantity > 0
-                        && i.type_id == probe_type_id
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                })
-                .or_else(|| {
-                    snap.items.values().find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == InventoryFlag::Cargo
-                            && i.quantity > 0
-                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                            && ctx
-                                .sde
-                                .types
-                                .get(&i.type_id)
-                                .is_some_and(|t| matches!(t.group_id, 548 | 4088))
-                    })
-                })
-                .map(|i| (i.item_id, i.type_id));
-            if let Some((cargo_id, reload_tid)) = cargo_probe_opt {
-                let r_vol = ctx
-                    .sde
-                    .types
-                    .get(&reload_tid)
-                    .map(|t| t.volume.max(0.1))
-                    .unwrap_or(probe_vol);
-                let r_cap = (launcher_cap / r_vol).floor().max(1.0) as i32;
-                let mut take = 0;
-                let mut cargo_rem = 0;
-                if let Some(c_item) = snap.items.get_mut(&cargo_id) {
-                    take = c_item.quantity.min(r_cap);
-                    c_item.quantity -= take;
-                    c_item.version += 1;
-                    cargo_rem = c_item.quantity;
-                }
-                if cargo_rem == 0 {
-                    snap.items.remove(&cargo_id);
-                }
-                if take > 0 {
-                    snap.next_entity_id += 1;
-                    let slot_stack_id = snap.next_entity_id;
-                    snap.items.insert(
-                        slot_stack_id,
-                        InventoryItemRecord {
-                            item_id: slot_stack_id,
-                            type_id: reload_tid,
-                            owner_id: char_id,
-                            location_id: ship_id,
-                            flag: InventoryFlag::from_u16(m.flag_id),
-                            quantity: take,
-                            singleton: false,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
-                    rem = take;
-                    reloaded_qty = take;
-                }
-            }
-        }
-        Ok((rem, reloaded_qty))
-    });
-    let (remaining_in_launcher, auto_reloaded) = match consume_res {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = sys.remove_ball(probe_id).await;
-            return Err(e);
-        }
-    };
 
     if is_wubble_probe {
         tactical_modules::register_launched_wubble_probe(

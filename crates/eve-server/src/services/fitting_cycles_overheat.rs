@@ -180,16 +180,36 @@ pub fn prepare_ancillary_module(
     }
 }
 
-/// Handles toggling overload on a module that is already cycling.
+/// Handles toggling overload on a module that is already cycling, or pre-overloading an inactive targeted module.
 pub async fn handle_active_overload_toggle(
     ctx: &ServerContext,
     sys: &SystemHandle,
     char_id: i64,
     ship_id: i64,
     module_id: i64,
-    fit: ShipFittingEngine,
+    mut fit: ShipFittingEngine,
+    already_active: bool,
 ) -> PyRep {
     let _ = sys.update_module_overload(ship_id, module_id, true).await;
+    if !already_active {
+        if let Some(fm) = fit.modules.get_mut(&module_id) {
+            fm.state = eve_dogma::ModuleState::Overloaded;
+        }
+        fit.recalculate_stats(&ctx.sde);
+        let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
+        ctx.store_ship_fitting(ship_id, fit);
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnHeatAdded",
+            "charid",
+            vec![PyRep::Integer(module_id)],
+        );
+        return PyRep::keyval([
+            ("moduleID", PyRep::Integer(module_id)),
+            ("overloaded", PyRep::Bool(true)),
+            ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+        ]);
+    }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
