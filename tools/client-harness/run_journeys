@@ -679,6 +679,9 @@ def main():
             esi_port = find_free_port()
             cfg_path = os.path.join(out_dir, "evomu_harness.toml")
             db_path = os.path.join(out_dir, "harness_world.sqlite")
+            for stale in (db_path, db_path + "-wal", db_path + "-shm"):
+                if os.path.exists(stale):
+                    os.remove(stale)
             with open(cfg_path, "w") as cf:
                 cf.write('bind_address = "127.0.0.1"\n')
                 cf.write("macho_port = %d\n" % macho_port)
