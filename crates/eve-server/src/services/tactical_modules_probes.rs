@@ -186,11 +186,23 @@ pub fn step_wubble_probes_and_debuffs(
         }
     }
 
+    let mut dead_or_detonated_ids = Vec::new();
     let pending = std::mem::take(&mut st.pending_wubble_probes);
     let mut kept_pending = Vec::with_capacity(pending.len());
     for (k, mut probe) in pending {
         if k != db_key || probe.solar_system_id != ballpark.solar_system_id {
             kept_pending.push((k, probe));
+            continue;
+        }
+        let probe_alive = ballpark.balls.contains_key(&probe.probe_id)
+            && ballpark
+                .combat_states
+                .get(&probe.probe_id)
+                .is_none_or(|cs| cs.structure_hp > 0.0);
+        if !probe_alive {
+            st.active_interdiction_probes
+                .remove(&(db_key, probe.probe_id));
+            dead_or_detonated_ids.push(probe.probe_id);
             continue;
         }
         probe.remaining_arming_s -= dt;
@@ -208,6 +220,9 @@ pub fn step_wubble_probes_and_debuffs(
                     );
                 }
             }
+            st.active_interdiction_probes
+                .remove(&(db_key, probe.probe_id));
+            dead_or_detonated_ids.push(probe.probe_id);
         } else {
             kept_pending.push((k, probe));
         }
@@ -221,5 +236,10 @@ pub fn step_wubble_probes_and_debuffs(
                 .active_wubble_multipliers
                 .insert(*sid, debuff.velocity_multiplier);
         }
+    }
+    drop(st);
+    for pid in dead_or_detonated_ids {
+        ballpark.remove_warp_bubble(pid);
+        let _ = ballpark.remove_ball(pid);
     }
 }

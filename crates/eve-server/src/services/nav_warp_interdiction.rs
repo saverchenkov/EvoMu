@@ -153,7 +153,7 @@ pub fn is_valid_waypoint_destination(ctx: &ServerContext, dest_id: i64) -> bool 
 /// - Planets (`group 7`) and Moons (`group 8`): `2,500 m` outside celestial surface radius along approach vector.
 /// - Stars (`group 6`): `100,000 m` outside star corona radius along approach vector.
 /// - Stargates (`group 10` / `sde.jumps`): stargate perimeter (`gate_radius`) along approach vector (`0 m` from jump activation radius).
-/// - NPC Stations (`sde.stations`) and Upwell Structures (`snap.structures`): docking ring perimeter (`2,000 m` along approach vector, inside `2,500 m` `CmdDock` range).
+/// - NPC Stations (`sde.stations`) and Upwell Structures (`snap.structures`): Zero Point Envelope (`anchor_radius + STATION_DOCKING_RING_STANDOFF_M`, `0.0 m` outside target ball radius along approach vector, pairing with `<= 2,500 m` warp jitter and `target_radius + 2,500.0 m` docking perimeter).
 /// - Asteroid Belts (`group 9`), Bookmarks, Signatures, Anomalies: exact anchor position.
 pub fn resolve_warp_landing_point(
     ctx: &ServerContext,

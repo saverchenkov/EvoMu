@@ -31,7 +31,7 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     let _sess_tgt2 = seed_pilot(&ctx, char_tgt2, ship_tgt2, 12_729, jita_sys, false); // Crane (Blockade Runner)
     let sys = ctx.systems.get_or_spawn(jita_sys);
 
-    // 1. Energy Nosferatu Relative Capacitor % & Blood Raider Override (`feat:modules.energy-nosferatu-relative-capacitor`)
+    // 1. Energy Nosferatu Absolute GJ Rule & Blood Raider Override (`feat:modules.energy-nosferatu-relative-capacitor`)
     let nos_id: i64 = 77_001;
     give_item(&ctx, nos_id, 530, char_src, ship_src, InventoryFlag::HiSlot0, 1);
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(nos_id, true); });
@@ -44,45 +44,45 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
         target_id: ship_tgt, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(100_000.0),
     }).await.unwrap();
 
-    // Target 400 GJ <= Source 800 GJ: no drain on standard hull
+    // 1a. Lower % (30% < 50%) but higher absolute GJ (Source 1500 / 5000 GJ >= Target 150 / 300 GJ): 0 GJ drained!
     let mut s_cs = sys.get_combat_state(ship_src).await.unwrap().unwrap();
     s_cs.capacitor_recharge_time_ms = 0.0;
-    s_cs.max_capacitor = 1_000.0;
-    s_cs.capacitor = 800.0;
+    s_cs.max_capacitor = 5_000.0;
+    s_cs.capacitor = 1_500.0;
     sys.set_combat_state(ship_src, s_cs.clone()).await.unwrap();
     let mut t_cs = sys.get_combat_state(ship_tgt).await.unwrap().unwrap();
     t_cs.capacitor_recharge_time_ms = 0.0;
-    t_cs.max_capacitor = 500.0;
-    t_cs.capacitor = 400.0;
+    t_cs.max_capacitor = 300.0;
+    t_cs.capacitor = 150.0;
     sys.set_combat_state(ship_tgt, t_cs.clone()).await.unwrap();
 
     rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.expect("Activate Nosferatu");
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 400.0);
+    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 150.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
-    // Target 1200 GJ > Source 500 GJ: drains on standard hull
+    // 1b. Higher % (80% > 50%) but lower absolute GJ (Source 120 / 150 GJ < Target 2000 / 4000 GJ): drains!
     let mut s_cs2 = sys.get_combat_state(ship_src).await.unwrap().unwrap();
     s_cs2.capacitor_recharge_time_ms = 0.0;
-    s_cs2.max_capacitor = 2_000.0;
-    s_cs2.capacitor = 500.0;
+    s_cs2.max_capacitor = 150.0;
+    s_cs2.capacitor = 120.0;
     sys.set_combat_state(ship_src, s_cs2).await.unwrap();
     let mut t_cs2 = sys.get_combat_state(ship_tgt).await.unwrap().unwrap();
     t_cs2.capacitor_recharge_time_ms = 0.0;
-    t_cs2.max_capacitor = 3_000.0;
-    t_cs2.capacitor = 1_200.0;
+    t_cs2.max_capacitor = 4_000.0;
+    t_cs2.capacitor = 2_000.0;
     sys.set_combat_state(ship_tgt, t_cs2).await.unwrap();
     rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.unwrap();
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 1_200.0);
-    assert!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor > 500.0);
+    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 2_000.0);
+    assert!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor > 120.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
-    // Blood Raider Bhaalgorn (17920) overrides absolute GJ limit
+    // 1c. Blood Raider Bhaalgorn (17920) overrides absolute GJ limit (drains Target 150 GJ even with Source 1500 GJ)
     ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&ship_src).unwrap().type_id = 17_920; });
     ctx.invalidate_ship_fitting(ship_src);
     sys.set_combat_state(ship_src, s_cs).await.unwrap();
@@ -91,7 +91,7 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.unwrap();
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
-    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 400.0);
+    assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 150.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
     // 2. Heavy Stasis Grappler Mechanics (`feat:modules.stasis-grappler-mechanics`)
@@ -414,3 +414,77 @@ async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
         "Warp Scrambler aborting MWD must emit OnGodmaShipEffect deactivation notification to victim"
     );
 }
+
+#[tokio::test]
+async fn test_wubble_destroyed_during_arming_cancels_detonation() {
+    let ctx = build_ctx();
+    let null_sys: u32 = 30_004_608; // 6VDT-H (-0.70 null-sec)
+    let sabre_char: i64 = 94_061;
+    let sabre_id: i64 = 84_061;
+    let sb_char: i64 = 94_062;
+    let sb_ship_id: i64 = 84_062;
+
+    let mut sabre_sess = seed_pilot(&ctx, sabre_char, sabre_id, 22_456, null_sys, false);
+    let mut sb_sess = seed_pilot(&ctx, sb_char, sb_ship_id, 640, null_sys, false);
+    give_item(&ctx, 77_201, 22_782, sabre_char, sabre_id, InventoryFlag::HiSlot0, 1);
+    give_item(&ctx, 77_202, 56_748, sabre_char, sabre_id, InventoryFlag::HiSlot0, 2);
+    for (slot_idx, flag) in [
+        (0, InventoryFlag::HiSlot0),
+        (1, InventoryFlag::HiSlot1),
+        (2, InventoryFlag::HiSlot2),
+        (3, InventoryFlag::HiSlot3),
+    ] {
+        give_item(&ctx, 77_210 + slot_idx, 3_995, sb_char, sb_ship_id, flag, 1); // Large EMP Smartbomb II
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(77_201, true);
+        for slot_idx in 0..4 {
+            snap.module_online_states.insert(77_210 + slot_idx, true);
+        }
+    });
+    ctx.invalidate_ship_fitting(sabre_id);
+    ctx.invalidate_ship_fitting(sb_ship_id);
+
+    let sys = ctx.systems.get_or_spawn(null_sys);
+    let arena = DVec3::new(50_060_000_000.0, 0.0, 0.0);
+    spawn_in_space(&ctx, sabre_char, sabre_id, 22_456, null_sys, arena).await;
+    spawn_in_space(&ctx, sb_char, sb_ship_id, 640, null_sys, arena + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    let (_, pre_sabre) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
+    let base_vel = pre_sabre.max_velocity;
+
+    let pw = rpc(&ctx, &mut sabre_sess, "dogmaIM", "Activate", vec![PyRep::Integer(77_201)])
+        .await
+        .expect("Launch Wubble 56748");
+    let pw_id = pw.dict_get("probeID").and_then(|v| v.as_i64()).unwrap();
+
+    // Advance 1.0s (< 2.0s arming window): probe is alive on grid
+    sys.step_manual(1.0).await.unwrap();
+    assert!(sys.get_ball_snapshot(pw_id).await.unwrap().is_some(), "Probe must still exist at t=1.0s while arming");
+
+    // Fire 4x Large EMP Smartbomb II before 2.0s detonation -> destroys the 1,000 HP arming probe
+    for slot_idx in 0..4 {
+        rpc(
+            &ctx,
+            &mut sb_sess,
+            "dogmaIM",
+            "Activate",
+            vec![PyRep::Integer(77_210 + slot_idx), PyRep::String("empWave".into()), PyRep::None, PyRep::Integer(1)],
+        )
+        .await
+        .unwrap();
+    }
+    assert!(sys.get_ball_snapshot(pw_id).await.unwrap().is_none(), "Smartbomb AoE must destroy arming wubble probe");
+
+    // Step well past the 2.0s detonation window: destroyed probe must NOT trigger a ghost web debuff
+    for _ in 0..4 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let (_, post_sabre) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
+    assert!(
+        (post_sabre.max_velocity - base_vel).abs() < 1e-2,
+        "Destroyed arming wubble must NOT apply ghost velocity debuff: got {} vs {}",
+        post_sabre.max_velocity,
+        base_vel
+    );
+}
+

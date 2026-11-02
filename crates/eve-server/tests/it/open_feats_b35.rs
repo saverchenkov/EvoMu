@@ -446,19 +446,23 @@ async fn test_b35_02_energy_nosferatu_relative_capacitor() {
     let tgt_after_eq = sys.get_combat_state(s_tgt).await.unwrap().unwrap();
     assert!(tgt_after_eq.capacitor >= 300.0 - 1e-3, "Equal cap % (100% == 100%) must not drain");
 
-    // 3. Strictly lower cap % (30% < 50%, even though 1500 GJ > 150 GJ): drains target AND transfers capacitor to activating ship!
+    // 3a. Lower cap % (30% < 50%, but 1500 GJ > 150 GJ): EVE checks absolute GJ, so must NOT drain!
     set_caps(1_500.0, 1_500.0, 150.0).await;
     let _ = sys.step_manual(15.0).await;
-    let tgt_after_low = sys.get_combat_state(s_tgt).await.unwrap().unwrap();
-    let src_after_low = sys.get_combat_state(s_norm).await.unwrap().unwrap();
-    let ctrl_after_low = sys.get_combat_state(s_ctrl).await.unwrap().unwrap();
-    assert!(tgt_after_low.capacitor < 150.0, "Lower cap % (30% < 50%) must drain target");
-    assert!(
-        src_after_low.capacitor > ctrl_after_low.capacitor + 5.0,
-        "Lower cap % must transfer positive capacitor to activating ship ({} vs idle {})",
-        src_after_low.capacitor,
-        ctrl_after_low.capacitor
-    );
+    assert!(sys.get_combat_state(s_tgt).await.unwrap().unwrap().capacitor >= 150.0 - 1e-3, "Higher absolute GJ (1500 GJ > 150 GJ) must not drain even at lower %");
+    assert!((sys.get_combat_state(s_norm).await.unwrap().unwrap().capacitor - sys.get_combat_state(s_ctrl).await.unwrap().unwrap().capacitor).abs() < 1e-3);
+
+    // 3b. Strictly lower absolute GJ (400 GJ = 80% < 950 GJ = 95%): drains target AND transfers capacitor to activating ship!
+    for (sid, max_c, cur_c) in [(s_norm, 500.0, 400.0), (s_ctrl, 500.0, 400.0), (s_tgt, 1_000.0, 950.0)] {
+        let mut cs = sys.get_combat_state(sid).await.unwrap().unwrap();
+        cs.capacitor_recharge_time_ms = 0.0;
+        cs.max_capacitor = max_c;
+        cs.capacitor = cur_c;
+        sys.set_combat_state(sid, cs).await.unwrap();
+    }
+    let _ = sys.step_manual(15.0).await;
+    assert!(sys.get_combat_state(s_tgt).await.unwrap().unwrap().capacitor < 950.0, "Lower absolute GJ (400 GJ < 950 GJ) must drain target");
+    assert!(sys.get_combat_state(s_norm).await.unwrap().unwrap().capacitor > sys.get_combat_state(s_ctrl).await.unwrap().unwrap().capacitor + 5.0);
 
     // 4. Sleeper NPC target (Sleepless Patroller 30188): standard hull transfers cap even at 80% > 50% without draining Sleeper cap
     let _ = sys.remove_module_cycle(s_norm, nos_mod).await;

@@ -347,24 +347,25 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     assert_eq!(pw.dict_get("bubbleRadius"), Some(&PyRep::Real(15_000.0)));
     assert_eq!(pw.dict_get("lifetimeSeconds"), Some(&PyRep::Real(30.0)));
 
-    // At t = 1.0s (< 2.0s SDE arming delay attr 2262): NOT webbed yet!
+    // At t = 1.0s (< 2.0s SDE arming delay attr 2262): probe is on grid and ship is NOT webbed yet!
     sys.step_manual(1.0).await.unwrap();
+    assert!(sys.get_ball_snapshot(pw_id).await.unwrap().is_some(), "Arming wubble probe must remain on grid before detonation");
     let (_, sabre_t1) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
     assert!((sabre_t1.max_velocity - ab_vel).abs() < 1e-2, "Wubble must not web during 2.0s arming delay");
 
-    // At t = 2.0s (armed): SDE attr 20 = -20.0 -> 0.80x of AB-boosted velocity, and NOT warp scrambled!
+    // At t = 2.0s (detonated): probe ball is immediately removed from grid; 0.80x debuff persists 30s without warp scramble!
     sys.step_manual(1.0).await.unwrap();
+    assert!(sys.get_ball_snapshot(pw_id).await.unwrap().is_none(), "Detonated wubble probe must be removed from grid immediately");
     let (_, sabre_wub) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
     assert!((sabre_wub.max_velocity - ab_vel * 0.80).abs() < 1e-2, "Wubble must apply SDE 0.80x to AB velocity: got {} vs {}", sabre_wub.max_velocity, ab_vel * 0.80);
     assert!(!sys.is_ball_scrambled(sabre_id).await.unwrap());
 
-    // Keep capacitor topped up and step 31s past 30s Wubble lifetime -> restores FULL AB-boosted velocity!
+    // Keep capacitor topped up and step 31s past 30s Wubble debuff lifetime -> restores FULL AB-boosted velocity!
     for _ in 0..31 {
         sys.set_capacitor(sabre_id, 5_000.0).await.unwrap();
         sys.step_manual(1.0).await.unwrap();
         ctx.advance_secs(1);
     }
-    assert!(sys.get_ball_snapshot(pw_id).await.unwrap().is_none());
     let (_, sabre_post_wub) = sys.get_ball_snapshot(sabre_id).await.unwrap().unwrap();
     assert!((sabre_post_wub.max_velocity - ab_vel).abs() < 1e-2, "Wubble expiry must restore active AB velocity ({ab_vel}), got {}", sabre_post_wub.max_velocity);
 

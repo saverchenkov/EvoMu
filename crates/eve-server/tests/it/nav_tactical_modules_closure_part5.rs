@@ -72,20 +72,9 @@ async fn test_interdiction_sphere_launcher_negative_states() {
     // 2. Not in space -> ShipNotInSpace
     let _ = sys.remove_ball(ship_id).await;
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
-    let mod_inst = fit.modules.get(&launcher_id).unwrap();
-    let mod_type = ctx.sde.types.get(&22_782).unwrap();
     let err_no_ball = eve_server::services::tactical_module_mechanics::activate_interdiction_sphere_launcher(
-        &ctx,
-        &sys,
-        jita_sys,
-        char_id,
-        ship_id,
-        22_456,
-        launcher_id,
-        mod_inst,
-        mod_type,
-        "online",
-        None,
+        &ctx, &sys, jita_sys, char_id, ship_id, 22_456, launcher_id,
+        fit.modules.get(&launcher_id).unwrap(), ctx.sde.types.get(&22_782).unwrap(), "online", None,
     )
     .await
     .unwrap_err();
@@ -486,7 +475,7 @@ async fn test_structure_docking_advances_waypoints_and_uses_sde_radius_fallback(
     .await
     .expect("SaveCharacterSetting waypoints");
 
-    // Spawn ship at sde_radius + 2_000 m (outside 5_000 m if radius were 0.0, inside sde_radius + 5_000 m)
+    // Spawn ship at sde_radius + 2_000 m (outside 2_500 m if radius were 0.0, inside sde_radius + 2_500 m)
     // Intentionally do NOT spawn a Ballpark ball for structure_id to test SDE radius fallback.
     let sys = ctx.systems.get_or_spawn(jita_sys);
     let cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
@@ -689,5 +678,3 @@ async fn test_warp_vector_rejects_mid_warp_and_abyssal_and_cmd_dock_checks_upwel
         .unwrap_err();
     assert_eq!(err_dock.code, "ShipWarpScrambled");
 }
-
-
