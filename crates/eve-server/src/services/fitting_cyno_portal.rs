@@ -126,7 +126,7 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     for k in matched {
         if let Some(mut b) = st.beacons.remove(&k) {
             b.expires_at_unix = now + 15;
-            st.destroyed_beacons.insert((key, b.char_id), b);
+            st.destroyed_beacons.insert(k, b);
         }
     }
 }
@@ -601,9 +601,7 @@ async fn light_cyno(
     let fuel_qty = {
         let raw_base = type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY);
         let bonus_1296 = type_attr(ctx, ship_type, 1296);
-        let role_mult = if ship_type.group_id == 830 {
-            0.0
-        } else if ship_type.effect_ids.contains(&3526) || bonus_1296 < 0.0 {
+        let role_mult = if ship_type.effect_ids.contains(&3526) || bonus_1296 < 0.0 {
             (1.0 + bonus_1296 / 100.0).max(0.0)
         } else {
             1.0
@@ -722,65 +720,57 @@ async fn light_cyno(
     ]))
 }
 
-pub(crate) fn live_beacon(
-    ctx: &ServerContext,
-    cyno_char_id: i64,
-    beacon_id: i64,
-    sys_id: u32,
-) -> Result<FleetModuleBeacon, BridgeRpcError> {
-    let now = ctx.now_unix_secs();
-    let ctx_k = ctx_key(ctx);
+fn cleanup_expired_beacons(ctx: &ServerContext, expired: Vec<(i64, u32, i64, TypeId)>) {
+    for (exp_char, exp_sys, exp_beacon, exp_type) in expired {
+        ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
+        if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, exp_char)) {
+            ctx.notify(
+                crate::router::NotificationTarget::Fleet(fleet_id),
+                "OnFleetJumpBeaconModuleChange",
+                "fleetid",
+                vec![
+                    PyRep::Integer(exp_char),
+                    PyRep::Integer(exp_sys as i64),
+                    PyRep::Integer(exp_beacon),
+                    PyRep::Integer(exp_type as i64),
+                    PyRep::Bool(false),
+                ],
+            );
+        }
+    }
+}
+
+pub(crate) fn live_beacon(ctx: &ServerContext, cyno_char_id: i64, beacon_id: i64, sys_id: u32) -> Result<FleetModuleBeacon, BridgeRpcError> {
+    let (now, ctx_k) = (ctx.now_unix_secs(), ctx_key(ctx));
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
-    let mut expired_for_char = None;
-    let mut expired_balls = Vec::new();
+    let (mut expired_for_char, mut expired_beacons) = (None, Vec::new());
     st.beacons.retain(|&(k, _), b| {
         if k == ctx_k && b.expires_at_unix <= now {
             if b.char_id == cyno_char_id && expired_for_char.is_none() {
                 expired_for_char = Some(b.beacon_id);
             }
-            expired_balls.push((b.solar_system_id, b.beacon_id));
+            expired_beacons.push((b.char_id, b.solar_system_id, b.beacon_id, b.beacon_type_id));
             false
         } else {
             true
         }
     });
-    let matched_key = st
+    let matched_b = st
         .beacons
         .iter()
         .find(|&(&(k, _), b)| {
-            k == ctx_k
-                && b.char_id == cyno_char_id
-                && (beacon_id == 0 || b.beacon_id == beacon_id)
-                && (sys_id == 0 || b.solar_system_id == sys_id)
+            k == ctx_k && b.char_id == cyno_char_id && (beacon_id == 0 || b.beacon_id == beacon_id) && (sys_id == 0 || b.solar_system_id == sys_id)
         })
-        .map(|(&k, _)| k)
-        .or_else(|| {
-            st.beacons
-                .iter()
-                .find(|&(&(k, _), b)| k == ctx_k && b.char_id == cyno_char_id)
-                .map(|(&k, _)| k)
-        });
-    let Some(key) = matched_key else {
-        drop(st);
-        for (exp_sys, exp_beacon) in expired_balls {
-            ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
-        }
+        .or_else(|| st.beacons.iter().find(|&(&(k, _), b)| k == ctx_k && b.char_id == cyno_char_id))
+        .map(|(_, b)| b.clone());
+    drop(st);
+    cleanup_expired_beacons(ctx, expired_beacons);
+    let Some(b) = matched_b else {
         if let Some(exp_id) = expired_for_char {
             return Err(err("NoActiveBeacon", format!("Cynosural field {exp_id} has collapsed")));
         }
         return Err(err("NoActiveBeacon", format!("Character {cyno_char_id} has no active cynosural field")));
     };
-    let Some(b) = st.beacons.get(&key).cloned() else {
-        drop(st);
-        for (exp_sys, exp_beacon) in expired_balls {
-            ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
-        }
-        return Err(err("NoActiveBeacon", format!("Character {cyno_char_id} has no active cynosural field")));
-    };
-    drop(st);
-    for (exp_sys, exp_beacon) in expired_balls {
-        ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
-    }
     if (beacon_id != 0 && b.beacon_id != beacon_id) || (sys_id != 0 && b.solar_system_id != sys_id) {
         return Err(err("NoActiveBeacon", format!("Beacon {beacon_id} in system {sys_id} is not active")));
     }
@@ -1214,17 +1204,21 @@ pub(super) async fn resolve_fleet_beacon_or_destroyed(
         Ok(b) => Ok((b, false)),
         Err(e) if !is_deployable && cyno_char != 0 && beacon_id != 0 => {
             let now = ctx.now_unix_secs();
+            let ctx_k = ctx_key(ctx);
             let destroyed_b = cyno_state()
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
                 .destroyed_beacons
-                .get(&(ctx_key(ctx), cyno_char))
-                .cloned();
-            if let Some(db_b) = destroyed_b.filter(|b| {
-                b.beacon_id == beacon_id
-                    && (target_sys == 0 || b.solar_system_id == target_sys)
-                    && b.expires_at_unix > now
-            }) {
+                .iter()
+                .find(|&(&(k, _), b)| {
+                    k == ctx_k
+                        && b.char_id == cyno_char
+                        && b.beacon_id == beacon_id
+                        && (target_sys == 0 || b.solar_system_id == target_sys)
+                        && b.expires_at_unix > now
+                })
+                .map(|(_, b)| b.clone());
+            if let Some(db_b) = destroyed_b {
                 Ok((db_b, true))
             } else {
                 Err(e)

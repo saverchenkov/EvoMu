@@ -479,17 +479,46 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
     let stront_left = ctx.db.with_snapshot(|s| s.items.get(&active_cyno_stront).map(|it| it.quantity).unwrap_or(0));
     assert_eq!(stront_left, 1_000, "rejected portal must not consume Strontium Clathrates");
 
-    // Advance past cyno expiry, light 0-ozone Covert Cyno on Anathema (-100% fuel bonus), then verify 2-arg jump (beacon_id == 0)
+    // Advance past cyno expiry, verify SDE attr 1296 Covert Cyno Liquid Ozone at CFT V:
+    // Enforcer (44995, attr 1296 = -80%) consumes 5 LO; Anathema (11188) and Stealth Bomber Purifier (12038) consume 25 LO
     ctx.advance_time_seconds(700);
-    let (covops_ship, covops_cyno_mod) = (210_013, 210_014);
-    put_in_space(&ctx, &mut s1, PILOT_1, covops_ship, 11_188, lowsec_sys, DVec3::new(10_000.0, 0.0, 0.0)).await;
-    seed_item(&ctx, covops_cyno_mod, COVERT_CYNO, PILOT_1, covops_ship, InventoryFlag::HiSlot0, 1);
-    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(covops_cyno_mod, true); });
-    ctx.invalidate_ship_fitting(covops_ship);
-    let covops_cyno_res = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(covops_cyno_mod), PyRep::String("cynosuralGeneration".into())])
+    let (enforcer_ship, enforcer_cyno_mod, enforcer_lo) = (210_013, 210_014, 210_022);
+    put_in_space(&ctx, &mut s1, PILOT_1, enforcer_ship, 44_995, lowsec_sys, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    seed_item(&ctx, enforcer_cyno_mod, COVERT_CYNO, PILOT_1, enforcer_ship, InventoryFlag::HiSlot0, 1);
+    seed_item(&ctx, enforcer_lo, 16_273, PILOT_1, enforcer_ship, InventoryFlag::Cargo, 5);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(enforcer_cyno_mod, true); });
+    ctx.invalidate_ship_fitting(enforcer_ship);
+    let enforcer_cyno_res = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(enforcer_cyno_mod), PyRep::String("cynosuralGeneration".into())])
         .await
-        .expect("Anathema with 0 Liquid Ozone must light Covert Cyno");
-    assert!(kv_get(&covops_cyno_res, "beaconTypeID").is_some());
+        .expect("Enforcer with 5 Liquid Ozone must light Covert Cyno at CFT V");
+    assert_eq!(kv_get(&enforcer_cyno_res, "consumptionQuantity").and_then(|v| v.as_i64()), Some(5));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&enforcer_lo).map(|i| i.quantity).unwrap_or(0)), 0);
+
+    ctx.advance_time_seconds(700);
+    let (anathema_ship, anathema_cyno_mod, anathema_lo) = (210_016, 210_017, 210_018);
+    put_in_space(&ctx, &mut s1, PILOT_1, anathema_ship, 11_188, lowsec_sys, DVec3::new(11_000.0, 0.0, 0.0)).await;
+    seed_item(&ctx, anathema_cyno_mod, COVERT_CYNO, PILOT_1, anathema_ship, InventoryFlag::HiSlot0, 1);
+    seed_item(&ctx, anathema_lo, 16_273, PILOT_1, anathema_ship, InventoryFlag::Cargo, 25);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(anathema_cyno_mod, true); });
+    ctx.invalidate_ship_fitting(anathema_ship);
+    let anathema_cyno_res = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(anathema_cyno_mod), PyRep::String("cynosuralGeneration".into())])
+        .await
+        .expect("Anathema with 25 Liquid Ozone must light Covert Cyno at CFT V");
+    assert_eq!(kv_get(&anathema_cyno_res, "consumptionQuantity").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&anathema_lo).map(|i| i.quantity).unwrap_or(0)), 0);
+
+    ctx.advance_time_seconds(700);
+    let (bomber_ship, bomber_cyno_mod, bomber_lo) = (210_019, 210_020, 210_021);
+    put_in_space(&ctx, &mut s1, PILOT_1, bomber_ship, 12_038, lowsec_sys, DVec3::new(12_000.0, 0.0, 0.0)).await;
+    seed_item(&ctx, bomber_cyno_mod, COVERT_CYNO, PILOT_1, bomber_ship, InventoryFlag::HiSlot0, 1);
+    seed_item(&ctx, bomber_lo, 16_273, PILOT_1, bomber_ship, InventoryFlag::Cargo, 25);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(bomber_cyno_mod, true); });
+    ctx.invalidate_ship_fitting(bomber_ship);
+    let bomber_cyno_res = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(bomber_cyno_mod), PyRep::String("cynosuralGeneration".into())])
+        .await
+        .expect("Stealth Bomber Purifier with 25 Liquid Ozone must light Covert Cyno at CFT V");
+    assert_eq!(kv_get(&bomber_cyno_res, "consumptionQuantity").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&bomber_lo).map(|i| i.quantity).unwrap_or(0)), 0);
 
     ctx.advance_time_seconds(700);
     put_in_space(&ctx, &mut s1, PILOT_1, std_beacon_ship, FALCON, lowsec_sys, DVec3::new(15_000.0, 0.0, 0.0)).await;
