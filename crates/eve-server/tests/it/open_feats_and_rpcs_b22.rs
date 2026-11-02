@@ -414,7 +414,27 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         PyRep::Bool(false)
     );
 
-    // 4. Structure reinforce default adopted by newly deployed structure
+    // 4. Structure reinforce default: non-director role gate + adopted by newly deployed structure
+    let deny_reinf = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "SetStructureReinforceDefault",
+        &[PyRep::Integer(5)],
+    )
+    .await;
+    assert_eq!(
+        deny_reinf.unwrap_err().code,
+        "CorpRoleDenied",
+        "Non-director member must be rejected when setting structure reinforce default"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
+            .await
+            .unwrap(),
+        PyRep::Integer(18),
+        "Default structure reinforce hour must remain unchanged after rejected call"
+    );
     rpc(
         &ctx,
         &mut sess1,
@@ -424,6 +444,19 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
     )
     .await
     .expect("SetStructureReinforceDefault");
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
+            .await
+            .unwrap(),
+        PyRep::Integer(21)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "corpRegistry", "SetStructureReinforceDefault", &[PyRep::Integer(3)])
+            .await
+            .unwrap_err()
+            .code,
+        "CorpRoleDenied"
+    );
     assert_eq!(
         rpc(&ctx, &mut sess1, "corpRegistry", "GetStructureReinforceDefault", &[])
             .await

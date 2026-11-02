@@ -5,6 +5,7 @@
 use eve_db::IskCents;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
+use std::collections::HashMap;
 
 use super::open_feats_and_rpcs_b22::{field, rowset_rows, rpc, select_pilot, PILOT_1, PILOT_2};
 
@@ -64,31 +65,63 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
     });
     sess2.corporation_id = Some(corp_id);
 
-    // 1. Division names
+    // 1. Division names (V24 client 14-argument call shape + GetDivisionNames + ESI divisions)
+    let hangar_names = [
+        "Armory", "Ore Bay", "Components", "Ammo", "Salvage", "Blueprints", "Capitals",
+    ];
+    let wallet_names = [
+        "Treasury", "SRP", "Industry", "Fuel", "Taxes", "Bounties", "Reserve",
+    ];
+    let div_args_14: Vec<PyRep> = hangar_names
+        .iter()
+        .chain(wallet_names.iter())
+        .map(|s| PyRep::String((*s).into()))
+        .collect();
     let deny_div = rpc(
         &ctx,
         &mut sess2,
         "corpRegistry",
         "UpdateDivisionNames",
-        &[PyRep::Integer(1), PyRep::String("Hack".into()), PyRep::String("HackW".into())],
+        &div_args_14,
     )
     .await;
-    assert!(deny_div.is_err(), "Non-director cannot rename divisions");
+    assert_eq!(deny_div.unwrap_err().code, "CorpRoleDenied", "Non-director cannot rename divisions");
 
     rpc(
         &ctx,
         &mut sess1,
         "corpRegistry",
         "UpdateDivisionNames",
-        &[PyRep::Integer(1), PyRep::String("Armory".into()), PyRep::String("Treasury".into())],
+        &div_args_14,
     )
     .await
-    .expect("UpdateDivisionNames");
+    .expect("UpdateDivisionNames (14 args)");
     let divs = rpc(&ctx, &mut sess1, "corpRegistry", "GetDivisionNames", &[PyRep::Integer(corp_id)])
         .await
         .expect("GetDivisionNames");
-    assert_eq!(field(&divs, "division1"), PyRep::String("Armory".into()));
-    assert_eq!(field(&divs, "walletDivision1"), PyRep::String("Treasury".into()));
+    for i in 0..7 {
+        assert_eq!(field(&divs, &format!("division{}", i + 1)), PyRep::String(hangar_names[i].into()));
+        assert_eq!(field(&divs, &format!("walletDivision{}", i + 1)), PyRep::String(wallet_names[i].into()));
+    }
+    let mut esi_params = HashMap::new();
+    esi_params.insert("corporation_id".to_string(), corp_id.to_string());
+    let esi_divs = eve_server::esi::sample_routes::dispatch_operation(
+        &ctx,
+        ctx.now_unix(),
+        "GET",
+        "/corporations/{corporation_id}/divisions",
+        &esi_params,
+        &HashMap::new(),
+        None,
+        1,
+        &[],
+    );
+    assert_eq!(esi_divs.status_code, 200, "ESI divisions route failed: {esi_divs:?}");
+    let esi_body = esi_divs.body.expect("ESI divisions JSON");
+    assert_eq!(esi_body["hangar"][0]["name"], "Armory");
+    assert_eq!(esi_body["hangar"][6]["name"], "Capitals");
+    assert_eq!(esi_body["wallet"][0]["name"], "Treasury");
+    assert_eq!(esi_body["wallet"][6]["name"], "Reserve");
 
     // 2. Share transfers (MoveCompanyShares + MovePrivateShares) & exact share counts
     let deny_shares = rpc(
@@ -178,13 +211,84 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
         assert!(s.wallet_journal.iter().any(|j| j.character_id == corp_id && j.entry_type == "CorporationDividendPayout" && j.amount.raw_cents() == -400_000_00));
     });
 
-    // 4. CEO resignation gating (GetNumberOfPotentialCEOs + multi-member vote/successor requirement)
+    // 4. CEO candidacy (CanRunForCEO), resignation gating, and CEO election via vote case
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(sk) = s.skills.get_mut(&PILOT_2) {
+            sk.remove(&3363);
+        }
+    });
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "voteManager", "CanRunForCEO", &[]).await.unwrap(),
+        PyRep::Bool(false),
+        "CanRunForCEO must be false without Corporation Management skill (3363)"
+    );
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(PILOT_2).or_default().insert(
+            3363,
+            eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 },
+        );
+    });
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "voteManager", "CanRunForCEO", &[]).await.unwrap(),
+        PyRep::Bool(true),
+        "CanRunForCEO must be true with Corporation Management skill (3363)"
+    );
+
     let pot_ceos = rpc(&ctx, &mut sess1, "corpRegistry", "GetNumberOfPotentialCEOs", &[])
         .await
         .expect("GetNumberOfPotentialCEOs");
     assert_eq!(pot_ceos, PyRep::Integer(1));
     let deny_resign = rpc(&ctx, &mut sess1, "corpRegistry", "ResignFromCEO", &[]).await;
     assert_eq!(deny_resign.unwrap_err().code, "InvalidNewCEO");
+
+    // Elect PILOT_2 as CEO via CEO vote case (vote_type = 0)
+    let vc_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "voteManager",
+        "InsertVoteCase",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::String("Elect PILOT_2 as CEO".into()),
+            PyRep::String("CEO succession vote".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(PILOT_2),
+        ],
+    )
+    .await
+    .expect("InsertVoteCase (CEO election)");
+    let case_id = field(&vc_rep, "voteCaseID").as_i64().unwrap();
+    rpc(
+        &ctx,
+        &mut sess2,
+        "voteManager",
+        "InsertVote",
+        &[PyRep::Integer(corp_id), PyRep::Integer(case_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("InsertVote for PILOT_2");
+    ctx.advance_secs(86_401);
+    rpc(
+        &ctx,
+        &mut sess2,
+        "voteManager",
+        "ActivateSanctionedAction",
+        &[PyRep::Integer(corp_id), PyRep::Integer(case_id)],
+    )
+    .await
+    .expect("ActivateSanctionedAction (CEO election)");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].ceo_id, PILOT_2, "Vote case must elect PILOT_2 as CEO");
+    });
+
+    // PILOT_2 resigns and designates PILOT_1 as successor
+    let handback = rpc(&ctx, &mut sess2, "corpRegistry", "ResignFromCEO", &[PyRep::Integer(PILOT_1)])
+        .await
+        .expect("ResignFromCEO(PILOT_1)");
+    assert_eq!(field(&handback, "newCeoID"), PyRep::Integer(PILOT_1));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.corporations[&corp_id].ceo_id, PILOT_1);
+    });
 
     // 5. Pending auto-kick when member is in space
     ctx.advance_secs(12);

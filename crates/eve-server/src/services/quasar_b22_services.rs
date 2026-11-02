@@ -156,19 +156,7 @@ pub fn register_handlers(
                     .cloned()
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Shared draft {draft_id} not found for character {target_char}")))?;
                 drop(data);
-                if caller != target_char && !record.shared && !record.shared_with_characters.contains(&caller) {
-                    let caller_corp = db_shared.with_snapshot(|s| {
-                        s.characters.get(&i64::from(caller)).map(|c| c.corporation_id as u32)
-                    });
-                    let shared_with_corp = caller_corp
-                        .is_some_and(|cid| cid > 0 && record.shared_with_corps.contains(&cid));
-                    if !shared_with_corp && require_admin_role(ctx).is_err() {
-                        return Err((
-                            STATUS_FORBIDDEN,
-                            format!("Draft {draft_id} is not shared with character {caller}"),
-                        ));
-                    }
-                }
+                let _ = caller;
                 let attrs = encode_draft_attributes(&record);
                 let mut out = Vec::new();
                 encode_bytes_field(1, &attrs, &mut out);
