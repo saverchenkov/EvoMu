@@ -578,10 +578,10 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
     assert_eq!(field.mining_efficiency(), 0.10);
     field.advance_fracture(0.45);
     assert!(field.beacon_spawned);
-    assert!(!field.connect_industrial_command_ship(28_606));
-    assert!(!field.connect_industrial_command_ship(42_244));
+    assert!(!field.connect_industrial_command_ship(1001, 50));
+    assert!(!field.connect_industrial_command_ship(1002, 35));
     assert_eq!(field.mining_efficiency(), 0.10);
-    assert!(field.connect_industrial_command_ship(42_244));
+    assert!(field.connect_industrial_command_ship(1003, 35));
     assert_eq!(field.mining_efficiency(), 1.0);
     field.advance_fracture(0.50);
     assert!(field.collapsed);

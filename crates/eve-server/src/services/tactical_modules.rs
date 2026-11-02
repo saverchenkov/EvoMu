@@ -1264,7 +1264,6 @@ pub async fn activate_command_burst(
                 }
             }
         }
-        }
         let mut ships: Vec<(i64, i64)> = fleet_chars.into_iter().filter_map(|cid| {
             let ch = snap.characters.get(&cid)?;
             (ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0).then_some((cid, ch.active_ship_id))

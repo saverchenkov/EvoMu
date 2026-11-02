@@ -946,7 +946,7 @@ pub async fn spawn_seeded_site_entities(
 }
 
 /// Phased Asteroid Field site lifecycle (`feat:mining.phased-asteroid-field-lifecycle`, `feat:mining.mobile-phase-anchor`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PhasedAsteroidFieldState {
     pub signature_id: String,
     pub solar_system_id: u32,
@@ -955,6 +955,8 @@ pub struct PhasedAsteroidFieldState {
     pub collapsed: bool,
     pub phased_in: bool,
     pub mobile_phase_anchor_energy: u32,
+    #[serde(default)]
+    pub connected_ship_ids: Vec<i64>,
 }
 
 impl PhasedAsteroidFieldState {
@@ -967,6 +969,7 @@ impl PhasedAsteroidFieldState {
             collapsed: false,
             phased_in: false,
             mobile_phase_anchor_energy: 0,
+            connected_ship_ids: Vec::new(),
         }
     }
 
@@ -981,16 +984,16 @@ impl PhasedAsteroidFieldState {
         }
     }
 
-    pub fn connect_industrial_command_ship(&mut self, ship_type_id: eve_sde::TypeId) -> bool {
-        let energy = match ship_type_id {
-            28352 => 100, // Rorqual
-            28606 => 50,  // Orca
-            42244 => 35,  // Porpoise
-            _ => 0,
-        };
-        self.mobile_phase_anchor_energy += energy;
-        if self.mobile_phase_anchor_energy >= 100 && !self.collapsed {
-            self.phased_in = true;
+    pub fn connect_industrial_command_ship(&mut self, ship_id: i64, energy: u32) -> bool {
+        if self.connected_ship_ids.contains(&ship_id) {
+            return self.phased_in;
+        }
+        if energy > 0 {
+            self.connected_ship_ids.push(ship_id);
+            self.mobile_phase_anchor_energy += energy;
+            if self.mobile_phase_anchor_energy >= 100 && !self.collapsed {
+                self.phased_in = true;
+            }
         }
         self.phased_in
     }

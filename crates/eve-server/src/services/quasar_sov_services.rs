@@ -369,11 +369,11 @@ pub fn register_handlers(
             router.register_handler(
                 req_name,
                 Arc::new(move |ctx, _any, dyn_msg| {
-                    require_admin_role(ctx)?;
                     let caller_cid = ctx.effective_character_id().ok_or((
                         STATUS_UNAUTHORIZED,
                         "Authentication required".to_string(),
                     ))? as u64;
+                    require_admin_role(ctx)?;
                     let opt_sys = get_identifier_or_int(dyn_msg, 1).map(|v| v as u32).or_else(|| {
                         ctx.effective_character_id().and_then(|cid| {
                             db_fw_adm.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.solar_system_id))

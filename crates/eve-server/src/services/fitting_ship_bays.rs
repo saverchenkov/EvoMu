@@ -629,7 +629,7 @@ pub(crate) async fn ship_drop(
             )
             .await;
         if tid == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR {
-            crate::services::mining_b33::on_mobile_phase_anchor_deployed(ctx, sys_id);
+            crate::services::mining_b33::on_mobile_phase_anchor_deployed(ctx, sys_id, launched_id).await;
         }
     }
     let mut map: HashMap<i64, Vec<PyRep>> = HashMap::new();

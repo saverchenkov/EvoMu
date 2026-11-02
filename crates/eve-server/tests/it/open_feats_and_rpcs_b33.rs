@@ -397,13 +397,46 @@ async fn test_b33_phased_asteroid_field_mobile_anchor_and_prismaticite() {
     let breached_units = breached_outcomes[0].units_delivered;
     assert!(breached_units > 0);
 
-    // 2. Deploy Mobile Phase Anchor (90037) via ship.Drop and power with ICS (Porpoise 35 + Orca 50 = 85 < 100; + Porpoise 35 = 120 >= 100)
+    // 2. Deploy Mobile Phase Anchor (90037) via ship.Drop and power with distinct fleet ICS ships
     let anchor_cargo_id = 9_300_020_i64;
     insert_item(&p.ctx, anchor_cargo_id, MOBILE_PHASE_ANCHOR, CHAR_ID, p.ship_id, InventoryFlag::Cargo, 1);
     let _ = rpc(&mut p, "ship", None, "Drop", &[PyRep::Integer(anchor_cargo_id)]).await.unwrap();
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, PORPOISE), Some(false));
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, ORCA), Some(false));
-    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, PORPOISE), Some(true));
+
+    // Seed 3 distinct fleet-mate ICS ships (Porpoise 35 + Orca 50 + Porpoise 35 = 120 >= 100)
+    let (porp1_ship, orca_ship, porp2_ship) = (9_300_031_i64, 9_300_032_i64, 9_300_033_i64);
+    p.ctx.db.with_mut_snapshot(|snap| {
+        for (idx, (cid, sid, tid)) in [
+            (9_300_131_i64, porp1_ship, PORPOISE),
+            (9_300_132_i64, orca_ship, ORCA),
+            (9_300_133_i64, porp2_ship, PORPOISE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut ch = snap.characters.get(&CHAR_ID).unwrap().clone();
+            ch.character_id = cid;
+            ch.name = format!("ICS_Pilot_{idx}");
+            ch.active_ship_id = sid;
+            ch.solar_system_id = NULL_SYS;
+            snap.characters.insert(cid, ch);
+            snap.items.insert(sid, eve_db::InventoryItemRecord {
+                item_id: sid, type_id: tid, owner_id: cid, location_id: i64::from(NULL_SYS),
+                flag: InventoryFlag::Cargo, quantity: 1, singleton: true, ..Default::default()
+            });
+        }
+        snap.fleets.insert(9_300_200, eve_db::FleetRecord {
+            fleet_id: 9_300_200,
+            boss_id: CHAR_ID,
+            members: vec![CHAR_ID, 9_300_131, 9_300_132, 9_300_133],
+            ..Default::default()
+        });
+    });
+
+    // Re-connecting the same Porpoise ship_id twice must not double-count energy
+    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp1_ship).await, Some(false));
+    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp1_ship).await, Some(false));
+    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, orca_ship).await, Some(false));
+    assert_eq!(eve_server::services::mining_b33::connect_ics_to_phase_anchor(&p.ctx, NULL_SYS, porp2_ship).await, Some(true));
 
     let phased_outcomes = advance(&p, 46).await;
     let phased_units = phased_outcomes[0].units_delivered;

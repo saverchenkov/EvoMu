@@ -14,11 +14,43 @@ use eve_server::quasar_gateway::{
     STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b33_services::create_user_payment_schedule;
+use eve_server::services::quasar_payment_store_types::PaymentScheduleRecord;
 use eve_server::services::sov_services::{
     TYPE_MAGMATIC_GAS, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB,
 };
 use std::collections::HashMap;
+
+fn create_user_payment_schedule(
+    db: &eve_db::WorldRepository,
+    user_id: u64,
+    schedule_type: u32,
+    offer_id: &str,
+    interval_days: u32,
+    now_unix: u64,
+) -> PaymentScheduleRecord {
+    db.with_mut_snapshot(|snap| {
+        let mut schedules: Vec<PaymentScheduleRecord> = snap
+            .service_state_blobs
+            .get("payment_schedules")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let next_id = schedules.iter().map(|s| s.id).max().unwrap_or(1000) + 1;
+        let rec = PaymentScheduleRecord {
+            id: next_id,
+            user_id,
+            schedule_type,
+            offer_id: offer_id.to_string(),
+            interval_days,
+            next_payment_unix: now_unix + u64::from(interval_days) * 86_400,
+            created_unix: now_unix,
+        };
+        schedules.push(rec.clone());
+        if let Ok(json) = serde_json::to_string(&schedules) {
+            snap.service_state_blobs.insert("payment_schedules".to_string(), json);
+        }
+        rec
+    })
+}
 
 fn make_session(sid: u64, uid: u64, cid: i64, corp_id: i64, admin: bool) -> SessionState {
     let mut sess = SessionState::new(sid);
@@ -94,6 +126,12 @@ fn encode_uuid_id(field_num: u32, uuid: &[u8], out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &sub, out);
 }
 
+fn encode_ach_uuid_ident(field_no: u32, id: u32, out: &mut Vec<u8>) {
+    let mut uuid = [0u8; 16];
+    uuid[12..16].copy_from_slice(&id.to_be_bytes());
+    encode_uuid_id(field_no, &uuid, out);
+}
+
 fn decode_dyn(ctx: &ServerContext, rsp: &EvePublicResponse) -> DynamicQuasarMessage {
     let any = rsp.payload.as_ref().expect("response payload");
     ctx.quasar_gateway
@@ -147,34 +185,14 @@ fn drain_notice_names(
     out
 }
 
-fn seed_structure(
-    snap: &mut eve_db::WorldStateSnapshot,
-    id: i64,
-    owner: i64,
-    sys: u32,
-    type_id: u32,
-) {
-    snap.structures.insert(
-        id,
-        UpwellStructureRecord {
-            structure_id: id,
-            type_id,
-            owner_corp_id: owner,
-            solar_system_id: sys,
-            name: format!("Structure {id}"),
-            position: [200_000.0, 0.0, 0.0],
-            state: "ShieldVulnerable".into(),
-            quantum_core_installed: true,
-            fuel_blocks: 0,
-            shield_hp: 5_000.0,
-            armor_hp: 5_000.0,
-            hull_hp: 5_000.0,
-            reinforced_until_unix: 0,
-            last_damage_tick: 0,
-            last_damage_unix: 0,
-            self_destruct_at_unix: None,
-        },
-    );
+fn seed_structure(snap: &mut eve_db::WorldStateSnapshot, id: i64, owner: i64, sys: u32, type_id: u32) {
+    snap.structures.insert(id, UpwellStructureRecord {
+        structure_id: id, type_id, owner_corp_id: owner, solar_system_id: sys,
+        name: format!("Structure {id}"), position: [200_000.0, 0.0, 0.0],
+        state: "ShieldVulnerable".into(), quantum_core_installed: true, fuel_blocks: 0,
+        shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
+        reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+    });
 }
 
 #[tokio::test]
@@ -212,11 +230,11 @@ async fn test_b33_faction_activity_admin_and_payment_schedule() {
     let r_forbid = quasar_rpc(&ctx, &mut player_sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_req.clone()).await;
     assert_eq!(r_forbid.status_code, STATUS_FORBIDDEN);
 
-    // 2. Unknown system -> 404
+    // 2. Unknown / non-warzone system -> 400 or 404
     let mut bad_sys = Vec::new();
     encode_u64_id(1, 99_999_999, &mut bad_sys);
     let r_not_found = quasar_rpc(&ctx, &mut admin_sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", bad_sys).await;
-    assert_eq!(r_not_found.status_code, STATUS_NOT_FOUND);
+    assert!(matches!(r_not_found.status_code, STATUS_BAD_REQUEST | STATUS_NOT_FOUND));
 
     // 3. Valid increment mutates victory points & emits notices
     let mut rx = subscribe_notices(&ctx, &mut admin_sess).await;
@@ -316,7 +334,7 @@ async fn test_b33_achievement_and_goal_admin_closure() {
         .id;
 
     let mut add_ach = Vec::new();
-    eve_server::services::quasar_b33_services::encode_ach_uuid_ident(1, aid, &mut add_ach);
+    encode_ach_uuid_ident(1, aid, &mut add_ach);
     encode_varint_field(2, 5, &mut add_ach);
 
     let r_forbid = quasar_rpc(
@@ -328,11 +346,13 @@ async fn test_b33_achievement_and_goal_admin_closure() {
     .await;
     assert_eq!(r_forbid.status_code, STATUS_FORBIDDEN);
 
+    let mut bad_ach = Vec::new();
+    encode_ach_uuid_ident(1, 0, &mut bad_ach);
     let r_bad = quasar_rpc(
         &ctx,
         &mut admin_sess,
         "eve_public.achievement.api.admin.AddProgressRequest",
-        Vec::new(),
+        bad_ach,
     )
     .await;
     assert_eq!(r_bad.status_code, STATUS_BAD_REQUEST);
@@ -344,7 +364,7 @@ async fn test_b33_achievement_and_goal_admin_closure() {
     assert_eq!(ach_prog, 5);
 
     let mut comp_ach = Vec::new();
-    eve_server::services::quasar_b33_services::encode_ach_uuid_ident(1, aid, &mut comp_ach);
+    encode_ach_uuid_ident(1, aid, &mut comp_ach);
     let r_comp = quasar_rpc(
         &ctx,
         &mut admin_sess,

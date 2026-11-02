@@ -1257,6 +1257,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         return;
     }
     crate::services::mining_sites::spawn_seeded_site_entities(ctx, sys_id, newly_spawned, guard_waves).await;
+    crate::services::mining_b33::maybe_spawn_phased_asteroid_field(ctx, sys_id);
 }
 
 #[cfg(test)]
