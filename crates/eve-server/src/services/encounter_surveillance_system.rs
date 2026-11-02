@@ -641,17 +641,17 @@ pub async fn handle_ess_link(
                 IskCents(0),
                 now_u,
             );
-            super::quasar_b34_services::emit_ess_solar_system_persisted(
-                &ctx.quasar_gateway,
-                sys_id,
-                post_main_cents,
-                post_reserve_cents,
-                now_u,
-            );
         } else if reserve_terminated {
             // V24 `dynamicresources.common.ess.const.UNLINKED_MANUAL = 0` (`unlink_reason_description(0) -> None`, normal completion disconnect)
             super::notify_emitters_batch6::emit_reserve_bank_player_link_disconnected(ctx, char_id, sys_id, 0);
         }
+        super::quasar_b34_services::emit_ess_solar_system_persisted(
+            &ctx.quasar_gateway,
+            sys_id,
+            post_main_cents,
+            post_reserve_cents,
+            now_u,
+        );
         let ess_data = PyRep::keyval([
             ("solarSystemID", PyRep::Integer(sys_id as i64)),
             ("mainBank", PyRep::Real(post_main_cents.to_wire_f64())),

@@ -19,9 +19,6 @@ use eve_server::quasar_gateway::{
     STATUS_PRECONDITION_FAILED,
 };
 use eve_server::router::ServerContext;
-use eve_server::services::quasar_b34_services::{
-    emit_ess_reserve_bank_primed,
-};
 use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
 
@@ -300,7 +297,9 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
     let auto_notices = drain_notices(&mut rx);
     assert!(auto_notices.iter().any(|n| n.normalized_type_name() == "eve.dailygoal.api.Redeemed"));
 
-    // Admin ExpireRequest -> PrematurelyDeactivated + Removed
+    // Complete g2, then Admin ExpireRequest -> PrematurelyDeactivated + Removed, then RedeemRequest must fail
+    let p2_rsp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.admin.ProgressRequest", make_admin_progress_req(g2, 90_000_001, 10_000)).await;
+    assert_eq!(p2_rsp.status_code, STATUS_OK);
     let exp_rsp = quasar_rpc(
         &ctx,
         &mut admin_sess,
@@ -309,6 +308,8 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
     )
     .await;
     assert_eq!(exp_rsp.status_code, STATUS_OK);
+    let redeem_exp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.RedeemRequest", make_uuid_req(g2)).await;
+    assert_eq!(redeem_exp.status_code, STATUS_NOT_FOUND);
     let exp_notices = drain_notices(&mut rx);
     assert!(exp_notices
         .iter()
@@ -613,39 +614,22 @@ async fn test_b34_solarsystem_bounty_npc_and_ess_bank_closure() {
         .quasar_gateway
         .subscribe_session(&ess_sess, Vec::new(), ess_sess.session_id);
 
-    let kw = std::collections::HashMap::new();
-    ctx.dispatch_rpc(
-        &mut ess_sess,
-        "essMgr",
-        None,
-        "AttemptLinkToMainBank",
-        &[eve_proto::PyRep::Integer(ess_ball_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("AttemptLinkToMainBank start");
-    for _ in 0..5 {
-        let _ = sys_handle.step_manual(1.0).await;
-    }
-    ctx.dispatch_rpc(
-        &mut ess_sess,
-        "essMgr",
-        None,
-        "AttemptLinkToMainBank",
-        &[eve_proto::PyRep::Integer(ess_ball_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("AttemptLinkToMainBank complete");
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(&mut ess_sess, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)], &kw, None).await.expect("AttemptLinkToMainBank start");
+    for _ in 0..5 { let _ = sys_handle.step_manual(1.0).await; }
+    ctx.dispatch_rpc(&mut ess_sess, "essMgr", None, "AttemptLinkToMainBank", &[PyRep::Integer(ess_ball_id)], &kw, None).await.expect("AttemptLinkToMainBank complete");
 
-    emit_ess_reserve_bank_primed(
-        &ctx.quasar_gateway,
-        nullsec_sys,
-        IskCents::from_isk(20_000_000),
-        ctx.now_unix(),
-    );
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(950_001, eve_db::InventoryItemRecord {
+            item_id: 950_001, type_id: 57720, owner_id: ess_cid, location_id: ship_id,
+            flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1,
+            dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+        });
+    });
+    ctx.dispatch_rpc(&mut ess_sess, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None).await.expect("AttemptLinkToReserveBank start");
+    for _ in 0..5 { let _ = sys_handle.step_manual(1.0).await; }
+    ctx.dispatch_rpc(&mut ess_sess, "essMgr", None, "AttemptLinkToReserveBank", &[PyRep::Integer(ess_ball_id)], &kw, None).await.expect("AttemptLinkToReserveBank complete");
 
     let ess_notices = drain_notices(&mut ess_rx);
     let link_est = ess_notices

@@ -475,7 +475,7 @@ impl DailyGoalManager {
 
             let mut found = None;
             for g in goals.iter_mut() {
-                if &g.uuid == goal_uuid {
+                if &g.uuid == goal_uuid && !g.expired {
                     if !g.completed {
                         return Err((STATUS_FORBIDDEN, "Daily goal not yet completed".into()));
                     }
