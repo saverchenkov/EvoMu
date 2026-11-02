@@ -111,6 +111,127 @@ pub async fn handle(
         }
     }
     match (service, method) {
+        ("abyssal_content_manager", "ActivateAbyssalKey") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipDocked".into(),
+                    message: "Cannot activate Abyssal filament while docked".into(),
+                }));
+            }
+            if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
+                return Some(Err(e));
+            }
+            let Some(origin_sys) = session.solar_system_id.or_else(|| {
+                ctx.db
+                    .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "NoSolarSystem".into(),
+                    message: "Character has no active solar system".into(),
+                }));
+            };
+            let ship_id = session.ship_id.unwrap_or(100_000_002);
+            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(
+                ctx,
+                ship_id,
+                "activate filament",
+            ) {
+                return Some(Err(e));
+            }
+            let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(47_765);
+            let now_unix = ctx.now_unix();
+            let resolved = ctx.db.try_with_mut_snapshot(|snap| {
+                let found = snap
+                    .items
+                    .values()
+                    .find(|i| {
+                        i.owner_id == char_id
+                            && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
+                            && i.quantity >= 1
+                    })
+                    .map(|i| (i.item_id, i.type_id));
+                let Some((iid, tid)) = found else {
+                    return Err(BridgeRpcError {
+                        code: "FilamentNotFound".into(),
+                        message: format!(
+                            "Abyssal filament {filament_arg} not found in character inventory"
+                        ),
+                    });
+                };
+                let Some(tier) = ctx.sde.types.get(&tid).and_then(|t| {
+                    (t.group_id == 1979)
+                        .then(|| t.default_attributes.get(&2761).copied().unwrap_or(1.0) as u8)
+                }) else {
+                    return Err(BridgeRpcError {
+                        code: "InvalidAbyssalFilament".into(),
+                        message: format!("Type {tid} is not a valid T0-T6 Abyssal filament"),
+                    });
+                };
+                let origin_sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&origin_sys)
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.9);
+                if tier >= 4 && origin_sec >= 0.75 {
+                    return Err(BridgeRpcError {
+                        code: "FilamentDisallowedInHighSec".into(),
+                        message: "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems".into(),
+                    });
+                }
+                if let Some(item) = snap.items.get_mut(&iid) {
+                    if item.quantity > 1 {
+                        item.quantity -= 1;
+                        item.version += 1;
+                    } else {
+                        snap.items.remove(&iid);
+                    }
+                }
+                Ok((tid, tier))
+            });
+            let (filament_type_id, tier) = match resolved {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            crate::sp6_lifecycle::register_abyssal_session(
+                ctx,
+                char_id,
+                ship_id,
+                ABYSSAL_SPACE_SYSTEM_ID,
+                origin_sys,
+                now_unix,
+                now_unix.saturating_add(1_200),
+            );
+            let (pocket_id, room1_npcs) =
+                crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
+                    ctx,
+                    session,
+                    char_id,
+                    filament_type_id,
+                    tier,
+                    origin_sys,
+                )
+                .await;
+            Some(Ok(PyRep::keyval([
+                ("pocketID", PyRep::Integer(pocket_id)),
+                ("solarSystemID", PyRep::Integer(ABYSSAL_SPACE_SYSTEM_ID as i64)),
+                ("originSolarSystemID", PyRep::Integer(origin_sys as i64)),
+                ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
+                ("tier", PyRep::Integer(tier as i64)),
+                ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+                ("currentRoom", PyRep::Integer(1)),
+                ("timerSeconds", PyRep::Integer(1_200)),
+                (
+                    "npcBallIDs",
+                    PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect()),
+                ),
+            ])))
+        }
+
         ("abyssalMgr", "AbyssalEntranceDeployment") => {
             if args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0).is_none() {
                 return Some(Err(BridgeRpcError {
@@ -428,12 +549,6 @@ async fn activate_trace(
     }
 
     let entry_now = ctx.now_unix();
-    if gives_suspect {
-        ctx.crimewatch
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .trigger_suspect_flag(char_id, entry_now);
-    }
     let (pocket_id, room1_npcs) =
         crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
             ctx,

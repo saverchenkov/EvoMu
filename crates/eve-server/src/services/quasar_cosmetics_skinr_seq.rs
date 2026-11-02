@@ -633,22 +633,21 @@ fn induction_time_disc_pct(lvl: u32) -> u32 {
 
 fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u32, u32, usize) {
     let Some(c) = cid else {
-        return (0, 0, 1);
+        return (0, 0, 5);
     };
     state.db.with_snapshot(|s| {
         let Some(sk_map) = s.skills.get(&(c as i64)) else {
-            return (0, 0, 1);
+            return (0, 0, 5);
         };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0);
-        // No skill reduces PLEX sequencing cost in EVE SKINR
-        let price_disc = 0;
+        let price_disc = ((lvl(81044) + lvl(81045) + lvl(81363) + lvl(81376)) * 2).min(25);
         let sde_ind_disc = induction_time_disc_pct(lvl(81377))
             + induction_time_disc_pct(lvl(81372))
             + induction_time_disc_pct(lvl(81373))
             + induction_time_disc_pct(lvl(81374));
         let legacy_dur_disc = (lvl(81040) + lvl(81041) + lvl(81042) + lvl(81043)) * 3;
         let dur_disc = (sde_ind_disc + legacy_dur_disc).min(60);
-        let max_jobs = 1 + (lvl(81046) + lvl(81047) + lvl(81366) * 2 + lvl(81367) * 2) as usize;
+        let max_jobs = 5 + (lvl(81046) + lvl(81047) + lvl(81366) * 2 + lvl(81367) * 2) as usize;
         (price_disc, dur_disc, max_jobs)
     })
 }
@@ -885,7 +884,7 @@ fn handle_job_initiate(
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let now = ctx.now_unix();
-    let (_, dur_disc, max_jobs) = skill_discounts_and_cap(state, Some(cid));
+    let (price_disc, dur_disc, max_jobs) = skill_discounts_and_cap(state, Some(cid));
 
     let preview_uuid = {
         let data = state.data.read().unwrap_or_else(|e| e.into_inner());
@@ -999,8 +998,10 @@ fn handle_job_initiate(
         .get(&tier_level)
         .copied()
         .unwrap_or(0);
-    let unit_plex_cents = ((tier_level as u64) * 1_500).saturating_add(min_pts as u64 * 2);
-    let total_plex_cost = i64::try_from(unit_plex_cents.saturating_mul(u64::from(licenses_qty)))
+    let base_plex_cents = ((tier_level as u64) * 1_500).saturating_add(min_pts as u64 * 2);
+    let unit_plex_cents = (base_plex_cents.saturating_mul(100 - price_disc as u64) / 100).max(100);
+    let total_plex_cents = unit_plex_cents.saturating_mul(u64::from(licenses_qty));
+    let total_plex_cost = i64::try_from(total_plex_cents.saturating_add(99) / 100)
         .unwrap_or(i64::MAX);
 
     // Check and debit PLEX sequencing cost + award Paragon EverMarks only for validated SKINR design layouts
@@ -1033,7 +1034,7 @@ fn handle_job_initiate(
         return Err((STATUS_BAD_REQUEST, "Insufficient PLEX for SKINR sequencing".into()));
     }
 
-    let base_secs = (tier_level as u64) * 3_600;
+    let base_secs = ((tier_level as u64) * 3_600).saturating_add((min_pts as u64) * 10);
     let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
 
     let (job_uuid, job_rec) = {

@@ -1,5 +1,4 @@
 //! Integration tests closing 17 `feat:cosmetics.*` and `feat:crimewatch.*` parity rows (Batch 23).
-
 use crate::plan_c7_crimewatch_closure::{dict_get, item_rec, setup_pilot_in_space};
 use crate::quasar_goal_tale_notices::{bytes, sub, varint};
 use crate::quasar_progression_complete::{build_sess, quasar_rpc};
@@ -20,13 +19,11 @@ use eve_server::services::combat_crimewatch::{
 use eve_server::services::quasar_cosmetics_market::PARAGON_CORP_ID;
 use glam::DVec3;
 use std::collections::HashMap;
-
 const JITA_SYS: u32 = 30_000_142; // 0.9
 const AMARR_SYS: u32 = 30_002_187; // 1.0
 const UEDAMA_SYS: u32 = 30_002_768; // 0.5
 const TAMA_SYS: u32 = 30_002_813; // 0.3 (low-sec)
 const HED_GP_SYS: u32 = 30_001_161; // -0.2 (null-sec)
-
 fn player_sess(sid: u64, cid: u32, corp: u32) -> SessionState {
     let mut s = build_sess(sid, cid, corp);
     s.user_id = Some(sid);
@@ -55,7 +52,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
     let corp_id: u32 = 98_230_001;
     seed_market_char(&ctx, seller_cid as i64, corp_id, 50_000_000, 5_000);
     seed_market_char(&ctx, buyer_cid as i64, corp_id, 50_000_000, 5_000);
-
     ctx.db.with_mut_snapshot(|s| {
         let sk = s.skills.entry(seller_cid as i64).or_default();
         for &(tid, lvl) in &[
@@ -75,11 +71,9 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
             );
         }
     });
-
     let mut seller = player_sess(952_301, seller_cid, corp_id);
     let mut seller_gm = build_sess(952_309, seller_cid, corp_id);
     let mut buyer = player_sess(952_302, buyer_cid, corp_id);
-
     // 1. Check tier durations scaled by SDE Induction skills (30% discount)
     let rsp_dur = quasar_rpc(
         &ctx,
@@ -90,7 +84,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
     assert_eq!(rsp_dur.status_code, STATUS_OK);
     let wm_dur = WireMessage::decode(&rsp_dur.payload.as_ref().unwrap().value).expect("decode dur");
     assert_eq!(varint(&wm_dur, 2), Some(30));
-
     // 2. Check Paragon Hub tax rate reduced by Paragon Relations + Paragon Partnership (20% - 10% = 10%)
     let rsp_tax = quasar_rpc(
         &ctx,
@@ -102,7 +95,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
     let wm_tax = WireMessage::decode(&rsp_tax.payload.as_ref().unwrap().value).expect("decode tax");
     let tr_msg = sub(&wm_tax, 1);
     assert_eq!(varint(&tr_msg, 1), Some(20)); // sint64(10) zigzag-encoded = 20
-
     // 3. Grant unactivated custom SKIN license, list on Paragon Hub, and have buyer purchase it
     let skin_hex = "b2300001000000000000000000000001";
     let mut grant_req = Vec::new();
@@ -117,7 +109,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
         grant_req,
     ).await;
     assert_eq!(rsp_grant.status_code, STATUS_OK);
-
     let mut price_isk = Vec::new();
     encode_varint_field(1, 1_000_000 * 2, &mut price_isk); // sint64 zigzag of 1_000_000
     let mut lic_id_msg = Vec::new();
@@ -129,14 +120,12 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
     encode_varint_field(1, 86_400, &mut dur_msg);
     let mut target_msg = Vec::new();
     encode_varint_field(1, 1, &mut target_msg);
-
     let mut create_req = Vec::new();
     encode_bytes_field(1, &price_isk, &mut create_req);
     encode_bytes_field(3, &lic_id_msg, &mut create_req);
     encode_bytes_field(4, &dur_msg, &mut create_req);
     encode_varint_field(5, 1, &mut create_req);
     encode_bytes_field(6, &target_msg, &mut create_req);
-
     let rsp_create = quasar_rpc(
         &ctx,
         &mut seller,
@@ -144,7 +133,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
         create_req,
     ).await;
     assert_eq!(rsp_create.status_code, STATUS_OK);
-
     let rsp_owned = quasar_rpc(
         &ctx,
         &mut seller,
@@ -157,13 +145,11 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
     let seller_bal_before_sale = ctx
         .db
         .with_snapshot(|s| s.characters[&(seller_cid as i64)].balance.0);
-
     let mut uuid_msg = Vec::new();
     encode_bytes_field(1, &listing_uuid, &mut uuid_msg);
     let mut buy_req = Vec::new();
     encode_bytes_field(1, &uuid_msg, &mut buy_req);
     encode_varint_field(2, 1, &mut buy_req);
-
     let rsp_buy = quasar_rpc(
         &ctx,
         &mut buyer,
@@ -171,7 +157,6 @@ async fn test_b23_skinr_sequencing_and_paragon_hub_listing() {
         buy_req,
     ).await;
     assert_eq!(rsp_buy.status_code, STATUS_OK);
-
     let seller_bal_after_sale = ctx
         .db
         .with_snapshot(|s| s.characters[&(seller_cid as i64)].balance.0);
@@ -184,30 +169,52 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
     let char_id: i64 = 95_230_010;
     let ship_id: i64 = 105_230_010;
     let pod_id: i64 = 105_230_011;
+    let lowsec_sec_office_station = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            let has_office = ctx
+                .sde
+                .station_operations
+                .get(&st.operation_id)
+                .is_some_and(|op| {
+                    op.services.iter().any(|sid| {
+                        ctx.sde.station_services.get(sid).is_some_and(|svc| {
+                            svc.name.eq_ignore_ascii_case("Security Office")
+                                || svc.name.eq_ignore_ascii_case("securityOffice")
+                        })
+                    })
+                })
+                || st.owner_corporation_id == 1_000_125
+                || st.owner_corporation_id == 1_000_137;
+            (0.0 < sec && sec < 0.45 && has_office).then_some(st.station_id)
+        })
+        .unwrap_or(60_014_861);
     let mut sess = setup_pilot_in_space(&ctx, 952_310, char_id, 98_230_002, ship_id, 621, JITA_SYS, DVec3::ZERO).await;
-    sess.station_id = Some(60_003_760);
-
+    sess.station_id = Some(lowsec_sec_office_station);
     // 1. Security status gain caps at +5.0 from NPC kills
     assert_eq!(compute_sec_status_gain(5.0, 1_000_000.0), 0.0);
     let near_cap = compute_sec_status_gain(4.9999, 1_000_000.0);
     assert!((4.9999 + near_cap) <= 5.0 + 1e-9);
-
     // 2. Clone soldier tag tier bands: Trainer (-10..-8), Recruiter (-8..-5), Transporter (-5..-2), Negotiator (-2..0)
     ctx.db.with_mut_snapshot(|s| {
         let ch = s.characters.get_mut(&char_id).unwrap();
-        ch.station_id = Some(60_003_760);
+        ch.station_id = Some(lowsec_sec_office_station);
+        ch.balance = IskCents::from_isk(50_000_000);
         ch.security_status = -9.0;
         s.items.insert(
             700_001,
-            item_rec(700_001, 35661, char_id, 60_003_760, InventoryFlag::Hangar, 2, false),
+            item_rec(700_001, 35661, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
         );
         s.items.insert(
             700_002,
-            item_rec(700_002, 35662, char_id, 60_003_760, InventoryFlag::Hangar, 2, false),
+            item_rec(700_002, 35662, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
         );
         s.items.insert(
             700_003,
-            item_rec(700_003, 35664, char_id, 60_003_760, InventoryFlag::Hangar, 2, false),
+            item_rec(700_003, 35664, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
         );
     });
     let kw = HashMap::new();
@@ -222,7 +229,6 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             None,
         ).await;
     assert_eq!(bad_tag.unwrap_err().code, "SecurityTagBandMismatch");
-
     let ok_tag = ctx
         .dispatch_rpc(
             &mut sess,
@@ -238,7 +244,6 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
         dict_get(&ok_tag, "newSecurityStatus").and_then(|v| v.as_f64()),
         Some(-8.5)
     );
-
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&char_id).unwrap().security_status = -0.2;
     });
@@ -257,7 +262,6 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
         dict_get(&cap_tag, "newSecurityStatus").and_then(|v| v.as_f64()),
         Some(0.0)
     );
-
     // 3. Faction police thresholds per system security & pod vs ship
     assert_eq!(faction_police_sec_threshold(1.0), Some(-2.0));
     assert_eq!(faction_police_sec_threshold(0.9), Some(-2.5));
@@ -265,7 +269,6 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
     assert_eq!(faction_police_sec_threshold(0.7), Some(-3.5));
     assert_eq!(faction_police_sec_threshold(0.6), Some(-4.0));
     assert_eq!(faction_police_sec_threshold(0.5), Some(-4.5));
-
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&char_id).unwrap().security_status = -5.0;
         s.items.insert(
@@ -277,12 +280,10 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
         evaluate_faction_police_response(&ctx, JITA_SYS, char_id, ship_id).await;
     assert!(engage_ship);
     assert!(!allow_ship_dock);
-
     let (engage_pod, allow_pod_dock, _) =
         evaluate_faction_police_response(&ctx, JITA_SYS, char_id, pod_id).await;
     assert!(!engage_pod);
     assert!(allow_pod_dock);
-
     // 4. Outlaw status (<= -4.95): legal to attack in high-sec without CONCORD
     let hunter_id: i64 = 95_230_011;
     let hunter_ship: i64 = 105_230_012;
@@ -308,7 +309,6 @@ async fn test_b23_weapon_timer_scope_and_pvp_logoff_renewal() {
     let char_id: i64 = 95_230_020;
     let ship_id: i64 = 105_230_020;
     let mut sess = setup_pilot_in_space(&ctx, 952_320, char_id, 98_230_004, ship_id, 621, UEDAMA_SYS, DVec3::ZERO).await;
-
     let now = ctx.now_unix();
     ctx.crimewatch.write().unwrap().trigger_weapon_timer(char_id, now);
     for act in [
@@ -327,7 +327,6 @@ async fn test_b23_weapon_timer_scope_and_pvp_logoff_renewal() {
             "weapon timer must block {act}"
         );
     }
-
     // Disconnected ship PvP logoff timer renewal vs NPC timer non-renewal
     let victim_id: i64 = 95_230_021;
     let _ = setup_pilot_in_space(

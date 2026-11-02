@@ -366,13 +366,34 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
         DVec3::ZERO,
     )
     .await;
-    sess.station_id = Some(60_003_760);
+    let sec_office_st = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            let has_office = ctx
+                .sde
+                .station_operations
+                .get(&st.operation_id)
+                .is_some_and(|op| {
+                    op.services.iter().any(|sid| {
+                        ctx.sde.station_services.get(sid).is_some_and(|svc| {
+                            svc.name.eq_ignore_ascii_case("Security Office")
+                                || svc.name.eq_ignore_ascii_case("securityOffice")
+                        })
+                    })
+                });
+            (0.0 < sec && sec < 0.45 && has_office).then_some(st.station_id)
+        })
+        .unwrap_or(60_014_861);
+    sess.station_id = Some(sec_office_st);
 
     let remote_tag_id = 87_157_201i64;
     let locked_tag_id = 87_157_202i64;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.station_id = Some(60_003_760);
+        ch.station_id = Some(sec_office_st);
         ch.security_status = -8.5;
         // Tag in remote station 60_008_494
         snap.items.insert(
@@ -387,14 +408,14 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
                 false,
             ),
         );
-        // Tag in local station 60_003_760 but locked in an Outstanding contract
+        // Tag in local station but locked in an Outstanding contract
         snap.items.insert(
             locked_tag_id,
             item_rec(
                 locked_tag_id,
                 35661,
                 char_id,
-                60_003_760,
+                sec_office_st,
                 InventoryFlag::Hangar,
                 1,
                 false,

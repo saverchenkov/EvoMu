@@ -346,7 +346,16 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
         );
     });
 
-    let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(lowsec_station));
+    let sec_office_st = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
+        })
+        .unwrap_or(lowsec_station);
+    let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(sec_office_st));
     let wrong_band_err = dispatch_combat_rpc(
         &ctx,
         &mut sess,

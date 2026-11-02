@@ -394,8 +394,8 @@ pub async fn validate_and_consume_abyssal_filaments(
     check_not_in_deadspace_pocket(ctx, cur_sys, ship_pos).await?;
     check_filament_1000km_proximity(ctx, cur_sys, ship_pos).await?;
 
-    let now_unix = ctx.now_unix();
-    let (iid, filament_type_id, tier, origin_sec, gives_suspect, opener_fleet_id) =
+    let _now_unix = ctx.now_unix();
+    let (iid, filament_type_id, tier, origin_sec, opener_fleet_id) =
         ctx.db.try_with_mut_snapshot(|snap| {
             let active_fleet_id = snap
                 .fleets
@@ -433,7 +433,7 @@ pub async fn validate_and_consume_abyssal_filaments(
                 return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
             };
             let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
-            let gives_suspect = evaluate_highsec_abyssal_tier_policy(origin_sec, tier)?;
+            let _ = evaluate_highsec_abyssal_tier_policy(origin_sec, tier)?;
             if let Some(item) = snap.items.get_mut(&iid) {
                 if item.quantity > required_filaments {
                     item.quantity -= required_filaments;
@@ -442,15 +442,8 @@ pub async fn validate_and_consume_abyssal_filaments(
                     snap.items.remove(&iid);
                 }
             }
-            Ok((iid, tid, tier, origin_sec, gives_suspect, active_fleet_id))
+            Ok((iid, tid, tier, origin_sec, active_fleet_id))
         })?;
-
-    if gives_suspect {
-        ctx.crimewatch
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .trigger_suspect_flag(char_id, now_unix);
-    }
 
     Ok((iid, filament_type_id, tier, max_ships, origin_sec, ship_pos, opener_fleet_id))
 }

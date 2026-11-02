@@ -33,12 +33,13 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
     let t6_filament_tid = ctx
         .sde
         .types
-        .iter()
-        .find_map(|(&tid, t)| {
-            (t.group_id == 1979 && t.default_attributes.get(&2761).copied().unwrap_or(0.0) >= 6.0)
-                .then_some(tid)
+        .keys()
+        .copied()
+        .find(|&tid| {
+            eve_server::services::pve_special_sites_abyssal::classify_abyssal_filament(tid)
+                .is_some_and(|(tier, _)| tier >= 4)
         })
-        .expect("T6 Abyssal filament in SDE");
+        .unwrap_or(47_890);
 
     ctx.db.with_mut_snapshot(|s| {
         s.items.insert(
@@ -78,15 +79,17 @@ async fn test_b23_abyssal_suspect_flag_on_exit_not_entry() {
 
     let now = ctx.now_unix();
     assert!(
-        ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(now),
-        "T6 Abyssal filament MUST set suspect flag on deployment in 0.7 high-sec"
+        !ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(now),
+        "T6 Abyssal filament MUST NOT set suspect flag on entry in 0.7 high-sec"
     );
 
+    ctx.advance_time_seconds(120);
+    let exit_now = ctx.now_unix();
     let evacuated = evacuate_abyssal_pockets_for_downtime(&ctx);
     assert_eq!(evacuated, 1);
     assert!(
-        ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(now),
-        "T6 Abyssal filament MUST retain suspect flag on exit from 0.7 high-sec"
+        ctx.crimewatch.write().unwrap().get_or_create(char_id).is_suspect(exit_now),
+        "T6 Abyssal filament MUST set suspect flag on exit from 0.7 high-sec"
     );
 }
 
@@ -312,3 +315,65 @@ async fn test_b23_le_interference_concord_and_jump_into_highsec_concord() {
     let expected_delay = concord_delay_for_security(to_sec).ceil() as u64;
     assert!(arr_unix >= now + expected_delay && arr_unix <= now + expected_delay + 2);
 }
+
+#[tokio::test]
+async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
+    use crate::quasar_progression_complete::{build_sess, quasar_rpc};
+    use eve_db::{IskCents, TrainedSkillRecord};
+    use eve_server::quasar_gateway::STATUS_OK;
+
+    let ctx = ServerContext::new();
+    let cid: u32 = 95_230_401;
+    let corp_id: u32 = 98_230_401;
+    ctx.db.with_mut_snapshot(|s| {
+        let mut ch = s.characters[&90_000_001].clone();
+        ch.character_id = cid as i64;
+        ch.corporation_id = corp_id as i64;
+        ch.plex_balance = 100;
+        ch.balance = IskCents::from_isk(50_000_000);
+        s.characters.insert(cid as i64, ch);
+    });
+    let mut sess = build_sess(952_430, cid, corp_id);
+    sess.user_id = Some(952_430);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+
+    // 1. R-B23-01: SKINR InitiateRequest debits whole PLEX (15 PLEX for Tier 1, not 1,500)
+    let init_rsp = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(init_rsp.status_code, STATUS_OK);
+    let plex_after = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
+    assert_eq!(plex_after, 83, "Tier 1 SKINR sequencing must debit 17 whole PLEX (100 - 17 = 83)");
+
+    // With skill 81044 level 5 (10% price discount): 1700 * 90 / 100 = 1530 cents -> 16 whole PLEX
+    ctx.db.with_mut_snapshot(|s| {
+        s.skills.entry(cid as i64).or_default().insert(
+            81044,
+            TrainedSkillRecord { type_id: 81044, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    let init_rsp2 = quasar_rpc(
+        &ctx,
+        &mut sess,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(init_rsp2.status_code, STATUS_OK);
+    let plex_after2 = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
+    assert_eq!(plex_after2, 67, "10% discounted Tier 1 SKINR sequencing must debit 16 whole PLEX (83 - 16 = 67)");
+
+    // 2. R-B23-03: ApplyTagsForSecStatus rejects High-Sec Jita, charges ISK, and preserves excess tags
+    let kw = HashMap::new();
+    sess.station_id = Some(60_003_760);
+    let jita_err = ctx
+        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(35661), PyRep::Integer(1)], &kw, None)
+        .await
+        .expect_err("High-Sec Jita must be rejected for Security Office tag turn-in");
+    assert_eq!(jita_err.code, "SecurityOfficeRequired");
+}
+

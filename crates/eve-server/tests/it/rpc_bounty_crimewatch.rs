@@ -559,19 +559,31 @@ async fn test_crimewatch_security_and_duels() {
     });
     assert!(has_le, "Mutual limited engagement must be active for 300 seconds");
 
-    // 5. ApplyTagsForSecStatus: P1 docked in station turns in Clone Soldier Trainer Tag (35661)
+    // 5. ApplyTagsForSecStatus: P1 docked in low-sec Security Office station turns in Clone Soldier Trainer Tag (35661)
     // Valid for security band [-10.0, -8.0); P1 is at -8.5.
-    s1.station_id = Some(60_003_760);
-    s1.solar_system_id = Some(30_000_142);
+    let sec_office_st = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            (0.0 < sec && sec < 0.45).then_some(st.station_id)
+        })
+        .unwrap_or(60_099_999);
+    s1.station_id = Some(sec_office_st);
+    s1.solar_system_id = Some(30_002_813);
     let tag_item_id = 880_001;
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.station_id = Some(sec_office_st);
+        }
         snap.items.insert(
             tag_item_id,
             eve_db::InventoryItemRecord {
                 item_id: tag_item_id,
                 type_id: 35661, // Clone Soldier Trainer Tag
                 owner_id: P1,
-                location_id: 60_003_760,
+                location_id: sec_office_st,
                 flag: eve_db::InventoryFlag::Hangar,
                 quantity: 1,
                 singleton: false,

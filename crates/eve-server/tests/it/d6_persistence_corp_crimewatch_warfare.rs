@@ -307,9 +307,22 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
         rpc(&ctx, &mut sess, "entity", "ChangeDroneSettings", &[PyRep::Bool(true), PyRep::Bool(true)]).await;
 
-        // Turn in a Clone Soldier Negotiator Tag (35664) via ApplyTagsForSecStatus while docked
+        // Turn in a Clone Soldier Negotiator Tag (35664) via ApplyTagsForSecStatus while docked at a low-sec Security Office
+        let sec_office_st = ctx
+            .sde
+            .stations
+            .values()
+            .find_map(|st| {
+                let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+                (0.0 < sec && sec < 0.45).then_some(st.station_id)
+            })
+            .unwrap_or(60_099_999);
+        let orig_station = sess.station_id;
+        let orig_sys = sess.solar_system_id;
+        sess.station_id = Some(sec_office_st);
+        sess.solar_system_id = Some(30_002_813);
         ctx.db.with_mut_snapshot(|snap| {
-            let station_id = snap.characters[&PILOT].station_id.unwrap_or(60_003_760);
+            snap.characters.get_mut(&PILOT).unwrap().station_id = Some(sec_office_st);
             snap.characters.get_mut(&PILOT).unwrap().security_status = -1.0;
             snap.characters.get_mut(&PILOT).unwrap().balance = IskCents::from_isk(500_000_000);
             snap.items.insert(
@@ -318,7 +331,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
                     item_id: 880_001,
                     type_id: 35664,
                     owner_id: PILOT,
-                    location_id: station_id,
+                    location_id: sec_office_st,
                     flag: InventoryFlag::Hangar,
                     quantity: 1,
                     singleton: false,
@@ -332,6 +345,11 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
             );
         });
         rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.characters.get_mut(&PILOT).unwrap().station_id = orig_station;
+        });
+        sess.station_id = orig_station;
+        sess.solar_system_id = orig_sys;
 
         // Undock, jump Turnur -> Zarzakh via CmdStargateJump (creates 6h Zarzakh gate lock),
         // then jump Zarzakh -> Thera via WormholeJump (creates 300s wormhole polarization)

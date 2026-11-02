@@ -606,14 +606,23 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     assert_eq!(payout[0][0].dict_get("amount"), Some(&PyRep::Real(claimed)));
     assert_eq!(payout[0][0].dict_get("enemyTypeID"), Some(&PyRep::Integer(587)));
 
+    let sec_office_st = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
+        })
+        .unwrap_or(60_014_861);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.security_status = -1.5;
-            ch.station_id = Some(JITA_44);
+            ch.station_id = Some(sec_office_st);
         }
     });
-    s1.station_id = Some(JITA_44);
-    seed_item(&ctx, 970_001, 35664, P1, JITA_44, InventoryFlag::Hangar, 2);
+    s1.station_id = Some(sec_office_st);
+    seed_item(&ctx, 970_001, 35664, P1, sec_office_st, InventoryFlag::Hangar, 2);
     call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(2)]).await;
     assert_eq!(events(&ctx, P1, "OnSecurityStatusUpdate"), vec![vec![PyRep::Real(-0.5)]]);
 }

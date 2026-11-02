@@ -594,3 +594,173 @@ pub fn handle_bounty_proxy(
         _ => None,
     }
 }
+
+pub fn handle_apply_tags_for_sec_status(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let Some(station_id) = session.station_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NotDockedInStation".into(),
+            message: "Security status tag turn-in requires being docked at a CONCORD station".into(),
+        }));
+    };
+    if let Some(st) = ctx.sde.stations.get(&station_id) {
+        let st_sec = ctx
+            .sde
+            .solar_systems
+            .get(&st.solar_system_id)
+            .map(|s| s.security_status)
+            .unwrap_or(0.0);
+        if !(0.0 < st_sec && st_sec < 0.45) {
+            return Some(Err(BridgeRpcError {
+                code: "SecurityOfficeRequired".into(),
+                message: "Security status tags can only be turned in at a low-security CONCORD/DED Security Office station".into(),
+            }));
+        }
+    }
+    let cur_sec = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status))
+        .unwrap_or(0.0);
+    let (tag_type_id, qty) = if args.len() >= 2 {
+        let t = args.first().and_then(|a| a.as_i64()).unwrap_or(35661) as u32;
+        let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+        (t, q)
+    } else {
+        let t = if cur_sec < -8.0 {
+            35661
+        } else if cur_sec < -5.0 {
+            35662
+        } else if cur_sec < -2.0 {
+            35663
+        } else {
+            35664
+        };
+        let q = args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+        (t, q)
+    };
+    let now_unix = ctx.now_unix();
+    let Some(sys_id) = session.solar_system_id.or_else(|| {
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+    }) else {
+        return Some(Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Character has no active solar system".into(),
+        }));
+    };
+
+    let band_opt = match tag_type_id {
+        35661 | 35514 => Some((-10.0, -8.0, 1_000_000_i64)),
+        35662 | 35515 => Some((-8.0, -5.0, 2_000_000_i64)),
+        35663 | 35516 => Some((-5.0, -2.0, 5_000_000_i64)),
+        35664 | 35517 => Some((-2.0, 0.0, 10_000_000_i64)),
+        _ => None,
+    };
+    let Some((min_band, max_band, fee_per_tag_isk)) = band_opt else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidSecurityTagType".into(),
+            message: format!("Type {tag_type_id} is not a valid Clone Soldier Tag (35661..35664)"),
+        }));
+    };
+
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let cur_sec = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.security_status)
+            .unwrap_or(0.0);
+        if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
+            return Err(BridgeRpcError {
+                code: "SecurityTagBandMismatch".into(),
+                message: format!(
+                    "Tag {tag_type_id} is only valid in security band [{min_band:.1}, {max_band:.1}); character is at {cur_sec:.2}"
+                ),
+            });
+        }
+        let max_needed = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
+        let consumed_qty = qty.min(max_needed);
+        let total_fee = eve_db::IskCents::from_isk(
+            fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)),
+        );
+        let cur_bal = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.balance)
+            .unwrap_or(eve_db::IskCents(0));
+        let Some(new_bal) = cur_bal.checked_sub(total_fee) else {
+            return Err(BridgeRpcError {
+                code: "InsufficientFunds".into(),
+                message: "Insufficient ISK for CONCORD Security Office tag processing fee".into(),
+            });
+        };
+        let ship_id_opt = session.ship_id;
+        let tag_item_id = snap
+            .items
+            .values()
+            .find(|i| {
+                i.owner_id == char_id
+                    && i.type_id == tag_type_id
+                    && i.quantity >= consumed_qty
+                    && ((i.location_id == station_id && i.flag == eve_db::InventoryFlag::Hangar)
+                        || (ship_id_opt.is_some_and(|sid| i.location_id == sid)
+                            && i.flag == eve_db::InventoryFlag::Cargo))
+                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
+            })
+            .map(|i| i.item_id);
+        let Some(iid) = tag_item_id else {
+            return Err(BridgeRpcError {
+                code: "InsufficientSecurityTags".into(),
+                message: format!("Missing {consumed_qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"),
+            });
+        };
+        if let Some(it) = snap.items.get_mut(&iid) {
+            if it.quantity > consumed_qty {
+                it.quantity -= consumed_qty;
+                it.version += 1;
+            } else {
+                snap.items.remove(&iid);
+            }
+        }
+        let new_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = new_sec;
+            ch.balance = new_bal;
+        }
+        Ok((cur_sec, new_sec))
+    });
+
+    match res {
+        Ok((old_sec, new_sec)) => {
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.sec_status_transactions
+                    .entry(char_id)
+                    .or_default()
+                    .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                        timestamp_unix: now_unix,
+                        old_sec,
+                        new_sec,
+                        delta: new_sec - old_sec,
+                        reason: "Clone Soldier Security Tag".into(),
+                        solar_system_id: sys_id,
+                    });
+            });
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSecurityStatusUpdate",
+                "charid",
+                vec![PyRep::Real(new_sec)],
+            );
+            Some(Ok(PyRep::keyval([
+                ("oldSecurityStatus", PyRep::Real(old_sec)),
+                ("newSecurityStatus", PyRep::Real(new_sec)),
+            ])))
+        }
+        Err(e) => Some(Err(e)),
+    }
+}

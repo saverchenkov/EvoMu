@@ -253,7 +253,16 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
             },
         );
     });
-    sess_b.station_id = Some(60_003_760);
+    let sec_office_st = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
+        })
+        .unwrap_or(60_014_861);
+    sess_b.station_id = Some(sec_office_st);
     let tag_res = dispatch_combat_rpc(&ctx, &mut sess_b, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35662), PyRep::Integer(2)], &HashMap::new())
         .await
         .expect("ApplyTagsForSecStatus");

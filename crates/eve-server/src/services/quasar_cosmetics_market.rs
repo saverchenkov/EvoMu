@@ -440,21 +440,8 @@ fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, us
 
 fn paragon_hub_tax_pct(st: &CosmeticsMarketState, cid: u32, target: &ListingTargetRecord) -> u64 {
     match target {
-        ListingTargetRecord::Character(_) => {
-            let cust_acq = st.db.with_snapshot(|s| {
-                s.skills
-                    .get(&(cid as i64))
-                    .and_then(|m| m.get(&81368))
-                    .map(|sk| sk.level as u64)
-                    .unwrap_or(0)
-                    .min(5)
-            });
-            30_u64.saturating_sub(cust_acq)
-        }
-        ListingTargetRecord::Corporation(_) | ListingTargetRecord::Alliance(_) => {
-            let (reduction, _) = paragon_hub_skill_reductions(st, cid);
-            10_u64.saturating_sub(reduction)
-        }
+        ListingTargetRecord::Character(_) => 30,
+        ListingTargetRecord::Corporation(_) | ListingTargetRecord::Alliance(_) => 10,
         ListingTargetRecord::Public => {
             let (reduction, _) = paragon_hub_skill_reductions(st, cid);
             20_u64.saturating_sub(reduction)
