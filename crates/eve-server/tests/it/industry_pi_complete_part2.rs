@@ -435,7 +435,17 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         .dispatch_rpc(&mut sess, "planetOrbitalRegistryBroker", None, "GetSettingsInfo", &[PyRep::Integer(JITA_PLANET_ID)], &kw, None)
         .await
         .expect("GetSettingsInfo on Orbital Skyhook");
-    assert_eq!(skyhook_info.dict_get("orbitalTypeID").and_then(|v| v.as_i64()), Some(81_080));
+    let PyRep::Tuple(skyhook_tuple) = &skyhook_info else {
+        panic!("GetSettingsInfo must return 6-tuple, got {skyhook_info:?}");
+    };
+    assert_eq!(skyhook_tuple.len(), 6);
+    assert!(skyhook_tuple[0].as_i64().is_some(), "selectedHour must be int");
+    assert!(matches!(skyhook_tuple[1], PyRep::KeyVal(_)), "taxRateValues must be KeyVal");
+    assert!((skyhook_tuple[1].dict_get("corporation").and_then(|v| v.as_f64()).unwrap() - 0.04).abs() < 1e-6);
+    assert!(skyhook_tuple[2].as_f64().is_some(), "standingLevel must be float");
+    assert_eq!(skyhook_tuple[3].as_bool(), Some(true));
+    assert_eq!(skyhook_tuple[4].as_bool(), Some(true));
+    assert!(matches!(skyhook_tuple[5], PyRep::None | PyRep::Integer(_)));
 
     sess.station_id = None;
     ctx.db.with_mut_snapshot(|snap| {

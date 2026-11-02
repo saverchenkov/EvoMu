@@ -852,74 +852,65 @@ pub fn orbital_settings_note_id(planet_or_orbital_id: i64) -> i64 {
     -(4_000_000_000_000_i64.saturating_add(planet_or_orbital_id.abs()))
 }
 
-pub fn load_orbital_settings(
-    snap: &eve_db::WorldStateSnapshot,
-    planet_or_orbital_id: i64,
-) -> Option<OrbitalCustomsSettings> {
+pub fn resolve_orbital_and_planet(snap: &eve_db::WorldStateSnapshot, planet_or_orbital_id: i64) -> (Option<i64>, i64) {
+    if let Some(st) = snap.structures.get(&planet_or_orbital_id) {
+        if let Some(pid) = st.name.strip_prefix("Orbital:").and_then(|s| s.parse::<i64>().ok()) {
+            return (Some(st.structure_id), pid);
+        }
+    }
+    let tag = format!("Orbital:{planet_or_orbital_id}");
+    if let Some(st) = snap.structures.values().find(|s| s.state != "Destroyed" && s.name == tag) {
+        return (Some(st.structure_id), planet_or_orbital_id);
+    }
+    (None, planet_or_orbital_id)
+}
+
+pub fn load_orbital_settings(snap: &eve_db::WorldStateSnapshot, planet_or_orbital_id: i64) -> Option<OrbitalCustomsSettings> {
     let nid = orbital_settings_note_id(planet_or_orbital_id);
-    snap.owner_notes
-        .get(&nid)
+    if let Some(cfg) = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<OrbitalCustomsSettings>(&n.note).ok()) {
+        return Some(cfg);
+    }
+    let (_, planet_id) = resolve_orbital_and_planet(snap, planet_or_orbital_id);
+    (planet_id != planet_or_orbital_id)
+        .then(|| orbital_settings_note_id(planet_id))
+        .and_then(|pid_nid| snap.owner_notes.get(&pid_nid))
         .and_then(|n| serde_json::from_str::<OrbitalCustomsSettings>(&n.note).ok())
 }
 
-pub fn save_orbital_settings(
-    snap: &mut eve_db::WorldStateSnapshot,
-    planet_or_orbital_id: i64,
-    settings: &OrbitalCustomsSettings,
-) {
-    let nid = orbital_settings_note_id(planet_or_orbital_id);
+pub fn save_orbital_settings(snap: &mut eve_db::WorldStateSnapshot, planet_or_orbital_id: i64, settings: &OrbitalCustomsSettings) {
+    let (orbital_id_opt, resolved_planet_id) = resolve_orbital_and_planet(snap, planet_or_orbital_id);
+    let planet_id = if settings.planet_id > 0 { settings.planet_id } else { resolved_planet_id };
+    let nid = orbital_settings_note_id(planet_id);
     if let Ok(js) = serde_json::to_string(settings) {
-        snap.owner_notes.insert(
-            nid,
-            eve_db::OwnerNoteRecord {
-                note_id: nid,
-                character_id: -4,
-                item_id: planet_or_orbital_id,
-                label: format!("orbital_settings:{planet_or_orbital_id}"),
-                note: js,
-                timestamp_unix: 0,
-            },
-        );
+        snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
+            note_id: nid, character_id: -4, item_id: planet_id,
+            label: format!("orbital_settings:{planet_id}"), note: js, timestamp_unix: 0,
+        });
     }
-    let sys_id = snap
-        .planetary_colonies
-        .values()
-        .find(|c| c.planet_id == settings.planet_id || c.planet_id == planet_or_orbital_id)
+    let sys_id = snap.planetary_colonies.values()
+        .find(|c| c.planet_id == planet_id || c.planet_id == planet_or_orbital_id)
         .map(|c| c.solar_system_id)
         .or_else(|| {
-            let (tag_a, tag_b) = (format!("Orbital:{}", settings.planet_id), format!("Orbital:{planet_or_orbital_id}"));
+            let (tag_a, tag_b) = (format!("Orbital:{planet_id}"), format!("Orbital:{planet_or_orbital_id}"));
             snap.structures.values().find(|s| s.structure_id == planet_or_orbital_id || s.name == tag_a || s.name == tag_b).map(|s| s.solar_system_id)
         })
         .unwrap_or(30_000_142);
-    let standing_lvl = if settings.minimum_standing > 5.0 {
-        Some("excellent".to_string())
-    } else if settings.minimum_standing > 0.0 {
-        Some("good".to_string())
-    } else if settings.minimum_standing >= -0.01 {
-        Some("neutral".to_string())
-    } else if settings.minimum_standing >= -5.0 {
-        Some("bad".to_string())
-    } else {
-        Some("terrible".to_string())
-    };
+    let office_id = orbital_id_opt.unwrap_or(planet_id);
+    let standing_lvl = if settings.minimum_standing > 5.0 { Some("excellent".to_string()) }
+        else if settings.minimum_standing > 0.0 { Some("good".to_string()) }
+        else if settings.minimum_standing >= -0.01 { Some("neutral".to_string()) }
+        else if settings.minimum_standing >= -5.0 { Some("bad".to_string()) }
+        else { Some("terrible".to_string()) };
     let rec = eve_db::CustomsOfficeRecord {
-        office_id: planet_or_orbital_id,
-        system_id: sys_id,
-        reinforce_exit_start: 18,
-        reinforce_exit_end: 20,
-        allow_alliance_access: settings.allow_alliance,
-        allow_access_with_standings: settings.allow_standings,
-        standing_level: standing_lvl,
-        corporation_tax_rate: Some(settings.corporation_tax_rate),
-        alliance_tax_rate: Some(settings.alliance_tax_rate),
-        excellent_standing_tax_rate: Some(settings.standing_high_tax_rate),
-        good_standing_tax_rate: Some(settings.standing_good_tax_rate),
-        neutral_standing_tax_rate: Some(settings.standing_neutral_tax_rate),
-        bad_standing_tax_rate: Some(settings.standing_bad_tax_rate),
-        terrible_standing_tax_rate: Some(settings.standing_horrible_tax_rate),
+        office_id, system_id: sys_id, reinforce_exit_start: 18, reinforce_exit_end: 20,
+        allow_alliance_access: settings.allow_alliance, allow_access_with_standings: settings.allow_standings,
+        standing_level: standing_lvl, corporation_tax_rate: Some(settings.corporation_tax_rate),
+        alliance_tax_rate: Some(settings.alliance_tax_rate), excellent_standing_tax_rate: Some(settings.standing_high_tax_rate),
+        good_standing_tax_rate: Some(settings.standing_good_tax_rate), neutral_standing_tax_rate: Some(settings.standing_neutral_tax_rate),
+        bad_standing_tax_rate: Some(settings.standing_bad_tax_rate), terrible_standing_tax_rate: Some(settings.standing_horrible_tax_rate),
     };
     let offices = snap.corp_customs_offices.entry(settings.owner_corp_id).or_default();
-    if let Some(existing) = offices.iter_mut().find(|o| o.office_id == planet_or_orbital_id) {
+    if let Some(existing) = offices.iter_mut().find(|o| o.office_id == office_id || o.office_id == planet_id) {
         *existing = rec;
     } else {
         offices.push(rec);

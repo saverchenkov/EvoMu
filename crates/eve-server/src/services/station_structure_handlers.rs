@@ -39,6 +39,13 @@ pub fn handle_upgrade_gantry(
         code: "NoActiveShip".into(),
         message: "Character has no active ship in space".into(),
     })?;
+    let ship_pos = ctx
+        .systems
+        .get_ball_position_sync(sys_id, ship_id)
+        .ok_or_else(|| BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship must be spawned in space to online an orbital".into(),
+        })?;
     let orbital_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let upgrade_item_arg = args.get(1).and_then(|a| a.as_i64());
 
@@ -127,16 +134,14 @@ pub fn handle_upgrade_gantry(
                     message: format!("Orbital {orbital_id} is in invalid state '{}'", st.state),
                 });
             }
-            if let Some(ship_pos) = ctx.systems.get_ball_position_sync(sys_id, ship_id) {
-                let dist = ship_pos.distance(glam::DVec3::from_array(st.position));
-                if dist > 10_000.0 {
-                    return Err(BridgeRpcError {
-                        code: "OrbitalOutOfRange".into(),
-                        message: format!(
-                            "Ship {ship_id} is {dist:.0}m from orbital {orbital_id} (max 10,000m)"
-                        ),
-                    });
-                }
+            let dist = ship_pos.distance(glam::DVec3::from_array(st.position));
+            if dist > 10_000.0 {
+                return Err(BridgeRpcError {
+                    code: "OrbitalOutOfRange".into(),
+                    message: format!(
+                        "Ship {ship_id} is {dist:.0}m from orbital {orbital_id} (max 10,000m)"
+                    ),
+                });
             }
             (it.type_id, it.location_id)
         };
@@ -205,7 +210,7 @@ pub fn handle_upgrade_gantry(
             owner_corp_id: char_corp,
             ..Default::default()
         };
-        crate::services::industry_pi::save_orbital_settings(snap, planet_id, &cfg);
+        crate::services::industry_pi::save_orbital_settings(snap, orbital_id, &cfg);
         Ok((target_tid, planet_id))
     })?;
 
@@ -313,7 +318,13 @@ pub fn handle_anchor_orbital(
         code: "NoActiveShip".into(),
         message: "Anchoring an orbital requires an active ship in space".into(),
     })?;
-    let ship_pos_opt = ctx.systems.get_ball_position_sync(sys_id, ship_id);
+    let ship_pos = ctx
+        .systems
+        .get_ball_position_sync(sys_id, ship_id)
+        .ok_or_else(|| BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship must be spawned in space to anchor an orbital".into(),
+        })?;
 
     let planets_in_sys: Vec<_> = ctx
         .sde
@@ -330,10 +341,6 @@ pub fn handle_anchor_orbital(
                 message: format!("Celestial {explicit_pid} is not a planet in solar system {sys_id}"),
             })?
     } else {
-        let ship_pos = ship_pos_opt.ok_or_else(|| BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship must be spawned in space to anchor an orbital".into(),
-        })?;
         planets_in_sys
             .into_iter()
             .min_by(|a, b| {
@@ -347,19 +354,16 @@ pub fn handle_anchor_orbital(
                 message: format!("Solar system {sys_id} has no anchorable planets"),
             })?
     };
-    let ship_pos = ship_pos_opt.unwrap_or(target_planet.position);
-    if let Some(sp) = ship_pos_opt {
-        let dist = (sp - target_planet.position).length();
-        let max_dist = target_planet.radius + 100_000_000.0;
-        if dist > max_dist {
-            return Err(BridgeRpcError {
-                code: "OrbitalOutOfRange".into(),
-                message: format!(
-                    "Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)",
-                    target_planet.celestial_id
-                ),
-            });
-        }
+    let dist = (ship_pos - target_planet.position).length();
+    let max_dist = target_planet.radius + 100_000_000.0;
+    if dist > max_dist {
+        return Err(BridgeRpcError {
+            code: "OrbitalOutOfRange".into(),
+            message: format!(
+                "Ship is {dist:.0}m from planet {} (must be within {max_dist:.0}m to anchor orbital)",
+                target_planet.celestial_id
+            ),
+        });
     }
     let planet_id = target_planet.celestial_id;
 

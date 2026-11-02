@@ -420,6 +420,20 @@ async fn test_esi6_planetary_interaction_and_plan_closure() {
         }
     });
     pi_sess.solar_system_id = Some(lowsec_sys);
+    let lowsec_planet = ctx.sde.celestials_in_system(lowsec_sys).into_iter().find(|c| c.celestial_id == lowsec_planet_id).unwrap();
+    let near_planet = lowsec_planet.position + glam::DVec3::new(lowsec_planet.radius + 5_000.0, 0.0, 0.0);
+    ctx.systems.get_or_spawn(lowsec_sys).spawn_ball(eve_destiny::Ball {
+        id: ship_id,
+        type_id: 587,
+        position: near_planet,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0,
+        inertia: 1.0,
+        mass: 1_000_000.0,
+        radius: 40.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await.unwrap();
     rpc_call(
         &ctx,
         &mut pi_sess,
@@ -499,7 +513,7 @@ async fn test_esi6_planetary_interaction_and_plan_closure() {
     );
     let pocos_arr = pocos.as_array().unwrap();
     assert_eq!(pocos_arr.len(), 1);
-    assert_eq!(pocos_arr[0]["office_id"], json!(lowsec_planet_id));
+    assert_eq!(pocos_arr[0]["office_id"], json!(gantry_item_id));
     assert_eq!(pocos_arr[0]["system_id"], json!(lowsec_sys));
     assert_eq!(pocos_arr[0]["corporation_tax_rate"], json!(0.04));
     assert_eq!(pocos_arr[0]["alliance_tax_rate"], json!(0.06));
