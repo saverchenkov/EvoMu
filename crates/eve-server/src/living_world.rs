@@ -639,12 +639,19 @@ impl LivingWorldDirector {
 
         let mut hauled = false;
         let mut final_cargo = current_cargo + extraction.mined_units as i32;
+        let hold_full = (final_cargo as f64) * ore_unit_vol >= ore_hold_m3 - 1e-6;
 
-        // If hauler is at destination station with cargo, dock/remove ball, offload into NPC sell orders, and return to belt
-        if in_transit_cargo > 0 {
+        // When miner ore hold is full (or hauler has in-transit cargo), transfer to hauler, warp to station, and offload
+        if in_transit_cargo > 0 || hold_full {
             hauled = true;
+            let added_units = if in_transit_cargo > 0 { in_transit_cargo } else { final_cargo };
+            let _ = handle
+                .set_movement_mode(
+                    hauler_ball_id,
+                    eve_destiny::MovementMode::new_warp(belt_hauler_pos, dest_station_pos, 3.0),
+                )
+                .await;
             let _ = handle.remove_ball(hauler_ball_id).await;
-            let added_units = in_transit_cargo;
             let (sys_region_id, owner_corp_id) = sde
                 .solar_systems
                 .get(&sys_id)
@@ -711,15 +718,16 @@ impl LivingWorldDirector {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&convoy_id);
-            let _ = handle.set_ball_position(hauler_ball_id, belt_hauler_pos).await;
-        } else if (final_cargo as f64) * ore_unit_vol >= ore_hold_m3 - 1e-6 {
-            // Miner ore hold is full: transfer ore to companion hauler and warp hauler to destination station
-            self.hauler_cargo
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(convoy_id, final_cargo);
             final_cargo = 0;
-            let _ = handle.set_ball_position(hauler_ball_id, dest_station_pos).await;
+            let hauler_tid = hauler_type_for_system(sde, sys_id);
+            let (h_ball, h_combat) = sde_ball_and_combat(sde, hauler_ball_id, hauler_tid, dest_station_pos);
+            let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+            let _ = handle
+                .set_movement_mode(
+                    hauler_ball_id,
+                    eve_destiny::MovementMode::new_warp(dest_station_pos, belt_hauler_pos, 3.0),
+                )
+                .await;
         }
 
         // Update convoy state

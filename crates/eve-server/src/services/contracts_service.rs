@@ -142,7 +142,12 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let contract_type = match args.first() {
+            let payload_opt = match args.first() {
+                Some(p @ (PyRep::KeyVal(_) | PyRep::Dict(_))) => Some(p),
+                _ => None,
+            };
+            let p_field = |key: &str| payload_opt.and_then(|p| p.dict_get(key));
+            let contract_type = match p_field("contractType").or_else(|| p_field("type")).or_else(|| args.first()) {
                 Some(PyRep::Integer(1)) => "ItemExchange",
                 Some(PyRep::Integer(2)) => "Auction",
                 Some(PyRep::Integer(3)) => "Courier",
@@ -158,10 +163,10 @@ pub fn handle(
                     return Some(Err(rpc_err("InvalidContractType", format!("Unsupported contract type {other:?}"),)));
                 }
             };
-            let availability = if let Some(av_kw) = kwargs.get("availability").and_then(|v| v.as_str()) {
+            let availability = if let Some(av_kw) = kwargs.get("availability").or_else(|| p_field("availability")).and_then(|v| v.as_str()) {
                 av_kw.to_string()
             } else {
-                match args.get(1) {
+                match p_field("availability").or_else(|| args.get(1)) {
                     Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)) | None | Some(PyRep::None) => {
                         "Public".to_string()
                     }
@@ -172,13 +177,13 @@ pub fn handle(
                     _ => "Public".to_string(),
                 }
             };
-            let assignee_id = args.get(2).and_then(|a| a.as_i64())
+            let assignee_id = p_field("assigneeID").or_else(|| args.get(2)).and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("assigneeID").and_then(|v| v.as_i64())).unwrap_or(0);
-            let num_days = args.get(4).and_then(|a| a.as_i64()).filter(|&d| d > 0).map(|d| d.clamp(1, 28) as u32)
+            let num_days = p_field("numDays").or_else(|| args.get(4)).and_then(|a| a.as_i64()).filter(|&d| d > 0).map(|d| d.clamp(1, 28) as u32)
                 .unwrap_or(1);
-            let duration_secs = if let Some(exp_min) = args.get(3).and_then(|a| a.as_i64()).filter(|&m| m > 0)
+            let duration_secs = if let Some(exp_min) = p_field("expireTime").or_else(|| args.get(3)).and_then(|a| a.as_i64()).filter(|&m| m > 0)
             { ((exp_min as u64).saturating_mul(60)).clamp(60, 2_419_200) } else { 86_400 };
-            let Some(start_station_id) = args.get(5).and_then(|a| a.as_i64()).filter(|&id| id > 0)
+            let Some(start_station_id) = p_field("startStationID").or_else(|| args.get(5)).and_then(|a| a.as_i64()).filter(|&id| id > 0)
                 .or(session.station_id).or(session.structure_id)
             else {
                 return Some(Err(rpc_err(
@@ -186,7 +191,7 @@ pub fn handle(
                     "Caller must be docked at start_station_id to create a contract",
                 )));
             };
-            let end_station_id = match args.get(6).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
+            let end_station_id = match p_field("endStationID").or_else(|| args.get(6)).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
                 Some(eid) => eid,
                 None if matches!(contract_type, "ItemExchange" | "Auction") => start_station_id,
                 None => {
@@ -196,24 +201,24 @@ pub fn handle(
                     )));
                 }
             };
-            let price_arg = args.get(7).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let reward_arg = args.get(8).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let collateral_arg = args.get(9).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let price_arg = p_field("price").or_else(|| args.get(7)).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let reward_arg = p_field("reward").or_else(|| args.get(8)).and_then(|a| a.as_f64()).unwrap_or(0.0);
+            let collateral_arg = p_field("collateral").or_else(|| args.get(9)).and_then(|a| a.as_f64()).unwrap_or(0.0);
             let (primary_isk, secondary_isk) = match contract_type {
                 "Courier" => (reward_arg, collateral_arg),
                 "Auction" => (price_arg, collateral_arg),
                 _ => (price_arg, reward_arg),
             };
-            let raw_title = args.get(10).and_then(|a| a.as_str())
+            let raw_title = p_field("title").or_else(|| args.get(10)).and_then(|a| a.as_str())
                 .or_else(|| kwargs.get("title").and_then(|v| v.as_str())).unwrap_or("");
             let title = raw_title.chars().take(128).collect::<String>();
-            let items_source = args.get(12).or_else(|| kwargs.get("itemList")).or_else(|| kwargs.get("items"));
+            let items_source = p_field("itemList").or_else(|| p_field("items")).or_else(|| args.get(12)).or_else(|| kwargs.get("itemList")).or_else(|| kwargs.get("items"));
             let item_ids_req = parse_item_ids(items_source);
-            let requested_items = match parse_requested_items(args.get(14), kwargs) {
+            let requested_items = match parse_requested_items(p_field("requestedItems").or_else(|| args.get(14)), kwargs) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let for_corp = args.get(15).and_then(|a| a.as_bool())
+            let for_corp = p_field("forCorp").or_else(|| args.get(15)).and_then(|a| a.as_bool())
                 .or_else(|| kwargs.get("forCorp").and_then(|v| v.as_bool())).unwrap_or(false);
 
             if session.station_id.or(session.structure_id) != Some(start_station_id) {

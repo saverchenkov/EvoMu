@@ -49,6 +49,18 @@ pub(crate) async fn rpc(
         .await
 }
 
+pub(crate) async fn rpc_kw(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, kwargs, None)
+        .await
+}
+
 pub(crate) fn field(rep: &PyRep, key: &str) -> PyRep {
     match rep {
         PyRep::KeyVal(map) => map.get(key).cloned().unwrap_or(PyRep::None),
@@ -118,34 +130,32 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
         (base - 3, base - 2, base - 1, base)
     });
 
-    // 1. Create ItemExchange contract with BPO, BPC, and abyssal module
-    let create_ie = rpc(
-        &ctx,
-        &mut sess1,
-        "contractProxy",
-        "CreateContract",
-        &[
-            PyRep::String("ItemExchange".into()),
-            PyRep::String("Public".into()),
-            PyRep::Integer(0),
-            PyRep::Integer(1440),
-            PyRep::Integer(7),
-            PyRep::Integer(JITA_STATION),
-            PyRep::Integer(JITA_STATION),
-            PyRep::Real(1_000_000.0),
-            PyRep::Real(0.0),
-            PyRep::Real(0.0),
-            PyRep::String("BPO + BPC + Abyssal".into()),
-            PyRep::String("".into()),
+    // 1. Create ItemExchange contract with BPO, BPC, and abyssal module (V24 1-arg KeyVal + confirm kwarg)
+    let confirm_kw = HashMap::from([("confirm".to_string(), PyRep::Bool(true))]);
+    let ie_params = PyRep::keyval([
+        ("contractType", PyRep::String("ItemExchange".into())),
+        ("availability", PyRep::String("Public".into())),
+        ("assigneeID", PyRep::Integer(0)),
+        ("expireTime", PyRep::Integer(1440)),
+        ("numDays", PyRep::Integer(7)),
+        ("startStationID", PyRep::Integer(JITA_STATION)),
+        ("endStationID", PyRep::Integer(JITA_STATION)),
+        ("price", PyRep::Real(1_000_000.0)),
+        ("reward", PyRep::Real(0.0)),
+        ("collateral", PyRep::Real(0.0)),
+        ("title", PyRep::String("BPO + BPC + Abyssal".into())),
+        (
+            "itemList",
             PyRep::List(vec![
                 PyRep::Integer(bpo_id),
                 PyRep::Integer(bpc_id),
                 PyRep::Integer(abyssal_id),
             ]),
-        ],
-    )
-    .await
-    .expect("CreateContract ItemExchange");
+        ),
+    ]);
+    let create_ie = rpc_kw(&ctx, &mut sess1, "contractProxy", "CreateContract", &[ie_params], &confirm_kw)
+        .await
+        .expect("CreateContract ItemExchange");
     let ie_cid = field(&create_ie, "contractID").as_i64().unwrap_or_else(|| create_ie.as_i64().unwrap());
 
     // Inspect via contractProxy.GetContract & contractProxy.SearchContracts
@@ -166,7 +176,8 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
     assert_eq!(field(ab_entry, "sourceMutaplasmidID"), PyRep::Integer(47746));
     assert_eq!(field(ab_entry, "damage"), PyRep::Real(12.5));
 
-    let search = rpc(&ctx, &mut sess2, "contractProxy", "SearchContracts", &[PyRep::String("ItemExchange".into())])
+    let search_kw = HashMap::from([("contractType".to_string(), PyRep::String("ItemExchange".into()))]);
+    let search = rpc_kw(&ctx, &mut sess2, "contractProxy", "SearchContracts", &[], &search_kw)
         .await
         .expect("contractProxy.SearchContracts");
     let PyRep::List(found_contracts) = search else {
@@ -179,8 +190,8 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
     assert_eq!(field(found_ie, "title"), PyRep::String("BPO + BPC + Abyssal".into()));
     assert_eq!(field(found_ie, "type"), PyRep::String("ItemExchange".into()));
 
-    // Accept contract and verify singleton metadata preserved on transferred items
-    rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(ie_cid)])
+    // Accept contract (V24 2-arg: contractID, forCorp) and verify singleton metadata preserved
+    rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(ie_cid), PyRep::Bool(false)])
         .await
         .expect("AcceptContract ItemExchange");
 
@@ -202,32 +213,26 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
         assert_eq!(ab.dynamic_attributes.get(&204).copied(), Some(1.35));
     });
 
-    // 2. Courier plastic wrap break forfeits collateral
-    let create_courier = rpc(
-        &ctx,
-        &mut sess1,
-        "contractProxy",
-        "CreateContract",
-        &[
-            PyRep::String("Courier".into()),
-            PyRep::String("Public".into()),
-            PyRep::Integer(0),
-            PyRep::Integer(1440),
-            PyRep::Integer(3),
-            PyRep::Integer(JITA_STATION),
-            PyRep::Integer(JITA_STATION),
-            PyRep::Real(0.0),
-            PyRep::Real(250_000.0),
-            PyRep::Real(2_000_000.0),
-            PyRep::String("Courier Wrap Test".into()),
-            PyRep::String("".into()),
-            PyRep::List(vec![PyRep::Integer(courier_cargo_id)]),
-        ],
-    )
-    .await
-    .expect("CreateContract Courier");
+    // 2. Courier plastic wrap break forfeits collateral (V24 1-arg KeyVal + confirm kwarg)
+    let courier_params = PyRep::keyval([
+        ("contractType", PyRep::String("Courier".into())),
+        ("availability", PyRep::String("Public".into())),
+        ("assigneeID", PyRep::Integer(0)),
+        ("expireTime", PyRep::Integer(1440)),
+        ("numDays", PyRep::Integer(3)),
+        ("startStationID", PyRep::Integer(JITA_STATION)),
+        ("endStationID", PyRep::Integer(JITA_STATION)),
+        ("price", PyRep::Real(0.0)),
+        ("reward", PyRep::Real(250_000.0)),
+        ("collateral", PyRep::Real(2_000_000.0)),
+        ("title", PyRep::String("Courier Wrap Test".into())),
+        ("itemList", PyRep::List(vec![PyRep::Integer(courier_cargo_id)])),
+    ]);
+    let create_courier = rpc_kw(&ctx, &mut sess1, "contractProxy", "CreateContract", &[courier_params], &confirm_kw)
+        .await
+        .expect("CreateContract Courier");
     let courier_cid = field(&create_courier, "contractID").as_i64().unwrap_or_else(|| create_courier.as_i64().unwrap());
-    rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(courier_cid)])
+    rpc(&ctx, &mut sess2, "contractProxy", "AcceptContract", &[PyRep::Integer(courier_cid), PyRep::Bool(false)])
         .await
         .expect("AcceptContract Courier");
 
@@ -241,13 +246,15 @@ async fn test_b22_contracts_blueprints_and_plastic_wrap_break() {
             .expect("Courier Plastic Wrap 3468 in hauler hangar")
     });
 
-    // Repackage (break) the plastic wrap
-    rpc(
+    // Repackage (break) the plastic wrap (V24 1-arg + destroyable kwarg)
+    let destroy_kw = HashMap::from([("destroyable".to_string(), PyRep::Bool(true))]);
+    rpc_kw(
         &ctx,
         &mut sess2,
         "repackagingSvc",
         "RepackageItems",
-        &[PyRep::List(vec![PyRep::Integer(wrap_id)]), PyRep::Bool(true)],
+        &[PyRep::List(vec![PyRep::Integer(wrap_id)])],
+        &destroy_kw,
     )
     .await
     .expect("RepackageItems plastic wrap");
@@ -294,13 +301,20 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
     .expect("AddCorporation");
     let corp_id = field(&created, "corporationID").as_i64().unwrap();
 
-    // 1. Welcome mail setting + automatic delivery on join
+    // 1. Welcome mail setting (V24 1-arg SetCorpWelcomeMail + None when unset) + automatic delivery on join
+    assert_eq!(
+        rpc(&ctx, &mut sess1, "corpRegistry", "GetCorpWelcomeMail", &[])
+            .await
+            .expect("GetCorpWelcomeMail unset"),
+        PyRep::None,
+        "GetCorpWelcomeMail must return None when unset"
+    );
     let deny_wm = rpc(
         &ctx,
         &mut sess2,
         "corpRegistry",
         "SetCorpWelcomeMail",
-        &[PyRep::String("Hi".into()), PyRep::String("Body".into()), PyRep::Bool(true)],
+        &[PyRep::String("Unauthorized".into())],
     )
     .await;
     assert!(deny_wm.is_err(), "Non-member cannot set corp welcome mail");
@@ -310,11 +324,7 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         &mut sess1,
         "corpRegistry",
         "SetCorpWelcomeMail",
-        &[
-            PyRep::String("Welcome to Vanguard".into()),
-            PyRep::String("Read the corp bulletin!".into()),
-            PyRep::Bool(true),
-        ],
+        &[PyRep::String("Read the corp bulletin!".into())],
     )
     .await
     .expect("SetCorpWelcomeMail");
@@ -322,20 +332,34 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
     let wm = rpc(&ctx, &mut sess1, "corpRegistry", "GetCorpWelcomeMail", &[])
         .await
         .expect("GetCorpWelcomeMail");
-    assert_eq!(field(&wm, "subject"), PyRep::String("Welcome to Vanguard".into()));
+    assert_eq!(field(&wm, "body"), PyRep::String("Read the corp bulletin!".into()));
 
     let app_rep = rpc(&ctx, &mut sess2, "corpRegistry", "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining!".into())])
         .await
         .expect("InsertApplication");
     let app_id = field(&app_rep, "applicationID").as_i64().unwrap_or_else(|| app_rep.as_i64().unwrap());
 
-    rpc(&ctx, &mut sess1, "corpRegistry", "UpdateApplicationOffer", &[PyRep::Integer(app_id), PyRep::String("Accepted".into()), PyRep::Integer(6)])
-        .await
-        .expect("UpdateApplicationOffer");
+    rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "UpdateApplicationOffer",
+        &[
+            PyRep::Integer(app_id),
+            PyRep::String("Accepted".into()),
+            PyRep::Integer(6),
+            PyRep::None,
+            PyRep::None,
+            PyRep::None,
+            PyRep::None,
+        ],
+    )
+    .await
+    .expect("UpdateApplicationOffer");
 
     ctx.db.with_snapshot(|s| {
         assert!(
-            s.mails.iter().any(|m| m.recipient_id == PILOT_2 && m.subject == "Welcome to Vanguard"),
+            s.mails.iter().any(|m| m.recipient_id == PILOT_2 && m.body == "Read the corp bulletin!"),
             "New member must automatically receive corp welcome mail on joining"
         );
     });
@@ -527,7 +551,7 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         &mut sess1,
         "beyonce",
         "CmdTransferCorpAssetOwnership",
-        &[PyRep::Integer(st_id), PyRep::Integer(target_corp_id)],
+        &[PyRep::Integer(st_id), PyRep::Integer(target_corp_id), PyRep::None],
     )
     .await;
     assert_eq!(
@@ -547,7 +571,7 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         &mut sess1,
         "beyonce",
         "CmdTransferCorpAssetOwnership",
-        &[PyRep::Integer(st_id), PyRep::Integer(target_corp_id)],
+        &[PyRep::Integer(st_id), PyRep::Integer(target_corp_id), PyRep::None],
     )
     .await
     .expect("Structure transfer must succeed when target corp accepts structures");

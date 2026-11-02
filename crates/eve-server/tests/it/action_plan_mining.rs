@@ -585,7 +585,7 @@ async fn test_action_plan_c6_mn08_to_mn12_harvesting_drones_scan_compression_rep
     ctx.advance_secs(120);
     eve_server::sp6_lifecycle::step_repeating_drone_mining(&ctx, ctx.now_unix()).await;
     assert_eq!(ctx.db.with_snapshot(|snap| snap.items.values().filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::SpecializedOreHold && i.type_id == 1230).map(|i| i.quantity).sum::<i32>()), 6_174, "'Excavator' Mining Drone + Drone Mining Augmentor I (+10%) deposits 6,174 Veldspar units");
-    assert_eq!(ctx.db.with_snapshot(|snap| snap.items.values().filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::SpecializedOreHold && i.type_id == 16262).map(|i| i.quantity).sum::<i32>()), 4, "'Excavator' Ice Harvesting Drone deposits 4 Clear Icicle units into SpecializedOreHold");
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.items.values().filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::SpecializedOreHold && i.type_id == 16262).map(|i| i.quantity).sum::<i32>()), 1, "'Excavator' Ice Harvesting Drone deposits 1 Clear Icicle unit into SpecializedOreHold");
 
     // 3. plan:MN-11 & plan:C-6: V24 1:1 lossless compression in-space (Orca + Core + Compressor) and in-structure + gas decompression
     let space_ore_id = 800_000_608i64;

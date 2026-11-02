@@ -1,4 +1,4 @@
-//! DERIVED (OF-36): Server-only regional and security-band asteroid belt ore distribution heuristic.
+//! DERIVED: Server-only regional and security-band asteroid belt ore distribution heuristic.
 //!
 //! V24.01 `.fsdbinary` client data omits server-only per-constellation asteroid belt ore spawn tables.
 //! `belt_ores_for_security_and_region` resolves base SDE ore types (`category_id == 25 && published`
@@ -40,14 +40,11 @@ impl crate::SdeRegistry {
                 // Post-Redistribution low-sec (0.4 - 0.1): no Veldspar/Scordite
                 &[459, 469, 457, 456, 455, 454]
             } else if security_status >= -0.45 {
-                // High null-sec (0.0 to -0.4)
-                &[457, 453, 467, 452, 454]
-            } else if security_status > -0.65 {
-                // Mid null-sec (-0.5 to -0.6)
-                &[453, 467, 452, 451, 450]
+                // High null-sec (0.0 to -0.4): Gneiss (453), Crokite (467), Dark Ochre (452), Spodumain (461), Mercoxit (468)
+                &[453, 467, 452, 461, 468]
             } else {
-                // Deep null-sec (-0.7 to -1.0): includes Mercoxit (468)
-                &[453, 467, 452, 451, 450, 468]
+                // Deep null-sec (-0.5 to -1.0): Gneiss (453), Crokite (467), Dark Ochre (452), Spodumain (461), Bistot (451), Arkonor (450), Mercoxit (468)
+                &[453, 467, 452, 461, 451, 450, 468]
             }
         };
 
@@ -61,7 +58,12 @@ impl crate::SdeRegistry {
                     && self.groups.get(&t.group_id).is_some_and(|g| g.name == t.name)
             })
             .collect();
-        ores.sort_by_key(|t| t.type_id);
+        ores.sort_by(|a, b| {
+            a.volume
+                .partial_cmp(&b.volume)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.type_id.cmp(&b.type_id))
+        });
         ores
     }
 

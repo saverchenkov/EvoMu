@@ -273,7 +273,7 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
         &mut sess2,
         "voteManager",
         "ActivateSanctionedAction",
-        &[PyRep::Integer(corp_id), PyRep::Integer(case_id)],
+        &[PyRep::Integer(case_id)],
     )
     .await
     .expect("ActivateSanctionedAction (CEO election)");

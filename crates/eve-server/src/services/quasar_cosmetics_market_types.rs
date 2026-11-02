@@ -96,3 +96,28 @@ pub struct CosmeticsMarketData {
     pub transactions: BTreeMap<String, CosmeticTransactionRecord>,
     pub next_seq: u64,
 }
+
+impl CosmeticsMarketData {
+    pub fn record_tx(
+        &mut self,
+        key: String,
+        uuid: [u8; 16],
+        last_updated_unix: u64,
+        succeeded: bool,
+        buyer_id: Option<u32>,
+        seller_id: Option<u32>,
+        details: CosmeticTransactionDetails,
+    ) {
+        self.transactions.insert(
+            key,
+            CosmeticTransactionRecord {
+                uuid,
+                last_updated_unix,
+                status: if succeeded { 3 } else { 2 },
+                buyer_id,
+                seller_id,
+                details,
+            },
+        );
+    }
+}

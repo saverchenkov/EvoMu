@@ -380,20 +380,10 @@ fn record_tx(
     seller_id: Option<u32>,
     details: CosmeticTransactionDetails,
 ) {
-    {
-        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-        data.transactions.insert(
-            hex(&uuid),
-            CosmeticTransactionRecord {
-                uuid,
-                last_updated_unix,
-                status: if succeeded { 3 } else { 2 },
-                buyer_id,
-                seller_id,
-                details,
-            },
-        );
-    }
+    st.data
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .record_tx(hex(&uuid), uuid, last_updated_unix, succeeded, buyer_id, seller_id, details);
     st.save();
 }
 
@@ -1339,30 +1329,12 @@ fn skin_admin_set_expiration_with_resp(
     Ok(any(resp_type, Vec::new()))
 }
 
-fn skin_admin_set_expiration(
-    st: &CosmeticsMarketState,
-    ctx: &AuthoritativeContext,
-    msg: &DynamicQuasarMessage,
-) -> HandlerResult {
-    skin_admin_set_expiration_with_resp(
-        st,
-        ctx,
-        msg,
-        "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
-    )
+fn skin_admin_set_expiration(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+    skin_admin_set_expiration_with_resp(st, ctx, msg, "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse")
 }
 
-fn skin_admin_set_expiration_eve(
-    st: &CosmeticsMarketState,
-    ctx: &AuthoritativeContext,
-    msg: &DynamicQuasarMessage,
-) -> HandlerResult {
-    skin_admin_set_expiration_with_resp(
-        st,
-        ctx,
-        msg,
-        "eve.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
-    )
+fn skin_admin_set_expiration_eve(st: &CosmeticsMarketState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+    skin_admin_set_expiration_with_resp(st, ctx, msg, "eve.cosmetic.market.skin.listing.api.admin.SetExpirationResponse")
 }
 
 /// Registers the state-backed Paragon Hub Cosmetic Market handlers.
@@ -1373,65 +1345,24 @@ pub fn register(
     skinr: Arc<SkinrCosmeticsState>,
 ) {
     let state = CosmeticsMarketState::load_with_sink(db, sde, skinr, Arc::clone(&router.macho_notify_sink));
-    let reg = |name: &'static str,
-               f: fn(&CosmeticsMarketState, &AuthoritativeContext, &DynamicQuasarMessage) -> HandlerResult| {
+    let handlers: &[(&'static str, fn(&CosmeticsMarketState, &AuthoritativeContext, &DynamicQuasarMessage) -> HandlerResult)] = &[
+        ("eve_public.cosmetic.market.api.GetBrokerFeesRequest", market_get_broker_fees),
+        ("eve_public.cosmetic.market.api.GetTaxRateRequest", market_get_tax_rate),
+        ("eve_public.cosmetic.market.api.GetBuyerFeeRequest", market_get_buyer_fee),
+        ("eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest", market_get_buyer_fees_definition),
+        ("eve_public.cosmetic.market.component.listing.api.GetAllRequest", component_get_all),
+        ("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest", component_initiate_purchase),
+        ("eve_public.cosmetic.market.skin.listing.api.GetAllRequest", skin_get_all),
+        ("eve_public.cosmetic.market.skin.listing.api.GetAllOwnedRequest", skin_get_all_owned),
+        ("eve_public.cosmetic.market.skin.listing.api.GetRequest", skin_get),
+        ("eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest", skin_initiate_create),
+        ("eve_public.cosmetic.market.skin.listing.api.CancelListingRequest", skin_cancel_listing),
+        ("eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest", skin_initiate_purchase),
+        ("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", skin_admin_set_expiration),
+        ("eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", skin_admin_set_expiration_eve),
+    ];
+    for &(name, f) in handlers {
         let st = Arc::clone(&state);
         router.register_handler(name, Arc::new(move |ctx, _any, msg| f(&st, ctx, msg)));
-    };
-    reg(
-        "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
-        market_get_broker_fees,
-    );
-    reg(
-        "eve_public.cosmetic.market.api.GetTaxRateRequest",
-        market_get_tax_rate,
-    );
-    reg(
-        "eve_public.cosmetic.market.api.GetBuyerFeeRequest",
-        market_get_buyer_fee,
-    );
-    reg(
-        "eve_public.cosmetic.market.api.GetBuyerFeesDefinitionRequest",
-        market_get_buyer_fees_definition,
-    );
-    reg(
-        "eve_public.cosmetic.market.component.listing.api.GetAllRequest",
-        component_get_all,
-    );
-    reg(
-        "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest",
-        component_initiate_purchase,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.GetAllRequest",
-        skin_get_all,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.GetAllOwnedRequest",
-        skin_get_all_owned,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.GetRequest",
-        skin_get,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
-        skin_initiate_create,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.CancelListingRequest",
-        skin_cancel_listing,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest",
-        skin_initiate_purchase,
-    );
-    reg(
-        "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest",
-        skin_admin_set_expiration,
-    );
-    reg(
-        "eve.cosmetic.market.skin.listing.api.admin.SetExpirationRequest",
-        skin_admin_set_expiration_eve,
-    );
+    }
 }

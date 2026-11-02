@@ -84,11 +84,14 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
         &mut s1,
         "posMgr",
         "AnchorStructure",
-        &[PyRep::Integer(obs_item_id), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        &[
+            PyRep::Integer(obs_item_id),
+            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
     )
     .await
     .expect_err("Mobile Observatory in high-sec must be rejected");
-    assert!(!hs_err.code.is_empty());
+    assert_eq!(hs_err.code, "CannotDeployInHighSec");
 
     // 2. Positive case for feat:structures.mobile-observatory: deploy in null-sec, anchor, and decloak nearby ship
     let ship2_id = 77_101_010_i64;
@@ -171,7 +174,10 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
         &mut s1,
         "posMgr",
         "AnchorStructure",
-        &[PyRep::Integer(obs_item_id), PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        &[
+            PyRep::Integer(obs_item_id),
+            PyRep::Tuple(vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0)]),
+        ],
     )
     .await
     .expect("Anchor Mobile Observatory in null-sec");
@@ -405,13 +411,13 @@ async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64,
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(ship_id)])
         .await
         .expect("ShipOnlineModules");
-    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_center)])
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_center), PyRep::None])
         .await
         .expect("dogmaIM.Overload mid");
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(mod_high), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1)])
         .await
         .expect("dogmaIM.Activate high");
-    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_high)])
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_high), PyRep::None])
         .await
         .expect("dogmaIM.Overload high");
 

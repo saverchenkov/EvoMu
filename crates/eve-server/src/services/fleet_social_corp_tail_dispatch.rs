@@ -58,18 +58,60 @@ pub fn handle_corp_gov_tail(
             if !has_comms {
                 return deny_role("Setting corporation welcome mail requires Communications Officer or Director role");
             }
-            let subject = args.first().and_then(|a| a.as_str()).unwrap_or("Welcome to the Corp");
-            let body = args.get(1).and_then(|a| a.as_str()).unwrap_or("Fly safe o7");
-            let enabled = args
-                .get(2)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(true);
+            let corp_name = ctx.db.with_snapshot(|snap| {
+                snap.corporations
+                    .get(&corp_id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| "the Corporation".to_string())
+            });
+            let (enabled, subject, body) = if args.len() == 1 {
+                match args.first() {
+                    Some(PyRep::None) | None => (false, String::new(), String::new()),
+                    Some(PyRep::String(text)) => {
+                        if text.trim().is_empty() {
+                            (false, String::new(), String::new())
+                        } else {
+                            (true, format!("Welcome to {corp_name}"), text.clone())
+                        }
+                    }
+                    Some(payload) => {
+                        let subj = payload
+                            .dict_get("subject")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("Welcome to {corp_name}"));
+                        let txt = payload
+                            .dict_get("body")
+                            .or_else(|| payload.dict_get("welcomeMail"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let en = payload
+                            .dict_get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(!txt.trim().is_empty());
+                        (en, subj, txt)
+                    }
+                }
+            } else {
+                let subj = args
+                    .first()
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("Welcome to the Corp")
+                    .to_string();
+                let txt = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+                let en = args
+                    .get(2)
+                    .and_then(|a| match a {
+                        PyRep::Bool(b) => Some(*b),
+                        PyRep::Integer(i) => Some(*i != 0),
+                        _ => None,
+                    })
+                    .unwrap_or(true);
+                (en, subj, txt)
+            };
             with_corp_gov(ctx, |g| {
-                g.entry(corp_id).or_default().welcome_mail = (enabled, subject.to_string(), body.to_string());
+                g.entry(corp_id).or_default().welcome_mail = (enabled, subject.clone(), body.clone());
             });
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
@@ -79,8 +121,8 @@ pub fn handle_corp_gov_tail(
             );
             Some(Ok(PyRep::keyval([
                 ("enabled", PyRep::Bool(enabled)),
-                ("subject", PyRep::String(subject.to_string())),
-                ("body", PyRep::String(body.to_string())),
+                ("subject", PyRep::String(subject)),
+                ("body", PyRep::String(body)),
             ])))
         }
 
@@ -90,11 +132,16 @@ pub fn handle_corp_gov_tail(
                     .map(|s| s.welcome_mail.clone())
                     .unwrap_or((false, String::new(), String::new()))
             });
-            Some(Ok(PyRep::keyval([
-                ("enabled", PyRep::Bool(enabled)),
-                ("subject", PyRep::String(subject)),
-                ("body", PyRep::String(body)),
-            ])))
+            if !enabled || (subject.is_empty() && body.is_empty()) {
+                Some(Ok(PyRep::None))
+            } else {
+                Some(Ok(PyRep::keyval([
+                    ("enabled", PyRep::Bool(enabled)),
+                    ("subject", PyRep::String(subject)),
+                    ("body", PyRep::String(body.clone())),
+                    ("welcomeMail", PyRep::String(body)),
+                ])))
+            }
         }
 
         ("corpRegistry", "RegisterNewCorpMailRestrictionSettings") => {

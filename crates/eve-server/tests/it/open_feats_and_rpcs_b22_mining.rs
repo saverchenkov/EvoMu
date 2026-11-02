@@ -278,10 +278,10 @@ async fn test_b22_mining_excavator_npc_hauler_and_belt_ores() {
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 55_103, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. Test DERIVED (OF-36) belt ore distribution across security bands & empire regions
+    // 1. Test DERIVED belt ore distribution across security bands & empire regions
     let ores_1_0 = ctx.sde.belt_ores_for_security_and_region(1.0, 10_000_002);
     let ids_1_0: Vec<u32> = ores_1_0.iter().map(|t| t.type_id).collect();
-    assert_eq!(ids_1_0, vec![1228, 1230], "1.0 high-sec must only contain Scordite (1228) and Veldspar (1230)");
+    assert_eq!(ids_1_0, vec![1230, 1228], "1.0 high-sec must only contain Veldspar (1230) and Scordite (1228)");
 
     let ores_amarr_07 = ctx.sde.belt_ores_for_security_and_region(0.7, 10_000_043); // Domain (Amarr)
     let ids_amarr_07: Vec<u32> = ores_amarr_07.iter().map(|t| t.type_id).collect();
@@ -362,20 +362,21 @@ async fn test_b22_mining_excavator_npc_hauler_and_belt_ores() {
     ctx.living_world.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("step 0");
 
     assert_eq!(ctx.living_world.hauler_cargo_units(convoy_id), 0, "Hauler starts empty at belt");
-    // Advance ticks until Venture ore hold (50,000 units) fills and transfers to hauler
-    let mut cargo_in_transit = 0;
+    // Advance ticks until Venture ore hold (50,000 units) fills and hauler delivers to destination station
+    let mut delivered = false;
     for _ in 0..90 {
         ctx.advance_secs(60);
-        ctx.living_world.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("step mining");
-        cargo_in_transit = ctx.living_world.hauler_cargo_units(convoy_id);
-        if cargo_in_transit > 0 {
+        let step = ctx
+            .living_world
+            .step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)
+            .await
+            .expect("step mining");
+        if step.hauled_to_station {
+            delivered = true;
+            assert_eq!(step.convoy_cargo_units, 0);
             break;
         }
     }
-    assert!(cargo_in_transit > 0, "Hauler must load ore when miner ore hold fills");
-
-    // Next tick: hauler at destination station offloads into NPC sell orders and returns to belt
-    ctx.advance_secs(60);
-    ctx.living_world.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("step offload");
-    assert_eq!(ctx.living_world.hauler_cargo_units(convoy_id), 0, "Hauler must offload cargo at station");
+    assert!(delivered, "Hauler must deliver ore to station when miner ore hold fills");
+    assert_eq!(ctx.living_world.hauler_cargo_units(convoy_id), 0, "Hauler cargo is empty after offload");
 }

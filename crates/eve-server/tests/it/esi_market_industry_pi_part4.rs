@@ -208,6 +208,21 @@ async fn test_esi6_industry_and_mining_routes() {
             mode: MovementMode::Stop,
         })
         .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&char_id) {
+            let mut ch = snap.characters.values().next().unwrap().clone();
+            ch.character_id = char_id;
+            ch.corporation_id = corp_id;
+            ch.solar_system_id = 30_000_144;
+            ch.active_ship_id = ship_id;
+            snap.characters.insert(char_id, ch);
+        }
+        snap.skills.entry(char_id).or_default().insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        snap.items.insert(ship_id, make_item(ship_id, 606, char_id, 30_000_144, InventoryFlag::None, 1, true));
+        snap.items.insert(93_000_483, make_item(93_000_483, 483, char_id, ship_id, InventoryFlag::HiSlot0, 1, true));
+        snap.module_online_states.insert(93_000_483, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
     rpc_call(&ctx, &mut char_sess, "dogmaIM", "Mine", &[PyRep::Integer(ast_id_1)]).await;
 
     // 2. Install & deliver an old industry job in Jita via other_char_id, then advance 35 days so both the first mining ledger entry (>30d) and first Jita job (>28d) age out
