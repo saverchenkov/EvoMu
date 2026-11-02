@@ -102,8 +102,9 @@ impl WorldRepository {
         let anc = sde.ancestries.get(&ancestry_id).ok_or_else(|| {
             DbError::ValidationError(format!("Unknown ancestry_id {ancestry_id}"))
         })?;
-        // V24.01 character creation sends const.ancestryUndefined (43, bloodline_id == 0).
-        let ancestry_id = if anc.bloodline_id == 0 {
+        // V24.01 character creation sends const.ancestryUndefined (64, "Undefined Ancestry for
+        // characters who didn't pick one during character creation", or bloodline_id == 0).
+        let ancestry_id = if anc.bloodline_id == 0 || ancestry_id == 64 {
             sde.ancestries
                 .values()
                 .filter(|a| a.bloodline_id == bloodline_id)

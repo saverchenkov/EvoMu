@@ -1029,3 +1029,19 @@ fn test_r66_p1_3_nine_maps_sqlite_persistence_restart_and_rollback() {
     let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-shm"));
 }
+
+#[test]
+fn test_create_character_accepts_v24_undefined_ancestry_64() {
+    let sde = SdeRegistry::open(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/evomu_sde.sqlite"
+    )))
+    .expect("open SDE");
+    let repo = WorldRepository::new_empty();
+    let created = repo
+        .create_character(1, "V24 Pilot", 8, 8, 64, 22, &sde)
+        .expect("V24.01 ancestryUndefined (64) must be accepted for Gallente bloodline 8");
+    assert_eq!(created.race_id, 8);
+    assert_eq!(created.bloodline_id, 8);
+    assert_ne!(created.ancestry_id, 64);
+}
