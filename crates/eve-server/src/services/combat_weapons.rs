@@ -263,7 +263,7 @@ pub async fn handle_weapons(
                             ctx.notify(NotificationTarget::Character(char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(vc), PyRep::Integer(timeout_ft)]);
                             ctx.notify(NotificationTarget::Character(vc), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                         }
-                        let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, vc, now_unix).is_none()).unwrap_or(true);
+                        let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vc, is_pod_target, now_unix);
                         let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -276,19 +276,10 @@ pub async fn handle_weapons(
                                 st.suspect_flag_until_unix = 0;
                             }
                         }
-                        if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg {
-                            let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
-                                (
-                                    s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
-                                    victim_char_opt.and_then(|vid| s.characters.get(&vid)).map(|c| c.security_status).unwrap_or(0.0),
-                                )
-                            });
-                            let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod_target, sys_sec);
-                            ctx.db.with_mut_snapshot(|s| {
-                                if let Some(ch) = s.characters.get_mut(&char_id) {
-                                    ch.security_status = (old_sec - loss).clamp(-10.0, 10.0);
-                                }
-                            });
+                        if !is_legal && !is_mobile_struct {
+                            crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                                ctx, char_id, vc, sys_id, sys_sec, is_pod_target, is_new_agg, now_unix,
+                            );
                         }
                     }
                 }

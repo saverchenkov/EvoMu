@@ -106,7 +106,13 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
     let now = ctx.now_unix();
 
     let highsec_sys = 30_000_142_u32; // Jita (0.95)
-    let lowsec_sys = 30_000_119_u32; // Low-sec system
+    let lowsec_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status > 0.0 && s.security_status < 0.45)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_510);
     let victim_id = 90_000_001_i64;
     let criminal_id = 90_000_002_i64;
     let buyer_id = 90_000_003_i64;
@@ -141,23 +147,10 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
     for (id, pos) in [(victim_ship, DVec3::ZERO), (crim_ship, DVec3::new(1_000.0, 0.0, 0.0))] {
         let mut cs = ctx.build_type_combat_state(587);
         cs.shield_hp = 500.0;
-        let _ = sys_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id,
-                    type_id: 587,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 1.0,
-                    mass: 1_000_000.0,
-                    radius: 40.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await;
+        let _ = sys_handle.spawn_ball_with_combat(Ball {
+            id, type_id: 587, position: pos, velocity: DVec3::ZERO, max_velocity: 300.0,
+            inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }, cs).await;
     }
 
     // 1. Low-sec unprovoked ship aggression grants Suspect flag, NOT a kill right.
@@ -193,24 +186,24 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
     for (id, tid, pos) in [(low_crim_ship, 587_u32, DVec3::new(1_000.0, 0.0, 0.0)), (low_vic_pod, 670_u32, DVec3::ZERO)] {
         let mut cs = ctx.build_type_combat_state(tid);
         cs.shield_hp = 500.0;
-        let _ = lowsec_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id,
-                    type_id: tid,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 1.0,
-                    mass: 1_000_000.0,
-                    radius: 40.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await;
+        let _ = lowsec_handle.spawn_ball_with_combat(Ball {
+            id, type_id: tid, position: pos, velocity: DVec3::ZERO, max_velocity: 300.0,
+            inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }, cs).await;
     }
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&victim_id) {
+            ch.active_ship_id = low_vic_pod;
+        }
+    });
+    eve_server::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+        &ctx, criminal_id, low_crim_ship, lowsec_sys, low_vic_pod, true,
+    ).expect("evaluate_and_record_pvp_aggression lowsec pod");
+    assert!(
+        ctx.db.with_snapshot(|s| s.kill_rights.values().any(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id)),
+        "evaluate_and_record_pvp_aggression on low-sec pod must grant kill right"
+    );
+    ctx.db.with_mut_snapshot(|s| s.kill_rights.clear());
     let mut sess_crim_low = SessionState::default();
     sess_crim_low.user_id = Some(2);
     sess_crim_low.character_id = Some(criminal_id);
@@ -444,8 +437,16 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         &ctx, char_id, 1, 30_000_142, victim_id, false,
     )
     .expect("evaluate_and_record_pvp_aggression");
+    // Repeated cycle on same target must not re-deduct security status; CONCORD arrival must not double-deduct
+    eve_server::services::combat_crimewatch::crimewatch_timers::evaluate_and_record_pvp_aggression(
+        &ctx, char_id, 1, 30_000_142, victim_id, false,
+    )
+    .expect("evaluate_and_record_pvp_aggression repeat");
+    let mut cw_concord = CrimeWatchDirector::new();
+    cw_concord.states = ctx.crimewatch.read().unwrap().states.clone();
+    let _ = cw_concord.step_concord(&ctx, now + 30, 99).await;
     let sec_after_aggr = ctx.db.with_snapshot(|s| s.characters[&char_id].security_status);
-    assert!((sec_after_aggr - (-expected_jita_loss)).abs() < 1e-6, "live character security_status must drop by exact ship loss formula");
+    assert!((sec_after_aggr - (-expected_jita_loss)).abs() < 1e-6, "live character security_status must drop once by exact ship loss formula");
 
     // 1b. Verify beyonce.CmdAttackTarget legacy high-sec path uses compute_sec_status_loss with real victim sec status (not flat -0.5)
     ctx.db.with_mut_snapshot(|snap| {
@@ -461,23 +462,10 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     for (id, pos) in [(att_ship, DVec3::new(1_000.0, 0.0, 0.0)), (vic_ship, DVec3::ZERO)] {
         let mut cs = ctx.build_type_combat_state(587);
         cs.shield_hp = 500.0;
-        let _ = jita_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id,
-                    type_id: 587,
-                    position: pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 1.0,
-                    mass: 1_000_000.0,
-                    radius: 40.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                cs,
-            )
-            .await;
+        let _ = jita_handle.spawn_ball_with_combat(Ball {
+            id, type_id: 587, position: pos, velocity: DVec3::ZERO, max_velocity: 300.0,
+            inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        }, cs).await;
     }
     let mut sess_cmd = SessionState::default();
     sess_cmd.user_id = Some(1);
@@ -585,60 +573,48 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         ch.balance
     });
 
-    for (start_sec, valid_tag, invalid_tag, expected_sec) in [
-        (-9.0_f64, 35661_i64, 35662_i64, -8.5_f64), // Trainer: -10 to -8
-        (-6.5_f64, 35662_i64, 35663_i64, -6.0_f64), // Recruiter: -8 to -5
-        (-3.5_f64, 35663_i64, 35664_i64, -3.0_f64), // Transporter: -5 to -2
-        (-0.2_f64, 35664_i64, 35661_i64, 0.0_f64),  // Negotiator: -2 to 0 (capped at 0.0!)
+    for (start_sec, valid_tag, invalid_tag, req_qty, expected_sec) in [
+        (-9.0_f64, 35661_i64, 35662_i64, 1_i64, -8.5_f64), // Trainer: -10 to -8
+        (-6.5_f64, 35662_i64, 35663_i64, 1_i64, -6.0_f64), // Recruiter: -8 to -5
+        (-3.5_f64, 35663_i64, 35664_i64, 1_i64, -3.0_f64), // Transporter: -5 to -2
+        (-0.2_f64, 35664_i64, 35661_i64, 5_i64, 0.0_f64),  // Negotiator: -2 to 0 (capped at 1 effective tag!)
     ] {
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.security_status = start_sec;
             }
         });
-        let bad = rpc(
-            &ctx,
-            &mut sess,
-            "crimewatch",
-            "ApplyTagsForSecStatus",
-            &[PyRep::Integer(invalid_tag), PyRep::Integer(1)],
-        )
-        .await;
+        let bad = rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(invalid_tag), PyRep::Integer(1)]).await;
         assert!(bad.unwrap_err().contains("SecurityTagBandMismatch"));
 
-        let ok = rpc(
-            &ctx,
-            &mut sess,
-            "crimewatch",
-            "ApplyTagsForSecStatus",
-            &[PyRep::Integer(valid_tag), PyRep::Integer(1)],
-        )
-        .await
-        .expect("ApplyTagsForSecStatus");
+        let ok = rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(valid_tag), PyRep::Integer(req_qty)])
+            .await
+            .expect("ApplyTagsForSecStatus");
         let new_sec = match field(&ok, "newSecurityStatus") {
             PyRep::Real(v) => v,
             other => panic!("expected Real newSecurityStatus, got {other:?}"),
         };
         assert!((new_sec - expected_sec).abs() < 1e-6);
     }
+    // Reject i64->i32 overflow / negative tag quantities and negative tag type IDs (`R-20261101-P0-01`)
+    for bad_qty in [4_294_966_296_i64, 2_147_483_648_i64, 0_i64, -5_i64] {
+        let err = rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(bad_qty)]).await;
+        assert!(err.unwrap_err().contains("InvalidTagQuantity"));
+    }
+    assert!(rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(-1), PyRep::Integer(1)]).await.unwrap_err().contains("InvalidSecurityTagType"));
 
     // Tag at 0.0 is refused (cannot raise above 0.0)
-    let at_zero = rpc(
-        &ctx,
-        &mut sess,
-        "crimewatch",
-        "ApplyTagsForSecStatus",
-        &[PyRep::Integer(35664), PyRep::Integer(1)],
-    )
-    .await;
-    assert!(at_zero.unwrap_err().contains("SecurityTagBandMismatch"));
+    assert!(rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await.unwrap_err().contains("SecurityTagBandMismatch"));
 
-    // Verify ISK fee charged for 4 tags (1M + 2M + 3M + 4M = 10M ISK deducted)
-    let bal_after_tags = ctx.db.with_snapshot(|s| s.characters[&char_id].balance);
-    assert_eq!(
-        bal_before_tags.0 - bal_after_tags.0,
-        IskCents::from_f64_isk(10_000_000.0).0
-    );
+    // Verify ISK fee charged for 4 effective tags (1M + 2M + 3M + 4M = 10M ISK, 4 Negotiator tags preserved, journal logged)
+    let (bal_after_tags, rem_neg_tags, has_tag_journal) = ctx.db.with_snapshot(|s| {
+        let rem = s.items.values().filter(|i| i.owner_id == char_id && i.type_id == 35664).map(|i| i.quantity).sum::<i32>();
+        let j = s.wallet_journal.iter().any(|w| w.character_id == char_id && w.entry_type == "SecurityTagFee" && w.amount == IskCents::from_isk(-4_000_000));
+        (s.characters[&char_id].balance, rem, j)
+    });
+    assert_eq!(bal_before_tags.0 - bal_after_tags.0, IskCents::from_isk(10_000_000).0);
+    assert_eq!(rem_neg_tags, 4, "excess tags above 0.0 cap must not be consumed");
+    assert!(has_tag_journal, "SecurityTagFee wallet journal entry must be recorded");
 
     // 4. Verify GetSecurityStatusTransactions returns V24 client columns by name
     let txs = rpc(&ctx, &mut sess, "crimewatch", "GetSecurityStatusTransactions", &[])
@@ -647,11 +623,11 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     let PyRep::Rowset { columns, rows, .. } = txs else {
         panic!("expected Rowset, got {txs:?}");
     };
-    assert_eq!(rows.len(), 4, "4 tag turn-ins recorded");
+    assert_eq!(rows.len(), 6, "2 illegal PvP aggressions (no CONCORD duplicate) + 4 tag turn-ins recorded");
     let row0: std::collections::HashMap<&str, &PyRep> = columns
         .iter()
         .map(|s| s.as_str())
-        .zip(rows[0].iter())
+        .zip(rows[2].iter())
         .collect();
     let expected_ft = (now as i64 + 11_644_473_600) * 10_000_000;
     assert_eq!(row0.get("eventDate"), Some(&&PyRep::Integer(expected_ft)));

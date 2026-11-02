@@ -574,21 +574,6 @@ pub async fn handle_legacy_and_ess(
                     let (kill_id, kr_id) = ctx
                         .db
                         .try_with_mut_snapshot(|snap| {
-                            let target_sec = snap
-                                .characters
-                                .get(&victim_char_id)
-                                .map(|c| c.security_status)
-                                .unwrap_or(0.0);
-                            let is_pod = target_ball.type_id == 670;
-                            if let Some(att) = snap.characters.get_mut(&char_id) {
-                                let loss = crate::combat::crimewatch::compute_sec_status_loss(
-                                    att.security_status,
-                                    target_sec,
-                                    is_pod,
-                                    sys_sec,
-                                );
-                                att.security_status = (att.security_status - loss).max(-10.0);
-                            }
                             snap.next_entity_id += 1;
                             let kid = snap.next_entity_id;
                             snap.record_killmail(
@@ -608,6 +593,15 @@ pub async fn handle_legacy_and_ess(
                             Ok::<_, std::convert::Infallible>((kid, krid))
                         })
                         .unwrap();
+                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                        ctx,
+                        char_id,
+                        victim_char_id,
+                        sys_id,
+                        sys_sec,
+                        target_ball.type_id == 670,
+                        now_unix,
+                    );
                     crate::services::combat_crimewatch::create_kill_right(
                         ctx,
                         kr_id,
@@ -885,25 +879,9 @@ pub async fn handle_legacy_and_ess(
                     .db
                     .try_with_mut_snapshot(|snap| {
                         let mut pod_kr_id = 0;
-                        if is_lowsec_unprovoked {
-                            let target_sec = snap
-                                .characters
-                                .get(&victim_char_id)
-                                .map(|c| c.security_status)
-                                .unwrap_or(0.0);
-                            if let Some(att) = snap.characters.get_mut(&char_id) {
-                                let sec_penalty = crate::combat::crimewatch::compute_sec_status_loss(
-                                    att.security_status,
-                                    target_sec,
-                                    is_pod_target,
-                                    sys_sec,
-                                );
-                                att.security_status = (att.security_status - sec_penalty).clamp(-10.0, 10.0);
-                            }
-                            if is_pod_target && victim_char_id > 0 {
-                                snap.next_entity_id += 1;
-                                pod_kr_id = snap.next_entity_id;
-                            }
+                        if is_lowsec_unprovoked && is_pod_target && victim_char_id > 0 {
+                            snap.next_entity_id += 1;
+                            pod_kr_id = snap.next_entity_id;
                         }
                         if destroyed {
                             for kr in snap.kill_rights.values_mut() {
@@ -998,6 +976,17 @@ pub async fn handle_legacy_and_ess(
                         }
                     })
                     .unwrap();
+                if is_lowsec_unprovoked {
+                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                        ctx,
+                        char_id,
+                        victim_char_id,
+                        sys_id,
+                        sys_sec,
+                        is_pod_target,
+                        now_unix,
+                    );
+                }
                 if lowsec_pod_kr_id > 0 {
                     crate::services::combat_crimewatch::create_kill_right(
                         ctx,

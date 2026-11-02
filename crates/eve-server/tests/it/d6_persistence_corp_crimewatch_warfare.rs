@@ -473,7 +473,13 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         assert_eq!(wh_pol_tuple[1], PyRep::Integer(300 * 10_000_000));
 
         let sec_tx = rpc(&ctx2, &mut sess2, "crimewatch", "GetSecurityStatusTransactions", &[]).await;
-        assert!(format!("{sec_tx:?}").contains("Clone Soldier Security Tag"));
+        let PyRep::Rowset { columns: sec_cols, rows: sec_rows, .. } = &sec_tx else {
+            panic!("expected Rowset from GetSecurityStatusTransactions, got {sec_tx:?}");
+        };
+        for col in ["eventDate", "eventTypeID", "locationID", "modification", "newValue", "otherOwnerID", "otherTypeID"] {
+            assert!(sec_cols.iter().any(|c| c == col), "missing V24 column {col} in {sec_cols:?}");
+        }
+        assert!(!sec_rows.is_empty());
         let bkr = rpc(&ctx2, &mut sess2, "bountyProxy", "GetBountiesAndKillRights", &[PyRep::List(vec![PyRep::Integer(OTHER)]), PyRep::List(vec![PyRep::Integer(OTHER)])]).await;
         assert!(format!("{bkr:?}").contains("5000000") && format!("{bkr:?}").contains("2500000"));
 

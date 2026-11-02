@@ -662,7 +662,9 @@ async fn test_crimewatch_security_and_duels() {
         panic!("Expected PyRowset from GetSecurityStatusTransactions");
     };
     assert!(!rows.is_empty(), "Security status transaction log must not be empty");
+    for col in ["eventDate", "eventTypeID", "locationID", "modification", "newValue", "otherOwnerID", "otherTypeID"] {
+        assert!(columns.iter().any(|c| c == col), "missing V24 column {col} in {columns:?}");
+    }
     assert!(columns.contains(&"oldSecurityStatus".into()));
     assert!(columns.contains(&"newSecurityStatus".into()));
-    assert!(columns.contains(&"modification".into()));
 }

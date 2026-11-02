@@ -595,41 +595,24 @@ async fn activate_single_fighter_ability(
                 } || with_combat_runtime(ctx, |rt| {
                     rt.has_limited_engagement_with(victim_char_id, char_id, now_unix)
                 });
-                let _ = ctx.crimewatch.write().unwrap().handle_combat_aggression(
+                let is_pod = target_ball.type_id == 670;
+                let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
+                    ctx, char_id, victim_char_id, is_pod, now_unix,
+                );
+                let _ = ctx.crimewatch.write().unwrap().handle_combat_aggression_with_pod(
                     char_id,
                     victim_char_id,
                     fighter.parent_ship_id,
                     sys_id,
                     sec,
                     is_legal,
+                    is_pod,
                     now_unix,
                 );
-                if !is_legal && sec > 0.0 {
-                    let (old_sec, target_sec) = ctx.db.with_snapshot(|snap| {
-                        let old = snap
-                            .characters
-                            .get(&char_id)
-                            .map(|c| c.security_status)
-                            .unwrap_or(0.0);
-                        let tgt = snap
-                            .characters
-                            .get(&victim_char_id)
-                            .map(|c| c.security_status)
-                            .unwrap_or(0.0);
-                        (old, tgt)
-                    });
-                    let loss = crate::combat::crimewatch::compute_sec_status_loss(
-                        old_sec,
-                        target_sec,
-                        false,
-                        sec,
+                if !is_legal {
+                    crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                        ctx, char_id, victim_char_id, sys_id, sec, is_pod, is_new_agg, now_unix,
                     );
-                    let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.security_status = new_sec;
-                        }
-                    });
                 }
             }
         }
@@ -978,40 +961,24 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                                 } || with_combat_runtime(ctx, |rt| {
                                     rt.has_limited_engagement_with(vcid, char_id, now_unix)
                                 });
-                                let _ = ctx.crimewatch.write().unwrap().handle_combat_aggression(
+                                let is_pod = b.type_id == 670;
+                                let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
+                                    ctx, char_id, vcid, is_pod, now_unix,
+                                );
+                                let _ = ctx.crimewatch.write().unwrap().handle_combat_aggression_with_pod(
                                     char_id,
                                     vcid,
                                     fighter.parent_ship_id,
                                     sys_id,
                                     sys_sec,
                                     is_legal,
+                                    is_pod,
                                     now_unix,
                                 );
-                                if !is_legal && sys_sec > 0.0 {
-                                    let (old_sec, target_sec) = ctx.db.with_snapshot(|snap| {
-                                        let old = snap
-                                            .characters
-                                            .get(&char_id)
-                                            .map(|c| c.security_status)
-                                            .unwrap_or(0.0);
-                                        let tgt = snap
-                                            .characters
-                                            .get(&vcid)
-                                            .map(|c| c.security_status)
-                                            .unwrap_or(0.0);
-                                        (old, tgt)
-                                    });
-                                    let loss = crate::combat::crimewatch::compute_sec_status_loss(
-                                        old_sec,
-                                        target_sec,
-                                        b.type_id == 670,
-                                        sys_sec,
+                                if !is_legal {
+                                    crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                                        ctx, char_id, vcid, sys_id, sys_sec, is_pod, is_new_agg, now_unix,
                                     );
-                                    ctx.db.with_mut_snapshot(|snap| {
-                                        if let Some(ch) = snap.characters.get_mut(&char_id) {
-                                            ch.security_status = (old_sec - loss).clamp(-10.0, 10.0);
-                                        }
-                                    });
                                 }
                             }
                         }

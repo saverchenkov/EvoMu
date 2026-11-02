@@ -738,6 +738,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                 let mut concord_triggered = false;
                 for (vcid, is_pod) in illegal_capsuleer_hits {
                     if sys_sec > 0.0 {
+                        let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vcid, is_pod, now_unix);
                         {
                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                             cw.system_corruption_stages.insert(sys_id, crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id));
@@ -756,19 +757,9 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                             }
                         }
                         emit_crimewatch_timer_notifications(ctx, char_id, now_unix);
-                        let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
-                            (
-                                s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
-                                s.characters.get(&vcid).map(|c| c.security_status).unwrap_or(0.0),
-                            )
-                        });
-                        let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod, sys_sec);
-                        let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
-                        ctx.db.with_mut_snapshot(|s| {
-                            if let Some(ch) = s.characters.get_mut(&char_id) {
-                                ch.security_status = new_sec;
-                            }
-                        });
+                        crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                            ctx, char_id, vcid, sys_id, sys_sec, is_pod, is_new_agg, now_unix,
+                        );
                     }
                 }
 
@@ -968,41 +959,23 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                                 rt.add_limited_engagement(vcid, char_id, now_unix);
                                             });
                                         }
-                                        if !is_legal {
-                                            if sys_sec > 0.0 {
-                                                let is_pod = b.type_id == 670;
-                                                {
-                                                    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                                                    let _ = cw.handle_combat_aggression_with_pod(
-                                                        char_id,
-                                                        vcid,
-                                                        ship_id,
-                                                        sys_id,
-                                                        sys_sec,
-                                                        false,
-                                                        is_pod,
-                                                        now_unix,
-                                                    );
-                                                    if sys_sec < 0.45 && is_pod {
-                                                        let st = cw.get_or_create(char_id);
-                                                        st.criminal_flag_until_unix = now_unix.saturating_add(900);
-                                                        st.suspect_flag_until_unix = 0;
-                                                    }
+                                        if !is_legal && sys_sec > 0.0 {
+                                            let is_pod = b.type_id == 670;
+                                            let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(ctx, char_id, vcid, is_pod, now_unix);
+                                            {
+                                                let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                                                let _ = cw.handle_combat_aggression_with_pod(
+                                                    char_id, vcid, ship_id, sys_id, sys_sec, false, is_pod, now_unix,
+                                                );
+                                                if sys_sec < 0.45 && is_pod {
+                                                    let st = cw.get_or_create(char_id);
+                                                    st.criminal_flag_until_unix = now_unix.saturating_add(900);
+                                                    st.suspect_flag_until_unix = 0;
                                                 }
-                                                let (old_sec, target_sec) = ctx.db.with_snapshot(|s| {
-                                                    (
-                                                        s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0),
-                                                        s.characters.get(&vcid).map(|c| c.security_status).unwrap_or(0.0),
-                                                    )
-                                                });
-                                                let loss = crate::combat::crimewatch::compute_sec_status_loss(old_sec, target_sec, is_pod, sys_sec);
-                                                let new_sec = (old_sec - loss).clamp(-10.0, 10.0);
-                                                ctx.db.with_mut_snapshot(|s| {
-                                                    if let Some(ch) = s.characters.get_mut(&char_id) {
-                                                        ch.security_status = new_sec;
-                                                    }
-                                                });
                                             }
+                                            crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                                                ctx, char_id, vcid, sys_id, sys_sec, is_pod, is_new_agg, now_unix,
+                                            );
                                         }
                                     }
                                 }
