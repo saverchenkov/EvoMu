@@ -355,6 +355,12 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
     let kw = HashMap::new();
     let char_id = 97_157_001i64;
     let ship_id = 87_157_101i64;
+    let sec_office_svc = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
+    let (lowsec_stn, lowsec_sys) = ctx.sde.stations.values().find(|st| {
+        (matches!(st.owner_corporation_id, 1_000_125 | 1_000_137) || st.owner_faction_id == Some(500_006))
+            && ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.security_status > 0.0 && s.security_status < 0.45)
+            && ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| op.services.contains(&sec_office_svc))
+    }).map(|st| (st.station_id, st.solar_system_id)).expect("lowsec CONCORD Security Office station");
     let mut sess = setup_pilot_in_space(
         &ctx,
         71571,
@@ -362,17 +368,17 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
         1_000_125,
         ship_id,
         587,
-        30_000_142,
+        lowsec_sys,
         DVec3::ZERO,
     )
     .await;
-    sess.station_id = Some(60_003_760);
+    sess.station_id = Some(lowsec_stn);
 
     let remote_tag_id = 87_157_201i64;
     let locked_tag_id = 87_157_202i64;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.station_id = Some(60_003_760);
+        ch.station_id = Some(lowsec_stn);
         ch.security_status = -8.5;
         // Tag in remote station 60_008_494
         snap.items.insert(
@@ -387,14 +393,14 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
                 false,
             ),
         );
-        // Tag in local station 60_003_760 but locked in an Outstanding contract
+        // Tag in local station lowsec_stn but locked in an Outstanding contract
         snap.items.insert(
             locked_tag_id,
             item_rec(
                 locked_tag_id,
                 35661,
                 char_id,
-                60_003_760,
+                lowsec_stn,
                 InventoryFlag::Hangar,
                 1,
                 false,

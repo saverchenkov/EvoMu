@@ -301,13 +301,12 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let ship_id = 105_000_101i64;
-    let lowsec_sys = 30_002_537u32;
-    let lowsec_station = ctx
-        .sde
-        .solar_systems
-        .get(&lowsec_sys)
-        .and_then(|s| s.stations.first().map(|st| st.station_id))
-        .unwrap_or(60_003_760);
+    let sec_office_svc = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
+    let (lowsec_station, lowsec_sys) = ctx.sde.stations.values().find(|st| {
+        (matches!(st.owner_corporation_id, 1_000_125 | 1_000_137) || st.owner_faction_id == Some(500_006))
+            && ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.security_status > 0.0 && s.security_status < 0.45)
+            && ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| op.services.contains(&sec_office_svc))
+    }).map(|st| (st.station_id, st.solar_system_id)).expect("lowsec CONCORD Security Office station");
 
     seed_ship_in_space(&ctx, char_id, ship_id, 587, lowsec_sys, DVec3::ZERO).await;
 
@@ -359,10 +358,11 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     .expect_err("Trainer tag must be refused at -6.0 sec status");
     assert!(!wrong_band_err.code.is_empty());
 
-    // 2. Negotiator tag (35664) at -0.3 caps at 0.0 (cannot raise sec status above 0.0)
+    // 2. Negotiator tag (35664) at -0.3 gives full +0.5 -> 0.2 (consuming 1 tag), then refuses further tags >= 0.0
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&char_id) {
             ch.security_status = -0.3;
+            ch.balance = eve_db::IskCents::from_isk(20_000_000);
         }
     });
     let _ = dispatch_combat_rpc(
@@ -376,10 +376,8 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
     .await
     .expect("Negotiator tag at -0.3");
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));
-    assert!(
-        sec_post_tag > -0.3 && sec_post_tag <= 0.0,
-        "Clone soldier tags must raise security status from -0.3 and cap at 0.0 (got {sec_post_tag})"
-    );
+    assert!((sec_post_tag - 0.2).abs() < 1e-6, "Last tag at -0.3 must give full +0.5 -> 0.2 (got {sec_post_tag})");
+    assert!(dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35_664), PyRep::Integer(1)], &HashMap::new()).await.is_err());
 
     // 3. Real belt, mission, and incursion NPC kills through live combat/death pipeline cap at +5.0
     ctx.db.with_mut_snapshot(|s| {

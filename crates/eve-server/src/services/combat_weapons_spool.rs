@@ -843,7 +843,7 @@ pub async fn handle_ship_or_npc_destruction(
                         crate::services::combat_crimewatch::SecStatusTransaction {
                             timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
                             reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id,
-                            event_type_id: 14, other_owner_id: None, other_type_id: None,
+                            event_type_id: crate::services::combat_crimewatch::crimewatch_timers::EVENT_SEC_STATUS_KILL_PIRATE_NPC, other_owner_id: None, other_type_id: None,
                         },
                     );
                 });

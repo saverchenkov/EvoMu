@@ -615,7 +615,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         (-9.0_f64, 35661_i64, 35662_i64, 1_i64, -8.5_f64), // Trainer: -10 to -8
         (-6.5_f64, 35662_i64, 35663_i64, 1_i64, -6.0_f64), // Recruiter: -8 to -5
         (-3.5_f64, 35663_i64, 35664_i64, 1_i64, -3.0_f64), // Transporter: -5 to -2
-        (-0.2_f64, 35664_i64, 35661_i64, 5_i64, 0.0_f64),  // Negotiator: -2 to 0 (capped at 1 effective tag!)
+        (-0.2_f64, 35664_i64, 35661_i64, 5_i64, 0.3_f64),  // Negotiator: -2 to 0 (1 effective tag gives full +0.5 -> 0.3)
     ] {
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -669,7 +669,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
         .collect();
     let expected_ft = (now as i64 + 11_644_473_600) * 10_000_000;
     assert_eq!(row0.get("eventDate"), Some(&&PyRep::Integer(expected_ft)));
-    assert_eq!(row0.get("eventTypeID"), Some(&&PyRep::Integer(507)));
+    assert_eq!(row0.get("eventTypeID"), Some(&&PyRep::Integer(385)));
     assert_eq!(row0.get("locationID"), Some(&&PyRep::Integer(lowsec_sys_id as i64)));
     assert_eq!(row0.get("modification"), Some(&&PyRep::Real(0.5)));
     assert_eq!(row0.get("newValue"), Some(&&PyRep::Real(-8.5)));

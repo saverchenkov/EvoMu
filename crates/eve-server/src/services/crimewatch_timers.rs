@@ -402,6 +402,11 @@ pub async fn step_sentry_gun_grid_aggression(
     (engaged, applied)
 }
 
+/// Client `logConst` security-status transaction event type IDs (`appLogConst.pyj`).
+pub const EVENT_SEC_STATUS_KILL_PIRATE_NPC: i64 = 378;
+pub const EVENT_SEC_STATUS_ILLEGAL_AGGRESSION: i64 = 379;
+pub const EVENT_SEC_STATUS_HAND_IN_TAGS: i64 = 385;
+
 /// Applies standard character security-status loss and appends a `SecStatusTransaction` on illegal PvP aggression in empire space.
 pub fn apply_illegal_pvp_sec_status_loss(
     ctx: &ServerContext,
@@ -438,7 +443,7 @@ pub fn apply_illegal_pvp_sec_status_loss(
                 delta: new_sec - old_sec,
                 reason: if is_pod_target { "Illegal Capsule Aggression".into() } else { "Illegal Ship Aggression".into() },
                 solar_system_id: sys_id,
-                event_type_id: 15, // logConst.eventSecStatusAttack
+                event_type_id: EVENT_SEC_STATUS_ILLEGAL_AGGRESSION,
                 other_owner_id: (victim_char_id > 0).then_some(victim_char_id),
                 other_type_id: None,
             });
@@ -799,11 +804,11 @@ pub async fn handle_crimewatch(
                     let event_type_id = if t.event_type_id != 0 {
                         t.event_type_id
                     } else if t.reason.contains("Tag") {
-                        507
+                        EVENT_SEC_STATUS_HAND_IN_TAGS
                     } else if t.delta < 0.0 {
-                        15
+                        EVENT_SEC_STATUS_ILLEGAL_AGGRESSION
                     } else {
-                        14
+                        EVENT_SEC_STATUS_KILL_PIRATE_NPC
                     };
                     let other_owner_rep = t.other_owner_id.map(PyRep::Integer).unwrap_or(PyRep::None);
                     let other_type_rep = t
@@ -1077,7 +1082,7 @@ pub async fn handle_crimewatch(
                         snap.items.remove(&iid);
                     }
                 }
-                let new_sec = (cur_sec + 0.5 * f64::from(effective_qty)).clamp(-10.0, ceiling);
+                let new_sec = (cur_sec + 0.5 * f64::from(effective_qty)).clamp(-10.0, 10.0);
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.balance = new_bal;
                     ch.security_status = new_sec;
@@ -1097,7 +1102,7 @@ pub async fn handle_crimewatch(
                         rt.sec_status_transactions.entry(char_id).or_default().push(SecStatusTransaction {
                             timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
                             reason: "Clone Soldier Security Tag".into(), solar_system_id: sys_id,
-                            event_type_id: 507, other_owner_id: Some(1_000_125), other_type_id: Some(tag_type_id),
+                            event_type_id: EVENT_SEC_STATUS_HAND_IN_TAGS, other_owner_id: Some(1_000_125), other_type_id: Some(tag_type_id),
                         });
                     });
                     ctx.notify(NotificationTarget::Character(char_id), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(new_sec)]);

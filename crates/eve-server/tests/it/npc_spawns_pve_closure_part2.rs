@@ -382,8 +382,8 @@ async fn test_concord_response_and_faction_police_enforcement() {
         "Criminal pilot must be ejected into capsule (670)"
     );
     assert!(
-        att_after.security_status <= -4.0,
-        "Unlawful pod aggression and destruction must drop security status (once per target + destruction), got {}",
+        att_after.security_status < -1.0,
+        "Unlawful pod aggression must drop security status once per target (no repeat-shot/CONCORD double-deduction), got {}",
         att_after.security_status
     );
 
@@ -396,6 +396,11 @@ async fn test_concord_response_and_faction_police_enforcement() {
     );
 
     // 2. Outlaw (`<= -5.0` sec) Faction Police (`feat:npc.navy-npc`): capsules never engaged & allowed to dock; non-capsule ship engaged & refused docking!
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&90_000_001) {
+            ch.security_status = -5.5;
+        }
+    });
     ctx.advance_secs(920);
     tick_background_cluster(&ctx).await;
     assert!(
