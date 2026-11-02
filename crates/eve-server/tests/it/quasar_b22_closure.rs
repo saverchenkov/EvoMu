@@ -345,30 +345,53 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     assert_eq!(shared_rsp.status_code, STATUS_OK, "{}", shared_rsp.status_message);
 
     // 3. Cosmetic market transactions: GetAllRequest starts empty (no fabricated next_seq),
-    // records real component purchase transactions, and enforces participant authorization.
+    // records real SKIN listing creation transactions, and enforces participant authorization.
     let tx_all_empty = rpc(&ctx, &mut s, "eve_public.cosmetic.market.transaction.api.GetAllRequest", Vec::new()).await;
     assert_eq!(tx_all_empty.status_code, STATUS_OK);
     assert!(fields(&wm(&tx_all_empty.payload.unwrap().value), 1).is_empty());
 
-    let comp_list_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
-    assert_eq!(comp_list_rsp.status_code, STATUS_OK);
-    let comp_entries = fields(&wm(&comp_list_rsp.payload.unwrap().value), 1);
-    let comp_uuid = bytes_field(&sub(&comp_entries[0], 1), 1);
+    // Grant 1 unactivated SKIN license to PILOT and create a listing via InitiateCreateListingRequest
+    let mut grant_req = Vec::new();
+    let mut g_skin_id = Vec::new();
+    encode_string_field(1, "deadbeefcafebabe", &mut g_skin_id);
+    encode_bytes_field(1, &g_skin_id, &mut grant_req);
+    encode_varint_field(2, 1, &mut grant_req);
+    let mut gm = sess(61_006, PILOT, CORP, JITA, 0);
+    gm.role = u64::MAX;
+    assert_eq!(
+        rpc(&ctx, &mut gm, "eve_public.cosmetic.ship.skin.thirdparty.license.api.admin.GrantRequest", grant_req)
+            .await
+            .status_code,
+        STATUS_OK
+    );
 
-    let mut buy_comp_req = Vec::new();
-    let mut comp_id_msg = Vec::new();
-    encode_bytes_field(1, &comp_uuid, &mut comp_id_msg);
-    encode_bytes_field(1, &comp_id_msg, &mut buy_comp_req);
-    encode_varint_field(2, 1, &mut buy_comp_req);
-    let buy_comp_rsp = rpc(
+    let mut price_isk = Vec::new();
+    encode_varint_field(1, 500_000 * 2, &mut price_isk);
+    let mut skin_id = Vec::new();
+    encode_string_field(1, "deadbeefcafebabe", &mut skin_id);
+    let mut lic_id = Vec::new();
+    encode_bytes_field(1, &id_req(1, PILOT as u64)[2..], &mut lic_id);
+    encode_bytes_field(2, &skin_id, &mut lic_id);
+    let mut dur = Vec::new();
+    encode_varint_field(1, 86_400, &mut dur);
+    let mut target = Vec::new();
+    encode_varint_field(1, 1, &mut target);
+    let mut create_req = Vec::new();
+    encode_bytes_field(1, &price_isk, &mut create_req);
+    encode_bytes_field(3, &lic_id, &mut create_req);
+    encode_bytes_field(4, &dur, &mut create_req);
+    encode_varint_field(5, 1, &mut create_req);
+    encode_bytes_field(6, &target, &mut create_req);
+
+    let create_rsp = rpc(
         &ctx,
         &mut s,
-        "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest",
-        buy_comp_req,
+        "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingRequest",
+        create_req,
     )
     .await;
-    assert_eq!(buy_comp_rsp.status_code, STATUS_OK, "{}", buy_comp_rsp.status_message);
-    let tx_uuid = bytes_field(&sub(&wm(&buy_comp_rsp.payload.unwrap().value), 1), 1);
+    assert_eq!(create_rsp.status_code, STATUS_OK, "{}", create_rsp.status_message);
+    let tx_uuid = bytes_field(&sub(&wm(&create_rsp.payload.unwrap().value), 1), 1);
 
     let tx_all_pilot = rpc(&ctx, &mut s, "eve_public.cosmetic.market.transaction.api.GetAllRequest", Vec::new()).await;
     assert_eq!(tx_all_pilot.status_code, STATUS_OK);
