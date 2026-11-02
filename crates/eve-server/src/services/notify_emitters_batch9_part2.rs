@@ -583,7 +583,7 @@ pub fn handle_get_all_text_changes(
     _args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
-    let key_id = session.character_id.unwrap_or(session.session_id as i64);
+    let key_id = session.session_id as i64;
     ctx.db.with_snapshot(|snap| {
         let qa_wrap = snap
             .service_state_blobs
@@ -646,7 +646,7 @@ pub fn handle_update_localization_qa_wrap(
             "UpdateLocalizationQAWrap requires a boolean enableQaWrap flag",
         ));
     };
-    let key_id = session.character_id.unwrap_or(session.session_id as i64);
+    let key_id = session.session_id as i64;
     ctx.db.with_mut_snapshot(|snap| {
         let mut map: BTreeMap<i64, bool> = snap
             .service_state_blobs

@@ -241,9 +241,9 @@ pub fn handle(
                             }
                         }
                         Some("solar_system_id") | Some("solarSystemID") => {
-                            if let Some(sys) = v.as_i64() {
+                            if let Some(sys) = v.as_i64().and_then(|s| u32::try_from(s).ok()) {
                                 if sys > 0 {
-                                    target_sys = sys as u32;
+                                    target_sys = sys;
                                 }
                             }
                         }

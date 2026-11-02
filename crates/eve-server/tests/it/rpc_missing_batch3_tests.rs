@@ -354,7 +354,8 @@ async fn test_rpc_missing_batch3_part1() {
 async fn test_rpc_missing_batch3_part2() {
     // parity: rpc:loadService.SetConfig, rpc:cache.Rowset, rpc:cache.Setting
     // parity: rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
-    // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc, rpc:debug.Exec
+    // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc
+    // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:debug.Exec
     eve_testkit::attest(&[
         "rpc:loadService.SetConfig",
         "rpc:cache.Rowset",
@@ -365,7 +366,6 @@ async fn test_rpc_missing_batch3_part2() {
         "rpc:userSvc.ProcessEVESessionCreated",
         "rpc:raffleMgr.QA_SeedRaffles",
         "rpc:DB2.CallProc",
-        "rpc:debug.Exec",
     ]);
 
     let ctx = ServerContext::new();
@@ -421,85 +421,76 @@ async fn test_rpc_missing_batch3_part2() {
         .dispatch_rpc(&mut sess1, "loadService", None, "GetTotalStats", &[], &kw, None)
         .await
         .expect("loadService.GetTotalStats");
-    match stats_res {
-        PyRep::Dict(entries) => {
-            let active = entries.iter().find(|(k, _)| k.as_str() == Some("active"));
-            assert!(active.is_some());
-            let config = entries.iter().find(|(k, _)| k.as_str() == Some("config"));
-            assert!(config.is_some());
-        }
-        other => panic!("Unexpected GetTotalStats shape: {other:?}"),
-    }
+    assert_eq!(stats_res.dict_get("active"), Some(&PyRep::Bool(false)));
+    assert!(stats_res.dict_get("sde_types_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    assert!(stats_res.dict_get("sde_solar_systems_count").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let cfg = stats_res.dict_get("config").expect("config dict");
+    assert_eq!(cfg.dict_get("concurrency"), Some(&PyRep::Integer(16)));
 
     // 13. rpc:sessionMgr.EndAllGameSessions
+    let (tx_victim, mut rx_victim) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(2002, tx_victim);
+    assert!(ctx.session_closers.read().unwrap().contains_key(&2002));
     let end_sessions_res = ctx
         .dispatch_rpc(&mut sess1, "sessionMgr", None, "EndAllGameSessions", &[], &kw, None)
         .await
         .expect("sessionMgr.EndAllGameSessions");
     assert_eq!(end_sessions_res, PyRep::None);
-    let active_blob = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("active_sessions").cloned()
-    });
+    assert_eq!(
+        rx_victim.try_recv().expect("victim session must receive EndAllGameSessions"),
+        ("EndAllGameSessions".into(), "All game sessions ended by administrator".into())
+    );
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&2002));
+    let active_blob = ctx.db.with_snapshot(|s| s.service_state_blobs.get("active_sessions").cloned());
     assert_eq!(active_blob.as_deref(), Some("[]"));
 
     // 14. rpc:sessionMgr.RemoveSessionsFromServer
-    // Verify unprivileged rejection
     let unpriv_rm_err = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "sessionMgr",
-            None,
-            "RemoveSessionsFromServer",
-            &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(1001)])],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess2, "sessionMgr", None, "RemoveSessionsFromServer", &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(1001)])], &kw, None)
         .await;
     assert!(unpriv_rm_err.is_err(), "Unprivileged session must be rejected for RemoveSessionsFromServer");
 
+    let (tx_1002, mut rx_1002) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_1003, mut rx_1003) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(1002, tx_1002);
+    ctx.register_session_closer(1003, tx_1003);
     ctx.db.with_mut_snapshot(|s| {
         s.service_state_blobs.insert("active_sessions".into(), "[1001, 1002, 1003]".into());
     });
     let rm_sessions_res = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "sessionMgr",
-            None,
-            "RemoveSessionsFromServer",
-            &[
-                PyRep::Integer(1),
-                PyRep::List(vec![PyRep::Integer(1002), PyRep::Integer(1003)]),
-            ],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "sessionMgr", None, "RemoveSessionsFromServer", &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(1002), PyRep::Integer(1003)])], &kw, None)
         .await
         .expect("sessionMgr.RemoveSessionsFromServer");
     assert_eq!(rm_sessions_res, PyRep::None);
-    let remaining_sessions = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("active_sessions").cloned().unwrap()
-    });
+    assert_eq!(rx_1002.try_recv().expect("1002 closed").0, "RemoveSession");
+    assert_eq!(rx_1003.try_recv().expect("1003 closed").0, "RemoveSession");
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&1002));
+    assert!(!ctx.session_closers.read().unwrap().contains_key(&1003));
+    let remaining_sessions = ctx.db.with_snapshot(|s| s.service_state_blobs.get("active_sessions").cloned().unwrap());
     assert!(remaining_sessions.contains("1001"));
     assert!(!remaining_sessions.contains("1002"));
 
     // 15. rpc:userSvc.ProcessEVESessionCreated
+    let saved_cid = sess2.character_id.take();
+    let wrong_char_err = ctx
+        .dispatch_rpc(&mut sess2, "userSvc", None, "ProcessEVESessionCreated", &[PyRep::Integer(PILOT1)], &kw, None)
+        .await
+        .expect_err("foreign character_id must be rejected");
+    assert_eq!(wrong_char_err.message, "CharacterDoesNotBelongToUser");
+    sess2.character_id = saved_cid;
+
     let process_sess_res = ctx
-        .dispatch_rpc(
-            &mut sess1,
-            "userSvc",
-            None,
-            "ProcessEVESessionCreated",
-            &[PyRep::Integer(PILOT1), PyRep::Integer(1001)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess1, "userSvc", None, "ProcessEVESessionCreated", &[PyRep::Integer(PILOT1), PyRep::Integer(1001)], &kw, None)
         .await
         .expect("userSvc.ProcessEVESessionCreated");
     assert_eq!(process_sess_res, PyRep::None);
-    let user_sess_blob = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("user_sessions").cloned().unwrap()
-    });
-    assert!(user_sess_blob.contains(&PILOT1.to_string()));
+    let user_sess_blob = ctx.db.with_snapshot(|s| s.service_state_blobs.get("user_sessions").cloned().unwrap());
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&user_sess_blob).expect("valid user_sessions json");
+    assert!(entries.iter().any(|e| {
+        e["user_id"].as_u64() == sess1.user_id
+            && e["session_id"].as_u64() == Some(1001)
+            && e["character_id"].as_i64() == Some(PILOT1)
+    }));
 
     // 16. rpc:cache.Rowset
     let cache_rowset_res = ctx
