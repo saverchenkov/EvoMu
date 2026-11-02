@@ -82,11 +82,7 @@ fn handle_chat_rpc(
     match (service, method) {
         ("chatAuthenticationService", "GetAuthenticationToken") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(char_id)),
-                ("token", PyRep::String(format!("evomu-xmpp-token-{char_id}"))),
-                ("jid", PyRep::String(format!("{char_id}@chat.evomu.local"))),
-            ])))
+            Some(Ok(PyRep::String(format!("evomu-xmpp-token-{char_id}"))))
         }
 
         ("XmppChatMgr", "AddCharacterToChannel") => {

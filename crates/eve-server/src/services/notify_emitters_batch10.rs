@@ -306,7 +306,12 @@ pub fn emit_signal_tracker_full_state_for_system(
                         PyRep::Integer(st.station_id),
                         PyRep::keyval([
                             ("siteID", PyRep::Integer(st.station_id)),
+                            ("instanceID", PyRep::Integer(st.station_id)),
+                            ("groupID", PyRep::Integer(15)),
                             ("typeID", PyRep::Integer(i64::from(st.station_type_id))),
+                            ("dungeonID", PyRep::None),
+                            ("dungeonNameID", PyRep::None),
+                            ("factionID", PyRep::None),
                             (
                                 "position",
                                 PyRep::Tuple(vec![
