@@ -127,8 +127,14 @@ async fn test_b36_progression_notifications() {
                 && op_defs.op_tree_parents.get(oid).is_none_or(|p| p.is_empty())
         })
         .find_map(|(op, ts)| {
-            ts.iter()
-                .find(|t| op_defs.client_completable_tasks.contains(t))
+            ts.first()
+                .filter(|t| {
+                    op_defs.client_completable_tasks.contains(t)
+                        && op_defs
+                            .task_event_conditions
+                            .get(t)
+                            .is_none_or(|c| c.is_empty())
+                })
                 .map(|t| (op, t))
         })
         .expect("SDE operation with client-completable tasks");

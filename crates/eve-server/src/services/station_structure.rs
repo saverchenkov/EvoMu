@@ -478,13 +478,6 @@ pub async fn handle(
             crate::services::notify_emitters_batch8::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
 
             session.station_id = None;
-            crate::services::operations_manager_helpers::record_server_operation_event(
-                ctx,
-                char_id,
-                "undockFromStation",
-                &[],
-                1,
-            );
             session.structure_id = None;
             ctx.invalidate_bound_objects_for_session_transition(char_id, ch.solar_system_id, None, "undock");
             let sess_rep = PyRep::keyval([
@@ -767,13 +760,6 @@ pub async fn handle(
                     if is_structure {
                         session.structure_id = Some(dock_id);
                         session.station_id = None;
-            crate::services::operations_manager_helpers::record_server_operation_event(
-                ctx,
-                char_id,
-                "undockFromStation",
-                &[],
-                1,
-            );
                     } else {
                         session.station_id = Some(dock_id);
                         session.structure_id = None;

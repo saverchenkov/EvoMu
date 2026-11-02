@@ -119,8 +119,8 @@ async fn test_operations_tutorial_and_career_progression() {
     let inc_err = rpc(&ctx, &mut p1, "operationsManager", "complete_category_for_character", &[PyRep::Integer(P1), PyRep::Integer(cat_id)]).await.unwrap_err();
     assert_eq!(inc_err.code, "OperationCategoryIncomplete"); // rpc-lint: allow error code assertion
     rpc(&ctx, &mut p1, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(30_000_142), PyRep::Integer(cat_id)]).await.unwrap();
-    rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("dockInStation".into())]).await.unwrap();
-    rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.unwrap();
+    eve_server::services::operations_manager_helpers::record_server_operation_event(&ctx, P1, "dockInStation", &[], 1);
+    eve_server::services::operations_manager_helpers::record_server_operation_event(&ctx, P1, "shipBoarded", &[], 1);
     let mut ed_346 = HashMap::new();
     ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
     ctx.dispatch_rpc(&mut p1, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await.unwrap();
@@ -277,15 +277,18 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let start = rpc(&ctx, &mut p1, "operationsManager", "start_site", &[PyRep::Integer(4087)]).await.expect("start_site");
     assert_eq!(start, PyRep::Bool(true));
 
-    // 6. Process client event: blocked task does not transition; unblocked task transitions and updates progress
+    // 6. Process server/client event: blocked task does not transition; unblocked task transitions and updates progress
     let task_id = 345;
     let blocked_tid = 346;
+    let _ = ctx.drain_notifications_for_char(P1);
     rpc(&ctx, &mut p1, "operationsManager", "block_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_id)]).await.expect("block 345");
-    let blocked_ev = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.expect("process blocked");
-    assert_eq!(blocked_ev, PyRep::Bool(false));
+    eve_server::services::operations_manager_helpers::record_server_operation_event(&ctx, P1, "shipBoarded", &[], 1);
+    assert!(
+        ctx.drain_notifications_for_char(P1).iter().all(|n| n.event != "OnOperationTaskCompleted"),
+        "blocked task must not complete on server event"
+    );
     rpc(&ctx, &mut p1, "operationsManager", "unblock_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_id)]).await.expect("unblock 345");
-    let active_ev = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("shipBoarded".into())]).await.expect("process unblocked");
-    assert_eq!(active_ev, PyRep::Bool(true));
+    eve_server::services::operations_manager_helpers::record_server_operation_event(&ctx, P1, "shipBoarded", &[], 1);
     let notifs_done = ctx.drain_notifications_for_char(P1);
     let done_ev = notifs_done.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
     assert_eq!(done_ev.args, vec![PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_id)]);
@@ -296,6 +299,14 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert!(prog_entries.contains(&(PyRep::Integer(task_to_skip), PyRep::Integer(100))));
     assert!(prog_entries.contains(&(PyRep::Integer(blocked_tid), PyRep::Integer(0))));
     assert!(prog_entries.contains(&(PyRep::Integer(op_id), PyRep::Integer(66))));
+
+    // Re-dock P1 at home station before survey reward delivery
+    let home_st = ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&P1).unwrap();
+        ch.station_id = Some(ch.home_station_id);
+        ch.home_station_id
+    });
+    p1.station_id = Some(home_st);
 
     // 7. Survey catalog & rewards: backed by SDE surveys.fsdbinary + GM/QA /survey schedule & completion
     let sde_surveys = ctx.sde.surveys().expect("sde surveys");
