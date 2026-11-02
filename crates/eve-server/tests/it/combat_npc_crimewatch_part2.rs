@@ -233,10 +233,15 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
         .sde
         .stations
         .values()
-        .find_map(|st| {
+        .filter_map(|st| {
             let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
-            (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
+            (0.0 < sec
+                && sec < 0.45
+                && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)
+                && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
+            .then_some(st.station_id)
         })
+        .min()
         .unwrap_or(60_014_861);
     let orig_ship_loc = ctx.db.with_mut_snapshot(|s| {
         if let Some(c) = s.characters.get_mut(&char_b) {

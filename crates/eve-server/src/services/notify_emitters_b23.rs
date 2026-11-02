@@ -1,6 +1,6 @@
 //! `notify_emitters_b23` — Real Gameplay & Service Notification Emitters (Batch 23).
 //!
-//! Covers 12 V24 client notifications:
+//! Covers 11 V24 client notifications:
 //! - Operations Manager (`OnOperationDeactivated`, `OnOperationSkipped`,
 //!   `OnOperationsProgressReset`, `OnOperationsServerFSDReload`)
 //! - Fleet Escalations (`OnFleetEscalatingPathMessage`)
@@ -8,7 +8,6 @@
 //! - Dungeon Room Triggers & Camera (`OnDungeonCameraInterest`,
 //!   `OnDungeonTriggerAmbientSound`, `OnDungeonTriggerAudio`,
 //!   `OnDungeonTriggerMessage`, `OnDungeonTriggerMusic`)
-//! - Stargate Jump Queue (`OnJumpQueueUpdate`)
 
 #![forbid(unsafe_code)]
 

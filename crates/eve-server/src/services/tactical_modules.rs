@@ -1333,7 +1333,7 @@ pub async fn activate_command_burst(
             st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix_burst.saturating_add(900));
         }
     }
-    if criminal_beneficiary.is_some() || trigger_suspect { crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, char_id, now_unix_burst); }
+    crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, char_id, now_unix_burst);
     {
         let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
         for &(_, target_sid) in &affected_ships {

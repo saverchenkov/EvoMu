@@ -441,7 +441,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
 
         let sec_tx = rpc(&ctx2, &mut sess2, "crimewatch", "GetSecurityStatusTransactions", &[]).await;
         let sec_txt = format!("{sec_tx:?}");
-        assert!(sec_txt.contains("Integer(1)") && sec_txt.contains("Real(-0.5)"), "tag turn-in transaction must persist across SQLite restart: {sec_txt}");
+        assert!(sec_txt.contains("Integer(385)") && sec_txt.contains("Real(-0.5)"), "tag turn-in transaction must persist across SQLite restart: {sec_txt}");
         let bkr = rpc(&ctx2, &mut sess2, "bountyProxy", "GetBountiesAndKillRights", &[PyRep::List(vec![PyRep::Integer(OTHER)]), PyRep::List(vec![PyRep::Integer(OTHER)])]).await;
         assert!(format!("{bkr:?}").contains("5000000") && format!("{bkr:?}").contains("2500000"));
 

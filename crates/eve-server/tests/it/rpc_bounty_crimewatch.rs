@@ -565,10 +565,15 @@ async fn test_crimewatch_security_and_duels() {
         .sde
         .stations
         .values()
-        .find_map(|st| {
+        .filter_map(|st| {
             let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
-            (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
+            (0.0 < sec
+                && sec < 0.45
+                && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)
+                && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
+            .then_some(st.station_id)
         })
+        .min()
         .unwrap_or(60_099_999);
     s1.station_id = Some(sec_office_st);
     s1.solar_system_id = Some(30_002_813);
