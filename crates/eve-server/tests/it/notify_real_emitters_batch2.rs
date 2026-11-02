@@ -664,15 +664,22 @@ async fn notify_batch2_void_exit_seasons_expert_systems_and_node_graphs() {
     let es_rem_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&es_rem_notifs, "OnExpertSystemsUpdated"), &[PyRep::Dict(vec![]), PyRep::Bool(false), PyRep::Integer(EXPERT_SYSTEM_TYPE_ID as i64)]);
 
-    // 4. Node Graph lifecycle via operationsManager, node_graph, and air_npe (DATA GAP: server-only)
-    let (&real_op, _) = eve_server::services::operations_manager::get_operation_defs(&ctx.sde).op_tasks.iter().next().expect("SDE op");
-    sess.role |= eve_machonet::service_roles::ROLE_GMH;
-    rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(real_op), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(1)]).await.expect("activate op");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStartClientNodeGraph"));
+    // 4. Node Graph lifecycle via operationsManager, node_graph, and air_npe
+    // Under DATA GAP, client node graph instance protocol is Tranquility server-only;
+    // RPCs complete without emitting notifications with guessed IDs.
+    rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(31)]).await.expect("activate op");
+    let ng_start_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!ng_start_notifs.iter().any(|(e, _)| e == "OnStartClientNodeGraph"));
+
     rpc(&ctx, &mut sess, "node_graph", "process_client_graph_message", &[PyRep::Integer(1), PyRep::Integer(1), PyRep::String("client_action".into()), PyRep::Integer(42)]).await.expect("update");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnClientNodeGraphUpdate"));
-    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await.expect("complete category");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStopClientNodeGraph"));
+    let ng_upd_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!ng_upd_notifs.iter().any(|(e, _)| e == "OnClientNodeGraphUpdate"));
+
+    rpc(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(PILOT_A), PyRep::Integer(31)]).await.expect("complete category");
+    let ng_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!ng_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraph"));
+
     rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[]).await.expect("skip_air_npe");
-    assert!(!drain_all(&ctx, &mut sess, PILOT_A).iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
+    let npe_stop_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(!npe_stop_notifs.iter().any(|(e, _)| e == "OnStopClientNodeGraphById"));
 }

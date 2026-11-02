@@ -113,11 +113,24 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         .await;
     assert!(bad_sel.is_err(), "select_season with invalid ID must fail");
 
-    // Valid season ID selection succeeds and returns true
+    // Valid season ID selection succeeds, returns true, and emits OnSeasonSelected with Dict challenges
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     let sel_res = rpc(&ctx, &mut sess, "seasonManager", "select_season", &[PyRep::Integer(1)])
         .await
         .expect("select_season 1");
     assert_eq!(sel_res, PyRep::Bool(true));
+    let sel_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    let on_sel = sel_notifs
+        .iter()
+        .find(|n| n.event == "OnSeasonSelected")
+        .expect("OnSeasonSelected emitted");
+    assert!(
+        matches!(
+            on_sel.args.get(2).and_then(|cp| cp.dict_get("challenges")),
+            Some(PyRep::Dict(_))
+        ),
+        "OnSeasonSelected character_progress.challenges must be a PyRep::Dict"
+    );
 
     // After selection, get_season_data_for_character returns selected season KeyVal with concrete fields
     let selected_data = rpc(&ctx, &mut sess, "seasonManager", "get_season_data_for_character", &[])
@@ -141,38 +154,29 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     assert!(max_act > 0, "max_active_challenges must be positive");
     assert!(selected_data.dict_get("tracked_event_types").is_some(), "tracked_event_types must be present");
 
-    // 4. feat:pve.seasons-challenges: Filling challenges per character
+    // 4. feat:pve.seasons-challenges: Filling challenges per character returns Dict keyed by challenge_id
     let filled_rep = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
         .await
         .expect("fill_up_and_return_challenges_for_character");
-    let challenges_list = match filled_rep {
-        PyRep::List(list) => list,
-        other => panic!("expected List of challenges, got {other:?}"),
+    let PyRep::Dict(challenges_dict) = filled_rep else {
+        panic!("expected Dict of challenges keyed by challenge_id, got {filled_rep:?}");
     };
-    assert!(
-        challenges_list.len() >= 4,
-        "Must populate at least 4 default seasonal challenges"
+    assert_eq!(
+        challenges_dict.len(),
+        4,
+        "Must populate max_active_challenges=4 default seasonal challenges"
     );
+    assert!(challenges_dict.iter().all(|(k, v)| k.as_i64() == v.dict_get("challengeID").and_then(|c| c.as_i64())));
 
-    // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274)
-    let kw = HashMap::new();
-    let pce_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "seasonManager",
-            None,
-            "process_client_event",
-            &[PyRep::Integer(274), PyRep::Integer(1)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("process_client_event progress");
+    // 5. feat:pve.seasons-challenges: Progress from real V24 client_lookAtObject challenge (274) requires SDE event_conditions
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &HashMap::new(), None).await.unwrap(), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
+    let def274 = eve_server::services::season_manager::fsd_challenge_definitions(&ctx.sde).iter().find(|d| d.challenge_id == 274).expect("challenge 274");
+    let ed274: Vec<(PyRep, PyRep)> = def274.event_conditions.iter().filter_map(|(k, vs)| Some((PyRep::String(k.clone()), PyRep::Integer(*vs.first()?)))).collect();
+    let kw = HashMap::from([("extra_data".to_string(), PyRep::Dict(ed274))]);
+    let pce_res = ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(274), PyRep::Integer(1)], &kw, None).await.expect("process_client_event progress");
     assert_eq!(pce_res, PyRep::None);
-
-    let ch_274 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
-        .await
-        .expect("get_challenge 274");
+    let ch_274 = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)]).await.expect("get_challenge 274");
     assert_eq!(ch_274.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
 
     // 6. feat:pve.seasons-challenges: Challenge expiration and automatic refresh
@@ -185,30 +189,38 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
     };
     assert!(exp_ticks > 0, "Expiration date ticks must be positive");
 
-    // Simulate expiration: set expiration_date to the past in character season state
+    // Simulate expiration on starter challenge 297: set expiration_date to the past in character season state
     ctx.db.with_mut_snapshot(|snap| {
         let mut st = load_season_state_from_blobs(snap, PILOT_1);
-        if let Some(ch) = st.challenges.get_mut(&274) {
+        if let Some(ch) = st.challenges.get_mut(&297) {
             ch.expiration_date = 100; // past timestamp
             ch.progress = 2;
         }
         save_season_state_to_blobs(snap, PILOT_1, &st);
     });
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
 
-    // Calling fill_up_and_return_challenges_for_character cycles the expired challenge
+    // Calling fill_up_and_return_challenges_for_character evicts expired 297, replaces it, and emits OnChallengeExpired(297, new_challenge)
     let refilled = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[])
         .await
         .expect("refill challenges post-expiration");
-    assert!(matches!(refilled, PyRep::List(_)));
-
-    let ch_274_refreshed = rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(274)])
-        .await
-        .expect("get_challenge 274 refreshed");
-    let new_exp = ch_274_refreshed.dict_get("expirationDate").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert!(
-        new_exp > now_ft,
-        "Expired challenge must be refreshed with future expiration date"
-    );
+    let PyRep::Dict(refilled_dict) = refilled else {
+        panic!("expected Dict of challenges post-expiration, got {refilled:?}");
+    };
+    assert_eq!(refilled_dict.len(), 4);
+    assert!(!refilled_dict.iter().any(|(k, _)| k.as_i64() == Some(297)), "expired 297 must be evicted and replaced");
+    let exp_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    let exp_notif = exp_notifs.iter().find(|n| n.event == "OnChallengeExpired").expect("OnChallengeExpired emitted");
+    assert_eq!(exp_notif.args.first(), Some(&PyRep::Integer(297)));
+    let new_cid = exp_notif.args.get(1).and_then(|kv| kv.dict_get("challengeID")).and_then(|v| v.as_i64()).expect("replacement challengeID");
+    assert!(refilled_dict.iter().any(|(k, _)| k.as_i64() == Some(new_cid)));
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        if let Some(ch) = st.challenges.get_mut(&274) {
+            ch.progress = 0;
+        }
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
 
     // 7. feat:pve.seasons-challenges: Claiming challenge rewards grants rewards and season points
     // Complete real V24 client_lookAtObject challenge 274 (max_progress = 4, points = 40).
@@ -272,12 +284,12 @@ async fn test_seasons_data_end_time_selection_and_challenges() {
         let dormant = defs.iter().find(|d| d.is_dormant && d.challenge_id != 2743).unwrap().challenge_id;
         let unassigned_starter = defs
             .iter()
-            .find(|d| !d.is_dormant && !st.challenges.contains_key(&d.challenge_id))
+            .find(|d| !d.is_dormant && !st.challenges.contains_key(&d.challenge_id) && !st.claimed_challenges.contains_key(&d.challenge_id))
             .unwrap()
             .challenge_id;
         let unassigned_client = defs
             .iter()
-            .filter(|d| d.client_event_driven && !st.challenges.contains_key(&d.challenge_id))
+            .filter(|d| d.client_event_driven && !st.challenges.contains_key(&d.challenge_id) && !st.claimed_challenges.contains_key(&d.challenge_id))
             .nth(1)
             .unwrap()
             .challenge_id;
@@ -402,6 +414,13 @@ async fn test_login_campaigns_seasonal_and_milestones() {
     );
 
     // 2. feat:pve.seasonal-login: seasonalLoginCampaignManager.get_active_campaign, claim_reward, get_claim_history
+    let mut gm_sess = SessionState::new(99_991);
+    gm_sess.user_id = Some(999);
+    gm_sess.character_id = Some(PILOT_1);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())])
+        .await
+        .expect("GM schedule seasonal campaign 2323");
     let active_seasonal = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_active_campaign", &[])
         .await
         .expect("seasonalLoginCampaignManager.get_active_campaign");
@@ -410,11 +429,12 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         other => panic!("expected 4-tuple from get_active_campaign, got {other:?}"),
     };
     let s_cid = s_tuple[0].as_i64().expect("campaign_id");
-    let s_ordinal = s_tuple[1].as_i64().expect("start_date_ordinal");
-    let s_days_rem = s_tuple[3].as_i64().expect("days_remaining");
-    assert!(s_cid > 0, "Seasonal campaign ID must be positive");
-    assert!(s_ordinal > 0, "Start date ordinal must be positive");
-    assert!(s_days_rem > 0, "Days remaining must be positive");
+    let s_ordinal = s_tuple[1].as_i64().expect("end_date_ordinal");
+    let s_days_rem = s_tuple[3].as_i64().expect("num_remaining_rewards");
+    assert_eq!(s_cid, 2323, "Seasonal campaign ID must match scheduled SDE campaign");
+    assert!(s_ordinal > 0, "End date ordinal must be positive");
+    assert_eq!(s_tuple[2].as_str(), Some("11:00:00"));
+    assert_eq!(s_days_rem, 30, "Remaining rewards must equal SDE track length before first claim");
 
     // History before claim
     let hist_before = rpc(&ctx, &mut sess, "seasonalLoginCampaignManager", "get_claim_history", &[])
@@ -527,6 +547,8 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
         save_season_state_to_blobs(snap, PILOT_1, &st);
     });
 
+    let journal_before = ctx.db.with_snapshot(|s| s.wallet_journal.len());
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     let claim_res = rpc(
         &ctx,
         &mut sess,
@@ -538,15 +560,15 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
     .expect("completed server-driven ISK challenge claim must succeed");
     assert_eq!(claim_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
 
-    let isk_after_claim = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance.0);
+    let (isk_after_claim, last_journal) = ctx.db.with_snapshot(|s| {
+        assert_eq!(s.wallet_journal.len(), journal_before + 1, "ISK reward must append WalletJournalEntry");
+        (s.characters.get(&PILOT_1).unwrap().balance.0, s.wallet_journal.last().cloned().unwrap())
+    });
     let expected_delta = eve_db::IskCents::from_isk(server_isk_def.isk_awarded).0;
-    assert_eq!(
-        isk_after_claim - isk_before,
-        expected_delta,
-        "claim_challenge_rewards must credit exact IskCents delta for server-driven FSD challenge"
-    );
+    assert_eq!(isk_after_claim - isk_before, expected_delta);
+    assert_eq!((last_journal.character_id, last_journal.amount.0), (PILOT_1, expected_delta));
+    let isk_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    assert!(isk_notifs.iter().any(|n| n.event == "OnAccountChange" && n.args.first() == Some(&PyRep::String("cash".into()))));
 
     // 3. Repeated claim must fail and pay 0 additional ISK
     let repeat_err = rpc(
@@ -608,4 +630,46 @@ async fn test_season_challenge_isk_award_trust_and_claim_guards() {
         isk_after_client, isk_after_claim,
         "client_event_driven challenge must withhold isk_awarded even when isk_awarded > 0"
     );
+
+    // 5. R-SM-P1-2..4: challengeconditions extra_data filtering, multi-challenge event_name, once-per-season/downtime flags, undocked redeem queue
+    let cond_key = eve_server::services::season_manager::fsd_challenge_conditions(&ctx.sde).keys().next().unwrap().clone();
+    let mut c1 = client_def.clone();
+    c1.challenge_id = 990_001; c1.isk_awarded = 0; c1.max_progress = 1; c1.should_only_appear_once_per_season = true; c1.should_not_expire_at_downtime = false;
+    c1.event_conditions = std::collections::BTreeMap::from([(cond_key.clone(), vec![42])]);
+    let mut c2 = c1.clone();
+    c2.challenge_id = 990_002; c2.should_not_expire_at_downtime = true;
+    let ch_daily = c1.to_character_challenge_with_end(1, now_ft, end_ft);
+    let ch_season = c2.to_character_challenge_with_end(1, now_ft, end_ft);
+    assert!(ch_daily.expiration_date < ch_season.expiration_date && ch_season.expiration_date == end_ft);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.insert(eve_server::services::season_manager::SEASONAL_CHALLENGES_CONFIG_KEY.into(), serde_json::to_string(&vec![c1.clone(), c2.clone()]).unwrap());
+        let mut st = load_season_state_from_blobs(snap, PILOT_1);
+        st.challenges.clear();
+        st.challenges.insert(990_001, ch_daily);
+        st.challenges.insert(990_002, ch_season);
+        let mut item_ch = eve_server::services::season_manager::default_challenge(990_003, 1, now_ft);
+        item_ch.client_event_driven = false; item_ch.completed = true; item_ch.progress = 1; item_ch.reward_type_id = 34; item_ch.reward_quantity = 10;
+        st.challenges.insert(990_003, item_ch);
+        if let Some(p) = snap.characters.get_mut(&PILOT_1) { p.station_id = None; p.structure_id = None; }
+        save_season_state_to_blobs(snap, PILOT_1, &st);
+    });
+    sess.station_id = None; sess.structure_id = None;
+    let bad_amt = HashMap::from([("amount".into(), PyRep::Integer(0))]);
+    assert!(ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::String(c1.event_type.clone())], &bad_amt, None).await.is_err());
+    let wrong_ed = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String(cond_key.clone()), PyRep::Integer(99))]))]);
+    ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::String(c1.event_type.clone())], &wrong_ed, None).await.unwrap();
+    rpc(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(990_001)]).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::Integer(990_001)], &HashMap::from([("extra_data".into(), PyRep::Dict(vec![]))]), None).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(990_001)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(0));
+    let right_ed = HashMap::from([("extra_data".into(), PyRep::Dict(vec![(PyRep::String(cond_key), PyRep::Integer(42))]))]);
+    ctx.dispatch_rpc(&mut sess, "seasonManager", None, "process_client_event", &[PyRep::String(c1.event_type.clone())], &right_ed, None).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(990_001)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(rpc(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(990_002)]).await.unwrap().dict_get("progress").and_then(|v| v.as_i64()), Some(1));
+    rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(990_001)]).await.expect("claim once-per-season 990_001");
+    let after_fill = rpc(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.unwrap();
+    let PyRep::Dict(after_dict) = after_fill else { panic!("expected Dict") };
+    assert!(!after_dict.iter().any(|(k, _)| k.as_i64() == Some(990_001)), "once-per-season challenge must not reappear after claim");
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    rpc(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(990_003)]).await.expect("claim undocked item reward");
+    assert!(ctx.drain_notifications_for_char(PILOT_1).iter().any(|n| n.event == "OnRedeemingTokensUpdated"));
 }

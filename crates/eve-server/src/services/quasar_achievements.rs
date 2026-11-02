@@ -473,23 +473,9 @@ impl AchievementManager {
             return;
         }
         if let Some(ref db) = self.db {
-            crate::services::quasar_goal_tale_notices::record_server_opportunity_event(
-                db,
-                &self.definitions,
-                character_id,
-                event_names,
-                delta,
-                now_unix,
-            );
+            crate::services::quasar_goal_tale_notices::record_server_opportunity_event(db, &self.definitions, character_id, event_names, delta, now_unix);
             if let Some(ref sde) = self.sde {
-                crate::services::operations_manager_helpers::advance_and_notify_server_operation_tasks(
-                    db,
-                    sde,
-                    gateway,
-                    i64::from(character_id),
-                    event_names,
-                    now_unix,
-                );
+                crate::services::operations_manager_helpers::advance_and_notify_server_operation_tasks(db, sde, gateway, i64::from(character_id), event_names, &[], delta, now_unix);
             }
         }
         let mut event_ids: Vec<u32> = self

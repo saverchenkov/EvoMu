@@ -1268,6 +1268,10 @@ pub(crate) async fn handle_module_cycles(
                     return Some(Err(e));
                 }
             };
+            let m_params = [("typeID", m.type_id.to_string()), ("groupID", mod_type.group_id.to_string())];
+            for ev in ["moduleActivate", "activateModule", "moduleActivated", "activateShipModule"] {
+                crate::services::operations_manager_helpers::record_server_operation_event(ctx, char_id, ev, &m_params, 1);
+            }
             if matches!(mod_type.group_id, 72 | 80 | 353 | 862) {
                 ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, ctx.now_unix());
             }

@@ -1010,6 +1010,22 @@ impl NpcSpawnManager {
                 ctx.now_unix(),
                 &ctx.quasar_gateway,
             );
+            let npc_gid = ctx
+                .sde
+                .types
+                .get(&entity.type_id)
+                .map(|t| t.group_id)
+                .unwrap_or(0);
+            crate::services::operations_manager::record_server_operation_event(
+                ctx,
+                killer_char_id,
+                "somethingExplode",
+                &[
+                    ("typeID", entity.type_id.to_string()),
+                    ("groupID", npc_gid.to_string()),
+                ],
+                1,
+            );
         }
         res
     }

@@ -240,26 +240,19 @@ async fn test_notify_sweep_operations_survey_and_market() {
     let mut sess = login_pilot_char(&ctx, 9105, "demo", "demo-secret", P1).await;
     let mut seen = Vec::new();
 
-    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
-    let (&real_op, real_tasks) = op_defs
-        .op_tasks
-        .iter()
-        .find(|(_, ts)| ts.iter().any(|t| op_defs.client_completable_tasks.contains(t)))
-        .expect("SDE operation with client-completable task");
-    let real_tid = real_tasks
-        .iter()
-        .copied()
-        .find(|t| op_defs.client_completable_tasks.contains(t))
-        .expect("client-completable task");
-    call(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(real_op)]).await;
-    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryChanged").first(), Some(&PyRep::Integer(1)));
-    call(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(real_tid)]).await;
+    call(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157)]).await;
+    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryChanged").first(), Some(&PyRep::Integer(31)));
+    call(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(344)]).await;
     let task_notif = take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationTaskCompleted");
-    assert_eq!(task_notif.get(2), Some(&PyRep::Integer(real_tid)));
-    sess.role |= eve_machonet::service_roles::ROLE_GMH;
-    call(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await;
-    sess.role &= !eve_machonet::service_roles::ROLE_GMH;
-    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryCompleted").first(), Some(&PyRep::Integer(1)));
+    assert_eq!(task_notif.get(2), Some(&PyRep::Integer(344)));
+    ctx.advance_secs(15);
+    let ship_id = sess.ship_id.unwrap_or_else(|| ctx.db.with_snapshot(|s| s.characters[&P1].active_ship_id));
+    call(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await;
+    let mut ed_346 = HashMap::new();
+    ed_346.insert("extra_data".into(), PyRep::Dict(vec![(PyRep::String("contentPieceType".into()), PyRep::Integer(18))]));
+    let _ = ctx.dispatch_rpc(&mut sess, "operationsManager", None, "process_client_event", &[PyRep::String("client_agencyContentExpanded".into())], &ed_346, None).await;
+    call(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(P1), PyRep::Integer(31)]).await;
+    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryCompleted").first(), Some(&PyRep::Integer(31)));
 
     let now = ctx.now_unix();
     eve_server::services::operations_manager::register_survey(&ctx, eve_server::services::operations_manager::SurveyDefinition { survey_id: 2801, name: "Ops Survey".into(), description: "Active".into(), start_date: None, end_date: None, start_unix: Some(now - 3600), expires_at_unix: Some(now + 86_400), grace_period_days: 7, min_account_age_hours: 24, item_rewards: vec![(34, 100)], vgs_rewards: vec![5003] });

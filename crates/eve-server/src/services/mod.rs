@@ -82,6 +82,7 @@ pub mod notify_emitters_b30;
 pub mod notify_emitters_b36;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
+pub mod operations_survey_handlers;
 pub mod petitioner_ops;
 pub mod project_discovery;
 pub mod pve_dungeon_cache;

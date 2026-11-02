@@ -795,6 +795,13 @@ pub async fn handle(
                     crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
                         ctx, char_id, dock_id,
                     );
+                    crate::services::operations_manager_helpers::record_server_operation_event(
+                        ctx,
+                        char_id,
+                        "dockInStation",
+                        &[],
+                        1,
+                    );
                     let sess_rep = PyRep::keyval([
                         ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
                         ("charid", PyRep::Integer(char_id)),

@@ -434,6 +434,21 @@ async fn test_keeper_and_alpha_injector_services() {
             .is_err(),
         "start_site must reject non-existent dungeon IDs"
     );
+    rpc(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(157)])
+        .await
+        .expect("activate_operation_in_solar_system");
+    let prev_station_id = sess.station_id;
+    let prev_structure_id = sess.structure_id;
+    sess.station_id = None;
+    sess.structure_id = None;
+    if let Some(cid) = sess.character_id {
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(c) = s.characters.get_mut(&cid) {
+                c.station_id = None;
+                c.structure_id = None;
+            }
+        });
+    }
     rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(49)])
         .await
         .expect("start_site 49");
@@ -447,6 +462,16 @@ async fn test_keeper_and_alpha_injector_services() {
     assert_eq!(dng_parts[0], PyRep::Integer(49));
     assert_eq!(dng_parts[1], PyRep::Integer(8652));
     assert_eq!(dng_parts[2], PyRep::Integer(49));
+    sess.station_id = prev_station_id;
+    sess.structure_id = prev_structure_id;
+    if let Some(cid) = sess.character_id {
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(c) = s.characters.get_mut(&cid) {
+                c.station_id = prev_station_id;
+                c.structure_id = prev_structure_id;
+            }
+        });
+    }
 
     // 3. keeper.GetOperationSpawnpointSolarSystem: resolves SDE starter school system, or activated operation system
     let mut sess2 = setup_pilot_session(&ctx).await;
@@ -473,18 +498,13 @@ async fn test_keeper_and_alpha_injector_services() {
     .expect("GetOperationSpawnpointSolarSystem");
     assert_eq!(spawn_sys, PyRep::Integer(30_002_547)); // Malukker (Republic Military School 14 in SDE)
 
-    let (&real_op_id, _) = eve_server::services::operations_manager::get_operation_defs(&ctx.sde)
-        .op_tasks
-        .iter()
-        .next()
-        .expect("SDE operation");
     assert!(
         rpc(
             &ctx,
             &mut sess2,
             "operationsManager",
             "activate_operation_in_solar_system",
-            &[PyRep::Integer(real_op_id), PyRep::Integer(30_002_187)],
+            &[PyRep::Integer(157), PyRep::Integer(30_002_187)],
         )
         .await
         .is_err(),
@@ -501,7 +521,7 @@ async fn test_keeper_and_alpha_injector_services() {
         &mut sess2,
         "operationsManager",
         "activate_operation_in_solar_system",
-        &[PyRep::Integer(real_op_id), PyRep::Integer(30_002_187)],
+        &[PyRep::Integer(157), PyRep::Integer(30_002_187)],
     )
     .await
     .expect("activate_operation_in_solar_system");
@@ -510,7 +530,7 @@ async fn test_keeper_and_alpha_injector_services() {
         &mut sess2,
         "keeper",
         "GetOperationSpawnpointSolarSystem",
-        &[PyRep::Integer(CHAR_ID), PyRep::Integer(real_op_id)],
+        &[PyRep::Integer(CHAR_ID), PyRep::Integer(157)],
     )
     .await
     .expect("GetOperationSpawnpointSolarSystem active");
@@ -522,9 +542,9 @@ async fn test_keeper_and_alpha_injector_services() {
         .expect("IsOperationSite Jita");
     assert_eq!(is_op_jita, PyRep::Bool(false));
 
-    let is_op_site_id = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(real_op_id)])
+    let is_op_site_id = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(157)])
         .await
-        .expect("IsOperationSite active operation");
+        .expect("IsOperationSite active operation 157");
     assert_eq!(is_op_site_id, PyRep::Bool(true));
 
     let is_op_activated = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(30_002_187)])

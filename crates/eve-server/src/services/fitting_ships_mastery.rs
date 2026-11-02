@@ -430,6 +430,18 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     crate::services::space_destiny::record_session_change_timer(
                         ctx, char_id, now_unix, sys_id, 0, "board_or_eject",
                     );
+                    let (ship_tid, ship_gid) = ctx.db.with_snapshot(|s| {
+                        let tid = s.items.get(&sid).map(|i| i.type_id).unwrap_or(0);
+                        let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
+                        (tid, gid)
+                    });
+                    crate::services::operations_manager_helpers::record_server_operation_event(
+                        ctx,
+                        char_id,
+                        "shipBoarded",
+                        &[("typeID", ship_tid.to_string()), ("groupID", ship_gid.to_string())],
+                        1,
+                    );
                     if prev_ship_id != Some(sid) {
                         let changes = vec![(
                             PyRep::String("shipid".to_string()),

@@ -354,6 +354,7 @@ pub async fn handle(
                                     .collect()
                             });
                             crate::services::notify_emitters_batch8::emit_charge_and_bank_ammo_loaded(ctx, char_id, new_loc, &mod_ids);
+                            crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, 0, new_loc, flag, loaded_type_id, loaded_qty);
                             Some(Ok(PyRep::keyval([
                                 ("itemID", PyRep::Integer(loaded_id)),
                                 ("typeID", PyRep::Integer(loaded_type_id as i64)),
@@ -1112,6 +1113,7 @@ pub async fn handle(
                     if let Some(ship_id) = session.ship_id {
                         ctx.invalidate_ship_fitting(ship_id);
                     }
+                    crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, moved_tid, moved_qty);
                     ctx.invalidate_ship_fitting(new_loc);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -1247,6 +1249,7 @@ pub async fn handle(
                     if let Some(ship_id) = session.ship_id {
                         ctx.invalidate_ship_fitting(ship_id);
                     }
+                    crate::services::operations_manager_helpers::record_invbroker_add_operation_event(ctx, char_id, orig_source_loc_id, new_loc, flag, updated.type_id, updated.quantity);
                     ctx.invalidate_ship_fitting(new_loc);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),

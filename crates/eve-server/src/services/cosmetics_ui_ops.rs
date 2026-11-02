@@ -36,6 +36,15 @@ pub struct StoredLinkRecord {
     pub setting_type: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeasonalCampaignSchedule {
+    pub campaign_id: i64,
+    pub start_unix: u64,
+    pub end_unix: u64,
+    #[serde(default)]
+    pub turnover_secs: u32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CosmeticsUiExtendedState {
     pub skin_license_entries: HashMap<i64, Vec<SkinLicenseEntry>>,
@@ -59,6 +68,10 @@ pub struct CosmeticsUiExtendedState {
     pub active_login_campaign_id: Option<i64>,
     #[serde(default)]
     pub active_seasonal_campaign_id: Option<i64>,
+    #[serde(default)]
+    pub active_seasonal_schedule: Option<SeasonalCampaignSchedule>,
+    #[serde(default)]
+    pub seasonal_claim_history: HashMap<i64, std::collections::BTreeMap<i64, Vec<(i64, u8)>>>,
     #[serde(default)]
     pub milestone_logons: HashMap<i64, u64>,
     #[serde(default)]

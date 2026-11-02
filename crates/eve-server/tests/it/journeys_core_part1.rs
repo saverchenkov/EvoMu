@@ -253,7 +253,8 @@ async fn test_journey_station_ui() {
     assert!(!fac_list.is_empty());
 
     // 6. Agency
-    let ops = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(1)]).await.expect("get_category_state");
+    let cat_id = *eve_server::services::operations_manager::get_operation_defs(&ctx.sde).sde_categories.iter().next().unwrap_or(&31);
+    let ops = call_rpc(&ctx, &mut sess, "operationsManager", "get_category_state", &[PyRep::Integer(cat_id)]).await.expect("get_category_state");
     assert!(matches!(ops, PyRep::Integer(s) if s >= 0));
 
     // 7. Character Sheet

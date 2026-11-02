@@ -613,6 +613,13 @@ async fn handle_cmd_warp_to_stuff(
                 ],
             );
             ctx.quasar_gateway.progression.achievements.on_gameplay_event_by_name(char_id as u32, &["timesWarped"], 1, ctx.now_unix(), &ctx.quasar_gateway);
+            crate::services::operations_manager_helpers::record_server_operation_event(
+                ctx,
+                char_id,
+                "warpToLocation",
+                &[],
+                1,
+            );
             Ok(PyRep::Integer(tick as i64))
         }
         Err(e) => {

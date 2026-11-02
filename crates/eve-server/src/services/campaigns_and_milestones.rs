@@ -22,7 +22,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 
 use crate::router::ServerContext;
 use crate::services::cosmetics_ui_ops::{
-    load_cosmetics_ui_state, save_cosmetics_ui_state,
+    load_cosmetics_ui_state, save_cosmetics_ui_state, SeasonalCampaignSchedule,
 };
 
 /// FIFO buffer capacity for client telemetry events.
@@ -225,25 +225,34 @@ pub fn get_sde_community_tracks(
     })
 }
 
-/// Seasonal campaign schedule window referencing an SDE campaign ID in
-/// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SeasonalLoginSchedule {
-    pub campaign_id: i64,
-    pub name: &'static str,
-    pub start_unix: u64,
-    pub end_unix: u64,
+/// Default daily reward turnover time in seconds past 00:00:00 UTC (11:00:00 EVE downtime).
+pub const DEFAULT_SEASONAL_TURNOVER_SECS: u32 = 11 * 3_600;
+
+/// Formats daily reward turnover seconds-from-midnight as `%H:%M:%S` per V24 `loginrewards/common/const.pyj` (`TIME_STRING_FORMAT`).
+pub fn format_turnover_hms(turnover_secs: u32) -> String {
+    let s = turnover_secs % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3_600, (s % 3_600) / 60, s % 60)
 }
 
-impl SeasonalLoginSchedule {
-    /// End date as `YYYY-MM-DD HH:MM:SS` (UTC), derived from `end_unix` so there is one source of truth.
-    pub fn end_date_str(&self) -> String {
-        format_unix_utc(self.end_unix)
+/// Parses a `%H:%M:%S` daily turnover string into seconds past 00:00:00 UTC.
+pub fn parse_turnover_hms(hms: &str) -> Option<u32> {
+    let parts: Vec<&str> = hms.trim().split(':').collect();
+    if parts.len() != 3 {
+        return None;
     }
+    let hh: u32 = parts[0].parse().ok()?;
+    let mm: u32 = parts[1].parse().ok()?;
+    let ss: u32 = parts[2].parse().ok()?;
+    if hh >= 24 || mm >= 60 || ss >= 60 {
+        return None;
+    }
+    Some(hh * 3_600 + mm * 60 + ss)
+}
 
-    fn contains(&self, unix: u64) -> bool {
-        unix >= self.start_unix && unix < self.end_unix
-    }
+/// Computes the V24 `TimeKeeper.get_reward_date_from_timestamp` proleptic Gregorian date ordinal.
+pub fn seasonal_reward_date_ordinal(unix: u64, turnover_secs: u32) -> i64 {
+    let adj = (unix as i64) - i64::from(turnover_secs % 86_400);
+    GREGORIAN_EPOCH_ORDINAL + adj.div_euclid(86_400)
 }
 
 /// Formats a Unix timestamp as `YYYY-MM-DD HH:MM:SS` UTC (proleptic Gregorian, civil-from-days).
@@ -267,48 +276,14 @@ pub fn format_unix_utc(unix: u64) -> String {
     )
 }
 
-// DATA GAP: requires server-only login campaign schedule (feat:pve.seasonal-login, feat:pve.login-campaign)
-// SYNTHETIC: Fallback seasonal login campaign schedules
-pub const SEASONAL_LOGIN_SCHEDULES: &[SeasonalLoginSchedule] = &[
-    SeasonalLoginSchedule {
-        campaign_id: DEFAULT_SEASONAL_CAMPAIGN_ID,
-        name: "Capsuleer Day XXII",
-        start_unix: 1_700_000_000,
-        end_unix: 1_850_000_000,
-    },
-    SeasonalLoginSchedule {
-        campaign_id: DEFAULT_LOGIN_CAMPAIGN_ID,
-        name: "Capsuleer Day XXI",
-        start_unix: 1_650_000_000,
-        end_unix: 1_700_000_000,
-    },
-];
-
-pub fn get_active_seasonal_campaign(now_unix: u64) -> Option<&'static SeasonalLoginSchedule> {
-    SEASONAL_LOGIN_SCHEDULES
-        .iter()
-        .find(|s| s.contains(now_unix))
-}
-
-pub fn get_schedule_for_campaign(campaign_id: i64, now_unix: u64) -> SeasonalLoginSchedule {
-    if let Some(sched) = SEASONAL_LOGIN_SCHEDULES
-        .iter()
-        .find(|s| s.campaign_id == campaign_id)
-    {
-        return sched.clone();
-    }
-    if let Some(active) = get_active_seasonal_campaign(now_unix) {
-        let mut s = active.clone();
-        s.campaign_id = campaign_id;
-        return s;
-    }
-    // SYNTHETIC: Fallback schedule window for unconfigured seasonal login campaign
-    SeasonalLoginSchedule {
-        campaign_id,
-        name: "Seasonal Login Campaign",
-        start_unix: now_unix.saturating_sub(86_400),
-        end_unix: now_unix + 30 * 86_400,
-    }
+fn active_scheduled_seasonal(
+    ext: &crate::services::cosmetics_ui_ops::CosmeticsUiExtendedState,
+    now_unix: u64,
+) -> Option<SeasonalCampaignSchedule> {
+    ext.active_seasonal_schedule
+        .as_ref()
+        .filter(|s| now_unix >= s.start_unix && now_unix < s.end_unix)
+        .cloned()
 }
 
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -668,25 +643,7 @@ fn handle_seasonal_login_get_active_campaign(
 ) -> Result<PyRep, BridgeRpcError> {
     ServerContext::require_auth(session)?;
 
-    // Character-selection screen before character selected
-    if session.character_id.is_none() {
-        return Ok(PyRep::Tuple(vec![
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-        ]));
-    }
-
-    let now = ctx.now_unix();
-    let configured_cid = ctx
-        .db
-        .with_snapshot(|snap| load_cosmetics_ui_state(snap).active_seasonal_campaign_id);
-    let s = if let Some(cid) = configured_cid {
-        get_schedule_for_campaign(cid, now)
-    } else if let Some(sched) = get_active_seasonal_campaign(now) {
-        sched.clone()
-    } else {
+    let Some(char_id) = session.character_id else {
         return Ok(PyRep::Tuple(vec![
             PyRep::None,
             PyRep::None,
@@ -694,24 +651,51 @@ fn handle_seasonal_login_get_active_campaign(
             PyRep::None,
         ]));
     };
+
+    let now = ctx.now_unix();
     let campaigns = get_sde_login_campaigns(&ctx.sde);
-    let campaign_id = configured_cid.unwrap_or(s.campaign_id);
-    if !campaigns.contains_key(&campaign_id) {
-        return Err(err(
-            "CampaignNotFound",
-            format!("Seasonal campaign {campaign_id} not found in SDE seasonalcampaignsloginrewards"),
-        ));
-    }
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_cosmetics_ui_state(snap);
+        let Some(sched) = active_scheduled_seasonal(&ext, now) else {
+            return Ok(PyRep::Tuple(vec![
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+            ]));
+        };
+        let campaign = campaigns.get(&sched.campaign_id).ok_or_else(|| {
+            err(
+                "CampaignNotFound",
+                format!(
+                    "Seasonal campaign {} not found in SDE seasonalcampaignsloginrewards",
+                    sched.campaign_id
+                ),
+            )
+        })?;
+        let claimed_count = ext
+            .seasonal_claim_history
+            .get(&char_id)
+            .and_then(|m| m.get(&sched.campaign_id))
+            .map_or(0, |v| v.len() as i64);
+        let end_date_ordinal = seasonal_reward_date_ordinal(sched.end_unix, sched.turnover_secs);
+        let today_ordinal = seasonal_reward_date_ordinal(now, sched.turnover_secs);
+        let claimed_today = ext
+            .seasonal_claim_history
+            .get(&char_id)
+            .and_then(|m| m.get(&sched.campaign_id))
+            .is_some_and(|v| v.iter().any(|&(ord, _)| ord == today_ordinal));
+        let days_remaining = (end_date_ordinal - today_ordinal + i64::from(!claimed_today)).max(0);
+        let num_remaining_rewards = (campaign.track_length() - claimed_count).max(0).min(days_remaining);
+        let turnover_time_str = format_turnover_hms(sched.turnover_secs);
 
-    let start_date_ordinal = GREGORIAN_EPOCH_ORDINAL + (s.start_unix / 86_400) as i64;
-    let days_remaining = (s.end_unix.saturating_sub(now) + 86_399) / 86_400;
-
-    Ok(PyRep::Tuple(vec![
-        PyRep::Integer(campaign_id),
-        PyRep::Integer(start_date_ordinal),
-        PyRep::String(s.end_date_str()),
-        PyRep::Integer(days_remaining as i64),
-    ]))
+        Ok(PyRep::Tuple(vec![
+            PyRep::Integer(sched.campaign_id),
+            PyRep::Integer(end_date_ordinal),
+            PyRep::String(turnover_time_str),
+            PyRep::Integer(num_remaining_rewards),
+        ]))
+    })
 }
 
 fn handle_seasonal_login_get_claim_history(
@@ -719,61 +703,29 @@ fn handle_seasonal_login_get_claim_history(
     session: &mut SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let campaigns = get_sde_login_campaigns(&ctx.sde);
+    let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
-        let clone_grade = snap
-            .characters
+        let Some(sched) = active_scheduled_seasonal(&ext, now) else {
+            return Ok(PyRep::Dict(Vec::new()));
+        };
+        let entries: Vec<(PyRep, PyRep)> = ext
+            .seasonal_claim_history
             .get(&char_id)
-            .map(|c| c.clone_grade)
-            .unwrap_or(1);
-        let claimed_days = ext
-            .seasonal_claimed_days
-            .get(&char_id)
-            .cloned()
+            .and_then(|m| m.get(&sched.campaign_id))
+            .map(|claims| {
+                claims
+                    .iter()
+                    .map(|&(date_ordinal, client_clone_state)| {
+                        // V24 `seasonalLoginCampaignService.pyj`: `{date_ordinal: clone_grade}` where `CLONE_STATE_ALPHA = 0`, `CLONE_STATE_OMEGA = 1`
+                        (
+                            PyRep::Integer(date_ordinal),
+                            PyRep::Integer(i64::from(client_clone_state)),
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
-
-        let mut entries = Vec::with_capacity(claimed_days.len());
-        for (claim_idx, &day_unix) in claimed_days.iter().enumerate() {
-            let campaign_id = if let Some(cid) = ext.active_seasonal_campaign_id {
-                cid
-            } else if let Some(sched) =
-                SEASONAL_LOGIN_SCHEDULES.iter().find(|s| s.contains(day_unix * 86_400))
-            {
-                sched.campaign_id
-            } else {
-                continue;
-            };
-            let day_u32 = claim_idx as u32;
-            let (alpha_tid, omega_tid) = campaigns
-                .get(&campaign_id)
-                .map(|c| {
-                    let a = c.alpha_rewards.get(&day_u32).map(|r| i64::from(r.type_id));
-                    let o = if clone_grade >= 2 {
-                        c.omega_rewards.get(&day_u32).map(|r| i64::from(r.type_id))
-                    } else {
-                        None
-                    };
-                    (a, o)
-                })
-                .unwrap_or((None, None));
-            let date_ordinal = GREGORIAN_EPOCH_ORDINAL + (day_unix as i64);
-            let claim_data = PyRep::keyval([
-                ("date_ordinal", PyRep::Integer(date_ordinal)),
-                ("campaign_id", PyRep::Integer(campaign_id)),
-                ("claimed_timestamp", PyRep::Integer((day_unix * 86_400) as i64)),
-                ("clone_grade", PyRep::Integer(i64::from(clone_grade))),
-                (
-                    "alpha_type_id",
-                    alpha_tid.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-                (
-                    "omega_type_id",
-                    omega_tid.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-            ]);
-            entries.push((PyRep::Integer(date_ordinal), claim_data));
-        }
         Ok(PyRep::Dict(entries))
     })
 }
@@ -784,25 +736,14 @@ fn handle_seasonal_login_claim_reward(
 ) -> Result<PyRep, BridgeRpcError> {
     let (uid, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
-    let today = now / 86_400;
-    let configured_cid = ctx
-        .db
-        .with_snapshot(|snap| load_cosmetics_ui_state(snap).active_seasonal_campaign_id);
-    let sched = if let Some(cid) = configured_cid {
-        get_schedule_for_campaign(cid, now)
-    } else {
-        get_active_seasonal_campaign(now)
-            .cloned()
-            .ok_or_else(|| err("NoActiveCampaign", "No seasonal campaign is currently active"))?
-    };
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     let sess_docked = session.station_id.or(session.structure_id);
 
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    let (rep, outcome) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        let campaign_id = ext
-            .active_seasonal_campaign_id
-            .unwrap_or(sched.campaign_id);
+        let sched = active_scheduled_seasonal(&ext, now)
+            .ok_or_else(|| err("NoActiveCampaign", "No seasonal campaign is currently active"))?;
+        let campaign_id = sched.campaign_id;
         let campaign = campaigns.get(&campaign_id).ok_or_else(|| {
             err(
                 "CampaignNotFound",
@@ -810,6 +751,7 @@ fn handle_seasonal_login_claim_reward(
             )
         })?;
         let track_length = campaign.track_length();
+        let today_ordinal = seasonal_reward_date_ordinal(now, sched.turnover_secs);
 
         let (docked_station_id, clone_grade) = snap
             .characters
@@ -819,56 +761,114 @@ fn handle_seasonal_login_claim_reward(
                 (stn, c.clone_grade)
             })
             .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
+        // V24 `clonegrade/const.pyj`: `CLONE_STATE_ALPHA = 0`, `CLONE_STATE_OMEGA = 1` (`CharacterRecord.clone_grade >= 2` is Omega)
+        let is_omega = clone_grade >= 2;
+        let client_clone_state: u8 = u8::from(is_omega);
 
-        let claimed_days = ext.seasonal_claimed_days.entry(char_id).or_default();
-        if claimed_days.contains(&today) {
+        let mut retro_indices: Vec<u32> = Vec::new();
+        let (already_claimed_today, day_idx) = {
+            let claims = ext
+                .seasonal_claim_history
+                .entry(char_id)
+                .or_default()
+                .entry(campaign_id)
+                .or_default();
+            if campaign.retro_claim && is_omega {
+                for (idx, (_, state)) in claims.iter().enumerate() {
+                    if *state == 0 {
+                        retro_indices.push(idx as u32);
+                    }
+                }
+            }
+            let already = claims.iter().any(|&(ord, _)| ord == today_ordinal);
+            (already, claims.len() as u32)
+        };
+
+        if already_claimed_today && retro_indices.is_empty() {
             return Err(err(
                 "SeasonalRewardAlreadyClaimedToday",
                 "Seasonal reward already claimed for today",
             ));
         }
-        let day_idx = claimed_days.len() as u32;
-        if i64::from(day_idx) >= track_length {
+        if !already_claimed_today && i64::from(day_idx) >= track_length && retro_indices.is_empty() {
             return Err(err(
                 "CampaignCompleted",
                 format!("All {track_length} seasonal rewards in campaign {campaign_id} have been claimed"),
             ));
         }
 
-        let alpha_rw = campaign.alpha_rewards.get(&day_idx);
-        let omega_rw = if clone_grade >= 2 {
-            campaign.omega_rewards.get(&day_idx)
-        } else {
-            None
-        };
-        if alpha_rw.is_none() && omega_rw.is_none() {
-            return Err(err(
-                "RewardDefinitionMissing",
-                format!("No SDE reward entry for seasonal campaign {campaign_id} day index {day_idx}"),
-            ));
+        let mut delivered_any = false;
+        let mut created_hangar_items: Vec<(i64, u32, i64, u32)> = Vec::new();
+        for retro_idx in &retro_indices {
+            if let Some(rw) = campaign.omega_rewards.get(retro_idx) {
+                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                if let Some(loc_id) = docked_station_id {
+                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                }
+                delivered_any = true;
+            }
         }
 
-        if let Some(rw) = alpha_rw {
-            deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
-        }
-        if let Some(rw) = omega_rw {
-            deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+        let mut claimed_new_today = false;
+        if !already_claimed_today && i64::from(day_idx) < track_length {
+            let alpha_rw = campaign.alpha_rewards.get(&day_idx);
+            let omega_rw = is_omega.then(|| campaign.omega_rewards.get(&day_idx)).flatten();
+            if alpha_rw.is_none() && omega_rw.is_none() && !delivered_any {
+                return Err(err(
+                    "RewardDefinitionMissing",
+                    format!("No SDE reward entry for seasonal campaign {campaign_id} day index {day_idx}"),
+                ));
+            }
+            if let Some(rw) = alpha_rw {
+                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                if let Some(loc_id) = docked_station_id {
+                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                }
+                delivered_any = true;
+            }
+            if let Some(rw) = omega_rw {
+                let item_id = deliver_login_reward(snap, uid, char_id, docked_station_id, campaign_id, now, rw);
+                if let Some(loc_id) = docked_station_id {
+                    created_hangar_items.push((item_id, rw.type_id, loc_id, rw.quantity.max(1)));
+                }
+                delivered_any = true;
+            }
+            claimed_new_today = true;
         }
 
-        claimed_days.push(today);
+        {
+            let claims = ext
+                .seasonal_claim_history
+                .entry(char_id)
+                .or_default()
+                .entry(campaign_id)
+                .or_default();
+            for &retro_idx in &retro_indices {
+                if let Some(entry) = claims.get_mut(retro_idx as usize) {
+                    entry.1 = 1;
+                }
+            }
+            if claimed_new_today {
+                claims.push((today_ordinal, client_clone_state));
+            }
+        }
         save_cosmetics_ui_state(snap, &ext);
 
-        Ok(PyRep::Bool(true))
-    });
-    if res.is_ok() {
-        ctx.notify(
-            crate::router::NotificationTarget::Character(char_id),
-            "OnRedeemingTokensUpdated",
-            "charid",
-            vec![],
-        );
-    }
-    res
+        Ok((
+            PyRep::Bool(true),
+            crate::services::operations_manager_helpers::OperationRewardOutcome {
+                created_hangar_items,
+                enqueued_redeem_tokens: delivered_any && docked_station_id.is_none(),
+                ..Default::default()
+            },
+        ))
+    })?;
+    crate::services::operations_manager_helpers::emit_operation_reward_notifications(
+        ctx,
+        char_id,
+        &outcome,
+    );
+    Ok(rep)
 }
 
 /// Global config keys (`machoNet.SetGlobalConfigValue`) controlling `infoGatheringMgr`.

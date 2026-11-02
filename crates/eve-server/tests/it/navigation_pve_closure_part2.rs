@@ -9,7 +9,6 @@ use eve_db::MiningLedgerRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::campaigns_and_milestones::SEASONAL_LOGIN_SCHEDULES;
 use std::collections::HashMap;
 
 async fn setup_pilot(
@@ -213,7 +212,14 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     assert_eq!(claim2_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(claim2_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(82_052));
 
-    // 2. Seasonal login campaign (SDE campaign 2323)
+    // 2. Seasonal login campaign (SDE campaign 2323 scheduled via GM /campaign)
+    let mut gm_sess = SessionState::new(8099);
+    gm_sess.user_id = Some(999);
+    gm_sess.character_id = Some(char_id);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())])
+        .await
+        .expect("GM schedule seasonal campaign 2323");
     let active_seasonal = rpc(
         &ctx,
         &mut sess,
@@ -230,10 +236,9 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         seasonal_tuple[0].as_i64(),
         Some(2323)
     );
-    let sched = &SEASONAL_LOGIN_SCHEDULES[0];
-    let expected_days = (sched.end_unix - ctx.now_unix() + 86_399) / 86_400;
-    assert_eq!(seasonal_tuple[3].as_i64(), Some(expected_days as i64));
-    assert_eq!(seasonal_tuple[2].as_str(), Some(sched.end_date_str().as_str()));
+    assert!(seasonal_tuple[1].as_i64().unwrap_or(0) > 730_000);
+    assert_eq!(seasonal_tuple[2].as_str(), Some("11:00:00"));
+    assert_eq!(seasonal_tuple[3].as_i64(), Some(30));
 
     let seasonal_claim = rpc(
         &ctx,

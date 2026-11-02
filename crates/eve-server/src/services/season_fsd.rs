@@ -37,16 +37,49 @@ pub struct SeasonalChallengeDef {
     pub next_challenge: Option<i64>,
     #[serde(default)]
     pub should_be_active_on_season_start: bool,
+    #[serde(default)]
+    pub should_not_expire_at_downtime: bool,
+    #[serde(default)]
+    pub should_only_appear_once_per_season: bool,
+    #[serde(default)]
+    pub event_conditions: BTreeMap<String, Vec<i64>>,
+}
+
+/// Computes the next daily 11:00:00 UTC downtime in BlueOS FILETIME (100ns ticks since 1601-01-01).
+pub fn next_downtime_filetime_ticks(now_ft: i64) -> i64 {
+    const EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+    const TICKS_PER_SEC: i64 = 10_000_000;
+    const DOWNTIME_UTC_SECS: i64 = 11 * 3_600;
+    let now_unix = (now_ft / TICKS_PER_SEC) - EPOCH_DIFF_SECS;
+    if now_unix <= 0 {
+        return now_ft.saturating_add(86_400 * TICKS_PER_SEC);
+    }
+    let day_start = now_unix.div_euclid(86_400) * 86_400;
+    let today_dt_ft = (day_start + DOWNTIME_UTC_SECS + EPOCH_DIFF_SECS) * TICKS_PER_SEC;
+    if now_ft < today_dt_ft {
+        today_dt_ft
+    } else {
+        today_dt_ft + 86_400 * TICKS_PER_SEC
+    }
 }
 
 impl SeasonalChallengeDef {
     pub fn to_character_challenge_with_end(&self, season_id: i64, now_ft: i64, season_end_ft: i64) -> CharacterChallenge {
         let expiration_date = if self.expiration_time_minutes > 0 {
             now_ft + self.expiration_time_minutes * 60 * 10_000_000
-        } else if season_end_ft > now_ft {
-            season_end_ft
+        } else if self.should_not_expire_at_downtime {
+            if season_end_ft > now_ft {
+                season_end_ft
+            } else {
+                now_ft + 30 * 86_400 * 10_000_000
+            }
         } else {
-            now_ft + 30 * 86_400 * 10_000_000
+            let dt_ft = next_downtime_filetime_ticks(now_ft);
+            if season_end_ft > now_ft {
+                dt_ft.min(season_end_ft)
+            } else {
+                dt_ft
+            }
         };
         CharacterChallenge {
             challenge_id: self.challenge_id,
@@ -262,10 +295,88 @@ pub fn load_season_config(snap: &eve_db::WorldStateSnapshot) -> SeasonConfig {
     SeasonConfig::default()
 }
 
+fn json_bool_flag(v: Option<&serde_json::Value>) -> bool {
+    v.and_then(|x| x.as_bool().or_else(|| x.as_i64().map(|n| n != 0)))
+        .unwrap_or(false)
+}
+
+/// Decodes all 33 V24 challenge condition keys and IDs from `res:/staticdata/challengeconditions.fsdbinary`.
+pub fn fsd_challenge_conditions(sde: &eve_sde::SdeRegistry) -> &'static BTreeMap<String, u64> {
+    static FSD_CONDITIONS: OnceLock<BTreeMap<String, u64>> = OnceLock::new();
+    FSD_CONDITIONS.get_or_init(|| {
+        let mut map = BTreeMap::new();
+        if let Ok(raw) = sde.challenge_conditions() {
+            for (k, v) in raw {
+                let id = v
+                    .get("value")
+                    .and_then(|n| n.as_u64())
+                    .or_else(|| v.as_u64())
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    .unwrap_or(0);
+                map.insert(k, id);
+            }
+        }
+        map
+    })
+}
+
+/// Evaluates `extra_data` from `seasonManager.process_client_event` against imported `challengeconditions`
+/// and the challenge's `event_conditions` table.
+pub fn matches_challenge_conditions(
+    def: &SeasonalChallengeDef,
+    extra_data: Option<&eve_proto::PyRep>,
+    cond_catalog: &BTreeMap<String, u64>,
+) -> bool {
+    if def.event_conditions.values().all(Vec::is_empty) {
+        return true;
+    }
+    let Some(ed) = extra_data else {
+        return false;
+    };
+    for (cond_key, allowed_vals) in &def.event_conditions {
+        if allowed_vals.is_empty() {
+            continue;
+        }
+        if !cond_catalog.is_empty() && !cond_catalog.contains_key(cond_key) {
+            return false;
+        }
+        let cond_id = cond_catalog.get(cond_key).copied().map(|id| id as i64);
+        let val_opt = match ed {
+            eve_proto::PyRep::Dict(entries) => entries
+                .iter()
+                .find(|(k, _)| {
+                    k.as_str() == Some(cond_key.as_str())
+                        || (cond_id.is_some() && k.as_i64() == cond_id)
+                })
+                .map(|(_, v)| v),
+            eve_proto::PyRep::KeyVal(_) => ed.dict_get(cond_key),
+            _ => None,
+        };
+        let Some(val) = val_opt else {
+            return false;
+        };
+        let matched = if let Some(n) = val.as_i64() {
+            allowed_vals.contains(&n)
+        } else if let eve_proto::PyRep::List(items) | eve_proto::PyRep::Tuple(items) = val {
+            items
+                .iter()
+                .filter_map(|x| x.as_i64())
+                .any(|n| allowed_vals.contains(&n))
+        } else {
+            false
+        };
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
 /// Decodes all 1,210 V24 seasonal challenges from `res:/staticdata/challenges.fsdbinary`.
 pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [SeasonalChallengeDef] {
     static FSD_CHALLENGES: OnceLock<Vec<SeasonalChallengeDef>> = OnceLock::new();
     FSD_CHALLENGES.get_or_init(|| {
+        let cond_catalog = fsd_challenge_conditions(sde);
         let Ok(raw) = sde.challenges() else {
             return Vec::new();
         };
@@ -303,11 +414,23 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
                     .get("next_challenge")
                     .and_then(|n| n.as_i64())
                     .filter(|&n| n > 0);
-                let active_start = v
-                    .get("should_be_active_on_season_start")
-                    .and_then(|n| n.as_i64())
-                    .unwrap_or(0)
-                    != 0;
+                let active_start = json_bool_flag(v.get("should_be_active_on_season_start"));
+                let no_expire_dt = json_bool_flag(v.get("should_not_expire_at_downtime"));
+                let once_per_season = json_bool_flag(v.get("should_only_appear_once_per_season"));
+                let mut event_conditions = BTreeMap::new();
+                if let Some(conds) = v.get("event_conditions").and_then(|c| c.as_object()) {
+                    for (ck, cv) in conds {
+                        if !cond_catalog.is_empty() && !cond_catalog.contains_key(ck) {
+                            continue;
+                        }
+                        if let Some(arr) = cv.as_array() {
+                            let vals: Vec<i64> = arr.iter().filter_map(|x| x.as_i64()).collect();
+                            if !vals.is_empty() {
+                                event_conditions.insert(ck.clone(), vals);
+                            }
+                        }
+                    }
+                }
                 let reward_type_id = v
                     .get("reward")
                     .and_then(|r| r.get("type_id"))
@@ -340,6 +463,9 @@ pub fn fsd_challenge_definitions(sde: &eve_sde::SdeRegistry) -> &'static [Season
                     isk_awarded,
                     next_challenge,
                     should_be_active_on_season_start: active_start,
+                    should_not_expire_at_downtime: no_expire_dt,
+                    should_only_appear_once_per_season: once_per_season,
+                    event_conditions,
                 }
             })
             .collect()

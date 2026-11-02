@@ -163,13 +163,34 @@ async fn batch10_progression_and_conversations() {
         .is_err()
     );
 
-    let valid_did = i64::from(*ctx.sde.dungeons.keys().min().expect("SDE dungeon"));
+    let op_defs = eve_server::services::operations_manager::get_operation_defs(&ctx.sde);
+    let empty_done = std::collections::HashSet::new();
+    let (op_with_site, site_id) = op_defs
+        .op_site_ids
+        .iter()
+        .find(|(&oid, &sid)| sid > 0 && op_defs.are_prerequisites_met(oid, &empty_done))
+        .map(|(&oid, &sid)| (oid, sid))
+        .unwrap_or_else(|| {
+            (
+                *op_defs.sde_operations.iter().next().expect("SDE op"),
+                i64::from(*ctx.sde.dungeons.keys().min().expect("SDE dungeon")),
+            )
+        });
+    rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "activate_operation_in_solar_system",
+        &[PyRep::Integer(op_with_site)],
+    )
+    .await
+    .unwrap();
     rpc(
         &ctx,
         &mut sess,
         "operationsManager",
         "start_site",
-        &[PyRep::Integer(valid_did)],
+        &[PyRep::Integer(site_id)],
     )
     .await
     .unwrap();

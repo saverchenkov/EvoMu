@@ -535,3 +535,4 @@ mod nav_tactical_modules_closure_part5;
 mod open_feats_and_rpcs_b30;
 mod open_feats_and_rpcs_b30_part2;
 mod notify_b30_closure;
+mod open_feats_b37;
