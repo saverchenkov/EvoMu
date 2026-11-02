@@ -260,12 +260,11 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             &kw,
             None,
         ).await
-        .expect("Negotiator tag crosses 0.0 to +0.3");
+        .expect("Negotiator tag caps at 0.0");
     assert!(
-        (dict_get(&cap_tag, "newSecurityStatus")
+        dict_get(&cap_tag, "newSecurityStatus")
             .and_then(|v| v.as_f64())
             .unwrap()
-            - 0.3)
             .abs()
             < 1e-6
     );

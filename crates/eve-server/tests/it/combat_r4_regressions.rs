@@ -400,7 +400,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
             remote_tag_id,
             item_rec(
                 remote_tag_id,
-                35661,
+                33138,
                 char_id,
                 60_008_494,
                 InventoryFlag::Hangar,
@@ -413,7 +413,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
             locked_tag_id,
             item_rec(
                 locked_tag_id,
-                35661,
+                33138,
                 char_id,
                 sec_office_st,
                 InventoryFlag::Hangar,
@@ -437,7 +437,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Real(-9.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
+            &[PyRep::Real(-8.0), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
             &kw,
             None,
         )

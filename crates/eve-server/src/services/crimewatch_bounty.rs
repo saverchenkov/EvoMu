@@ -708,6 +708,15 @@ pub fn handle_apply_tags_for_sec_status(
             .get(&char_id)
             .map(|c| c.security_status)
             .unwrap_or(0.0);
+        let effective_target = now_target_sec.min(0.0);
+        if effective_target <= orig_sec + 1e-9 {
+            return Err(BridgeRpcError {
+                code: "InvalidTargetSecurityStatus".into(),
+                message: format!(
+                    "Target security status {now_target_sec:.2} must exceed current security status {orig_sec:.2} (max 0.0)"
+                ),
+            });
+        }
         let ship_id_opt = session.ship_id.filter(|sid| {
             snap.items
                 .get(sid)
@@ -719,7 +728,7 @@ pub fn handle_apply_tags_for_sec_status(
         let mut changed_items: Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)> = Vec::new();
         for (idx, (tag_type_id, min_band, max_band, fee_per_tag_isk)) in tag_bands.into_iter().enumerate() {
             let req_qty = requested_by_type[idx];
-            if req_qty <= 0 {
+            if req_qty <= 0 || cur_sec + 1e-9 >= effective_target {
                 continue;
             }
             if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
@@ -731,8 +740,11 @@ pub fn handle_apply_tags_for_sec_status(
                 });
             }
             let band_cap = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
-            let target_cap = ((now_target_sec.min(0.5) - cur_sec) / 0.5).ceil().max(1.0) as i32;
+            let target_cap = ((effective_target - cur_sec) / 0.5).ceil().max(0.0) as i32;
             let max_needed = band_cap.min(target_cap);
+            if max_needed <= 0 {
+                continue;
+            }
             let consumed_qty = req_qty.min(max_needed);
             let mut matching_ids: Vec<(i64, i32)> = snap
                 .items
@@ -779,7 +791,7 @@ pub fn handle_apply_tags_for_sec_status(
                     changed_items.push((old_item, new_item_opt));
                 }
             }
-            cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.5);
+            cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
             total_fee_isk = total_fee_isk.saturating_add(fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)));
             total_consumed = total_consumed.saturating_add(consumed_qty);
         }
@@ -839,6 +851,19 @@ pub fn handle_apply_tags_for_sec_status(
                     .as_ref()
                     .map(|i| (i.quantity, i.location_id))
                     .unwrap_or((0, 6));
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&old_item.type_id)
+                    .map(|t| (t.group_id as i64, t.category_id as i64))
+                    .unwrap_or((1224, 17));
+                let mut changes = vec![
+                    (PyRep::Integer(5), PyRep::Integer(old_item.quantity as i64)), // ixQuantity
+                    (PyRep::Integer(9), PyRep::Integer(old_item.quantity as i64)), // ixStackSize
+                ];
+                if new_item_opt.is_none() {
+                    changes.push((PyRep::Integer(3), PyRep::Integer(old_item.location_id))); // ixLocationID
+                }
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnItemChange",
@@ -847,14 +872,16 @@ pub fn handle_apply_tags_for_sec_status(
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(old_item.item_id)),
                             ("typeID", PyRep::Integer(old_item.type_id as i64)),
+                            ("ownerID", PyRep::Integer(old_item.owner_id)),
                             ("locationID", PyRep::Integer(rem_loc)),
                             ("flagID", PyRep::Integer(old_item.flag as i64)),
                             ("quantity", PyRep::Integer(rem_qty as i64)),
+                            ("groupID", PyRep::Integer(group_id)),
+                            ("categoryID", PyRep::Integer(category_id)),
+                            ("stacksize", PyRep::Integer(rem_qty as i64)),
                         ]),
-                        PyRep::Dict(vec![(
-                            PyRep::Integer(5), // ixQuantity
-                            PyRep::Integer(old_item.quantity as i64),
-                        )]),
+                        PyRep::Dict(changes),
+                        PyRep::Integer(old_item.location_id),
                     ],
                 );
             }

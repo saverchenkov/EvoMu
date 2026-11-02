@@ -1205,9 +1205,9 @@ fn handle_job_complete_early(
     };
 
     let key = hex_bytes(&target_uuid);
-    let (skin_hex, qty) = {
-        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
-        let Some(job) = data.sequencing_jobs.get_mut(&key) else {
+    let plex_cost: i64 = {
+        let data = state.data.read().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = data.sequencing_jobs.get(&key) else {
             return Err((STATUS_NOT_FOUND, "Sequencing job not found".into()));
         };
         if job.sequencer_id != caller {
@@ -1216,31 +1216,32 @@ fn handle_job_complete_early(
         if !job.is_active() {
             return Err((STATUS_BAD_REQUEST, "Sequencing job is already finished".into()));
         }
-        let end_unix = job.initiated_unix.saturating_add(job.planned_duration_secs);
-        let rem_secs = end_unix.saturating_sub(now);
-        let plex_cost: i64 = if rem_secs <= 3_600 {
-            5
-        } else if rem_secs <= 86_400 {
-            25
-        } else {
-            100
-        };
-        let mut insufficient_plex = false;
-        state.db.with_mut_snapshot(|s| {
-            if let Some(ch) = s.characters.get_mut(&(caller as i64)) {
-                if ch.plex_balance < plex_cost {
-                    insufficient_plex = true;
-                } else {
-                    ch.plex_balance -= plex_cost;
-                }
+        let rem_secs = job.initiated_unix.saturating_add(job.planned_duration_secs).saturating_sub(now);
+        if rem_secs <= 3_600 { 5 } else if rem_secs <= 86_400 { 25 } else { 100 }
+    };
+    let mut insufficient_plex = false;
+    state.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&(caller as i64)) {
+            if ch.plex_balance < plex_cost {
+                insufficient_plex = true;
+            } else {
+                ch.plex_balance -= plex_cost;
             }
-        });
-        if insufficient_plex {
-            return Err((
-                STATUS_BAD_REQUEST,
-                format!("Insufficient PLEX balance for early sequencing completion (requires {plex_cost} PLEX)"),
-            ));
+        } else {
+            insufficient_plex = true;
         }
+    });
+    if insufficient_plex {
+        return Err((
+            STATUS_BAD_REQUEST,
+            format!("Insufficient PLEX balance for early sequencing completion (requires {plex_cost} PLEX)"),
+        ));
+    }
+    let (skin_hex, qty) = {
+        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = data.sequencing_jobs.get_mut(&key) else {
+            return Err((STATUS_NOT_FOUND, "Sequencing job not found".into()));
+        };
         job.completed_unix = Some(now);
         let sh = job.skin_hex.clone();
         let q = job.quantity;

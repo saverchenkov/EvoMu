@@ -1243,9 +1243,7 @@ pub async fn activate_command_burst(
         }
     } else { 0.0 };
     let total_strength_mult = (1.0 + 0.10 * (specialist_lvl as f64)) * (1.0 + mod_strength_bonus) * (1.0 + ship_strength_bonus) * (1.0 + mindlink_strength_bonus) * (1.0 + ind_core_strength_bonus);
-
-    let mindlink_duration_bonus = if has_mindlink { 0.25 } else { 0.0 };
-    let buff_duration_s = 60.0 * (1.0 + 0.10 * (command_lvl as f64)) * (1.0 + mindlink_duration_bonus);
+    let buff_duration_s = 60.0 * (1.0 + 0.10 * (command_lvl as f64)) * (1.0 + if has_mindlink { 0.25 } else { 0.0 });
     let cbs_lvl = skills.get(&3354).or_else(|| skills.get(&43728)).copied().unwrap_or(0).min(5);
     let reload_time_s = 60.0 * (1.0 - 0.10 * (cbs_lvl as f64));
     let now_unix = ctx.now_unix_secs();
@@ -1263,7 +1261,6 @@ pub async fn activate_command_burst(
         }
     }
     let primary_buff_strength = raw_buffs.first().map(|&(_, v)| v).unwrap_or(0.0);
-
     let candidate_ship_ids: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
         let mut fleet_chars = vec![char_id];
         for fl in snap.fleets.values().filter(|fl| fl.members.contains(&char_id)) {
@@ -1276,14 +1273,13 @@ pub async fn activate_command_burst(
         if !ships.iter().any(|&(_, sid)| sid == ship_id) { ships.push((char_id, ship_id)); }
         ships
     });
-
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let now_unix_burst = ctx.now_unix();
     let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Green)
     });
     let mut trigger_suspect = false;
-    let mut trigger_criminal = false;
+    let mut criminal_beneficiary: Option<i64> = None;
     let booster_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
     let mut affected_ships = Vec::new();
     for (member_char_id, member_ship_id) in candidate_ship_ids {
@@ -1314,7 +1310,7 @@ pub async fn activate_command_burst(
             let war_interference = !same_corp_or_alliance && crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(ctx, char_id, member_char_id, now_unix_burst);
             if m_crim {
                 if safety != crate::services::combat_crimewatch::SafetyLevel::Red { continue; }
-                trigger_criminal = true;
+                criminal_beneficiary.get_or_insert(member_char_id);
             } else if sys_sec >= 0.45 && (has_unshared_le || war_interference) {
                 continue; // High-sec Command Bursts exclude unshared LE/war-engaged fleetmates without blocking
             } else if m_susp || (sys_sec >= 0.45 && is_outlaw) || (sys_sec < 0.45 && (has_unshared_le || war_interference)) {
@@ -1324,12 +1320,20 @@ pub async fn activate_command_burst(
         }
         affected_ships.push((member_char_id, member_ship_id));
     }
-    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-    cw.trigger_weapon_timer(char_id, now_unix_burst);
-    if trigger_criminal { cw.get_or_create(char_id).criminal_flag_until_unix = now_unix_burst.saturating_add(900); }
-    else if trigger_suspect { cw.trigger_suspect_flag(char_id, now_unix_burst); }
-    drop(cw);
-
+    let concord_suppressed = crate::services::combat_npc_police::is_concord_suppressed_in_system(ctx, sys_id);
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        cw.trigger_weapon_timer(char_id, now_unix_burst);
+        if let Some(beneficiary_id) = criminal_beneficiary {
+            let eff_sec = if concord_suppressed { 0.0 } else { f64::from(sys_sec) };
+            let _ = cw.handle_criminal_remote_assistance(char_id, beneficiary_id, ship_id, sys_id, eff_sec, now_unix_burst);
+        } else if trigger_suspect {
+            cw.trigger_suspect_flag(char_id, now_unix_burst);
+            let st = cw.get_or_create(char_id);
+            st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix_burst.saturating_add(900));
+        }
+    }
+    if criminal_beneficiary.is_some() || trigger_suspect { crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, char_id, now_unix_burst); }
     {
         let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
         for &(_, target_sid) in &affected_ships {
@@ -1340,12 +1344,9 @@ pub async fn activate_command_burst(
             }
         }
     }
-
-    let (dbuff_id_reps, affected_ship_reps, affected_member_reps): (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) = (
-        raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect(),
-        affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect(),
-        affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect(),
-    );
+    let dbuff_id_reps: Vec<PyRep> = raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect();
+    let affected_ship_reps: Vec<PyRep> = affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect();
+    let affected_member_reps: Vec<PyRep> = affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect();
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
         let exhausted = charge_item_id_opt.is_some_and(|cid| {

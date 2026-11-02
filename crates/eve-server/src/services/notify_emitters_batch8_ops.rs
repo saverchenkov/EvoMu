@@ -474,8 +474,29 @@ pub(crate) fn reset_operations_progress_for_char(
         })
         .unwrap_or(1);
     let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
+    let (items_to_lock, items_to_skip) = ctx.db.with_mut_snapshot(|snap| {
         with_character_operations_record(snap, char_id, now, |rec: &mut CharacterOperationsRecord| {
+            let mut to_lock: Vec<i64> = rec
+                .completed_categories
+                .iter()
+                .chain(rec.completed_operations.iter())
+                .chain(rec.completed_tasks.iter())
+                .copied()
+                .collect();
+            if let Some(active_op) = rec.active_operation_id {
+                if !to_lock.contains(&active_op) {
+                    to_lock.push(active_op);
+                }
+            }
+            if let Some(active_cat) = rec.active_category_id {
+                if !to_lock.contains(&active_cat) {
+                    to_lock.push(active_cat);
+                }
+            }
+            to_lock.sort_unstable();
+            to_lock.dedup();
+            let mut to_skip: Vec<i64> = rec.skipped_tasks.iter().copied().collect();
+            to_skip.sort_unstable();
             rec.completed_categories.clear();
             rec.completed_operations.clear();
             rec.completed_tasks.clear();
@@ -483,12 +504,15 @@ pub(crate) fn reset_operations_progress_for_char(
             rec.blocked_tasks.clear();
             rec.active_category_id = Some(first_cat_id);
             rec.active_operation_id = Some(first_op_id);
-        });
+            (to_lock, to_skip)
+        })
     });
     stop_all_client_node_graphs_for_char(ctx, char_id);
     crate::services::notify_emitters_b23::emit_operations_progress_reset(
         ctx,
         char_id,
+        &items_to_lock,
+        &items_to_skip,
         first_cat_id,
         first_op_id,
         first_task_id,

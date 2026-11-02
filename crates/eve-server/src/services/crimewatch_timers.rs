@@ -816,12 +816,13 @@ pub async fn handle_crimewatch(
             let rows: Vec<Vec<PyRep>> = txs
                 .into_iter()
                 .map(|t| {
-                    // DERIVED: logConst.eventSecStatus* enum IDs for V24 GetSecurityStatusTransactions
+                    // V24 `appLogConst.pyj` `logConst.eventSecStatus*` constants for `GetSecurityStatusTransactions`
                     let event_type_id = match t.reason.as_str() {
-                        "Clone Soldier Security Tag" | "eventSecStatusHandInTags" => 1_i64,
-                        "NPC Pirate Bounty" | "eventSecStatusKillPirateNpc" => 2_i64,
-                        "Illegal PvP Aggression" | "eventSecStatusIllegalAggression" => 3_i64,
-                        _ => 4_i64,
+                        "Clone Soldier Security Tag" | "eventSecStatusHandInTags" => 385_i64,
+                        "NPC Pirate Bounty" | "eventSecStatusKillPirateNpc" => 378_i64,
+                        "Illegal PvP Aggression" | "eventSecStatusIllegalAggression" => 379_i64,
+                        "eventSecStatusGmRollback" => 386_i64,
+                        _ => 380_i64,
                     };
                     let event_date = crate::sp6_lifecycle::unix_to_filetime(t.timestamp_unix);
                     vec![

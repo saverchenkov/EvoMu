@@ -43,10 +43,12 @@ pub fn emit_operation_skipped(ctx: &ServerContext, char_id: i64, cat_id: i64, op
     );
 }
 
-/// Emits `OnOperationsProgressReset(completedCategories, completedOperations, activeTuple)` (`3` args, `id_type = "charid"`).
+/// Emits `OnOperationsProgressReset(itemsToLock, itemsToSkip, activeTuple)` (`3` args, `id_type = "charid"`).
 pub fn emit_operations_progress_reset(
     ctx: &ServerContext,
     char_id: i64,
+    items_to_lock: &[i64],
+    items_to_skip: &[i64],
     first_cat_id: i64,
     first_op_id: i64,
     first_task_id: i64,
@@ -56,8 +58,8 @@ pub fn emit_operations_progress_reset(
         "OnOperationsProgressReset",
         "charid",
         vec![
-            PyRep::List(Vec::new()),
-            PyRep::List(Vec::new()),
+            PyRep::List(items_to_lock.iter().copied().map(PyRep::Integer).collect()),
+            PyRep::List(items_to_skip.iter().copied().map(PyRep::Integer).collect()),
             PyRep::Tuple(vec![
                 PyRep::Integer(first_cat_id),
                 PyRep::Integer(first_op_id),

@@ -426,20 +426,37 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         .expect_err("Zero quantity must be rejected");
     assert_eq!(zero_err.code, "InvalidQuantity");
 
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    let uid = sess.user_id.unwrap();
     ctx.db.with_mut_snapshot(|s| {
         let ch = s.characters.get_mut(&(cid as i64)).unwrap();
+        ch.user_id = uid;
         ch.security_status = -0.1;
         ch.balance = eve_db::IskCents::from_isk(25_000_000);
         s.items.insert(700_998, item_rec(700_998, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 1, false));
         s.items.insert(700_999, item_rec(700_999, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 2, false));
     });
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(cid as i64)], &kw, None).await.unwrap();
+    sess.character_id = Some(cid as i64);
+    sess.station_id = Some(sec_office_station);
+    let low_err = ctx
+        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])], &kw, None)
+        .await
+        .expect_err("targetSecStatus <= cur_sec must be rejected");
+    assert_eq!(low_err.code, "InvalidTargetSecurityStatus");
+    let _ = ctx.drain_notifications_for_char(cid as i64);
     ctx.dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(3))])], &kw, None)
         .await
         .expect("ApplyTagsForSecStatus with SDE Clone Soldier Negotiator Tag (33141)");
 
+    let notifs = ctx.drain_notifications_for_char(cid as i64);
+    let item_change = notifs.iter().find(|n| n.event == "OnItemChange").expect("3-arg OnItemChange");
+    assert_eq!(item_change.args.len(), 3, "OnItemChange must have 3 positional args");
+    assert_eq!(item_change.args[2].as_i64(), Some(sec_office_station));
+
     ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&(cid as i64)];
-        assert!((ch.security_status - 0.4).abs() < 1e-6, "Final Negotiator tag must cross 0.0 to +0.4, got {}", ch.security_status);
+        assert!((ch.security_status - 0.0).abs() < 1e-6, "Clone Soldier tags cap security status at 0.0, got {}", ch.security_status);
         assert_eq!(ch.balance, eve_db::IskCents::from_isk(15_000_000), "Must debit 10M ISK for 1 tag");
         assert_eq!(s.items.get(&700_999).map(|i| i.quantity), Some(2), "Must preserve 2 excess tags");
         assert!(
