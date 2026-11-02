@@ -5,7 +5,7 @@
 use crate::common;
 use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, make_structure};
 use eve_db::{
-    corp_roles::{ROLE_DIRECTOR, ROLE_STATION_MANAGER, ROLE_TRADER},
+    corp_roles::{ROLE_ACCOUNTANT, ROLE_DIRECTOR, ROLE_STATION_MANAGER, ROLE_TRADER},
     CorporationRecord, InventoryFlag, IskCents, TrainedSkillRecord,
 };
 use eve_machonet::SessionState;
@@ -129,6 +129,8 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
 
     let ceo_id = 90_000_001_i64;
     let miner_id = 90_000_002_i64;
+    let accountant_id = 90_000_003_i64;
+    let director_id = 90_000_004_i64;
     let corp_id = 98_000_811_i64;
     let athanor_id = 1_000_000_811_001_i64;
 
@@ -142,11 +144,22 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
         };
         corp.member_roles.insert(ceo_id, ROLE_DIRECTOR);
         corp.member_roles.insert(miner_id, ROLE_STATION_MANAGER);
+        corp.member_roles.insert(accountant_id, ROLE_ACCOUNTANT);
+        corp.member_roles.insert(director_id, ROLE_DIRECTOR);
         snap.corporations.insert(corp_id, corp);
         for cid in [ceo_id, miner_id] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.corporation_id = corp_id;
             }
+        }
+        let template_char = snap.characters.get(&ceo_id).unwrap().clone();
+        for (cid, name) in [(accountant_id, "B2 Accountant"), (director_id, "B2 Non-CEO Director")] {
+            let mut ch = template_char.clone();
+            ch.character_id = cid;
+            ch.user_id = cid as u64;
+            ch.name = name.into();
+            ch.corporation_id = corp_id;
+            snap.characters.insert(cid, ch);
         }
         snap.structures.insert(
             athanor_id,
@@ -249,6 +262,8 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     let spec = OpenApiSpec::pinned();
     let scopes = vec!["esi-industry.read_corporation_mining.v1", "esi-planets.read_customs_offices.v1"];
     let tok_station_mgr = issue_token_with_scopes(&ctx, miner_id, scopes.clone());
+    let tok_accountant = issue_token_with_scopes(&ctx, accountant_id, scopes.clone());
+    let tok_non_ceo_director = issue_token_with_scopes(&ctx, director_id, scopes.clone());
     let tok_director = issue_token_with_scopes(&ctx, ceo_id, scopes);
 
     let ext_path = format!("/v1/corporation/{corp_id}/mining/extractions/");
@@ -258,27 +273,31 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     // Auth / role / 404 checks
     http_expect_status(addr, &ext_path, None, 401).await;
     http_expect_status(addr, &obs_path, Some(&tok_station_mgr), 403).await;
+    http_expect_status(addr, &poco_path, Some(&tok_accountant), 403).await;
     http_expect_status(addr, "/v1/corporation/999999999/mining/extractions/", Some(&tok_director), 403).await;
 
-    // Station Manager succeeds on extractions; Director succeeds on customs_offices & observers
+    // Station Manager succeeds on extractions; non-CEO Director succeeds on customs_offices
     let exts = http_get_json(addr, &spec, &ext_path, Some(&tok_station_mgr)).await;
     assert_eq!(exts.as_array().unwrap().len(), 1);
     assert_eq!(exts[0]["structure_id"], athanor_id);
 
     http_expect_status(addr, &poco_path, Some(&tok_station_mgr), 403).await;
-    let pocos = http_get_json(addr, &spec, &poco_path, Some(&tok_director)).await;
+    let pocos = http_get_json(addr, &spec, &poco_path, Some(&tok_non_ceo_director)).await;
     assert_eq!(pocos.as_array().unwrap().len(), 1);
     assert_eq!(pocos[0]["office_id"], lowsec_planet_id);
     assert_eq!(pocos[0]["system_id"], lowsec_sys);
 
-    let obs = http_get_json(addr, &spec, &obs_path, Some(&tok_director)).await;
+    // Accountant (non-CEO, ROLE_ACCOUNTANT only) & non-CEO Director succeed on mining observers
+    let obs = http_get_json(addr, &spec, &obs_path, Some(&tok_accountant)).await;
     let obs_id = obs[0]["observer_id"].as_i64().unwrap();
     let obs_detail_path = format!("/v1/corporation/{corp_id}/mining/observers/{obs_id}/");
     http_expect_status(addr, &obs_detail_path, Some(&tok_station_mgr), 403).await;
-    http_expect_status(addr, &format!("/v1/corporation/{corp_id}/mining/observers/999999999/"), Some(&tok_director), 404).await;
-    let entries = http_get_json(addr, &spec, &obs_detail_path, Some(&tok_director)).await;
+    http_expect_status(addr, &format!("/v1/corporation/{corp_id}/mining/observers/999999999/"), Some(&tok_accountant), 404).await;
+    let entries = http_get_json(addr, &spec, &obs_detail_path, Some(&tok_accountant)).await;
     assert_eq!(entries[0]["character_id"], miner_id);
     assert_eq!(entries[0]["quantity"], mine_res.units_delivered);
+    let entries_dir = http_get_json(addr, &spec, &obs_detail_path, Some(&tok_non_ceo_director)).await;
+    assert_eq!(entries_dir[0]["quantity"], mine_res.units_delivered);
 
     handle.abort();
 
