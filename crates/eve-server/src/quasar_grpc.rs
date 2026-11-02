@@ -134,14 +134,14 @@ pub async fn handle_quasar_grpc_connection(
                 if e.is_io() {
                     break;
                 }
-                tracing::debug!(error = %e, "Quasar gRPC stream accept error");
+                tracing::warn!(error = %e, "Quasar gRPC stream accept error");
                 continue;
             }
         };
         let stream_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
             if let Err(e) = handle_grpc_stream(request, respond, stream_ctx).await {
-                tracing::debug!(error = %e, "Quasar gRPC stream closed with error");
+                tracing::warn!(error = %e, "Quasar gRPC stream closed with error");
             }
         });
     }
@@ -223,6 +223,21 @@ async fn handle_grpc_stream(
                     false,
                     ctx.now_unix(),
                 );
+                if rsp.status_code != 200 {
+                    let req_type = pub_req
+                        .payload
+                        .as_ref()
+                        .map(|p| p.normalized_type_name())
+                        .unwrap_or("<none>");
+                    tracing::warn!(
+                        req_type = %req_type,
+                        status_code = rsp.status_code,
+                        status_message = %rsp.status_message,
+                        user_id = identity.user_id,
+                        char_id = ?session.character_id,
+                        "Quasar gRPC public request returned non-200 status"
+                    );
+                }
                 let encoded = frame_grpc_message(&rsp.encode_proto());
                 send.send_data(encoded, false)?;
             }
@@ -1052,15 +1067,24 @@ mod tests {
             assert_eq!(rsp.status(), StatusCode::OK);
             let mut reader = GrpcFrameReader::new(rsp.into_body(), "identity".into());
 
-            let request_types = [
-                ("eve_public.corporationgoal.api.GetMineWithRewardsRequest", Some(90_000_001u32)),
-                ("eve_public.career.goal.api.GetDefinitionsRequest", Some(90_000_001u32)),
-                ("eve_public.achievement.reward.api.GetUnclaimedRequest", None),
-                ("eve_public.dailygoal.api.GetAllWithRewardsRequest", Some(90_000_001u32)),
-                ("eve_public.campaign.api.GetAllRequest", Some(90_000_001u32)),
+            let mut sys_inner = Vec::new();
+            eve_proto::quasar::encode_varint_field(1, 30_000_139, &mut sys_inner);
+            let mut corruption_req = Vec::new();
+            eve_proto::quasar::encode_bytes_field(1, &sys_inner, &mut corruption_req);
+
+            let request_types: &[(&str, Option<u32>, Vec<u8>)] = &[
+                ("eve_public.corporationgoal.api.GetMineWithRewardsRequest", Some(90_000_001u32), Vec::new()),
+                ("eve_public.career.goal.api.GetDefinitionsRequest", Some(90_000_001u32), Vec::new()),
+                ("eve_public.achievement.reward.api.GetUnclaimedRequest", None, Vec::new()),
+                ("eve_public.dailygoal.api.GetAllWithRewardsRequest", Some(90_000_001u32), Vec::new()),
+                ("eve_public.campaign.api.GetAllRequest", Some(90_000_001u32), Vec::new()),
+                ("eve_public.pirate.corruption.api.GetSystemInfoRequest", Some(90_000_001u32), corruption_req),
+                ("eve_public.achievement.definition.api.cdn.GetLatestRequest", None, vec![0x10, 0x01]),
+                ("eve_public.space.api.cdn.GetUpdateRequest", None, vec![0x10, 0x01]),
+                ("eve_public.cosmetic.character.title.definition.api.GetLatestRequest", None, vec![0x10, 0x01]),
             ];
 
-            for (idx, (type_name, char_opt)) in request_types.iter().enumerate() {
+            for (idx, (type_name, char_opt, payload_bytes)) in request_types.iter().enumerate() {
                 let mut corr = vec![0u8; 16];
                 corr[15] = (idx + 1) as u8;
                 let pub_req = EvePublicRequest {
@@ -1071,7 +1095,7 @@ mod tests {
                     correlation_uuid: corr.clone(),
                     payload: Some(GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
-                        value: Vec::new(),
+                        value: payload_bytes.clone(),
                     }),
                     external_origin: "eve-desktop-client/3619879 tq".into(),
                     application_instance_uuid: app_uuid.as_bytes().to_vec(),

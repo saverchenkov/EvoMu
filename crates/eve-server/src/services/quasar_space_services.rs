@@ -1011,8 +1011,7 @@ pub fn register_handlers(
         let sde_cdn = Arc::clone(&sde);
         router.register_handler(
             "eve_public.space.api.cdn.GetUpdateRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let _cid = require_character(ctx)?;
+            Arc::new(move |_ctx, _any, dyn_msg| {
                 let cur_ver = match dyn_msg.get(1) {
                     Some(DynamicValue::Message(m)) => Some((
                         get_int_field(m, 1).unwrap_or(0) as u32,

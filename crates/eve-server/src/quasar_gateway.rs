@@ -479,6 +479,11 @@ impl PublicGatewayRouter {
                 | "eve_public.app.launcher.distribution.api.LauncherDistributionClientStartRequest"
                 | "eve_public.app.launcher.eve_client.GameClientStartRequest"
                 | "eve_public.app.launcher.eve_client.GameClientStopRequest"
+                | "eve_public.achievement.definition.api.cdn.GetLatestRequest"
+                | "eve.achievement.definition.api.GetLatestRequest"
+                | "eve_public.space.api.cdn.GetUpdateRequest"
+                | "eve_public.cosmetic.character.title.definition.api.GetLatestRequest"
+                | "eve.cosmetic.character.title.definition.api.GetLatestRequest"
         ) {
             return false;
         }
