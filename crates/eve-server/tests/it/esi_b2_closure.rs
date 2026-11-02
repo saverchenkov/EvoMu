@@ -84,6 +84,11 @@ async fn http_get_json(
     let raw_path = path.split('?').next().unwrap_or(path);
     spec.validate_response("GET", raw_path, resp.status_code, &resp.headers, &resp.body)
         .unwrap_or_else(|e| panic!("OpenAPI validation failed for {path}: {e}"));
+    assert!(resp.header("ETag").is_some(), "200 response for {path} must include ETag");
+    assert!(
+        resp.header("Expires").is_some() || resp.header("Cache-Control").is_some(),
+        "200 response for {path} must include cache headers"
+    );
     resp.json().expect("JSON body")
 }
 
@@ -210,9 +215,25 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
         .expect("mine_once");
     assert!(mine_res.units_delivered > 0);
 
-    // 3. Configure corporation customs office via planetOrbitalRegistryBroker.UpdateSettings
-    let mut gm_sess = ceo_sess.clone();
-    gm_sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    // 3. Anchor, online, and configure corporation customs office via real client RPCs (no GM role)
+    let lowsec_sys = 30_000_192_u32;
+    let lowsec_planet_id = ctx.sde.solar_systems[&lowsec_sys].planet_ids[0];
+    let (ceo_ship_id, gantry_id, poco_item_id) = (800_000_812_i64, 800_000_813_i64, 800_000_814_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.station_id = None;
+            ch.solar_system_id = lowsec_sys;
+            ch.active_ship_id = ceo_ship_id;
+            ch.standings.insert(500_026, 2.0);
+        }
+        snap.items.insert(gantry_id, make_item(gantry_id, 3962, corp_id, ceo_ship_id, InventoryFlag::Cargo, 1, false));
+        snap.items.insert(poco_item_id, make_item(poco_item_id, 2233, corp_id, ceo_ship_id, InventoryFlag::Cargo, 1, false));
+    });
+    ceo_sess.station_id = None;
+    ceo_sess.solar_system_id = Some(lowsec_sys);
+    ceo_sess.ship_id = Some(ceo_ship_id);
+    let _ = rpc(&ctx, &mut ceo_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(lowsec_planet_id)]).await;
+    let _ = rpc(&ctx, &mut ceo_sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(poco_item_id)]).await;
     let tax_kv = PyRep::keyval([
         ("corporation", PyRep::Real(0.02)),
         ("alliance", PyRep::Real(0.05)),
@@ -220,21 +241,9 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
         ("standingGood", PyRep::Real(0.08)),
         ("standingNeutral", PyRep::Real(0.12)),
     ]);
-    let _ = rpc(
-        &ctx,
-        &mut gm_sess,
-        "planetOrbitalRegistryBroker",
-        "UpdateSettings",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(18),
-            tax_kv,
-            PyRep::Real(1.0),
-            PyRep::Bool(true),
-            PyRep::Bool(true),
-        ],
-    )
-    .await;
+    let _ = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "UpdateSettings", &[
+        PyRep::Integer(lowsec_planet_id), PyRep::Integer(18), tax_kv, PyRep::Real(1.0), PyRep::Bool(true), PyRep::Bool(true),
+    ]).await;
 
     let (addr, _router, handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0").await.expect("spawn ESI");
     let spec = OpenApiSpec::pinned();
@@ -259,7 +268,8 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     http_expect_status(addr, &poco_path, Some(&tok_station_mgr), 403).await;
     let pocos = http_get_json(addr, &spec, &poco_path, Some(&tok_director)).await;
     assert_eq!(pocos.as_array().unwrap().len(), 1);
-    assert_eq!(pocos[0]["office_id"], JITA_PLANET_ID);
+    assert_eq!(pocos[0]["office_id"], lowsec_planet_id);
+    assert_eq!(pocos[0]["system_id"], lowsec_sys);
 
     let obs = http_get_json(addr, &spec, &obs_path, Some(&tok_director)).await;
     let obs_id = obs[0]["observer_id"].as_i64().unwrap();
@@ -323,38 +333,14 @@ async fn test_esi_b2_character_planets_and_orders_live_http_and_sqlite() {
             make_item(800_000_821, 2534, char_id, ship_id, InventoryFlag::Cargo, 1, false),
         );
     });
-    let _ = rpc(
-        &ctx,
-        &mut s1,
-        "planetMgr",
-        "UserUpdateNetwork",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::List(vec![
-                PyRep::Tuple(vec![
-                    PyRep::Integer(1),
-                    PyRep::Integer(1),
-                    PyRep::Integer(2534),
-                    PyRep::Real(0.1),
-                    PyRep::Real(0.2),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(1),
-                    PyRep::Integer(2),
-                    PyRep::Integer(2541),
-                    PyRep::Real(0.15),
-                    PyRep::Real(0.25),
-                ]),
-                PyRep::Tuple(vec![
-                    PyRep::Integer(3),
-                    PyRep::Integer(1),
-                    PyRep::Integer(2),
-                    PyRep::Integer(1),
-                ]),
-            ]),
-        ],
-    )
-    .await;
+    let _ = rpc(&ctx, &mut s1, "planetMgr", "UserUpdateNetwork", &[
+        PyRep::Integer(JITA_PLANET_ID),
+        PyRep::List(vec![
+            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(2534), PyRep::Real(0.1), PyRep::Real(0.2)]),
+            PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(2541), PyRep::Real(0.15), PyRep::Real(0.25)]),
+            PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(1)]),
+        ]),
+    ]).await;
 
     // Dock back at Jita 4-4 and place two character orders, cancelling one via marketProxy
     s1.station_id = Some(JITA_STATION_ID);
@@ -559,21 +545,10 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
             ch.structure_id = Some(fortizar_id);
         }
     });
-    let _ = rpc(
-        &ctx,
-        &mut s1,
-        "marketProxy",
-        "PlaceBuyOrder",
-        &[
-            PyRep::Integer(fortizar_id),
-            PyRep::Integer(TRITANIUM_TYPE_ID as i64),
-            PyRep::Real(5.5),
-            PyRep::Integer(100),
-            PyRep::Integer(90),
-            PyRep::Integer(1),
-        ],
-    )
-    .await;
+    let _ = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
+        PyRep::Integer(fortizar_id), PyRep::Integer(TRITANIUM_TYPE_ID as i64), PyRep::Real(5.5),
+        PyRep::Integer(100), PyRep::Integer(90), PyRep::Integer(1),
+    ]).await;
 
     // 3. Place two corporation orders (one active, one cancelled) via useCorp=true
     s2.station_id = Some(JITA_STATION_ID);
@@ -625,14 +600,7 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
 
     let (addr, _router, handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0").await.expect("spawn ESI");
     let spec = OpenApiSpec::pinned();
-    let tok_trader = issue_token_with_scopes(
-        &ctx,
-        trader_id,
-        vec![
-            "esi-markets.structure_markets.v1",
-            "esi-markets.read_corporation_orders.v1",
-        ],
-    );
+    let tok_trader = issue_token_with_scopes(&ctx, trader_id, vec!["esi-markets.structure_markets.v1", "esi-markets.read_corporation_orders.v1"]);
 
     // Public market history
     http_expect_status(addr, &format!("/v1/markets/{JITA_REGION_ID}/history/"), None, 400).await;
@@ -657,14 +625,7 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
 
     let ctx2 = Arc::new(crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_market_struct_corp"));
     let (addr2, _router2, handle2) = EsiServer::spawn(Arc::clone(&ctx2), "127.0.0.1:0").await.expect("spawn ESI 2");
-    let tok_trader2 = issue_token_with_scopes(
-        &ctx2,
-        trader_id,
-        vec![
-            "esi-markets.structure_markets.v1",
-            "esi-markets.read_corporation_orders.v1",
-        ],
-    );
+    let tok_trader2 = issue_token_with_scopes(&ctx2, trader_id, vec!["esi-markets.structure_markets.v1", "esi-markets.read_corporation_orders.v1"]);
     let hist2 = http_get_json(addr2, &spec, &format!("/v1/markets/{JITA_REGION_ID}/history/?type_id={TRITANIUM_TYPE_ID}"), None,).await;
     assert!(hist2[0]["volume"].as_i64().unwrap() >= 50);
     let corp_orders2 = http_get_json(addr2, &spec, &format!("/v1/corporations/{corp_id}/orders/"), Some(&tok_trader2),).await;
