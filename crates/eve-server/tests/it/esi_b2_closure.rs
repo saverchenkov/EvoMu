@@ -171,29 +171,12 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     let mut miner_sess = setup_pilot(&ctx, 12, "other", "other-secret", miner_id).await;
 
     // 1. Start moon extraction via moonExtractions.StartNewExtraction
-    let start_res = rpc(
-        &ctx,
-        &mut ceo_sess,
-        "moonExtractions",
-        "StartNewExtraction",
-        &[PyRep::Integer(athanor_id), PyRep::Integer(864_000)],
-    )
-    .await;
-    assert_eq!(
-        start_res.dict_get("status").and_then(|v| v.as_str()),
-        Some("Started")
-    );
+    let start_res = rpc(&ctx, &mut ceo_sess, "moonExtractions", "StartNewExtraction", &[PyRep::Integer(athanor_id), PyRep::Integer(864_000)]).await;
+    assert_eq!(start_res.dict_get("status").and_then(|v| v.as_str()), Some("Started"));
 
     // 2. Advance time, fracture chunk, and mine via real mining laser cycle
     ctx.advance_time_seconds(864_000);
-    let frac_res = rpc(
-        &ctx,
-        &mut ceo_sess,
-        "moonExtractions",
-        "FractureChunkWithStructure",
-        &[PyRep::Integer(athanor_id)],
-    )
-    .await;
+    let frac_res = rpc(&ctx, &mut ceo_sess, "moonExtractions", "FractureChunkWithStructure", &[PyRep::Integer(athanor_id)]).await;
     let PyRep::List(ast_ids) = frac_res.dict_get("asteroidIDs").expect("asteroidIDs") else {
         panic!("Expected asteroidIDs list");
     };
@@ -230,23 +213,63 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
 
     // 3. Anchor, online, and configure corporation customs office via real client RPCs (no GM role)
     let lowsec_sys = 30_000_192_u32;
-    let lowsec_planet_id = ctx.sde.solar_systems[&lowsec_sys].planet_ids[0];
-    let (ceo_ship_id, gantry_id, poco_item_id) = (800_000_812_i64, 800_000_813_i64, 800_000_814_i64);
+    let lowsec_planet = ctx
+        .sde
+        .celestials_in_system(lowsec_sys)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .expect("lowsec planet");
+    let lowsec_planet_id = lowsec_planet.celestial_id;
+    let ceo_undock = rpc(&ctx, &mut ceo_sess, "stationSvc", "Undock", &[]).await;
+    let ceo_ship_id = ceo_undock.dict_get("shipID").and_then(|v| v.as_i64()).unwrap();
+    let mut ceo_ball = jita.get_ball_snapshot(ceo_ship_id).await.unwrap().unwrap().1;
+    let _ = jita.remove_ball(ceo_ship_id).await;
+    let (gantry_id, poco_item_id) = (800_000_813_i64, 800_000_814_i64);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&ceo_id) {
             ch.station_id = None;
             ch.solar_system_id = lowsec_sys;
-            ch.active_ship_id = ceo_ship_id;
             ch.standings.insert(500_026, 2.0);
+        }
+        if let Some(ship) = snap.items.get_mut(&ceo_ship_id) {
+            ship.location_id = i64::from(lowsec_sys);
         }
         snap.items.insert(gantry_id, make_item(gantry_id, 3962, corp_id, ceo_ship_id, InventoryFlag::Cargo, 1, false));
         snap.items.insert(poco_item_id, make_item(poco_item_id, 2233, corp_id, ceo_ship_id, InventoryFlag::Cargo, 1, false));
     });
     ceo_sess.station_id = None;
     ceo_sess.solar_system_id = Some(lowsec_sys);
-    ceo_sess.ship_id = Some(ceo_ship_id);
-    let _ = rpc(&ctx, &mut ceo_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(lowsec_planet_id)]).await;
-    let _ = rpc(&ctx, &mut ceo_sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(poco_item_id)]).await;
+    let kw = HashMap::new();
+    let lowsec = ctx.systems.get_or_spawn(lowsec_sys);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut ceo_sess, "posMgr", None, "AnchorOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(lowsec_planet_id)], &kw, None).await.unwrap_err().code,
+        "ShipNotInSpace"
+    );
+    let near_planet = lowsec_planet.position + DVec3::new(lowsec_planet.radius + 5_000.0, 0.0, 0.0);
+    ceo_ball.position = lowsec_planet.position + DVec3::new(lowsec_planet.radius + 250_000_000.0, 0.0, 0.0);
+    lowsec.spawn_ball(ceo_ball.clone()).await.expect("spawn far ball");
+    assert_eq!(
+        ctx.dispatch_rpc(&mut ceo_sess, "posMgr", None, "AnchorOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(lowsec_planet_id)], &kw, None).await.unwrap_err().code,
+        "OrbitalOutOfRange"
+    );
+    lowsec.set_ball_position(ceo_ship_id, near_planet).await;
+    let anchor_res = rpc(&ctx, &mut ceo_sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_id), PyRep::Integer(lowsec_planet_id)]).await;
+    let orbital_id = anchor_res.dict_get("orbitalID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(orbital_id, gantry_id);
+
+    let _ = lowsec.remove_ball(ceo_ship_id).await;
+    assert_eq!(
+        ctx.dispatch_rpc(&mut ceo_sess, "posMgr", None, "OnlineOrbital", &[PyRep::Integer(orbital_id), PyRep::Integer(poco_item_id)], &kw, None).await.unwrap_err().code,
+        "ShipNotInSpace"
+    );
+    ceo_ball.position = near_planet + DVec3::new(25_000.0, 0.0, 0.0);
+    lowsec.spawn_ball(ceo_ball).await.expect("spawn far online ball");
+    assert_eq!(
+        ctx.dispatch_rpc(&mut ceo_sess, "posMgr", None, "OnlineOrbital", &[PyRep::Integer(orbital_id), PyRep::Integer(poco_item_id)], &kw, None).await.unwrap_err().code,
+        "OrbitalOutOfRange"
+    );
+    lowsec.set_ball_position(ceo_ship_id, near_planet).await;
+    let _ = rpc(&ctx, &mut ceo_sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(orbital_id), PyRep::Integer(poco_item_id)]).await;
     let tax_kv = PyRep::keyval([
         ("corporation", PyRep::Real(0.02)),
         ("alliance", PyRep::Real(0.05)),
@@ -254,8 +277,12 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
         ("standingGood", PyRep::Real(0.08)),
         ("standingNeutral", PyRep::Real(0.12)),
     ]);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut ceo_sess, "planetOrbitalRegistryBroker", None, "UpdateSettings", &[PyRep::Integer(999_999_999)], &kw, None).await.unwrap_err().code,
+        "CrpAccessDenied"
+    );
     let _ = rpc(&ctx, &mut ceo_sess, "planetOrbitalRegistryBroker", "UpdateSettings", &[
-        PyRep::Integer(lowsec_planet_id), PyRep::Integer(18), tax_kv, PyRep::Real(1.0), PyRep::Bool(true), PyRep::Bool(true),
+        PyRep::Integer(orbital_id), PyRep::Integer(18), tax_kv, PyRep::Real(1.0), PyRep::Bool(true), PyRep::Bool(true),
     ]).await;
 
     let (addr, _router, handle) = EsiServer::spawn(Arc::clone(&ctx), "127.0.0.1:0").await.expect("spawn ESI");
@@ -284,7 +311,7 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     http_expect_status(addr, &poco_path, Some(&tok_station_mgr), 403).await;
     let pocos = http_get_json(addr, &spec, &poco_path, Some(&tok_non_ceo_director)).await;
     assert_eq!(pocos.as_array().unwrap().len(), 1);
-    assert_eq!(pocos[0]["office_id"], lowsec_planet_id);
+    assert_eq!(pocos[0]["office_id"], orbital_id);
     assert_eq!(pocos[0]["system_id"], lowsec_sys);
 
     // Accountant (non-CEO, ROLE_ACCOUNTANT only) & non-CEO Director succeed on mining observers
@@ -304,14 +331,7 @@ async fn test_esi_b2_corp_mining_and_customs_offices_live_http_and_sqlite() {
     // Reload from SQLite and verify persistence over live HTTP
     let ctx2 = Arc::new(crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "esi_b2_corp_mining_poco"));
     let (addr2, _router2, handle2) = EsiServer::spawn(Arc::clone(&ctx2), "127.0.0.1:0").await.expect("spawn ESI 2");
-    let tok_dir2 = issue_token_with_scopes(
-        &ctx2,
-        ceo_id,
-        vec![
-            "esi-industry.read_corporation_mining.v1",
-            "esi-planets.read_customs_offices.v1",
-        ],
-    );
+    let tok_dir2 = issue_token_with_scopes(&ctx2, ceo_id, vec!["esi-industry.read_corporation_mining.v1", "esi-planets.read_customs_offices.v1"]);
     let exts2 = http_get_json(addr2, &spec, &ext_path, Some(&tok_dir2)).await;
     assert_eq!(exts2.as_array().unwrap().len(), 1);
     let pocos2 = http_get_json(addr2, &spec, &poco_path, Some(&tok_dir2)).await;
@@ -633,7 +653,7 @@ async fn test_esi_b2_market_history_structure_and_corp_orders_live_http_and_sqli
     assert_eq!(struct_orders.as_array().unwrap().len(), 1);
     assert_eq!(struct_orders[0]["location_id"], fortizar_id);
 
-    // Corporation orders & history accessible by Junior_Accountant | Trader
+    // Corporation orders & history accessible by Accountant | Trader (with Director/CEO always allowed)
     let corp_orders = http_get_json(addr, &spec, &format!("/v1/corporations/{corp_id}/orders/"), Some(&tok_trader),).await;
     assert!(corp_orders.as_array().unwrap().iter().any(|o| o["order_id"] == corp_open_oid));
 

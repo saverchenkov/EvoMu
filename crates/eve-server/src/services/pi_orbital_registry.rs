@@ -23,13 +23,14 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(raw_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetTaxRate requires planetID".into(),
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
+                let (_, planet_id) = resolve_orbital_and_planet(snap, raw_id);
                 let (player_rate, _) =
                     resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
                 Ok(PyRep::Real(player_rate))
@@ -42,19 +43,22 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(raw_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "GetSettingsInfo requires planetID".into(),
                 }));
             };
-            let cfg = ctx.db.with_snapshot(|snap| {
-                load_orbital_settings(snap, planet_id).unwrap_or(OrbitalCustomsSettings {
-                    planet_id,
+            let (orbital_id_opt, planet_id, cfg) = ctx.db.with_snapshot(|snap| {
+                let (oid, pid) = resolve_orbital_and_planet(snap, raw_id);
+                let cfg = load_orbital_settings(snap, pid).unwrap_or(OrbitalCustomsSettings {
+                    planet_id: pid,
                     ..Default::default()
-                })
+                });
+                (oid, pid, cfg)
             });
             Some(Ok(PyRep::keyval([
+                ("orbitalID", PyRep::Integer(orbital_id_opt.unwrap_or(planet_id))),
                 ("planetID", PyRep::Integer(planet_id)),
                 ("orbitalTypeID", PyRep::Integer(cfg.orbital_type_id as i64)),
                 ("ownerCorpID", PyRep::Integer(cfg.owner_corp_id)),
@@ -88,13 +92,14 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+            let Some(raw_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
                 return Some(Err(BridgeRpcError {
-                    code: "InvalidPlanetID".into(),
-                    message: "UpdateSettings requires planetID".into(),
+                    code: "InvalidOrbitalID".into(),
+                    message: "UpdateSettings requires orbitalID".into(),
                 }));
             };
-            let res = match ctx.db.try_with_mut_snapshot(|snap| {
+            let (office_id, planet_id, res) = match ctx.db.try_with_mut_snapshot(|snap| {
+                let (orbital_id_opt, planet_id) = resolve_orbital_and_planet(snap, raw_id);
                 let char_corp = snap
                     .characters
                     .get(&char_id)
@@ -216,8 +221,9 @@ pub fn handle_pi_orbital_registry(
                 {
                     cfg.allow_standings = as_flag;
                 }
-                save_orbital_settings(snap, planet_id, &cfg);
-                Ok(cfg)
+                let save_key = orbital_id_opt.unwrap_or(planet_id);
+                save_orbital_settings(snap, save_key, &cfg);
+                Ok((save_key, planet_id, cfg))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -230,6 +236,7 @@ pub fn handle_pi_orbital_registry(
                 vec![PyRep::Integer(planet_id), PyRep::Bool(false)],
             );
             Some(Ok(PyRep::keyval([
+                ("orbitalID", PyRep::Integer(office_id)),
                 ("planetID", PyRep::Integer(planet_id)),
                 ("orbitalTypeID", PyRep::Integer(res.orbital_type_id as i64)),
                 ("ownerCorpID", PyRep::Integer(res.owner_corp_id)),
