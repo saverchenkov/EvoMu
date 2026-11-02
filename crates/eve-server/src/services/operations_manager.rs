@@ -93,6 +93,39 @@ pub fn sync_air_npe_skip(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, no
     save_store(snap, &store, now_unix);
 }
 
+/// Initializes tutorial state as pending (`tutorial_finished = Some(false)`, `tutorial_state = 1`)
+/// for newly created characters so `operationsManager` and the V24 client offer/launch the NPE flow.
+pub fn mark_new_character_tutorial_pending(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) {
+    let mut store = load_store(snap);
+    let rec = store.by_character.entry(char_id).or_default();
+    rec.tutorial_finished = Some(false);
+    rec.tutorial_skipped = false;
+    if rec.tutorial_state == 0 {
+        rec.tutorial_state = 1;
+    }
+    save_store(snap, &store, now_unix);
+}
+
+/// Returns whether `char_id` is eligible to play/launch the tutorial (tutorial initialized as
+/// unfinished and not yet skipped or completed).
+pub fn can_character_play_tutorial(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> bool {
+    let npe_completed = snap
+        .npe_progress
+        .get(&char_id)
+        .is_some_and(|n| n.completed || n.current_node_id >= 4);
+    if npe_completed {
+        return false;
+    }
+    load_store(snap)
+        .by_character
+        .get(&char_id)
+        .is_some_and(|r| !r.tutorial_skipped && r.tutorial_finished == Some(false))
+}
+
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
 /// if the character has started an operation site (`start_site`) and is still in that solar system.
 pub fn active_operation_dungeon_for_character(

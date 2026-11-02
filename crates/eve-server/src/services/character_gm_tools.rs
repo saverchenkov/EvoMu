@@ -325,6 +325,11 @@ pub fn handle_char_unbound(
                         }
                         snap.character_doll_info
                             .insert(ch.character_id, (doll_str, portrait_str));
+                        crate::services::operations_manager::mark_new_character_tutorial_pending(
+                            snap,
+                            ch.character_id,
+                            now_unix,
+                        );
                         if let Some(smap) = snap.skills.get(&ch.character_id).cloned() {
                             let hist = snap.skill_history.entry(ch.character_id).or_default();
                             let mut sorted: Vec<_> = smap.values().collect();

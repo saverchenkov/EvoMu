@@ -500,3 +500,96 @@ async fn test_operations_tasks_sites_and_events() {
         "completed operations must include op_id {op_id}"
     );
 }
+
+#[tokio::test]
+async fn test_new_character_tutorial_enabled_by_default() {
+    let ctx = ServerContext::new();
+    let mut sess = SessionState::new(1);
+    sess.user_id = Some(80_099);
+    let doll = PyRep::Dict(vec![(PyRep::String("genderID".into()), PyRep::Integer(1))]);
+    let portrait = PyRep::Dict(vec![(PyRep::String("lighting".into()), PyRep::Integer(1))]);
+    let char_id_rep = call_rpc(
+        &ctx,
+        &mut sess,
+        "charUnboundMgr",
+        "CreateCharacterWithDoll",
+        &[
+            PyRep::String("New Tutorial Pilot".into()),
+            PyRep::Integer(1),  // bloodlineID
+            PyRep::Integer(1),  // genderID
+            PyRep::Integer(11), // ancestryID
+            doll,
+            portrait,
+            PyRep::Integer(17), // schoolID
+        ],
+    )
+    .await
+    .expect("CreateCharacterWithDoll");
+    let char_id = char_id_rep.as_i64().expect("created character_id");
+    sess.character_id = Some(char_id);
+
+    let can_play = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "can_character_play_the_tutorial",
+        &[],
+    )
+    .await
+    .expect("can_character_play_the_tutorial");
+    assert_eq!(can_play, PyRep::Bool(true));
+
+    let finished = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "is_main_tutorial_finished",
+        &[],
+    )
+    .await
+    .expect("is_main_tutorial_finished");
+    assert_eq!(finished, PyRep::Bool(false));
+
+    let tut_state = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "get_tutorial_state",
+        &[],
+    )
+    .await
+    .expect("get_tutorial_state");
+    let PyRep::Dict(items) = tut_state else {
+        panic!("expected Dict from get_tutorial_state");
+    };
+    let active = items
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("is_tutorial_active"))
+        .map(|(_, v)| v);
+    assert_eq!(active, Some(&PyRep::Bool(true)));
+
+    // Skipping AIR NPE disables can_character_play_the_tutorial and marks main tutorial finished.
+    call_rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[])
+        .await
+        .expect("skip_air_npe");
+    let can_play_after = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "can_character_play_the_tutorial",
+        &[],
+    )
+    .await
+    .expect("can_character_play_the_tutorial after skip");
+    assert_eq!(can_play_after, PyRep::Bool(false));
+    let finished_after = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "is_main_tutorial_finished",
+        &[],
+    )
+    .await
+    .expect("is_main_tutorial_finished after skip");
+    assert_eq!(finished_after, PyRep::Bool(true));
+}

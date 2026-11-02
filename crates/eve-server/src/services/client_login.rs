@@ -818,12 +818,14 @@ pub async fn handle(
             Some(Ok(PyRep::Integer(ch.free_skill_points as i64)))
         }
         ("operationsManager", "can_character_play_the_tutorial") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            // const-ok: `operations/common/util.pyj:is_npe_enabled_for_character` returns False when
-            // the character is not in the tutorial flow.
-            Some(Ok(PyRep::Bool(false)))
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let can_play = ctx.db.with_snapshot(|snap| {
+                crate::services::operations_manager::can_character_play_tutorial(snap, char_id)
+            });
+            Some(Ok(PyRep::Bool(can_play)))
         }
         _ => None,
     }
