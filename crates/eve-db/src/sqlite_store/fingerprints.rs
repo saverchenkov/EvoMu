@@ -450,6 +450,7 @@ pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
         ship_combat_hp,
         space_object_meta,
         missions_awaiting_downtime_respawn,
+        mission_initial_npc_counts,
     } = st;
     let mut h = FnvHasher::new();
     hash_map_xor(&mut h, safe_logoffs, |eh, &k, v| {
@@ -580,6 +581,10 @@ pub(crate) fn fp_sp6_lifecycle(st: &crate::Sp6PersistedState) -> u64 {
         h.write_i64(c);
         h.write_u32(m);
     }
+    hash_map_xor(&mut h, mission_initial_npc_counts, |eh, k, &cnt| {
+        eh.write_str(k);
+        eh.write_u32(cnt);
+    });
     h.finish()
 }
 
@@ -814,6 +819,7 @@ mod tests {
             ship_combat_hp: HashMap::with_capacity(cap),
             space_object_meta: HashMap::with_capacity(cap),
             missions_awaiting_downtime_respawn: vec![(90_000_001, 42), (90_000_002, 77)],
+            mission_initial_npc_counts: HashMap::with_capacity(cap),
         };
         if scramble {
             for dummy in 9_000..9_032 {

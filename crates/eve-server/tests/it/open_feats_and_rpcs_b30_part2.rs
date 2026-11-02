@@ -369,7 +369,8 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         snap.items.insert(cargo_a, make_item(cargo_a, 34, P1, ship_id, InventoryFlag::Cargo, 25, false));
         snap.items.insert(cargo_b, make_item(cargo_b, 34, P1, ship_id, InventoryFlag::Cargo, 25, false));
         snap.items.insert(mod_id, make_item(mod_id, 3528, P1, ship_id, InventoryFlag::LoSlot0, 1, true));
-        snap.items.insert(gun_id, make_item(gun_id, 2873, P1, ship_id, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(gun_id, make_item(gun_id, 3074, P1, ship_id, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(950_000_019, make_item(950_000_019, 12_625, P1, ship_id, InventoryFlag::HiSlot0, 500, false));
         snap.items.insert(mwd_id, make_item(mwd_id, 12_198, P1, ship_id, InventoryFlag::Cargo, 1, true));
     });
 
@@ -416,24 +417,42 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     let ag_space = ctx.systems.get_or_spawn(ag_sys);
     let ag_beyonce = ctx.bind_object(&sess, "beyonce", ag_sys as i64).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
-    let (initial_npcs, first_npc) = ctx.db.with_snapshot(|s| (
+    let (initial_npcs, first_npc, bmid) = ctx.db.with_snapshot(|s| (
         s.active_missions[&(P1, m_id)].npcs_remaining,
         s.active_missions[&(P1, m_id)].spawned_npc_ball_ids[0],
+        s.active_missions[&(P1, m_id)].bookmark_id.unwrap(),
     ));
-    if let (Ok(Some((_, mut sb))), Ok(Some((_, nb)))) = (ag_space.get_ball_snapshot(ship_id).await, ag_space.get_ball_snapshot(first_npc).await) {
-        sb.position = nb.position + DVec3::new(500.0, 0.0, 0.0);
-        let _ = ag_space.spawn_ball(sb).await;
+    let npc_pos = ag_space.get_ball_snapshot(first_npc).await.unwrap().unwrap().1.position;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(bm) = s.bookmarks.get_mut(&bmid) {
+            bm.x = npc_pos.x; bm.y = npc_pos.y; bm.z = npc_pos.z;
+        }
+    });
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(bmid), PyRep::Real(0.0)], &HashMap::new(), None).await.unwrap();
+    for _ in 0..120 {
+        ag_space.step_manual(1.0).await.unwrap();
+        if matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop) {
+            break;
+        }
     }
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(first_npc)]).await.unwrap();
-    ag_space.step_manual(10.0).await.unwrap();
-    let _ = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("attack".into()), PyRep::Integer(first_npc)]).await;
+    for _ in 0..25 {
+        if ag_space.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == first_npc && l.locked) { break; }
+        ag_space.step_manual(1.0).await.unwrap();
+    }
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(first_npc), PyRep::Integer(1)]).await.expect("Activate gun_id on first_npc");
+    for _ in 0..45 {
+        if ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none() { break; }
+        ag_space.step_manual(1.0).await.unwrap();
+    }
+    assert!(ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none(), "first_npc destroyed before downtime");
+    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs - 1));
     ctx.advance_secs(10);
     run_daily_downtime_and_jobs(&ctx);
-    assert!(ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none());
-    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs.max(4)));
+    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs));
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
     let respawned_ids = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].spawned_npc_ball_ids.clone());
-    assert_eq!(respawned_ids.len() as u32, initial_npcs.max(4));
+    assert_eq!(respawned_ids.len() as u32, initial_npcs);
     assert!(with_combat_runtime(&ctx, |rt| respawned_ids.iter().all(|id| rt.npc_entities.contains_key(id))));
 
     // 4. `mobile_warp_disruptor-lifecycle`: Anchor completion from anchor_start_unix, bubble re-created after restart, removed after 2 days

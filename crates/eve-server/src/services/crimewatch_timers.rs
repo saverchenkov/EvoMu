@@ -123,46 +123,57 @@ pub fn evaluate_remote_assistance_legality(
     res
 }
 
+fn compute_crimewatch_timer_states(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+) -> ([(i64, PyRep); 5], (i64, i64, i64, i64, i64), [u64; 5], Option<(i64, i64, i64, i64, i64)>) {
+    let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
+    let st = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).cloned()).unwrap_or_default();
+    let (npc_exp, dis_exp, prev_opt, trig_at) = with_combat_runtime(ctx, |rt| (
+        rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp),
+        rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp),
+        rt.crimewatch_timer_states.get(&char_id).copied(),
+        rt.crimewatch_timer_triggered_at.get(&char_id).copied().unwrap_or([0; 5]),
+    ));
+    let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
+    let mut next_trig = trig_at;
+    let eval = |slot: usize, prev_sig: i64, exp: u64, active_c: i64, cd_c: i64, nt: &mut [u64; 5]| -> (i64, PyRep, i64) {
+        let same_exp = (prev_sig >> 40) != 0 && (prev_sig & 0xFF_FFFF_FFFF) as u64 == exp;
+        let c = if same_exp {
+            if now_unix > nt[slot] { cd_c } else { active_c }
+        } else {
+            nt[slot] = now_unix;
+            active_c
+        };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
+    };
+    let (wc, wv, ws) = if st.is_weapon_timer_active(now_unix) {
+        eval(0, prev.0, st.weapon_timer_until_unix, 101, 102, &mut next_trig)
+    } else { next_trig[0] = 0; (100, PyRep::None, 100) };
+    let (pc, pv, ps) = if st.is_pvp_active(now_unix) {
+        eval(1, prev.1, st.pvp_timer_until_unix, 201, 202, &mut next_trig)
+    } else { next_trig[1] = 0; (200, PyRep::None, 200) };
+    let (nc, nv, ns) = if let Some(exp) = npc_exp {
+        eval(2, prev.2, exp, 401, 402, &mut next_trig)
+    } else { next_trig[2] = 0; (400, PyRep::None, 400) };
+    let (cc, cv, cs) = if st.is_criminal(now_unix) {
+        eval(3, prev.3, st.criminal_flag_until_unix, 301, 303, &mut next_trig)
+    } else if st.is_suspect(now_unix) {
+        eval(3, prev.3, st.suspect_flag_until_unix, 302, 304, &mut next_trig)
+    } else { next_trig[3] = 0; (300, PyRep::None, 300) };
+    let (dc, dv, ds) = if let Some(exp) = dis_exp {
+        eval(4, prev.4, exp, 501, 502, &mut next_trig)
+    } else { next_trig[4] = 0; (500, PyRep::None, 500) };
+    ([(wc, wv), (pc, pv), (nc, nv), (cc, cv), (dc, dv)], (ws, ps, ns, cs, ds), next_trig, prev_opt)
+}
+
 /// Pushes `OnWeaponsTimerUpdate`, `OnPvpTimerUpdate`, `OnNpcTimerUpdate`, and `OnCriminalTimerUpdate`
 /// (`(state, expiryTime)` with Windows FILETIME expiry) to `char_id` on timer state changes (`feat:crimewatch.crimewatch-states`).
 pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, now_unix: u64) {
-    let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
-    let st = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).cloned()).unwrap_or_default();
-    let npc_exp = with_combat_runtime(ctx, |rt| rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp));
-    let dis_exp = with_combat_runtime(ctx, |rt| rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp));
-    let prev_opt = with_combat_runtime(ctx, |rt| rt.crimewatch_timer_states.get(&char_id).copied());
+    let ([(weap_code, weap_val), (pvp_code, pvp_val), (npc_code, npc_val), (crim_code, crim_val), (dis_code, dis_val)], (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig), next_trig, prev_opt) =
+        compute_crimewatch_timer_states(ctx, char_id, now_unix);
     let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
-    let is_countdown = |prev_sig: i64, exp: u64, dur: u64| -> bool {
-        (prev_sig >> 40) != 0 && (prev_sig & 0xFF_FFFF_FFFF) as u64 == exp && now_unix > exp.saturating_sub(dur.saturating_sub(1))
-    };
-    let (weap_code, weap_val, weap_sig) = if st.is_weapon_timer_active(now_unix) {
-        let exp = st.weapon_timer_until_unix;
-        let c = if is_countdown(prev.0, exp, 60) { 102i64 } else { 101i64 };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
-    } else { (100i64, PyRep::None, 100i64) };
-    let (pvp_code, pvp_val, pvp_sig) = if st.is_pvp_active(now_unix) {
-        let exp = st.pvp_timer_until_unix;
-        let dur = if exp >= now_unix.saturating_add(301) { 900 } else { 300 };
-        let c = if is_countdown(prev.1, exp, dur) { 202i64 } else { 201i64 };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
-    } else { (200i64, PyRep::None, 200i64) };
-    let (npc_code, npc_val, npc_sig) = if let Some(exp) = npc_exp {
-        let c = if is_countdown(prev.2, exp, 300) { 402i64 } else { 401i64 };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
-    } else { (400i64, PyRep::None, 400i64) };
-    let (crim_code, crim_val, crim_sig) = if st.is_criminal(now_unix) {
-        let exp = st.criminal_flag_until_unix;
-        let c = if is_countdown(prev.3, exp, 900) { 303i64 } else { 301i64 };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
-    } else if st.is_suspect(now_unix) {
-        let exp = st.suspect_flag_until_unix;
-        let c = if is_countdown(prev.3, exp, 900) { 304i64 } else { 302i64 };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
-    } else { (300i64, PyRep::None, 300i64) };
-    let (dis_code, dis_val, dis_sig) = if let Some(exp) = dis_exp {
-        let c = if is_countdown(prev.4, exp, 900) { 502i64 } else { 501i64 };
-        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
-    } else { (500i64, PyRep::None, 500i64) };
 
     let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
     let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
@@ -195,8 +206,10 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
         }
         if is_all_idle {
             rt.crimewatch_timer_states.remove(&char_id);
+            rt.crimewatch_timer_triggered_at.remove(&char_id);
         } else {
             rt.crimewatch_timer_states.insert(char_id, (weap_sig, pvp_sig, npc_sig, crim_sig, dis_sig));
+            rt.crimewatch_timer_triggered_at.insert(char_id, next_trig);
         }
     });
     for (ev, mut a) in updates {
@@ -674,9 +687,8 @@ pub async fn handle_crimewatch(
                 Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
-            let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            let st = cw.get_or_create(char_id).clone();
+            let _ = cw.get_or_create(char_id);
             let mut criminals = Vec::new();
             let mut suspects = Vec::new();
             for (&cid, cst) in &cw.states {
@@ -687,7 +699,7 @@ pub async fn handle_crimewatch(
                 }
             }
             drop(cw);
-            let (le_entries, dis_exp, npc_exp, safety_lvl) = with_combat_runtime(ctx, |rt| {
+            let (le_entries, safety_lvl) = with_combat_runtime(ctx, |rt| {
                 let le: Vec<(PyRep, PyRep)> = rt
                     .limited_engagements
                     .get(&char_id)
@@ -698,49 +710,21 @@ pub async fn handle_crimewatch(
                             .collect()
                     })
                     .unwrap_or_default();
-                let dis = rt
-                    .disapproval_flags
-                    .get(&char_id)
-                    .copied()
-                    .filter(|&exp| now_unix < exp);
-                let npc = rt
-                    .npc_timers
-                    .get(&char_id)
-                    .copied()
-                    .filter(|&exp| now_unix < exp);
                 let saf = rt
                     .safety_levels
                     .get(&char_id)
                     .copied()
                     .unwrap_or(SafetyLevel::Green);
-                (le, dis, npc, saf)
+                (le, saf)
             });
-            let timer = |idle: i64, active: i64, exp_opt: Option<u64>| {
-                if let Some(exp) = exp_opt {
-                    PyRep::Tuple(vec![PyRep::Integer(active), PyRep::Integer(unix_to_ft(exp))])
-                } else {
-                    PyRep::Tuple(vec![PyRep::Integer(idle), PyRep::None])
-                }
-            };
-            let crim_tuple = if st.is_criminal(now_unix) {
-                let code = if now_unix > st.criminal_flag_until_unix.saturating_sub(900) { 303 } else { 301 };
-                PyRep::Tuple(vec![PyRep::Integer(code), PyRep::Integer(unix_to_ft(st.criminal_flag_until_unix))])
-            } else if st.is_suspect(now_unix) {
-                let code = if now_unix > st.suspect_flag_until_unix.saturating_sub(900) { 304 } else { 302 };
-                PyRep::Tuple(vec![PyRep::Integer(code), PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix))])
-            } else {
-                PyRep::Tuple(vec![PyRep::Integer(300), PyRep::None])
-            };
-            let w_code = if now_unix > st.weapon_timer_until_unix.saturating_sub(60) { 102 } else { 101 };
-            let p_code = if now_unix > st.pvp_timer_until_unix.saturating_sub(900) { 202 } else { 201 };
+            let (timers, _, _, _) = compute_crimewatch_timer_states(ctx, char_id, now_unix);
             Some(Ok(PyRep::Tuple(vec![
-                PyRep::Tuple(vec![
-                    timer(100, w_code, st.is_weapon_timer_active(now_unix).then_some(st.weapon_timer_until_unix)),
-                    timer(200, p_code, st.is_pvp_active(now_unix).then_some(st.pvp_timer_until_unix)),
-                    timer(400, 401, npc_exp),
-                    crim_tuple,
-                    timer(500, 501, dis_exp),
-                ]),
+                PyRep::Tuple(
+                    timers
+                        .into_iter()
+                        .map(|(code, val)| PyRep::Tuple(vec![PyRep::Integer(code), val]))
+                        .collect(),
+                ),
                 PyRep::Dict(le_entries),
                 PyRep::Tuple(vec![PyRep::List(criminals), PyRep::List(suspects)]),
                 PyRep::Integer(safety_lvl as i64),

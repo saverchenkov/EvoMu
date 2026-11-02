@@ -293,6 +293,20 @@ async fn notify_b30_operations_and_container_password() {
     )
     .await
     .expect("corp container SetPassword with equipment config role");
+
+    // BF-04 negative checks: invalid which, non-container item, non-string password, and >2500m in space
+    assert_eq!(rpc(&ctx, &mut sess_a, "invbroker", "SetPassword", &[PyRep::Integer(corp_container_id), PyRep::Integer(99), PyRep::String("pw".into())]).await.unwrap_err().code, "InvalidPasswordType");
+    assert_eq!(rpc(&ctx, &mut sess_a, "invbroker", "SetPassword", &[PyRep::Integer(corp_container_id), PyRep::Integer(1), PyRep::Integer(123)]).await.unwrap_err().code, "InvalidPassword");
+    let (mineral_id, ship_sp_id, far_cont_id) = (960_000_031_i64, 960_000_032_i64, 960_000_033_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mineral_id, make_item(mineral_id, 34, PILOT_A, STATION_JITA, InventoryFlag::Hangar, 100, false));
+        snap.items.insert(far_cont_id, make_item(far_cont_id, 3465, PILOT_A, SYS_JITA as i64, InventoryFlag::None, 1, true));
+    });
+    assert_eq!(rpc(&ctx, &mut sess_a, "invbroker", "SetPassword", &[PyRep::Integer(mineral_id), PyRep::Integer(1), PyRep::String("pw".into())]).await.unwrap_err().code, "ContainerDoesNotSupportPassword");
+    let mut sess_space = login_in_space(&ctx, 9_609, "demo", "demo-secret", PILOT_A, ship_sp_id, 587, SYS_JITA, DVec3::ZERO).await;
+    let sys_sp = ctx.systems.get_or_spawn(SYS_JITA);
+    sys_sp.spawn_ball_with_meta(eve_destiny::Ball { id: far_cont_id, type_id: 3465, position: DVec3::new(10_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1_000.0, radius: 50.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop }, ctx.build_ship_combat_state(PILOT_A, far_cont_id, 3465), ctx.build_ship_slim_meta(PILOT_A, 3465)).await.unwrap();
+    assert_eq!(rpc(&ctx, &mut sess_space, "invbroker", "SetPassword", &[PyRep::Integer(far_cont_id), PyRep::Integer(1), PyRep::String("pw".into())]).await.unwrap_err().code, "OutsideOperationalRange");
 }
 
 // parity: notify:OnMultiEvent, notify:OnSolarSystemLPChange, notify:OnVictoryPointStateUpdated
@@ -337,7 +351,7 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
             PyRep::Integer(0),
         ])])]
     );
-    assert!(ctx.drain_notifications_for_char(PILOT_A).iter().any(|n| n.event == "OnMultiEvent"));
+    assert!(ctx.drain_notifications_for_char(PILOT_A).iter().all(|n| n.event != "OnMultiEvent"));
 
     // RemoveTarget while locked -> PILOT_B receives otherlost; locker receives lost
     rpc(&ctx, &mut sess_a, "dogmaIM", "RemoveTarget", &[PyRep::Integer(ship_b)]).await.expect("RemoveTarget");
@@ -425,20 +439,29 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
     assert_eq!(lp_ev.id_type, "solarsystemid");
     assert_eq!(lp_ev.args, vec![PyRep::Integer(0), PyRep::Integer(1_500)]);
 
-    // 7. OnVictoryPointStateUpdated: live FW complex capture via RPCs + clock advance
+    // 7. OnVictoryPointStateUpdated: live FW complex capture via RPCs + guard combat + clock advance
     let fw_ctx = new_ctx();
     let (_enemy_sys, warzone_sys, _cmd_sys, _rear_sys) =
         crate::fw_warzone_insurgency_closure::setup_warzone_chain(&fw_ctx);
+    let fw_ship = 960_000_109_i64;
     fw_ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
             ch.corporation_id = 1_000_181;
             ch.station_id = None;
             ch.solar_system_id = warzone_sys;
         }
+        for (i, flg) in [InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2].into_iter().enumerate() {
+            let gid = 960_000_120 + (i as i64) * 2;
+            snap.items.insert(gid, make_item(gid, 3074, PILOT_A, fw_ship, flg, 1, true));
+            snap.items.insert(gid + 1, make_item(gid + 1, 12_625, PILOT_A, fw_ship, flg, 500, false));
+        }
+        for &(tid, lvl) in &[(3300_u32, 5), (3301_u32, 5), (3311_u32, 5), (11_082_u32, 5)] {
+            snap.skills.entry(PILOT_A).or_default().insert(tid, TrainedSkillRecord { type_id: tid, level: lvl, skill_points: 256_000.0 });
+        }
     });
-    let mut sess_fw = login_in_space(&fw_ctx, 9_619, "demo", "demo-secret", PILOT_A, 960_000_109, 587, warzone_sys, DVec3::ZERO).await;
+    let mut sess_fw = login_in_space(&fw_ctx, 9_619, "demo", "demo-secret", PILOT_A, fw_ship, 587, warzone_sys, DVec3::ZERO).await;
     sess_fw.role |= ROLE_GM_DEFAULT;
-    let _ = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
+    let wz_beyonce = fw_ctx.bind_object(&sess_fw, "beyonce", i64::from(warzone_sys)).unwrap();
     rpc(&fw_ctx, &mut sess_fw, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(500_004)])
         .await
         .expect("CreateMyDirectEnlistment");
@@ -454,18 +477,23 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
             .expect("Novice complex in frontline system")
     });
     let wz_space = fw_ctx.systems.get_or_spawn(warzone_sys);
-    let novice_pos = wz_space.get_ball_snapshot(novice_gate).await.unwrap().unwrap().1.position;
-    if let Ok(Some((_, mut sb))) = wz_space.get_ball_snapshot(960_000_109).await {
-        sb.position = novice_pos + DVec3::new(500.0, 0.0, 0.0);
-        let _ = wz_space.spawn_ball(sb).await;
+    fw_ctx.dispatch_rpc(&mut sess_fw, "beyonce", Some(wz_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(novice_gate), PyRep::Real(0.0)], &HashMap::new(), None).await.expect("CmdWarpToStuff novice_gate");
+    for _ in 0..4 {
+        wz_space.step_manual(15.0).await.unwrap();
     }
-    let _ = wz_space.remove_ball(500_000_000 + novice_gate).await;
-    fw_ctx.db.with_mut_snapshot(|s| {
-        s.fw_runtime.complex_guards_cleared.insert(novice_gate, true);
-    });
-    let _ = fw_ctx.drain_notifications_for_char(PILOT_A);
     let _ = rpc(&fw_ctx, &mut sess_fw, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(novice_gate)]).await.expect("ActivateAccelerationGate");
-    wz_space.step_manual(30.0).await.unwrap();
+    let guard_id = 500_000_000 + novice_gate;
+    rpc(&fw_ctx, &mut sess_fw, "dogmaIM", "AddTarget", &[PyRep::Integer(guard_id)]).await.expect("AddTarget guard");
+    wz_space.step_manual(5.0).await.unwrap();
+    for gid in [960_000_120_i64, 960_000_122, 960_000_124] {
+        rpc(&fw_ctx, &mut sess_fw, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("projectileFired".into()), PyRep::Integer(guard_id), PyRep::Integer(1)]).await.expect("Activate gun on guard");
+    }
+    for _ in 0..90 {
+        if wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none() { break; }
+        wz_space.step_manual(1.0).await.unwrap();
+    }
+    assert!(wz_space.get_ball_snapshot(guard_id).await.unwrap().is_none(), "guard NPC destroyed via live combat");
+    let _ = fw_ctx.drain_notifications_for_char(PILOT_A);
     eve_server::services::fw_gameplay::tick_fw_gameplay(&fw_ctx, fw_ctx.now_unix()).await;
     for _ in 0..6 {
         rpc(&fw_ctx, &mut sess_fw, "timeControl", "AdvanceClock", &[PyRep::Integer(150)]).await.expect("AdvanceClock 150");
@@ -502,6 +530,7 @@ async fn notify_b30_crimewatch_timers_and_ship_death() {
     sess_b.role |= ROLE_GM_DEFAULT;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(gun_a, make_item(gun_a, 2873, PILOT_A, ship_a, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(960_000_212, make_item(960_000_212, 178, PILOT_A, ship_a, InventoryFlag::HiSlot0, 500, false));
         for &(tid, lvl) in &[(3300_u32, 5), (3301_u32, 5), (3311_u32, 5)] {
             snap.skills.entry(PILOT_A).or_default().insert(tid, TrainedSkillRecord { type_id: tid, level: lvl, skill_points: 256_000.0 });
         }
@@ -540,6 +569,17 @@ async fn notify_b30_crimewatch_timers_and_ship_death() {
     let c_cd = tick_notifs.iter().find(|n| n.event == "OnCriminalTimerUpdate").expect("OnCriminalTimerUpdate 303");
     assert_eq!(c_cd.args, vec![PyRep::Integer(303), PyRep::Integer(expected_ft(t0 + 900))]);
 
+    // Advance past t0 + 600 -> 900s PvP timer must stay 202 (no 202 -> 201 regression) in both notifications and GetClientStates
+    rpc(&ctx, &mut sess_a, "timeControl", "AdvanceClock", &[PyRep::Integer(596)]).await.expect("AdvanceClock to t0+601");
+    let mid_notifs = ctx.drain_notifications_for_char(PILOT_A);
+    assert!(mid_notifs.iter().all(|n| n.event != "OnPvpTimerUpdate" || n.args[0] == PyRep::Integer(202)));
+    let cw_states = rpc(&ctx, &mut sess_a, "crimewatch", "GetClientStates", &[]).await.expect("GetClientStates at t0+601");
+    if let PyRep::Tuple(outer) = &cw_states {
+        if let PyRep::Tuple(timers) = &outer[0] {
+            assert_eq!(timers[1], PyRep::Tuple(vec![PyRep::Integer(202), PyRep::Integer(expected_ft(t0 + 900))]));
+        }
+    }
+
     // Low-sec suspect via SetSafetyLevel(1) + Activate -> 302 -> AdvanceClock -> 304 + suspects list
     let (low_sys, ship_c, gun_c) = (30_002_537_u32, 960_000_203_i64, 960_000_213_i64);
     let uid_c = ctx.db.provision_player_account("b30_crim_c", "b30_crim_pass");
@@ -551,6 +591,7 @@ async fn notify_b30_crimewatch_timers_and_ship_death() {
     sess_b2.role |= ROLE_GM_DEFAULT;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(gun_c, make_item(gun_c, 2873, pilot_c, ship_c, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(960_000_214, make_item(960_000_214, 178, pilot_c, ship_c, InventoryFlag::HiSlot0, 500, false));
         for &(tid, lvl) in &[(3300_u32, 5), (3301_u32, 5), (3311_u32, 5)] {
             snap.skills.entry(pilot_c).or_default().insert(tid, TrainedSkillRecord { type_id: tid, level: lvl, skill_points: 256_000.0 });
         }

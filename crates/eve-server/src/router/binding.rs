@@ -1057,7 +1057,6 @@ impl ServerContext {
                 }
                 let _ = notify_tx_lock.send((rcpt_char, notif));
             };
-            enqueue_target_ev(char_id, None, "add", target_id);
             let target_owner_info: Option<(i64, Option<u64>, i64)> = db_lock.with_snapshot(|s| {
                 let target_char = s.items.get(&target_id).map(|i| i.owner_id).filter(|oid| s.characters.contains_key(oid))?;
                 if target_char == char_id {

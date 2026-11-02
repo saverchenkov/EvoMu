@@ -1118,33 +1118,14 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     let locks_after = sys.get_target_locks(ship_id).await.expect("get_target_locks");
     assert!(locks_after[0].locked);
 
-    // `OnMultiEvent([(('OnTarget', 'add', targetID, reason), groupKey)])`: the V24 client's
-    // `Godma.OnMultiEvent` derives `OnTargets`; the derived name is never sent by the server.
+    // Locker receives `DoDestinyUpdate` `OnTarget` `"add"` without duplicate standalone `OnMultiEvent`.
     let mut completed_notes: Vec<(String, Vec<PyRep>)> = ctx
         .drain_notifications_for_char(90_000_001)
         .into_iter()
         .map(|n| (n.event, n.args))
         .collect();
     completed_notes.extend(sess.drain_notifications());
-    let multi = completed_notes
-        .iter()
-        .find(|(n, _)| n == "OnMultiEvent")
-        .expect("OnMultiEvent carrying OnTarget");
-    let Some(PyRep::List(events)) = multi.1.first() else {
-        panic!("OnMultiEvent(events) list expected");
-    };
-    let PyRep::Tuple(entry) = &events[0] else { panic!("(event, key) tuple expected") };
-    assert_eq!(entry.len(), 2);
-    assert_eq!(
-        entry[0],
-        PyRep::Tuple(vec![
-            PyRep::String("OnTarget".into()),
-            PyRep::String("add".into()),
-            PyRep::Integer(near_target_id),
-            PyRep::String(String::new()),
-        ])
-    );
-    assert!(completed_notes.iter().all(|(n, _)| n != "OnTargets"));
+    assert!(completed_notes.iter().all(|(n, _)| n != "OnMultiEvent" && n != "OnTargets"));
 
     // 4. RemoveTarget & ClearTargets
     let _ = sess.drain_notifications();

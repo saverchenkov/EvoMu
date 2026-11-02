@@ -286,7 +286,7 @@ pub(crate) fn can_character_access_ship_bay_snap(
 
 
 
-fn resolve_corp_container_log_target(
+pub(crate) fn resolve_corp_container_log_target(
     snap: &eve_db::WorldStateSnapshot,
     container_id: i64,
 ) -> Option<(i64, i32, i64, String)> {
@@ -890,70 +890,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "SetPassword") | ("invbroker", "ALSCConfigSet") | ("invbroker", "ConfigureALSC") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let kw_old = kwargs.get("oldPassword").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(ToString::to_string);
-            let old_at = |i: usize| args.get(i).and_then(|a| a.as_str()).filter(|s| !s.is_empty()).map(ToString::to_string).or_else(|| kw_old.clone());
-            let (container_id, which, password, old_password) = if let Some(b) = bound_entry {
-                if let Some(w) = args.first().and_then(|a| a.as_i64()) {
-                    (b.object_id, w, args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string(), old_at(2))
-                } else {
-                    (b.object_id, kwargs.get("which").and_then(|v| v.as_i64()).unwrap_or(1), args.first().and_then(|a| a.as_str()).or_else(|| kwargs.get("password").and_then(|v| v.as_str())).unwrap_or("").to_string(), old_at(1))
-                }
-            } else if let Some(w) = args.get(1).and_then(|a| a.as_i64()) {
-                (args.first().and_then(|a| a.as_i64()).unwrap_or(0), w, args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(), old_at(3))
-            } else {
-                (args.first().and_then(|a| a.as_i64()).unwrap_or(0), kwargs.get("which").and_then(|v| v.as_i64()).unwrap_or(1), args.get(1).and_then(|a| a.as_str()).or_else(|| kwargs.get("password").and_then(|v| v.as_str())).unwrap_or("").to_string(), old_at(2))
-            };
-            let corp_id = session.corporation_id.unwrap_or(0);
-            let cont_res = ctx.db.with_snapshot(|snap| {
-                let item = snap.items.get(&container_id).ok_or_else(|| BridgeRpcError { code: "ItemNotFound".into(), message: format!("Secure container {container_id} not found or not owned") })?;
-                if item.owner_id != char_id {
-                    let is_ceo = snap.corporations.get(&corp_id).map(|c| c.ceo_id == char_id).unwrap_or(false);
-                    if corp_id == 0 || item.owner_id != corp_id {
-                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Secure container {container_id} not found or not owned") });
-                    }
-                    let eff_role = session.corp_role | snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(0);
-                    if !is_ceo && (eff_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG)) == 0 {
-                        return Err(BridgeRpcError { code: "CorpRoleRequired".into(), message: "Corporation role required to configure corp container password".into() });
-                    }
-                }
-                let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
-                if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
-                    return Err(BridgeRpcError { code: "ColocationRequired".into(), message: "Character must be colocated with container to configure password".into() });
-                }
-                Ok((item.type_id, ctx.sde.types.get(&item.type_id).map(|t| t.group_id).unwrap_or(0)))
-            });
-            let (tid, grp_id) = match cont_res { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if matches!(grp_id, 12 | 649) {
-                return Some(Err(BridgeRpcError { code: "ContainerDoesNotSupportPassword".into(), message: format!("Container {container_id} (group {grp_id}) does not support passwords") }));
-            }
-            if let Some(existing_pw) = read_container_ship_state(ctx).get_container_password(container_id, which).filter(|p| !p.is_empty()) {
-                if old_password.as_deref() != Some(existing_pw) {
-                    return Some(Err(BridgeRpcError { code: "InvalidPassword".into(), message: "Incorrect old container password".into() }));
-                }
-            }
-            let now_unix = ctx.now_unix_secs();
-            let pw_type_str = if which == 2 { "config" } else { "general" };
-            ctx.db.with_mut_snapshot(|snap| {
-                write_container_ship_state_snap(snap, |st| {
-                    st.set_container_password(container_id, which, password.clone());
-                    if which != 2 {
-                        st.unlocked_containers.retain(|&(a, b)| a != container_id && b != container_id);
-                        if !password.is_empty() { st.unlocked_containers.insert((container_id, char_id)); }
-                    }
-                    st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry { timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionSetPassword".into(), item_id: container_id, item_type_id: tid, quantity: 1 });
-                });
-                if let Some((corp_id, _, loc_id, loc_flag)) = resolve_corp_container_log_target(snap, container_id) {
-                    snap.corp_container_logs.entry(corp_id).or_default().push(eve_db::CorpContainerLogEntry {
-                        logged_at_unix: now_unix, container_id, container_type_id: tid as i32, character_id: char_id,
-                        location_id: loc_id, location_flag: loc_flag, action: "set_password".into(), password_type: Some(pw_type_str.into()),
-                        type_id: None, quantity: None, old_config_bitmask: None, new_config_bitmask: None,
-                    });
-                }
-            });
-            if method == "SetPassword" { crate::services::notify_emitters_b30::emit_password_changed(ctx, char_id, which, container_id, tid); }
-            crate::services::notify_emitters_b30::emit_invalidate_cache_for_locations(ctx, crate::router::NotificationTarget::Character(char_id), &[container_id]);
-            Some(Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("passwordSet", PyRep::Bool(!password.is_empty()))])))
+            Some(crate::services::notify_emitters_b30::handle_set_password(ctx, session, bound_entry, method, args, kwargs).await)
         }
 
         ("invbroker", "ALSCConfigGet") => {

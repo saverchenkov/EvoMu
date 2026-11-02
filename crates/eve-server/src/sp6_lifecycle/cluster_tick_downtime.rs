@@ -48,9 +48,16 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
         // Despawn surviving mission NPCs and reset uncompleted ("Accepted") missions (`feat:lifecycle.mission-downtime-respawn`)
         for mission in snap.active_missions.values_mut() {
             if mission.state == "Accepted" {
-                let target_count = (mission.spawned_npc_ball_ids.len() as u32)
-                    .max(mission.npcs_remaining)
-                    .max(4);
+                let mkey = format!("{}:{}", mission.character_id, mission.mission_id);
+                let target_count = st
+                    .mission_initial_npc_counts
+                    .get(&mkey)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        (mission.spawned_npc_ball_ids.len() as u32)
+                            .max(mission.npcs_remaining)
+                            .max(4)
+                    });
                 for &old_bid in &mission.spawned_npc_ball_ids {
                     removed_mission_npcs.push((mission.solar_system_id, old_bid));
                 }
@@ -117,7 +124,11 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             }
             st.missions_awaiting_downtime_respawn
                 .retain(|&k| k != (cid, aid));
-            let wave_count = mission.npcs_remaining.max(4);
+            let wave_count = st
+                .mission_initial_npc_counts
+                .get(&format!("{cid}:{}", mission.mission_id))
+                .copied()
+                .unwrap_or_else(|| mission.npcs_remaining.max(4));
             mission.npcs_remaining = wave_count;
             mission.current_room_id = 1;
             mission.spawned_npc_ball_ids.clear();
