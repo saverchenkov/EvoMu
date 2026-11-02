@@ -1173,7 +1173,9 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         _ => false,
     });
     if crossed_downtime {
-        let _ = crate::services::wallet_serverops::run_daily_downtime_and_jobs(ctx);
+        let _ = crate::services::serverops_cluster::start_daily_downtime_window(ctx);
+    } else {
+        let _ = crate::services::serverops_cluster::maybe_complete_scheduled_downtime_restart(ctx, now_unix);
     }
 
     on_advance_secs(ctx, now_unix, 0);
@@ -1348,7 +1350,8 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
             crate::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(ctx, sys_id).await;
             if let Some(mgr) = ctx.npc_spawns.write().unwrap_or_else(|e| e.into_inner()).get_mut(&sys_id) {
                 let tick = handle.ballpark.read().map(|b| b.current_tick).unwrap_or(0);
-                mgr.step_ai_sync(ctx, sys_id, tick, 1.0);
+                let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, sys_id);
+                mgr.step_ai_sync(ctx, sys_id, tick, 1.0 * tidi);
             }
         }
         if (32_000_000..=32_999_999).contains(&sys_id) {

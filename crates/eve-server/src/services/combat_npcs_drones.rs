@@ -147,7 +147,9 @@ pub async fn step_engaged_drones(ctx: &ServerContext, now_unix: u64) {
                 );
             }
         }
-        let next_ready = now_unix.saturating_add(d.cycle_duration_secs(ctx));
+        let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, d.solar_system_id).clamp(0.1, 1.0);
+        let scaled_cycle_secs = ((d.cycle_duration_secs(ctx) as f64) / tidi).round().max(1.0) as u64;
+        let next_ready = now_unix.saturating_add(scaled_cycle_secs);
         with_mut_combat_runtime(ctx, |rt| {
             rt.drone_next_ready_unix.insert(d.ball_id, next_ready);
         });

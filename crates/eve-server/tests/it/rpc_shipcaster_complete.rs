@@ -273,6 +273,8 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
 
     // 2. Highsec deployment rejected; lowsec FW deployment + SDE material contributions build & link up to 3 pads
     place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, 30_000_142); // Jita (highsec)
+    let jita_handle = ctx.systems.get_or_spawn(30_000_142);
+    spawn_test_ship(&ctx, &jita_handle, char_id, ship_id, 601, DVec3::new(100_000.0, 0.0, 0.0)).await;
     let hs_cid = ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_001);
         snap.next_entity_id += 1;
@@ -291,6 +293,20 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
         );
         id
     });
+    assert_eq!(
+        rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::Integer(hs_cid), PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)])
+            .await
+            .expect_err("NaN coordinates must fail")
+            .code,
+        "InvalidCoordinates"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::Integer(hs_cid), PyRep::Real(900_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])
+            .await
+            .expect_err("Out-of-range coordinates must fail")
+            .code,
+        "OutOfRange"
+    );
     let hs_err = rpc(
         &ctx,
         &mut sess,
@@ -360,33 +376,25 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
         .iter()
         .any(|n| n.event == "OnShipcasterTargetStateChanged" && n.args.len() == 1));
 
-    // 3. Disrupt pad #1 -> unlinks pad #1, emits OnShipcasterTargetStateChanged, and allows pad #4 to link!
+    // 3. Destroy pad #1 via live combat ball destruction -> unlinks/destroys pad #1 and auto-links pad #4!
     let first_pad_id = kv_i64(&built_pads[0], "itemID");
     place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, lowsec_systems[0]);
     let _ = ctx.drain_notifications_for_char(char_id);
-    let disrupted_pad = eve_server::services::shipcaster_ops::disrupt_or_destroy_fw_landing_pad(
-        &ctx,
-        first_pad_id,
-        false,
-    )
-    .await
-    .expect("disrupt_or_destroy_fw_landing_pad");
-    let disrupted_rep = disrupted_pad.to_keyval();
-    assert!(
-        kv_bool(&disrupted_rep, "isDisrupted")
-            && !kv_bool(&disrupted_rep, "isLinked")
-            && !kv_bool(&disrupted_rep, "canBeLinked")
-    );
+    let ls0_handle = ctx.systems.get_or_spawn(lowsec_systems[0]);
+    let _ = ls0_handle
+        .apply_damage(
+            first_pad_id,
+            eve_destiny::DamageVector { em: 50_000_000.0, thermal: 50_000_000.0, kinetic: 50_000_000.0, explosive: 50_000_000.0 },
+        )
+        .await
+        .expect("apply lethal damage to pad #1");
+    let _ = ls0_handle.step_manual(1.0).await.expect("step_manual destruction");
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     assert!(ctx
         .drain_notifications_for_char(char_id)
         .iter()
         .any(|n| n.event == "OnShipcasterTargetStateChanged"
             && n.args == vec![PyRep::Integer(first_pad_id)]));
-
-    let linked_fourth = eve_server::services::shipcaster_ops::link_fw_landing_pad(&ctx, fourth_pad_id)
-        .expect("4th built pad links once slot opens")
-        .to_keyval();
-    assert!(kv_bool(&linked_fourth, "isLinked"));
 
     let caldari_pads = rpc(
         &ctx,
@@ -400,7 +408,32 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
     let PyRep::List(caldari_list) = caldari_pads else {
         panic!("expected list");
     };
-    assert_eq!(caldari_list.len(), 4);
+    assert_eq!(caldari_list.len(), 3);
+    let fourth_after = caldari_list
+        .iter()
+        .find(|p| kv_i64(p, "itemID") == fourth_pad_id)
+        .expect("4th built pad present");
+    assert!(kv_bool(fourth_after, "isLinked"), "4th built pad must auto-link when pad #1 is destroyed");
+
+    // 4. Multi-stack partial deposit + batch failedToMove reporting (`RF-04`)
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, lowsec_systems[0]);
+    let pos0 = DVec3::new(120_000.0, 0.0, 0.0);
+    spawn_test_ship(&ctx, &ls0_handle, char_id, ship_id, 601, pos0).await;
+    let mat_tid = *ctx.sde.shipcaster_sde_components().unwrap().under_construction[&75933].input_items.keys().next().unwrap();
+    let (c5, s_a, s_b) = ctx.db.with_mut_snapshot(|snap| {
+        let mut alloc = || { snap.next_entity_id += 1; snap.next_entity_id };
+        let (c5, s_a, s_b) = (alloc(), alloc(), alloc());
+        for (id, tid, qty) in [(c5, 75933_u32, 1_i32), (s_a, mat_tid, 30), (s_b, mat_tid, 30)] {
+            snap.items.insert(id, InventoryItemRecord { item_id: id, type_id: tid, owner_id: char_id, location_id: ship_id, flag: InventoryFlag::Cargo, quantity: qty, ..Default::default() });
+        }
+        (c5, s_a, s_b)
+    });
+    let PyRep::List(l5) = rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::Integer(c5)]).await.expect("launch #5") else { panic!() };
+    let pad5_id = kv_i64(&l5[0], "itemID");
+    let dep = rpc(&ctx, &mut sess, "beyonce", "CallComponentFromClient", &[PyRep::Integer(pad5_id), PyRep::String("underConstruction".into()), PyRep::String("DepositItemsFromShip".into()), PyRep::Dict(vec![(PyRep::Integer(mat_tid as i64), PyRep::Integer(45)), (PyRep::Integer(75924), PyRep::Integer(10))])]).await.expect("DepositItemsFromShip");
+    assert_eq!(dep, PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Dict(vec![(PyRep::Integer(75924), PyRep::Integer(10))])]));
+    let rem_total: i32 = ctx.db.with_snapshot(|s| [s_a, s_b].iter().filter_map(|id| s.items.get(id)).map(|i| i.quantity).sum());
+    assert_eq!(rem_total, 15, "Multi-stack partial deposit of 45 from 30+30 must leave 15");
 }
 
 #[tokio::test]

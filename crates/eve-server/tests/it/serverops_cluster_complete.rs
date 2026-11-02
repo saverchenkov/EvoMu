@@ -20,9 +20,8 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::serverops_cluster::{
-    assign_or_reinforce_system_node, complete_cluster_downtime_restart, get_system_tidi_factor,
-    get_system_worker_node, get_worker_node_load, initiate_cluster_downtime_shutdown,
-    rebalance_overloaded_worker_nodes, recompute_cluster_node_tidi,
+    assign_or_reinforce_system_node, get_system_tidi_factor, get_system_worker_node,
+    get_worker_node_load, rebalance_overloaded_worker_nodes, recompute_cluster_node_tidi,
     reinforce_solar_system_for_fleet_fight, run_daily_downtime_and_jobs,
     set_cluster_node_load_threshold, set_system_tidi_factor, step_downtime_countdown_warnings,
 };
@@ -332,13 +331,37 @@ async fn test_downtime_countdown_warnings_session_disconnect_login_rejection_and
         assert_eq!(w.args[2], PyRep::Integer(15));
     }
 
-    // Advance 5m to 11:00 UTC and initiate cluster downtime shutdown
+    // Advance 5m to 11:00 UTC: GM TCP session stays connected, non-GM session is disconnected,
+    // and scheduled 11:00-11:15 UTC downtime window keeps shutdown_in_progress=true until 11:15 UTC.
+    let (gm_uid, gm_cid) = ctx.db.with_mut_snapshot(|snap| {
+        let uid = 99_901_u64;
+        let cid = 90_999_001_i64;
+        let mut acc = snap.accounts.get("demo").unwrap().clone();
+        acc.user_id = uid;
+        acc.username = "gm_ops".into();
+        acc.password_token = "gm-secret".into();
+        acc.role = eve_db::service_roles::ROLE_GM_MASK;
+        snap.accounts.insert("gm_ops".into(), acc);
+        let mut ch = snap.characters.get(&P1).unwrap().clone();
+        ch.character_id = cid;
+        ch.user_id = uid;
+        ch.name = "GM Ops".into();
+        snap.characters.insert(cid, ch);
+        (uid, cid)
+    });
+    let mut gm_sess = SessionState::new(19_029);
+    gm_sess.user_id = Some(gm_uid);
+    gm_sess.character_id = Some(gm_cid);
+    let _ = ctx.db.acquire_online_lock(gm_uid, gm_sess.session_id, Some(gm_cid), false, 0);
+    let (gm_closer_tx, mut gm_closer_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.register_session_closer(gm_sess.session_id, gm_closer_tx);
+
     ctx.advance_secs(5 * 60);
-    let disconnected = initiate_cluster_downtime_shutdown(&ctx);
-    assert!(disconnected >= 1);
-    assert!(ctx.is_shutting_down());
-    assert_eq!(ctx.db.online_session_count(), 0, "Active non-GM online sessions must be disconnected");
-    let close_msg = closer_rx.try_recv().expect("session_closers channel must receive shutdown close signal");
+    tick_background_cluster(&ctx).await;
+    assert!(ctx.is_shutting_down(), "11:00 UTC downtime window must persist across background ticks");
+    assert!(gm_closer_rx.try_recv().is_err(), "GM TCP session must NOT be disconnected by downtime");
+    assert_eq!(ctx.db.online_session_count(), 1, "Only GM online session remains");
+    let close_msg = closer_rx.try_recv().expect("non-GM session_closers channel must receive shutdown close signal");
     assert_eq!(close_msg.0, "ClusterShutdown");
 
     // Non-GM login AND character selection during active shutdown must fail with ClusterShuttingDown
@@ -357,12 +380,12 @@ async fn test_downtime_countdown_warnings_session_disconnect_login_rejection_and
         .expect_err("Non-GM Login during active cluster shutdown must fail");
     assert_eq!(login_err.code, "ClusterShuttingDown");
 
-    // Complete cluster restart -> pilots can authenticate and enter the cluster again
-    let epoch = complete_cluster_downtime_restart(&ctx);
-    assert!(epoch >= 1);
-    assert!(!ctx.is_shutting_down());
+    // Advance 15m to 11:15 UTC -> tick_background_cluster automatically completes cluster restart
+    ctx.advance_secs(15 * 60);
+    tick_background_cluster(&ctx).await;
+    assert!(!ctx.is_shutting_down(), "11:15 UTC tick must complete downtime restart");
     let _s1_reconnected = setup_pilot(&ctx, 19_023, "demo", "demo-secret", P1).await;
-    assert_eq!(ctx.db.online_session_count(), 1);
+    assert_eq!(ctx.db.online_session_count(), 2);
 }
 
 #[tokio::test]
@@ -449,6 +472,8 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
     // 2. Seed 24h market fills, 28d industry job, elevated military/industrial/strategic sov indices + ESS bank,
     //    expired mission decline cooldown + accepted mission, and an expired market order.
     let null_sov_sys: u32 = 30_004_759; // 1DQ1-A
+    let hub_sov_sys: u32 = 30_004_760;
+    let sov_hub_id: i64 = 950_777;
     let expired_oid = 889_001_i64;
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_transactions.push(MarketTransactionRecord {
@@ -523,6 +548,21 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
                 last_sov_claim_tick: 0,
             },
         );
+        snap.system_states.insert(hub_sov_sys, snap.system_states[&null_sov_sys].clone());
+        if let Some(hub_st) = snap.system_states.get_mut(&hub_sov_sys) {
+            hub_st.solar_system_id = hub_sov_sys;
+        }
+        snap.structures.insert(
+            sov_hub_id,
+            eve_db::UpwellStructureRecord {
+                structure_id: sov_hub_id, type_id: eve_server::services::sov_services::TYPE_SOVEREIGNTY_HUB,
+                owner_corp_id: 98_000_001, solar_system_id: hub_sov_sys, name: "ADM Rollover Sov Hub".into(),
+                position: [15_000.0, 0.0, 0.0], state: "ShieldVulnerable".into(), quantum_core_installed: true,
+                fuel_blocks: 1_000, shield_hp: 1.0, armor_hp: 1.0, hull_hp: 1.0,
+                reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+            },
+        );
+        snap.sov_runtime.adm_vulnerability_windows.insert(sov_hub_id, (12 * 3_600, 14 * 3_600));
 
         snap.last_mission_decline_times.insert(P1, now - 5 * 3_600);
         snap.active_missions.insert(
@@ -625,6 +665,9 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         assert_eq!(sov.military_index, 3, "military_index must decay 4 -> 3");
         assert_eq!(sov.industrial_index, 2, "industrial_index must decay 3 -> 2");
         assert_eq!(sov.strategic_index, 2, "strategic_index without Sov Hub must decay 3 -> 2");
+        assert_eq!(snap.system_states[&hub_sov_sys].strategic_index, 3, "strategic_index with active Sov Hub stays 3");
+        let (vuln_start, vuln_end) = snap.sov_runtime.adm_vulnerability_windows[&sov_hub_id];
+        assert!(vuln_end - vuln_start > 7_200, "Sov Hub ADM decay must widen vulnerability window");
         assert_eq!(sov.ess_main_bank, IskCents::from_isk(700_000));
         assert_eq!(sov.ess_reserve_bank, IskCents::from_isk(500_000));
 

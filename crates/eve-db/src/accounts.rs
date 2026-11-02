@@ -943,6 +943,15 @@ impl WorldRepository {
         rt.online_sessions.len() as u32
     }
 
+    /// Returns `(user_id, session_id)` for all currently active online sessions (`feat:serverops.downtime`).
+    pub fn online_sessions_snapshot(&self) -> Vec<(u64, u64)> {
+        let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+        rt.online_sessions
+            .iter()
+            .map(|(&uid, rec)| (uid, rec.session_id))
+            .collect()
+    }
+
     /// Looks up `user_id` for `username` (`D-4`).
     pub fn find_user_id_by_username(&self, username: &str) -> Option<u64> {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());

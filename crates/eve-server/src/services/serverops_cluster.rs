@@ -25,6 +25,8 @@ struct PersistedDowntimeState {
     pub last_shutdown_epoch_day: Option<u64>,
     pub cluster_restart_epoch: u64,
     pub last_maintenance_unix: u64,
+    #[serde(default)]
+    pub downtime_until_unix: Option<u64>,
 }
 
 fn load_downtime_state(snap: &WorldStateSnapshot) -> PersistedDowntimeState {
@@ -560,23 +562,24 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
         cluster.termination_reason = Some("Daily cluster downtime".into());
     }
 
-    let (non_gm_users, non_gm_session_ids): (Vec<u64>, BTreeSet<u64>) = ctx.db.with_snapshot(|snap| {
-        let gm_uids: BTreeSet<u64> = snap
-            .accounts
+    let gm_uids: BTreeSet<u64> = ctx.db.with_snapshot(|snap| {
+        snap.accounts
             .values()
             .filter(|a| (a.role & eve_db::service_roles::ROLE_GM_MASK) != 0)
             .map(|a| a.user_id)
-            .collect();
-        let mut uids = Vec::new();
-        let mut sids = BTreeSet::new();
-        for (&uid, sess_rec) in &snap.sessions {
-            if !gm_uids.contains(&uid) {
-                uids.push(uid);
-                sids.insert(sess_rec.session_id);
-            }
-        }
-        (uids, sids)
+            .collect()
     });
+    let mut gm_session_ids = BTreeSet::new();
+    let mut non_gm_users = Vec::new();
+    let mut non_gm_session_ids = BTreeSet::new();
+    for (uid, sid) in ctx.db.online_sessions_snapshot() {
+        if gm_uids.contains(&uid) {
+            gm_session_ids.insert(sid);
+        } else {
+            non_gm_users.push(uid);
+            non_gm_session_ids.insert(sid);
+        }
+    }
 
     let closer_sids: Vec<u64> = ctx
         .session_closers
@@ -586,11 +589,14 @@ pub fn initiate_cluster_downtime_shutdown(ctx: &ServerContext) -> usize {
 
     let mut disconnected = BTreeSet::new();
     for sid in closer_sids {
+        if gm_session_ids.contains(&sid) {
+            continue;
+        }
         ctx.disconnect_session(sid, "ClusterShutdown", "Daily cluster downtime");
         disconnected.insert(sid);
     }
     for sid in &non_gm_session_ids {
-        ctx.release_session_bindings(*sid);
+        ctx.disconnect_session(*sid, "ClusterShutdown", "Daily cluster downtime");
         ctx.quasar_gateway.unsubscribe_session(*sid);
         disconnected.insert(*sid);
     }
@@ -615,6 +621,7 @@ pub fn complete_cluster_downtime_restart(ctx: &ServerContext) -> u64 {
         st.cluster_restart_epoch = st.cluster_restart_epoch.saturating_add(1);
         st.last_maintenance_unix = now;
         st.last_shutdown_epoch_day = Some(now / 86_400);
+        st.downtime_until_unix = None;
         let epoch = st.cluster_restart_epoch;
         save_downtime_state(snap, &st);
         epoch
@@ -748,6 +755,8 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
     crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
     let (npc_wrecks_cleaned, mission_npcs_respawned) =
         crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
+    let wormhole_sites_despawned =
+        super::wormhole_pve_escalations::process_wormhole_sites_on_downtime(ctx);
 
     // 1. Respawn fully depleted SDE ore belts and depleted ice belts in all active solar system actors
     let mut respawned_belt_asteroids = 0_i64;
@@ -881,15 +890,31 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
         }
 
-        // 5. Sovereignty Index Decay across ALL 3 indices (military, industrial, strategic) + ESS daily rollover
-        let sov_hub_systems: BTreeSet<u32> = snap
-            .structures
-            .values()
-            .filter(|s| s.type_id == super::sov_services::TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed")
-            .map(|s| s.solar_system_id)
-            .collect();
+        // 5. Sovereignty Index Decay across ALL 3 indices (military, industrial, strategic) + ADM vulnerability rollover + ESS daily rollover
+        let mut sov_hub_systems: BTreeSet<u32> = BTreeSet::new();
+        let mut sov_hubs_by_sys: HashMap<u32, Vec<(i64, u32)>> = HashMap::new();
+        for s in snap.structures.values() {
+            if s.type_id == super::sov_services::TYPE_SOVEREIGNTY_HUB && s.state != "Destroyed" {
+                sov_hub_systems.insert(s.solar_system_id);
+                if let Some((start_s, end_s)) = snap
+                    .sov_runtime
+                    .adm_vulnerability_windows
+                    .get(&s.structure_id)
+                    .or_else(|| snap.structure_vulnerability_windows.get(&s.structure_id))
+                    .copied()
+                {
+                    let dur_s = (end_s + 86_400 - (start_s % 86_400)) % 86_400;
+                    let center_hour = (((start_s + dur_s / 2) % 86_400) / 3_600) as u32;
+                    sov_hubs_by_sys
+                        .entry(s.solar_system_id)
+                        .or_default()
+                        .push((s.structure_id, center_hour));
+                }
+            }
+        }
         let mut sov_cnt = 0_i64;
         let mut ess_cnt = 0_i64;
+        let mut decayed_hubs: Vec<(i64, u32)> = Vec::new();
         let mut changed_sov: Vec<(u32, HashMap<String, i64>)> = Vec::new();
         for (&sys_id, sov) in snap.system_states.iter_mut() {
             let mut decayed_here = false;
@@ -924,6 +949,9 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
             if decayed_here {
                 sov_cnt += 1;
+                if let Some(hubs) = sov_hubs_by_sys.get(&sys_id) {
+                    decayed_hubs.extend(hubs.iter().copied());
+                }
                 changed_sov.push((
                     sys_id,
                     HashMap::from([
@@ -952,6 +980,14 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                     ess_cnt += 1;
                 }
             }
+        }
+
+        for (hub_id, center_hour) in decayed_hubs {
+            let _ = crate::services::sov_gameplay::sov_gameplay_entosis::apply_adm_scaled_vulnerability_window_in_snap(
+                snap,
+                hub_id,
+                center_hour,
+            );
         }
 
         // 6. Daily Mission Decline Cooldown Reset & LP Log Retention Sweep
@@ -1001,24 +1037,49 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
         ("evacuatedAbyssalPilots".into(), evacuated_abyssal),
         ("npcWrecksCleaned".into(), npc_wrecks_cleaned as i64),
         ("missionNpcsRespawned".into(), mission_npcs_respawned as i64),
+        ("wormholeSitesDespawned".into(), wormhole_sites_despawned as i64),
     ])
 }
 
-/// Executes an atomic 11:00 UTC cluster downtime & restart rollover (`tick_background_cluster`):
-/// emits `OnClusterShutdownInitiated`, disconnects live TCP transport sessions, runs all daily
-/// world-state maintenance jobs, and completes cluster restart (`feat:serverops.downtime`, `feat:serverops.daily-jobs`).
-pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> {
+/// Begins the scheduled `11:00–11:15 UTC` daily downtime window (`tick_background_cluster`):
+/// disconnects non-GM sessions, runs daily maintenance jobs, and keeps `shutdown_in_progress = true`
+/// until the 15-minute maintenance window completes (`feat:serverops.downtime`).
+pub fn start_daily_downtime_window(ctx: &ServerContext) -> HashMap<String, i64> {
     let now = ctx.now_unix();
-    emit_cluster_shutdown_initiated(ctx, now, DOWNTIME_DURATION_MINUTES);
-    let closer_sids: Vec<u64> = ctx
-        .session_closers
-        .read()
-        .map(|g| g.keys().copied().collect())
-        .unwrap_or_default();
-    let disconnected = closer_sids.len() as i64;
-    for sid in closer_sids {
-        ctx.disconnect_session(sid, "ClusterShutdown", "Daily cluster downtime");
+    let disconnected = initiate_cluster_downtime_shutdown(ctx) as i64;
+    let mut report = execute_daily_maintenance_jobs(ctx);
+    let until = now.saturating_add((DOWNTIME_DURATION_MINUTES as u64) * 60);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = load_downtime_state(snap);
+        st.downtime_until_unix = Some(until);
+        save_downtime_state(snap, &st);
+    });
+    report.insert("disconnectedSessions".into(), disconnected);
+    report
+}
+
+/// Completes a scheduled daily downtime window once `now_unix` reaches `downtime_until_unix`.
+pub fn maybe_complete_scheduled_downtime_restart(ctx: &ServerContext, now_unix: u64) -> Option<u64> {
+    if !ctx.is_shutting_down() {
+        return None;
     }
+    let due = ctx.db.with_snapshot(|snap| {
+        load_downtime_state(snap)
+            .downtime_until_unix
+            .is_some_and(|until| now_unix >= until)
+    });
+    if due {
+        Some(complete_cluster_downtime_restart(ctx))
+    } else {
+        None
+    }
+}
+
+/// Executes an atomic 11:00 UTC cluster downtime & restart rollover (`run_daily_downtime_and_jobs`):
+/// disconnects non-GM sessions, runs all daily world-state maintenance jobs, and completes cluster
+/// restart (`feat:serverops.downtime`, `feat:serverops.daily-jobs`).
+pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> {
+    let disconnected = initiate_cluster_downtime_shutdown(ctx) as i64;
     let mut report = execute_daily_maintenance_jobs(ctx);
     let restart_epoch = complete_cluster_downtime_restart(ctx) as i64;
     report.insert("disconnectedSessions".into(), disconnected);

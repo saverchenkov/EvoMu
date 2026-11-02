@@ -291,8 +291,27 @@ pub fn sde_launchers(sde: &SdeRegistry) -> Vec<LauncherRecord> {
             });
         }
     }
+    for (item_id, solar_system_id) in default_deathless_zarzakh_entry_beacons() {
+        out.push(LauncherRecord {
+            item_id,
+            type_id: 79018,
+            solar_system_id,
+            faction_id: 0,
+            linked_pad_ids: vec![104_000_030],
+            position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+        });
+    }
     out.sort_by_key(|l| l.faction_id);
     out
+}
+
+fn default_deathless_zarzakh_entry_beacons() -> [(i64, u32); 4] {
+    [
+        (105_000_011_i64, 30_002_086_u32), // Turnur
+        (105_000_012_i64, 30_002_538_u32), // Vard
+        (105_000_013_i64, 30_003_841_u32), // Alsavoinon
+        (105_000_014_i64, 30_045_338_u32), // Hikkoken
+    ]
 }
 
 /// Builds Rookie Starter Shipcaster launchers across all 12 `sde_schools` starter & career-agent
@@ -366,6 +385,28 @@ impl ClusterMiscRuntimeState {
                 st.sde_initialized = !st.launchers.is_empty() && !st.starter_launchers.is_empty();
             }
         }
+        if !st.launchers.iter().any(|l| l.item_id == 105_000_010) {
+            st.launchers.push(LauncherRecord {
+                item_id: 105_000_010,
+                type_id: 79018,
+                solar_system_id: 30_100_000,
+                faction_id: 500_029,
+                linked_pad_ids: vec![104_000_020, 104_000_021],
+                position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+            });
+        }
+        for (item_id, solar_system_id) in default_deathless_zarzakh_entry_beacons() {
+            if !st.launchers.iter().any(|l| l.item_id == item_id) {
+                st.launchers.push(LauncherRecord {
+                    item_id,
+                    type_id: 79018,
+                    solar_system_id,
+                    faction_id: 0,
+                    linked_pad_ids: vec![104_000_030],
+                    position: glam::DVec3::new(250_000.0, 0.0, 0.0),
+                });
+            }
+        }
         st
     }
 
@@ -373,8 +414,13 @@ impl ClusterMiscRuntimeState {
         if self.sde_initialized {
             return;
         }
-        if self.launchers.is_empty() {
-            self.launchers = sde_launchers(sde);
+        if !self.launchers.iter().any(|l| matches!(l.faction_id, 500_001..=500_004)) {
+            for l in sde_launchers(sde) {
+                if !self.launchers.iter().any(|existing| existing.item_id == l.item_id) {
+                    self.launchers.push(l);
+                }
+            }
+            self.launchers.sort_by_key(|l| l.faction_id);
         }
         if self.starter_launchers.is_empty() {
             self.starter_launchers = sde_starter_launchers(sde);
@@ -389,17 +435,30 @@ pub fn with_misc_state<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut ClusterMiscRuntimeState) -> R,
 ) -> R {
-    let mut guard = ctx
-        .cluster_misc_state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.ensure_sde_initialized(&ctx.sde);
+    with_misc_state_arc(&ctx.cluster_misc_state, &ctx.sde, f)
+}
+
+pub(crate) fn with_misc_state_arc<R>(
+    misc: &std::sync::Arc<std::sync::Mutex<ClusterMiscRuntimeState>>,
+    sde: &SdeRegistry,
+    f: impl FnOnce(&mut ClusterMiscRuntimeState) -> R,
+) -> R {
+    let mut guard = misc.lock().unwrap_or_else(|e| e.into_inner());
+    guard.ensure_sde_initialized(sde);
     f(&mut guard)
 }
 
 /// Persists the character settings and cluster travel state to SQLite via `service_state_blobs`.
 pub(crate) fn persist_misc_state(ctx: &ServerContext) {
-    let p = with_misc_state(ctx, |st| PersistedClusterMiscState {
+    persist_misc_state_arc(&ctx.cluster_misc_state, &ctx.sde, &ctx.db);
+}
+
+pub(crate) fn persist_misc_state_arc(
+    misc: &std::sync::Arc<std::sync::Mutex<ClusterMiscRuntimeState>>,
+    sde: &SdeRegistry,
+    db: &WorldRepository,
+) {
+    let p = with_misc_state_arc(misc, sde, |st| PersistedClusterMiscState {
         persisted_shipcaster_state: st.sde_initialized,
         char_settings: st.char_settings.clone(),
         landing_pads: st.landing_pads.clone(),
@@ -414,7 +473,7 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
         zarzakh_horizon_siege: st.zarzakh_horizon_siege.clone(),
     });
     if let Ok(json) = serde_json::to_string(&p) {
-        let _ = ctx.db.try_with_mut_snapshot(|snap| {
+        let _ = db.try_with_mut_snapshot(|snap| {
             snap.service_state_blobs
                 .insert(MISC_STATE_BLOB_KEY.to_string(), json);
             Ok::<(), String>(())
@@ -478,10 +537,13 @@ pub fn populate_shipcaster_balls_with_sde(
         .unwrap_or_else(default_pirate_fob_pads);
     for l in launchers {
         if l.solar_system_id == solar_system_id {
-            let (group_id, category_id) = sde
-                .and_then(|s| s.types.get(&l.type_id))
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((4549, 2));
+            let (group_id, category_id) = if l.type_id == 79_018 {
+                (4549, 65)
+            } else {
+                sde.and_then(|s| s.types.get(&l.type_id))
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((4549, 2))
+            };
             ballpark.add_static_ball_with_meta(
                 eve_destiny::Ball {
                     id: l.item_id,
@@ -544,10 +606,13 @@ pub fn populate_shipcaster_balls_with_sde(
     }
     for p in pads {
         if p.solar_system_id == solar_system_id {
-            let (group_id, category_id) = sde
-                .and_then(|s| s.types.get(&p.type_id))
-                .map(|t| (t.group_id, t.category_id))
-                .unwrap_or((4547, 2));
+            let (group_id, category_id) = if p.type_id == 79_018 {
+                (4549, 65)
+            } else {
+                sde.and_then(|s| s.types.get(&p.type_id))
+                    .map(|t| (t.group_id, t.category_id))
+                    .unwrap_or((4547, 2))
+            };
             ballpark.add_static_ball_with_meta(
                 eve_destiny::Ball {
                     id: p.item_id,

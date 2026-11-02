@@ -1166,7 +1166,7 @@ impl ServerContext {
             esi_state,
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(Default::default()),
-            cluster_misc_state: std::sync::Mutex::new(Default::default()),
+            cluster_misc_state: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             cluster_state,
             global_config_values: std::sync::RwLock::new(std::collections::HashMap::new()),
             alert_telemetry: std::sync::Mutex::new(Default::default()),

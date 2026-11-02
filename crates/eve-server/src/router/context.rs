@@ -84,7 +84,7 @@ pub struct ServerContext {
     /// Per-world social state not persisted in `WorldRepository` (mailing lists, calendar, chat moderation).
     pub(crate) social_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState>,
     /// Per-world cluster/macho/misc service state (`cluster_macho_misc_services`).
-    pub(crate) cluster_misc_state: std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>,
+    pub(crate) cluster_misc_state: Arc<std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>>,
     pub cluster_state: Arc<RwLock<crate::services::macho_cluster_mgmt::MachoClusterState>>,
     pub global_config_values: RwLock<HashMap<String, eve_proto::PyRep>>,
     pub alert_telemetry: std::sync::Mutex<crate::services::client_login::AlertTelemetryState>,
@@ -167,8 +167,13 @@ impl ServerContext {
             notify_tx.clone(),
             Arc::downgrade(&combat_ephemeral),
         );
+        let cluster_misc_arc = Arc::new(std::sync::Mutex::new(
+            crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db),
+        ));
+        let misc_w = Arc::downgrade(&cluster_misc_arc);
         systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
             let gww = gw_w.clone();
+            let mw = misc_w.clone();
             let (sw, dw, sdw, rw, pw, tx, cew) = (
                 sys_w.clone(),
                 db_w.clone(),
@@ -191,6 +196,9 @@ impl ServerContext {
                         crate::services::pve_special_sites::notify_special_site_account_changes(&db, &pws, &tx, &acct_changes);
                     }
                     crate::services::agents_missions::on_mission_npc_destroyed_core(&db, sys_id, npc_id, killer_opt);
+                    if let Some(misc) = mw.upgrade() {
+                        crate::services::shipcaster_ops::on_landing_pad_ball_destroyed_core(&misc, &sys, &db, &sde, pw.upgrade().as_deref(), &tx, npc_id).await;
+                    }
                     if let Some(ce) = cew.upgrade() {
                         crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(&sys, &db, &sde, &ce, sys_id, npc_id, killer_opt).await;
                     }
@@ -242,6 +250,7 @@ impl ServerContext {
                 for (tid, killer_opt) in destroyed_balls {
                     crate::services::fw_gameplay::on_space_entity_destroyed(&ctx, sys_id, killer_opt, tid, 0).await;
                     crate::services::notify_emitters_batch8::on_deployable_deactivated(&ctx, None, tid);
+                    crate::services::shipcaster_ops::on_landing_pad_ball_destroyed(&ctx, tid).await;
                     let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
                     if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
@@ -279,7 +288,7 @@ impl ServerContext {
             });
         }
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db));
-        let cluster_misc = crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
+        let _cluster_misc = crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
         let persisted_global_config: HashMap<String, eve_proto::PyRep> = db.with_snapshot(|snap| {
             snap.service_state_blobs.get("macho_global_config").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
         });
@@ -330,7 +339,7 @@ impl ServerContext {
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
-            cluster_misc_state: std::sync::Mutex::new(cluster_misc),
+            cluster_misc_state: cluster_misc_arc,
             cluster_state: Arc::new(RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
             global_config_values: RwLock::new(persisted_global_config),
             alert_telemetry: std::sync::Mutex::new(crate::services::client_login::AlertTelemetryState::default()),

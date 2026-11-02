@@ -15,6 +15,8 @@
 
 #![forbid(unsafe_code)]
 
+use eve_db::InventoryFlag;
+
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::cluster_macho_misc_services::{
     LandingPadRecord, LauncherRecord, persist_misc_state, with_misc_state,
@@ -207,10 +209,15 @@ pub async fn deploy_fw_beacon_constructor(
             .items
             .get(&constructor_item_id)
             .ok_or_else(|| rpc_err("ItemNotFound", "Beacon constructor item not found"))?;
-        if item.location_id != ship_id || item.quantity == 0 {
+        if item.location_id != ship_id
+            || item.owner_id != char_id
+            || item.flag != InventoryFlag::Cargo
+            || snap.is_item_locked_in_contract_or_job(item.item_id)
+            || item.quantity == 0
+        {
             return Err(rpc_err(
                 "ItemNotInCargo",
-                "Beacon constructor must be inside the active ship's hold",
+                "Beacon constructor must be an unlocked item in the active ship's cargo hold",
             ));
         }
         let spec = comps.under_construction.get(&item.type_id).ok_or_else(|| {
@@ -287,6 +294,18 @@ pub async fn contribute_fw_beacon_material(
     cargo_item_id: i64,
     quantity: u32,
 ) -> Result<LandingPadRecord, BridgeRpcError> {
+    contribute_fw_beacon_material_inner(ctx, session, pad_item_id, cargo_item_id, quantity)
+        .await
+        .map(|(pad, _)| pad)
+}
+
+async fn contribute_fw_beacon_material_inner(
+    ctx: &ServerContext,
+    session: &SessionState,
+    pad_item_id: i64,
+    cargo_item_id: i64,
+    quantity: u32,
+) -> Result<(LandingPadRecord, u32), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if quantity == 0 {
         return Err(rpc_err("InvalidArguments", "Contribution quantity must be positive"));
@@ -340,8 +359,13 @@ pub async fn contribute_fw_beacon_material(
             .items
             .get(&cargo_item_id)
             .ok_or_else(|| rpc_err("ItemNotFound", "Material stack not found in inventory"))?;
-        if item.location_id != ship_id || item.quantity == 0 {
-            return Err(rpc_err("ItemNotInCargo", "Material stack must be in the active ship's hold"));
+        if item.location_id != ship_id
+            || item.owner_id != char_id
+            || item.flag != InventoryFlag::Cargo
+            || snap.is_item_locked_in_contract_or_job(item.item_id)
+            || item.quantity == 0
+        {
+            return Err(rpc_err("ItemNotInCargo", "Material stack must be an unlocked item in the active ship's cargo hold"));
         }
         let mat_tid = item.type_id;
         let Some(&req_qty) = pad_snapshot.required_materials.get(&mat_tid) else {
@@ -380,15 +404,7 @@ pub async fn contribute_fw_beacon_material(
         Ok::<(u32, u32), BridgeRpcError>((mat_tid, take))
     })?;
 
-    let now_unix = ctx.now_unix();
-    let (updated_pad, completed_and_linked_launcher) = with_misc_state(ctx, |st| {
-        let mut launcher_notify: Option<(u32, i64)> = None;
-        let active_linked_count = st
-            .launchers
-            .iter()
-            .find(|l| l.faction_id == pad_snapshot.faction_id)
-            .map(|l| l.linked_pad_ids.len())
-            .unwrap_or(0);
+    let newly_built = with_misc_state(ctx, |st| {
         let pad_mut = st
             .landing_pads
             .iter_mut()
@@ -406,36 +422,31 @@ pub async fn contribute_fw_beacon_material(
             if pad_mut.built_type_id > 0 {
                 pad_mut.type_id = pad_mut.built_type_id;
             }
-            if active_linked_count < MAX_LINKED_LANDING_PADS_PER_FACTION {
-                pad_mut.link_timestamp = now_unix.max(1) as i64;
-            }
+            true
+        } else {
+            false
         }
-        let cloned_pad = pad_mut.clone();
-        if cloned_pad.is_built && cloned_pad.link_timestamp > 0 {
-            if let Some(launcher) = st
-                .launchers
-                .iter_mut()
-                .find(|l| l.faction_id == cloned_pad.faction_id)
-            {
-                if !launcher.linked_pad_ids.contains(&cloned_pad.item_id) {
-                    launcher.linked_pad_ids.push(cloned_pad.item_id);
-                    launcher_notify = Some((launcher.solar_system_id, launcher.item_id));
-                }
-            }
-        }
-        (cloned_pad, launcher_notify)
+    });
+    if newly_built {
+        let _ = link_fw_landing_pad(ctx, pad_item_id);
+    }
+    let updated_pad = with_misc_state(ctx, |st| {
+        st.landing_pads
+            .iter()
+            .find(|p| p.item_id == pad_item_id)
+            .cloned()
+            .expect("pad verified above")
     });
 
     persist_misc_state(ctx);
     if updated_pad.is_built {
         spawn_or_replace_pad_ball(ctx, &updated_pad).await;
-        emit_shipcaster_target_state_changed(ctx, updated_pad.solar_system_id, updated_pad.item_id);
-        if let Some((war_hq_sys, launcher_id)) = completed_and_linked_launcher {
-            emit_shipcaster_target_state_changed(ctx, war_hq_sys, launcher_id);
+        if newly_built {
+            emit_shipcaster_target_state_changed(ctx, updated_pad.solar_system_id, updated_pad.item_id);
         }
     }
     emit_beacon_slim_item_change(ctx, &pad_snapshot, &updated_pad).await;
-    Ok(updated_pad)
+    Ok((updated_pad, taken_qty))
 }
 
 /// V24 client `beyonce.CallComponentFromClient(itemID, "underConstruction", "DepositItemsFromShip", qtyByTypeID)`
@@ -447,7 +458,7 @@ pub async fn deposit_items_from_ship(
     pad_item_id: i64,
     type_and_qty_arg: Option<&PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, _char_id) = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let ship_id = session
         .ship_id
         .ok_or_else(|| rpc_err("NoActiveShip", "DepositItemsFromShip requires an active ship"))?;
@@ -470,7 +481,14 @@ pub async fn deposit_items_from_ship(
         let stack_ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
             snap.items
                 .values()
-                .filter(|it| it.location_id == ship_id && it.type_id == tid && it.quantity > 0)
+                .filter(|it| {
+                    it.location_id == ship_id
+                        && it.owner_id == char_id
+                        && it.flag == InventoryFlag::Cargo
+                        && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                        && it.type_id == tid
+                        && it.quantity > 0
+                })
                 .map(|it| it.item_id)
                 .collect()
         });
@@ -478,18 +496,15 @@ pub async fn deposit_items_from_ship(
             if rem == 0 {
                 break;
             }
-            if let Ok(before_after) =
-                contribute_fw_beacon_material(ctx, session, pad_item_id, sid, rem).await
-            {
-                any_deposited = true;
-                let have = before_after.contributed_materials.get(&tid).copied().unwrap_or(0);
-                let req = before_after.required_materials.get(&tid).copied().unwrap_or(0);
-                rem = rem.min(req.saturating_sub(have));
-            } else {
-                break;
+            match contribute_fw_beacon_material_inner(ctx, session, pad_item_id, sid, rem).await {
+                Ok((_, taken)) if taken > 0 => {
+                    any_deposited = true;
+                    rem = rem.saturating_sub(taken);
+                }
+                _ => break,
             }
         }
-        if rem > 0 && !any_deposited {
+        if rem > 0 {
             failed_to_move.push((PyRep::Integer(tid as i64), PyRep::Integer(rem as i64)));
         }
     }
@@ -584,76 +599,12 @@ pub async fn disrupt_or_destroy_fw_landing_pad(
     Ok(pad)
 }
 
-/// Validates all Rookie Starter Shipcaster eligibility rules:
-/// 1. One-time-use per character (`used_starter_shipcaster_chars`).
-/// 2. Rookie character age `<= 30` days (`create_date_unix`).
-/// 3. No active Crimewatch weapons, PvP combat, or criminal timer.
-/// 4. Subcapital, non-capsule active ship.
-pub fn check_starter_shipcaster_eligibility(
-    ctx: &ServerContext,
-    session: &SessionState,
-    char_id: i64,
-) -> Result<(), BridgeRpcError> {
-    let already_used = with_misc_state(ctx, |st| st.used_starter_shipcaster_chars.contains(&char_id));
-    if already_used {
-        return Err(rpc_err(
-            "StarterShipcasterAlreadyUsed",
-            "Rookie starter shipcasters may only be used once per character",
-        ));
-    }
-
-    let now = ctx.now_unix();
-    let (create_date_unix, active_ship_id) = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&char_id)
-            .map(|ch| (ch.create_date_unix, session.ship_id.unwrap_or(ch.active_ship_id)))
-            .unwrap_or((0, 0))
-    });
-    if create_date_unix == 0
-        || now.saturating_sub(create_date_unix) > STARTER_SHIPCASTER_MAX_ROOKIE_AGE_SECS
-    {
-        return Err(rpc_err(
-            "CharacterTooOldForStarterShipcaster",
-            "Only rookie characters 30 days old or younger may use a Starter Shipcaster",
-        ));
-    }
-
-    {
-        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        let st_cw = cw.get_or_create(char_id);
-        if st_cw.is_weapon_timer_active(now)
-            || st_cw.is_pvp_active(now)
-            || st_cw.criminal_flag_until_unix > now
-        {
-            return Err(rpc_err(
-                "WeaponsTimerActive",
-                "Cannot jump through starter shipcaster while a combat or weapons timer is active",
-            ));
-        }
-    }
-
-    if active_ship_id <= 0 {
-        return Err(rpc_err("CustomError", "Starter shipcaster requires an active ship"));
-    }
-    let ship_type_id = ctx
-        .db
-        .with_snapshot(|s| s.items.get(&active_ship_id).map(|i| i.type_id))
-        .unwrap_or(0);
-    if matches!(ship_type_id, 670 | 33328) {
-        return Err(rpc_err(
-            "CapsuleCannotJumpShipcaster",
-            "Capsules cannot jump through a starter shipcaster",
-        ));
-    }
-    let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
-    if is_capital_or_freighter_group(ship_group_id) {
-        return Err(rpc_err(
-            "CapitalShipCannotJumpShipcaster",
-            "Capital ships and freighters cannot jump through a starter shipcaster",
-        ));
-    }
-    Ok(())
-}
+#[path = "shipcaster_ops_starter.rs"]
+mod shipcaster_ops_starter;
+pub use shipcaster_ops_starter::{
+    check_starter_shipcaster_eligibility, on_landing_pad_ball_destroyed,
+    on_landing_pad_ball_destroyed_core,
+};
 
 /// Enforces fail-closed operational range and ball presence in the active solar system actor.
 pub(crate) async fn check_proximity(
@@ -914,22 +865,37 @@ pub async fn handle(
             if !is_beacon_constructor {
                 return None;
             }
+            if args.get(1..=3).is_some_and(|coords| coords.iter().any(|a| matches!(a, PyRep::Real(v) if !v.is_finite()))) {
+                return Some(Err(rpc_err("InvalidCoordinates", "Launch coordinates must be finite numbers")));
+            }
+            let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) else {
+                return Some(Err(rpc_err("NotInSpace", "Active ship in space is required to launch a beacon constructor")));
+            };
+            let h = ctx.systems.get_or_spawn(sys_id);
+            let Some((_, ship_ball)) = h.get_ball_snapshot(ship_id).await.ok().flatten() else {
+                return Some(Err(rpc_err("ShipNotInSpace", "Active ship is not spawned in space")));
+            };
+            if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+                return Some(Err(rpc_err("CannotLaunchWhileWarping", "Cannot deploy beacon constructor while in warp")));
+            }
+            if h.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                return Some(Err(rpc_err("CannotLaunchWhileCloaked", "Cannot deploy beacon constructor while cloaked")));
+            }
             let pos = if let (Some(x), Some(y), Some(z)) = (
                 args.get(1).and_then(|a| a.as_f64()),
                 args.get(2).and_then(|a| a.as_f64()),
                 args.get(3).and_then(|a| a.as_f64()),
             ) {
-                DVec3::new(x, y, z)
-            } else if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
-                let h = ctx.systems.get_or_spawn(sys_id);
-                h.get_ball_snapshot(ship_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position + DVec3::new(1_000.0, 0.0, 0.0))
-                    .unwrap_or(DVec3::new(100_000.0, 0.0, 0.0))
+                if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                    return Some(Err(rpc_err("InvalidCoordinates", "Launch coordinates must be finite numbers")));
+                }
+                let requested = DVec3::new(x, y, z);
+                if requested.distance(ship_ball.position) > 10_000.0 {
+                    return Some(Err(rpc_err("OutOfRange", "Deployment coordinates exceed maximum 10km launch range")));
+                }
+                requested
             } else {
-                DVec3::new(100_000.0, 0.0, 0.0)
+                ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0)
             };
             Some(
                 deploy_fw_beacon_constructor(ctx, session, item_id, pos)
