@@ -1,24 +1,17 @@
-//! `quasar_b29_services` — Batch 29 Quasar Public Gateway Protobuf Handlers.
+//! `quasar_b29_services` — Batch 29 Quasar Public Gateway Admin & Orchestrator Handlers.
 //!
-//! Implements state-backed Quasar protobuf handlers for:
-//! 1. `eve.content.orchestrator.admin.api` (`SetDefaultTenantVersionRequest`, `SetTenantVersionRequest`);
-//! 2. `eve.content.orchestrator.api` (`GetDefaultTenantVersionRequest`, `GetTenantVersionRequest`, `DryRunRulesetRequest`);
-//! 3. `eve.content.orchestrator.deployment.api` (`ListRequest`, `GetRequest`, `EnableRequest`, `DisableRequest`);
-//! 4. `eve.content.orchestrator.deployment.contentgroup.api` (`GetRequest`);
-//! 5. `eve.content.orchestrator.deployment.contenttype.api` (`GetRequest`);
-//! 6. `eve.content.orchestrator.deployment.instance.admin.api` (`RemoveRequest`);
-//! 7. `eve.content.orchestrator.deployment.instance.api` (`ListRequest`, `GetRequest`);
-//! 8. `eve.cosmetic.market.component.listing.api` (`GetAllRequest`);
-//! 9. `eve.cosmetic.market.skin.listing.api.admin` (`SetExpirationRequest`, `GetAllListedByCharacterRequest`);
-//! 10. `eve.payment.admin.api` (`ProcessPaymentFilesRequest`, `GetPersonalDataRequest`);
-//! 11. `eve.store.sale.admin` (`RetryFailedFulfillmentRequest`, `RetryAllFailedFulfillmentsRequest`, `DropFailedFulfillmentRequest`);
-//! 12. `eve.store.targetaudience.offer.api.admin` (`PromoteRequest`, `RetractRequest`, `BackfillPartnerCodeRequest`).
+//! All handlers require `ROLE_ADMIN | ROLE_GMH` (enforced by `PublicGatewayRouter::requires_admin_role`)
+//! and read/write canonical `WorldRepository` state (`quasar_cosmetics_market`, `payment_receipts`,
+//! `plex_balances`, `plex_tx_logs`, `accounts`, `characters`, and `service_state_blobs`).
 
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
 };
+use crate::services::quasar_cosmetics_market::seed_component_listings_if_empty;
+use crate::services::quasar_cosmetics_market_types::CosmeticsMarketData;
+use crate::services::quasar_payment_store_types::{record_plex_transaction, PaymentReceiptRecord};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_fixed64_field, encode_string_field, encode_varint_field,
@@ -26,11 +19,13 @@ use eve_proto::quasar::{
 };
 use eve_sde::SdeRegistry;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-const BLOB_B29_ORCHESTRATOR: &str = "quasar_b29_orchestrator_state";
-const BLOB_B29_COMMERCE_ADMIN: &str = "quasar_b29_commerce_admin_state";
+const BLOB_COSMETICS_MARKET: &str = "quasar_cosmetics_market";
+const BLOB_ORCHESTRATOR: &str = "content_orchestrator_state";
+const BLOB_FAILED_FULFILLMENTS: &str = "store_failed_fulfillments";
+const BLOB_TARGETED_OFFERS: &str = "store_targeted_offers";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SemVerSpec {
@@ -109,7 +104,7 @@ pub struct DeploymentInstanceRecord {
     pub created_unix: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrchestratorState {
     pub default_tenant_version: SemVerSpec,
     pub tenant_version: Option<SemVerSpec>,
@@ -119,81 +114,13 @@ pub struct OrchestratorState {
     pub instances: Vec<DeploymentInstanceRecord>,
 }
 
-impl Default for OrchestratorState {
-    fn default() -> Self {
-        let mut deployments = BTreeMap::new();
-        deployments.insert(
-            101,
-            DeploymentRecord {
-                id: 101,
-                name: "pirate_insurgency_deployment".into(),
-                short_description: "Pirate insurgency forward operating sites".into(),
-                content_group_id: 201,
-                enabled: true,
-                current_content_count: 1,
-            },
-        );
-        let mut content_groups = BTreeMap::new();
-        content_groups.insert(
-            201,
-            ContentGroupRecord {
-                id: 201,
-                name: "insurgency_sites".into(),
-                content_type_id: 301,
-                weight: 1.0,
-            },
-        );
-        let mut content_types = BTreeMap::new();
-        content_types.insert(
-            301,
-            ContentTypeRecord {
-                id: 301,
-                name: "guristas_outpost".into(),
-                short_description: "Guristas forward outpost".into(),
-                dungeon_id: 8001,
-            },
-        );
-        let instances = vec![DeploymentInstanceRecord {
-            uuid: b"b29-orch-inst-01".to_vec(),
-            deployment_id: 101,
-            content_type_id: 301,
-            solar_system_id: 30_000_142,
-            constellation_id: 20_000_020,
-            created_unix: 1_700_000_000,
-        }];
-        Self {
-            default_tenant_version: SemVerSpec::default(),
-            tenant_version: None,
-            deployments,
-            content_groups,
-            content_types,
-            instances,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComponentListingRecord {
-    pub uuid: Vec<u8>,
-    pub component_type_id: u32,
-    pub bundle_size: u64,
-    pub discount_percent: u32,
-    pub plex_units: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkinListingAdminRecord {
-    pub uuid: Vec<u8>,
-    pub seller_char_id: u64,
-    pub expires_unix: i64,
-    pub quantity: u32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailedFulfillmentRecord {
     pub id: u32,
     pub user_id: u64,
+    pub plex_units: i64,
     pub retries: u32,
+    pub fulfilled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,59 +133,10 @@ pub struct TargetedOfferAdminRecord {
     pub partner_code: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommerceAdminState {
-    pub component_listings: Vec<ComponentListingRecord>,
-    pub skin_listings: Vec<SkinListingAdminRecord>,
-    pub processed_merchants: Vec<u64>,
-    pub failed_fulfillments: BTreeMap<u32, FailedFulfillmentRecord>,
-    pub targeted_offers: HashMap<String, TargetedOfferAdminRecord>,
-}
-
-impl Default for CommerceAdminState {
-    fn default() -> Self {
-        let mut failed_fulfillments = BTreeMap::new();
-        failed_fulfillments.insert(
-            5001,
-            FailedFulfillmentRecord {
-                id: 5001,
-                user_id: 1001,
-                retries: 0,
-            },
-        );
-        failed_fulfillments.insert(
-            5002,
-            FailedFulfillmentRecord {
-                id: 5002,
-                user_id: 1002,
-                retries: 0,
-            },
-        );
-        Self {
-            component_listings: vec![ComponentListingRecord {
-                uuid: b"b29-comp-list-01".to_vec(),
-                component_type_id: 81001,
-                bundle_size: 5,
-                discount_percent: 10,
-                plex_units: 25,
-            }],
-            skin_listings: vec![SkinListingAdminRecord {
-                uuid: b"b29-skin-list-01".to_vec(),
-                seller_char_id: 2112000001,
-                expires_unix: 1_800_000_000,
-                quantity: 1,
-            }],
-            processed_merchants: Vec::new(),
-            failed_fulfillments,
-            targeted_offers: HashMap::new(),
-        }
-    }
-}
-
 fn load_orch_state(db: &WorldRepository) -> OrchestratorState {
     db.with_snapshot(|snap| {
-        snap.quasar_state_blobs
-            .get(BLOB_B29_ORCHESTRATOR)
+        snap.service_state_blobs
+            .get(BLOB_ORCHESTRATOR)
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default()
     })
@@ -266,29 +144,9 @@ fn load_orch_state(db: &WorldRepository) -> OrchestratorState {
 
 fn save_orch_state(db: &WorldRepository, state: &OrchestratorState) {
     if let Ok(json) = serde_json::to_string(state) {
-        let _ = db.try_with_mut_snapshot(|snap| {
-            snap.quasar_state_blobs
-                .insert(BLOB_B29_ORCHESTRATOR.to_string(), json);
-            Ok::<(), String>(())
-        });
-    }
-}
-
-fn load_commerce_state(db: &WorldRepository) -> CommerceAdminState {
-    db.with_snapshot(|snap| {
-        snap.quasar_state_blobs
-            .get(BLOB_B29_COMMERCE_ADMIN)
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default()
-    })
-}
-
-fn save_commerce_state(db: &WorldRepository, state: &CommerceAdminState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        let _ = db.try_with_mut_snapshot(|snap| {
-            snap.quasar_state_blobs
-                .insert(BLOB_B29_COMMERCE_ADMIN.to_string(), json);
-            Ok::<(), String>(())
+        db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert(BLOB_ORCHESTRATOR.to_string(), json);
         });
     }
 }
@@ -351,7 +209,12 @@ fn encode_uuid_id(field_num: u32, uuid: &[u8], out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &sub, out);
 }
 
-fn encode_space_location_solar_system(field_num: u32, sys_id: u32, const_id: u32, out: &mut Vec<u8>) {
+fn encode_space_location_solar_system(
+    field_num: u32,
+    sys_id: u32,
+    const_id: u32,
+    out: &mut Vec<u8>,
+) {
     let mut const_msg = Vec::new();
     encode_seq_id(1, const_id as u64, &mut const_msg);
     encode_seq_id(2, sys_id as u64, &mut const_msg);
@@ -363,7 +226,16 @@ fn encode_space_location_solar_system(field_num: u32, sys_id: u32, const_id: u32
 pub fn register_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
-    _sde: Arc<SdeRegistry>,
+    sde: Arc<SdeRegistry>,
+) {
+    register_orchestrator_handlers(router, Arc::clone(&db), Arc::clone(&sde));
+    register_commerce_admin_handlers(router, db, sde);
+}
+
+fn register_orchestrator_handlers(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    sde: Arc<SdeRegistry>,
 ) {
     // 1. eve.content.orchestrator.admin.api.*
     {
@@ -444,20 +316,40 @@ pub fn register_handlers(
             }),
         );
 
+        let sde_dry = Arc::clone(&sde);
         router.register_handler(
             "eve.content.orchestrator.api.DryRunRulesetRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
-                let tag_name = match dyn_msg.get(1) {
+                let raw_tag = match dyn_msg.get(1) {
                     Some(DynamicValue::Message(rs)) => get_string(rs, 1),
                     _ => String::new(),
                 };
-                let tag_name = if tag_name.is_empty() {
+                let tag_name = if raw_tag.trim().is_empty() {
                     "highsec".to_string()
                 } else {
-                    tag_name
+                    raw_tag.trim().to_string()
+                };
+                let mut sys_ids: Vec<u32> = sde_dry.solar_systems.keys().copied().collect();
+                sys_ids.sort_unstable();
+                let matched_sys = sys_ids.into_iter().find_map(|sid| {
+                    let info = sde_dry.solar_systems.get(&sid)?;
+                    let ok = match tag_name.as_str() {
+                        "highsec" => info.security_status >= 0.45,
+                        "lowsec" => (0.05..0.45).contains(&info.security_status),
+                        "nullsec" => info.security_status < 0.05 && sid < 31_000_000,
+                        "wormhole" => sid >= 31_000_000,
+                        other => other.parse::<u32>().is_ok_and(|id| id == sid),
+                    };
+                    ok.then_some((sid, info.constellation_id))
+                });
+                let Some((sys_id, const_id)) = matched_sys else {
+                    return Err((
+                        STATUS_NOT_FOUND,
+                        format!("No SDE solar system matches ruleset tag '{tag_name}'"),
+                    ));
                 };
                 let mut eval_buf = Vec::new();
-                encode_space_location_solar_system(1, 30_000_142, 20_000_020, &mut eval_buf);
+                encode_space_location_solar_system(1, sys_id, const_id, &mut eval_buf);
                 let mut tid = Vec::new();
                 encode_string_field(1, &tag_name, &mut tid);
                 encode_bytes_field(2, &tid, &mut eval_buf);
@@ -485,6 +377,7 @@ pub fn register_handlers(
                     encode_seq_id(1, dep.id, &mut dbuf);
                     encode_string_field(2, &dep.name, &mut dbuf);
                     encode_string_field(3, &dep.short_description, &mut dbuf);
+                    encode_varint_field(4, u64::from(dep.enabled), &mut dbuf);
                     encode_bytes_field(1, &dbuf, &mut out);
                 }
                 Ok(any_resp(
@@ -690,21 +583,34 @@ pub fn register_handlers(
             }),
         );
     }
+}
 
-    // 8. eve.cosmetic.market.component.listing.api.GetAllRequest
+fn register_commerce_admin_handlers(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    sde: Arc<SdeRegistry>,
+) {
+    // 8. eve.cosmetic.market.component.listing.api.GetAllRequest -> canonical CosmeticsMarketData
     {
         let db1 = Arc::clone(&db);
+        let sde1 = Arc::clone(&sde);
         router.register_handler(
             "eve.cosmetic.market.component.listing.api.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                let st = load_commerce_state(&db1);
+                let mut data: CosmeticsMarketData = db1.with_snapshot(|snap| {
+                    snap.quasar_state_blobs
+                        .get(BLOB_COSMETICS_MARKET)
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default()
+                });
+                seed_component_listings_if_empty(&mut data, &sde1);
                 let mut out = Vec::new();
-                for l in &st.component_listings {
+                for l in data.component_listings.values() {
                     let mut attr_buf = Vec::new();
                     let mut plex_buf = Vec::new();
-                    encode_varint_field(1, l.plex_units, &mut plex_buf);
+                    encode_varint_field(1, l.price_plex_cents.unwrap_or(0), &mut plex_buf);
                     encode_bytes_field(5, &plex_buf, &mut attr_buf);
-                    encode_seq_id(6, l.component_type_id as u64, &mut attr_buf);
+                    encode_seq_id(6, l.component_item_type_id as u64, &mut attr_buf);
                     encode_varint_field(7, l.bundle_size, &mut attr_buf);
                     encode_varint_field(8, l.discount_percent as u64, &mut attr_buf);
 
@@ -721,7 +627,7 @@ pub fn register_handlers(
         );
     }
 
-    // 9. eve.cosmetic.market.skin.listing.api.admin.*
+    // 9. eve.cosmetic.market.skin.listing.api.admin.* -> canonical CosmeticsMarketData
     {
         let db1 = Arc::clone(&db);
         router.register_handler(
@@ -732,17 +638,30 @@ pub fn register_handlers(
                     return Err((STATUS_BAD_REQUEST, "listing uuid required".into()));
                 }
                 let expires_unix = match dyn_msg.get(2) {
-                    Some(DynamicValue::Message(ts)) => get_u64(ts, 1) as i64,
+                    Some(DynamicValue::Message(ts)) => get_u64(ts, 1),
                     _ => 0,
                 };
-                let mut st = load_commerce_state(&db1);
-                let listing = st
-                    .skin_listings
-                    .iter_mut()
-                    .find(|l| l.uuid == uuid)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Skin listing not found".into()))?;
-                listing.expires_unix = expires_unix;
-                save_commerce_state(&db1, &st);
+                let updated = db1.with_mut_snapshot(|snap| {
+                    let mut data: CosmeticsMarketData = snap
+                        .quasar_state_blobs
+                        .get(BLOB_COSMETICS_MARKET)
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
+                    let found = data.skin_listings.values_mut().find(|l| l.uuid.as_slice() == uuid.as_slice());
+                    if let Some(listing) = found {
+                        listing.expires_unix = expires_unix;
+                        if let Ok(json) = serde_json::to_string(&data) {
+                            snap.quasar_state_blobs
+                                .insert(BLOB_COSMETICS_MARKET.to_string(), json);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if !updated {
+                    return Err((STATUS_NOT_FOUND, "Skin listing not found".into()));
+                }
                 Ok(any_resp(
                     "eve.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
                     Vec::new(),
@@ -758,17 +677,22 @@ pub fn register_handlers(
                 if creator_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "creator character id required".into()));
                 }
-                let st = load_commerce_state(&db2);
+                let data: CosmeticsMarketData = db2.with_snapshot(|snap| {
+                    snap.quasar_state_blobs
+                        .get(BLOB_COSMETICS_MARKET)
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default()
+                });
                 let mut out = Vec::new();
-                for l in st
+                for l in data
                     .skin_listings
-                    .iter()
-                    .filter(|l| l.seller_char_id == creator_id)
+                    .values()
+                    .filter(|l| l.seller_id as u64 == creator_id)
                 {
                     let mut attr_buf = Vec::new();
-                    encode_seq_id(1, l.seller_char_id, &mut attr_buf);
+                    encode_seq_id(1, l.seller_id as u64, &mut attr_buf);
                     let mut ts_buf = Vec::new();
-                    encode_varint_field(1, l.expires_unix as u64, &mut ts_buf);
+                    encode_varint_field(1, l.expires_unix, &mut ts_buf);
                     encode_bytes_field(3, &ts_buf, &mut attr_buf);
                     encode_varint_field(8, l.quantity as u64, &mut attr_buf);
 
@@ -785,21 +709,39 @@ pub fn register_handlers(
         );
     }
 
-    // 10. eve.payment.admin.api.*
+    // 10. eve.payment.admin.api.* -> canonical payment_receipts + accounts/characters
     {
         let db1 = Arc::clone(&db);
         router.register_handler(
             "eve.payment.admin.api.ProcessPaymentFilesRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
+            Arc::new(move |ctx, _any, dyn_msg| {
                 let merchant_id = get_u64(dyn_msg, 1);
                 if merchant_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "merchant identifier required".into()));
                 }
-                let mut st = load_commerce_state(&db1);
-                if !st.processed_merchants.contains(&merchant_id) {
-                    st.processed_merchants.push(merchant_id);
-                }
-                save_commerce_state(&db1, &st);
+                let uid = ctx.effective_user_id().unwrap_or(0) as u64;
+                let now_unix = ctx.now_unix();
+                db1.with_mut_snapshot(|snap| {
+                    let mut receipts: Vec<PaymentReceiptRecord> = snap
+                        .service_state_blobs
+                        .get("payment_receipts")
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    if !receipts.iter().any(|r| r.receipt_id == merchant_id) {
+                        receipts.push(PaymentReceiptRecord {
+                            receipt_id: merchant_id,
+                            user_id: uid,
+                            offer_id: format!("merchant-{merchant_id}"),
+                            amount_in_cents: 0,
+                            currency: "USD".to_string(),
+                            timestamp_unix: now_unix,
+                        });
+                        if let Ok(s) = serde_json::to_string(&receipts) {
+                            snap.service_state_blobs
+                                .insert("payment_receipts".to_string(), s);
+                        }
+                    }
+                });
                 Ok(any_resp(
                     "eve.payment.admin.api.ProcessPaymentFilesResponse",
                     Vec::new(),
@@ -807,6 +749,7 @@ pub fn register_handlers(
             }),
         );
 
+        let db2 = Arc::clone(&db);
         router.register_handler(
             "eve.payment.admin.api.GetPersonalDataRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
@@ -814,13 +757,27 @@ pub fn register_handlers(
                 if user_id == 0 {
                     return Err((STATUS_BAD_REQUEST, "user identifier required".into()));
                 }
+                let resolved = db2.with_snapshot(|snap| {
+                    let acc = snap.accounts.values().find(|a| a.user_id == user_id)?;
+                    let ch = snap.characters.values().find(|c| c.user_id == user_id);
+                    let display_name = ch
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| acc.username.clone());
+                    let region_code = ch
+                        .map(|c| format!("REG-{}", c.region_id))
+                        .unwrap_or_else(|| "UNASSIGNED".to_string());
+                    Some((display_name, region_code))
+                });
+                let Some((display_name, region_code)) = resolved else {
+                    return Err((STATUS_NOT_FOUND, format!("User {user_id} not found")));
+                };
                 let mut tax_buf = Vec::new();
-                encode_string_field(1, &format!("Pilot {user_id}"), &mut tax_buf);
-                encode_string_field(5, "US", &mut tax_buf);
+                encode_string_field(1, &display_name, &mut tax_buf);
+                encode_string_field(5, &region_code, &mut tax_buf);
 
                 let mut bill_buf = Vec::new();
-                encode_string_field(1, &format!("Pilot {user_id}"), &mut bill_buf);
-                encode_string_field(6, "US", &mut bill_buf);
+                encode_string_field(1, &display_name, &mut bill_buf);
+                encode_string_field(6, &region_code, &mut bill_buf);
 
                 let mut out = Vec::new();
                 encode_bytes_field(3, &tax_buf, &mut out);
@@ -833,20 +790,52 @@ pub fn register_handlers(
         );
     }
 
-    // 11. eve.store.sale.admin.*
+    // 11. eve.store.sale.admin.* -> canonical store_failed_fulfillments + plex_balances
     {
         let db1 = Arc::clone(&db);
         router.register_handler(
             "eve.store.sale.admin.RetryFailedFulfillmentRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
+            Arc::new(move |ctx, _any, dyn_msg| {
                 let fid = get_u64(dyn_msg, 1) as u32;
-                let mut st = load_commerce_state(&db1);
-                let rec = st
-                    .failed_fulfillments
-                    .get_mut(&fid)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Failed fulfillment not found".into()))?;
-                rec.retries += 1;
-                save_commerce_state(&db1, &st);
+                let now_unix = ctx.now_unix();
+                let found = db1.with_mut_snapshot(|snap| {
+                    let mut map: BTreeMap<u32, FailedFulfillmentRecord> = snap
+                        .service_state_blobs
+                        .get(BLOB_FAILED_FULFILLMENTS)
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    let Some(rec) = map.get_mut(&fid) else {
+                        return false;
+                    };
+                    rec.retries += 1;
+                    if !rec.fulfilled && rec.plex_units > 0 {
+                        rec.fulfilled = true;
+                        let bal = snap.account_plex_vault.entry(rec.user_id).or_insert(0);
+                        *bal += rec.plex_units;
+                        let new_bal = *bal;
+                        snap.next_entity_id += 1;
+                        let tx_id = snap.next_entity_id as u64;
+                        let uid = rec.user_id;
+                        let amt = rec.plex_units;
+                        record_plex_transaction(
+                            snap,
+                            tx_id,
+                            uid,
+                            amt,
+                            new_bal,
+                            &format!("Admin retry fulfillment #{fid}"),
+                            now_unix,
+                        );
+                    }
+                    if let Ok(s) = serde_json::to_string(&map) {
+                        snap.service_state_blobs
+                            .insert(BLOB_FAILED_FULFILLMENTS.to_string(), s);
+                    }
+                    true
+                });
+                if !found {
+                    return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
+                }
                 Ok(any_resp(
                     "eve.store.sale.admin.RetryFailedFulfillmentResponse",
                     Vec::new(),
@@ -857,12 +846,39 @@ pub fn register_handlers(
         let db2 = Arc::clone(&db);
         router.register_handler(
             "eve.store.sale.admin.RetryAllFailedFulfillmentsRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                let mut st = load_commerce_state(&db2);
-                for rec in st.failed_fulfillments.values_mut() {
-                    rec.retries += 1;
-                }
-                save_commerce_state(&db2, &st);
+            Arc::new(move |ctx, _any, _dyn_msg| {
+                let now_unix = ctx.now_unix();
+                db2.with_mut_snapshot(|snap| {
+                    let mut map: BTreeMap<u32, FailedFulfillmentRecord> = snap
+                        .service_state_blobs
+                        .get(BLOB_FAILED_FULFILLMENTS)
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    for rec in map.values_mut() {
+                        rec.retries += 1;
+                        if !rec.fulfilled && rec.plex_units > 0 {
+                            rec.fulfilled = true;
+                            let bal = snap.account_plex_vault.entry(rec.user_id).or_insert(0);
+                            *bal += rec.plex_units;
+                            let new_bal = *bal;
+                            snap.next_entity_id += 1;
+                            let tx_id = snap.next_entity_id as u64;
+                            record_plex_transaction(
+                                snap,
+                                tx_id,
+                                rec.user_id,
+                                rec.plex_units,
+                                new_bal,
+                                &format!("Admin retry-all fulfillment #{}", rec.id),
+                                now_unix,
+                            );
+                        }
+                    }
+                    if let Ok(s) = serde_json::to_string(&map) {
+                        snap.service_state_blobs
+                            .insert(BLOB_FAILED_FULFILLMENTS.to_string(), s);
+                    }
+                });
                 Ok(any_resp(
                     "eve.store.sale.admin.RetryAllFailedFulfillmentsResponse",
                     Vec::new(),
@@ -875,11 +891,24 @@ pub fn register_handlers(
             "eve.store.sale.admin.DropFailedFulfillmentRequest",
             Arc::new(move |_ctx, _any, dyn_msg| {
                 let fid = get_u64(dyn_msg, 1) as u32;
-                let mut st = load_commerce_state(&db3);
-                if st.failed_fulfillments.remove(&fid).is_none() {
+                let removed = db3.with_mut_snapshot(|snap| {
+                    let mut map: BTreeMap<u32, FailedFulfillmentRecord> = snap
+                        .service_state_blobs
+                        .get(BLOB_FAILED_FULFILLMENTS)
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    let was_present = map.remove(&fid).is_some();
+                    if was_present {
+                        if let Ok(s) = serde_json::to_string(&map) {
+                            snap.service_state_blobs
+                                .insert(BLOB_FAILED_FULFILLMENTS.to_string(), s);
+                        }
+                    }
+                    was_present
+                });
+                if !removed {
                     return Err((STATUS_NOT_FOUND, "Failed fulfillment not found".into()));
                 }
-                save_commerce_state(&db3, &st);
                 Ok(any_resp(
                     "eve.store.sale.admin.DropFailedFulfillmentResponse",
                     Vec::new(),
@@ -888,7 +917,7 @@ pub fn register_handlers(
         );
     }
 
-    // 12. eve.store.targetaudience.offer.api.admin.*
+    // 12. eve.store.targetaudience.offer.api.admin.* -> canonical store_targeted_offers
     {
         let db1 = Arc::clone(&db);
         router.register_handler(
@@ -905,18 +934,27 @@ pub fn register_handlers(
                     ));
                 }
                 let key = format!("{uid}:{cat_name}");
-                let mut st = load_commerce_state(&db1);
-                let rec = st.targeted_offers.entry(key).or_insert(TargetedOfferAdminRecord {
-                    user_id: uid,
-                    catalogue_entry_name: cat_name,
-                    promoted: false,
-                    retracted: false,
-                    earliest_reissue_unix: 0,
-                    partner_code: String::new(),
+                db1.with_mut_snapshot(|snap| {
+                    let mut map: BTreeMap<String, TargetedOfferAdminRecord> = snap
+                        .service_state_blobs
+                        .get(BLOB_TARGETED_OFFERS)
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    let rec = map.entry(key).or_insert(TargetedOfferAdminRecord {
+                        user_id: uid,
+                        catalogue_entry_name: cat_name,
+                        promoted: false,
+                        retracted: false,
+                        earliest_reissue_unix: 0,
+                        partner_code: String::new(),
+                    });
+                    rec.promoted = true;
+                    rec.retracted = false;
+                    if let Ok(s) = serde_json::to_string(&map) {
+                        snap.service_state_blobs
+                            .insert(BLOB_TARGETED_OFFERS.to_string(), s);
+                    }
                 });
-                rec.promoted = true;
-                rec.retracted = false;
-                save_commerce_state(&db1, &st);
                 Ok(any_resp(
                     "eve.store.targetaudience.offer.api.admin.PromoteResponse",
                     Vec::new(),
@@ -933,13 +971,25 @@ pub fn register_handlers(
                     _ => return Err((STATUS_BAD_REQUEST, "offer identifier required".into())),
                 };
                 let key = format!("{uid}:{cat_name}");
-                let mut st = load_commerce_state(&db2);
-                let rec = st
-                    .targeted_offers
-                    .get_mut(&key)
-                    .ok_or_else(|| (STATUS_NOT_FOUND, "Targeted offer not found".into()))?;
-                rec.retracted = true;
-                save_commerce_state(&db2, &st);
+                let found = db2.with_mut_snapshot(|snap| {
+                    let mut map: BTreeMap<String, TargetedOfferAdminRecord> = snap
+                        .service_state_blobs
+                        .get(BLOB_TARGETED_OFFERS)
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    let Some(rec) = map.get_mut(&key) else {
+                        return false;
+                    };
+                    rec.retracted = true;
+                    if let Ok(s) = serde_json::to_string(&map) {
+                        snap.service_state_blobs
+                            .insert(BLOB_TARGETED_OFFERS.to_string(), s);
+                    }
+                    true
+                });
+                if !found {
+                    return Err((STATUS_NOT_FOUND, "Targeted offer not found".into()));
+                }
                 Ok(any_resp(
                     "eve.store.targetaudience.offer.api.admin.RetractResponse",
                     Vec::new(),
@@ -964,17 +1014,26 @@ pub fn register_handlers(
                     ));
                 }
                 let key = format!("{uid}:{cat_name}");
-                let mut st = load_commerce_state(&db3);
-                let rec = st.targeted_offers.entry(key).or_insert(TargetedOfferAdminRecord {
-                    user_id: uid,
-                    catalogue_entry_name: cat_name,
-                    promoted: true,
-                    retracted: false,
-                    earliest_reissue_unix: 0,
-                    partner_code: String::new(),
+                db3.with_mut_snapshot(|snap| {
+                    let mut map: BTreeMap<String, TargetedOfferAdminRecord> = snap
+                        .service_state_blobs
+                        .get(BLOB_TARGETED_OFFERS)
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    let rec = map.entry(key).or_insert(TargetedOfferAdminRecord {
+                        user_id: uid,
+                        catalogue_entry_name: cat_name,
+                        promoted: true,
+                        retracted: false,
+                        earliest_reissue_unix: 0,
+                        partner_code: String::new(),
+                    });
+                    rec.partner_code = partner_code;
+                    if let Ok(s) = serde_json::to_string(&map) {
+                        snap.service_state_blobs
+                            .insert(BLOB_TARGETED_OFFERS.to_string(), s);
+                    }
                 });
-                rec.partner_code = partner_code;
-                save_commerce_state(&db3, &st);
                 Ok(any_resp(
                     "eve.store.targetaudience.offer.api.admin.BackfillPartnerCodeResponse",
                     Vec::new(),
