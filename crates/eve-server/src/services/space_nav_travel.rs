@@ -541,6 +541,7 @@ pub(crate) fn apply_jump_fatigue(ctx: &ServerContext, char_id: i64, distance_ly:
             PyRep::Integer(unix_to_filetime(cd_until)),
             PyRep::Integer(unix_to_filetime(fat_until)),
             PyRep::Integer(unix_to_filetime(now)),
+            PyRep::Bool(true),
         ],
     );
     (cd, fat)

@@ -248,64 +248,56 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     }
 
     // 3. CanJumpStarterSpaceShipCasterRequest & CanJumpShipCasterRequest
-    // Character 2_112_000_001 has a zarzakh_gate_lock, so both endpoints return false (0)
+    // Seed CHAR_A in space (30_000_142) + starter_launchers; while zarzakh_gate_lock is active, both return false (0)
+    ctx.seed_demo_world_fixtures();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch) = snap.characters.values().next().cloned() {
+            ch.character_id = 2_112_000_001;
+            ch.user_id = 1001;
+            ch.corporation_id = 98_000_001;
+            ch.solar_system_id = 30_000_142;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = 1_010_000_001;
+            ch.jump_cooldown_until_unix = 0;
+            snap.characters.insert(2_112_000_001, ch);
+        }
+        snap.items.insert(1_010_000_001, eve_db::InventoryItemRecord {
+            item_id: 1_010_000_001, type_id: 606, owner_id: 2_112_000_001,
+            location_id: 30_000_142, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.service_state_blobs.insert("cluster_misc_state".to_string(), r#"{"starter_launchers":[1]}"#.to_string());
+    });
     let mut caster_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut caster_req);
-    let r1 = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
-        caster_req.clone(),
-    )
-    .await;
+    let r1 = quasar_rpc(&ctx, &mut sess, "eve.ship.api.CanJumpStarterSpaceShipCasterRequest", caster_req.clone()).await;
     assert_eq!(r1.status_code, STATUS_OK);
-    assert_eq!(
-        first_varint(&parse_raw_proto(&r1.payload.unwrap().value), 1),
-        Some(0)
-    );
+    assert_eq!(first_varint(&parse_raw_proto(&r1.payload.unwrap().value), 1), Some(0));
 
-    let r2 = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.starterspace.api.CanJumpShipCasterRequest",
-        caster_req.clone(),
-    )
-    .await;
+    let r2 = quasar_rpc(&ctx, &mut sess, "eve.starterspace.api.CanJumpShipCasterRequest", caster_req.clone()).await;
     assert_eq!(r2.status_code, STATUS_OK);
-    assert_eq!(
-        first_varint(&parse_raw_proto(&r2.payload.unwrap().value), 1),
-        Some(0)
-    );
+    assert_eq!(first_varint(&parse_raw_proto(&r2.payload.unwrap().value), 1), Some(0));
+
+    // Clearing zarzakh_gate_lock enables both ShipCaster endpoints (allowed == 1)
+    ctx.db.with_mut_snapshot(|snap| { snap.zarzakh_gate_locks.remove(&2_112_000_001); });
+    let r1_ok = quasar_rpc(&ctx, &mut sess, "eve.ship.api.CanJumpStarterSpaceShipCasterRequest", caster_req.clone()).await;
+    assert_eq!(r1_ok.status_code, STATUS_OK);
+    assert_eq!(first_varint(&parse_raw_proto(&r1_ok.payload.unwrap().value), 1), Some(1));
+    let r2_ok = quasar_rpc(&ctx, &mut sess, "eve.starterspace.api.CanJumpShipCasterRequest", caster_req.clone()).await;
+    assert_eq!(r2_ok.status_code, STATUS_OK);
+    assert_eq!(first_varint(&parse_raw_proto(&r2_ok.payload.unwrap().value), 1), Some(1));
 
     // Emptying starter_launchers in cluster_misc_state disables CanJumpStarterSpaceShipCasterRequest
     ctx.db.with_mut_snapshot(|snap| {
-        snap.service_state_blobs.insert(
-            "cluster_misc_state".to_string(),
-            r#"{"starter_launchers":[]}"#.to_string(),
-        );
+        snap.service_state_blobs.insert("cluster_misc_state".to_string(), r#"{"starter_launchers":[]}"#.to_string());
     });
-    let r3 = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
-        caster_req,
-    )
-    .await;
+    let r3 = quasar_rpc(&ctx, &mut sess, "eve.ship.api.CanJumpStarterSpaceShipCasterRequest", caster_req).await;
     assert_eq!(r3.status_code, STATUS_OK);
-    assert_eq!(
-        first_varint(&parse_raw_proto(&r3.payload.unwrap().value), 1),
-        Some(0)
-    );
+    assert_eq!(first_varint(&parse_raw_proto(&r3.payload.unwrap().value), 1), Some(0));
 
     // Unauthenticated session is rejected with STATUS_UNAUTHORIZED
     let mut unauth = SessionState::new(99);
-    let unauth_rsp = quasar_rpc(
-        &ctx,
-        &mut unauth,
-        "eve_public.ship.unlock.GetPendingNotificationsRequest",
-        Vec::new(),
-    )
-    .await;
+    let unauth_rsp = quasar_rpc(&ctx, &mut unauth, "eve_public.ship.unlock.GetPendingNotificationsRequest", Vec::new()).await;
     assert_eq!(unauth_rsp.status_code, STATUS_UNAUTHORIZED);
 }
 

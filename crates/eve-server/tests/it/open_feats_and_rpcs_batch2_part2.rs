@@ -571,6 +571,9 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
     let (src_sys, dst_sys) = (30_000_142_u32, 30_000_204_u32);
     let (cyno_ship, cyno_mod, bridger_ship, portal_mod, bridger_fuel, passenger_ship) =
         (990_010_001_i64, 990_010_002, 990_010_011, 990_010_012, 990_010_013, 990_010_021);
+    let mut pass_sess = make_player_session(51_103, 1, passenger_char, 98_000_001, None, src_sys);
+    ctx.dispatch_rpc(&mut pass_sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
+    ctx.dispatch_rpc(&mut pass_sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(passenger_char)], &kw, None).await.expect("SelectCharacterID");
 
     ctx.db.with_mut_snapshot(|snap| {
         if !snap.characters.contains_key(&bridger_char) {
@@ -649,28 +652,23 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
     cyno_sess.ship_id = Some(cyno_ship); cyno_sess.station_id = None;
     let mut bridger_sess = make_player_session(51_102, 102, bridger_char, 98_000_001, None, src_sys);
     bridger_sess.ship_id = Some(bridger_ship); bridger_sess.station_id = None;
-    let mut pass_sess = make_player_session(51_103, 103, passenger_char, 98_000_001, None, src_sys);
-    pass_sess.ship_id = Some(passenger_ship); pass_sess.station_id = None;
+    pass_sess.ship_id = Some(passenger_ship); pass_sess.station_id = None; pass_sess.solar_system_id = Some(src_sys); pass_sess.fleet_id = Some(77_001);
 
-    let cyno_res = ctx
-        .dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &kw, None)
-        .await
-        .expect("activate covert cyno");
+    let cyno_res = ctx.dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &kw, None).await.expect("activate covert cyno");
     let beacon_id = if let PyRep::KeyVal(entries) = &cyno_res {
         entries.iter().find(|(k, _)| *k == "beaconID").and_then(|(_, v)| match v { PyRep::Integer(n) => Some(*n), _ => None }).unwrap_or(cyno_ship)
-    } else {
-        cyno_ship
-    };
-
-    ctx.dispatch_rpc(&mut bridger_sess, "beyonce", None, "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(cyno_char), PyRep::Integer(i64::from(dst_sys)), PyRep::Integer(beacon_id)], &kw, None)
-        .await
-        .expect("open covert bridge");
+    } else { cyno_ship };
+    ctx.dispatch_rpc(&mut bridger_sess, "beyonce", None, "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(cyno_char), PyRep::Integer(i64::from(dst_sys)), PyRep::Integer(beacon_id)], &kw, None).await.expect("open covert bridge");
 
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, passenger_char);
     ctx.dispatch_rpc(&mut pass_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(bridger_char), PyRep::Integer(bridger_ship)], &kw, None)
         .await
         .expect("passenger jump through covert portal");
     assert_eq!(pass_sess.solar_system_id, Some(dst_sys));
+    let jnotifs = ctx.drain_notifications_for_char(passenger_char);
+    let jtimer_notif = jnotifs.iter().find(|n| n.event == "OnJumpTimersUpdated").expect("OnJumpTimersUpdated");
+    assert_eq!(jtimer_notif.args.len(), 4, "OnJumpTimersUpdated must include 4th doAlert arg");
+    assert_eq!(jtimer_notif.args[3], PyRep::Bool(true));
 
     let timers = ctx.dispatch_rpc(&mut pass_sess, "jumpTimers", None, "GetTimers", &[], &kw, None).await.expect("GetTimers");
     assert!(!matches!(timers, PyRep::None));

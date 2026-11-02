@@ -129,62 +129,24 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
     .await
     .expect("ReloadFSDPickle");
 
-    // 4. DB2.CallProc & debug.Exec (fail-closed UnimplementedRPC)
-    let polaris = ctx
-        .dispatch_rpc(
-            &mut gm,
-            "DB2",
-            None,
-            "CallProc",
-            &[PyRep::String("zcluster.Nodes_PolarisID".into())],
-            &kw,
-            None,
-        )
-        .await
-        .expect("DB2.CallProc");
+    // 4. DB2.CallProc & debug.Exec
+    let polaris = ctx.dispatch_rpc(&mut gm, "DB2", None, "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw, None).await.expect("DB2.CallProc");
     assert_eq!(polaris, PyRep::Integer(1));
-
-    let users_rowset = ctx
-        .dispatch_rpc(
-            &mut gm,
-            "DB2",
-            None,
-            "CallProc",
-            &[PyRep::String("zuser.Users_SelectByRole".into())],
-            &kw,
-            None,
-        )
-        .await
-        .expect("DB2.CallProc zuser.Users_SelectByRole");
+    let users_rowset = ctx.dispatch_rpc(&mut gm, "DB2", None, "CallProc", &[PyRep::String("zuser.Users_SelectByRole".into())], &kw, None).await.expect("DB2.CallProc zuser.Users_SelectByRole");
     assert!(matches!(users_rowset, PyRep::Rowset { .. }));
-
-    let unknown_proc_err = ctx
-        .dispatch_rpc(
-            &mut gm,
-            "DB2",
-            None,
-            "CallProc",
-            &[PyRep::String("zcluster.UnknownProc".into())],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("DB2.CallProc unknown proc must return UnimplementedRPC");
+    let unknown_proc_err = ctx.dispatch_rpc(&mut gm, "DB2", None, "CallProc", &[PyRep::String("zcluster.UnknownProc".into())], &kw, None).await.expect_err("DB2.CallProc unknown proc must return UnimplementedRPC");
     assert_eq!(unknown_proc_err.code, "UnimplementedRPC");
 
-    let debug_exec_err = ctx
-        .dispatch_rpc(
-            &mut gm,
-            "debug",
-            None,
-            "Exec",
-            &[PyRep::String("status".into())],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("debug.Exec must fail-closed with UnimplementedRPC");
-    assert_eq!(debug_exec_err.code, "UnimplementedRPC");
+    // Non-GM client session may call zcluster.Attacks_Insert, but is rejected on zuser.Users_SelectByRole
+    let mut player_sess = SessionState::new(999);
+    player_sess.user_id = Some(9001);
+    player_sess.character_id = Some(91_000_001);
+    let attack_ok = ctx.dispatch_rpc(&mut player_sess, "DB2", None, "CallProc", &[PyRep::String("zcluster.Attacks_Insert".into()), PyRep::Integer(9001), PyRep::String("MalformedPacket".into())], &kw, None).await.expect("non-GM client must be allowed to call zcluster.Attacks_Insert");
+    assert_eq!(attack_ok, PyRep::None);
+    let unpriv_users_err = ctx.dispatch_rpc(&mut player_sess, "DB2", None, "CallProc", &[PyRep::String("zuser.Users_SelectByRole".into()), PyRep::Integer(0)], &kw, None).await.expect_err("non-GM client must be rejected on zuser.Users_SelectByRole");
+    assert_eq!(unpriv_users_err.message, "NotAuthorized");
+    let debug_exec_err = ctx.dispatch_rpc(&mut player_sess, "debug", None, "Exec", &[PyRep::String("status".into())], &kw, None).await.expect_err("non-GM debug.Exec must be rejected");
+    assert_eq!(debug_exec_err.message, "NotAuthorized");
 
     // 5. raffleMgr.QA_SeedRaffles
     let seeded = ctx

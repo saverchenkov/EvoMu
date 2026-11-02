@@ -800,6 +800,7 @@ pub async fn relocate_ship(
             PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + cd_secs)),
             PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + fat_secs)),
             PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now)),
+            PyRep::Bool(true),
         ],
     );
     if let Ok(mut bmap) = ctx.bound_objects.write() {

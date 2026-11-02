@@ -976,29 +976,33 @@ pub async fn handle(
                             && is_sov_struct(s.type_id)
                     })
                     .map(|s| {
-                        let (vuln_start_ft, vuln_end_ft) = snap
+                        let (vuln_start_ft, vuln_end_ft) = if let Some(&(sv, ev)) = snap
                             .sov_runtime
                             .adm_vulnerability_windows
                             .get(&s.structure_id)
-                            .or_else(|| snap.structure_vulnerability_windows.get(&s.structure_id))
-                            .copied()
-                            .filter(|&(sv, ev)| sv != 0 || ev != 0)
-                            .map(|(sv, ev)| {
-                                let day_start = now_unix - (now_unix % 86_400);
-                                let mut start_u = day_start + sv;
-                                let mut end_u = if ev > sv {
-                                    day_start + ev
-                                } else {
-                                    day_start + 86_400 + ev
-                                };
-                                if end_u <= now_unix {
-                                    start_u += 86_400;
-                                    end_u += 86_400;
-                                }
-                                let to_ft = |u: u64| ((u as i64) + 11_644_473_600) * 10_000_000;
-                                (to_ft(start_u), to_ft(end_u))
-                            })
-                            .unwrap_or((0, 0));
+                            .filter(|&&(sv, ev)| sv != 0 || ev != 0)
+                        {
+                            let day_start = now_unix - (now_unix % 86_400);
+                            let mut start_u = day_start + sv;
+                            let mut end_u = if ev > sv {
+                                day_start + ev
+                            } else {
+                                day_start + 86_400 + ev
+                            };
+                            if end_u <= now_unix {
+                                start_u += 86_400;
+                                end_u += 86_400;
+                            }
+                            let to_ft = |u: u64| ((u as i64) + 11_644_473_600) * 10_000_000;
+                            (to_ft(start_u), to_ft(end_u))
+                        } else {
+                            let vuln = snap
+                                .structure_vulnerability_windows
+                                .get(&s.structure_id)
+                                .copied()
+                                .unwrap_or((0, 0));
+                            (vuln.0 as i64, vuln.1 as i64)
+                        };
                         let struct_aid = snap
                             .corporations
                             .get(&s.owner_corp_id)

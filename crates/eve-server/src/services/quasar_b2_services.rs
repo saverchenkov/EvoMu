@@ -100,26 +100,45 @@ fn active_char_id(ctx: &AuthoritativeContext) -> Result<u64, (u32, String)> {
         .ok_or_else(|| (STATUS_UNAUTHORIZED, "Active character required".to_string()))
 }
 
-fn has_starter_launchers(db: &WorldRepository) -> bool {
-    db.with_snapshot(|snap| {
-        if let Some(json) = snap.service_state_blobs.get(MISC_STATE_BLOB_KEY) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json) {
-                if let Some(arr) = val.get("starter_launchers").and_then(|v| v.as_array()) {
-                    return !arr.is_empty();
-                }
+fn can_jump_shipcaster(
+    ctx: &AuthoritativeContext,
+    msg: &DynamicQuasarMessage,
+    db: &WorldRepository,
+    sde: &SdeRegistry,
+    require_starter_system: bool,
+) -> Result<bool, (u32, String)> {
+    let caller_cid = i64::try_from(active_char_id(ctx)?)
+        .map_err(|_| (STATUS_UNAUTHORIZED, "Invalid character".to_string()))?;
+    let cid = match extract_u64_checked(msg, 1)? {
+        Some(rcid) if rcid > 0 => {
+            let rcid_i64 = i64::try_from(rcid)
+                .map_err(|_| (STATUS_BAD_REQUEST, "Invalid character identifier".to_string()))?;
+            if rcid_i64 != caller_cid && require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Cannot query another character".to_string()));
             }
+            rcid_i64
         }
-        !crate::services::cluster_macho_misc_services::derived_starter_launchers().is_empty()
-    })
-}
-
-fn can_jump_shipcaster(ctx: &AuthoritativeContext, db: &WorldRepository) -> Result<bool, (u32, String)> {
-    let cid = active_char_id(ctx)? as i64;
-    if !has_starter_launchers(db) {
-        return Ok(false);
-    }
+        _ => caller_cid,
+    };
     let now = ctx.now_unix();
     let eligible = db.with_snapshot(|snap| {
+        let has_caster = if let Some(json) = snap.service_state_blobs.get(MISC_STATE_BLOB_KEY) {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|val| val.get("starter_launchers")?.as_array().map(|a| !a.is_empty()))
+                .unwrap_or(false)
+        } else {
+            snap.structures.values().any(|st| {
+                st.state != "Destroyed"
+                    && sde
+                        .types
+                        .get(&st.type_id)
+                        .is_some_and(|t| t.name.to_ascii_lowercase().contains("shipcaster"))
+            })
+        };
+        if !has_caster {
+            return false;
+        }
         let has_lock = snap
             .zarzakh_gate_locks
             .get(&cid)
@@ -127,19 +146,23 @@ fn can_jump_shipcaster(ctx: &AuthoritativeContext, db: &WorldRepository) -> Resu
         if has_lock {
             return false;
         }
-        if let Some(ch) = snap.characters.get(&cid) {
-            if ch.jump_cooldown_until_unix > now || ch.active_ship_id <= 0 {
-                return false;
-            }
-            let in_space = snap
-                .items
-                .get(&ch.active_ship_id)
-                .is_some_and(|sh| sh.location_id == i64::from(ch.solar_system_id));
-            if !in_space {
-                return false;
-            }
+        let Some(ch) = snap.characters.get(&cid) else {
+            return false;
+        };
+        if ch.jump_cooldown_until_unix > now || ch.active_ship_id <= 0 {
+            return false;
         }
-        true
+        if require_starter_system
+            && !sde
+                .solar_systems
+                .get(&ch.solar_system_id)
+                .is_some_and(|sys| sys.security_status >= 0.45)
+        {
+            return false;
+        }
+        snap.items
+            .get(&ch.active_ship_id)
+            .is_some_and(|sh| sh.location_id == i64::from(ch.solar_system_id))
     });
     Ok(eligible)
 }
@@ -166,10 +189,11 @@ pub fn register_handlers(
 
     // 2. eve.ship.api.CanJumpStarterSpaceShipCasterRequest
     let db_sc1 = Arc::clone(&db);
+    let sde_sc1 = Arc::clone(&sde);
     router.register_handler(
         "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
-        Arc::new(move |ctx, _any, _msg| {
-            let can_jump = can_jump_shipcaster(ctx, &db_sc1)?;
+        Arc::new(move |ctx, _any, msg| {
+            let can_jump = can_jump_shipcaster(ctx, msg, &db_sc1, &sde_sc1, false)?;
             let mut out = Vec::new();
             encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
             Ok(any("eve.ship.api.CanJumpStarterSpaceShipCasterResponse", out))
@@ -178,10 +202,11 @@ pub fn register_handlers(
 
     // 3. eve.starterspace.api.CanJumpShipCasterRequest
     let db_ss1 = Arc::clone(&db);
+    let sde_ss1 = Arc::clone(&sde);
     router.register_handler(
         "eve.starterspace.api.CanJumpShipCasterRequest",
-        Arc::new(move |ctx, _any, _msg| {
-            let can_jump = can_jump_shipcaster(ctx, &db_ss1)?;
+        Arc::new(move |ctx, _any, msg| {
+            let can_jump = can_jump_shipcaster(ctx, msg, &db_ss1, &sde_ss1, true)?;
             let mut out = Vec::new();
             encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
             Ok(any("eve.starterspace.api.CanJumpShipCasterResponse", out))
