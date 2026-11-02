@@ -117,6 +117,16 @@ impl ServerContext {
                     || (session.station_id.is_none()
                         && session.structure_id.is_none()
                         && session.solar_system_id.map(|s| s as i64) == Some(object_id))
+                    || self
+                        .sde
+                        .stations
+                        .get(&object_id)
+                        .is_some_and(|st| Some(st.solar_system_id) == session.solar_system_id)
+                    || self.db.with_snapshot(|snap| {
+                        snap.structures
+                            .get(&object_id)
+                            .is_some_and(|st| Some(st.solar_system_id) == session.solar_system_id)
+                    })
             }
             "station" | "corpStationMgr" | "repairSvc" | "reprocessingSvc" | "insuranceSvc" => {
                 session.station_id == Some(object_id) || session.structure_id == Some(object_id)

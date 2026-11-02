@@ -451,6 +451,7 @@ pub async fn activate_interdiction_sphere_launcher(
                 is_cloaked: false,
                 skin_id: None,
                 skin_material_set_id: None,
+                jump_target: None,
             },
         )
         .await
