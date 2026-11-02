@@ -581,7 +581,7 @@ async fn test_crimewatch_security_and_duels() {
             tag_item_id,
             eve_db::InventoryItemRecord {
                 item_id: tag_item_id,
-                type_id: 35661, // Clone Soldier Trainer Tag
+                type_id: 33138, // Clone Soldier Trainer Tag
                 owner_id: P1,
                 location_id: sec_office_st,
                 flag: eve_db::InventoryFlag::Hangar,
@@ -604,7 +604,7 @@ async fn test_crimewatch_security_and_duels() {
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Integer(35661), PyRep::Integer(1)],
+            &[PyRep::Real(-8.0), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
             &kw,
             None,
         )

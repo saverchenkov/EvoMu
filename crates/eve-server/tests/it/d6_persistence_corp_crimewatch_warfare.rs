@@ -307,47 +307,32 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
         rpc(&ctx, &mut sess, "entity", "ChangeDroneSettings", &[PyRep::Bool(true), PyRep::Bool(true)]).await;
 
-        // Turn in a Clone Soldier Negotiator Tag (35664) via ApplyTagsForSecStatus while docked at a low-sec Security Office
+        // Turn in a Clone Soldier Negotiator Tag (33141) via ApplyTagsForSecStatus while docked at a low-sec Security Office
         let sec_office_st = ctx
             .sde
             .stations
             .values()
             .find_map(|st| {
                 let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
-                (0.0 < sec && sec < 0.45).then_some(st.station_id)
+                (0.0 < sec && sec < 0.45 && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27)).then_some(st.station_id)
             })
-            .unwrap_or(60_099_999);
-        let orig_station = sess.station_id;
-        let orig_sys = sess.solar_system_id;
+            .unwrap_or(60_014_861);
+        let (orig_station, orig_sys) = (sess.station_id, sess.solar_system_id);
         sess.station_id = Some(sec_office_st);
-        sess.solar_system_id = Some(30_002_813);
+        sess.solar_system_id = ctx.sde.stations.get(&sec_office_st).map(|s| s.solar_system_id);
         ctx.db.with_mut_snapshot(|snap| {
-            snap.characters.get_mut(&PILOT).unwrap().station_id = Some(sec_office_st);
-            snap.characters.get_mut(&PILOT).unwrap().security_status = -1.0;
-            snap.characters.get_mut(&PILOT).unwrap().balance = IskCents::from_isk(500_000_000);
-            snap.items.insert(
-                880_001,
-                InventoryItemRecord {
-                    item_id: 880_001,
-                    type_id: 35664,
-                    owner_id: PILOT,
-                    location_id: sec_office_st,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
+            let ch = snap.characters.get_mut(&PILOT).unwrap();
+            ch.station_id = Some(sec_office_st);
+            ch.security_status = -1.0;
+            ch.balance = IskCents::from_isk(500_000_000);
+            snap.items.insert(880_001, InventoryItemRecord {
+                item_id: 880_001, type_id: 33141, owner_id: PILOT, location_id: sec_office_st, flag: InventoryFlag::Hangar,
+                quantity: 1, singleton: false, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+            });
         });
-        rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.characters.get_mut(&PILOT).unwrap().station_id = orig_station;
-        });
+        rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])]).await;
+        ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&PILOT).unwrap().station_id = orig_station; });
         sess.station_id = orig_station;
         sess.solar_system_id = orig_sys;
 
@@ -455,7 +440,8 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         assert_eq!(wh_pol_tuple[1], PyRep::Integer(300 * 10_000_000));
 
         let sec_tx = rpc(&ctx2, &mut sess2, "crimewatch", "GetSecurityStatusTransactions", &[]).await;
-        assert!(format!("{sec_tx:?}").contains("Clone Soldier Security Tag"));
+        let sec_txt = format!("{sec_tx:?}");
+        assert!(sec_txt.contains("Integer(1)") && sec_txt.contains("Real(-0.5)"), "tag turn-in transaction must persist across SQLite restart: {sec_txt}");
         let bkr = rpc(&ctx2, &mut sess2, "bountyProxy", "GetBountiesAndKillRights", &[PyRep::List(vec![PyRep::Integer(OTHER)]), PyRep::List(vec![PyRep::Integer(OTHER)])]).await;
         assert!(format!("{bkr:?}").contains("5000000") && format!("{bkr:?}").contains("2500000"));
 

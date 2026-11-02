@@ -229,30 +229,6 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
         .expect("ActivateKillRight");
     assert_eq!(dict_get(&act_kr, "suspectFlagged").and_then(|v| v.as_bool()), Some(true));
 
-    // 10. Clone Soldier Security Tags (`feat:crimewatch.security-tags`)
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(c) = s.characters.get_mut(&char_b) {
-            c.security_status = -6.5;
-        }
-        s.items.insert(
-            750_001,
-            InventoryItemRecord {
-                item_id: 750_001,
-                type_id: 35662, // Clone Soldier Recruiter Tag ([-8.0, -5.0) band)
-                owner_id: char_b,
-                location_id: ship_b,
-                flag: InventoryFlag::Cargo,
-                quantity: 4,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
     let sec_office_st = ctx
         .sde
         .stations
@@ -262,11 +238,32 @@ async fn test_c8_crimewatch_faction_police_killrights_tags_and_sentries() {
             (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)).then_some(st.station_id)
         })
         .unwrap_or(60_014_861);
+    let orig_ship_loc = ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_b) {
+            c.security_status = -6.5;
+            c.station_id = Some(sec_office_st);
+        }
+        let prev_loc = s.items.get(&ship_b).map(|sh| sh.location_id).unwrap_or(0);
+        if let Some(sh) = s.items.get_mut(&ship_b) { sh.location_id = sec_office_st; }
+        s.items.insert(
+            750_001,
+            InventoryItemRecord {
+                item_id: 750_001, type_id: 33139, owner_id: char_b, location_id: ship_b, flag: InventoryFlag::Cargo,
+                quantity: 4, singleton: false, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+            },
+        );
+        prev_loc
+    });
     sess_b.station_id = Some(sec_office_st);
-    let tag_res = dispatch_combat_rpc(&ctx, &mut sess_b, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35662), PyRep::Integer(2)], &HashMap::new())
+    let tag_res = dispatch_combat_rpc(&ctx, &mut sess_b, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(-5.5), PyRep::Dict(vec![(PyRep::Integer(33139), PyRep::Integer(2))])], &HashMap::new())
         .await
         .expect("ApplyTagsForSecStatus");
     sess_b.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&char_b) { c.station_id = None; }
+        if let Some(sh) = s.items.get_mut(&ship_b) { sh.location_id = orig_ship_loc; }
+    });
     let new_sec = dict_get(&tag_res, "newSecurityStatus").and_then(|v| v.as_f64()).unwrap_or(-10.0);
     assert!((new_sec - (-5.5)).abs() < 1e-6, "2 Clone Soldier Recruiter tags must raise security status from -6.5 to -5.5 (got {new_sec})");
     let tx_res = dispatch_combat_rpc(&ctx, &mut sess_b, "crimewatch", "GetSecurityStatusTransactions", &[], &HashMap::new())

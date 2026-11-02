@@ -660,35 +660,24 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert!(format!("{sentry:?}").contains("5.0"));
         assert_eq!(esi_get(&router, &format!("/v1/corporations/{CORP_ID}/starbases/{tower_id}/?system_id={JITA_SYSTEM_ID}"), Some(&token))["attack_standing_threshold"], 5.0);
 
-        let cfg_get = call(&ctx, &mut sess, "invbroker", "ALSCConfigGet", &[PyRep::Integer(alsc_id)]).await.expect("ALSCConfigGet");
-        assert_eq!(cfg_get.dict_get("hasPassword").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(call(&ctx, &mut sess, "invbroker", "ALSCConfigGet", &[PyRep::Integer(alsc_id)]).await.expect("ALSCConfigGet").dict_get("hasPassword").and_then(|v| v.as_bool()), Some(true));
         let locked_dict = call(&ctx, &mut sess, "itemLocking", "GetItemsByLocation", &[PyRep::Integer(alsc_id)]).await.expect("GetItemsByLocation");
         assert!(format!("{locked_dict:?}").contains(&locked_item_id.to_string()));
-        let log_rep = call_kw(&ctx, &mut sess, "invbroker", "ALSCLogGet", &[PyRep::Integer(alsc_id)], &[("password", PyRep::String("vault-pw-99".into()))]).await.expect("ALSCLogGet");
-        assert!(log_rep.dict_get("logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
+        assert!(call_kw(&ctx, &mut sess, "invbroker", "ALSCLogGet", &[PyRep::Integer(alsc_id)], &[("password", PyRep::String("vault-pw-99".into()))]).await.expect("ALSCLogGet").dict_get("logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
         assert!(esi_get(&router, &format!("/v3/corporations/{CORP_ID}/containers/logs/"), Some(&token)).as_array().unwrap().iter().any(|l| l["container_id"] == alsc_id && l["action"] == "lock"));
-
         let ship_cfg = call(&ctx, &mut sess, "ship", "GetShipConfiguration", &[PyRep::Integer(ship_id)]).await.expect("GetShipConfiguration");
         assert_eq!((ship_cfg.dict_get("SMB_AllowFleetAccess").and_then(|v| v.as_bool()), ship_cfg.dict_get("FleetHangar_AllowCorpAccess").and_then(|v| v.as_bool())), (Some(false), Some(false)));
-
-        let err_cd = call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(777_102)]).await.expect_err("Daily Alpha Injector cooldown must persist across restart");
-        assert_eq!(err_cd.code, "DailyAlphaInjectorCooldownActive");
+        assert_eq!(call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(777_102)]).await.expect_err("Daily Alpha Injector cooldown must persist across restart").code, "DailyAlphaInjectorCooldownActive");
 
         let ch_rep = call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("get_challenge");
-        assert_eq!(ch_rep.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(10));
+        assert_eq!((ch_rep.dict_get("claimed").and_then(|v| v.as_bool()), ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64())), (Some(true), Some(10)));
         let pd_stats = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
-        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(1), Some(1)));
-        assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(325.0));
-        let pd_ak = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
-        assert_eq!(pd_ak.as_i64(), Some(0));
+        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64()), pd_stats.dict_get("experience").and_then(|v| v.as_f64())), (Some(1), Some(1), Some(325.0)));
+        assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits").as_i64(), Some(0));
         let lic_after = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
-        assert_eq!(lic_after, lic_bytes_before);
-        assert_ne!(lic_after, lic_initial, "Mutated Omega license expiry must persist across SQLite restart");
-        let agr_after = send_quasar_req(&ctx, &mut sess, "eve.legal.agreement.api.GetLatestRequest", Vec::new()).await;
-        assert!(String::from_utf8_lossy(&agr_after.payload.unwrap().value).contains("eula_v24"));
-        let ent_after = send_quasar_req(&ctx, &mut sess, "eve_public.entitlement.user.api.GetRequest", Vec::new()).await;
-        assert!(String::from_utf8_lossy(&ent_after.payload.unwrap().value).contains("omega_veteran_reward"));
+        assert_eq!((lic_after == lic_bytes_before, lic_after != lic_initial), (true, true));
+        assert!(String::from_utf8_lossy(&send_quasar_req(&ctx, &mut sess, "eve.legal.agreement.api.GetLatestRequest", Vec::new()).await.payload.unwrap().value).contains("eula_v24"));
+        assert!(String::from_utf8_lossy(&send_quasar_req(&ctx, &mut sess, "eve_public.entitlement.user.api.GetRequest", Vec::new()).await.payload.unwrap().value).contains("omega_veteran_reward"));
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload).await.status_code, STATUS_NOT_IMPLEMENTED);
     }
     let _ = std::fs::remove_file(&path);

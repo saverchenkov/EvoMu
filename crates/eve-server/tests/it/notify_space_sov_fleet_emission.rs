@@ -622,7 +622,7 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
         }
     });
     s1.station_id = Some(sec_office_st);
-    seed_item(&ctx, 970_001, 35664, P1, sec_office_st, InventoryFlag::Hangar, 2);
-    call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(2)]).await;
+    seed_item(&ctx, 970_001, 33141, P1, sec_office_st, InventoryFlag::Hangar, 2);
+    call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(2))])]).await;
     assert_eq!(events(&ctx, P1, "OnSecurityStatusUpdate"), vec![vec![PyRep::Real(-0.5)]]);
 }

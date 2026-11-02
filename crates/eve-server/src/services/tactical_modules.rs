@@ -1134,60 +1134,35 @@ pub async fn handle_entosis_link_activation(
 /// Applies Command Burst (`group_id == 1770`) fleet `dbuffs` with V24 range, strength, duration, reload, Omega clone, and Industrial Core bonuses.
 #[allow(clippy::too_many_arguments)]
 pub async fn activate_command_burst(
-    ctx: &ServerContext,
-    sys: &SystemHandle,
-    char_id: i64,
-    ship_id: i64,
-    sys_id: u32,
-    module_id: i64,
-    mod_type: &InvType,
-    mod_state: &DogmaItemState,
-    charge_tid_opt: Option<TypeId>,
-    fit: &ShipFittingEngine,
+    ctx: &ServerContext, sys: &SystemHandle, char_id: i64, ship_id: i64, sys_id: u32,
+    module_id: i64, mod_type: &InvType, mod_state: &DogmaItemState, charge_tid_opt: Option<TypeId>, fit: &ShipFittingEngine,
 ) -> Result<PyRep, BridgeRpcError> {
     let (clone_grade, ship_type_id, ship_group_id, active_burst_count, cmd_rig_bonus, active_ind_core_tid) = ctx.db.with_snapshot(|snap| {
         let cg = snap.characters.get(&char_id).map(|c| c.clone_grade).unwrap_or(1);
         let s_tid = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
         let s_grp = ctx.sde.types.get(&s_tid).map(|t| t.group_id).unwrap_or(0);
-        let mut act_bursts = 0usize;
-        let mut rig_bonus = 0usize;
-        let mut ind_core = None;
-        for item in snap.items.values() {
-            if item.location_id == ship_id && snap.module_online_states.get(&item.item_id).copied().unwrap_or(true) {
-                if let Some(t) = ctx.sde.types.get(&item.type_id) {
-                    if t.effect_ids.contains(&6766) {
-                        rig_bonus += t.default_attributes.get(&2542).copied().unwrap_or(1.0).round() as usize;
-                    }
-                    if snap.module_active_states.contains(&item.item_id) {
-                        if t.group_id == 1770 && item.item_id != module_id { act_bursts += 1; }
-                        if matches!(item.type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591) { ind_core = Some(item.type_id); }
-                    }
+        let (mut act_bursts, mut rig_bonus, mut ind_core) = (0usize, 0usize, None);
+        for item in snap.items.values().filter(|i| i.location_id == ship_id && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)) {
+            if let Some(t) = ctx.sde.types.get(&item.type_id) {
+                if t.effect_ids.contains(&6766) { rig_bonus += t.default_attributes.get(&2542).copied().unwrap_or(1.0).round() as usize; }
+                if snap.module_active_states.contains(&item.item_id) {
+                    if t.group_id == 1770 && item.item_id != module_id { act_bursts += 1; }
+                    if matches!(item.type_id, 28583 | 42890 | 58945 | 58950 | 62590 | 62591) { ind_core = Some(item.type_id); }
                 }
             }
         }
         (cg, s_tid, s_grp, act_bursts, rig_bonus, ind_core)
     });
 
-    if clone_grade == 0 {
-        return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into() });
-    }
+    if clone_grade == 0 { return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into() }); }
     let max_active_allowed = 2 + cmd_rig_bonus;
-    if active_burst_count >= max_active_allowed {
-        return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") });
-    }
+    if active_burst_count >= max_active_allowed { return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") }); }
 
     let allowed_charge_groups: Vec<u32> = [604u16, 605, 606, 609, 610]
-        .into_iter()
-        .filter_map(|aid| mod_type.default_attributes.get(&aid).map(|&v| v as u32))
-        .filter(|&g| g > 0)
-        .collect();
+        .into_iter().filter_map(|aid| mod_type.default_attributes.get(&aid).map(|&v| v as u32)).filter(|&g| g > 0).collect();
     let is_valid_charge_type = |tid: TypeId| {
         ctx.sde.types.get(&tid).is_some_and(|t| {
-            if allowed_charge_groups.is_empty() {
-                matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905)
-            } else {
-                allowed_charge_groups.contains(&t.group_id)
-            }
+            if allowed_charge_groups.is_empty() { matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905) } else { allowed_charge_groups.contains(&t.group_id) }
         })
     };
     let (charge_tid, charge_item_id_opt) = ctx.db.with_snapshot(|snap| {
@@ -1221,17 +1196,11 @@ pub async fn activate_command_burst(
     let is_t2_module = mod_type.default_attributes.get(&422).copied().unwrap_or(1.0) >= 2.0;
     let is_mining_burst = matches!(mod_type.type_id, 42528 | 43551) || mod_type.name.contains("Mining Foreman");
 
-    let (command_skill_id, specialist_skill_id) = if is_mining_burst {
-        (22536u32, 22552u32)
-    } else if matches!(mod_type.type_id, 42526 | 43555) || mod_type.name.contains("Shield") {
-        (3350, 3351)
-    } else if matches!(mod_type.type_id, 42525 | 43553) || mod_type.name.contains("Armor") {
-        (3352, 3353)
-    } else if matches!(mod_type.type_id, 42529 | 43556) || mod_type.name.contains("Skirmish") {
-        (3349, 3355)
-    } else {
-        (20494, 20495)
-    };
+    let (command_skill_id, specialist_skill_id) = if is_mining_burst { (22536u32, 22552u32) }
+        else if matches!(mod_type.type_id, 42526 | 43555) || mod_type.name.contains("Shield") { (3350, 3351) }
+        else if matches!(mod_type.type_id, 42525 | 43553) || mod_type.name.contains("Armor") { (3352, 3353) }
+        else if matches!(mod_type.type_id, 42529 | 43556) || mod_type.name.contains("Skirmish") { (3349, 3355) }
+        else { (20494, 20495) };
     let command_lvl = skills.get(&command_skill_id).copied().unwrap_or(0).min(5);
     let specialist_lvl = skills.get(&specialist_skill_id).copied()
         .or_else(|| mod_type.default_attributes.get(&184).and_then(|&sid| skills.get(&(sid as u32)).copied()))
@@ -1245,13 +1214,11 @@ pub async fn activate_command_burst(
     let ind_cmd_lvl = skills.get(&29637).copied().unwrap_or(0).min(5) as f64;
     let cap_ind_lvl = skills.get(&28374).copied().unwrap_or(0).min(5) as f64;
     let ship_range_mult = match ship_group_id {
-        30 | 547 | 659 | 1538 => 3.00,
-        540 => 2.00,
+        30 | 547 | 659 | 1538 => 3.00, 540 => 2.00,
         883 => 1.50 * if is_mining_burst { 1.0 + 0.05 * cap_ind_lvl } else { 1.0 },
         941 if ship_type_id == 28606 => 2.00 * if is_mining_burst { 1.0 + 0.05 * ind_cmd_lvl } else { 1.0 },
         941 => 1.50 * if is_mining_burst { 1.0 + 0.05 * ind_cmd_lvl } else { 1.0 },
-        419 | 963 => 1.50,
-        _ => 1.0,
+        419 | 963 => 1.50, _ => 1.0,
     };
     let ind_core_range_bonus = match active_ind_core_tid {
         Some(62590) => 0.45, Some(62591) => 0.60, Some(58945) => 0.75, Some(58950) => 1.00, Some(28583) => 2.00, Some(42890) => 2.50, _ => 0.0,
@@ -1299,69 +1266,69 @@ pub async fn activate_command_burst(
 
     let candidate_ship_ids: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
         let mut fleet_chars = vec![char_id];
-        for fl in snap.fleets.values() {
-            if fl.members.contains(&char_id) {
-                for &m_id in &fl.members {
-                    if !fleet_chars.contains(&m_id) { fleet_chars.push(m_id); }
-                }
-            }
+        for fl in snap.fleets.values().filter(|fl| fl.members.contains(&char_id)) {
+            for &m_id in &fl.members { if !fleet_chars.contains(&m_id) { fleet_chars.push(m_id); } }
         }
-        let mut ships = Vec::new();
-        for cid in fleet_chars {
-            if let Some(ch) = snap.characters.get(&cid) {
-                if ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0 {
-                    ships.push((cid, ch.active_ship_id));
-                }
-            }
-        }
+        let mut ships: Vec<(i64, i64)> = fleet_chars.into_iter().filter_map(|cid| {
+            let ch = snap.characters.get(&cid)?;
+            (ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.structure_id.is_none() && ch.active_ship_id > 0).then_some((cid, ch.active_ship_id))
+        }).collect();
         if !ships.iter().any(|&(_, sid)| sid == ship_id) { ships.push((char_id, ship_id)); }
         ships
     });
 
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let now_unix_burst = ctx.now_unix();
+    let safety = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.safety_levels.get(&char_id).copied().unwrap_or(crate::services::combat_crimewatch::SafetyLevel::Green)
+    });
+    let mut trigger_suspect = false;
+    let mut trigger_criminal = false;
     let booster_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
     let mut affected_ships = Vec::new();
     for (member_char_id, member_ship_id) in candidate_ship_ids {
         if affected_ships.len() >= 256 { break; }
-        let same_corp_or_alliance = ctx.db.with_snapshot(|snap| {
-            let (Some(booster), Some(member)) = (snap.characters.get(&char_id), snap.characters.get(&member_char_id)) else { return false; };
-            booster.corporation_id == member.corporation_id
-                || (booster.alliance_id.is_some() && booster.alliance_id == member.alliance_id)
-        });
-        if sys_sec >= 0.45 && member_char_id != char_id {
-            let is_illegal_target = {
+        let in_range = if member_ship_id == ship_id { true }
+            else if let Ok(Some((_, m_ball))) = sys.get_ball_snapshot(member_ship_id).await { (m_ball.position - booster_pos).length() <= aoe_range }
+            else { false };
+        if !in_range { continue; }
+        if sys_sec > 0.0 && member_char_id != char_id {
+            let (m_crim, m_susp) = {
                 let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                 let st = cw.get_or_create(member_char_id);
-                st.is_criminal(now_unix_burst) || st.is_suspect(now_unix_burst)
-            } || (crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
+                (st.is_criminal(now_unix_burst), st.is_suspect(now_unix_burst))
+            };
+            let has_unshared_le = crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
                 && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                     let hle = rt.limited_engagements.get(&char_id);
                     rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
                         m.iter().any(|(&pid, &exp)| pid != char_id && now_unix_burst <= exp && !hle.is_some_and(|h| h.get(&pid).is_some_and(|&he| now_unix_burst <= he)))
                     })
-                })) || ctx.db.with_snapshot(|snap| {
-                snap.characters.get(&member_char_id).is_some_and(|rec| rec.security_status <= -4.95)
-            }) || (!same_corp_or_alliance
-                && crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(
-                    ctx,
-                    char_id,
-                    member_char_id,
-                    now_unix_burst,
-                ));
-            if is_illegal_target {
-                continue;
+                });
+            let (same_corp_or_alliance, is_outlaw) = ctx.db.with_snapshot(|snap| {
+                let b = snap.characters.get(&char_id);
+                let m = snap.characters.get(&member_char_id);
+                let same = b.zip(m).is_some_and(|(b, m)| b.corporation_id == m.corporation_id || (b.alliance_id.is_some() && b.alliance_id == m.alliance_id));
+                (same, m.is_some_and(|rec| rec.security_status <= -4.95))
+            });
+            let war_interference = !same_corp_or_alliance && crate::services::combat_crimewatch::crimewatch_timers::is_war_interference_assistance(ctx, char_id, member_char_id, now_unix_burst);
+            if m_crim {
+                if safety != crate::services::combat_crimewatch::SafetyLevel::Red { continue; }
+                trigger_criminal = true;
+            } else if sys_sec >= 0.45 && (has_unshared_le || war_interference) {
+                continue; // High-sec Command Bursts exclude unshared LE/war-engaged fleetmates without blocking
+            } else if m_susp || (sys_sec >= 0.45 && is_outlaw) || (sys_sec < 0.45 && (has_unshared_le || war_interference)) {
+                if safety == crate::services::combat_crimewatch::SafetyLevel::Green { continue; }
+                trigger_suspect = true;
             }
         }
-        let in_range = if member_ship_id == ship_id {
-            true
-        } else if let Ok(Some((_, m_ball))) = sys.get_ball_snapshot(member_ship_id).await {
-            (m_ball.position - booster_pos).length() <= aoe_range
-        } else {
-            false
-        };
-        if in_range { affected_ships.push((member_char_id, member_ship_id)); }
+        affected_ships.push((member_char_id, member_ship_id));
     }
+    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+    cw.trigger_weapon_timer(char_id, now_unix_burst);
+    if trigger_criminal { cw.get_or_create(char_id).criminal_flag_until_unix = now_unix_burst.saturating_add(900); }
+    else if trigger_suspect { cw.trigger_suspect_flag(char_id, now_unix_burst); }
+    drop(cw);
 
     {
         let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
@@ -1374,20 +1341,18 @@ pub async fn activate_command_burst(
         }
     }
 
-    let dbuff_id_reps: Vec<PyRep> = raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect();
-    let affected_ship_reps: Vec<PyRep> = affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect();
-    let affected_member_reps: Vec<PyRep> = affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect();
-
+    let (dbuff_id_reps, affected_ship_reps, affected_member_reps): (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) = (
+        raw_buffs.iter().map(|&(id, _)| PyRep::Integer(id as i64)).collect(),
+        affected_ships.iter().map(|&(_, sid)| PyRep::Integer(sid)).collect(),
+        affected_ships.iter().map(|&(cid, _)| PyRep::Integer(cid)).collect(),
+    );
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
-        let mut exhausted = false;
-        if let Some(cid) = charge_item_id_opt {
-            if let Some(ci) = snap.items.get_mut(&cid) {
-                ci.quantity = ci.quantity.saturating_sub(1);
-                if ci.quantity == 0 { exhausted = true; }
-            }
-            if exhausted { snap.items.remove(&cid); }
-        }
+        let exhausted = charge_item_id_opt.is_some_and(|cid| {
+            let zero = snap.items.get_mut(&cid).is_some_and(|ci| { ci.quantity = ci.quantity.saturating_sub(1); ci.quantity == 0 });
+            if zero { snap.items.remove(&cid); }
+            zero
+        });
         if exhausted { snap.module_active_charges.remove(&module_id); } else { snap.module_active_charges.insert(module_id, c_tid); }
     });
     for &(member_cid, member_sid) in &affected_ships {
@@ -1398,18 +1363,15 @@ pub async fn activate_command_burst(
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("chargeTypeID", PyRep::Integer(c_tid as i64)),
-        ("dbuffIDs", PyRep::List(dbuff_id_reps)), ("affectedShipIDs", PyRep::List(affected_ship_reps)),
-        ("affectedMemberIDs", PyRep::List(affected_member_reps)), ("buffStrength", PyRep::Real(primary_buff_strength)),
-        ("buffStrengthMultiplier", PyRep::Real(total_strength_mult)), ("burstStrengthMultiplier", PyRep::Real(total_strength_mult)),
-        ("buffDurationSeconds", PyRep::Real(buff_duration_s)), ("durationSeconds", PyRep::Real(cycle_duration_s)),
-        ("cycleDurationSeconds", PyRep::Real(cycle_duration_s)), ("reloadTimeSeconds", PyRep::Real(reload_time_s)),
-        ("expiresAtUnix", PyRep::Integer(expires_at_unix as i64)), ("aoeRangeMeters", PyRep::Real(aoe_range)), ("aoeRange", PyRep::Real(aoe_range)),
+        ("dbuffIDs", PyRep::List(dbuff_id_reps)), ("affectedShipIDs", PyRep::List(affected_ship_reps)), ("affectedMemberIDs", PyRep::List(affected_member_reps)),
+        ("buffStrength", PyRep::Real(primary_buff_strength)), ("buffStrengthMultiplier", PyRep::Real(total_strength_mult)), ("burstStrengthMultiplier", PyRep::Real(total_strength_mult)),
+        ("buffDurationSeconds", PyRep::Real(buff_duration_s)), ("durationSeconds", PyRep::Real(cycle_duration_s)), ("cycleDurationSeconds", PyRep::Real(cycle_duration_s)),
+        ("reloadTimeSeconds", PyRep::Real(reload_time_s)), ("expiresAtUnix", PyRep::Integer(expires_at_unix as i64)),
+        ("aoeRangeMeters", PyRep::Real(aoe_range)), ("aoeRange", PyRep::Real(aoe_range)),
     ]))
 }
 
 /// Overlays cycle-transient item attributes (RAH/ADC/EHE resonances, mutadaptive spool, rack heat) onto `ItemGetInfo` attributes.
 pub fn apply_transient_item_attrs(ctx: &ServerContext, item_id: i64, merged_attrs: &mut HashMap<u16, f64>) {
-    ctx.db.with_snapshot(|snap| if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) {
-        for (&attr_id, &val) in tr_attrs { merged_attrs.insert(attr_id, val); }
-    });
+    ctx.db.with_snapshot(|snap| if let Some(tr_attrs) = snap.transient_item_attributes.get(&item_id) { merged_attrs.extend(tr_attrs.iter().map(|(&k, &v)| (k, v))); });
 }

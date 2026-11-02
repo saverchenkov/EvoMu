@@ -334,7 +334,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
             750_102,
             InventoryItemRecord {
                 item_id: 750_102,
-                type_id: 35_664, // Negotiator (-2 to 0)
+                type_id: 33141, // Negotiator (-2 to 0)
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -361,7 +361,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
         &mut sess,
         "crimewatch",
         "ApplyTagsForSecStatus",
-        &[PyRep::Integer(35_661), PyRep::Integer(1)],
+        &[PyRep::Real(-9.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
         &HashMap::new(),
     )
     .await
@@ -373,7 +373,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
         if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; ch.station_id = sess.station_id; }
         if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = sec_office_st; }
     });
-    let _ = dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35_664), PyRep::Integer(2)], &HashMap::new())
+    let _ = dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(0.2), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(2))])], &HashMap::new())
         .await
         .expect("Negotiator tag at -0.3");
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));

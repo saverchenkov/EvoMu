@@ -421,35 +421,14 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
                 false,
             ),
         );
-        snap.contracts.insert(
-            77_157_001,
-            ContractRecord {
-                contract_id: 77_157_001,
-                issuer_id: char_id,
-                issuer_corp_id: 1_000_125,
-                assignee_id: 0,
-                acceptor_id: None,
-                contract_type: "ItemExchange".into(),
-                status: "Outstanding".into(),
-                title: "Locked Tag".into(),
-                for_corp: false,
-                availability: "Public".into(),
-                start_station_id: 60_003_760,
-                end_station_id: 60_003_760,
-                price: IskCents::from_isk(1),
-                reward: IskCents(0),
-                collateral: IskCents(0),
-                item_ids: vec![locked_tag_id],
-                expiration_unix: 1_700_086_400,
-                buyout: IskCents(0),
-                current_bid: IskCents(0),
-                current_bidder_id: None,
-                requested_items: Vec::new(),
-                bid_history: Vec::new(),
-                date_issued_unix: 1_700_000_000,
-                num_days: 1,
-            },
-        );
+        snap.contracts.insert(77_157_001, ContractRecord {
+            contract_id: 77_157_001, issuer_id: char_id, issuer_corp_id: 1_000_125, assignee_id: 0, acceptor_id: None,
+            contract_type: "ItemExchange".into(), status: "Outstanding".into(), title: "Locked Tag".into(), for_corp: false,
+            availability: "Public".into(), start_station_id: 60_003_760, end_station_id: 60_003_760,
+            price: IskCents::from_isk(1), reward: IskCents(0), collateral: IskCents(0), item_ids: vec![locked_tag_id],
+            expiration_unix: 1_700_086_400, buyout: IskCents(0), current_bid: IskCents(0), current_bidder_id: None,
+            requested_items: Vec::new(), bid_history: Vec::new(), date_issued_unix: 1_700_000_000, num_days: 1,
+        });
     });
 
     let err = ctx
@@ -458,7 +437,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Integer(35661), PyRep::Integer(1)],
+            &[PyRep::Real(-9.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
             &kw,
             None,
         )

@@ -7,7 +7,6 @@ use eve_db::{
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles, SessionState};
 use eve_proto::PyRep;
-use eve_server::combat::crimewatch::CrimeWatchDirector;
 use eve_server::combat::death_pipeline::execute_death_pipeline;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
@@ -601,13 +600,13 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
     .expect_err("Tier 4-6 Abyssal filament must be blocked in 0.8-1.0 high-security space");
     assert_eq!(err_jita.code, "FilamentDisallowedInHighSec");
 
-    // 2. In high-sec system 0.5-0.7 (e.g. Sivala 30000160, sec = 0.6):
-    // Activating high-tier Abyssal filament is allowed, and exiting applies 15-minute Suspect flag
-    let sivala_sys_id = 30_000_160;
-    seed_pilot(&ctx, char_id, ship_id, sivala_sys_id, DVec3::ZERO).await;
-    let mut sess_sivala = make_session(char_id, ship_id, sivala_sys_id, None);
+    // 2. In 0.6 high-sec system Sooma (30000009, sec = 0.6):
+    // Activating T6 Abyssal filament (56139) is allowed and applies 15-minute Suspect flag on exit
+    let sooma_sys_id = 30_000_009;
+    let cruiser_t6_tid: u32 = 56_139;
+    seed_pilot(&ctx, char_id, ship_id, sooma_sys_id, DVec3::ZERO).await;
+    let mut sess_sooma = make_session(char_id, ship_id, sooma_sys_id, None);
 
-    // Seed filament into pilot cargo
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.type_id = 621;
@@ -616,7 +615,7 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
             500_000_001,
             InventoryItemRecord {
                 item_id: 500_000_001,
-                type_id: cruiser_t4_tid,
+                type_id: cruiser_t6_tid,
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -632,46 +631,49 @@ async fn test_abyssal_filament_highsec_restrictions_and_suspect_flag() {
         );
     });
 
-    let deploy_sivala = dispatch_combat_rpc(
+    let deploy_sooma = dispatch_combat_rpc(
         &ctx,
-        &mut sess_sivala,
+        &mut sess_sooma,
         "abyssalMgr",
         "AbyssalEntranceDeployment",
         &[PyRep::Integer(500_000_001)],
         &HashMap::new(),
     )
     .await
-    .expect("Tier 4 Abyssal filament allowed in 0.5-0.7 high-sec");
-    let trace_ball_id = deploy_sivala
+    .expect("Tier 6 Abyssal filament allowed in 0.6 high-sec");
+    let trace_ball_id = deploy_sooma
         .dict_get("traceBallID")
         .and_then(|v| v.as_i64())
         .expect("traceBallID");
-    let res_sivala = dispatch_combat_rpc(
+    let res_sooma = dispatch_combat_rpc(
         &ctx,
-        &mut sess_sivala,
+        &mut sess_sooma,
         "abyssalMgr",
         "AbyssalEntranceGateActivation",
         &[PyRep::Integer(trace_ball_id)],
         &HashMap::new(),
     )
     .await
-    .expect("AbyssalEntranceGateActivation in Sivala");
+    .expect("AbyssalEntranceGateActivation in Sooma");
 
-    let PyRep::KeyVal(kv) = res_sivala else {
-        panic!("Expected KeyVal response, got {res_sivala:?}");
+    let PyRep::KeyVal(kv) = res_sooma else {
+        panic!("Expected KeyVal response, got {res_sooma:?}");
     };
-    assert_eq!(kv.get("suspectFlagOnExit"), Some(&PyRep::Bool(false)));
-
-    // Exiting the trace applies 15-minute (900s) Suspect flag to the pilot
+    assert_eq!(kv.get("suspectFlagOnExit"), Some(&PyRep::Bool(true)));
+    let pid_sus = kv.get("pocketID").and_then(|v| v.as_i64()).unwrap();
+    for room in 0..3_usize {
+        crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, char_id, room).await;
+        let gid = 1_895_000_000 + pid_sus * 10 + (room as i64 + 1);
+        if room < 2 {
+            dispatch_combat_rpc(&ctx, &mut sess_sooma, "abyssalMgr", "AbyssalGateActivation", &[PyRep::Integer(gid)], &HashMap::new()).await.expect("gate");
+        } else {
+            ctx.pending_notifications.write().unwrap().clear();
+            dispatch_combat_rpc(&ctx, &mut sess_sooma, "abyssalMgr", "AbyssalEndGateActivation", &[PyRep::Integer(gid)], &HashMap::new()).await.expect("exit");
+        }
+    }
     let now_unix = ctx.now_unix();
-    let mut cw = CrimeWatchDirector::new();
-    cw.trigger_suspect_flag(char_id, now_unix);
-    assert!(
-        cw.is_suspect(char_id, now_unix + 10),
-        "Exiting high-tier Abyssal trace in 0.5-0.7 high-sec must apply a 15-minute Suspect flag"
-    );
-    assert!(
-        !cw.is_suspect(char_id, now_unix + 901),
-        "Suspect flag must expire after 15 minutes"
-    );
+    let cw = ctx.crimewatch.read().unwrap();
+    assert!(cw.is_suspect(char_id, now_unix + 10), "Exiting T6 Abyssal trace in 0.6 high-sec must apply live 15m Suspect flag");
+    assert!(!cw.is_suspect(char_id, now_unix + 901), "Suspect flag must expire after 15 minutes");
+    drop(cw);
 }

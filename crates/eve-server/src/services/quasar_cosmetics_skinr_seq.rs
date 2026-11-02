@@ -879,7 +879,7 @@ fn parse_initiate_slots(
 fn handle_job_initiate(
     state: &SkinrCosmeticsState,
     ctx: &AuthoritativeContext,
-    raw: &[u8],
+    _raw: &[u8],
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
@@ -994,8 +994,74 @@ fn handle_job_initiate(
     let total_plex_cost = i64::try_from(total_plex_cents.saturating_add(99) / 100)
         .unwrap_or(i64::MAX);
 
-    // Check and debit PLEX sequencing cost + award Paragon EverMarks only for validated SKINR design layouts
+    let base_secs = ((tier_level as u64) * 3_600).saturating_add((min_pts as u64) * 10);
+    let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
     let award_evermarks = !slots.is_empty() && !required_comps.is_empty();
+
+    let (job_uuid, skin_hex, job_rec) = {
+        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+        let active_count = data
+            .sequencing_jobs
+            .values()
+            .filter(|j| j.sequencer_id == cid && j.is_active())
+            .count();
+        let next_uuid = job_seq_to_uuid(data.next_job_seq);
+        if active_count >= max_jobs {
+            drop(data);
+            queue_job_failed_notice(cid, &next_uuid, 1, now);
+            return Err((STATUS_BAD_REQUEST, "Maximum active sequencing jobs reached".into()));
+        }
+        let cap_ok = required_comps.iter().all(|&(comp_id, is_pat)| {
+            let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
+            data.infinite_licenses.contains_key(&key)
+                || data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0) >= licenses_qty as u64
+        });
+        if !cap_ok {
+            drop(data);
+            queue_job_failed_notice(cid, &next_uuid, 3, now);
+            return Err((STATUS_BAD_REQUEST, "SKINR sequencing license capacity exceeded".into()));
+        }
+        for &(comp_id, is_pat) in &required_comps {
+            let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
+            if !data.infinite_licenses.contains_key(&key) {
+                if let Some(fl) = data.finite_licenses.get_mut(&key) {
+                    fl.capacity = fl.capacity.saturating_sub(licenses_qty as u64);
+                }
+            }
+        }
+        let seq = data.next_job_seq;
+        data.next_job_seq += 1;
+        let uuid = job_seq_to_uuid(seq);
+        let shex = format!("skin_{cid:08x}_{seq:04x}");
+        data.skins.insert(
+            shex.clone(),
+            SkinDesignRecord {
+                skin_hex: shex.clone(),
+                name,
+                line_name,
+                creator_id: cid,
+                ship_type_id,
+                pattern_blend_mode: blend_mode,
+                slots,
+                tier_level,
+                first_sequenced_unix: None,
+            },
+        );
+        let job = SequencingJobRecord {
+            job_uuid: uuid,
+            skin_hex: shex.clone(),
+            quantity: licenses_qty,
+            sequencer_id: cid,
+            initiated_unix: now,
+            planned_duration_secs: planned_secs,
+            completed_unix: None,
+            failed_reason: None,
+        };
+        data.sequencing_jobs.insert(hex_bytes(&uuid), job.clone());
+        (uuid, shex, job)
+    };
+
+    // Check and debit PLEX sequencing cost + award Paragon EverMarks atomically in DB
     let mut insufficient_funds = false;
     state.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
@@ -1017,83 +1083,27 @@ fn handle_job_initiate(
             } else {
                 insufficient_funds = true;
             }
+        } else {
+            insufficient_funds = true;
         }
     });
     if insufficient_funds {
-        queue_job_failed_notice(cid, &preview_uuid, 3, now);
-        return Err((STATUS_BAD_REQUEST, "Insufficient PLEX for SKINR sequencing".into()));
-    }
-
-    let base_secs = ((tier_level as u64) * 3_600).saturating_add((min_pts as u64) * 10);
-    let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
-
-    let (job_uuid, job_rec) = {
-        let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
-        let active_count = data
-            .sequencing_jobs
-            .values()
-            .filter(|j| j.sequencer_id == cid && j.is_active())
-            .count();
-        let next_uuid = job_seq_to_uuid(data.next_job_seq);
-        let cap_ok = required_comps.iter().all(|&(comp_id, is_pat)| {
-            let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
-            data.infinite_licenses.contains_key(&key)
-                || data.finite_licenses.get(&key).map(|l| l.capacity).unwrap_or(0) >= licenses_qty as u64
-        });
-        if active_count >= max_jobs || !cap_ok {
-            drop(data);
-            state.db.with_mut_snapshot(|s| {
-                if let Some(ch) = s.characters.get_mut(&(cid as i64)) {
-                    ch.plex_balance = ch.plex_balance.saturating_add(total_plex_cost);
-                    if award_evermarks {
-                        let em_reward = 500_i64.saturating_mul(i64::from(licenses_qty));
-                        let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
-                        *cur = cur.saturating_sub(em_reward);
+        {
+            let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
+            data.sequencing_jobs.remove(&hex_bytes(&job_uuid));
+            data.skins.remove(&skin_hex);
+            for &(comp_id, is_pat) in &required_comps {
+                let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
+                if !data.infinite_licenses.contains_key(&key) {
+                    if let Some(fl) = data.finite_licenses.get_mut(&key) {
+                        fl.capacity = fl.capacity.saturating_add(licenses_qty as u64);
                     }
-                }
-            });
-            queue_job_failed_notice(cid, &next_uuid, 3, now);
-            return Err((STATUS_BAD_REQUEST, "SKINR sequencing capacity or license limit exceeded".into()));
-        }
-        for &(comp_id, is_pat) in &required_comps {
-            let key = SkinrCosmeticsState::comp_key(cid, is_pat, comp_id);
-            if !data.infinite_licenses.contains_key(&key) {
-                if let Some(fl) = data.finite_licenses.get_mut(&key) {
-                    fl.capacity = fl.capacity.saturating_sub(licenses_qty as u64);
                 }
             }
         }
-        let seq = data.next_job_seq;
-        data.next_job_seq += 1;
-        let uuid = job_seq_to_uuid(seq);
-        let skin_hex = format!("skin_{cid:08x}_{seq:04x}");
-        data.skins.insert(
-            skin_hex.clone(),
-            SkinDesignRecord {
-                skin_hex: skin_hex.clone(),
-                name,
-                line_name,
-                creator_id: cid,
-                ship_type_id,
-                pattern_blend_mode: blend_mode,
-                slots,
-                tier_level,
-                first_sequenced_unix: None,
-            },
-        );
-        let job = SequencingJobRecord {
-            job_uuid: uuid,
-            skin_hex,
-            quantity: licenses_qty,
-            sequencer_id: cid,
-            initiated_unix: now,
-            planned_duration_secs: planned_secs,
-            completed_unix: None,
-            failed_reason: None,
-        };
-        data.sequencing_jobs.insert(hex_bytes(&uuid), job.clone());
-        (uuid, job)
-    };
+        queue_job_failed_notice(cid, &job_uuid, 3, now);
+        return Err((STATUS_BAD_REQUEST, "Insufficient PLEX for SKINR sequencing".into()));
+    }
     state.save();
     queue_job_started_notice(cid, &job_uuid, now);
 

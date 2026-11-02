@@ -499,6 +499,13 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     encode_string_field(2, "Cap Line", &mut seq_init);
     encode_bytes_field(3, &seq_layout, &mut seq_init);
     encode_varint_field(5, 1, &mut seq_init);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(mut ch) = s.characters.get(&90_000_001).cloned() {
+            ch.character_id = 90_000_105;
+            ch.plex_balance = 5_000;
+            s.characters.insert(90_000_105, ch);
+        }
+    });
     for _ in 0..5 {
         let r = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", seq_init.clone(), true);
         assert_eq!(r.status_code, STATUS_OK);

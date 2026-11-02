@@ -209,15 +209,15 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
         ch.security_status = -9.0;
         s.items.insert(
             700_001,
-            item_rec(700_001, 35661, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
+            item_rec(700_001, 33138, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
         );
         s.items.insert(
             700_002,
-            item_rec(700_002, 35662, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
+            item_rec(700_002, 33139, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
         );
         s.items.insert(
             700_003,
-            item_rec(700_003, 35664, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
+            item_rec(700_003, 33141, char_id, lowsec_sec_office_station, InventoryFlag::Hangar, 2, false),
         );
     });
     let kw = HashMap::new();
@@ -227,7 +227,7 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Integer(35662), PyRep::Integer(1)],
+            &[PyRep::Real(-8.5), PyRep::Dict(vec![(PyRep::Integer(33139), PyRep::Integer(1))])],
             &kw,
             None,
         ).await;
@@ -238,7 +238,7 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Integer(35661), PyRep::Integer(1)],
+            &[PyRep::Real(-8.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
             &kw,
             None,
         ).await
@@ -256,7 +256,7 @@ async fn test_b23_sec_status_caps_tags_outlaw_and_faction_police() {
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Integer(35664), PyRep::Integer(1)],
+            &[PyRep::Real(0.3), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])],
             &kw,
             None,
         ).await

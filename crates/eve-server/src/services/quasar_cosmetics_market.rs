@@ -894,7 +894,7 @@ fn skin_initiate_create(
     let now = ctx.now_unix();
 
     let (_, max_listings) = paragon_hub_skill_reductions(st, cid);
-    let tx_uuid = {
+    let (tx_uuid, listing_key) = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
         let active_owned = data
             .skin_listings
@@ -920,34 +920,13 @@ fn skin_initiate_create(
                 "Insufficient unactivated SKIN licenses for listing".to_string(),
             ));
         }
-        let tx = next_uuid(&mut data, b"COSMTXID");
-        let fee_paid = st.db.with_mut_snapshot(|s| {
-            let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
-                return false;
-            };
-            let Some(rem) = ch.balance.checked_sub(broker_fee) else {
-                return false;
-            };
-            ch.balance = rem;
-            true
-        });
-        if !fee_paid {
-            drop(skinr_data);
-            drop(data);
-            st.save();
-            queue_transaction_notice(cid, &tx, false, now);
-            let mut out = Vec::new();
-            put_uuid(1, &tx, &mut out);
-            return Ok(any(
-                "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
-                out,
-            ));
-        }
         if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
             lic.unactivated = lic.unactivated.saturating_sub(u64::from(quantity));
             lic.escrowed = lic.escrowed.saturating_add(u64::from(quantity));
         }
+        let tx = next_uuid(&mut data, b"COSMTXID");
         let listing_uuid = next_uuid(&mut data, b"SKINLIST");
+        let lkey = hex(&listing_uuid);
         let rec = SkinListingRecord {
             uuid: listing_uuid,
             seller_id: cid,
@@ -960,9 +939,38 @@ fn skin_initiate_create(
             branded: target.is_branded(),
             target,
         };
-        data.skin_listings.insert(hex(&listing_uuid), rec);
-        tx
+        data.skin_listings.insert(lkey.clone(), rec);
+        (tx, lkey)
     };
+    let fee_paid = st.db.with_mut_snapshot(|s| {
+        let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
+            return false;
+        };
+        let Some(rem) = ch.balance.checked_sub(broker_fee) else {
+            return false;
+        };
+        ch.balance = rem;
+        true
+    });
+    if !fee_paid {
+        st.data.write().unwrap_or_else(|e| e.into_inner()).skin_listings.remove(&listing_key);
+        {
+            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
+            if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
+                lic.unactivated = lic.unactivated.saturating_add(u64::from(quantity));
+                lic.escrowed = lic.escrowed.saturating_sub(u64::from(quantity));
+            }
+        }
+        st.save();
+        queue_transaction_notice(cid, &tx_uuid, false, now);
+        let mut out = Vec::new();
+        put_uuid(1, &tx_uuid, &mut out);
+        return Ok(any(
+            "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
+            out,
+        ));
+    }
     st.skinr.save();
     st.save();
     queue_transaction_notice(cid, &tx_uuid, true, now);

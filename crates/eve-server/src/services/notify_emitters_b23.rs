@@ -271,3 +271,38 @@ pub fn emit_dungeon_trigger_music_core(
         ],
     );
 }
+
+pub fn dispatch_dungeon_trigger_notify_actions(
+    db: &eve_db::WorldRepository,
+    pending_notifications: Option<
+        &std::sync::RwLock<HashMap<i64, Vec<PendingMachoNotification>>>,
+    >,
+    notify_tx: Option<&broadcast::Sender<(i64, PendingMachoNotification)>>,
+    char_id: i64,
+    dungeon_id: i64,
+    obj_ball_ids: &[i64],
+    actions: Vec<crate::services::pve_dungeon_runtime::DungeonTriggerAction>,
+) {
+    use crate::services::pve_dungeon_runtime::DungeonTriggerAction;
+    for act in actions {
+        match act {
+            DungeonTriggerAction::CameraInterest { item_id, speed_bits, duration_bits } => {
+                let target_item = if item_id > 0 { item_id } else { obj_ball_ids.first().copied().unwrap_or(0) };
+                emit_dungeon_camera_interest_core(db, pending_notifications, notify_tx, char_id, target_item, f64::from_bits(speed_bits), f64::from_bits(duration_bits));
+            }
+            DungeonTriggerAction::TriggerAmbientSound { sound_id, entity_item_id, emitter_id } => {
+                emit_dungeon_trigger_ambient_sound_core(db, pending_notifications, notify_tx, char_id, dungeon_id, sound_id, entity_item_id, emitter_id);
+            }
+            DungeonTriggerAction::TriggerAudio { audio_url } => {
+                emit_dungeon_trigger_audio_core(db, pending_notifications, notify_tx, char_id, dungeon_id, &audio_url);
+            }
+            DungeonTriggerAction::TriggerMessage { message_type, message_id } => {
+                emit_dungeon_trigger_message_core(db, pending_notifications, notify_tx, char_id, message_type, message_id);
+            }
+            DungeonTriggerAction::TriggerMusic { music_trigger_id } => {
+                emit_dungeon_trigger_music_core(db, pending_notifications, notify_tx, char_id, dungeon_id, music_trigger_id);
+            }
+            _ => {}
+        }
+    }
+}

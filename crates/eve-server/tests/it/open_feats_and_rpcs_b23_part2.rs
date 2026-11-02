@@ -223,6 +223,10 @@ async fn test_b23_war_interference_and_command_burst_filtering() {
     };
     assert!(affected.contains(&corpmate_a), "corpmate in same war must receive command burst");
     assert!(!affected.contains(&neutral_logi), "neutral pilot who is criminal must be excluded");
+    assert!(
+        ctx.crimewatch.read().unwrap().states.get(&pilot_a).is_some_and(|s| s.weapon_timer_until_unix > ctx.now_unix()),
+        "Command burst must apply mandatory 60s Weapons Timer"
+    );
 
     // Clear neutral_logi's criminal flag so only war-interference exclusion is tested
     ctx.crimewatch.write().unwrap().states.remove(&neutral_logi);
@@ -393,7 +397,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     let kw = HashMap::new();
     sess.station_id = Some(60_003_760);
     let jita_err = ctx
-        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(33141), PyRep::Integer(1)], &kw, None)
+        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])], &kw, None)
         .await
         .expect_err("High-Sec Jita must be rejected for Security Office tag turn-in");
     assert_eq!(jita_err.code, "SecurityOfficeRequired");
@@ -417,7 +421,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     sess.station_id = Some(sec_office_station);
 
     let zero_err = ctx
-        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(33141), PyRep::Integer(0)], &kw, None)
+        .dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(0))])], &kw, None)
         .await
         .expect_err("Zero quantity must be rejected");
     assert_eq!(zero_err.code, "InvalidQuantity");
@@ -426,12 +430,10 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
         let ch = s.characters.get_mut(&(cid as i64)).unwrap();
         ch.security_status = -0.1;
         ch.balance = eve_db::IskCents::from_isk(25_000_000);
-        s.items.insert(
-            700_999,
-            item_rec(700_999, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 3, false),
-        );
+        s.items.insert(700_998, item_rec(700_998, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 1, false));
+        s.items.insert(700_999, item_rec(700_999, 33141, cid as i64, sec_office_station, InventoryFlag::Hangar, 2, false));
     });
-    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Integer(33141), PyRep::Integer(3)], &kw, None)
+    ctx.dispatch_rpc(&mut sess, "crimewatch", None, "ApplyTagsForSecStatus", &[PyRep::Real(0.4), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(3))])], &kw, None)
         .await
         .expect("ApplyTagsForSecStatus with SDE Clone Soldier Negotiator Tag (33141)");
 
