@@ -42,3 +42,6 @@ eve-testkit = { path = "../eve-testkit" }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

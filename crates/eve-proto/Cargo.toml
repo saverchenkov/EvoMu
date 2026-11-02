@@ -19,3 +19,5 @@ eve-testkit = { path = "../eve-testkit" }
 glam.workspace = true
 proptest.workspace = true
 
+[lints]
+workspace = true

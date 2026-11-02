@@ -356,7 +356,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
     let char_id = 97_157_001i64;
     let ship_id = 87_157_101i64;
     let sec_office_svc = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
-    let (lowsec_stn, lowsec_sys) = ctx.sde.stations.values().find(|st| {
+    let (_lowsec_stn, lowsec_sys) = ctx.sde.stations.values().find(|st| {
         (matches!(st.owner_corporation_id, 1_000_125 | 1_000_137) || st.owner_faction_id == Some(500_006))
             && ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|s| s.security_status > 0.0 && s.security_status < 0.45)
             && ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| op.services.contains(&sec_office_svc))

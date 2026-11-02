@@ -16,3 +16,6 @@ eve-testkit = { path = "../eve-testkit" }
 proptest.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true }
+
+[lints]
+workspace = true

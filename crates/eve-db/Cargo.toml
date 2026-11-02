@@ -22,3 +22,6 @@ demo-seed = []
 [dev-dependencies]
 eve-testkit = { path = "../eve-testkit" }
 proptest.workspace = true
+
+[lints]
+workspace = true

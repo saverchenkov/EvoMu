@@ -17,3 +17,5 @@ eve-dogma = { path = "../eve-dogma" }
 serde_json.workspace = true
 rusqlite.workspace = true
 
+[lints]
+workspace = true
