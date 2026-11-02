@@ -779,7 +779,18 @@ pub(crate) async fn handle_module_cycles(
                 let d = mod_state.get_attribute(attr_ids::DURATION, &ctx.sde);
                 if d > 0.0 { d } else {
                     let d_high = mod_state.get_attribute(3115, &ctx.sde);
-                    if d_high > 0.0 { d_high } else { mod_state.get_attribute(attr_ids::SPEED, &ctx.sde) }
+                    if d_high > 0.0 {
+                        d_high
+                    } else {
+                        let s = mod_state.get_attribute(attr_ids::SPEED, &ctx.sde);
+                        if s > 0.0 {
+                            s
+                        } else if mjd_jump_distance_m.is_some() {
+                            12_000.0
+                        } else {
+                            0.0
+                        }
+                    }
                 }
             };
             let duration_s = if duration_ms > 0.0 { duration_ms / 1000.0 } else { 1.0 };

@@ -714,13 +714,30 @@ pub async fn handle(
             if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
                 return Some(Err(BridgeRpcError { code: "ShipWarpScrambled".into(), message: "Cannot dock at an Upwell structure while ship is warp scrambled".into() }));
             }
+            let sde_target_radius = if is_structure {
+                ctx.db
+                    .with_snapshot(|snap| snap.structures.get(&dock_id).map(|s| s.type_id))
+                    .and_then(|tid| ctx.sde.types.get(&tid))
+                    .map(|t| t.radius)
+                    .filter(|&r| r > 0.0)
+                    .unwrap_or(0.0)
+            } else {
+                ctx.sde
+                    .stations
+                    .get(&dock_id)
+                    .and_then(|st| ctx.sde.types.get(&st.station_type_id))
+                    .map(|t| t.radius)
+                    .filter(|&r| r > 0.0)
+                    .unwrap_or(0.0)
+            };
             let target_radius = handle
                 .get_ball_snapshot(dock_id)
                 .await
                 .ok()
                 .flatten()
                 .map(|(_, b)| b.radius)
-                .unwrap_or(0.0);
+                .filter(|&r| r > 0.0)
+                .unwrap_or(sde_target_radius);
             let dist = ball.position.distance(target_pos);
             if dist > target_radius + 5_000.0 {
                 return Some(Err(BridgeRpcError {
@@ -774,6 +791,9 @@ pub async fn handle(
                     }
                     crate::services::space_destiny::record_session_change_timer(
                         ctx, char_id, now_unix, sys_id, 0, "dock",
+                    );
+                    crate::services::nav_warp_interdiction::advance_waypoints_on_arrival(
+                        ctx, char_id, dock_id,
                     );
                     let sess_rep = PyRep::keyval([
                         ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),

@@ -342,7 +342,6 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                 }
 
-<<<<<<< HEAD
                 // Micro Jump Drive / Field Generator (`group_id == 1189 | 1533 | 4769`)
                 if is_mjd {
                     let mut allowed_groups = Vec::new();

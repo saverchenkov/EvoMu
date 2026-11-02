@@ -472,15 +472,6 @@ async fn handle_cmd_warp_to_stuff(
         anchor_pos,
     );
     let landing_dist = current_ball.position.distance(landing_pos);
-    if landing_dist < 150_000.0 {
-        return Err(BridgeRpcError {
-            code: "WarpDistanceTooShort".into(),
-            message: format!(
-                "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                landing_dist.max(0.0)
-            ),
-        });
-    }
 
     if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError {
@@ -506,6 +497,16 @@ async fn handle_cmd_warp_to_stuff(
     let warp_dir = (landing_pos - current_ball.position).normalize_or_zero();
     let mut dest_pos = landing_pos - warp_dir * min_range;
     let requested_dist_m = current_ball.position.distance(dest_pos);
+    let effective_warp_dist_m = (landing_dist - min_range).min(requested_dist_m);
+    if effective_warp_dist_m < 150_000.0 {
+        return Err(BridgeRpcError {
+            code: "WarpDistanceTooShort".into(),
+            message: format!(
+                "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
+                effective_warp_dist_m.max(0.0)
+            ),
+        });
+    }
 
     let (base_warp_cap_need, sde_max_cap) = ctx
         .sde

@@ -970,12 +970,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
     let beam_len = 300_000.0;
     // DERIVED: Titan Lance Doomsday beam cylinder radius (20 km cone/cylinder)
     let beam_radius = 20_000.0;
-    let candidates: Vec<(i64, u32, DVec3)> = ballpark
-        .balls
-        .values()
-        .filter(|b| b.id != cycle.ship_id && is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), b.id, b.type_id))
-        .map(|b| (b.id, b.type_id, b.position))
-        .collect();
+    let candidates: Vec<(i64, u32, DVec3)> = ballpark.balls.values().filter(|b| b.id != cycle.ship_id && is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), b.id, b.type_id)).map(|b| (b.id, b.type_id, b.position)).collect();
     let mut hits = Vec::new();
     for (bid, _tid, bpos) in candidates {
         let to_b = bpos - ship_pos;
@@ -985,9 +980,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
             let mut applied_dmg = 0.0;
             if let Some((app, destroyed, _)) = ballpark.apply_damage_to_ball(bid, cycle.damage_vector) {
                 applied_dmg = app;
-                if destroyed {
-                    destroyed_balls.push((bid, cycle.owner_char_id));
-                }
+                if destroyed { destroyed_balls.push((bid, cycle.owner_char_id)); }
             }
             if let Some(v_cs) = ballpark.combat_states.get_mut(&bid) {
                 v_cs.lance_disrupted_remaining_s = 300.0;
@@ -1001,9 +994,7 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         let db_key = std::sync::Arc::as_ptr(db) as usize;
         let now_unix = db.clock().now_unix_secs();
         let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        for &(vid, _) in &hits {
-            st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
-        }
+        for &(vid, _) in &hits { st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300); }
     }
     if let Some(c_cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
         c_cs.lance_disrupted_remaining_s = c_cs.lance_disrupted_remaining_s.max(285.0);

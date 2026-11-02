@@ -38,8 +38,8 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let sys = ctx.systems.get_or_spawn(null_sys);
 
     // 1. Warp Bubble Catch & Drag + Shuttle Immunity (`feat:navigation.warp-bubble-drag-and-catch`)
-    let origin = DVec3::new(10_000_000.0, 0.0, 0.0);
-    let dest = DVec3::new(30_000_000.0, 0.0, 0.0);
+    let origin = DVec3::new(50_010_000_000.0, 0.0, 0.0);
+    let dest = DVec3::new(50_030_000_000.0, 0.0, 0.0);
     let dest_beacon_id: i64 = 88_701;
     sys.spawn_ball(Ball {
         id: dest_beacon_id, type_id: 15, position: dest, velocity: DVec3::ZERO,
@@ -49,7 +49,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
 
     // 1a. Mid-path bubble at 20,000 km on a 30,000 km warp (10,000 km from destination) must NOT catch
     let mid_bubble_id: i64 = 88_702;
-    sys.add_warp_bubble(mid_bubble_id, DVec3::new(20_000_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    sys.add_warp_bubble(mid_bubble_id, DVec3::new(50_020_000_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
     spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, origin).await;
     spawn_in_space(&ctx, shuttle_char, shuttle_id, 672, null_sys, origin).await;
     // Step 1 tick first to prove reconcile_tackle_and_bubbles preserves Shuttle passive SDE 1538 immunity!
@@ -66,12 +66,14 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let MovementMode::Warp { destination: crane_mid_dest, .. } = crane_mid.mode else {
         panic!("Expected Crane in Warp mode");
     };
-    assert!((crane_mid_dest.x - 30_000_000.0).abs() < 10.0, "mid-path bubble must not catch; got {}", crane_mid_dest.x);
+    assert!((crane_mid_dest.x - 50_030_000_000.0).abs() < 10.0, "mid-path bubble must not catch; got {}", crane_mid_dest.x);
 
     // 1b. Exit-corridor catch bubble within 150 km in front of destination (at 29,900 km, 20 km radius -> catches at 29,880 km)
     let catch_bubble_id: i64 = 88_704;
-    sys.add_warp_bubble(catch_bubble_id, DVec3::new(29_900_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    sys.add_warp_bubble(catch_bubble_id, DVec3::new(50_029_900_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    let _ = sys.remove_ball(target_ship_id).await;
     spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, origin).await;
+    sys.step_manual(1.0).await.unwrap();
     ctx.dispatch_rpc(
         &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
@@ -81,7 +83,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let MovementMode::Warp { destination: crane_catch_dest, .. } = crane_catch.mode else {
         panic!("Expected Crane in Warp mode");
     };
-    assert!((crane_catch_dest.x - 29_880_000.0).abs() < 10.0, "got {}", crane_catch_dest.x);
+    assert!((crane_catch_dest.x - 50_029_880_000.0).abs() < 10.0, "got {}", crane_catch_dest.x);
 
     // Shuttle (group 31, SDE attr 1538 = 1.0) ignores catch bubble AND warps out from inside an active bubble
     let origin_bubble_id: i64 = 88_705;
@@ -95,14 +97,16 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let MovementMode::Warp { destination: shuttle_dest, .. } = shuttle_catch.mode else {
         panic!("Expected Shuttle in Warp mode");
     };
-    assert!((shuttle_dest.x - 30_000_000.0).abs() < 10.0, "got {}", shuttle_dest.x);
+    assert!((shuttle_dest.x - 50_030_000_000.0).abs() < 10.0, "got {}", shuttle_dest.x);
     sys.remove_warp_bubble(origin_bubble_id).await.unwrap();
     sys.remove_warp_bubble(catch_bubble_id).await.unwrap();
 
     // 1b. Drag bubble 100 km BEHIND destination at 30,100 km (20 km radius -> drags Crane to 30,080 km!)
     let drag_bubble_id: i64 = 88_703;
-    sys.add_warp_bubble(drag_bubble_id, DVec3::new(30_100_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    sys.add_warp_bubble(drag_bubble_id, DVec3::new(50_030_100_000.0, 0.0, 0.0), 20_000.0).await.unwrap();
+    let _ = sys.remove_ball(target_ship_id).await;
     spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, origin).await;
+    sys.step_manual(1.0).await.unwrap();
     ctx.dispatch_rpc(
         &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(dest_beacon_id), PyRep::Real(0.0)], &kw, None,
@@ -112,7 +116,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     let MovementMode::Warp { destination: crane_drag_dest, .. } = crane_drag.mode else {
         panic!("Expected Crane in Warp mode for drag");
     };
-    assert!((crane_drag_dest.x - 30_080_000.0).abs() < 10.0, "got {}", crane_drag_dest.x);
+    assert!((crane_drag_dest.x - 50_030_080_000.0).abs() < 10.0, "got {}", crane_drag_dest.x);
 
     // 1c. Capital cyno jump blocked inside bubble, while disconnect emergency logoff warp succeeds!
     let near_null_sys = ctx
@@ -154,7 +158,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     ]).await.expect("Light cyno in near_null_sys");
     let cyno_beacon_id = cyno_rep.dict_get("beaconID").and_then(|v| v.as_i64()).unwrap();
 
-    spawn_in_space(&ctx, dread_char, dread_ship, 19_720, null_sys, DVec3::new(30_100_000.0, 0.0, 0.0)).await;
+    spawn_in_space(&ctx, dread_char, dread_ship, 19_720, null_sys, DVec3::new(50_030_100_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 74_192, 16_274, dread_char, dread_ship, InventoryFlag::Cargo, 50_000); // Helium Isotopes
     let jump_blocked = rpc(&ctx, &mut dread_sess, "beyonce", "CmdJumpToFleetModuleBeacon", vec![
         PyRep::Integer(cyno_char), PyRep::Integer(near_null_sys as i64), PyRep::Integer(cyno_beacon_id),
@@ -194,14 +198,14 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
 
     let far_beacon_id: i64 = 88_704;
     sys.spawn_ball(Ball {
-        id: far_beacon_id, type_id: 15, position: DVec3::new(50_000_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        id: far_beacon_id, type_id: 15, position: DVec3::new(50_050_000_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
         max_velocity: 0.0, inertia: 1.0, mass: 1e12, radius: 100.0,
         speed_fraction: 0.0, mode: MovementMode::Rigid,
     }).await.unwrap();
     target_sess.station_id = None;
     target_sess.solar_system_id = Some(null_sys);
-    spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, DVec3::new(30_100_000.0, 0.0, 0.0)).await;
-    sys.set_ball_position(target_ship_id, DVec3::new(30_100_000.0, 0.0, 0.0)).await;
+    spawn_in_space(&ctx, target_char, target_ship_id, 12_729, null_sys, DVec3::new(50_030_100_000.0, 0.0, 0.0)).await;
+    sys.set_ball_position(target_ship_id, DVec3::new(50_030_100_000.0, 0.0, 0.0)).await;
     let blocked_err = ctx.dispatch_rpc(
         &mut target_sess, "beyonce", Some(b_target), "CmdWarpToStuff",
         &[PyRep::String("item".into()), PyRep::Integer(far_beacon_id), PyRep::Real(0.0)], &kw, None,
@@ -254,7 +258,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
 
     // 3c. Move to null-sec (`null_sys`), test 15 m3 (3-probe) capacity + 60s auto-reload when last loaded probe is fired!
     sabre_sess.solar_system_id = Some(null_sys);
-    let sabre_pos = DVec3::new(50_000_000.0, 0.0, 0.0);
+    let sabre_pos = DVec3::new(50_050_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, sabre_char, sabre_id, 22_456, null_sys, sabre_pos).await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.items.get_mut(&74_302) {
@@ -315,7 +319,7 @@ async fn test_warp_bubble_drag_catch_nullifier_and_probe_variants() {
     assert_eq!(cadence_err.code, "ModuleReactivationDelay");
     ctx.advance_secs(6);
     // Move away from p_reloaded bubble before testing Wubble
-    let wub_pos = DVec3::new(55_000_000.0, 0.0, 0.0);
+    let wub_pos = DVec3::new(50_055_000_000.0, 0.0, 0.0);
     sys.set_ball_position(sabre_id, wub_pos).await;
 
     // 3d. Stasis Webification Probe (`56748`: SDE 15km, 30s lifetime, 2.0s arming delay, -20% speedFactor = 0.80x, composes with active AB!)
@@ -401,7 +405,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(med_mjd_id, true); });
     ctx.invalidate_ship_fitting(ship_mjd);
 
-    let mjd_origin = DVec3::new(10_000_000.0, 0.0, 0.0);
+    let mjd_origin = DVec3::new(50_010_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_mjd, ship_mjd, 16_231, jita_sys, mjd_origin).await;
     let b_mjd = ctx.bind_object(&mut sess_mjd, "beyonce", jita_sys as i64).unwrap();
     let init_cs = sys.get_combat_state(ship_mjd).await.unwrap().unwrap();
@@ -473,7 +477,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     let char_mjd_l5: i64 = 94_033;
     let ship_mjd_l5: i64 = 84_033;
     let med_mjd_l5_id: i64 = 75_002;
-    let l5_origin = DVec3::new(20_000_000.0, 0.0, 0.0);
+    let l5_origin = DVec3::new(50_020_000_000.0, 0.0, 0.0);
     let mut sess_mjd_l5 = seed_pilot(&ctx, char_mjd_l5, ship_mjd_l5, 16_231, jita_sys, false);
     set_skill_level(&ctx, char_mjd_l5, 4_385, 5);
     give_item(&ctx, med_mjd_l5_id, 33_915, char_mjd_l5, ship_mjd_l5, InventoryFlag::MedSlot0, 1);
@@ -504,7 +508,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     give_item(&ctx, cap_mjd_id, 83_465, char_mjd, ship_mjd, InventoryFlag::MedSlot0, 1);
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(cap_mjd_id, true); });
     ctx.invalidate_ship_fitting(ship_mjd);
-    let cap_origin = DVec3::new(30_000_000.0, 0.0, 0.0);
+    let cap_origin = DVec3::new(50_030_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_mjd, ship_mjd, 23_757, jita_sys, cap_origin).await;
     sys.set_ball_position(ship_mjd, cap_origin).await;
     ctx.dispatch_rpc(
@@ -549,7 +553,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     ctx.invalidate_ship_fitting(ship_mjd);
     ctx.invalidate_ship_fitting(ship_scram);
 
-    let scram_arena = DVec3::new(40_000_000.0, 0.0, 0.0);
+    let scram_arena = DVec3::new(50_040_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_mjd, ship_mjd, 16_231, jita_sys, scram_arena).await;
     spawn_in_space(&ctx, char_scram, ship_scram, 640, jita_sys, scram_arena + DVec3::new(3_000.0, 0.0, 0.0)).await;
     let (_, base_cyclone) = sys.get_ball_snapshot(ship_mjd).await.unwrap().unwrap();
@@ -572,7 +576,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     assert!(under_disruptor_ball.max_velocity > base_vel * 4.0);
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Deactivate", vec![PyRep::Integer(mwd_id)]).await.unwrap();
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
-    for _ in 0..12 {
+    for _ in 0..13 {
         sys.set_capacitor(ship_mjd, 10_000.0).await.unwrap();
         sys.step_manual(1.0).await.unwrap();
     }
@@ -591,7 +595,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
     sys.add_warp_bubble(980_101, bubble_pos, 20_000.0).await.unwrap();
     assert!(sys.is_ball_scrambled(ship_mjd).await.unwrap());
     rpc(&ctx, &mut sess_mjd, "dogmaIM", "Activate", vec![PyRep::Integer(mid_spool_mjd_id)]).await.unwrap();
-    for _ in 0..12 {
+    for _ in 0..13 {
         sys.set_capacitor(ship_mjd, 10_000.0).await.unwrap();
         sys.step_manual(1.0).await.unwrap();
     }
@@ -662,11 +666,7 @@ async fn test_mjd_spool_and_warp_scramble_propulsion_shutoff() {
 fn test_warp_catch_bubble_350km_in_front_of_destination() {
     let origin = DVec3::ZERO;
     let dest = DVec3::new(10_000_000.0, 0.0, 0.0);
-    let bubble = eve_destiny::WarpBubble {
-        id: 99_001,
-        position: DVec3::new(dest.x - 350_000.0, 0.0, 0.0),
-        radius: 20_000.0,
-    };
+    let bubble = eve_destiny::WarpBubble { id: 99_001, position: DVec3::new(dest.x - 350_000.0, 0.0, 0.0), radius: 20_000.0 };
     let hit = bubble.intercept_warp(origin, dest).expect("Catch bubble 350 km in front of destination must intercept warp");
     assert!((hit.x - (dest.x - 370_000.0)).abs() < 1.0, "Expected entry at dest - 370 km, got {:?}", hit);
     let mid_route = eve_destiny::WarpBubble { id: 99_002, position: DVec3::new(dest.x - 600_000.0, 0.0, 0.0), radius: 20_000.0 };

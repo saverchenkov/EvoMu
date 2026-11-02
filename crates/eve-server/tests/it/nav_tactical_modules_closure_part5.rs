@@ -3,6 +3,7 @@
 //! (`warpVectorMgr.UseVector` rejection during MJD spool + `Ballpark::micro_jump` /
 //! `Ballpark::micro_jump_field` rejection during active warp).
 
+use crate::esi_market_industry_pi::make_structure;
 use crate::modules_advanced_tactical::*;
 use eve_db::InventoryFlag;
 use eve_destiny::{Ball, Ballpark, DVec3, MovementMode, WarpPhase};
@@ -331,7 +332,7 @@ async fn test_mid_cycle_overload_and_burnout_ship_fitting_sync() {
     let char_id: i64 = 95_011;
     let ship_id: i64 = 96_011;
     let mwd_id: i64 = 97_011;
-    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, true);
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, false);
     give_item(&ctx, mwd_id, 439, char_id, ship_id, InventoryFlag::MedSlot0, 1);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(mwd_id, true);
@@ -378,6 +379,153 @@ async fn test_mid_cycle_overload_and_burnout_ship_fitting_sync() {
         fit_after.modules[&mwd_id].state,
         eve_dogma::ModuleState::Overloaded,
         "Cycle boundary must transition cached ShipFittingEngine state to Overloaded"
+    );
+}
+
+#[tokio::test]
+async fn test_warp_to_within_min_range_sub_150km_rejected() {
+    let ctx = Arc::new(build_ctx());
+    let jita_sys: u32 = 30_004_759;
+    let char_id: i64 = 95_012;
+    let ship_id: i64 = 96_012;
+    let target_id: i64 = 1_000_000_098_012;
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, false);
+    let sys = ctx.systems.get_or_spawn(jita_sys);
+    let origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
+    let target_pos = DVec3::new(50_000_250_000.0, 0.0, 0.0); // 250 km away (Astrahus radius 47 km -> 203 km landing dist)
+
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    cs.capacitor = 100_000.0;
+    cs.max_capacitor = 100_000.0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id, type_id: 587, position: origin,
+            velocity: DVec3::ZERO, max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0,
+            radius: 37.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    ).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = make_structure(target_id, 35_832, 98_000_001, jita_sys, "Target Astrahus");
+        st.position = target_pos.to_array();
+        snap.structures.insert(target_id, st);
+    });
+
+    // "Warp to Within 100 km" on a 180 km target -> 80 km effective warp < 150 km -> must reject
+    let err = rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "CmdWarpToStuff",
+        vec![
+            PyRep::String("item".into()),
+            PyRep::Integer(target_id),
+            PyRep::Real(100_000.0),
+        ],
+    )
+    .await
+    .expect_err("Warp to Within 100 km on 180 km target must be rejected");
+    assert_eq!(err.code, "WarpDistanceTooShort");
+
+    // "Warp to Within 20 km" on a 180 km target -> 160 km effective warp >= 150 km -> must succeed
+    rpc(
+        &ctx,
+        &mut sess,
+        "beyonce",
+        "CmdWarpToStuff",
+        vec![
+            PyRep::String("item".into()),
+            PyRep::Integer(target_id),
+            PyRep::Real(20_000.0),
+        ],
+    )
+    .await
+    .expect("Warp to Within 20 km on 180 km target must succeed");
+}
+
+#[tokio::test]
+async fn test_structure_docking_advances_waypoints_and_uses_sde_radius_fallback() {
+    let ctx = Arc::new(build_ctx());
+    let jita_sys: u32 = 30_004_759;
+    let char_id: i64 = 95_013;
+    let ship_id: i64 = 96_013;
+    let structure_id: i64 = 1_000_000_099_013;
+    let astrahus_type_id: u32 = 35_832;
+    let sde_radius = ctx
+        .sde
+        .types
+        .get(&astrahus_type_id)
+        .map(|t| t.radius)
+        .filter(|&r| r > 0.0)
+        .expect("Astrahus SDE radius must be > 0");
+
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, false);
+    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
+    let structure_pos = DVec3::new(50_000_000_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = make_structure(structure_id, astrahus_type_id, corp_id, jita_sys, "Test Astrahus");
+        st.position = structure_pos.to_array();
+        snap.structures.insert(structure_id, st);
+    });
+
+    // Set waypoints [structure_id, 30_004_759]
+    rpc(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "SaveCharacterSetting",
+        vec![
+            PyRep::String("waypoints".into()),
+            PyRep::List(vec![
+                PyRep::Integer(structure_id),
+                PyRep::Integer(jita_sys as i64),
+            ]),
+        ],
+    )
+    .await
+    .expect("SaveCharacterSetting waypoints");
+
+    // Spawn ship at sde_radius + 2_000 m (outside 5_000 m if radius were 0.0, inside sde_radius + 5_000 m)
+    // Intentionally do NOT spawn a Ballpark ball for structure_id to test SDE radius fallback.
+    let sys = ctx.systems.get_or_spawn(jita_sys);
+    let cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::new(structure_pos.x + sde_radius + 2_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    )
+    .await
+    .unwrap();
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "structureDocking",
+        "Dock",
+        vec![PyRep::Integer(structure_id)],
+    )
+    .await
+    .expect("structureDocking.Dock must succeed using SDE radius fallback");
+
+    let settings = rpc(&ctx, &mut sess, "charMgr", "GetCharacterSettings", vec![])
+        .await
+        .expect("GetCharacterSettings after structureDocking.Dock");
+    assert_eq!(
+        settings.dict_get("waypoints"),
+        Some(&PyRep::List(vec![PyRep::Integer(jita_sys as i64)])),
+        "structureDocking.Dock must advance waypoints on arrival"
     );
 }
 
