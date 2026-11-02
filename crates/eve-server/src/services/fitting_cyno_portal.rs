@@ -792,6 +792,16 @@ pub async fn relocate_ship(
         }
         snap.character_last_jump_unix.insert(char_id, now);
     });
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "OnJumpTimersUpdated",
+        "charid",
+        vec![
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + cd_secs)),
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + fat_secs)),
+            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now)),
+        ],
+    );
     if let Ok(mut bmap) = ctx.bound_objects.write() {
         for entry in bmap.values_mut() {
             if entry.character_id == char_id && entry.service == "beyonce" {

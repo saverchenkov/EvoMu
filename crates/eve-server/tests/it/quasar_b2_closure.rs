@@ -248,6 +248,7 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     }
 
     // 3. CanJumpStarterSpaceShipCasterRequest & CanJumpShipCasterRequest
+    // Character 2_112_000_001 has a zarzakh_gate_lock, so both endpoints return false (0)
     let mut caster_req = Vec::new();
     encode_id_field(1, 2_112_000_001, &mut caster_req);
     let r1 = quasar_rpc(
@@ -260,10 +261,9 @@ async fn test_quasar_b2_ship_unlock_and_starterspace_caster() {
     assert_eq!(r1.status_code, STATUS_OK);
     assert_eq!(
         first_varint(&parse_raw_proto(&r1.payload.unwrap().value), 1),
-        Some(1)
+        Some(0)
     );
 
-    // Character 2_112_000_001 has a zarzakh_gate_lock, so starterspace CanJumpShipCasterRequest returns false (0)
     let r2 = quasar_rpc(
         &ctx,
         &mut sess,
@@ -336,6 +336,7 @@ async fn test_quasar_b2_structure_star_resources_and_space_tags() {
     encode_id_field(1, 9_999_999, &mut bad_struct);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve.structure.api.GetRequest", bad_struct).await.status_code, STATUS_NOT_FOUND);
     let mut outsider = make_session(20, 1020, 2_112_000_020, 98_000_999);
+    outsider.role = 0;
     let mut priv_req = Vec::new();
     encode_id_field(1, 1_030_000_000_001, &mut priv_req);
     assert_eq!(quasar_rpc(&ctx, &mut outsider, "eve.structure.api.GetRequest", priv_req.clone()).await.status_code, STATUS_NOT_FOUND);

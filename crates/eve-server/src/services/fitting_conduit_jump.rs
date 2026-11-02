@@ -524,8 +524,16 @@ pub(super) async fn group_jump_to_fleet_beacon(
             &[ATTR_JUMP_THROUGH_FATIGUE_MULTIPLIER, ATTR_JUMP_FATIGUE_MULTIPLIER],
             None,
         );
-        let p_fatigue_mult = if pvals[0] > 0.0 && (pvals[0] - 1.0).abs() > 1e-6 {
+        let p_type_id = ctx.db.with_snapshot(|s| s.items.get(m_ship).map(|i| i.type_id)).unwrap_or(0);
+        let p_hull_bonus = crate::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(ctx, p_type_id);
+        let p_fatigue_mult = if p_hull_bonus >= 0.90 {
+            0.10
+        } else if pvals[0] > 0.0 && (pvals[0] - 1.0).abs() > 1e-6 {
             pvals[0]
+        } else if is_blops {
+            0.25
+        } else if p_hull_bonus > 0.0 {
+            (1.0 - p_hull_bonus).clamp(0.0, 1.0)
         } else if pvals[1] > 0.0 {
             pvals[1]
         } else {

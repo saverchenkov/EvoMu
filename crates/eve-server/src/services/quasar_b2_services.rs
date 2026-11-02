@@ -113,6 +113,37 @@ fn has_starter_launchers(db: &WorldRepository) -> bool {
     })
 }
 
+fn can_jump_shipcaster(ctx: &AuthoritativeContext, db: &WorldRepository) -> Result<bool, (u32, String)> {
+    let cid = active_char_id(ctx)? as i64;
+    if !has_starter_launchers(db) {
+        return Ok(false);
+    }
+    let now = ctx.now_unix();
+    let eligible = db.with_snapshot(|snap| {
+        let has_lock = snap
+            .zarzakh_gate_locks
+            .get(&cid)
+            .is_some_and(|&(_, exp)| exp > now);
+        if has_lock {
+            return false;
+        }
+        if let Some(ch) = snap.characters.get(&cid) {
+            if ch.jump_cooldown_until_unix > now || ch.active_ship_id <= 0 {
+                return false;
+            }
+            let in_space = snap
+                .items
+                .get(&ch.active_ship_id)
+                .is_some_and(|sh| sh.location_id == i64::from(ch.solar_system_id));
+            if !in_space {
+                return false;
+            }
+        }
+        true
+    });
+    Ok(eligible)
+}
+
 pub fn register_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -138,8 +169,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.ship.api.CanJumpStarterSpaceShipCasterRequest",
         Arc::new(move |ctx, _any, _msg| {
-            let _cid = active_char_id(ctx)?;
-            let can_jump = has_starter_launchers(&db_sc1);
+            let can_jump = can_jump_shipcaster(ctx, &db_sc1)?;
             let mut out = Vec::new();
             encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
             Ok(any("eve.ship.api.CanJumpStarterSpaceShipCasterResponse", out))
@@ -151,14 +181,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.starterspace.api.CanJumpShipCasterRequest",
         Arc::new(move |ctx, _any, _msg| {
-            let cid = active_char_id(ctx)?;
-            let now = ctx.now_unix();
-            let has_lock = db_ss1.with_snapshot(|snap| {
-                snap.zarzakh_gate_locks
-                    .get(&(cid as i64))
-                    .is_some_and(|&(_, exp)| exp > now)
-            });
-            let can_jump = has_starter_launchers(&db_ss1) && !has_lock;
+            let can_jump = can_jump_shipcaster(ctx, &db_ss1)?;
             let mut out = Vec::new();
             encode_varint_field(1, if can_jump { 1 } else { 0 }, &mut out);
             Ok(any("eve.starterspace.api.CanJumpShipCasterResponse", out))
@@ -337,17 +360,23 @@ pub fn register_handlers(
                         });
                         let hub_id = hub.map(|s| s.structure_id as u64).unwrap_or(0);
                         let corp_id = hub.map(|s| s.owner_corp_id as u64).unwrap_or(0);
-                        (alliance_id as u64, hub_id, corp_id)
+                        let claimed_since = snap
+                            .sov_runtime
+                            .sov_claimed_since_unix
+                            .get(&sys_id)
+                            .copied()
+                            .unwrap_or(0);
+                        (alliance_id as u64, hub_id, corp_id, claimed_since)
                     })
             });
             let mut out = Vec::new();
-            if let Some((alliance_id, hub_id, corp_id)) = claim {
+            if let Some((alliance_id, hub_id, corp_id, claimed_since)) = claim {
                 encode_varint_field(1, 0, &mut out);
                 let mut cbuf = Vec::new();
                 encode_id_msg(1, alliance_id, &mut cbuf);
                 encode_id_msg(3, hub_id, &mut cbuf);
                 encode_id_msg(4, corp_id, &mut cbuf);
-                encode_timestamp(5, 0, &mut cbuf);
+                encode_timestamp(5, claimed_since, &mut cbuf);
                 encode_bytes_field(2, &cbuf, &mut out);
             } else {
                 encode_varint_field(1, 1, &mut out);
@@ -373,7 +402,7 @@ pub fn register_handlers(
     router.register_handler(
         "eve.sovereignty.api.GetAllClaimsRequest",
         Arc::new(move |_ctx, _any, _msg| {
-            let claims: Vec<(u64, u64, u64)> = db_sov2.with_snapshot(|snap| {
+            let claims: Vec<(u64, u64, u64, u64)> = db_sov2.with_snapshot(|snap| {
                 snap.system_states
                     .values()
                     .filter_map(|st| {
@@ -387,20 +416,26 @@ pub fn register_handlers(
                                 })
                                 .map(|s| s.owner_corp_id as u64)
                                 .unwrap_or(0);
-                            (u64::from(st.solar_system_id), alliance_id as u64, corp_id)
+                            let claimed_since = snap
+                                .sov_runtime
+                                .sov_claimed_since_unix
+                                .get(&st.solar_system_id)
+                                .copied()
+                                .unwrap_or(0);
+                            (u64::from(st.solar_system_id), alliance_id as u64, corp_id, claimed_since)
                         })
                     })
                     .collect()
             });
             let mut out = Vec::new();
-            for (sys_id, alliance_id, corp_id) in claims {
+            for (sys_id, alliance_id, corp_id, claimed_since) in claims {
                 let mut sc = Vec::new();
                 encode_id_msg(1, sys_id, &mut sc);
                 let mut ac = Vec::new();
                 encode_id_msg(1, alliance_id, &mut ac);
                 encode_id_msg(2, corp_id, &mut ac);
-                encode_timestamp(3, 0, &mut ac);
-                encode_varint_field(5, 0, &mut ac);
+                encode_timestamp(3, claimed_since, &mut ac);
+                encode_varint_field(5, 1, &mut ac);
                 encode_bytes_field(3, &ac, &mut sc);
                 encode_bytes_field(1, &sc, &mut out);
             }

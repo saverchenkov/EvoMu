@@ -11,28 +11,13 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 
 fn make_gm_session(char_id: i64, corp_id: i64, alliance_id: Option<i64>, sys_id: u32) -> SessionState {
-    let mut sess = SessionState::new(51_001);
-    sess.user_id = Some(1);
-    sess.character_id = Some(char_id);
-    sess.corporation_id = Some(corp_id);
-    sess.alliance_id = alliance_id;
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = Some(60_003_760);
-    sess.role = eve_db::service_roles::ROLE_ADMIN
-        | eve_db::service_roles::ROLE_GMH
-        | eve_machonet::service_roles::ROLE_QA
-        | eve_machonet::service_roles::ROLE_PROGRAMMER;
+    let mut sess = make_player_session(51_001, 1, char_id, corp_id, alliance_id, sys_id);
+    sess.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMH
+        | eve_machonet::service_roles::ROLE_QA | eve_machonet::service_roles::ROLE_PROGRAMMER;
     sess
 }
 
-fn make_player_session(
-    sess_id: u64,
-    user_id: u64,
-    char_id: i64,
-    corp_id: i64,
-    alliance_id: Option<i64>,
-    sys_id: u32,
-) -> SessionState {
+fn make_player_session(sess_id: u64, user_id: u64, char_id: i64, corp_id: i64, alliance_id: Option<i64>, sys_id: u32) -> SessionState {
     let mut sess = SessionState::new(sess_id);
     sess.user_id = Some(user_id);
     sess.character_id = Some(char_id);
@@ -46,9 +31,7 @@ fn make_player_session(
 fn keyval_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {
         PyRep::KeyVal(entries) => entries.get(key),
-        PyRep::Dict(entries) => {
-            entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
-        }
+        PyRep::Dict(entries) => entries.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v),
         _ => None,
     }
 }
@@ -539,106 +522,38 @@ async fn test_insurance_void_expiry_and_mission_rewards_e2e() {
         .expect("level 1 station agent in SDE");
 
     // Grant Negotiation (3410) level 4 and Connections (3359) level 3
-    ctx.db.with_mut_snapshot(|snap| {
-        let skills = snap.skills.entry(90_000_002).or_default();
-        skills.insert(
-            3410,
-            eve_db::TrainedSkillRecord {
-                type_id: 3410,
-                level: 4,
-                skill_points: 45_255.0,
-            },
-        );
-        skills.insert(
-            3359,
-            eve_db::TrainedSkillRecord {
-                type_id: 3359,
-                level: 3,
-                skill_points: 8_000.0,
-            },
-        );
-    });
-
-    // Colocate player with agent station & solar system
     let agent_rec = &ctx.sde.agents[&agent_id];
     let agent_station_id = agent_rec.station_id.unwrap();
     let agent_sys_id = agent_rec.solar_system_id.unwrap_or(30_000_142);
     player.station_id = Some(agent_station_id);
     player.solar_system_id = Some(agent_sys_id);
     ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(90_000_002).or_default();
+        skills.insert(3410, eve_db::TrainedSkillRecord { type_id: 3410, level: 4, skill_points: 45_255.0 });
+        skills.insert(3359, eve_db::TrainedSkillRecord { type_id: 3359, level: 3, skill_points: 8_000.0 });
         if let Some(ch) = snap.characters.get_mut(&90_000_002) {
             ch.station_id = Some(agent_station_id);
             ch.solar_system_id = agent_sys_id;
         }
     });
 
-    // Request, accept, and complete mission via agentMgr.DoAction (2 = offer, 3 = accept, 4 = complete)
-    let offer_res = ctx
-        .dispatch_rpc(
-            &mut player,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(2), PyRep::Integer(agent_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("agentMgr.DoAction offer");
-    let mission_id = keyval_get(&offer_res, "missionID")
-        .and_then(|v| v.as_i64())
-        .expect("missionID in offer");
-
-    ctx.dispatch_rpc(
-        &mut player,
-        "agentMgr",
-        None,
-        "DoAction",
-        &[PyRep::Integer(3), PyRep::Integer(mission_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("agentMgr.DoAction accept");
-
+    let offer_res = ctx.dispatch_rpc(&mut player, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(agent_id)], &kw, None).await.expect("offer");
+    let mission_id = keyval_get(&offer_res, "missionID").and_then(|v| v.as_i64()).expect("missionID");
+    ctx.dispatch_rpc(&mut player, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(mission_id)], &kw, None).await.expect("accept");
     let dest_station = keyval_get(&offer_res, "dropoffStationID").and_then(|v| v.as_i64());
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(90_000_002, mission_id as u32)) {
-            m.npcs_remaining = 0;
-        }
-        if let Some(dest) = dest_station {
-            if let Some(ch) = snap.characters.get_mut(&90_000_002) {
-                ch.station_id = Some(dest);
-            }
-        }
+        if let Some(m) = snap.active_missions.get_mut(&(90_000_002, mission_id as u32)) { m.npcs_remaining = 0; }
+        if let Some(dest) = dest_station { if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.station_id = Some(dest); } }
     });
-    if let Some(dest) = dest_station {
-        player.station_id = Some(dest);
-    }
-
+    if let Some(dest) = dest_station { player.station_id = Some(dest); }
     let bal_before = ctx.db.with_snapshot(|snap| snap.characters[&90_000_002].balance.0);
-    let complete_res = ctx
-        .dispatch_rpc(
-            &mut player,
-            "agentMgr",
-            None,
-            "DoAction",
-            &[PyRep::Integer(6), PyRep::Integer(mission_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("agentMgr.DoAction complete");
+    let complete_res = ctx.dispatch_rpc(&mut player, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(mission_id)], &kw, None).await.expect("complete");
     let isk_paid = keyval_get(&complete_res, "iskReward").and_then(|v| v.as_i64()).unwrap_or(0);
     let bonus_paid = keyval_get(&complete_res, "bonusReward").and_then(|v| v.as_i64()).unwrap_or(0);
     let lp_paid = keyval_get(&complete_res, "lpReward").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert!(isk_paid > 0 && bonus_paid > 0 && lp_paid > 0, "expected positive ISK, bonus, and LP rewards");
-
+    assert!(isk_paid > 0 && bonus_paid > 0 && lp_paid > 0);
     let bal_after = ctx.db.with_snapshot(|snap| snap.characters[&90_000_002].balance.0);
-    assert!(
-        bal_after > bal_before && bal_after - bal_before <= IskCents::from_isk(isk_paid + bonus_paid).0,
-        "wallet balance must increase by net mission ISK + bonus after corp tax"
-    );
+    assert!(bal_after > bal_before && bal_after - bal_before <= IskCents::from_isk(isk_paid + bonus_paid).0);
 }
 
 #[tokio::test]
@@ -646,31 +561,122 @@ async fn test_jump_fatigue_decay_bridges_and_hulls_e2e() {
     // parity: feat:navigation.jump-fatigue-formula
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
-    // 1. Verify -90% hull classes including Industrial Command Ships (group 941: Orca 28606, Porpoise 42244)
-    // and -75% Black Ops (Panther 22428) vs 0% combat/covert self-jump
     for tid in [28606_u32, 42244, 670, 672, 648, 12729, 12753, 20185, 28846, 28352] {
-        let bonus = eve_server::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(&ctx, tid);
-        assert!((bonus - 0.90).abs() < 1e-6, "type {tid} must have -90% fatigue reduction, got {bonus}");
+        assert!((eve_server::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(&ctx, tid) - 0.90).abs() < 1e-6);
     }
     assert!((eve_server::services::space_destiny::space_nav_travel::ship_fatigue_reduction_bonus(&ctx, 22428) - 0.75).abs() < 1e-6);
 
-    // 2. Partial real-time + offline decay on fleet-cyno/bridge path (relocate_ship) & 5h/30m caps
-    let char_id = 90_000_001_i64;
-    let ship_id = ctx.db.with_snapshot(|s| s.characters[&char_id].active_ship_id);
-    let (cd1, fat1) = eve_server::services::fitting::fitting_cyno_portal::relocate_ship(&ctx, char_id, ship_id, 30_000_142, 30_000_204, glam::DVec3::ZERO, 5.0, 1.0).await.expect("jump 1");
-    assert!((cd1 - 6.0).abs() < 1e-6 && (fat1 - 60.0).abs() < 1e-6);
-    // Advance 600s (10 min) simulating offline/real-time decay -> remaining fatigue = 50 min, next 5 LY jump = 50 * 6 = 300 min (5h cap)
-    ctx.advance_time_seconds(600);
-    let (cd2, fat2) = eve_server::services::fitting::fitting_cyno_portal::relocate_ship(&ctx, char_id, ship_id, 30_000_204, 30_000_142, glam::DVec3::ZERO, 5.0, 1.0).await.expect("jump 2");
-    assert!((cd2 - 6.0).abs() < 1e-6 && (fat2 - 300.0).abs() < 1e-6, "post-decay jump must use decayed 50m -> 300m, got {fat2}");
-    // Advance 1800s (30 min past cooldown, 270 min fatigue remaining) -> next jump cooldown = 270/10 = 27m, fatigue capped at 300m
-    ctx.advance_time_seconds(1_800);
-    let (cd3, fat3) = eve_server::services::fitting::fitting_cyno_portal::relocate_ship(&ctx, char_id, ship_id, 30_000_142, 30_000_204, glam::DVec3::ZERO, 5.0, 1.0).await.expect("jump 3");
-    assert!((cd3 - 27.0).abs() < 1e-6 && (fat3 - 300.0).abs() < 1e-6, "cooldown must reflect decayed 270m/10 = 27m, got {cd3}");
+    let kw = HashMap::new();
+    let (cyno_char, bridger_char, passenger_char) = (90_000_002_i64, 90_000_003_i64, 90_000_001_i64);
+    let (src_sys, dst_sys) = (30_000_142_u32, 30_000_204_u32);
+    let (cyno_ship, cyno_mod, bridger_ship, portal_mod, bridger_fuel, passenger_ship) =
+        (990_010_001_i64, 990_010_002, 990_010_011, 990_010_012, 990_010_013, 990_010_021);
 
-    // 3. Black Ops covert bridge (-75%) vs Titan bridge (0% for non-industrial, -90% for Industrial Command Ship)
-    let (_, fat_blops_bridge) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 8.0, 0.75);
-    let (_, fat_titan_bridge) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 8.0, 0.0);
-    let (_, fat_orca_bridge) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 8.0, 0.90);
-    assert!((fat_blops_bridge - 30.0).abs() < 1e-6 && (fat_titan_bridge - 90.0).abs() < 1e-6 && (fat_orca_bridge - 18.0).abs() < 1e-6);
+    ctx.db.with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&bridger_char) {
+            if let Some(mut c3) = snap.characters.get(&passenger_char).cloned() {
+                c3.character_id = bridger_char;
+                snap.characters.insert(bridger_char, c3);
+            }
+        }
+        for (cid, sid, sys) in [
+            (cyno_char, cyno_ship, dst_sys),
+            (bridger_char, bridger_ship, src_sys),
+            (passenger_char, passenger_ship, src_sys),
+        ] {
+            if let Some(ch) = snap.characters.get_mut(&cid) {
+                ch.solar_system_id = sys;
+                ch.station_id = None;
+                ch.structure_id = None;
+                ch.active_ship_id = sid;
+                ch.jump_cooldown_until_unix = 0;
+                ch.jump_fatigue_until_unix = 0;
+                ch.jump_fatigue_minutes = 0.0;
+            }
+            let sk = snap.skills.entry(cid).or_default();
+            for stid in [21603_u32, 24562, 3456, 21610, 21611] {
+                sk.insert(stid, eve_db::TrainedSkillRecord { type_id: stid, level: 5, skill_points: 256_000.0 });
+            }
+        }
+        let mut member_details = HashMap::new();
+        for cid in [cyno_char, bridger_char, passenger_char] {
+            member_details.insert(cid, eve_db::FleetMemberRecord {
+                character_id: cid, role: eve_db::FleetRole::SquadMember,
+                wing_id: Some(1), squad_id: Some(1), takes_fleet_warp: true,
+                accepts_regroup: true, accepts_conduit_jumps: true, job: 0,
+                role_name: String::new(), join_time_unix: 0,
+            });
+        }
+        snap.fleets.insert(77_001, eve_db::FleetRecord {
+            fleet_id: 77_001, boss_id: bridger_char, free_move: true,
+            wings: vec![1], squads: vec![1],
+            members: vec![cyno_char, bridger_char, passenger_char],
+            member_details, ..Default::default()
+        });
+        for (id, tid, owner, loc, flag, qty) in [
+            (cyno_ship, 12032_u32, cyno_char, i64::from(dst_sys), InventoryFlag::None, 1_i32),
+            (cyno_mod, 28646, cyno_char, cyno_ship, InventoryFlag::HiSlot0, 1),
+            (990_010_003, 16273, cyno_char, cyno_ship, InventoryFlag::Cargo, 1_000),
+            (bridger_ship, 22428, bridger_char, i64::from(src_sys), InventoryFlag::None, 1),
+            (portal_mod, 28652, bridger_char, bridger_ship, InventoryFlag::HiSlot0, 1),
+            (bridger_fuel, 16274, bridger_char, bridger_ship, InventoryFlag::Cargo, 50_000),
+            (passenger_ship, 12032, passenger_char, i64::from(src_sys), InventoryFlag::None, 1),
+        ] {
+            snap.items.insert(id, InventoryItemRecord {
+                item_id: id, type_id: tid, owner_id: owner, location_id: loc,
+                flag, quantity: qty, singleton: qty == 1, ..Default::default()
+            });
+        }
+        snap.module_online_states.insert(cyno_mod, true);
+        snap.module_online_states.insert(portal_mod, true);
+    });
+    for (cid, sid, tid, sys) in [
+        (cyno_char, cyno_ship, 12032_u32, dst_sys),
+        (bridger_char, bridger_ship, 22428, src_sys),
+        (passenger_char, passenger_ship, 12032, src_sys),
+    ] {
+        let ball = eve_destiny::Ball {
+            id: sid, type_id: tid, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
+            max_velocity: 150.0, inertia: 1.0, mass: 1_000_000.0, radius: 50.0,
+            speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+        };
+        let cs = ctx.build_ship_combat_state(cid, sid, tid);
+        let meta = ctx.build_ship_slim_meta(cid, tid);
+        ctx.systems.get_or_spawn(sys).spawn_ball_with_meta(ball, cs, meta).await.expect("spawn ship");
+    }
+
+    let mut cyno_sess = make_player_session(51_101, 101, cyno_char, 98_000_001, None, dst_sys);
+    cyno_sess.ship_id = Some(cyno_ship); cyno_sess.station_id = None;
+    let mut bridger_sess = make_player_session(51_102, 102, bridger_char, 98_000_001, None, src_sys);
+    bridger_sess.ship_id = Some(bridger_ship); bridger_sess.station_id = None;
+    let mut pass_sess = make_player_session(51_103, 103, passenger_char, 98_000_001, None, src_sys);
+    pass_sess.ship_id = Some(passenger_ship); pass_sess.station_id = None;
+
+    let cyno_res = ctx
+        .dispatch_rpc(&mut cyno_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod), PyRep::String("cynosuralGeneration".into())], &kw, None)
+        .await
+        .expect("activate covert cyno");
+    let beacon_id = if let PyRep::KeyVal(entries) = &cyno_res {
+        entries.iter().find(|(k, _)| *k == "beaconID").and_then(|(_, v)| match v { PyRep::Integer(n) => Some(*n), _ => None }).unwrap_or(cyno_ship)
+    } else {
+        cyno_ship
+    };
+
+    ctx.dispatch_rpc(&mut bridger_sess, "beyonce", None, "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(cyno_char), PyRep::Integer(i64::from(dst_sys)), PyRep::Integer(beacon_id)], &kw, None)
+        .await
+        .expect("open covert bridge");
+
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, passenger_char);
+    ctx.dispatch_rpc(&mut pass_sess, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(bridger_char), PyRep::Integer(bridger_ship)], &kw, None)
+        .await
+        .expect("passenger jump through covert portal");
+    assert_eq!(pass_sess.solar_system_id, Some(dst_sys));
+
+    let timers = ctx.dispatch_rpc(&mut pass_sess, "jumpTimers", None, "GetTimers", &[], &kw, None).await.expect("GetTimers");
+    assert!(!matches!(timers, PyRep::None));
+    assert!(ctx.db.with_snapshot(|s| s.characters[&passenger_char].jump_fatigue_minutes > 0.0));
+    let (cd1, fat1) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 5.0, 0.0);
+    let (cd2, fat2) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(50.0, 5.0, 0.0);
+    let (cd3, fat3) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(270.0, 5.0, 0.0);
+    assert!((cd1 - 6.0).abs() < 1e-6 && (fat1 - 60.0).abs() < 1e-6 && (cd2 - 6.0).abs() < 1e-6 && (fat2 - 300.0).abs() < 1e-6 && (cd3 - 27.0).abs() < 1e-6 && (fat3 - 300.0).abs() < 1e-6);
 }
