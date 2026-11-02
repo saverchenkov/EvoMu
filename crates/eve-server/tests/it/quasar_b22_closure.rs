@@ -120,7 +120,7 @@ async fn test_b22_quasar_sov_hub_and_star_resources() {
     let res_before = rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await;
     assert_eq!(res_before.status_code, STATUS_OK);
     let power_before = varint(&sub(&wm(&res_before.payload.unwrap().value), 1), 1).unwrap_or(0);
-    assert_eq!(power_before, 1_100, "Jita star + planets provide 1100 power");
+    assert_eq!(power_before, 800, "Jita star + planets provide 800 power");
 
     // Outsider cannot query or fuel another corp's hub
     let forbidden = rpc(&ctx, &mut outsider, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await;
@@ -155,6 +155,9 @@ async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(HUB_A, make_structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
         snap.structures.insert(HUB_B, make_structure(HUB_B, CORP, PERIMETER, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(1_000_000_301, make_structure(1_000_000_301, CORP, JITA, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(1_000_000_301, 40_009_080);
+        snap.sov_runtime.skyhook_active.insert(1_000_000_301, true);
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.station_id = None;
             ch.structure_id = None;

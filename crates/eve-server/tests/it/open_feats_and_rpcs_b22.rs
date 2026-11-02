@@ -431,14 +431,27 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
         PyRep::Integer(21)
     );
 
-    rpc(&ctx, &mut sess1, "structureDocking", "Undock", &[])
-        .await
-        .expect("Undock");
-    let sys_id = sess1.solar_system_id.unwrap();
+    let (sys_id, station_id, base_pos) = ctx
+        .sde
+        .stations
+        .values()
+        .find(|s| s.solar_system_id == 30_000_144)
+        .map(|s| (s.solar_system_id, s.station_id, s.position))
+        .unwrap();
     let ship_id = sess1.ship_id.unwrap();
-    let base_pos = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(glam::DVec3::ZERO);
-    ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, base_pos + glam::DVec3::new(0.0, 5.0e9, 0.0)).await;
+    sess1.station_id = Some(station_id);
+    sess1.solar_system_id = Some(sys_id);
     ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.characters.get_mut(&PILOT_1) {
+            c.station_id = Some(station_id);
+            c.solar_system_id = sys_id;
+        }
+        if let Some(it) = s.items.get_mut(&ship_id) {
+            it.location_id = station_id;
+        }
+        if let Some(gov) = s.corp_governance.get_mut(&corp_id) {
+            gov.created_unix = gov.created_unix.saturating_sub(8 * 86_400);
+        }
         s.next_entity_id += 1;
         let id = s.next_entity_id;
         s.items.insert(id, InventoryItemRecord {
@@ -446,6 +459,10 @@ async fn test_b22_corp_settings_mail_and_structure_defaults() {
             flag: InventoryFlag::Cargo, quantity: 1, ..Default::default()
         });
     });
+    rpc(&ctx, &mut sess1, "structureDocking", "Undock", &[])
+        .await
+        .expect("Undock");
+    ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, base_pos + glam::DVec3::new(0.0, 5.0e9, 0.0)).await;
     let anchor_rep = rpc(
         &ctx,
         &mut sess1,
