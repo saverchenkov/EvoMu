@@ -246,7 +246,21 @@ pub(crate) fn step_cycles_and_capacitor(
             }
         }
     }
-    let mut finished_indices = Vec::new();
+    
+    // Sum SDE heatAbsorbtionRateModifier (1180) across overloaded modules per (ship_id, rack_idx)
+    let mut rack_absorption_sums: HashMap<(BallId, usize), f64> = HashMap::new();
+    for c in active_module_cycles.iter() {
+        if c.is_overloaded {
+            let abs_mod = sde_opt
+                .as_ref()
+                .and_then(|sde| sde.types.get(&c.module_type_id))
+                .and_then(|t| t.default_attributes.get(&1180).copied())
+                .filter(|&v| v > 0.0)
+                .unwrap_or(0.02);
+            *rack_absorption_sums.entry((c.ship_id, c.rack_idx.min(2))).or_insert(0.0) += abs_mod;
+        }
+    }
+let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // If the source ship was destroyed / removed from space mid-cycle, cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).

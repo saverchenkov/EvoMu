@@ -224,7 +224,6 @@ pub async fn handle_active_overload_toggle(
         ("effectiveMaxVelocity", PyRep::Real(max_vel)),
     ])
 }
-
 /// Enforces CCP in-space Nanite Repair Paste lockouts (`feat:modules.nanite-repair-paste-in-space`):
 /// a module currently being repaired cannot be activated, and no module on the ship may be overloaded
 /// while any module on the ship is undergoing active Nanite Repair Paste repair.
@@ -252,57 +251,4 @@ pub fn check_nanite_repair_overheat_lockout(
         });
     }
     Ok(())
-}
-
-/// Applies one overheat heat-generation and damage-propagation cycle directly to `fit`.
-pub fn apply_overheat_cycle_to_fit(
-    ctx: &ServerContext,
-    char_id: i64,
-    fit: &mut ShipFittingEngine,
-    module_id: i64,
-    dmg_roll: f64,
-) -> Option<eve_dogma::HeatDamageReport> {
-    let (heat_gen_rate, dissipation_rate, cycle_duration_s) = {
-        let m = fit.modules.get(&module_id)?;
-        let mod_t = ctx.sde.types.get(&m.type_id);
-        let absorb = mod_t
-            .and_then(|t| t.default_attributes.get(&1180).copied())
-            .filter(|v| *v > 0.0)
-            .unwrap_or(0.05);
-        let ship_t = ctx.sde.types.get(&fit.ship.type_id);
-        let diss_attr = match m.flag_id {
-            27..=34 => 1179,
-            19..=26 => 1189,
-            _ => 1199,
-        };
-        let diss = ship_t
-            .and_then(|t| t.default_attributes.get(&diss_attr).copied())
-            .filter(|v| *v > 0.0)
-            .unwrap_or(0.01);
-        let dur_s = (mod_t
-            .and_then(|t| t.default_attributes.get(&73).copied())
-            .unwrap_or(10_000.0)
-            / 1_000.0)
-            .max(1.0);
-        (absorb, diss, dur_s)
-    };
-    let thermo_lvl = ctx.db.with_snapshot(|s| {
-        s.skills
-            .get(&char_id)
-            .and_then(|m| m.get(&28164))
-            .map(|sk| sk.level)
-            .unwrap_or(0)
-    });
-    if thermo_lvl > 0 {
-        fit.character_skills.insert(28164, thermo_lvl);
-    }
-    fit.apply_heat_cycle(
-        module_id,
-        heat_gen_rate,
-        dissipation_rate,
-        cycle_duration_s,
-        dmg_roll,
-        &ctx.sde,
-    )
-    .ok()
 }

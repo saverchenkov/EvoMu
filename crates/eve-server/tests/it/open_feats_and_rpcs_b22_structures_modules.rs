@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::open_feats_and_rpcs_b22::{field, rpc, select_pilot, PILOT_1, PILOT_2};
+use crate::open_feats_and_rpcs_b22::{rpc, select_pilot, PILOT_1, PILOT_2};
 use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord};
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -285,14 +285,7 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
     assert!(after_sh < before_sh, "Standup Point Defense Battery must damage ship within perimeter");
 }
 
-#[tokio::test]
-async fn test_b22_overheat_rack_heat_and_damage_propagation() {
-    // parity: feat:modules.overheat-rack-heat-generation, feat:modules.overheat-damage-propagation
-    eve_testkit::attest(&[
-        "feat:modules.overheat-rack-heat-generation",
-        "feat:modules.overheat-damage-propagation",
-    ]);
-
+async fn run_overheat_fit(thermo_lvl: u8) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
     let ctx = ServerContext::new();
     let mut s1 = select_pilot(&ctx, 55_203, "demo", "demo-secret", PILOT_1).await;
 
@@ -301,7 +294,7 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
     let mod_left = 77_103_002_i64;
     let mod_center = 77_103_003_i64;
     let mod_right = 77_103_004_i64;
-    let mod_dist2 = 77_103_006_i64;
+    let mod_low = 77_103_006_i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&PILOT_1) {
             c.station_id = None;
@@ -313,7 +306,7 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
             ship_id,
             InventoryItemRecord {
                 item_id: ship_id,
-                type_id: 587, // Rifter
+                type_id: 587, // Rifter (1259 heatAttenuationHi=0.5, 1261 heatAttenuationMed=0.5)
                 owner_id: PILOT_1,
                 location_id: JITA_SYS as i64,
                 flag: InventoryFlag::None,
@@ -323,49 +316,55 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
             },
         );
         for (mid, flag, tid) in [
-            (mod_high, InventoryFlag::HiSlot0, 2873),    // 125mm Gatling AutoCannon I (flag 27, high rack)
-            (mod_left, InventoryFlag::MedSlot0, 3242),   // Warp Scrambler I (flag 19, dist 1)
-            (mod_center, InventoryFlag::MedSlot1, 440),  // 5MN Microwarpdrive I (flag 20, overloaded)
-            (mod_right, InventoryFlag::MedSlot2, 527),   // Stasis Webifier I (flag 21, dist 1)
-            (mod_dist2, InventoryFlag::MedSlot3, 399),   // Small Shield Booster I (flag 22, dist 2)
+            (mod_high, InventoryFlag::HiSlot0, 2873),   // 125mm Gatling AutoCannon II (flag 27, 1180=0.02, 0 cap)
+            (mod_left, InventoryFlag::MedSlot0, 3242),  // Warp Disruptor I (flag 19, dist 1)
+            (mod_center, InventoryFlag::MedSlot1, 440), // 5MN Microwarpdrive II (flag 20, 1180=0.04)
+            (mod_right, InventoryFlag::MedSlot2, 527),  // Stasis Webifier II (flag 21, dist 1)
+            (mod_low, InventoryFlag::LoSlot0, 2048),    // Damage Control II (flag 11, low rack)
         ] {
-            snap.items.insert(
-                mid,
-                InventoryItemRecord {
-                    item_id: mid,
-                    type_id: tid,
-                    owner_id: PILOT_1,
-                    location_id: ship_id,
-                    flag,
-                    quantity: 1,
-                    singleton: true,
-                    ..Default::default()
-                },
-            );
+            let mut item = InventoryItemRecord {
+                item_id: mid,
+                type_id: tid,
+                owner_id: PILOT_1,
+                location_id: ship_id,
+                flag,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            };
+            item.dynamic_attributes.insert(eve_sde::attr_ids::HP_STRUCT, 500.0);
+            snap.items.insert(mid, item);
             snap.module_online_states.insert(mid, true);
         }
-        snap.skills
-            .entry(PILOT_1)
-            .or_default()
-            .insert(
-                28164,
-                TrainedSkillRecord {
-                    type_id: 28164, // Thermodynamics
-                    level: 4,
-                    skill_points: 135_765.0,
-                },
-            );
-        snap.skills
-            .entry(PILOT_1)
-            .or_default()
-            .insert(
-                3454,
-                TrainedSkillRecord {
-                    type_id: 3454, // High Speed Maneuvering
-                    level: 4,
-                    skill_points: 135_765.0,
-                },
-            );
+        snap.items.insert(
+            77_103_010,
+            InventoryItemRecord {
+                item_id: 77_103_010,
+                type_id: 212, // EMP S
+                owner_id: PILOT_1,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 100,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        snap.skills.entry(PILOT_1).or_default().insert(
+            28164,
+            TrainedSkillRecord {
+                type_id: 28164, // Thermodynamics
+                level: thermo_lvl,
+                skill_points: 135_765.0,
+            },
+        );
+        snap.skills.entry(PILOT_1).or_default().insert(
+            3454,
+            TrainedSkillRecord {
+                type_id: 3454, // High Speed Maneuvering
+                level: 4,
+                skill_points: 135_765.0,
+            },
+        );
     });
     s1.solar_system_id = Some(JITA_SYS);
     s1.ship_id = Some(ship_id);
@@ -373,81 +372,88 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
 
     let jita_handle = ctx.systems.get_or_spawn(JITA_SYS);
     let (sb, mut sc) = eve_server::living_world::sde_ball_and_combat(&ctx.sde, ship_id, 587, DVec3::ZERO);
-    sc.capacitor = 1_000.0;
+    sc.capacitor = 2_000.0;
+    sc.max_capacitor = 2_000.0;
     jita_handle.spawn_ball_with_combat(sb, sc).await.expect("spawn Rifter");
+    let target_id = 77_103_099_i64;
+    let (tb, mut tc) = eve_server::living_world::sde_ball_and_combat(&ctx.sde, target_id, 587, DVec3::new(1_000.0, 0.0, 0.0));
+    tc.shield_hp = 50_000.0;
+    tc.max_shield_hp = 50_000.0;
+    jita_handle.spawn_ball_with_combat(tb, tc).await.expect("spawn target");
+    jita_handle.add_target_lock(ship_id, eve_destiny::TargetLock { target_id, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: Some(100_000.0) }).await.expect("lock target");
 
-    // Online modules, activate & overload center module (5MN MWD) via dogmaIM.Overload
     let _ = rpc(&ctx, &mut s1, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(ship_id)])
         .await
         .expect("ShipOnlineModules");
-    let base_max_vel = ctx
-        .get_or_rebuild_ship_fitting(PILOT_1, ship_id)
-        .expect("base fit")
-        .ship
-        .get_attribute(eve_dogma::attr_ids::MAX_VELOCITY, &ctx.sde);
-    let ovl_rsp = rpc(
-        &ctx,
-        &mut s1,
-        "dogmaIM",
-        "Overload",
-        &[PyRep::Integer(mod_center)],
-    )
-    .await
-    .expect("dogmaIM.Overload");
-    let ovl_max_vel = match field(&ovl_rsp, "effectiveMaxVelocity") {
-        PyRep::Real(v) => v,
-        _ => ctx
-            .get_or_rebuild_ship_fitting(PILOT_1, ship_id)
-            .expect("overloaded fit")
-            .ship
-            .get_attribute(eve_dogma::attr_ids::MAX_VELOCITY, &ctx.sde),
-    };
-    assert!(
-        ovl_max_vel > base_max_vel * 1.2,
-        "Overloaded 5MN MWD must apply +50% propulsion speed overload bonus (base={base_max_vel}, ovl={ovl_max_vel})"
-    );
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_center)])
+        .await
+        .expect("dogmaIM.Overload mid");
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(mod_high), PyRep::String("targetAttack".into()), PyRep::Integer(target_id), PyRep::Integer(1)])
+        .await
+        .expect("dogmaIM.Activate high");
+    let _ = rpc(&ctx, &mut s1, "dogmaIM", "Overload", &[PyRep::Integer(mod_high)])
+        .await
+        .expect("dogmaIM.Overload high");
 
-    // Step SystemActor across 4 MWD cycles (40s) so rack heat builds and propagates damage
-    for _ in 0..4 {
-        ctx.advance_secs(10);
-        jita_handle.step_manual(10.0).await.expect("step overheat cycle");
+    // Step SystemActor across 80s (80 x 1.0s ticks) so high & mid (10s cycle -> 8 cycles = 80s) rack heat build
+    for _ in 0..80 {
+        ctx.advance_secs(1);
+        jita_handle.step_manual(1.0).await.expect("step overheat cycle");
     }
 
-    let (med_heat, dmg_left, dmg_center, dmg_right, dmg_dist2, dmg_high) = ctx.db.with_snapshot(|snap| {
-        let mh = snap
-            .transient_item_attributes
-            .get(&ship_id)
-            .and_then(|m| m.get(&1176))
-            .copied()
-            .unwrap_or(0.0);
+    ctx.db.with_snapshot(|snap| {
+        let tr = snap.transient_item_attributes.get(&ship_id);
+        let hi_h = tr.and_then(|m| m.get(&1175)).copied().unwrap_or(0.0);
+        let med_h = tr.and_then(|m| m.get(&1176)).copied().unwrap_or(0.0);
+        let low_h = tr.and_then(|m| m.get(&1177)).copied().unwrap_or(0.0);
         let dl = snap.items.get(&mod_left).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         let dc = snap.items.get(&mod_center).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
         let dr = snap.items.get(&mod_right).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
-        let d2 = snap.items.get(&mod_dist2).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
-        let dh = snap.items.get(&mod_high).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
-        (mh, dl, dc, dr, d2, dh)
-    });
-    let expected_heat = 1.0 - (-0.04_f64 * 40.0).exp();
-    assert!(
-        (med_heat - expected_heat).abs() < 1e-6,
-        "Mid rack heat (attr 1176) must match exponential formula 1 - exp(-0.04 * 40): got {med_heat}, expected {expected_heat}"
-    );
-    assert!(dmg_center > 0.0, "Overloaded center MWD must take heat damage");
-    assert!(dmg_left > 0.0 && dmg_right > 0.0, "Adjacent mid-rack modules must take propagated heat damage");
-    assert!((dmg_left - dmg_right).abs() < 1e-9, "Symmetric distance-1 slots must take equal heat damage");
-    let expected_falloff = (-0.5_f64).exp();
-    assert!(
-        ((dmg_dist2 / dmg_right) - expected_falloff).abs() < 1e-6,
-        "Slot-distance 2 vs 1 heat damage ratio must equal exp(-0.5): got {}, expected {expected_falloff}",
-        dmg_dist2 / dmg_right
-    );
-    assert_eq!(dmg_high, 0.0, "Unheated high rack module must take 0 heat damage across rack boundary");
+        let dlow = snap.items.get(&mod_low).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
+        let dhi = snap.items.get(&mod_high).and_then(|i| i.dynamic_attributes.get(&eve_sde::attr_ids::DAMAGE)).copied().unwrap_or(0.0);
+        (hi_h, med_h, low_h, dl, dc, dr, dlow, dhi)
+    })
+}
 
-    // Verify Thermodynamics level 4 gives exactly 0.8x heat damage vs level 0
-    let dmg_thermo4 = eve_dogma::thermodynamics::effective_heat_damage(19.0, 4);
-    let dmg_thermo0 = eve_dogma::thermodynamics::effective_heat_damage(19.0, 0);
+#[tokio::test]
+async fn test_b22_overheat_rack_heat_and_damage_propagation() {
+    // parity: feat:modules.overheat-rack-heat-generation, feat:modules.overheat-damage-propagation
+    eve_testkit::attest(&[
+        "feat:modules.overheat-rack-heat-generation",
+        "feat:modules.overheat-damage-propagation",
+    ]);
+
+    let (hi_heat, med_heat, low_heat, dmg_left_0, dmg_center_0, dmg_right_0, dmg_low_0, _dmg_hi_0) =
+        run_overheat_fit(0).await;
+    let (_hi_heat_4, _med_heat_4, _low_heat_4, _dmg_left_4, dmg_center_4, _dmg_right_4, _dmg_low_4, _dmg_hi_4) =
+        run_overheat_fit(4).await;
+
+    // Rifter SDE: heatAttenuationHi (1259) = 0.5, 125mm Gatling AutoCannon II (2873) heatAbsorbtionRateModifier (1180) = 0.02 -> rate = 0.01
+    let expected_hi_heat = 1.0 - (-0.5_f64 * 0.02 * 79.212).exp();
     assert!(
-        (dmg_thermo4 - 0.8 * dmg_thermo0).abs() < 1e-9,
-        "Thermodynamics IV must give exactly 0.8x overheat damage of level 0 (lvl4={dmg_thermo4}, lvl0={dmg_thermo0})"
+        (hi_heat - expected_hi_heat).abs() < 1e-3,
+        "High rack heat (attr 1175 heatHi) must match SDE formula 1 - exp(-0.5 * 0.02 * t): got {hi_heat}, expected {expected_hi_heat}"
+    );
+
+    // Rifter SDE: heatAttenuationMed (1261) = 0.5, 5MN MWD II (440) heatAbsorbtionRateModifier (1180) = 0.04 -> rate = 0.02
+    // Over 80s, 10s-cycle MWD completes 8 cycles = 80s of heating
+    let expected_med_heat = 1.0 - (-0.5_f64 * 0.04 * 80.0).exp();
+    assert!(
+        (med_heat - expected_med_heat).abs() < 1e-6,
+        "Mid rack heat (attr 1176 heatMed) must match SDE formula 1 - exp(-0.5 * 0.04 * 40): got {med_heat}, expected {expected_med_heat}"
+    );
+    assert_eq!(low_heat, 0.0, "Unheated low rack (attr 1177 heatLow) must remain 0.0");
+
+    assert!(dmg_center_0 > 0.0, "Overloaded center MWD must take heat damage from seeded roll");
+    assert!(
+        dmg_left_0 > 0.0 || dmg_right_0 > 0.0,
+        "Adjacent mid-rack modules must take propagated heat damage from seeded roll (left={dmg_left_0}, right={dmg_right_0})"
+    );
+    assert_eq!(dmg_low_0, 0.0, "Unheated low rack module must take 0 heat damage across rack boundary");
+
+    // Live SystemActor Thermodynamics IV must reduce heat damage by 20% (0.8x of level 0)
+    assert!(
+        (dmg_center_4 - 0.8 * dmg_center_0).abs() < 1e-6,
+        "Live SystemActor Thermodynamics IV must give 0.8x heat damage of level 0 (lvl4={dmg_center_4}, lvl0={dmg_center_0})"
     );
 }

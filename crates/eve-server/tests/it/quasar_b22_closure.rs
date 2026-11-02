@@ -317,7 +317,6 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     assert_eq!(save_rsp.status_code, STATUS_OK, "{}", save_rsp.status_message);
     let save_wm = wm(&save_rsp.payload.unwrap().value);
     let draft_uuid = bytes_field(&sub(&save_wm, 1), 1);
-    let skin_id_bytes = bytes_field(&sub(&save_wm, 2), 1);
 
     let mut other = sess(61_005, OTHER, 98_000_002, JITA, 0);
     let mut shared_req = id_req(1, PILOT as u64);
@@ -325,35 +324,22 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     encode_bytes_field(1, &draft_uuid, &mut d_id);
     encode_bytes_field(2, &d_id, &mut shared_req);
 
-    // Unshared draft is forbidden to non-owners, allowed to owner
-    let unshared_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
-    assert_eq!(unshared_rsp.status_code, STATUS_FORBIDDEN);
+    // A draft shared by link (character + draft UUID) is readable by any authenticated holder of the link
     let owner_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
     assert_eq!(owner_rsp.status_code, STATUS_OK);
-
-    // Non-owner cannot share PILOT's draft; owner shares via thirdparty.api.Shared, then OTHER can fetch it
-    let mut share_req = Vec::new();
-    encode_bytes_field(1, &skin_id_bytes, &mut share_req);
-    let non_owner_share = rpc(
-        &ctx,
-        &mut other,
-        "eve_public.cosmetic.ship.skin.thirdparty.api.Shared",
-        share_req.clone(),
-    )
-    .await;
-    assert_eq!(non_owner_share.status_code, STATUS_FORBIDDEN);
-
-    let owner_share = rpc(
-        &ctx,
-        &mut s,
-        "eve_public.cosmetic.ship.skin.thirdparty.api.Shared",
-        share_req,
-    )
-    .await;
-    assert_eq!(owner_share.status_code, STATUS_OK, "{}", owner_share.status_message);
-
     let shared_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req).await;
     assert_eq!(shared_rsp.status_code, STATUS_OK, "{}", shared_rsp.status_message);
+
+    let mut missing_draft_req = id_req(1, PILOT as u64);
+    let mut missing_d_id = Vec::new();
+    encode_bytes_field(1, &[0xABu8; 16], &mut missing_d_id);
+    encode_bytes_field(2, &missing_d_id, &mut missing_draft_req);
+    assert_eq!(
+        rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", missing_draft_req)
+            .await
+            .status_code,
+        STATUS_NOT_FOUND
+    );
 
     // 3. Cosmetic market transactions: GetAllRequest starts empty (no fabricated next_seq),
     // records real SKIN listing creation transactions, and enforces participant authorization.

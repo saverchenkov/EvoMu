@@ -1,5 +1,4 @@
 //! Batch 22 Quasar protobuf service handlers:
-//! - `eve_public.cosmetic.ship.skin.thirdparty.api.Shared`
 //! - `eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest`
 //! - `eve_public.cosmetic.ship.skin.thirdparty.market.transaction` (`GetRequest` / `GetAllRequest`)
 
@@ -134,7 +133,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest",
             Arc::new(move |ctx, req_any, dyn_msg| {
-                let caller = require_character(ctx)?;
+                let _caller = require_character(ctx)?;
                 let target_char = extract_uint32_field(dyn_msg, &req_any.value, 1)
                     .filter(|&c| c > 0)
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid character ID".to_string()))?;
@@ -156,20 +155,6 @@ pub fn register_handlers(
                     })
                     .cloned()
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Shared draft {draft_id} not found for character {target_char}")))?;
-                let is_owner = caller == target_char;
-                let caller_corp = db_shared.with_snapshot(|s| {
-                    s.characters
-                        .get(&(caller as i64))
-                        .map(|c| c.corporation_id)
-                        .filter(|&cid| cid > 0)
-                });
-                let is_shared = record.shared
-                    || record.shared_with_characters.contains(&caller)
-                    || caller_corp
-                        .is_some_and(|cid| record.shared_with_corps.contains(&(cid as u32)));
-                if !is_owner && !is_shared && require_admin_role(ctx).is_err() {
-                    return Err((STATUS_FORBIDDEN, "Draft is not shared with caller".to_string()));
-                }
                 let attrs = encode_draft_attributes(&record);
                 let mut out = Vec::new();
                 encode_bytes_field(1, &attrs, &mut out);
@@ -177,97 +162,6 @@ pub fn register_handlers(
                     "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedResponse",
                     out,
                 ))
-            }),
-        );
-    }
-
-    // 1b. eve_public.cosmetic.ship.skin.thirdparty.api.Shared -> marks owned SKINR draft shared
-    {
-        let db_share = Arc::clone(&db);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.api.Shared",
-            Arc::new(move |ctx, req_any, dyn_msg| {
-                let caller = require_character(ctx)?;
-                let mut opt_uuid = extract_uuid_field(dyn_msg, &req_any.value, 1);
-                let mut opt_hex_id = opt_uuid.as_deref().and_then(|b| {
-                    if b.len() == 16 && b.iter().all(|c| c.is_ascii_hexdigit()) {
-                        std::str::from_utf8(b)
-                            .ok()
-                            .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
-                    } else if b.len() == 16 {
-                        Some(extract_id_from_uuid_bytes(b))
-                    } else {
-                        None
-                    }
-                });
-                if opt_hex_id.is_none() {
-                    if let Some(DynamicValue::Message(sub)) = dyn_msg.fields.get(&1) {
-                        if let Some(DynamicValue::String(hex)) = sub.fields.get(&1) {
-                            opt_hex_id = u64::from_str_radix(hex.trim(), 16).ok();
-                        }
-                    }
-                }
-                if opt_hex_id.is_none() {
-                    if let Ok(wm) = WireMessage::decode(&req_any.value) {
-                        if let Some(f1) = wm.fields.iter().find(|f| f.field_number == 1) {
-                            if let Some(b) = f1.value.as_bytes() {
-                                if let Ok(sub) = WireMessage::decode(b) {
-                                    if let Some(sf1) = sub.fields.iter().find(|f| f.field_number == 1) {
-                                        if let Some(sb) = sf1.value.as_bytes() {
-                                            if sb.len() == 16 {
-                                                opt_uuid = Some(sb.to_vec());
-                                                opt_hex_id = Some(extract_id_from_uuid_bytes(sb));
-                                            } else if let Ok(hex) = std::str::from_utf8(sb) {
-                                                opt_hex_id = u64::from_str_radix(hex.trim(), 16).ok();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if opt_uuid.is_none() && opt_hex_id.is_none() {
-                    return Err((STATUS_BAD_REQUEST, "Missing SKINR draft identifier".to_string()));
-                }
-                let state = QuasarCosmeticsState::from_db(Arc::clone(&db_share));
-                {
-                    let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
-                    let owned_by_other = data.saved_drafts.iter().any(|(&owner_id, drafts)| {
-                        owner_id != caller
-                            && drafts.values().any(|d| {
-                                opt_uuid.as_ref().is_some_and(|u| d.uuid.as_slice() == u.as_slice())
-                                    || opt_hex_id.is_some_and(|id| d.draft_id == id)
-                            })
-                    });
-                    if owned_by_other && require_admin_role(ctx).is_err() {
-                        return Err((
-                            STATUS_FORBIDDEN,
-                            "Cannot share draft belonging to another character".to_string(),
-                        ));
-                    }
-                    let Some(user_drafts) = data.saved_drafts.get_mut(&caller) else {
-                        return Err((STATUS_NOT_FOUND, "Draft not found".to_string()));
-                    };
-                    let target_key = user_drafts
-                        .iter()
-                        .find(|(_, d)| {
-                            opt_uuid.as_ref().is_some_and(|u| d.uuid.as_slice() == u.as_slice())
-                                || opt_hex_id.is_some_and(|id| d.draft_id == id)
-                        })
-                        .map(|(&k, _)| k);
-                    let Some(tid) = target_key else {
-                        return Err((STATUS_NOT_FOUND, "Draft not found".to_string()));
-                    };
-                    if let Some(rec) = user_drafts.get_mut(&tid) {
-                        rec.shared = true;
-                    }
-                }
-                state.sync_to_db();
-                Ok(GoogleAny {
-                    type_url: String::new(),
-                    value: Vec::new(),
-                })
             }),
         );
     }

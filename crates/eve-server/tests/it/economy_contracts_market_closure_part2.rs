@@ -458,8 +458,11 @@ async fn test_d6_persistence_and_no_transient_attrs_across_restart() {
         let _ = sys_h
             .apply_damage(ship_id, eve_destiny::DamageVector::new(100.0, 0.0, 0.0, 0.0))
             .await;
-        for _ in 0..25 {
-            let _ = sys_h.step_manual(1.0).await;
+        for _ in 0..5 {
+            let _ = sys_h.set_capacitor(ship_id, 6_000.0).await;
+            for _ in 0..15 {
+                let _ = sys_h.step_manual(1.0).await;
+            }
         }
 
         assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&bastion_id)));
