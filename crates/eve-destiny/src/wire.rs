@@ -987,7 +987,6 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                 PyRep::Real(destination[0]),
                 PyRep::Real(destination[1]),
                 PyRep::Real(destination[2]),
-                PyRep::Integer(0),
                 PyRep::Integer((*warp_speed_au_s * 10.0).round() as i64),
             ]),
         ]),

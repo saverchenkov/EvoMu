@@ -62,6 +62,14 @@ pub struct DailyGoalTemplate {
 }
 
 impl DailyGoalTemplate {
+    /// Returns the `.eve_public.dailygoal.Category` (`1` = `CATEGORY_DAILY`, `2` = `CATEGORY_DAILY_BONUS`).
+    pub fn effective_goal_category(&self) -> u32 {
+        if self.category == 6 {
+            2
+        } else {
+            1
+        }
+    }
     /// Returns the `res:/staticdata/contributionmethods.fsdbinary` `titleID` or configured message ID.
     pub fn effective_name_message_id(&self) -> u32 {
         if self.name_message_id > 0 {
@@ -205,6 +213,28 @@ fn ensure_character_daily_goals_with_templates(
     changed
 }
 
+pub fn default_daily_bonus_template() -> DailyGoalTemplate {
+    let mut uuid = [0u8; 16];
+    uuid[0..5].copy_from_slice(b"SDEDG");
+    uuid[15] = 6;
+    DailyGoalTemplate {
+        uuid,
+        name_message: "DailyBonus".to_string(),
+        description_message: "DailyBonus_daily".to_string(),
+        category: 6,
+        career: 1,
+        target: 2,
+        isk_reward: 500_000,
+        sp_reward: 10_000.0,
+        completion_cost_isk: None,
+        completion_cost_evermarks: None,
+        name_message_id: 659_195,
+        description_message_id: 696_260,
+        help_text_message_id: 665_456,
+        assigner_corporation_id: 1_000_419,
+    }
+}
+
 pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGoalTemplate> {
     let methods = sde.contribution_methods().unwrap_or_default();
     // DERIVED: Only localization message IDs come from `res:/staticdata/contributionmethods.fsdbinary`.
@@ -278,6 +308,7 @@ pub fn build_sde_daily_goal_templates(sde: &eve_sde::SdeRegistry) -> Vec<DailyGo
                 }
             },
         )
+        .chain(std::iter::once(default_daily_bonus_template()))
         .collect()
 }
 
@@ -327,6 +358,11 @@ impl DailyGoalManager {
             if let Some(ref sde_reg) = sde {
                 store.templates = build_sde_daily_goal_templates(sde_reg);
             }
+        }
+        if !store.templates.is_empty()
+            && !store.templates.iter().any(|t| t.effective_goal_category() == 2)
+        {
+            store.templates.push(default_daily_bonus_template());
         }
 
         let mut character_goals = store.character_goals;
@@ -831,6 +867,16 @@ fn encode_contribution_configuration(category: u32, out: &mut Vec<u8>) {
             encode_bytes_field(1, &method, &mut mfg);
             encode_bytes_field(9, &mfg, &mut cfg);
         }
+        6 => {
+            // 10: complete_daily_goal (CompleteDailyGoal { 1: Method { 1: DailyGoalMatcher { any=true }, 2: DailyGoalCategoryMatcher { category=CATEGORY_DAILY(1) } } })
+            let (mut any_m, mut cat_m, mut method, mut cdg) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            encode_varint_field(1, 1, &mut any_m);
+            encode_varint_field(2, 1, &mut cat_m);
+            encode_bytes_field(1, &any_m, &mut method);
+            encode_bytes_field(2, &cat_m, &mut method);
+            encode_bytes_field(1, &method, &mut cdg);
+            encode_bytes_field(10, &cdg, &mut cfg);
+        }
         _ => {
             encode_bytes_field(13, &[], &mut cfg);
         }
@@ -866,8 +912,8 @@ pub fn encode_goal_attributes(tpl: &DailyGoalTemplate, out: &mut Vec<u8>) {
     encode_bytes_field(3, &encode_loc_message_id(tpl.effective_help_text_message_id()), out);
     // 4: assigner (.eve_public.corporation.Identifier { 1: uint32 sequential })
     encode_bytes_field(4, &encode_loc_message_id(tpl.effective_assigner_corporation_id()), out);
-    // 5: category (.eve_public.dailygoal.Category: CATEGORY_DAILY = 1)
-    encode_varint_field(5, 1, out);
+    // 5: category (.eve_public.dailygoal.Category: CATEGORY_DAILY = 1, CATEGORY_DAILY_BONUS = 2)
+    encode_varint_field(5, tpl.effective_goal_category() as u64, out);
     // 6: contribution_configuration (.eve_public.dailygoal.ContributionConfiguration)
     encode_contribution_configuration(tpl.category, out);
     // 7: career (.eve_public.career.Path: 1..=4)

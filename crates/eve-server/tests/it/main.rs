@@ -125,6 +125,7 @@ mod inventory_ships_fitting_complete;
 mod inventory_ships_fitting_complete_part2;
 mod inventory_ships_fitting_complete_part3;
 mod inventory_ships_ledger_rows;
+mod live_playtest_fixes;
 mod market_orders_complete;
 mod mining_advanced;
 mod mining_belts_drones_sites;

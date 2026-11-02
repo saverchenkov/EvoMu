@@ -174,7 +174,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     // ServerContext seeds 5 SDE-backed AIR Daily Goals from contributionmethods.fsdbinary out of the box
     let sde_tpls = ctx.quasar_gateway.progression.daily_goals.get_templates();
-    assert_eq!(sde_tpls.len(), 5, "ServerContext must seed 5 SDE daily goals");
+    assert_eq!(sde_tpls.len(), 6, "ServerContext must seed 5 SDE daily goals + 1 daily bonus goal");
     assert!(sde_tpls.iter().all(|t| t.name_message_id > 0 && t.description_message_id > 0));
     configure_test_daily_goals(&ctx);
 
@@ -200,7 +200,7 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let wm = WireMessage::decode(&payload.value).expect("decode WireMessage");
     let goal_entries: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_entries.len(), 10, "5 SDE + 5 configured daily goals should be returned");
+    assert_eq!(goal_entries.len(), 11, "6 SDE + 5 configured daily goals should be returned");
 
     // Target configured goal #1 ([0x44, 0x47, 0x01, ..., 1]) and verify its Identifier is present
     let target_uuid = [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];

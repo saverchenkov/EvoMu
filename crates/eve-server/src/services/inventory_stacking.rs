@@ -1046,12 +1046,57 @@ pub(super) async fn handle_get_container_contents(
         .await
 }
 
+fn extract_flag_list(args: &[PyRep], kwargs: &HashMap<String, PyRep>) -> Vec<i64> {
+    let raw = args.first().or_else(|| kwargs.get("flags"));
+    match raw {
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            items.iter().filter_map(|v| v.as_i64()).collect()
+        }
+        Some(PyRep::Integer(f)) => vec![*f],
+        _ => Vec::new(),
+    }
+}
+
+pub(super) fn handle_list_by_flags(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let flags = extract_flag_list(args, kwargs);
+    handle_list_impl(ctx, session, bound_entry, args, kwargs, Some(&flags))
+}
+
 pub(super) fn handle_list(
     ctx: &ServerContext,
     session: &SessionState,
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let list_flag_filter = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
+        .filter(|&f| f > 0);
+    handle_list_impl(
+        ctx,
+        session,
+        bound_entry,
+        args,
+        kwargs,
+        list_flag_filter.as_ref().map(std::slice::from_ref),
+    )
+}
+
+fn handle_list_impl(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+    flags_filter: Option<&[i64]>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let Some(bound_loc_id) = bound_entry
@@ -1074,17 +1119,20 @@ pub(super) fn handle_list(
             message: format!("Character {char_id} is not docked at bound inventory location {bound_loc_id}"),
         });
     }
-    let list_flag_filter = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-        .filter(|&f| f > 0);
-    if let Some(flag_val) = list_flag_filter {
-        if (116..=122).contains(&flag_val) {
-            let corp_id = session.corporation_id.or_else(|| {
-                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
-            }).unwrap_or(0);
-            let (is_ceo, roles) = get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(bound_loc_id));
+    let mut corp_flags: Vec<i64> = Vec::new();
+    if let Some(flags) = flags_filter {
+        for &f in flags {
+            if (116..=122).contains(&f) && !corp_flags.contains(&f) {
+                corp_flags.push(f);
+            }
+        }
+    }
+    if !corp_flags.is_empty() {
+        let corp_id = session.corporation_id.or_else(|| {
+            ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+        }).unwrap_or(0);
+        let (is_ceo, roles) = get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(bound_loc_id));
+        for flag_val in corp_flags {
             let div_idx = (flag_val - 116) as u32;
             let req_query_role = 1u64 << (20 + div_idx);
             if !is_ceo && !eve_db::corp_roles::has_role(roles, req_query_role) {
@@ -1185,34 +1233,60 @@ pub(super) fn handle_list(
         }
     });
     let is_deployable_or_shipping_unit = unit_check?;
-    let rows = if is_deployable_or_shipping_unit {
-        ctx.db.with_snapshot(|snap| {
-            snap.items
-                .values()
-                .filter(|i| i.location_id == bound_loc_id && list_flag_filter.map_or(true, |f| (i.flag as i64) == f))
-                .map(|i| item_to_packed_cells(ctx, i))
-                .collect()
-        })
-    } else if let Some(flag_val) = list_flag_filter {
-        if (116..=122).contains(&flag_val) {
-            let corp_id = session.corporation_id.or_else(|| {
-                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
-            }).unwrap_or(0);
+    let rows = if let Some(flags) = flags_filter {
+        if flags.is_empty() {
+            Vec::new()
+        } else if is_deployable_or_shipping_unit {
             ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
-                    .filter(|i| i.location_id == bound_loc_id && i.owner_id == corp_id && (i.flag as i64) == flag_val)
+                    .filter(|i| i.location_id == bound_loc_id && flags.contains(&(i.flag as i64)))
                     .map(|i| item_to_packed_cells(ctx, i))
                     .collect()
             })
         } else {
-            ctx.db
-                .get_items_for_character(char_id)
-                .into_iter()
-                .filter(|i| i.location_id == bound_loc_id && (i.flag as i64) == flag_val)
-                .map(|i| item_to_packed_cells(ctx, &i))
-                .collect()
+            let mut out_rows = Vec::new();
+            if flags.iter().any(|f| (116..=122).contains(f)) {
+                let corp_id = session.corporation_id.or_else(|| {
+                    ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+                }).unwrap_or(0);
+                ctx.db.with_snapshot(|snap| {
+                    out_rows.extend(
+                        snap.items
+                            .values()
+                            .filter(|i| {
+                                i.location_id == bound_loc_id
+                                    && i.owner_id == corp_id
+                                    && (116..=122).contains(&(i.flag as i64))
+                                    && flags.contains(&(i.flag as i64))
+                            })
+                            .map(|i| item_to_packed_cells(ctx, i)),
+                    );
+                });
+            }
+            if flags.iter().any(|f| !(116..=122).contains(f)) {
+                out_rows.extend(
+                    ctx.db
+                        .get_items_for_character(char_id)
+                        .into_iter()
+                        .filter(|i| {
+                            i.location_id == bound_loc_id
+                                && !(116..=122).contains(&(i.flag as i64))
+                                && flags.contains(&(i.flag as i64))
+                        })
+                        .map(|i| item_to_packed_cells(ctx, &i)),
+                );
+            }
+            out_rows
         }
+    } else if is_deployable_or_shipping_unit {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|i| i.location_id == bound_loc_id)
+                .map(|i| item_to_packed_cells(ctx, i))
+                .collect()
+        })
     } else {
         ctx.db
             .get_items_for_character(char_id)

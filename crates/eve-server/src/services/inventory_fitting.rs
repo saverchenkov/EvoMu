@@ -125,6 +125,11 @@ pub async fn handle(
             Some(super::inventory_stacking::handle_list(ctx, session, bound_entry, args, kwargs))
         }
 
+        ("invbroker", "ListByFlags") => {
+            crate::services::station_structure::structure_upwell_ops::sync_auto_delivered_asset_safety_wraps(ctx);
+            Some(super::inventory_stacking::handle_list_by_flags(ctx, session, bound_entry, args, kwargs))
+        }
+
         ("invbroker", "GetContainerContents") => {
             Some(super::inventory_stacking::handle_get_container_contents(ctx, session, bound_entry, args, kwargs).await)
         }

@@ -142,7 +142,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&all_rsp.payload.unwrap().value).expect("decode GetAllCurrentResponse");
     let goal_fields: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_fields.len(), 5, "ServerContext must seed 5 SDE daily goals without manual setup");
+    assert_eq!(goal_fields.len(), 6, "ServerContext must seed 5 SDE daily goals + 1 daily bonus goal without manual setup");
 
     let mut uuids = Vec::new();
     for f in &goal_fields {
@@ -368,7 +368,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
     // 4. Advance virtual clock by 86,400s (next 11:00 UTC downtime bucket) -> daily goals reset cleanly
     ctx.advance_virtual_clock(86_400);
     let next_day_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(char_id);
-    assert_eq!(next_day_goals.len(), 5);
+    assert_eq!(next_day_goals.len(), 6);
     assert!(next_day_goals
         .iter()
         .all(|g| g.current_progress == 0 && !g.completed && !g.claimed));
@@ -397,7 +397,7 @@ async fn test_daily_goals_reset_at_1100_utc_downtime_not_midnight() {
         .progression
         .daily_goals
         .get_or_init_goals_at(char_id, ctx.now_unix());
-    assert_eq!(goals_init.len(), 5);
+    assert_eq!(goals_init.len(), 6);
     let scan_uuid = goals_init.iter().find(|g| g.template.category == 3).unwrap().uuid;
 
     // Progress & claim ScanSignature at 23:59 UTC
