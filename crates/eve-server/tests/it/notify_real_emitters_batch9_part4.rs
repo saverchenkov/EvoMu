@@ -455,9 +455,22 @@ async fn notify_batch9_godma_and_location_cache_invalidation() {
         .await
         .expect("step_manual");
     let locker_notifs = drain_all(&ctx, &mut sess_a, PILOT_A);
-    assert!(
-        locker_notifs.iter().all(|(e, _)| e != "OnMultiEvent"),
-        "locker must not receive duplicate standalone OnMultiEvent on lock completion"
+    assert_eq!(
+        locker_notifs.iter().filter(|(e, _)| e == "OnMultiEvent").count(),
+        1,
+        "expected exactly one OnMultiEvent on locker after lock completion"
+    );
+    assert_eq!(
+        find_notif(&locker_notifs, "OnMultiEvent"),
+        &[PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnTarget".into()),
+                PyRep::String("add".into()),
+                PyRep::Integer(ship_b),
+                PyRep::String(String::new()),
+            ]),
+            PyRep::Integer(0),
+        ])])]
     );
     let target_notifs = drain_all(&ctx, &mut sess_b, PILOT_B);
     assert_eq!(

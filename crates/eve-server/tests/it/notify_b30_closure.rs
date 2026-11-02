@@ -332,11 +332,25 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
         .expect("RemoveTarget without lock");
     assert!(ctx.drain_notifications_for_char(PILOT_B).iter().all(|n| n.event != "OnMultiEvent"));
 
-    // AddTarget + step_manual -> PILOT_B receives otheradd; locker does NOT get duplicate standalone OnMultiEvent("add")
+    // AddTarget + step_manual -> PILOT_A receives add, PILOT_B receives otheradd
     assert!(rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(0)]).await.is_err());
     rpc(&ctx, &mut sess_a, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_b)]).await.expect("AddTarget");
     sys.step_manual(10.0).await.expect("step_manual");
 
+    let notifs_a = ctx.drain_notifications_for_char(PILOT_A);
+    let locker_add = notifs_a.iter().find(|n| n.event == "OnMultiEvent").expect("PILOT_A OnMultiEvent add");
+    assert_eq!(
+        locker_add.args,
+        vec![PyRep::List(vec![PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::String("OnTarget".into()),
+                PyRep::String("add".into()),
+                PyRep::Integer(ship_b),
+                PyRep::String(String::new()),
+            ]),
+            PyRep::Integer(0),
+        ])])]
+    );
     let notifs_b = ctx.drain_notifications_for_char(PILOT_B);
     let multi_add = notifs_b.iter().find(|n| n.event == "OnMultiEvent").expect("PILOT_B OnMultiEvent otheradd");
     assert_eq!(
@@ -351,7 +365,6 @@ async fn notify_b30_target_multi_event_and_fw_warzone() {
             PyRep::Integer(0),
         ])])]
     );
-    assert!(ctx.drain_notifications_for_char(PILOT_A).iter().all(|n| n.event != "OnMultiEvent"));
 
     // RemoveTarget while locked -> PILOT_B receives otherlost; locker receives lost
     rpc(&ctx, &mut sess_a, "dogmaIM", "RemoveTarget", &[PyRep::Integer(ship_b)]).await.expect("RemoveTarget");

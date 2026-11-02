@@ -369,8 +369,11 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         snap.items.insert(cargo_a, make_item(cargo_a, 34, P1, ship_id, InventoryFlag::Cargo, 25, false));
         snap.items.insert(cargo_b, make_item(cargo_b, 34, P1, ship_id, InventoryFlag::Cargo, 25, false));
         snap.items.insert(mod_id, make_item(mod_id, 3528, P1, ship_id, InventoryFlag::LoSlot0, 1, true));
-        snap.items.insert(gun_id, make_item(gun_id, 3074, P1, ship_id, InventoryFlag::HiSlot0, 1, true));
-        snap.items.insert(950_000_019, make_item(950_000_019, 12_625, P1, ship_id, InventoryFlag::HiSlot0, 500, false));
+        for (i, flg) in [InventoryFlag::HiSlot0, InventoryFlag::HiSlot1, InventoryFlag::HiSlot2].into_iter().enumerate() {
+            let gid = gun_id + (i as i64) * 2;
+            snap.items.insert(gid, make_item(gid, 3074, P1, ship_id, flg, 1, true));
+            snap.items.insert(gid + 1, make_item(gid + 1, 12_625, P1, ship_id, flg, 500, false));
+        }
         snap.items.insert(mwd_id, make_item(mwd_id, 12_198, P1, ship_id, InventoryFlag::Cargo, 1, true));
     });
 
@@ -413,26 +416,46 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(sec_agent.agent_id)]).await.unwrap();
     let m_id = ctx.db.with_snapshot(|s| s.active_missions.keys().find_map(|&(c, mid)| (c == P1).then_some(mid)).unwrap());
     rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(sec_agent.agent_id), PyRep::Integer(i64::from(m_id))]).await.unwrap();
-    let _ = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.unwrap();
-    let ag_space = ctx.systems.get_or_spawn(ag_sys);
-    let ag_beyonce = ctx.bind_object(&sess, "beyonce", ag_sys as i64).unwrap();
+    let m_sys = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].solar_system_id);
+    let ag_space = ctx.systems.get_or_spawn(m_sys);
+    if m_sys == ag_sys {
+        let _ = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.unwrap();
+    } else {
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = None; ch.solar_system_id = m_sys; }
+            if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = i64::from(m_sys); }
+        });
+        sess.station_id = None;
+        sess.solar_system_id = Some(m_sys);
+        ag_space.spawn_ball_with_meta(ship_ball.clone(), ctx.build_ship_combat_state(P1, ship_id, 587), ctx.build_ship_slim_meta(P1, 587)).await.unwrap();
+    }
+    let ag_beyonce = ctx.bind_object(&sess, "beyonce", i64::from(m_sys)).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
+    for _ in 0..120 {
+        ag_space.step_manual(1.0).await.unwrap();
+        if matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop) {
+            break;
+        }
+    }
     let (initial_npcs, first_npc, bmid) = ctx.db.with_snapshot(|s| (
         s.active_missions[&(P1, m_id)].npcs_remaining,
         s.active_missions[&(P1, m_id)].spawned_npc_ball_ids[0],
         s.active_missions[&(P1, m_id)].bookmark_id.unwrap(),
     ));
     let npc_pos = ag_space.get_ball_snapshot(first_npc).await.unwrap().unwrap().1.position;
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(bm) = s.bookmarks.get_mut(&bmid) {
-            bm.x = npc_pos.x; bm.y = npc_pos.y; bm.z = npc_pos.z;
-        }
-    });
-    ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(bmid), PyRep::Real(0.0)], &HashMap::new(), None).await.unwrap();
-    for _ in 0..120 {
-        ag_space.step_manual(1.0).await.unwrap();
-        if matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop) {
-            break;
+    let ship_pos = ag_space.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position;
+    if ship_pos.distance(npc_pos) >= 150_000.0 {
+        ctx.db.with_mut_snapshot(|s| {
+            if let Some(bm) = s.bookmarks.get_mut(&bmid) {
+                bm.x = npc_pos.x; bm.y = npc_pos.y; bm.z = npc_pos.z;
+            }
+        });
+        ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(bmid), PyRep::Real(0.0)], &HashMap::new(), None).await.unwrap();
+        for _ in 0..120 {
+            ag_space.step_manual(1.0).await.unwrap();
+            if matches!(ag_space.get_ball_snapshot(ship_id).await.unwrap(), Some((_, b)) if b.mode == MovementMode::Stop) {
+                break;
+            }
         }
     }
     rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(first_npc)]).await.unwrap();
@@ -440,8 +463,10 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
         if ag_space.get_target_locks(ship_id).await.unwrap().iter().any(|l| l.target_id == first_npc && l.locked) { break; }
         ag_space.step_manual(1.0).await.unwrap();
     }
-    rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(first_npc), PyRep::Integer(1)]).await.expect("Activate gun_id on first_npc");
-    for _ in 0..45 {
+    for gid in [gun_id, gun_id + 2, gun_id + 4] {
+        rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gid), PyRep::String("projectileFired".into()), PyRep::Integer(first_npc), PyRep::Integer(1)]).await.expect("Activate gun on first_npc");
+    }
+    for _ in 0..120 {
         if ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none() { break; }
         ag_space.step_manual(1.0).await.unwrap();
     }

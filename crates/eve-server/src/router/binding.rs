@@ -1057,21 +1057,26 @@ impl ServerContext {
                 }
                 let _ = notify_tx_lock.send((rcpt_char, notif));
             };
-            let target_owner_info: Option<(i64, Option<u64>, i64)> = db_lock.with_snapshot(|s| {
-                let target_char = s.items.get(&target_id).map(|i| i.owner_id).filter(|oid| s.characters.contains_key(oid))?;
-                if target_char == char_id {
-                    return None;
-                }
+            let hook_info = db_lock.with_snapshot(|s| {
                 let locker = s.characters.get(&char_id)?;
-                let target = s.characters.get(&target_char)?;
-                if locker.station_id.is_some() || target.station_id.is_some() || locker.solar_system_id != target.solar_system_id {
-                    return None;
-                }
-                let locker_ship = if locker.active_ship_id > 0 { locker.active_ship_id } else { char_id };
-                Some((target_char, Some(target.user_id), locker_ship))
+                if locker.station_id.is_some() { return None; }
+                let target_info = s.items.get(&target_id).map(|i| i.owner_id)
+                    .filter(|&oid| oid != char_id && s.characters.contains_key(&oid))
+                    .and_then(|target_char| {
+                        let target = s.characters.get(&target_char)?;
+                        if target.station_id.is_some() || locker.solar_system_id != target.solar_system_id {
+                            return None;
+                        }
+                        let locker_ship = if locker.active_ship_id > 0 { locker.active_ship_id } else { char_id };
+                        Some((target_char, Some(target.user_id), locker_ship))
+                    });
+                Some((Some(locker.user_id), target_info))
             });
-            if let Some((target_char, target_user, locker_ship)) = target_owner_info {
-                enqueue_target_ev(target_char, target_user, "otheradd", locker_ship);
+            if let Some((locker_user, target_owner_info)) = hook_info {
+                enqueue_target_ev(char_id, locker_user, "add", target_id);
+                if let Some((target_char, target_user, locker_ship)) = target_owner_info {
+                    enqueue_target_ev(target_char, target_user, "otheradd", locker_ship);
+                }
             }
         }));
     }

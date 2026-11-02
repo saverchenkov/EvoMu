@@ -553,7 +553,7 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let _ = ctx.dispatch_rpc(
         &mut sess, "invbroker", None, "SetPassword",
-        &[eve_proto::PyRep::Integer(990_001), eve_proto::PyRep::String("vault123".into())],
+        &[eve_proto::PyRep::Integer(990_001), eve_proto::PyRep::Integer(2), eve_proto::PyRep::String("vault123".into())],
         &std::collections::HashMap::new(), None,
     ).await.expect("SetPassword RPC on 990_001");
     let _ = ctx.dispatch_rpc(

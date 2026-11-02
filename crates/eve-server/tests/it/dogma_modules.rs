@@ -1118,14 +1118,26 @@ async fn test_phase_4_dg5_targeting_lock_and_break() {
     let locks_after = sys.get_target_locks(ship_id).await.expect("get_target_locks");
     assert!(locks_after[0].locked);
 
-    // Locker receives `DoDestinyUpdate` `OnTarget` `"add"` without duplicate standalone `OnMultiEvent`.
+    // Locker receives `OnMultiEvent` `OnTarget` `"add"` on lock completion.
     let mut completed_notes: Vec<(String, Vec<PyRep>)> = ctx
         .drain_notifications_for_char(90_000_001)
         .into_iter()
         .map(|n| (n.event, n.args))
         .collect();
     completed_notes.extend(sess.drain_notifications());
-    assert!(completed_notes.iter().all(|(n, _)| n != "OnMultiEvent" && n != "OnTargets"));
+    let expected_add = vec![PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Tuple(vec![
+            PyRep::String("OnTarget".into()),
+            PyRep::String("add".into()),
+            PyRep::Integer(near_target_id),
+            PyRep::String(String::new()),
+        ]),
+        PyRep::Integer(0),
+    ])])];
+    assert!(
+        completed_notes.iter().any(|(n, args)| n == "OnMultiEvent" && args == &expected_add),
+        "Expected OnMultiEvent OnTarget add on lock completion, got: {completed_notes:?}"
+    );
 
     // 4. RemoveTarget & ClearTargets
     let _ = sess.drain_notifications();
