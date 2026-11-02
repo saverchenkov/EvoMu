@@ -70,6 +70,17 @@ fn dict_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     }
 }
 
+fn kv_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
+    match rep {
+        PyRep::KeyVal(entries) => entries
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v),
+        PyRep::Object { args, .. } => kv_get(args, key),
+        _ => dict_get(rep, key),
+    }
+}
+
 #[tokio::test]
 async fn test_load_service_start_stop_and_stats() {
     // parity: rpc:loadService.GetTotalStats
@@ -243,7 +254,7 @@ async fn test_localization_server_and_user_svc_session_created() {
     )
     .await
     .expect("ReloadFSDPickle");
-    assert_ne!(reload_res, PyRep::None);
+    assert_eq!(reload_res, PyRep::Bool(true));
 
     let sess_created = rpc(
         &ctx,
@@ -291,7 +302,7 @@ async fn test_ui_neocom_badges_map_stats_and_agency() {
     )
     .await
     .expect("GetActivityBadgeStatuses");
-    assert_ne!(badges, PyRep::Integer(-1));
+    assert!(matches!(badges, PyRep::PySet(_)));
 
     let history = rpc(
         &ctx,
@@ -302,12 +313,12 @@ async fn test_ui_neocom_badges_map_stats_and_agency() {
     )
     .await
     .expect("map.GetHistory");
-    assert_ne!(history, PyRep::None);
+    assert!(matches!(history, PyRep::ObjectEx { .. }));
 
     let visits = rpc(&ctx, &mut sess, "map", "GetSolarSystemVisits", &[])
         .await
         .expect("map.GetSolarSystemVisits");
-    assert_ne!(visits, PyRep::None);
+    assert!(matches!(visits, PyRep::List(_)));
 
     let agency_data = rpc(
         &ctx,
@@ -318,5 +329,17 @@ async fn test_ui_neocom_badges_map_stats_and_agency() {
     )
     .await
     .expect("custom_agency_provider.get_content_data");
-    assert_ne!(agency_data, PyRep::None);
+    match &agency_data {
+        PyRep::List(items) => {
+            if let Some(first) = items.first() {
+                assert_eq!(
+                    kv_get(first, "solarSystemID"),
+                    Some(&PyRep::Integer(JITA_SYSTEM as i64))
+                );
+                assert!(kv_get(first, "contentType").is_some());
+                assert!(kv_get(first, "instanceID").is_some());
+            }
+        }
+        other => panic!("expected PyRep::List from get_content_data, got {other:?}"),
+    }
 }

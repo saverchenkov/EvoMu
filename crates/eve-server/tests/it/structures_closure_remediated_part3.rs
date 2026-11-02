@@ -583,7 +583,15 @@ async fn test_remediated_mobile_cyno_inhibitor_lifecycle_and_activation() {
     );
 
     // Covert Cynosural Field Generator I (28646) is unaffected by Mobile Cynosural Inhibitor!
-    rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(cov_cyno), PyRep::String("cynosuralGeneration".into())])
+    let covops_id = falcon_id + 10;
+    spawn_pilot_ship(&ctx, &mut sess, OWNER, corp_id, RANCER, covops_id, 11_188, inhib_pos + DVec3::new(50_000.0, 0.0, 0.0)).await;
+    let cov_cyno_2 = grant(&ctx, OWNER, covops_id, 28646, InventoryFlag::HiSlot0, 1);
+    let _ozone_cov = grant(&ctx, OWNER, covops_id, 16273, InventoryFlag::Cargo, 500);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(cov_cyno_2, true);
+    });
+    ctx.invalidate_ship_fitting(covops_id);
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(cov_cyno_2), PyRep::String("cynosuralGeneration".into())])
         .await
         .expect("Covert cyno succeeds inside 100 km of Mobile Cyno Inhibitor");
 
@@ -603,7 +611,8 @@ async fn test_remediated_mobile_cyno_inhibitor_lifecycle_and_activation() {
         "CynoInhibited"
     );
 
-    // Move Falcon to 150 km (> 100 km) -> Standard cyno succeeds!
+    // Move Falcon to 150 km (> 100 km) after prior cyno expires -> Standard cyno succeeds!
+    ctx.advance_virtual_clock(600);
     spawn_pilot_ship(&ctx, &mut sess, OWNER, corp_id, RANCER, falcon_id, 11957, inhib_pos + DVec3::new(150_000.0, 0.0, 0.0)).await;
     rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(std_cyno), PyRep::String("cynosuralGeneration".into())])
         .await

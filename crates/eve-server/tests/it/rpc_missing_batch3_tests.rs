@@ -582,7 +582,7 @@ async fn test_rpc_missing_batch3_part2() {
         .await;
     assert!(debug_auth_err.is_err(), "Non-admin/programmer must be rejected for debug.Exec");
 
-    let debug_res = ctx
+    let debug_err = ctx
         .dispatch_rpc(
             &mut sess1,
             "debug",
@@ -599,22 +599,6 @@ async fn test_rpc_missing_batch3_part2() {
             None,
         )
         .await
-        .expect("debug.Exec");
-    match debug_res {
-        PyRep::List(items) => {
-            assert!(!items.is_empty());
-            match &items[0] {
-                PyRep::Tuple(parts) => {
-                    assert_eq!(parts[1], PyRep::String("ok".into()));
-                    assert!(parts[2].as_str().unwrap().contains("self.stats()"));
-                }
-                other => panic!("Unexpected debug.Exec item shape: {other:?}"),
-            }
-        }
-        other => panic!("Unexpected debug.Exec shape: {other:?}"),
-    }
-    let debug_log = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("debug_exec_log").cloned().unwrap()
-    });
-    assert!(debug_log.contains("self.stats()"));
+        .expect_err("debug.Exec must fail closed with UnimplementedRPC");
+    assert_eq!(debug_err.code, "UnimplementedRPC");
 }

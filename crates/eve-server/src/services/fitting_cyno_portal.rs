@@ -508,12 +508,6 @@ async fn light_cyno(
     if sys_id == 30_100_000 {
         return Err(err("CynoDisallowedInZarzakh", "Cynosural fields cannot be lit in Zarzakh"));
     }
-    if is_ship_cyno_active(ctx, ship_id) {
-        return Err(err(
-            "CannotLightCynoInSystem",
-            "A cynosural field is already active on this ship",
-        ));
-    }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Active ship type unknown"))?;
     if !hull_allowed(ctx, mod_type, ship_type) {
@@ -560,6 +554,12 @@ async fn light_cyno(
             "A Mobile Cynosural Inhibitor is active within range (100 km), preventing cynosural field activation",
         ));
     }
+    if is_ship_cyno_active(ctx, ship_id) {
+        return Err(err(
+            "CannotLightCynoInSystem",
+            "A cynosural field is already active on this ship",
+        ));
+    }
     let beacon_type_id = beacon_type_for_module(ctx, mod_type)
         .ok_or_else(|| err("NoActiveBeacon", "No SDE beacon type matches this cynosural generator"))?;
     let (ship_vals, mod_vals) = evaluated_attrs(
@@ -600,8 +600,11 @@ async fn light_cyno(
     }
     let fuel_qty = {
         let raw_base = type_attr(ctx, mod_type, ATTR_CONSUMPTION_QUANTITY);
-        let role_mult = if ship_type.effect_ids.contains(&3526) {
-            (1.0 + type_attr(ctx, ship_type, 1296) / 100.0).max(0.0)
+        let bonus_1296 = type_attr(ctx, ship_type, 1296);
+        let role_mult = if ship_type.group_id == 830 {
+            0.0
+        } else if ship_type.effect_ids.contains(&3526) || bonus_1296 < 0.0 {
+            (1.0 + bonus_1296 / 100.0).max(0.0)
         } else {
             1.0
         };
@@ -728,6 +731,19 @@ pub(crate) fn live_beacon(
     let now = ctx.now_unix_secs();
     let ctx_k = ctx_key(ctx);
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+    let mut expired_for_char = None;
+    let mut expired_balls = Vec::new();
+    st.beacons.retain(|&(k, _), b| {
+        if k == ctx_k && b.expires_at_unix <= now {
+            if b.char_id == cyno_char_id && expired_for_char.is_none() {
+                expired_for_char = Some(b.beacon_id);
+            }
+            expired_balls.push((b.solar_system_id, b.beacon_id));
+            false
+        } else {
+            true
+        }
+    });
     let matched_key = st
         .beacons
         .iter()
@@ -745,16 +761,25 @@ pub(crate) fn live_beacon(
                 .map(|(&k, _)| k)
         });
     let Some(key) = matched_key else {
+        drop(st);
+        for (exp_sys, exp_beacon) in expired_balls {
+            ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
+        }
+        if let Some(exp_id) = expired_for_char {
+            return Err(err("NoActiveBeacon", format!("Cynosural field {exp_id} has collapsed")));
+        }
         return Err(err("NoActiveBeacon", format!("Character {cyno_char_id} has no active cynosural field")));
     };
     let Some(b) = st.beacons.get(&key).cloned() else {
+        drop(st);
+        for (exp_sys, exp_beacon) in expired_balls {
+            ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
+        }
         return Err(err("NoActiveBeacon", format!("Character {cyno_char_id} has no active cynosural field")));
     };
-    if b.expires_at_unix <= now {
-        st.beacons.remove(&key);
-        drop(st);
-        ctx.systems.get_or_spawn(b.solar_system_id).try_remove_ball(b.beacon_id);
-        return Err(err("NoActiveBeacon", format!("Cynosural field {} has collapsed", b.beacon_id)));
+    drop(st);
+    for (exp_sys, exp_beacon) in expired_balls {
+        ctx.systems.get_or_spawn(exp_sys).try_remove_ball(exp_beacon);
     }
     if (beacon_id != 0 && b.beacon_id != beacon_id) || (sys_id != 0 && b.solar_system_id != sys_id) {
         return Err(err("NoActiveBeacon", format!("Beacon {beacon_id} in system {sys_id} is not active")));

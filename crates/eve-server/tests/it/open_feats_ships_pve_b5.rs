@@ -440,95 +440,70 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
     // Verify Titan Jump Portal generator bridge to standard cyno on a separate ship
     let std_beacon_ship = 210_008;
     let std_cyno_mod = 210_007;
-    put_in_space(
-        &ctx,
-        &mut s1,
-        PILOT_1,
-        std_beacon_ship,
-        FALCON,
-        lowsec_sys,
-        DVec3::new(5_000.0, 0.0, 0.0),
-    )
-    .await;
-    seed_item(
-        &ctx,
-        std_cyno_mod,
-        CYNO,
-        PILOT_1,
-        std_beacon_ship,
-        InventoryFlag::HiSlot0,
-        1,
-    );
-    seed_item(
-        &ctx,
-        210_010,
-        16_273,
-        PILOT_1,
-        std_beacon_ship,
-        InventoryFlag::Cargo,
-        500,
-    );
-    ctx.db.with_mut_snapshot(|s| {
-        s.module_online_states.insert(std_cyno_mod, true);
-    });
+    put_in_space(&ctx, &mut s1, PILOT_1, std_beacon_ship, FALCON, lowsec_sys, DVec3::new(5_000.0, 0.0, 0.0)).await;
+    seed_item(&ctx, std_cyno_mod, CYNO, PILOT_1, std_beacon_ship, InventoryFlag::HiSlot0, 1);
+    seed_item(&ctx, 210_010, 16_273, PILOT_1, std_beacon_ship, InventoryFlag::Cargo, 500);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(std_cyno_mod, true); });
     ctx.invalidate_ship_fitting(std_beacon_ship);
-    let std_cyno_res = rpc(
-        &ctx,
-        &mut s1,
-        "dogmaIM",
-        "Activate",
-        &[
-            PyRep::Integer(std_cyno_mod),
-            PyRep::String("cynosuralGeneration".into()),
-        ],
-    )
-    .await
-    .expect("Activate standard cyno");
+    let std_cyno_res = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(std_cyno_mod), PyRep::String("cynosuralGeneration".into())])
+        .await
+        .expect("Activate standard cyno");
     let beacon_id = kv_get(&std_cyno_res, "beaconID").cloned().unwrap_or(PyRep::Integer(1));
     let beacon_type_id = kv_get(&std_cyno_res, "beaconTypeID").cloned().unwrap_or(PyRep::Integer(21096));
 
     grant_skills(&ctx, PILOT_2, JUMP_PORTAL);
-    seed_item(
-        &ctx,
-        portal_mod,
-        JUMP_PORTAL,
-        PILOT_2,
-        titan_ship,
-        InventoryFlag::HiSlot0,
-        1,
-    );
-    seed_item(
-        &ctx,
-        210_006,
-        16_275,
-        PILOT_2,
-        titan_ship,
-        InventoryFlag::Cargo,
-        5_000,
-    );
+    seed_item(&ctx, portal_mod, JUMP_PORTAL, PILOT_2, titan_ship, InventoryFlag::HiSlot0, 1);
+    seed_item(&ctx, 210_006, 16_275, PILOT_2, titan_ship, InventoryFlag::Cargo, 5_000);
     ctx.db.with_mut_snapshot(|s| {
         s.module_online_states.insert(portal_mod, true);
-        if let Some(ch) = s.characters.get_mut(&PILOT_2) {
-            ch.jump_cooldown_until_unix = 0;
-        }
+        if let Some(ch) = s.characters.get_mut(&PILOT_2) { ch.jump_cooldown_until_unix = 0; }
     });
     ctx.invalidate_ship_fitting(titan_ship);
 
-    let portal_res = rpc(
-        &ctx,
-        &mut s2,
-        "beyonce",
-        "CmdBridgeToFleetModuleBeacon",
-        &[
-            PyRep::Integer(PILOT_1),
-            PyRep::Integer(lowsec_sys as i64),
-            beacon_id,
-            beacon_type_id,
-        ],
-    )
-    .await
-    .expect("Activate Titan Jump Portal");
+    let portal_res = rpc(&ctx, &mut s2, "beyonce", "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(PILOT_1), PyRep::Integer(lowsec_sys as i64), beacon_id, beacon_type_id])
+        .await
+        .expect("Activate Titan Jump Portal");
     assert_ne!(portal_res, PyRep::None);
+
+    // Verify bridge_to_fleet_beacon is rejected when the ship already has an active cyno
+    let (active_cyno_portal_mod, active_cyno_stront) = (210_011, 210_012);
+    seed_item(&ctx, active_cyno_portal_mod, JUMP_PORTAL, PILOT_1, std_beacon_ship, InventoryFlag::HiSlot1, 1);
+    seed_item(&ctx, active_cyno_stront, 16_275, PILOT_1, std_beacon_ship, InventoryFlag::Cargo, 1_000);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(active_cyno_portal_mod, true); });
+    ctx.invalidate_ship_fitting(std_beacon_ship);
+    let _ = ctx.systems.get_or_spawn(lowsec_sys).remove_module_cycle(std_beacon_ship, std_cyno_mod).await;
+    let portal_on_cyno_err = rpc(&ctx, &mut s1, "beyonce", "CmdBridgeToFleetModuleBeacon", &[PyRep::Integer(PILOT_1), PyRep::Integer(lowsec_sys as i64)])
+        .await
+        .expect_err("bridge_to_fleet_beacon must fail when ship has an active cyno");
+    assert_eq!(portal_on_cyno_err.code, "CynosuralFieldActive");
+    let stront_left = ctx.db.with_snapshot(|s| s.items.get(&active_cyno_stront).map(|it| it.quantity).unwrap_or(0));
+    assert_eq!(stront_left, 1_000, "rejected portal must not consume Strontium Clathrates");
+
+    // Advance past cyno expiry, light 0-ozone Covert Cyno on Anathema (-100% fuel bonus), then verify 2-arg jump (beacon_id == 0)
+    ctx.advance_time_seconds(700);
+    let (covops_ship, covops_cyno_mod) = (210_013, 210_014);
+    put_in_space(&ctx, &mut s1, PILOT_1, covops_ship, 11_188, lowsec_sys, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    seed_item(&ctx, covops_cyno_mod, COVERT_CYNO, PILOT_1, covops_ship, InventoryFlag::HiSlot0, 1);
+    ctx.db.with_mut_snapshot(|s| { s.module_online_states.insert(covops_cyno_mod, true); });
+    ctx.invalidate_ship_fitting(covops_ship);
+    let covops_cyno_res = rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(covops_cyno_mod), PyRep::String("cynosuralGeneration".into())])
+        .await
+        .expect("Anathema with 0 Liquid Ozone must light Covert Cyno");
+    assert!(kv_get(&covops_cyno_res, "beaconTypeID").is_some());
+
+    ctx.advance_time_seconds(700);
+    put_in_space(&ctx, &mut s1, PILOT_1, std_beacon_ship, FALCON, lowsec_sys, DVec3::new(15_000.0, 0.0, 0.0)).await;
+    rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(std_cyno_mod), PyRep::String("cynosuralGeneration".into())])
+        .await
+        .expect("Re-activate standard cyno after expiry");
+    seed_item(&ctx, 210_015, 16_274, PILOT_2, titan_ship, InventoryFlag::Cargo, 5_000);
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&PILOT_2) { ch.jump_cooldown_until_unix = 0; }
+    });
+    let jump_2arg_res = rpc(&ctx, &mut s2, "beyonce", "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(PILOT_1), PyRep::Integer(lowsec_sys as i64)])
+        .await
+        .expect("2-arg jump after reship must match live beacon ahead of expired beacons");
+    assert_ne!(jump_2arg_res, PyRep::None);
 }
 
 #[tokio::test]
