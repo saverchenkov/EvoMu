@@ -83,7 +83,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         .sde
         .solar_systems
         .values()
-        .find(|s| {
+        .filter(|s| {
             s.security_status <= -0.1
                 && s.solar_system_id < 31_000_000
                 && ctx
@@ -92,6 +92,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
                     .iter()
                     .any(|c| c.group_id == 9)
         })
+        .min_by_key(|s| s.solar_system_id)
         .map(|s| s.solar_system_id)
         .unwrap_or(30_004_759);
 
@@ -217,7 +218,13 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
     // 1a (`F-04` regression): 1 Hz `NpcSpawnManager::handle_npc_destroyed` in null-sec splits bounties into
     // `ess_main_bank` + `ess_reserve_bank` and records `pilot_c` in `ess_main_bank_contributors`!
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let first_belt_rat = *ctx.npc_spawns.read().unwrap()[&sys_id].entities.keys().next().unwrap();
+    let first_belt_rat = ctx.npc_spawns.read().unwrap()[&sys_id]
+        .entities
+        .values()
+        .filter(|e| e.bounty_isk > 0.0)
+        .min_by_key(|e| e.ball_id)
+        .map(|e| e.ball_id)
+        .unwrap();
     let belt_rat_bounty = ctx
         .npc_spawns
         .write()
