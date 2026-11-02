@@ -203,29 +203,67 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
         ctx.db.with_snapshot(|s| s.kill_rights.values().any(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id)),
         "evaluate_and_record_pvp_aggression on low-sec pod must grant kill right"
     );
-    ctx.db.with_mut_snapshot(|s| s.kill_rights.clear());
+    ctx.db.with_mut_snapshot(|s| {
+        s.kill_rights.clear();
+        s.crimewatch_aggressions.clear();
+    });
+    let sec_before_cmd = ctx.db.with_snapshot(|s| s.characters[&criminal_id].security_status);
     let mut sess_crim_low = SessionState::default();
     sess_crim_low.user_id = Some(2);
     sess_crim_low.character_id = Some(criminal_id);
     sess_crim_low.solar_system_id = Some(lowsec_sys);
     sess_crim_low.ship_id = Some(low_crim_ship);
-    let _ = rpc(
-        &ctx,
-        &mut sess_crim_low,
-        "beyonce",
+    for i in 0..2 {
+        if i > 0 {
+            for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
+        }
         // rpc-lint: allow legacy CmdAttackTarget
-        "CmdAttackTarget",
-        &[PyRep::Integer(low_vic_pod)],
-    )
-    .await
-    .expect("CmdAttackTarget lowsec pod");
-    let low_pod_kr_id = ctx.db.with_snapshot(|s| {
-        s.kill_rights
-            .values()
-            .find(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id)
-            .map(|kr| kr.kill_right_id)
-            .expect("low-sec pod aggression must grant a kill right")
+        let _ = rpc(&ctx, &mut sess_crim_low, "beyonce", "CmdAttackTarget", &[PyRep::Integer(low_vic_pod)])
+            .await
+            .expect("CmdAttackTarget lowsec pod");
+    }
+    let (sec_after_cmd, kr_count_cmd, low_pod_kr_id) = ctx.db.with_snapshot(|s| {
+        let krs: Vec<_> = s.kill_rights.values().filter(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id).collect();
+        (s.characters[&criminal_id].security_status, krs.len(), krs[0].kill_right_id)
     });
+    assert!(sec_after_cmd < sec_before_cmd, "CmdAttackTarget low-sec pod must deduct sec status");
+    assert_eq!(kr_count_cmd, 1, "two CmdAttackTarget cycles must create only 1 kill right");
+    // Verify second cycle did not re-deduct security status
+    let sec_before_cycle2 = sec_after_cmd;
+    for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
+    // rpc-lint: allow legacy CmdAttackTarget
+    let _ = rpc(&ctx, &mut sess_crim_low, "beyonce", "CmdAttackTarget", &[PyRep::Integer(low_vic_pod)]).await.expect("CmdAttackTarget cycle 3");
+    assert!((ctx.db.with_snapshot(|s| s.characters[&criminal_id].security_status) - sec_before_cycle2).abs() < 1e-9);
+
+    // 1c. Main weapon path (dogmaIM.Activate) ship-then-pod in low-sec grants pod penalty + kill right
+    let low_vic_ship = spawn_ship(&ctx, victim_id, lowsec_sys, 587, DVec3::new(500.0, 0.0, 0.0));
+    let mut cs_ship = ctx.build_type_combat_state(587);
+    cs_ship.shield_hp = 500.0;
+    let _ = lowsec_handle.spawn_ball_with_combat(Ball {
+        id: low_vic_ship, type_id: 587, position: DVec3::new(500.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }, cs_ship).await;
+    let gun_id = ctx.db.with_mut_snapshot(|s| {
+        s.kill_rights.clear();
+        s.crimewatch_aggressions.clear();
+        s.characters.get_mut(&victim_id).unwrap().active_ship_id = low_vic_ship;
+        s.items.values().find(|i| i.location_id == low_crim_ship && i.type_id == 487).unwrap().item_id
+    });
+    let _ = lowsec_handle.add_target_lock(low_crim_ship, eve_destiny::TargetLock {
+        target_id: low_vic_ship, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None,
+    }).await;
+    let _ = lowsec_handle.add_target_lock(low_crim_ship, eve_destiny::TargetLock {
+        target_id: low_vic_pod, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None,
+    }).await;
+    let sec_pre_ship = ctx.db.with_snapshot(|s| s.characters[&criminal_id].security_status);
+    let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(low_vic_ship)]).await.expect("Activate ship");
+    let (sec_post_ship, kr_after_ship) = ctx.db.with_snapshot(|s| (s.characters[&criminal_id].security_status, s.kill_rights.len()));
+    assert!(sec_post_ship < sec_pre_ship && kr_after_ship == 0, "low-sec ship hit deducts sec without kill right");
+    for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&victim_id).unwrap().active_ship_id = low_vic_pod);
+    let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(low_vic_pod)]).await.expect("Activate pod");
+    let (sec_post_pod, kr_after_pod) = ctx.db.with_snapshot(|s| (s.characters[&criminal_id].security_status, s.kill_rights.len()));
+    assert!(sec_post_pod < sec_post_ship && kr_after_pod == 1, "low-sec pod hit after ship hit must deduct pod sec and grant 1 kill right");
     let low_pod_exp = with_combat_runtime(&ctx, |rt| rt.kill_right_expires_unix.get(&low_pod_kr_id).copied())
         .expect("30-day expiry recorded for low-sec pod kill right");
     assert_eq!(low_pod_exp, now + 30 * 86_400);
@@ -606,7 +644,7 @@ async fn test_crimewatch_sec_status_loss_caps_tags_and_transactions_closure() {
     // Tag at 0.0 is refused (cannot raise above 0.0)
     assert!(rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await.unwrap_err().contains("SecurityTagBandMismatch"));
 
-    // Verify ISK fee charged for 4 effective tags (1M + 2M + 3M + 4M = 10M ISK, 4 Negotiator tags preserved, journal logged)
+    // Verify derived placeholder ISK fee charged for 4 effective tags (1M + 2M + 3M + 4M = 10M ISK, 4 Negotiator tags preserved, journal logged)
     let (bal_after_tags, rem_neg_tags, has_tag_journal) = ctx.db.with_snapshot(|s| {
         let rem = s.items.values().filter(|i| i.owner_id == char_id && i.type_id == 35664).map(|i| i.quantity).sum::<i32>();
         let j = s.wallet_journal.iter().any(|w| w.character_id == char_id && w.entry_type == "SecurityTagFee" && w.amount == IskCents::from_isk(-4_000_000));

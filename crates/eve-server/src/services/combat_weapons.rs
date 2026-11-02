@@ -1186,7 +1186,13 @@ pub async fn handle_weapons(
                         let jetcan = (target_ball.type_id == 23 && !anchored) || is_mobile_struct;
                         (anchored, secure, jetcan)
                     });
-                let is_new_agg = ctx.crimewatch.read().map(|cw| cw.get_aggression(char_id, victim_char_id, now_unix).is_none()).unwrap_or(true);
+                let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
+                    ctx,
+                    char_id,
+                    victim_char_id,
+                    is_pod_target,
+                    now_unix,
+                );
                 let c_stage = crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, sys_id);
                 {
                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -1248,22 +1254,16 @@ pub async fn handle_weapons(
                     ctx.notify(NotificationTarget::Character(victim_char_id), "OnCrimewatchEngagementCreated", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(timeout_ft)]);
                 }
                 if !is_legal && sys_sec > 0.0 && !is_mobile_struct && is_new_agg {
-                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
-                        ctx, char_id, victim_char_id, sys_id, sys_sec, is_pod_target, now_unix,
+                    crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
+                        ctx,
+                        char_id,
+                        victim_char_id,
+                        sys_id,
+                        sys_sec,
+                        is_pod_target,
+                        is_new_agg,
+                        now_unix,
                     );
-                    if sys_sec < 0.45 && is_pod_target && victim_char_id > 0 {
-                        let kr_id = ctx.db.with_mut_snapshot(|snap| {
-                            snap.next_entity_id += 1;
-                            snap.next_entity_id
-                        });
-                        crate::services::combat_crimewatch::create_kill_right(
-                            ctx,
-                            kr_id,
-                            victim_char_id,
-                            char_id,
-                            0.0,
-                        );
-                    }
                 }
                 if !is_legal && sys_sec > 0.0 && sys_sec < 0.45 && !is_mobile_struct {
                     if let Some(sentry_origin) = crate::services::security_mgr::nearest_sentry_gun_origin(

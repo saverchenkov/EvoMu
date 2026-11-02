@@ -461,11 +461,19 @@ pub fn record_illegal_pvp_penalties_if_new(
     }
     apply_illegal_pvp_sec_status_loss(ctx, attacker_char_id, victim_char_id, sys_id, sys_sec, is_pod, now_unix);
     if sys_sec < 0.45 && is_pod && victim_char_id > 0 {
-        let kr_id = ctx.db.with_mut_snapshot(|snap| {
-            snap.next_entity_id += 1;
-            snap.next_entity_id
+        let rt_expiries = with_combat_runtime(ctx, |rt| rt.kill_right_expires_unix.clone());
+        let has_unexpired_kr = ctx.db.with_snapshot(|snap| {
+            snap.kill_rights.values().any(|kr| {
+                kr.owner_id == victim_char_id && kr.target_id == attacker_char_id && !kr.is_active_suspect
+                    && rt_expiries.get(&kr.kill_right_id)
+                        .or_else(|| snap.combat_crimewatch_state.kill_right_expires_unix.get(&kr.kill_right_id))
+                        .is_some_and(|&exp| exp > now_unix)
+            })
         });
-        crate::services::combat_crimewatch::create_kill_right(ctx, kr_id, victim_char_id, attacker_char_id, 0.0);
+        if !has_unexpired_kr {
+            let kr_id = ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; snap.next_entity_id });
+            crate::services::combat_crimewatch::create_kill_right(ctx, kr_id, victim_char_id, attacker_char_id, 0.0);
+        }
     }
 }
 
@@ -1009,12 +1017,8 @@ pub async fn handle_crimewatch(
                 };
                 (tid, q)
             } else {
-                let q = match args.first() {
-                    Some(a) => match a.as_i64() {
-                        Some(v) => v,
-                        None => return Some(Err(BridgeRpcError::user_error("InvalidTagQuantity"))),
-                    },
-                    None => 1,
+                let Some(q) = args.first().map(|a| a.as_i64()).unwrap_or(Some(1)) else {
+                    return Some(Err(BridgeRpcError::user_error("InvalidTagQuantity")));
                 };
                 let t = if cur_sec < -8.0 { 35661 } else if cur_sec < -5.0 { 35662 } else if cur_sec < -2.0 { 35663 } else { 35664 };
                 (t, q)
@@ -1026,7 +1030,10 @@ pub async fn handle_crimewatch(
             let Some(sys_id) = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))) else {
                 return Some(Err(BridgeRpcError::user_error("NoSolarSystem")));
             };
-            // Clone Soldier Tag bands: 35661 [-10,-8), 35662 [-8,-5), 35663 [-5,-2), 35664 [-2,0)
+            // Clone Soldier Tag bands: 35661 [-10,-8), 35662 [-8,-5), 35663 [-5,-2), 35664 [-2,0).
+            // DERIVED (OF-36): EVE Uni Wiki (`Security_tags.md`) documents an additional ISK fee per tag
+            // when redeeming Clone Soldier tags at a CONCORD/DED Security Office without publishing the
+            // exact server-side ISK schedule; 1M/2M/3M/4M ISK per tier is a derived placeholder.
             let band_opt = match tag_type_id {
                 35661 | 35514 => Some((-10.0, -8.0, eve_db::IskCents::from_isk(1_000_000))),
                 35662 | 35515 => Some((-8.0, -5.0, eve_db::IskCents::from_isk(2_000_000))),

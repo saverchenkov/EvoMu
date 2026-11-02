@@ -870,19 +870,35 @@ pub async fn handle_legacy_and_ess(
                     sys_sec > 0.0 && sys_sec < 0.45 && !has_legal_engagement;
                 let legal_engagement = !is_lowsec_unprovoked;
                 let is_pod_target = target_ball.type_id == 670;
+                let is_new_agg =
+                    crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
+                        ctx,
+                        char_id,
+                        victim_char_id,
+                        is_pod_target,
+                        now_unix,
+                    );
+                {
+                    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                    let _ = cw.handle_combat_aggression_with_pod(
+                        char_id,
+                        victim_char_id,
+                        ship_id,
+                        sys_id,
+                        sys_sec,
+                        legal_engagement,
+                        is_pod_target,
+                        now_unix,
+                    );
+                }
 
                 if destroyed {
                     ctx.invalidate_ship_fitting(victim_ship_id);
                 }
 
-                let (kill_id, ejected_capsule_id, lowsec_pod_kr_id) = ctx
+                let (kill_id, ejected_capsule_id) = ctx
                     .db
                     .try_with_mut_snapshot(|snap| {
-                        let mut pod_kr_id = 0;
-                        if is_lowsec_unprovoked && is_pod_target && victim_char_id > 0 {
-                            snap.next_entity_id += 1;
-                            pod_kr_id = snap.next_entity_id;
-                        }
                         if destroyed {
                             for kr in snap.kill_rights.values_mut() {
                                 if kr.target_id == victim_char_id && kr.is_active_suspect {
@@ -970,30 +986,22 @@ pub async fn handle_legacy_and_ess(
                                     vic.system_epoch += 1;
                                 }
                             }
-                            Ok::<_, std::convert::Infallible>((id, cap_id, pod_kr_id))
+                            Ok::<_, std::convert::Infallible>((id, cap_id))
                         } else {
-                            Ok::<_, std::convert::Infallible>((0, 0, pod_kr_id))
+                            Ok::<_, std::convert::Infallible>((0, 0))
                         }
                     })
                     .unwrap();
                 if is_lowsec_unprovoked {
-                    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                    crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
                         ctx,
                         char_id,
                         victim_char_id,
                         sys_id,
                         sys_sec,
                         is_pod_target,
+                        is_new_agg,
                         now_unix,
-                    );
-                }
-                if lowsec_pod_kr_id > 0 {
-                    crate::services::combat_crimewatch::create_kill_right(
-                        ctx,
-                        lowsec_pod_kr_id,
-                        victim_char_id,
-                        char_id,
-                        0.0,
                     );
                 }
                 if destroyed {
