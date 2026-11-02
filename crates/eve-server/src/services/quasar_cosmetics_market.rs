@@ -1068,6 +1068,7 @@ fn skin_initiate_purchase(
         let Some(l) = data.skin_listings.get(&key).cloned() else {
             return Err((STATUS_NOT_FOUND, "Skin listing not found".to_string()));
         };
+        if l.seller_id == cid { return Err((STATUS_BAD_REQUEST, "Cannot purchase your own SKIN listing".to_string())); }
         if l.expires_unix <= now {
             return Err((STATUS_BAD_REQUEST, "Skin listing has expired".to_string()));
         }
@@ -1209,19 +1210,18 @@ fn skin_initiate_purchase(
         }
         if let Some((total_cost, net_credit)) = checked_isk_settlement {
             let Some(new_buyer_bal) = buyer.balance.checked_sub(total_cost) else { return false; };
-            let new_seller_bal = if let Some(seller) = s.characters.get(&(listing.seller_id as i64)) {
-                let Some(sb) = seller.balance.checked_add(net_credit) else { return false; };
-                Some(sb)
-            } else { None };
+            if listing.seller_id != cid && s.characters.get(&(listing.seller_id as i64)).is_some_and(|sl| sl.balance.checked_add(net_credit).is_none()) { return false; }
             if let Some(b) = s.characters.get_mut(&(cid as i64)) {
                 b.balance = new_buyer_bal;
                 if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) { *lp -= buyer_lp_fee; }
             }
             s.append_journal(cid as i64, "ParagonHubSkinPurchase", IskCents(-total_cost.0), new_buyer_bal, format!("Paragon Hub SKIN purchase ({quantity}x)"));
-            if let (Some(seller), Some(sb)) = (s.characters.get_mut(&(listing.seller_id as i64)), new_seller_bal) {
+            let new_seller_bal = if let Some(seller) = s.characters.get_mut(&(listing.seller_id as i64)) {
+                let Some(sb) = seller.balance.checked_add(net_credit) else { return false; };
                 seller.balance = sb;
                 s.append_journal(listing.seller_id as i64, "ParagonHubSkinSale", net_credit, sb, format!("Paragon Hub SKIN sale ({quantity}x)"));
-            }
+                Some(sb)
+            } else { None };
             isk_balances = Some((new_buyer_bal, listing.seller_id as i64, new_seller_bal));
         } else if let Some((total_plex, net_plex)) = checked_plex_settlement {
             if buyer.plex_balance < total_plex {

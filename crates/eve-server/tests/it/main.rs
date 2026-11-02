@@ -521,3 +521,4 @@ mod quasar_b2_closure;
 mod notify_p7_sp1_sp2_closure;
 mod open_feats_and_rpcs_b23;
 mod open_feats_and_rpcs_b23_part2;
+mod paragon_hub_self_purchase;
