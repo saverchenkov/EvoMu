@@ -761,7 +761,9 @@ pub async fn handle(
                                 m.npcs_remaining = count as u32;
                                 m.spawned_npc_ball_ids = ball_ids;
                             }
+                            let wave_tids: Vec<u32> = spawned_npcs.iter().map(|&(_, tid)| tid).collect();
                             snap.sp6_lifecycle.mission_initial_npc_counts.insert(format!("{char_id}:{mission_id}"), count as u32);
+                            snap.sp6_lifecycle.mission_initial_npc_types.insert(format!("{char_id}:{mission_id}"), wave_tids);
                         }
                         if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
                             meta.accepted_at_unix = Some(now);

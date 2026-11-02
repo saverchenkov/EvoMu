@@ -71,6 +71,16 @@ pub fn cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx: &ServerContext) ->
                 missions_reset_count += 1;
             }
         }
+        let active_accepted_keys: std::collections::HashSet<String> = snap
+            .active_missions
+            .values()
+            .filter(|m| m.state == "Accepted")
+            .map(|m| format!("{}:{}", m.character_id, m.mission_id))
+            .collect();
+        st.mission_initial_npc_counts
+            .retain(|k, _| active_accepted_keys.contains(k));
+        st.mission_initial_npc_types
+            .retain(|k, _| active_accepted_keys.contains(k));
     });
 
     let wrecks_removed_count = removed_wreck_balls.len();
@@ -124,22 +134,29 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
             }
             st.missions_awaiting_downtime_respawn
                 .retain(|&k| k != (cid, aid));
+            let mkey = format!("{cid}:{}", mission.mission_id);
             let wave_count = st
                 .mission_initial_npc_counts
-                .get(&format!("{cid}:{}", mission.mission_id))
+                .get(&mkey)
                 .copied()
                 .unwrap_or_else(|| mission.npcs_remaining.max(4));
+            let wave_types = st.mission_initial_npc_types.get(&mkey).cloned();
             mission.npcs_remaining = wave_count;
             mission.current_room_id = 1;
             mission.spawned_npc_ball_ids.clear();
             for idx in 0..wave_count {
                 snap.next_entity_id += 1;
-                let npc_bid = snap.next_entity_id;
+                let npc_bid = 700_000_000_i64.saturating_add(snap.next_entity_id);
+                let npc_tid = wave_types
+                    .as_ref()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v[(idx as usize) % v.len()])
+                    .unwrap_or(default_npc_tid);
                 mission.spawned_npc_ball_ids.push(npc_bid);
                 let angle = (idx as f64) * std::f64::consts::TAU / (wave_count as f64);
                 let pos =
                     pocket_origin + DVec3::new(angle.cos() * 4_500.0, 0.0, angle.sin() * 4_500.0);
-                spawned_npcs.push((solar_system_id, npc_bid, default_npc_tid, pos));
+                spawned_npcs.push((solar_system_id, npc_bid, npc_tid, pos));
             }
         }
     });

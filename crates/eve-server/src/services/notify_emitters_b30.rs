@@ -22,7 +22,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 
 /// Emits `OnOperationReplayed(categoryID, operationID)` (`2` args, `id_type = "charid"`).
-// parity: notify:OnOperationReplayed
+/// Emitter for notify:OnOperationReplayed
 pub fn emit_operation_replayed(ctx: &ServerContext, char_id: i64, cat_id: i64, op_id: i64) {
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -33,7 +33,7 @@ pub fn emit_operation_replayed(ctx: &ServerContext, char_id: i64, cat_id: i64, o
 }
 
 /// Emits `OnUiRevealForced()` (`0` args, `id_type = "charid"`).
-// parity: notify:OnUiRevealForced
+/// Emitter for notify:OnUiRevealForced
 pub fn emit_ui_reveal_forced(ctx: &ServerContext, char_id: i64) {
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -44,7 +44,7 @@ pub fn emit_ui_reveal_forced(ctx: &ServerContext, char_id: i64) {
 }
 
 /// Emits `OnPasswordChanged(which, containerItem)` (`2` args, `id_type = "charid"`).
-// parity: notify:OnPasswordChanged
+/// Emitter for notify:OnPasswordChanged
 pub fn emit_password_changed(
     ctx: &ServerContext,
     char_id: i64,
@@ -65,7 +65,7 @@ pub fn emit_password_changed(
 }
 
 /// Emits `OnInvalidateCacheForLocations(locationIDs)` (`1` arg, `id_type = "charid"`).
-// parity: notify:OnInvalidateCacheForLocations
+/// Emitter for notify:OnInvalidateCacheForLocations
 pub fn emit_invalidate_cache_for_locations(
     ctx: &ServerContext,
     target: NotificationTarget,
@@ -84,7 +84,7 @@ pub fn emit_invalidate_cache_for_locations(
 }
 
 /// Emits `OnMultiEvent(events)` (`1` arg, `id_type = "charid"`).
-// parity: notify:OnMultiEvent
+/// Emitter for notify:OnMultiEvent
 pub fn emit_multi_event(ctx: &ServerContext, char_id: i64, events: &[(&str, i64, &str)]) {
     if !events.is_empty() {
         let _ = ctx.notify_target_events(char_id, events);
@@ -92,7 +92,7 @@ pub fn emit_multi_event(ctx: &ServerContext, char_id: i64, events: &[(&str, i64,
 }
 
 /// Emits `OnSolarSystemLPChange(oldPoints, newPoints)` (`2` args, `id_type = "solarsystemid"`).
-// parity: notify:OnSolarSystemLPChange
+/// Emitter for notify:OnSolarSystemLPChange
 pub fn emit_solar_system_lp_change(
     ctx: &ServerContext,
     sys_id: u32,
@@ -111,7 +111,7 @@ pub fn emit_solar_system_lp_change(
 }
 
 /// Emits `OnVictoryPointStateUpdated(solarsystemID, newVictoryPointState)` (`2` args, `id_type = "solarsystemid"`).
-// parity: notify:OnVictoryPointStateUpdated
+/// Emitter for notify:OnVictoryPointStateUpdated
 pub fn emit_victory_point_state_updated(
     ctx: &ServerContext,
     sys_id: u32,
@@ -134,7 +134,7 @@ pub fn emit_victory_point_state_updated(
 }
 
 /// Emits `OnWeaponsTimerUpdate(state, expiryTime)` (`2` args, `id_type = "charid"`).
-// parity: notify:OnWeaponsTimerUpdate
+/// Emitter for notify:OnWeaponsTimerUpdate
 pub fn emit_weapons_timer_update(
     ctx: &ServerContext,
     char_id: i64,
@@ -150,7 +150,7 @@ pub fn emit_weapons_timer_update(
 }
 
 /// Emits `OnPvpTimerUpdate(state, expiryTime)` (`2` args, `id_type = "charid"`).
-// parity: notify:OnPvpTimerUpdate
+/// Emitter for notify:OnPvpTimerUpdate
 pub fn emit_pvp_timer_update(
     ctx: &ServerContext,
     char_id: i64,
@@ -166,7 +166,7 @@ pub fn emit_pvp_timer_update(
 }
 
 /// Emits `OnCriminalTimerUpdate(state, expiryTime)` (`2` args, `id_type = "charid"`).
-// parity: notify:OnCriminalTimerUpdate
+/// Emitter for notify:OnCriminalTimerUpdate
 pub fn emit_criminal_timer_update(
     ctx: &ServerContext,
     char_id: i64,
@@ -182,7 +182,7 @@ pub fn emit_criminal_timer_update(
 }
 
 /// Emits `OnSystemCriminalFlagUpdates(newIdles, newSuspects, newCriminals)` (`3` args, `id_type = "solarsystemid"`).
-// parity: notify:OnSystemCriminalFlagUpdates
+/// Emitter for notify:OnSystemCriminalFlagUpdates
 pub fn emit_system_criminal_flag_updates(
     ctx: &ServerContext,
     sys_id: u32,
@@ -196,7 +196,7 @@ pub fn emit_system_criminal_flag_updates(
 }
 
 /// Emits `OnShipDeath()` (`0` args, `id_type = "charid"`).
-// parity: notify:OnShipDeath
+/// Emitter for notify:OnShipDeath
 pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
     if char_id <= 0 {
         return;
