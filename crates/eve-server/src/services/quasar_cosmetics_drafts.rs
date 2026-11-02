@@ -939,9 +939,6 @@ pub fn register_draft_and_title_handlers(
         router.register_handler(
             "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
             Arc::new(move |ctx, any, dyn_msg| {
-                let Some(active_char_id) = ctx.effective_character_id() else {
-                    return Err((STATUS_FORBIDDEN, "Active character required".into()));
-                };
                 let req_char_id = dyn_msg.get(1)
                     .and_then(|v| match v {
                         DynamicValue::Message(m) => m.get(1).and_then(|seq| match seq {
@@ -970,7 +967,8 @@ pub fn register_draft_and_title_handlers(
                             })
                         })
                     })
-                    .unwrap_or(active_char_id);
+                    .or_else(|| ctx.effective_character_id())
+                    .unwrap_or(0);
 
                 let equipped = {
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());

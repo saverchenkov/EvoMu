@@ -484,6 +484,7 @@ impl PublicGatewayRouter {
                 | "eve_public.space.api.cdn.GetUpdateRequest"
                 | "eve_public.cosmetic.character.title.definition.api.GetLatestRequest"
                 | "eve.cosmetic.character.title.definition.api.GetLatestRequest"
+                | "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest"
         ) {
             return false;
         }
@@ -1302,7 +1303,10 @@ impl PublicGatewayRouter {
                         }));
                     }
                     let event = if method == "PublishEventPayload" {
-                        if let Some(any) = GoogleAny::decode_proto(raw_event).ok().filter(|a| a.type_url.starts_with(TYPE_GOOGLEAPIS_PREFIX)) {
+                        if let Some(any) = GoogleAny::decode_proto(raw_event)
+                            .ok()
+                            .filter(|a| eve_proto::quasar::has_quasar_type_url_prefix(&a.type_url))
+                        {
                             EvePublicEvent { payload: Some(any), ..Default::default() }
                         } else {
                             match EvePublicEvent::decode_proto(raw_event) {

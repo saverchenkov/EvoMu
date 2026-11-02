@@ -452,10 +452,7 @@ impl QuasarDescriptorRegistry {
     }
 
     pub fn normalize_type_name(full_name_or_type_url: &str) -> &str {
-        full_name_or_type_url
-            .strip_prefix(TYPE_GOOGLEAPIS_PREFIX)
-            .unwrap_or(full_name_or_type_url)
-            .trim_start_matches('.')
+        super::strip_quasar_type_url_prefix(full_name_or_type_url)
     }
 
     pub fn get_message(&self, full_name_or_type_url: &str) -> Option<&DescriptorProto> {

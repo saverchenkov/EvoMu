@@ -132,6 +132,13 @@ pub fn build_client_global_config(
         );
     }
 
+    let host = match local_host_hint.map(str::trim).filter(|h| !h.is_empty()) {
+        Some("0.0.0.0") | Some("::") | Some("[::]") | None => "127.0.0.1".to_string(),
+        Some(h) if h.contains(':') && !h.starts_with('[') => format!("[{h}]"),
+        Some(h) => h.to_string(),
+    };
+    cfg.insert("ejabberdAddress".to_string(), PyRep::String(host));
+
     if let Ok(extra) = ctx.global_config_values.read() {
         for (k, v) in extra.iter() {
             cfg.insert(k.clone(), v.clone());

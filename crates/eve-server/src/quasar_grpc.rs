@@ -1082,11 +1082,20 @@ mod tests {
                 ("eve_public.achievement.definition.api.cdn.GetLatestRequest", None, vec![0x10, 0x01]),
                 ("eve_public.space.api.cdn.GetUpdateRequest", None, vec![0x10, 0x01]),
                 ("eve_public.cosmetic.character.title.definition.api.GetLatestRequest", None, vec![0x10, 0x01]),
+                // V24.01 desktop client sends `type.evetech.net/` `Any.type_url` prefix (#301/#302)
+                ("type.evetech.net/eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest", None, Vec::new()),
+                ("type.evetech.net/eve_public.career.goal.api.GetDefinitionsRequest", Some(90_000_001u32), Vec::new()),
+                ("type.evetech.net/eve_public.achievement.definition.api.cdn.GetLatestRequest", None, vec![0x10, 0x01]),
             ];
 
             for (idx, (type_name, char_opt, payload_bytes)) in request_types.iter().enumerate() {
                 let mut corr = vec![0u8; 16];
                 corr[15] = (idx + 1) as u8;
+                let type_url = if eve_proto::quasar::has_quasar_type_url_prefix(type_name) {
+                    (*type_name).to_string()
+                } else {
+                    format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}")
+                };
                 let pub_req = EvePublicRequest {
                     issued: Some(GoogleTimestamp {
                         seconds: ctx.now_unix() as i64,
@@ -1094,7 +1103,7 @@ mod tests {
                     }),
                     correlation_uuid: corr.clone(),
                     payload: Some(GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+                        type_url,
                         value: payload_bytes.clone(),
                     }),
                     external_origin: "eve-desktop-client/3619879 tq".into(),

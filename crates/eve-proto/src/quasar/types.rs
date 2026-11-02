@@ -30,11 +30,7 @@ pub trait QuasarMessage: Sized + Clone {
 
     fn from_any(any: &GoogleAny) -> Result<Self, QuasarError> {
         let expected = Self::type_url();
-        let norm_actual = any
-            .type_url
-            .strip_prefix(TYPE_GOOGLEAPIS_PREFIX)
-            .unwrap_or(&any.type_url)
-            .trim_start_matches('.');
+        let norm_actual = super::strip_quasar_type_url_prefix(&any.type_url);
         if norm_actual != Self::FULL_NAME {
             return Err(QuasarError::TypeUrlMismatch {
                 expected,
@@ -141,10 +137,7 @@ pub struct GoogleAny {
 
 impl GoogleAny {
     pub fn normalized_type_name(&self) -> &str {
-        self.type_url
-            .strip_prefix(TYPE_GOOGLEAPIS_PREFIX)
-            .unwrap_or(&self.type_url)
-            .trim_start_matches('.')
+        super::strip_quasar_type_url_prefix(&self.type_url)
     }
 }
 

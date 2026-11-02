@@ -26,6 +26,22 @@ use crate::{MAX_COLLECTION_LEN, MAX_FRAME_SIZE, MAX_RECURSION_DEPTH};
 pub const EXPECTED_QUASAR_DOMAIN_COUNT: usize = 135;
 pub const EXPECTED_QUASAR_FILE_COUNT: usize = 1_455;
 pub const TYPE_GOOGLEAPIS_PREFIX: &str = "type.googleapis.com/";
+pub const TYPE_EVETECH_PREFIX: &str = "type.evetech.net/";
+
+#[inline]
+pub fn has_quasar_type_url_prefix(full_name_or_type_url: &str) -> bool {
+    full_name_or_type_url.starts_with(TYPE_GOOGLEAPIS_PREFIX)
+        || full_name_or_type_url.starts_with(TYPE_EVETECH_PREFIX)
+}
+
+#[inline]
+pub fn strip_quasar_type_url_prefix(full_name_or_type_url: &str) -> &str {
+    full_name_or_type_url
+        .strip_prefix(TYPE_GOOGLEAPIS_PREFIX)
+        .or_else(|| full_name_or_type_url.strip_prefix(TYPE_EVETECH_PREFIX))
+        .unwrap_or(full_name_or_type_url)
+        .trim_start_matches('.')
+}
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum QuasarError {
