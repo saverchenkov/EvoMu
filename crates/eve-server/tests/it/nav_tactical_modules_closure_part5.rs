@@ -262,3 +262,122 @@ async fn test_warp_vector_rejected_during_mjd_spool() {
     assert!(bp.micro_jump(ship_id, 100_000.0).unwrap_err().contains("CantActivateInWarp"));
     assert!(bp.micro_jump_field(ship_id, 100_000.0, 6_000.0, 25).unwrap_err().contains("CantActivateInWarp"));
 }
+
+#[tokio::test]
+async fn test_warp_bubble_warp_entry_only_and_shuttle_emergency_exemptions() {
+    let mut bp = Ballpark::new(30_000_142);
+    let origin = DVec3::ZERO;
+    let dest = DVec3::new(100_000_000.0, 0.0, 0.0);
+    let bubble_center = DVec3::new(100_000_000.0, 0.0, 0.0);
+
+    // (a) Bubble present at set_mode that despawns during Aligning must NOT trap the ship
+    bp.add_ball(Ball {
+        id: 1001, type_id: 587, position: origin, velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 3.45, mass: 1_067_000.0, radius: 37.0,
+        speed_fraction: 0.0, mode: MovementMode::Stop,
+    });
+    let bid: i64 = 5001;
+    bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(bid, bubble_center, 20_000.0));
+    bp.set_mode(1001, MovementMode::new_warp(origin, dest, 3.0)).unwrap();
+    if let MovementMode::Warp { destination, .. } = bp.balls[&1001].mode {
+        assert_eq!(destination, dest, "set_mode must not prematurely mutate warp destination");
+    } else {
+        panic!("Expected Warp mode");
+    }
+    bp.warp_bubble_mgr.remove_bubble(bid);
+    for _ in 0..10 {
+        bp.step(1.0);
+    }
+    if let MovementMode::Warp { destination, .. } = bp.balls[&1001].mode {
+        assert_eq!(destination, dest, "Despawned bubble during alignment must not trap ship");
+    }
+
+    // (b) is_emergency_warping disconnect warp toward a bubbled destination is exempt
+    bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(5002, bubble_center, 20_000.0));
+    let mut cs_emerg = eve_destiny::CombatState::default();
+    cs_emerg.is_emergency_warping = true;
+    bp.combat_states.insert(1002, cs_emerg);
+    bp.add_ball(Ball {
+        id: 1002, type_id: 587, position: origin, velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 37.0,
+        speed_fraction: 0.0, mode: MovementMode::new_warp(origin, dest, 3.0),
+    });
+    for _ in 0..5 {
+        bp.step(1.0);
+    }
+    if let MovementMode::Warp { destination, .. } = bp.balls[&1002].mode {
+        assert_eq!(destination, dest, "Emergency disconnect warp must be exempt from warp bubbles");
+    }
+
+    // (c) Newly spawned group 31 shuttle warping toward a bubbled destination is exempt
+    bp.ball_group_ids.insert(1003, 31);
+    bp.add_ball(Ball {
+        id: 1003, type_id: 672, position: origin, velocity: DVec3::ZERO,
+        max_velocity: 500.0, inertia: 1.0, mass: 1_000_000.0, radius: 25.0,
+        speed_fraction: 0.0, mode: MovementMode::new_warp(origin, dest, 5.0),
+    });
+    for _ in 0..5 {
+        bp.step(1.0);
+    }
+    if let MovementMode::Warp { destination, .. } = bp.balls[&1003].mode {
+        assert_eq!(destination, dest, "Group 31 shuttle must be exempt from warp bubbles");
+    }
+}
+
+#[tokio::test]
+async fn test_mid_cycle_overload_and_burnout_ship_fitting_sync() {
+    let ctx = Arc::new(build_ctx());
+    let jita_sys: u32 = 30_004_759;
+    let char_id: i64 = 95_011;
+    let ship_id: i64 = 96_011;
+    let mwd_id: i64 = 97_011;
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, true);
+    give_item(&ctx, mwd_id, 439, char_id, ship_id, InventoryFlag::MedSlot0, 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mwd_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let sys = ctx.systems.get_or_spawn(jita_sys);
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    cs.capacitor = 100_000.0;
+    cs.max_capacitor = 100_000.0;
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id, type_id: 587, position: DVec3::new(50_000_000_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO, max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0,
+            radius: 37.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    ).await.unwrap();
+
+    // Activate MWD (non-overloaded)
+    rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(mwd_id), PyRep::String("online".into())])
+        .await
+        .expect("Activate MWD");
+    let fit_before = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(fit_before.modules[&mwd_id].state, eve_dogma::ModuleState::Active);
+
+    // Mid-cycle Overload must defer ShipFittingEngine state until cycle boundary
+    rpc(&ctx, &mut sess, "dogmaIM", "Overload", vec![PyRep::Integer(mwd_id)])
+        .await
+        .expect("Overload mid-cycle");
+    let fit_mid = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(
+        fit_mid.modules[&mwd_id].state,
+        eve_dogma::ModuleState::Active,
+        "Mid-cycle Overload must not immediately mutate cached ShipFittingEngine state"
+    );
+
+    // Advance past 10s MWD cycle boundary -> SyncOverloadState updates ShipFittingEngine to Overloaded
+    for _ in 0..11 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let fit_after = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).unwrap();
+    assert_eq!(
+        fit_after.modules[&mwd_id].state,
+        eve_dogma::ModuleState::Overloaded,
+        "Cycle boundary must transition cached ShipFittingEngine state to Overloaded"
+    );
+}
+

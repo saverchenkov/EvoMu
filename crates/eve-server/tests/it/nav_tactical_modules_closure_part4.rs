@@ -37,7 +37,7 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     ctx.db.with_mut_snapshot(|snap| { snap.module_online_states.insert(nos_id, true); });
     ctx.invalidate_ship_fitting(ship_src);
 
-    let origin = DVec3::new(50_000_000.0, 0.0, 0.0);
+    let origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_src, ship_src, 640, jita_sys, origin).await;
     spawn_in_space(&ctx, char_tgt, ship_tgt, 24_690, jita_sys, origin + DVec3::new(1_500.0, 0.0, 0.0)).await;
     sys.add_target_lock(ship_src, eve_destiny::TargetLock {
@@ -282,7 +282,7 @@ async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
     let ship_a: i64 = 84_161;
     let mut sess_a = seed_pilot(&ctx, char_a, ship_a, 22_456, NULL_SYS, false); // Sabre (Interdictor, 180 m3 cargo)
     let sys = ctx.systems.get_or_spawn(NULL_SYS);
-    let origin = DVec3::new(10_000_000.0, 0.0, 0.0);
+    let origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_a, ship_a, 22_456, NULL_SYS, origin).await;
 
     set_skill_level(&ctx, char_a, 28_164, 0); // Thermodynamics L0

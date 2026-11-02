@@ -187,15 +187,10 @@ pub async fn handle_active_overload_toggle(
     char_id: i64,
     ship_id: i64,
     module_id: i64,
-    mut fit: ShipFittingEngine,
+    fit: ShipFittingEngine,
 ) -> PyRep {
     let _ = sys.update_module_overload(ship_id, module_id, true).await;
-    if let Some(fm) = fit.modules.get_mut(&module_id) {
-        fm.state = eve_dogma::ModuleState::Overloaded;
-    }
-    fit.recalculate_stats(&ctx.sde);
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-    ctx.store_ship_fitting(ship_id, fit);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnHeatAdded",

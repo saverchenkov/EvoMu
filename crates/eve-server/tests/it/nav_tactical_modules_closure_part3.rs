@@ -53,7 +53,7 @@ async fn test_overheat_rack_heat_analytical_curves_and_overload_bonuses() {
     });
     ctx.invalidate_ship_fitting(ship_a);
 
-    let origin = DVec3::new(10_000_000.0, 0.0, 0.0);
+    let origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_a, ship_a, 24_690, jita_sys, origin).await;
     let target_id: i64 = 88_801;
     let mut t_cs = CombatState::default();
@@ -256,7 +256,7 @@ async fn test_probabilistic_heat_damage_propagation_and_nanite_paste() {
     });
     ctx.invalidate_ship_fitting(ship_a);
 
-    let origin = DVec3::new(30_000_000.0, 0.0, 0.0);
+    let origin = DVec3::new(50_000_000_000.0, 0.0, 0.0);
     spawn_in_space(&ctx, char_a, ship_a, 24_690, jita_sys, origin).await;
     let target_id: i64 = 88_810;
     let mut t_cs = CombatState::default();

@@ -132,7 +132,7 @@ fn test_spatial_bubbles_10000km_isolation_and_warp_transitions() {
         Ball {
             id: 40_009_076,
             type_id: 3802,
-            position: DVec3::ZERO,
+            position: DVec3::new(0.0, 0.0, -600_000_000.0),
             velocity: DVec3::ZERO,
             max_velocity: 0.0,
             inertia: 0.0,

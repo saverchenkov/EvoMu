@@ -1137,7 +1137,7 @@ impl Ballpark {
         true
     }
 
-    pub fn set_mode(&mut self, ball_id: BallId, mut mode: MovementMode) -> Result<(), String> {
+    pub fn set_mode(&mut self, ball_id: BallId, mode: MovementMode) -> Result<(), String> {
         if !self.balls.contains_key(&ball_id) {
             return Err(format!("Ball {ball_id} not found in ballpark"));
         }
@@ -1204,29 +1204,6 @@ impl Ballpark {
                         "CloakedCannotWarp: Cannot warp while cloaked with a non-covert cloaking device"
                             .to_string(),
                     );
-                }
-            }
-
-            // Check bubble interception along the warp path
-            if let MovementMode::Warp {
-                origin,
-                ref mut destination,
-                ref mut total_distance,
-                ..
-            } = mode
-            {
-                let is_nullified = self
-                    .combat_states
-                    .get(&ball_id)
-                    .map(|cs| cs.is_interdiction_nullified)
-                    .unwrap_or(false);
-                if !is_nullified {
-                    if let Some((_bid, intercept_pos)) =
-                        self.warp_bubble_mgr.check_interception(origin, *destination)
-                    {
-                        *destination = intercept_pos;
-                        *total_distance = (*destination - origin).length();
-                    }
                 }
             }
 

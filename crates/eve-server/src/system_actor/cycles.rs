@@ -563,6 +563,12 @@ pub(crate) fn step_cycles_and_capacitor(
                     &mut burned_out,
                     &mut burned_ship_modules,
                 );
+                if burned_out {
+                    pending_cycle_actions.push(PendingCycleAction::InvalidateShipFitting {
+                        char_id: cycle.owner_char_id,
+                        ship_id: cycle.ship_id,
+                    });
+                }
             }
 
             // 4. Weapon ammo & T2/Faction/Mining crystal volatility damage (`feat:modules.t2-crystal-volatility-destruction`)
@@ -899,6 +905,12 @@ pub(crate) fn step_cycles_and_capacitor(
                             ballpark,
                             sde_opt,
                         );
+                        pending_cycle_actions.push(PendingCycleAction::SyncOverloadState {
+                            char_id: cycle.owner_char_id,
+                            ship_id: cycle.ship_id,
+                            module_id: cycle.module_id,
+                            is_overloaded: next_ovl,
+                        });
                     }
                     if matches!(mod_grp, 72 | 80 | 353 | 650) {
                         if let Some(cid) = cycle.owner_char_id {
@@ -979,6 +991,14 @@ pub(crate) fn step_cycles_and_capacitor(
         }
     }
     for (burned_ship_id, burned_mod_id) in burned_ship_modules {
+        let burned_char_id = active_module_cycles
+            .iter()
+            .find(|c| c.ship_id == burned_ship_id)
+            .and_then(|c| c.owner_char_id);
+        pending_cycle_actions.push(PendingCycleAction::InvalidateShipFitting {
+            char_id: burned_char_id,
+            ship_id: burned_ship_id,
+        });
         for (other_idx, c) in active_module_cycles.iter().enumerate() {
             if c.ship_id == burned_ship_id && c.module_id == burned_mod_id {
                 finished_indices.push(other_idx);

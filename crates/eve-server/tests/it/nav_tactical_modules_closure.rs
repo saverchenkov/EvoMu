@@ -472,16 +472,12 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     let (_, struct_ball) = sys.get_ball_snapshot(struct_id).await.unwrap().unwrap();
     let gate = ctx.sde.jumps.values().find(|j| j.from_solar_system_id == jita_sys).expect("Jita gate");
     let (_, gate_ball) = sys.get_ball_snapshot(gate.stargate_id).await.unwrap().unwrap();
-    let planet = ctx
-        .sde
-        .celestials_in_system(jita_sys)
-        .into_iter()
-        .find(|c| c.group_id == 7 && c.radius > 0.0)
-        .expect("Jita planet");
+    let planet = ctx.sde.celestials_in_system(jita_sys).into_iter().find(|c| c.group_id == 7 && c.radius > 0.0).expect("Jita planet");
     for (static_id, static_pos, core_rad, label) in [
         (JITA_STATION, station_pos, sta_ball.radius, "NPC station"),
         (struct_id, DVec3::from_array(struct_pos), struct_ball.radius, "Upwell structure"),
         (gate.stargate_id, gate.position, gate_ball.radius, "stargate"),
+        (planet.celestial_id, planet.position, planet.radius, "planet"),
     ] {
         let mut cs_coll = ctx.build_ship_combat_state(char_a, ship_a, 640);
         cs_coll.undock_invulnerable_remaining_ticks = 0;

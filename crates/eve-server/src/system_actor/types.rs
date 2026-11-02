@@ -181,6 +181,16 @@ pub enum PendingCycleAction {
         is_overloaded: bool,
         effect_name: String,
     },
+    SyncOverloadState {
+        char_id: Option<CharacterId>,
+        ship_id: BallId,
+        module_id: i64,
+        is_overloaded: bool,
+    },
+    InvalidateShipFitting {
+        char_id: Option<CharacterId>,
+        ship_id: BallId,
+    },
 }
 
 #[derive(Default)]

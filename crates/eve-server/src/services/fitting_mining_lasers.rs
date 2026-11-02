@@ -249,25 +249,29 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "No active ship in session".into(),
                 }));
             };
-            if let Some(sys_id) = session.solar_system_id {
+            let was_cycling = if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.update_module_overload(ship_id, module_id, false).await;
-            }
+                sys.update_module_overload(ship_id, module_id, false).await.unwrap_or(false)
+            } else {
+                false
+            };
             let mut fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(fm) = fit.modules.get_mut(&module_id) {
-                if fm.state == eve_dogma::ModuleState::Overloaded {
-                    fm.state = eve_dogma::ModuleState::Active;
+            if !was_cycling {
+                if let Some(fm) = fit.modules.get_mut(&module_id) {
+                    if fm.state == eve_dogma::ModuleState::Overloaded {
+                        fm.state = eve_dogma::ModuleState::Online;
+                    }
+                }
+                fit.recalculate_stats(&ctx.sde);
+                ctx.store_ship_fitting(ship_id, fit.clone());
+                if let Some(sys_id) = session.solar_system_id {
+                    crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
                 }
             }
-            fit.recalculate_stats(&ctx.sde);
             let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-            ctx.store_ship_fitting(ship_id, fit);
-            if let Some(sys_id) = session.solar_system_id {
-                crate::services::space_destiny::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-            }
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
@@ -329,7 +333,8 @@ pub(crate) async fn handle_mining_and_deactivate(
                     message: "UserError: Cannot overheat modules while in-space Nanite Repair Paste repair is active".into(),
                 }));
             }
-            let mut affected_modules = Vec::new();
+            let mut notified_modules = Vec::new();
+            let mut cycling_modules = Vec::new();
             for (&mid, fm) in fit.modules.iter_mut() {
                 let r_idx = match fm.flag_id {
                     27..=34 => 0,
@@ -337,26 +342,47 @@ pub(crate) async fn handle_mining_and_deactivate(
                     11..=18 => 2,
                     _ => continue,
                 };
-                if r_idx == target_rack_idx && fm.state != eve_dogma::ModuleState::Offline {
-                    affected_modules.push(mid);
-                    if overloaded && fm.state == eve_dogma::ModuleState::Active {
+                if r_idx != target_rack_idx || fm.state == eve_dogma::ModuleState::Offline {
+                    continue;
+                }
+                if overloaded {
+                    if fm.state == eve_dogma::ModuleState::Online {
                         fm.state = eve_dogma::ModuleState::Overloaded;
-                    } else if !overloaded && fm.state == eve_dogma::ModuleState::Overloaded {
-                        fm.state = eve_dogma::ModuleState::Active;
+                        notified_modules.push(mid);
+                    } else if fm.state == eve_dogma::ModuleState::Active {
+                        cycling_modules.push(mid);
+                        notified_modules.push(mid);
+                    }
+                } else if fm.state == eve_dogma::ModuleState::Overloaded {
+                    cycling_modules.push(mid);
+                    notified_modules.push(mid);
+                }
+            }
+            if let Some(sys_id) = session.solar_system_id {
+                let sys = ctx.systems.get_or_spawn(sys_id);
+                for &mid in &cycling_modules {
+                    let was_cycling = sys.update_module_overload(ship_id, mid, overloaded).await.unwrap_or(false);
+                    if !overloaded && !was_cycling {
+                        if let Some(fm) = fit.modules.get_mut(&mid) {
+                            if fm.state == eve_dogma::ModuleState::Overloaded {
+                                fm.state = eve_dogma::ModuleState::Online;
+                            }
+                        }
+                    }
+                }
+            } else if !overloaded {
+                for &mid in &cycling_modules {
+                    if let Some(fm) = fit.modules.get_mut(&mid) {
+                        if fm.state == eve_dogma::ModuleState::Overloaded {
+                            fm.state = eve_dogma::ModuleState::Online;
+                        }
                     }
                 }
             }
             fit.recalculate_stats(&ctx.sde);
             ctx.store_ship_fitting(ship_id, fit);
-
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                for &mid in &affected_modules {
-                    let _ = sys.update_module_overload(ship_id, mid, overloaded).await;
-                }
-            }
             let notif_name = if overloaded { "OnHeatAdded" } else { "OnHeatRemoved" };
-            for &mid in &affected_modules {
+            for &mid in &notified_modules {
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     notif_name,
@@ -370,7 +396,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 ("overloaded", PyRep::Bool(overloaded)),
                 (
                     "moduleIDs",
-                    PyRep::List(affected_modules.into_iter().map(PyRep::Integer).collect()),
+                    PyRep::List(notified_modules.into_iter().map(PyRep::Integer).collect()),
                 ),
             ])))
         }
