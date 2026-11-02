@@ -38,6 +38,7 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
     let corp_id = field(&created, "corporationID").as_i64().unwrap();
 
     let dock_id = sess2.station_id.unwrap_or(60_003_760);
+    let mut trit_item_id = 0_i64;
     ctx.db.with_mut_snapshot(|s| {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.members.insert(PILOT_2);
@@ -47,11 +48,11 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
         s.characters.get_mut(&PILOT_2).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT_2).unwrap().balance = IskCents::ZERO;
         s.next_entity_id += 1;
-        let item_id = s.next_entity_id;
+        trit_item_id = s.next_entity_id;
         s.items.insert(
-            item_id,
+            trit_item_id,
             eve_db::InventoryItemRecord {
-                item_id,
+                item_id: trit_item_id,
                 type_id: 34,
                 owner_id: PILOT_2,
                 location_id: dock_id,
@@ -249,6 +250,7 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
     let corp_id = field(&created, "corporationID").as_i64().unwrap();
 
     let dock_id = sess2.station_id.unwrap_or(60_003_760);
+    let mut trit_item_id = 0_i64;
     ctx.db.with_mut_snapshot(|s| {
         let corp = s.corporations.get_mut(&corp_id).unwrap();
         corp.members.insert(PILOT_2);
@@ -258,11 +260,11 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
         s.characters.get_mut(&PILOT_2).unwrap().corporation_id = corp_id;
         s.characters.get_mut(&PILOT_2).unwrap().balance = IskCents::ZERO;
         s.next_entity_id += 1;
-        let item_id = s.next_entity_id;
+        trit_item_id = s.next_entity_id;
         s.items.insert(
-            item_id,
+            trit_item_id,
             eve_db::InventoryItemRecord {
-                item_id,
+                item_id: trit_item_id,
                 type_id: 34,
                 owner_id: PILOT_2,
                 location_id: dock_id,
@@ -366,6 +368,8 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
     ctx.db.with_mut_snapshot(|s| {
         eve_server::services::lp_store::record_lp_reward_log(s, PILOT_2, 1_000_006, 25, "LP reward".into(), now_unix);
     });
+    let over_deliv = rpc(&ctx, &mut sess2, "corporationSvc", "GoalProgress", &[PyRep::Integer(pid_deliv), PyRep::Integer(20)]).await;
+    assert_eq!(over_deliv.unwrap_err().code, "InsufficientContributionItems");
     rpc(&ctx, &mut sess2, "corporationSvc", "GoalProgress", &[PyRep::Integer(pid_deliv), PyRep::Integer(5)])
         .await
         .expect("GoalProgress DeliverItem");
@@ -375,6 +379,7 @@ async fn test_b22_corp_projects_and_npc_corp_rules() {
         assert_eq!(s.corp_projects[&pid_npc].current_quantity, 1);
         assert_eq!(s.corp_projects[&pid_lp].current_quantity, 25);
         assert_eq!(s.corp_projects[&pid_deliv].current_quantity, 5);
+        assert_eq!(s.items[&trit_item_id].quantity, 5, "DeliverItem must consume 5 Tritanium from PILOT_2 hangar");
         assert_eq!(s.characters[&PILOT_2].balance.raw_cents(), 135_000_00);
     });
 

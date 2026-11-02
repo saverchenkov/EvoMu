@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
+
 use crate::quasar_sov_equinox_hub::{drain, id_req, rpc, sess, structure as make_structure, subscribe};
 use eve_db::{corp_roles, InventoryItemRecord, PersistedMercenaryDen};
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field, WireMessage};
@@ -324,9 +326,24 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     encode_bytes_field(1, &draft_uuid, &mut d_id);
     encode_bytes_field(2, &d_id, &mut shared_req);
 
-    // A draft shared by link (character + draft UUID) is readable by any authenticated holder of the link
+    // Unshared draft is readable by owner, rejected with STATUS_FORBIDDEN for non-owner, and readable once shared
     let owner_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
     assert_eq!(owner_rsp.status_code, STATUS_OK);
+    let unshared_other_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
+    assert_eq!(unshared_other_rsp.status_code, STATUS_FORBIDDEN, "Unshared draft must be rejected for non-owner");
+
+    // Share the draft and verify non-owner can now read it via GetSharedRequest
+    {
+        let st = eve_server::services::quasar_cosmetics_services::QuasarCosmeticsState::from_db(Arc::clone(&ctx.db));
+        let draft_id = eve_server::services::quasar_cosmetics_drafts::extract_id_from_uuid_bytes(&draft_uuid);
+        {
+            let mut data = st.data.write().unwrap();
+            if let Some(d) = data.saved_drafts.get_mut(&(PILOT as u32)).and_then(|m| m.get_mut(&draft_id)) {
+                d.shared = true;
+            }
+        }
+        st.sync_to_db();
+    }
     let shared_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req).await;
     assert_eq!(shared_rsp.status_code, STATUS_OK, "{}", shared_rsp.status_message);
 

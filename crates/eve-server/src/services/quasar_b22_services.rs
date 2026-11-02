@@ -133,7 +133,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest",
             Arc::new(move |ctx, req_any, dyn_msg| {
-                let _caller = require_character(ctx)?;
+                let caller = require_character(ctx)?;
                 let target_char = extract_uint32_field(dyn_msg, &req_any.value, 1)
                     .filter(|&c| c > 0)
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid character ID".to_string()))?;
@@ -155,6 +155,20 @@ pub fn register_handlers(
                     })
                     .cloned()
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Shared draft {draft_id} not found for character {target_char}")))?;
+                drop(data);
+                if caller != target_char && !record.shared && !record.shared_with_characters.contains(&caller) {
+                    let caller_corp = db_shared.with_snapshot(|s| {
+                        s.characters.get(&i64::from(caller)).map(|c| c.corporation_id as u32)
+                    });
+                    let shared_with_corp = caller_corp
+                        .is_some_and(|cid| cid > 0 && record.shared_with_corps.contains(&cid));
+                    if !shared_with_corp && require_admin_role(ctx).is_err() {
+                        return Err((
+                            STATUS_FORBIDDEN,
+                            format!("Draft {draft_id} is not shared with character {caller}"),
+                        ));
+                    }
+                }
                 let attrs = encode_draft_attributes(&record);
                 let mut out = Vec::new();
                 encode_bytes_field(1, &attrs, &mut out);

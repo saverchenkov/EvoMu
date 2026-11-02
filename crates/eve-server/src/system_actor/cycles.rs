@@ -260,7 +260,7 @@ pub(crate) fn step_cycles_and_capacitor(
             *rack_absorption_sums.entry((c.ship_id, c.rack_idx.min(2))).or_insert(0.0) += abs_mod;
         }
     }
-let mut finished_indices = Vec::new();
+    let mut finished_indices = Vec::new();
     let mut burned_ship_modules: Vec<(BallId, i64)> = Vec::new();
     for (idx, cycle) in active_module_cycles.iter_mut().enumerate() {
         // If the source ship was destroyed / removed from space mid-cycle, cancel module cycle (`feat:combat.active-armor-repair-cycle-end`).

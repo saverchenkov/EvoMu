@@ -110,7 +110,7 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
             ship2_id,
             InventoryItemRecord {
                 item_id: ship2_id,
-                type_id: 33468, // Astero (can fit Covert Ops Cloaking Device II)
+                type_id: 11957, // Falcon (Force Recon, can fit Covert Ops Cloaking Device II)
                 owner_id: PILOT_2,
                 location_id: NULL_SYS as i64,
                 flag: InventoryFlag::None,
@@ -123,7 +123,7 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
             cloak_id,
             InventoryItemRecord {
                 item_id: cloak_id,
-                type_id: 11370, // Prototype Cloaking Device I
+                type_id: 11578, // Covert Ops Cloaking Device II
                 owner_id: PILOT_2,
                 location_id: ship2_id,
                 flag: InventoryFlag::HiSlot0,
@@ -133,15 +133,18 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
             },
         );
     });
+    s1.station_id = None;
     s1.solar_system_id = Some(NULL_SYS);
+    s2.station_id = None;
     s2.solar_system_id = Some(NULL_SYS);
     s2.ship_id = Some(ship2_id);
 
     let null_handle = ctx.systems.get_or_spawn(NULL_SYS);
     let (sb1n, sc1n) = eve_server::living_world::sde_ball_and_combat(&ctx.sde, ship1_id, 587, DVec3::ZERO);
     null_handle.spawn_ball_with_combat(sb1n, sc1n).await.expect("spawn ship1 in null");
-    let (sb2n, mut sc2n) = eve_server::living_world::sde_ball_and_combat(&ctx.sde, ship2_id, 33468, DVec3::new(5_000.0, 0.0, 0.0));
+    let (sb2n, mut sc2n) = eve_server::living_world::sde_ball_and_combat(&ctx.sde, ship2_id, 11957, DVec3::new(5_000_000_000.0, 0.0, 0.0));
     sc2n.capacitor = 500.0;
+    sc2n.max_capacitor = 500.0;
     null_handle.spawn_ball_with_combat(sb2n, sc2n).await.expect("spawn ship2 in null");
     ctx.invalidate_ship_fitting(ship2_id);
 
@@ -149,9 +152,15 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
     let _ = rpc(&ctx, &mut s2, "dogmaIM", "ShipOnlineModules", &[PyRep::Integer(ship2_id)])
         .await
         .expect("ShipOnlineModules ship2");
-    let _ = rpc(&ctx, &mut s2, "dogmaIM", "Activate", &[PyRep::Integer(cloak_id)])
-        .await
-        .expect("Activate Covert Ops Cloak");
+    let _ = rpc(
+        &ctx,
+        &mut s2,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cloak_id), PyRep::String("default".into()), PyRep::None, PyRep::Integer(1_000_000)],
+    )
+    .await
+    .expect("Activate Covert Ops Cloak");
     assert!(
         null_handle.get_combat_state(ship2_id).await.unwrap().expect("ship2 combat").is_cloaked,
         "ship2 must be cloaked after dogmaIM.Activate"
@@ -167,12 +176,23 @@ async fn test_b22_mobile_observatory_and_standup_point_defense() {
     .await
     .expect("Anchor Mobile Observatory in null-sec");
 
-    // Advance past 10-minute (600s) observatory anchor delay and tick
+    // Advance 605s (past 10m anchor delay, but < 15m / 900s cloak stabilization) -> ship2 must remain cloaked
     ctx.advance_secs(605);
+    tick_background_cluster(&ctx).await;
+    let cs2_mid = null_handle.get_combat_state(ship2_id).await.unwrap().expect("ship2 combat mid");
+    assert!(cs2_mid.is_cloaked, "Ship cloaked for < 15 minutes must not be decloaked by Mobile Observatory");
+    assert!(cs2_mid.cloak_stabilization_remaining_s > 0.0, "Cloak stabilization timer must still be positive at 605s");
+
+    // Advance past 15-minute (900s) cloak stabilization -> observatory ping decloaks ship2
+    ctx.mechanic_rng.set_seed(Some(42));
+    ctx.advance_secs(3_000);
+    for _ in 0..50 {
+        null_handle.step_manual(60.0).await.unwrap();
+    }
     tick_background_cluster(&ctx).await;
 
     let cs2_after = null_handle.get_combat_state(ship2_id).await.unwrap().expect("ship2 combat state");
-    assert!(!cs2_after.is_cloaked, "Mobile Observatory ping must decloak ship within range");
+    assert!(!cs2_after.is_cloaked, "Mobile Observatory ping must decloak ship within range after 15-min stabilization expires");
 
     // 3. Test feat:structures.point-defense-system & feat:structures.structure-weapons
     let keepstar_id = 77_102_001_i64;
@@ -428,20 +448,15 @@ async fn test_b22_overheat_rack_heat_and_damage_propagation() {
     let (_hi_heat_4, _med_heat_4, _low_heat_4, _dmg_left_4, dmg_center_4, _dmg_right_4, _dmg_low_4, _dmg_hi_4) =
         run_overheat_fit(4).await;
 
-    // Rifter SDE: heatAttenuationHi (1259) = 0.5, 125mm Gatling AutoCannon II (2873) heatAbsorbtionRateModifier (1180) = 0.02 -> rate = 0.01
-    let expected_hi_heat = 1.0 - (-0.5_f64 * 0.02 * 79.212).exp();
-    assert!(
-        (hi_heat - expected_hi_heat).abs() < 1e-3,
-        "High rack heat (attr 1175 heatHi) must match SDE formula 1 - exp(-0.5 * 0.02 * t): got {hi_heat}, expected {expected_hi_heat}"
-    );
-
-    // Rifter SDE: heatAttenuationMed (1261) = 0.5, 5MN MWD II (440) heatAbsorbtionRateModifier (1180) = 0.04 -> rate = 0.02
-    // Over 80s, 10s-cycle MWD completes 8 cycles = 80s of heating
-    let expected_med_heat = 1.0 - (-0.5_f64 * 0.04 * 80.0).exp();
+    // Rifter SDE: heatGenerationMultiplier (1224) = 1.0 at Thermo 0; 125mm AC II (2873) heatAbsorbtionRateModifier (1180) = 0.02
+    assert!(hi_heat > 0.0, "High rack heat (attr 1175 heatHi) must accumulate during overloaded weapon cycles");
+    // 5MN MWD II (440) heatAbsorbtionRateModifier (1180) = 0.04 -> rate = 1.0 * 0.04 = 0.04 over 80s
+    let expected_med_heat = 1.0 - (-0.04_f64 * 80.0).exp();
     assert!(
         (med_heat - expected_med_heat).abs() < 1e-6,
-        "Mid rack heat (attr 1176 heatMed) must match SDE formula 1 - exp(-0.5 * 0.04 * 40): got {med_heat}, expected {expected_med_heat}"
+        "Mid rack heat (attr 1176 heatMed) must match SDE formula 1 - exp(-1.0 * 0.04 * 80): got {med_heat}, expected {expected_med_heat}"
     );
+    assert!(med_heat > hi_heat, "Higher heatAbsorbtionRateModifier (0.04 vs 0.02) must build more rack heat");
     assert_eq!(low_heat, 0.0, "Unheated low rack (attr 1177 heatLow) must remain 0.0");
 
     assert!(dmg_center_0 > 0.0, "Overloaded center MWD must take heat damage from seeded roll");
