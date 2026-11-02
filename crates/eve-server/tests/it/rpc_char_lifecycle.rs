@@ -206,6 +206,7 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     let PyRep::KeyVal(pub_kv) = pub_info else { panic!("expected KeyVal") };
     assert_eq!(pub_kv.get("characterID"), Some(&PyRep::Integer(90_000_001)));
     assert_eq!(pub_kv.get("characterName"), Some(&PyRep::String("Aura Capsuleer".into())));
+    assert!(matches!(pub_kv.get("raceID"), Some(PyRep::Integer(r)) if *r > 0));
 
     // 7. GetRecentShipKillsAndLosses (queries real killmails)
     ctx.db.with_mut_snapshot(|snap| {

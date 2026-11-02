@@ -826,19 +826,21 @@ fn handle_char_mgr(
                         c.security_status,
                         c.description.clone(),
                         unix_to_filetime(c.create_date_unix),
+                        c.race_id,
                         c.bloodline_id,
                         c.gender,
                         c.school_id,
                     )
                 })
             });
-            let (name, corp, ally, sec, desc, cdate, bloodline, gender, school) = info.unwrap_or((
+            let (name, corp, ally, sec, desc, cdate, race, bloodline, gender, school) = info.unwrap_or((
                 "Unknown".into(),
                 1000044,
                 None,
                 0.0,
                 String::new(),
                 ctx.now_blueos_filetime_ticks(),
+                1,
                 1,
                 0,
                 0,
@@ -857,6 +859,7 @@ fn handle_char_mgr(
                 ("securityStatus", PyRep::Real(sec)),
                 ("description", PyRep::String(desc)),
                 ("createDateTime", PyRep::Integer(cdate)),
+                ("raceID", PyRep::Integer(race as i64)),
                 ("bloodlineID", PyRep::Integer(bloodline as i64)),
                 ("gender", PyRep::Integer(gender as i64)),
                 ("schoolID", PyRep::Integer(school as i64)),

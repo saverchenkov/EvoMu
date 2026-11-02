@@ -1291,22 +1291,13 @@ pub fn handle_contacts(
 
         ("charMgr", "GetAssetWorth") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let total_worth = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .values()
-                    .filter(|it| it.owner_id == char_id)
-                    .map(|it| {
-                        let unit_price = ctx
-                            .sde
-                            .types
-                            .get(&it.type_id)
-                            .map(|t| t.base_price)
-                            .unwrap_or(0.0);
-                        unit_price * (it.quantity.max(1) as f64)
-                    })
-                    .sum::<f64>()
+            let (asset_worth, plex_worth) = ctx.db.with_snapshot(|snap| {
+                snap.items.values().filter(|it| it.owner_id == char_id).fold((0.0, 0.0), |(assets, plex), it| {
+                    let val = ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0) * (it.quantity.max(1) as f64);
+                    if it.type_id == 44_992 { (assets, plex + val) } else { (assets + val, plex) }
+                })
             });
-            Some(Ok(PyRep::Real(total_worth)))
+            Some(Ok(PyRep::Tuple(vec![PyRep::Real(asset_worth), PyRep::Real(plex_worth)])))
         }
 
         // parity: feat:character.home-station

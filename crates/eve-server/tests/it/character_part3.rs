@@ -278,7 +278,12 @@ async fn test_p3_p4_p5_object_cache_config_service_and_notifications() {
         .dispatch_rpc(&mut sess, "charMgr", None, "GetAssetWorth", &[], &kw, None)
         .await
         .expect("charMgr.GetAssetWorth");
-    assert!(matches!(worth, PyRep::Real(_)));
+    let PyRep::Tuple(worth_pair) = worth else {
+        panic!("expected 2-tuple (asset_worth, plex_worth) from charMgr.GetAssetWorth");
+    };
+    assert_eq!(worth_pair.len(), 2);
+    assert!(matches!(worth_pair[0], PyRep::Real(_)));
+    assert!(matches!(worth_pair[1], PyRep::Real(_)));
 
     let skins_two_arg = ctx
         .dispatch_rpc(
