@@ -110,45 +110,11 @@ impl SystemRegistry {
     }
 
     pub fn with_sde(sde: Arc<SdeRegistry>) -> Self {
-        Self {
-            systems: RwLock::new(HashMap::new()),
-            sde: Some(sde),
-            db: None,
-            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_BELT_RESPAWN_INTERVAL_SECS)),
-            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
-            mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
-            npc_death_hook: Arc::new(RwLock::new(None)),
-            module_deactivation_hook: Arc::new(RwLock::new(None)),
-            target_lock_completed_hook: Arc::new(RwLock::new(None)),
-            system_step_hook: Arc::new(RwLock::new(None)),
-            special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
-            hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
-            tactical_state: Arc::new(RwLock::new(Default::default())),
-            pending_notifications_opt: None,
-            notify_tx_opt: None,
-            cluster_nodes: RwLock::new(ClusterNodeRegistry::default()),
-        }
+        Self { sde: Some(sde), ..Self::new() }
     }
 
     pub fn with_sde_and_db(sde: Arc<SdeRegistry>, db: Arc<eve_db::WorldRepository>) -> Self {
-        Self {
-            systems: RwLock::new(HashMap::new()),
-            sde: Some(sde),
-            db: Some(db),
-            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_BELT_RESPAWN_INTERVAL_SECS)),
-            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
-            mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
-            npc_death_hook: Arc::new(RwLock::new(None)),
-            module_deactivation_hook: Arc::new(RwLock::new(None)),
-            target_lock_completed_hook: Arc::new(RwLock::new(None)),
-            system_step_hook: Arc::new(RwLock::new(None)),
-            special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
-            hydrated_wh_ore_anomalies: std::sync::Mutex::new(std::collections::HashSet::new()),
-            tactical_state: Arc::new(RwLock::new(Default::default())),
-            pending_notifications_opt: None,
-            notify_tx_opt: None,
-            cluster_nodes: RwLock::new(ClusterNodeRegistry::default()),
-        }
+        Self { sde: Some(sde), db: Some(db), ..Self::new() }
     }
 
     pub fn with_notifications(
@@ -435,23 +401,13 @@ impl SystemRegistry {
         }));
         let actor_state_actor = actor_state_shared.clone();
         let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let initial_tidi = self
-            .cluster_nodes
-            .read()
-            .ok()
+        let initial_tidi = self.cluster_nodes.read().ok()
             .and_then(|cn| cn.manual_tidi_overrides.get(&solar_system_id).copied())
-            .or_else(|| {
-                self.db.as_ref().and_then(|db| {
-                    db.with_snapshot(|snap| {
-                        let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-                        snap.owner_notes
-                            .get(&nid)
-                            .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-                    })
-                })
-            })
-            .unwrap_or(1.0)
-            .clamp(0.10, 1.0);
+            .or_else(|| self.db.as_ref().and_then(|db| db.with_snapshot(|snap| {
+                let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
+                snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
+            })))
+            .unwrap_or(1.0).clamp(0.10, 1.0);
         let tidi_factor_bits = Arc::new(std::sync::atomic::AtomicU64::new(initial_tidi.to_bits()));
         let tidi_factor_bits_actor = tidi_factor_bits.clone();
 
@@ -998,14 +954,8 @@ impl SystemRegistry {
                                 }
                             }
                             SystemCommand::StepManual { dt, reply } => {
-                                let raw_tidi = f64::from_bits(
-                                    tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed),
-                                );
-                                let tidi = if raw_tidi.is_finite() {
-                                    raw_tidi.clamp(0.10, 1.0)
-                                } else {
-                                    1.0
-                                };
+                                let raw_tidi = f64::from_bits(tidi_factor_bits_actor.load(std::sync::atomic::Ordering::Relaxed));
+                                let tidi = if raw_tidi.is_finite() { raw_tidi.clamp(0.10, 1.0) } else { 1.0 };
                                 let dt_sim = if dt > 0.0 && dt.is_finite() { dt * tidi } else { dt };
                                 if dt_sim > 0.0 && dt_sim.is_finite() {
                                     *sim_elapsed_secs += dt_sim;
