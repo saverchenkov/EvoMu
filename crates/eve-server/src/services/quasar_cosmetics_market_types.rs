@@ -70,9 +70,29 @@ pub struct SkinListingRecord {
     pub branded: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CosmeticTransactionDetails {
+    PurchasingComponent,
+    PurchasingSkin,
+    CreatingSkinListing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CosmeticTransactionRecord {
+    pub uuid: [u8; 16],
+    pub last_updated_unix: u64,
+    /// `eve_public.cosmetic.market.transaction.Attributes.Status`: 2 = FAILED, 3 = SUCCESSFUL.
+    pub status: u32,
+    pub buyer_id: Option<u32>,
+    pub seller_id: Option<u32>,
+    pub details: CosmeticTransactionDetails,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CosmeticsMarketData {
     pub component_listings: BTreeMap<String, ComponentListingRecord>,
     pub skin_listings: BTreeMap<String, SkinListingRecord>,
+    #[serde(default)]
+    pub transactions: BTreeMap<String, CosmeticTransactionRecord>,
     pub next_seq: u64,
 }

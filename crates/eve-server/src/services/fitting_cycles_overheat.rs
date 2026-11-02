@@ -211,7 +211,6 @@ pub async fn handle_active_overload_toggle(
         ]);
     }
     let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-    let _ = apply_overheat_cycle_to_fit(ctx, char_id, &mut fit, module_id, 0.25);
     ctx.store_ship_fitting(ship_id, fit);
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
@@ -263,7 +262,7 @@ pub fn apply_overheat_cycle_to_fit(
     module_id: i64,
     dmg_roll: f64,
 ) -> Option<eve_dogma::HeatDamageReport> {
-    let (heat_gen_rate, heat_attenuation) = {
+    let (heat_gen_rate, dissipation_rate, cycle_duration_s) = {
         let m = fit.modules.get(&module_id)?;
         let mod_t = ctx.sde.types.get(&m.type_id);
         let absorb = mod_t
@@ -271,24 +270,39 @@ pub fn apply_overheat_cycle_to_fit(
             .filter(|v| *v > 0.0)
             .unwrap_or(0.05);
         let ship_t = ctx.sde.types.get(&fit.ship.type_id);
-        let atten_attr = match m.flag_id {
-            27..=34 => 1259,
-            19..=26 => 1260,
-            _ => 1261,
+        let diss_attr = match m.flag_id {
+            27..=34 => 1179,
+            19..=26 => 1189,
+            _ => 1199,
         };
-        let atten = ship_t
-            .and_then(|t| t.default_attributes.get(&atten_attr).copied())
+        let diss = ship_t
+            .and_then(|t| t.default_attributes.get(&diss_attr).copied())
             .filter(|v| *v > 0.0)
             .unwrap_or(0.01);
-        (absorb, atten)
+        let dur_s = (mod_t
+            .and_then(|t| t.default_attributes.get(&73).copied())
+            .unwrap_or(10_000.0)
+            / 1_000.0)
+            .max(1.0);
+        (absorb, diss, dur_s)
     };
     let thermo_lvl = ctx.db.with_snapshot(|s| {
         s.skills
             .get(&char_id)
             .and_then(|m| m.get(&28164))
-            .map(|sk| sk.level as f64)
-            .unwrap_or(0.0)
+            .map(|sk| sk.level)
+            .unwrap_or(0)
     });
-    fit.apply_heat_cycle(module_id, heat_gen_rate, heat_attenuation, thermo_lvl, dmg_roll, &ctx.sde)
-        .ok()
+    if thermo_lvl > 0 {
+        fit.character_skills.insert(28164, thermo_lvl);
+    }
+    fit.apply_heat_cycle(
+        module_id,
+        heat_gen_rate,
+        dissipation_rate,
+        cycle_duration_s,
+        dmg_roll,
+        &ctx.sde,
+    )
+    .ok()
 }

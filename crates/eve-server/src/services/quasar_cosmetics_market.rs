@@ -20,8 +20,9 @@ use super::quasar_cosmetics_market_types::{
     GROUP_SHIP_SKIN_DESIGN_ELEMENT, LISTING_DURATIONS_SECS,
 };
 pub use super::quasar_cosmetics_market_types::{
-    ComponentListingRecord, CosmeticsMarketData, ListingTargetRecord, SkinListingRecord,
-    BUYER_FEES_VERSION, MAX_LISTING_PRICE_UNITS, MAX_LISTING_QUANTITY, PARAGON_CORP_ID,
+    ComponentListingRecord, CosmeticTransactionDetails, CosmeticTransactionRecord,
+    CosmeticsMarketData, ListingTargetRecord, SkinListingRecord, BUYER_FEES_VERSION,
+    MAX_LISTING_PRICE_UNITS, MAX_LISTING_QUANTITY, PARAGON_CORP_ID,
 };
 use super::quasar_cosmetics_skinr::{SkinrCosmeticsState, ThirdPartySkinLicense};
 use super::quasar_social_chat::ctx_queue_notice;
@@ -370,6 +371,32 @@ fn encode_skin_entry(rec: &SkinListingRecord) -> Vec<u8> {
     entry
 }
 
+fn record_tx(
+    st: &CosmeticsMarketState,
+    uuid: [u8; 16],
+    last_updated_unix: u64,
+    succeeded: bool,
+    buyer_id: Option<u32>,
+    seller_id: Option<u32>,
+    details: CosmeticTransactionDetails,
+) {
+    {
+        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        data.transactions.insert(
+            hex(&uuid),
+            CosmeticTransactionRecord {
+                uuid,
+                last_updated_unix,
+                status: if succeeded { 3 } else { 2 },
+                buyer_id,
+                seller_id,
+                details,
+            },
+        );
+    }
+    st.save();
+}
+
 fn queue_transaction_notice(cid: u32, tx_uuid: &[u8; 16], succeeded: bool, now_unix: u64) {
     let mut payload = Vec::new();
     put_uuid(1, tx_uuid, &mut payload);
@@ -686,6 +713,7 @@ fn component_initiate_purchase(
         true
     });
     if let Some(rem) = debited_bal { st.emit_account_change(cid as i64, rem); }
+    record_tx(st, tx_uuid, now, succeeded, Some(cid), None, CosmeticTransactionDetails::PurchasingComponent);
     queue_transaction_notice(cid, &tx_uuid, succeeded, now);
     let mut out = Vec::new();
     put_uuid(1, &tx_uuid, &mut out);
@@ -971,7 +999,7 @@ fn skin_initiate_create(
                 lic.escrowed = lic.escrowed.saturating_sub(u64::from(quantity));
             }
         }
-        st.save();
+        record_tx(st, tx_uuid, now, false, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
         queue_transaction_notice(cid, &tx_uuid, false, now);
         let mut out = Vec::new();
         put_uuid(1, &tx_uuid, &mut out);
@@ -982,7 +1010,7 @@ fn skin_initiate_create(
     };
     if broker_fee.0 > 0 { st.emit_account_change(cid as i64, new_bal); }
     st.skinr.save();
-    st.save();
+    record_tx(st, tx_uuid, now, true, None, Some(cid), CosmeticTransactionDetails::CreatingSkinListing);
     queue_transaction_notice(cid, &tx_uuid, true, now);
     let mut out = Vec::new();
     put_uuid(1, &tx_uuid, &mut out);
@@ -1128,6 +1156,7 @@ fn skin_initiate_purchase(
     });
     if buyer_lp < buyer_lp_fee {
         rollback_listing_qty(st, &listing, quantity);
+        record_tx(st, tx_uuid, now, false, Some(cid), Some(listing.seller_id), CosmeticTransactionDetails::PurchasingSkin);
         queue_transaction_notice(cid, &tx_uuid, false, now);
         return Err((STATUS_PRECONDITION_FAILED, "Insufficient EverMarks for buyer fee".to_string()));
     }
@@ -1274,7 +1303,7 @@ fn skin_initiate_purchase(
     } else {
         rollback_listing_qty(st, &listing, quantity);
     }
-    st.save();
+    record_tx(st, tx_uuid, now, settled, Some(cid), Some(listing.seller_id), CosmeticTransactionDetails::PurchasingSkin);
     queue_transaction_notice(cid, &tx_uuid, settled, now);
     let mut out = Vec::new();
     put_uuid(1, &tx_uuid, &mut out);

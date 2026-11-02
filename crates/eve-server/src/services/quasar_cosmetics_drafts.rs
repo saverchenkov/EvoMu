@@ -38,6 +38,12 @@ pub struct SkinrDraftRecord {
     pub editor_cfg: Vec<u8>,
     #[serde(default)]
     pub ship_type_id: u32,
+    #[serde(default)]
+    pub shared: bool,
+    #[serde(default)]
+    pub shared_with_characters: Vec<u32>,
+    #[serde(default)]
+    pub shared_with_corps: Vec<u32>,
 }
 
 pub fn id_to_uuid_bytes(id: u64) -> [u8; 16] {
@@ -524,6 +530,9 @@ pub fn register_draft_and_title_handlers(
                             updated_at_unix: ctx.now_unix(),
                             editor_cfg: Vec::new(),
                             ship_type_id: 0,
+                            shared: false,
+                            shared_with_characters: Vec::new(),
+                            shared_with_corps: Vec::new(),
                         });
                     }
                     user_drafts.values().cloned().collect()
@@ -683,6 +692,9 @@ pub fn register_draft_and_title_handlers(
                         updated_at_unix: ctx.now_unix(),
                         editor_cfg,
                         ship_type_id,
+                        shared: false,
+                        shared_with_characters: Vec::new(),
+                        shared_with_corps: Vec::new(),
                     };
                     user_drafts.insert(draft_id, rec.clone());
                     data.skinr_drafts.insert(draft_id, (char_id, name));

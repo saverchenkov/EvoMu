@@ -551,24 +551,33 @@ impl LivingWorldDirector {
             .map(|st| st.position)
             .unwrap_or(belt_hauler_pos + DVec3::new(100_000_000.0, 0.0, 0.0));
         let in_transit_cargo = self.hauler_cargo_units(convoy_id);
-        let desired_hauler_pos = if in_transit_cargo > 0 { dest_station_pos } else { belt_hauler_pos };
-        if handle
-            .get_ball_snapshot(hauler_ball_id)
-            .await
-            .ok()
-            .flatten()
-            .is_none()
-        {
+        let hauler_snap = handle.get_ball_snapshot(hauler_ball_id).await.ok().flatten();
+        if in_transit_cargo > 0 {
+            if let Some((_, hb)) = hauler_snap {
+                if (hb.position - dest_station_pos).length() > 5_000.0 {
+                    let _ = handle
+                        .set_movement_mode(
+                            hauler_ball_id,
+                            eve_destiny::MovementMode::new_warp(hb.position, dest_station_pos, 3.0),
+                        )
+                        .await;
+                }
+            }
+        } else if hauler_snap.is_none() {
             let hauler_tid = hauler_type_for_system(sde, sys_id);
             let (h_ball, h_combat) = sde_ball_and_combat(
                 sde,
                 hauler_ball_id,
                 hauler_tid,
-                desired_hauler_pos,
+                dest_station_pos,
             );
             let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
-        } else {
-            let _ = handle.set_ball_position(hauler_ball_id, desired_hauler_pos).await;
+            let _ = handle
+                .set_movement_mode(
+                    hauler_ball_id,
+                    eve_destiny::MovementMode::new_warp(dest_station_pos, belt_hauler_pos, 3.0),
+                )
+                .await;
         }
 
         // DERIVED (MN-17): NPC mining op simulation uses SDE hull + Miner I (`483`) attributes rather
@@ -616,18 +625,25 @@ impl LivingWorldDirector {
             0
         };
         let ore_hold_m3 = ship_type
-            .and_then(|t| t.default_attributes.get(&1556).copied().or(Some(t.capacity)))
+            .and_then(|t| {
+                t.default_attributes
+                    .get(&1556)
+                    .copied()
+                    .filter(|&v| v > 0.0)
+                    .or_else(|| (t.capacity > 0.0).then_some(t.capacity))
+            })
             .unwrap_or(5_000.0)
-            .max(500.0);
+            .clamp(500.0, 5_000.0);
 
         let extraction = handle.mine_asteroid(target_id, units_per_tick, 0.0).await?;
 
         let mut hauled = false;
         let mut final_cargo = current_cargo + extraction.mined_units as i32;
 
-        // If hauler is at destination station with cargo, offload into NPC sell orders and return to belt
+        // If hauler is at destination station with cargo, dock/remove ball, offload into NPC sell orders, and return to belt
         if in_transit_cargo > 0 {
             hauled = true;
+            let _ = handle.remove_ball(hauler_ball_id).await;
             let added_units = in_transit_cargo;
             let (sys_region_id, owner_corp_id) = sde
                 .solar_systems
@@ -1050,17 +1066,33 @@ impl LivingWorldDirector {
             .get(&solar_system_id)
             .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
             .unwrap_or(60_003_760);
+        let miner_type_id = sde
+            .types
+            .values()
+            .filter(|t| {
+                t.category_id == 11
+                    && t.published
+                    && t.name.to_ascii_lowercase().contains("mining frigate")
+            })
+            .min_by_key(|t| t.type_id)
+            .map(|t| t.type_id)
+            .unwrap_or(32880);
+        let default_ore_id = sde
+            .belt_ores_for_system(solar_system_id)
+            .first()
+            .map(|t| t.type_id)
+            .unwrap_or(1230);
         let convoy_id = 800_100_000 + (solar_system_id as i64 % 100_000);
         let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
         convoys.entry(convoy_id).or_insert(LivingWorldConvoy {
             convoy_id,
             archetype: NpcArchetype::MiningOp,
-            ship_type_id: 32880, // Venture
+            ship_type_id: miner_type_id,
             origin_system_id: solar_system_id,
             current_system_id: solar_system_id,
             destination_system_id: solar_system_id,
             destination_station_id: dest_station_id,
-            cargo_type_id: 1230, // Veldspar
+            cargo_type_id: default_ore_id,
             cargo_quantity: 0,
             lod_level: 1,
             destroyed: false,

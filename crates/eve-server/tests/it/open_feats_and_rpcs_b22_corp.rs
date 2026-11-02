@@ -10,12 +10,11 @@ use super::open_feats_and_rpcs_b22::{field, rowset_rows, rpc, select_pilot, PILO
 
 #[tokio::test]
 async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
-    // parity: feat:corporation.ceo-resign, feat:corporation.corp-division-names, feat:corporation.dividends, feat:corporation.pending-auto-kick, feat:corporation.share-transfer
+    // parity: feat:corporation.ceo-resign, feat:corporation.corp-division-names, feat:corporation.dividends, feat:corporation.share-transfer
     eve_testkit::attest(&[
         "feat:corporation.ceo-resign",
         "feat:corporation.corp-division-names",
         "feat:corporation.dividends",
-        "feat:corporation.pending-auto-kick",
         "feat:corporation.share-transfer",
     ]);
 
@@ -223,13 +222,11 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
 
 #[tokio::test]
 async fn test_b22_corp_projects_and_npc_corp_rules() {
-    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-contribution-methods, feat:corporation.corp-project-reward-pool, feat:corporation.npc-corp-placement-rules, feat:corporation.npc-corp-tax-rate
+    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-contribution-methods, feat:corporation.corp-project-reward-pool
     eve_testkit::attest(&[
         "feat:corporation.corp-project-close-expiry",
         "feat:corporation.corp-project-contribution-methods",
         "feat:corporation.corp-project-reward-pool",
-        "feat:corporation.npc-corp-placement-rules",
-        "feat:corporation.npc-corp-tax-rate",
     ]);
 
     let ctx = ServerContext::new();

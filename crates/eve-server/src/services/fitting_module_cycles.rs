@@ -713,11 +713,6 @@ pub(crate) async fn handle_module_cycles(
                     }
                 }
                 let is_overloaded = method == "Overload" || m.state == eve_dogma::ModuleState::Overloaded;
-                if is_overloaded {
-                    let _ = crate::services::fitting_cycles_overheat::apply_overheat_cycle_to_fit(
-                        ctx, char_id, &mut fit, module_id, 0.25,
-                    );
-                }
                 let mod_state = fit.build_effective_module_state(module_id, m.type_id, is_overloaded, &ctx.sde);
 
                 let ship_group_id = ctx

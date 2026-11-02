@@ -66,10 +66,9 @@ fn bytes_field(m: &WireMessage, field: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_b22_quasar_sov_hub_and_star_resources() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
     ]);
@@ -103,12 +102,12 @@ async fn test_b22_quasar_sov_hub_and_star_resources() {
     let mut s = sess(61_001, PILOT, CORP, JITA, corp_roles::ROLE_DIRECTOR);
     let mut outsider = sess(61_002, OTHER, 98_000_002, JITA, 0);
 
-    // 1. Star & Planet resource configurations from SDE
+    // 1. Star (DERIVED Equinox star_power fallback) & Planet resource configurations from SDE
     let star_rsp = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(star_rsp.status_code, STATUS_OK);
     let star_wm = wm(&star_rsp.payload.unwrap().value);
     let stars = fields(&star_wm, 1);
-    assert!(!stars.is_empty(), "Jita star configuration must be returned from SDE");
+    assert!(!stars.is_empty(), "Jita star configuration must be returned from DERIVED Equinox star_power fallback");
     assert!(varint(&stars[0], 2).unwrap_or(0) > 0, "Star power output must be positive");
 
     let planet_rsp = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new()).await;
@@ -142,12 +141,11 @@ async fn test_b22_quasar_sov_hub_and_star_resources() {
 
 #[tokio::test]
 async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -240,9 +238,8 @@ async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
 
 #[tokio::test]
 async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
@@ -312,7 +309,7 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
         "Expected StartedNotice"
     );
 
-    // 2. Batch 22 Quasar services: Save SKINR draft & fetch via GetSharedRequest + error cases
+    // 2. Batch 22 Quasar services: Save SKINR draft & enforce sharing on GetSharedRequest
     let mut save_req = Vec::new();
     encode_string_field(1, "B22 Test Skin", &mut save_req);
     encode_string_field(2, "B22 Line", &mut save_req);
@@ -325,10 +322,78 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
     let mut d_id = Vec::new();
     encode_bytes_field(1, &draft_uuid, &mut d_id);
     encode_bytes_field(2, &d_id, &mut shared_req);
+
+    // Unshared draft is forbidden to non-owners, allowed to owner
+    let unshared_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
+    assert_eq!(unshared_rsp.status_code, STATUS_FORBIDDEN);
+    let owner_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req.clone()).await;
+    assert_eq!(owner_rsp.status_code, STATUS_OK);
+
+    // Mark draft shared; now OTHER can fetch it
+    {
+        let cos_state = eve_server::services::quasar_cosmetics_services::QuasarCosmeticsState::from_db(ctx.db.clone());
+        let mut cos_data = cos_state.data.write().unwrap();
+        if let Some(dmap) = cos_data.saved_drafts.get_mut(&(PILOT as u32)) {
+            for rec in dmap.values_mut() {
+                rec.shared = true;
+            }
+        }
+        drop(cos_data);
+        cos_state.sync_to_db();
+    }
     let shared_rsp = rpc(&ctx, &mut other, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest", shared_req).await;
     assert_eq!(shared_rsp.status_code, STATUS_OK, "{}", shared_rsp.status_message);
 
-    // Missing draft returns STATUS_NOT_FOUND; malformed UUID returns STATUS_BAD_REQUEST
+    // 3. Cosmetic market transactions: GetAllRequest starts empty (no fabricated next_seq),
+    // records real component purchase transactions, and enforces participant authorization.
+    let tx_all_empty = rpc(&ctx, &mut s, "eve_public.cosmetic.market.transaction.api.GetAllRequest", Vec::new()).await;
+    assert_eq!(tx_all_empty.status_code, STATUS_OK);
+    assert!(fields(&wm(&tx_all_empty.payload.unwrap().value), 1).is_empty());
+
+    let comp_list_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
+    assert_eq!(comp_list_rsp.status_code, STATUS_OK);
+    let comp_entries = fields(&wm(&comp_list_rsp.payload.unwrap().value), 1);
+    let comp_uuid = bytes_field(&sub(&comp_entries[0], 1), 1);
+
+    let mut buy_comp_req = Vec::new();
+    let mut comp_id_msg = Vec::new();
+    encode_bytes_field(1, &comp_uuid, &mut comp_id_msg);
+    encode_bytes_field(1, &comp_id_msg, &mut buy_comp_req);
+    encode_varint_field(2, 1, &mut buy_comp_req);
+    let buy_comp_rsp = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingRequest",
+        buy_comp_req,
+    )
+    .await;
+    assert_eq!(buy_comp_rsp.status_code, STATUS_OK, "{}", buy_comp_rsp.status_message);
+    let tx_uuid = bytes_field(&sub(&wm(&buy_comp_rsp.payload.unwrap().value), 1), 1);
+
+    let tx_all_pilot = rpc(&ctx, &mut s, "eve_public.cosmetic.market.transaction.api.GetAllRequest", Vec::new()).await;
+    assert_eq!(tx_all_pilot.status_code, STATUS_OK);
+    let pilot_txs = fields(&wm(&tx_all_pilot.payload.unwrap().value), 1);
+    assert_eq!(pilot_txs.len(), 1);
+    assert_eq!(bytes_field(&pilot_txs[0], 1), tx_uuid);
+
+    let tx_all_other = rpc(&ctx, &mut other, "eve_public.cosmetic.market.transaction.api.GetAllRequest", Vec::new()).await;
+    assert_eq!(tx_all_other.status_code, STATUS_OK);
+    assert!(fields(&wm(&tx_all_other.payload.unwrap().value), 1).is_empty());
+
+    let mut get_tx_req = Vec::new();
+    let mut get_tx_id = Vec::new();
+    encode_bytes_field(1, &tx_uuid, &mut get_tx_id);
+    encode_bytes_field(1, &get_tx_id, &mut get_tx_req);
+    let tx_rsp = rpc(&ctx, &mut s, "eve_public.cosmetic.market.transaction.api.GetRequest", get_tx_req.clone()).await;
+    assert_eq!(tx_rsp.status_code, STATUS_OK);
+    let tx_attrs = sub(&wm(&tx_rsp.payload.unwrap().value), 1);
+    assert!(varint(&sub(&tx_attrs, 1), 1).unwrap_or(0) > 0, "last_updated seconds must be set");
+    assert_eq!(varint(&tx_attrs, 2), Some(3), "status must be SUCCESSFUL (3)");
+
+    let tx_other = rpc(&ctx, &mut other, "eve_public.cosmetic.market.transaction.api.GetRequest", get_tx_req).await;
+    assert_eq!(tx_other.status_code, STATUS_FORBIDDEN);
+
+    // Missing draft / transaction return STATUS_NOT_FOUND; malformed UUID returns STATUS_BAD_REQUEST
     let mut bad_req = id_req(1, PILOT as u64);
     let mut bad_id = Vec::new();
     encode_bytes_field(1, b"short", &mut bad_id);

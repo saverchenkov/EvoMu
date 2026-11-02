@@ -5,13 +5,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_cosmetics_drafts::{
-    encode_draft_attributes, extract_id_from_uuid_bytes, id_to_uuid_bytes,
+use super::quasar_cosmetics_drafts::{encode_draft_attributes, extract_id_from_uuid_bytes};
+use super::quasar_cosmetics_market_types::{
+    CosmeticTransactionDetails, CosmeticTransactionRecord, CosmeticsMarketData,
 };
-use super::quasar_cosmetics_market_types::CosmeticsMarketData;
 use super::quasar_cosmetics_services::QuasarCosmeticsState;
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
+    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -31,6 +32,34 @@ fn any(type_name: &str, value: Vec<u8>) -> GoogleAny {
 fn require_character(ctx: &AuthoritativeContext) -> Result<u32, (u32, String)> {
     ctx.effective_character_id()
         .ok_or_else(|| (STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))
+}
+
+fn hex_uuid(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+fn encode_transaction_attributes(tx: &CosmeticTransactionRecord) -> Vec<u8> {
+    let mut ts = Vec::new();
+    encode_varint_field(1, tx.last_updated_unix, &mut ts);
+
+    let mut details = Vec::new();
+    let detail_field = match tx.details {
+        CosmeticTransactionDetails::PurchasingComponent => 1,
+        CosmeticTransactionDetails::PurchasingSkin => 2,
+        CosmeticTransactionDetails::CreatingSkinListing => 3,
+    };
+    encode_bytes_field(detail_field, &[], &mut details);
+
+    let mut attrs = Vec::new();
+    encode_bytes_field(1, &ts, &mut attrs);
+    encode_varint_field(2, u64::from(tx.status), &mut attrs);
+    encode_bytes_field(3, &details, &mut attrs);
+    attrs
 }
 
 fn extract_uint32_field(_dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8], field_num: u32) -> Option<u32> {
@@ -105,7 +134,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSharedRequest",
             Arc::new(move |ctx, req_any, dyn_msg| {
-                let _caller = require_character(ctx)?;
+                let caller = require_character(ctx)?;
                 let target_char = extract_uint32_field(dyn_msg, &req_any.value, 1)
                     .filter(|&c| c > 0)
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid character ID".to_string()))?;
@@ -127,6 +156,20 @@ pub fn register_handlers(
                     })
                     .cloned()
                     .ok_or_else(|| (STATUS_NOT_FOUND, format!("Shared draft {draft_id} not found for character {target_char}")))?;
+                let is_owner = caller == target_char;
+                let caller_corp = db_shared.with_snapshot(|s| {
+                    s.characters
+                        .get(&(caller as i64))
+                        .map(|c| c.corporation_id)
+                        .filter(|&cid| cid > 0)
+                });
+                let is_shared = record.shared
+                    || record.shared_with_characters.contains(&caller)
+                    || caller_corp
+                        .is_some_and(|cid| record.shared_with_corps.contains(&(cid as u32)));
+                if !is_owner && !is_shared && require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Draft is not shared with caller".to_string()));
+                }
                 let attrs = encode_draft_attributes(&record);
                 let mut out = Vec::new();
                 encode_bytes_field(1, &attrs, &mut out);
@@ -144,30 +187,34 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.market.transaction.api.GetRequest",
             Arc::new(move |ctx, req_any, dyn_msg| {
-                let _caller = require_character(ctx)?;
+                let caller = require_character(ctx)?;
                 let uuid = extract_uuid_field(dyn_msg, &req_any.value, 1)
                     .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing transaction UUID".to_string()))?;
                 if uuid.len() != 16 {
                     return Err((STATUS_BAD_REQUEST, "Transaction UUID must be 16 bytes".to_string()));
                 }
-                let tx_id = extract_id_from_uuid_bytes(&uuid);
-                let found = db_tx.with_snapshot(|snap| {
+                let tx_key = hex_uuid(&uuid);
+                let tx_opt = db_tx.with_snapshot(|snap| {
                     let market: CosmeticsMarketData = snap
                         .quasar_state_blobs
                         .get("quasar_cosmetics_market")
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default();
-                    let in_market = market.skin_listings.values().any(|l| l.uuid.as_slice() == uuid.as_slice())
-                        || (tx_id > 0 && tx_id <= market.next_seq);
-                    let in_journal = snap.wallet_journal.iter().any(|j| j.entry_id as u64 == tx_id);
-                    in_market || in_journal
+                    market.transactions.get(&tx_key).cloned()
                 });
-                if !found {
-                    return Err((STATUS_NOT_FOUND, format!("Cosmetic market transaction {tx_id} not found")));
+                let Some(tx) = tx_opt else {
+                    return Err((STATUS_NOT_FOUND, "Cosmetic market transaction not found".to_string()));
+                };
+                let is_participant = tx.buyer_id == Some(caller) || tx.seller_id == Some(caller);
+                if !is_participant && require_admin_role(ctx).is_err() {
+                    return Err((
+                        STATUS_FORBIDDEN,
+                        "Transaction belongs to another character".to_string(),
+                    ));
                 }
+                let attrs = encode_transaction_attributes(&tx);
                 let mut out = Vec::new();
-                // status = 1 (STATUS_SUCCEEDED)
-                encode_varint_field(1, 1, &mut out);
+                encode_bytes_field(1, &attrs, &mut out);
                 Ok(any(
                     "eve_public.cosmetic.market.transaction.api.GetResponse",
                     out,
@@ -189,16 +236,12 @@ pub fn register_handlers(
                         .get("quasar_cosmetics_market")
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or_default();
-                    let mut list: Vec<[u8; 16]> = market
-                        .skin_listings
+                    market
+                        .transactions
                         .values()
-                        .filter(|l| l.seller_id == caller)
-                        .map(|l| l.uuid)
-                        .collect();
-                    if list.is_empty() && market.next_seq > 0 {
-                        list.push(id_to_uuid_bytes(market.next_seq));
-                    }
-                    list
+                        .filter(|tx| tx.buyer_id == Some(caller) || tx.seller_id == Some(caller))
+                        .map(|tx| tx.uuid)
+                        .collect::<Vec<[u8; 16]>>()
                 });
                 let mut out = Vec::new();
                 for u in uuids {
