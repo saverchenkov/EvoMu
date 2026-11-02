@@ -184,10 +184,12 @@ async fn test_sov_hub_mercenaryden_and_star_resources_descriptors() {
     let stars = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(stars.status_code, STATUS_OK);
     let star_cfgs = fields(&stars.payload.unwrap().value, 1);
-    assert_eq!(star_cfgs.len(), 1, "Jita must return 1 SDE star configuration");
-    let decoded_star_id = field(&star_cfgs[0], 1).and_then(|id| varint(&id, 1));
-    assert_eq!(decoded_star_id, Some(expected_star_id));
-    assert!(varint(&star_cfgs[0], 2).unwrap_or(0) > 0);
+    assert!(!star_cfgs.is_empty(), "Must return SDE star configurations");
+    let jita_star_cfg = star_cfgs
+        .iter()
+        .find(|cfg| field(cfg, 1).and_then(|id| varint(&id, 1)) == Some(expected_star_id))
+        .expect("GetAllConfigurationsResponse must include Jita SDE star");
+    assert!(varint(jita_star_cfg, 2).unwrap_or(0) > 0);
 
     // 3. Seed Mercenary Den and verify EvolutionStateChangedNotice + Activity requests/notices.
     let planet_id = 40_009_048i64;

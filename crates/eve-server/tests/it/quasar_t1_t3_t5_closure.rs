@@ -251,6 +251,11 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
     ]);
 
     let ctx = ServerContext::new();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.plex_balance = 100;
+        }
+    });
     let mut gm = sess(92_003, PILOT, CORP, JITA, 0);
     gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let mut s = sess(92_004, PILOT, CORP, JITA, 0);
@@ -314,6 +319,37 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
     // Advance clock by 30 days so planned_duration_secs elapses naturally
     ctx.clock.read().unwrap().advance_secs(30 * 86_400);
 
+    // Without calling GetAllActiveRequest first:
+    // 1. CompleteEarlyRequest on an already-elapsed job must reject and deduct 0 PLEX.
+    let early_res = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(early_res.status_code, STATUS_BAD_REQUEST);
+    let plex_after = ctx
+        .db
+        .with_snapshot(|snap| snap.characters.get(&PILOT).map(|c| c.plex_balance))
+        .unwrap_or(0);
+    assert_eq!(plex_after, 100, "Naturally elapsed job must not deduct 5 PLEX on CompleteEarlyRequest");
+
+    // 2. GetOwnedRequest must already include the newly sequenced SKIN license.
+    let owned_res = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(owned_res.status_code, STATUS_OK);
+    assert_eq!(
+        fields(&owned_res.payload.unwrap().value, 1).len(),
+        1,
+        "GetOwnedRequest must settle elapsed job and return the new SKIN license"
+    );
+
     let active_res = rpc(
         &ctx,
         &mut s,
@@ -343,19 +379,29 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
     let ctx = ServerContext::new();
     common::seed_test_nes_store_catalog(&ctx);
     ctx.db.with_mut_snapshot(|snap| {
-        let tokens = vec![eve_server::services::quasar_payment_store::PaymentTokenRecord {
-            id: 1,
-            user_id: 1,
-            token_str: "tok_visa_4242".into(),
-            is_quick_pay: true,
-            consumed: false,
-        }];
+        let tokens = vec![
+            eve_server::services::quasar_payment_store::PaymentTokenRecord {
+                id: 1,
+                user_id: 1,
+                token_str: "tok_visa_4242".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            eve_server::services::quasar_payment_store::PaymentTokenRecord {
+                id: 2,
+                user_id: 1,
+                token_str: "tok_visa_4243".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
         snap.service_state_blobs
             .insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
     });
     let mut s = sess(92_005, PILOT, CORP, JITA, 0);
 
-    // Purchase Omega offer "1001" via TokenRequest -> creates payment schedule
+    // Purchase Omega offer "1001" twice via TokenRequest -> creates and extends payment schedule
+    let now_unix = ctx.now_unix();
     let mut off_ident = Vec::new();
     encode_string_field(1, "1001", &mut off_ident);
     let mut order_msg = Vec::new();
@@ -365,6 +411,12 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
     encode_bytes_field(2, &idm(1), &mut purchase_req);
     let p_res = rpc(&ctx, &mut s, "eve_public.payment.purchase.api.TokenRequest", purchase_req).await;
     assert_eq!(p_res.status_code, STATUS_OK);
+
+    let mut purchase_req2 = Vec::new();
+    encode_bytes_field(1, &order_msg, &mut purchase_req2);
+    encode_bytes_field(2, &idm(2), &mut purchase_req2);
+    let p_res2 = rpc(&ctx, &mut s, "eve_public.payment.purchase.api.TokenRequest", purchase_req2).await;
+    assert_eq!(p_res2.status_code, STATUS_OK);
 
     let mut by_type_req = Vec::new();
     encode_varint_field(1, 1, &mut by_type_req);
@@ -392,6 +444,11 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
     let sched_payload = get_sched.payload.unwrap().value;
     let sched_attr = field(&sched_payload, 1).expect("schedule attributes");
     assert_eq!(varint(&sched_attr, 1), Some(1), "Omega schedule type = 1");
+    let next_pay_ts = field(&sched_attr, 2).and_then(|t| varint(&t, 1)).unwrap_or(0);
+    assert!(
+        next_pay_ts >= now_unix + 60 * 86_400,
+        "Consecutive 30-day Omega purchases must accumulate next_payment_unix (+60d), got {next_pay_ts} vs {now_unix}"
+    );
     assert_eq!(varint(&sched_attr, 4), Some(30), "30-day recurring interval");
 
     // Faction activity admin: non-admin rejected, admin increments FW victory points

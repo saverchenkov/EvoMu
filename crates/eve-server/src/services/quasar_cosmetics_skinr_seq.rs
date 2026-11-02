@@ -294,6 +294,7 @@ fn handle_skin_license_get_owned(
     req_type: &str,
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
+    settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let mut owned_hexes: Vec<String> = data
         .skin_licenses
@@ -341,6 +342,7 @@ fn handle_skin_license_get(
         return Err((STATUS_FORBIDDEN, "Cannot read another character's SKIN license".into()));
     }
     let key = SkinrCosmeticsState::skin_lic_key(target_cid, &skin_hex);
+    settle_completed_jobs(state, ctx.now_unix());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let redeemed_qty = super::quasar_entitlement_ledger::redeemed_skin_licenses_for_char(&state.db, target_cid)
         .into_iter()
@@ -387,6 +389,7 @@ fn handle_skin_license_activate(
         return Err((STATUS_FORBIDDEN, "Cannot activate another character's SKIN license".into()));
     }
     let key = SkinrCosmeticsState::skin_lic_key(caller, &skin_hex);
+    settle_completed_jobs(state, ctx.now_unix());
     let (updated, prev) = {
         let mut data = state.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(lic) = data.skin_licenses.get_mut(&key) else {
@@ -869,6 +872,7 @@ fn handle_job_initiate(
 ) -> HandlerResult {
     let cid = require_char(ctx)?;
     let now = ctx.now_unix();
+    settle_completed_jobs(state, now);
     let (_, dur_disc, max_jobs) = skill_discounts_and_cap(state, Some(cid));
 
     let preview_uuid = {
@@ -1163,6 +1167,7 @@ fn handle_job_complete_early(
 ) -> HandlerResult {
     let caller = require_char(ctx)?;
     let now = ctx.now_unix();
+    settle_completed_jobs(state, now);
     let target_uuid = match parse_job_uuid(dyn_msg, raw) {
         Some(u) => u,
         None if raw.is_empty() => {

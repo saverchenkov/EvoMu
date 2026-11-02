@@ -66,11 +66,9 @@ fn can_relay_export(
     if exporter_id == importer_id || !linked_owners(snap, exporter_id, importer_id) {
         return false;
     }
-    if dest_sys == imp_sys {
-        return systems_within_jumps(sde, exp_sys, WORKFORCE_TRANSFER_MAX_JUMPS).contains_key(&imp_sys);
-    }
-    if !systems_within_jumps(sde, exp_sys, WORKFORCE_TRANSFER_MAX_JUMPS).contains_key(&dest_sys) {
-        return false;
+    let exp_reach = systems_within_jumps(sde, exp_sys, WORKFORCE_TRANSFER_MAX_JUMPS);
+    if dest_sys == imp_sys && exp_reach.contains_key(&imp_sys) {
+        return true;
     }
     // Collect all Transit relay hubs belonging to the same owner/alliance.
     let transit_hubs: Vec<(i64, u32)> = snap
@@ -88,9 +86,20 @@ fn can_relay_export(
 
     let mut visited = std::collections::HashSet::new();
     let mut queue = VecDeque::new();
-    for (tid, tsys) in &transit_hubs {
-        if *tsys == dest_sys && visited.insert(*tid) {
-            queue.push_back(*tsys);
+    if dest_sys == imp_sys {
+        for (tid, tsys) in &transit_hubs {
+            if exp_reach.contains_key(tsys) && visited.insert(*tid) {
+                queue.push_back(*tsys);
+            }
+        }
+    } else {
+        if !exp_reach.contains_key(&dest_sys) {
+            return false;
+        }
+        for (tid, tsys) in &transit_hubs {
+            if *tsys == dest_sys && visited.insert(*tid) {
+                queue.push_back(*tsys);
+            }
         }
     }
     for _ in 0..transit_hubs.len() {

@@ -209,17 +209,17 @@ pub fn register_handlers(
     }
 
     // 4. eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest
-    //    All star celestials (`group_id == 6`) from SDE `sde_celestials` (cached in `OnceLock`).
+    //    All star celestials (`group_id == 6`) from SDE `sde_celestials` (cached per router in `OnceLock`).
     {
         let sde_star = Arc::clone(&sde);
+        let star_configs: Arc<OnceLock<Vec<u8>>> = Arc::new(OnceLock::new());
         router.register_handler(
             "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
                 let _cid = ctx
                     .effective_character_id()
                     .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))?;
-                static ALL_STAR_CONFIGS: OnceLock<Vec<u8>> = OnceLock::new();
-                let out = ALL_STAR_CONFIGS
+                let out = star_configs
                     .get_or_init(|| {
                         let mut buf = Vec::new();
                         for (star_id, type_id) in sde_star.all_stars() {
