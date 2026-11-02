@@ -126,7 +126,7 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     for k in matched {
         if let Some(mut b) = st.beacons.remove(&k) {
             b.expires_at_unix = now + 15;
-            st.destroyed_beacons.insert(k, b);
+            st.destroyed_beacons.insert((key, b.char_id), b);
         }
     }
 }
@@ -685,7 +685,7 @@ async fn light_cyno(
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .beacons
-        .insert((ctx_key(ctx), char_id), beacon);
+        .insert((ctx_key(ctx), ship_id), beacon);
     let mut cyno_sess = SessionState::new(0);
     cyno_sess.character_id = Some(char_id);
     cyno_sess.solar_system_id = Some(sys_id);
@@ -726,8 +726,27 @@ pub(crate) fn live_beacon(
     sys_id: u32,
 ) -> Result<FleetModuleBeacon, BridgeRpcError> {
     let now = ctx.now_unix_secs();
-    let key = (ctx_key(ctx), cyno_char_id);
+    let ctx_k = ctx_key(ctx);
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+    let matched_key = st
+        .beacons
+        .iter()
+        .find(|&(&(k, _), b)| {
+            k == ctx_k
+                && b.char_id == cyno_char_id
+                && (beacon_id == 0 || b.beacon_id == beacon_id)
+                && (sys_id == 0 || b.solar_system_id == sys_id)
+        })
+        .map(|(&k, _)| k)
+        .or_else(|| {
+            st.beacons
+                .iter()
+                .find(|&(&(k, _), b)| k == ctx_k && b.char_id == cyno_char_id)
+                .map(|(&k, _)| k)
+        });
+    let Some(key) = matched_key else {
+        return Err(err("NoActiveBeacon", format!("Character {cyno_char_id} has no active cynosural field")));
+    };
     let Some(b) = st.beacons.get(&key).cloned() else {
         return Err(err("NoActiveBeacon", format!("Character {cyno_char_id} has no active cynosural field")));
     };
@@ -941,11 +960,11 @@ pub(super) async fn caller_in_space(
         let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
         let pmod = st
             .bridges
-            .get(&(ctx_key(ctx), char_id))
+            .get(&(ctx_key(ctx), ship_id))
             .filter(|b| b.bridger_ship_id == ship_id && b.expires_at_unix <= now)
             .map(|b| b.portal_module_id);
         if pmod.is_some() {
-            st.bridges.remove(&(ctx_key(ctx), char_id));
+            st.bridges.remove(&(ctx_key(ctx), ship_id));
         }
         pmod
     };
@@ -971,7 +990,7 @@ pub(super) async fn caller_in_space(
     }
     {
         let st = cyno_state().read().unwrap_or_else(|e| e.into_inner());
-        if let Some(b) = st.bridges.get(&(ctx_key(ctx), char_id)) {
+        if let Some(b) = st.bridges.get(&(ctx_key(ctx), ship_id)) {
             if b.bridger_ship_id == ship_id && b.expires_at_unix > now {
                 return Err(err("JumpPortalOpen", "Cannot jump while own portal is open"));
             }

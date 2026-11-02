@@ -44,6 +44,12 @@ pub(super) async fn bridge_to_fleet_beacon(
         ));
     }
     let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session, true).await?;
+    if is_ship_cyno_active(ctx, ship_id) {
+        return Err(err(
+            "JumpPortalOpen",
+            "Cannot open a jump portal while a cynosural field or jump portal is already active on this ship",
+        ));
+    }
     if sys_id == 30_100_000 || target_sys == 30_100_000 {
         return Err(err("JumpDriveForbiddenInZarzakh", "Jump portals cannot operate in or into Zarzakh"));
     }
@@ -198,7 +204,7 @@ pub(super) async fn bridge_to_fleet_beacon(
         .unwrap_or_else(|e| e.into_inner())
         .bridges
         .insert(
-            (ctx_key(ctx), char_id),
+            (ctx_key(ctx), ship_id),
             ActiveJumpBridge {
                 bridger_char_id: char_id,
                 bridger_ship_id: ship_id,
@@ -632,7 +638,7 @@ pub(super) async fn jump_through_fleet(
         )?;
     }
     require_same_fleet(ctx, char_id, other_char)?;
-    let key = (ctx_key(ctx), other_char);
+    let key = (ctx_key(ctx), other_ship);
     let bridge = cyno_state().read().unwrap_or_else(|e| e.into_inner()).bridges.get(&key).cloned();
     let bridge = bridge
         .filter(|b| {

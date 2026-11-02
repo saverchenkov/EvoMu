@@ -406,11 +406,6 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
     // Verify jump fatigue accumulation
     let (cd_min, fat_min) = eve_server::formulas::compute_jump_fatigue_and_cooldown_minutes(0.0, 4.5, 0.0);
     assert!(cd_min > 0.0 && fat_min > 0.0);
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&PILOT_2) {
-            ch.jump_fatigue_minutes = fat_min;
-        }
-    });
 
     // Verify concurrent cyno activation on the same ship is rejected
     let dup_cyno_mod = 210_009;
@@ -537,7 +532,7 @@ async fn test_cyno_covert_cyno_jump_fatigue_and_titan_portal() {
 }
 
 #[tokio::test]
-async fn test_rnd_research_agents_datacore_purchase_and_storyline_counter() {
+async fn test_rnd_research_agents_and_datacore_purchase() {
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, PILOT_1).await;
     sess.station_id = Some(RND_STATION_ID);
