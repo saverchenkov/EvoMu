@@ -441,6 +441,21 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     rpc(&ctx, &mut s1, "autoMoonMining", "RequestMiningCycleOutput", &[PyRep::Integer(metenox_id)]).await.unwrap();
     rpc_kw(&ctx, &mut s1, "planetOrbitalRegistryBroker", "UpdateSettings", &[PyRep::Integer(JITA_PLANET_ID)], &[("taxRateValues", PyRep::keyval([("corporation", PyRep::Real(0.075))]))]).await.unwrap();
 
+    // Build PI colony network via UserUpdateNetwork for durable PI verification
+    let ship_pi = s1.ship_id.unwrap();
+    s1.station_id = None;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = None; }
+        s.items.insert(910_040, make_item(910_040, 2534, P1, ship_pi, InventoryFlag::Cargo, 1, false));
+    });
+    rpc(&ctx, &mut s1, "planetMgr", "UserUpdateNetwork", &[PyRep::Integer(JITA_PLANET_ID), PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(201), PyRep::Integer(2534), PyRep::Real(0.20), PyRep::Real(0.20)]),
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(202), PyRep::Integer(2848), PyRep::Real(0.22), PyRep::Real(0.22)]),
+        pi_cmd(3, 201, 202, 0),
+    ])]).await.unwrap();
+    s1.station_id = Some(JITA_STATION_ID);
+    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(JITA_STATION_ID); } });
+
     let rnd = ctx.sde.agents.values().filter(|a| a.agent_type_id == 4 && a.station_id.is_some()).min_by_key(|a| a.agent_id).cloned().unwrap();
     ctx.db.with_mut_snapshot(|s| {
         if let Some(ch) = s.characters.get_mut(&P1) { ch.standings.insert(rnd.agent_id, 9.0); ch.solar_system_id = rnd.solar_system_id.unwrap(); ch.station_id = rnd.station_id; }
@@ -466,9 +481,16 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
         (PyRep::String("stationID".into()), PyRep::Integer(JITA_STATION_ID)), (PyRep::String("duration".into()), PyRep::Integer(90)),
     ])]), PyRep::Bool(false)]).await.unwrap().dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
     rpc(&ctx, &mut s2, "marketProxy", "PlaceBuyOrder", &[PyRep::Integer(JITA_STATION_ID), PyRep::Integer(34), PyRep::Real(4.50), PyRep::Integer(400), PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false)]).await.unwrap();
+    let char_orders_before = rowset_maps(&rpc(&ctx, &mut s1, "marketProxy", "GetCharOrders", &[]).await.unwrap());
+    let sell_row_b = char_orders_before.iter().find(|r| r.get("orderID").and_then(|v| v.as_i64()) == Some(sell_oid)).unwrap();
+    let sell_issue_ft = sell_row_b.get("issueDate").and_then(|v| v.as_i64()).unwrap();
     let old_hist_before = rpc(&ctx, &mut s1, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(34)]).await.unwrap();
+    let char_tx_before = rpc(&ctx, &mut s1, "marketProxy", "CharGetTransactions", &[]).await.unwrap();
+    let corp_tx_before = rpc(&ctx, &mut s1, "marketProxy", "CorpGetTransactions", &[PyRep::Integer(1000)]).await.unwrap();
+    let acct_tx_before = rpc(&ctx, &mut s1, "account", "GetTransactions", &[PyRep::Integer(1000)]).await.unwrap();
     rpc_kw(&ctx, &mut s1, "account", "GiveCashFromCorpAccount", &[PyRep::Integer(P2), PyRep::Real(50_000.0), PyRep::Integer(1000)], &[("reason", PyRep::String("B30 dividend".into()))]).await.unwrap();
     let bill_id = create_bill(&ctx, 2, CORP_ID, 1_000_035, 250_000.0, ctx.now_unix() + 86_400, 0.0, JITA_STATION_ID, 0);
+    rpc(&ctx, &mut s1, "billMgr", "SendAutomaticPaySettings", &[PyRep::Dict(vec![(PyRep::Integer(2), PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Integer(1000)]))])]).await.unwrap();
     let trade_id = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.unwrap().dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
     rpc(&ctx, &mut s1, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(125_000.0)]).await.unwrap();
     let raffle_id = rpc(&ctx, &mut s1, "raffleProxy", "CreateRaffle", &[PyRep::Dict(vec![
@@ -500,6 +522,13 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     let ctx2 = open_ctx_at(&db_path, saved_u + 3_600);
     let mut s1_re = login_select(&ctx2, 9603, "demo", "demo-secret", P1).await;
     assert_eq!(rpc(&ctx2, &mut s1_re, "planetOrbitalRegistryBroker", "GetTaxRate", &[PyRep::Integer(JITA_PLANET_ID)]).await.unwrap().as_f64(), Some(0.075));
+    let pi_net = rpc(&ctx2, &mut s1_re, "planetMgr", "GetFullNetworkForOwner", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(P1)]).await.unwrap();
+    let PyRep::List(pi_pins) = pi_net.dict_get("pins").unwrap() else { panic!() };
+    assert_eq!(pi_pins.len(), 2);
+    assert_eq!(pi_net.dict_get("links").and_then(|v| match v { PyRep::List(l) => Some(l.len()), _ => None }), Some(1));
+    let pin0_id = pi_pins[0].dict_get("pinID").and_then(|v| v.as_i64()).unwrap();
+    assert!(rpc(&ctx2, &mut s1_re, "planetMgr", "GetPin", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(pin0_id)]).await.is_ok());
+
     let PyRep::Tuple(ext_tup) = rpc(&ctx2, &mut s1_re, "moonExtractions", "GetExtractionAndEventIDFromStructureID", &[PyRep::Integer(athanor_id)]).await.unwrap() else { panic!() };
     assert!(ext_tup[0].dict_get("status").is_some());
     let met_det = rpc(&ctx2, &mut s1_re, "autoMoonMining", "RequestMiningDetails", &[PyRep::Integer(metenox_id)]).await.unwrap();
@@ -509,11 +538,24 @@ async fn test_b30_industry_pi_and_market_wallet_history_durable() {
     let PyRep::Tuple(jp2) = rpc(&ctx2, &mut s1_re, "agentMgr", "GetMyJournalDetails", &[]).await.unwrap() else { panic!() };
     let PyRep::List(rl2) = &jp2[1] else { panic!() };
     assert!(rl2[0].dict_get("points").and_then(|v| v.as_f64()).unwrap_or(0.0) > rnd_rp_before);
-    assert!(format!("{:?}", rpc(&ctx2, &mut s1_re, "industryManager", "GetJobsByOwner", &[PyRep::Integer(P1)]).await.unwrap()).contains(&job_id.to_string()));
+    let jobs_rep = rpc(&ctx2, &mut s1_re, "industryManager", "GetJobsByOwner", &[PyRep::Integer(P1)]).await.unwrap();
+    assert!(format!("{jobs_rep:?}").contains(&job_id.to_string()));
+    let PyRep::List(job_list) = &jobs_rep else { panic!() };
+    let j_row = job_list.iter().find(|r| r.dict_get("jobID").and_then(|v| v.as_i64()) == Some(job_id)).unwrap();
+    assert!(j_row.dict_get("facilityTaxISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    assert!(j_row.dict_get("totalJobCostISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
 
     assert_eq!(rpc(&ctx2, &mut s1_re, "marketProxy", "GetOldPriceHistory", &[PyRep::Integer(34)]).await.unwrap(), old_hist_before);
-    assert!(format!("{:?}", rpc(&ctx2, &mut s1_re, "marketProxy", "GetCharOrders", &[]).await.unwrap()).contains(&sell_oid.to_string()));
+    let char_orders_after = rowset_maps(&rpc(&ctx2, &mut s1_re, "marketProxy", "GetCharOrders", &[]).await.unwrap());
+    let sell_row_a = char_orders_after.iter().find(|r| r.get("orderID").and_then(|v| v.as_i64()) == Some(sell_oid)).unwrap();
+    assert_eq!(sell_row_a.get("issueDate").and_then(|v| v.as_i64()), Some(sell_issue_ft));
+    assert_eq!(sell_row_a.get("duration").and_then(|v| v.as_i64()), Some(90));
+    assert_eq!(sell_row_a.get("accountID").and_then(|v| v.as_i64()), Some(1000));
+    assert_eq!(rpc(&ctx2, &mut s1_re, "marketProxy", "CharGetTransactions", &[]).await.unwrap(), char_tx_before);
+    assert_eq!(rpc(&ctx2, &mut s1_re, "marketProxy", "CorpGetTransactions", &[PyRep::Integer(1000)]).await.unwrap(), corp_tx_before);
+    assert_eq!(rpc(&ctx2, &mut s1_re, "account", "GetTransactions", &[PyRep::Integer(1000)]).await.unwrap(), acct_tx_before);
     assert!(format!("{:?}", rpc(&ctx2, &mut s1_re, "billMgr", "GetCorporationBills", &[]).await.unwrap()).contains(&bill_id.to_string()));
+    assert!(rpc(&ctx2, &mut s1_re, "billMgr", "GetAutomaticPaySettings", &[]).await.is_ok());
     assert_eq!(rpc(&ctx2, &mut s1_re, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.unwrap().dict_get("myMoney").and_then(|v| v.as_f64()), Some(125_000.0));
     assert!(format!("{:?}", rpc(&ctx2, &mut s1_re, "raffleProxy", "GetRaffle", &[PyRep::Integer(raffle_id)]).await.unwrap()).contains(&raffle_id.to_string()));
     ctx2.db.with_snapshot(|s| {

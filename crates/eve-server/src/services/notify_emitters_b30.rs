@@ -85,29 +85,9 @@ pub fn emit_invalidate_cache_for_locations(
 /// Emits `OnMultiEvent(events)` (`1` arg, `id_type = "charid"`).
 // parity: notify:OnMultiEvent
 pub fn emit_multi_event(ctx: &ServerContext, char_id: i64, events: &[(&str, i64, &str)]) {
-    if events.is_empty() {
-        return;
+    if !events.is_empty() {
+        let _ = ctx.notify_target_events(char_id, events);
     }
-    let list = events
-        .iter()
-        .map(|(action, target_id, reason)| {
-            PyRep::Tuple(vec![
-                PyRep::Tuple(vec![
-                    PyRep::String("OnTarget".into()),
-                    PyRep::String((*action).into()),
-                    PyRep::Integer(*target_id),
-                    PyRep::String((*reason).into()),
-                ]),
-                PyRep::Integer(0),
-            ])
-        })
-        .collect();
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnMultiEvent",
-        "charid",
-        vec![PyRep::List(list)],
-    );
 }
 
 /// Emits `OnSolarSystemLPChange(oldPoints, newPoints)` (`2` args, `id_type = "solarsystemid"`).
@@ -209,21 +189,17 @@ pub fn emit_system_criminal_flag_updates(
     new_suspects: &[i64],
     new_criminals: &[i64],
 ) {
-    if new_idles.is_empty() && new_suspects.is_empty() && new_criminals.is_empty() {
-        return;
+    if !new_idles.is_empty() || !new_suspects.is_empty() || !new_criminals.is_empty() {
+        let _ = ctx.notify_system_criminal_flag_updates(sys_id, new_idles, new_suspects, new_criminals);
     }
-    let ids = |v: &[i64]| PyRep::List(v.iter().map(|c| PyRep::Integer(*c)).collect());
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        "OnSystemCriminalFlagUpdates",
-        "solarsystemid",
-        vec![ids(new_idles), ids(new_suspects), ids(new_criminals)],
-    );
 }
 
 /// Emits `OnShipDeath()` (`0` args, `id_type = "charid"`).
 // parity: notify:OnShipDeath
 pub fn emit_ship_death(ctx: &ServerContext, char_id: i64) {
+    if char_id <= 0 {
+        return;
+    }
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnShipDeath",

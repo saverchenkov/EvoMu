@@ -35,38 +35,18 @@ pub async fn evaluate_faction_police_response(
     if crate::services::combat_npc_police::is_faction_police_suppressed(ctx, solar_system_id) {
         return (false, true, false);
     }
-    let sys_sec = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.0);
+    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     let Some(threshold) = faction_police_sec_threshold(sys_sec) else {
         return (false, true, false);
     };
     let (char_sec, is_capsule) = ctx.db.with_snapshot(|snap| {
-        let sec = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.security_status)
-            .unwrap_or(0.0);
-        let is_pod = snap
-            .items
-            .get(&ship_id)
-            .map(|i| i.type_id == 670)
-            .unwrap_or(false);
+        let sec = snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0);
+        let is_pod = snap.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false);
         (sec, is_pod)
     });
     if char_sec <= threshold {
-        let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-        let _ = sys_handle.break_gate_cloak(ship_id).await;
-        if is_capsule {
-            // Capsules are not attacked and are allowed to dock
-            (false, true, true)
-        } else {
-            // Ships are engaged by Faction Police and refused docking/tethering
-            (true, false, true)
-        }
+        let _ = ctx.systems.get_or_spawn(solar_system_id).break_gate_cloak(ship_id).await;
+        if is_capsule { (false, true, true) } else { (true, false, true) }
     } else {
         (false, true, false)
     }
@@ -150,22 +130,38 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     let st = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).cloned()).unwrap_or_default();
     let npc_exp = with_combat_runtime(ctx, |rt| rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp));
     let dis_exp = with_combat_runtime(ctx, |rt| rt.disapproval_flags.get(&char_id).copied().filter(|&exp| now_unix < exp));
+    let prev_opt = with_combat_runtime(ctx, |rt| rt.crimewatch_timer_states.get(&char_id).copied());
+    let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
+    let is_countdown = |prev_sig: i64, exp: u64, dur: u64| -> bool {
+        (prev_sig >> 40) != 0 && (prev_sig & 0xFF_FFFF_FFFF) as u64 == exp && now_unix > exp.saturating_sub(dur.saturating_sub(1))
+    };
     let (weap_code, weap_val, weap_sig) = if st.is_weapon_timer_active(now_unix) {
-        (101i64, PyRep::Integer(unix_to_ft(st.weapon_timer_until_unix)), st.weapon_timer_until_unix as i64)
+        let exp = st.weapon_timer_until_unix;
+        let c = if is_countdown(prev.0, exp, 60) { 102i64 } else { 101i64 };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
     } else { (100i64, PyRep::None, 100i64) };
     let (pvp_code, pvp_val, pvp_sig) = if st.is_pvp_active(now_unix) {
-        (201i64, PyRep::Integer(unix_to_ft(st.pvp_timer_until_unix)), st.pvp_timer_until_unix as i64)
+        let exp = st.pvp_timer_until_unix;
+        let dur = if exp >= now_unix.saturating_add(301) { 900 } else { 300 };
+        let c = if is_countdown(prev.1, exp, dur) { 202i64 } else { 201i64 };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
     } else { (200i64, PyRep::None, 200i64) };
     let (npc_code, npc_val, npc_sig) = if let Some(exp) = npc_exp {
-        (401i64, PyRep::Integer(unix_to_ft(exp)), exp as i64)
+        let c = if is_countdown(prev.2, exp, 300) { 402i64 } else { 401i64 };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
     } else { (400i64, PyRep::None, 400i64) };
     let (crim_code, crim_val, crim_sig) = if st.is_criminal(now_unix) {
-        (301i64, PyRep::Integer(unix_to_ft(st.criminal_flag_until_unix)), st.criminal_flag_until_unix as i64)
+        let exp = st.criminal_flag_until_unix;
+        let c = if is_countdown(prev.3, exp, 900) { 303i64 } else { 301i64 };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
     } else if st.is_suspect(now_unix) {
-        (302i64, PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix)), -(st.suspect_flag_until_unix as i64))
+        let exp = st.suspect_flag_until_unix;
+        let c = if is_countdown(prev.3, exp, 900) { 304i64 } else { 302i64 };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
     } else { (300i64, PyRep::None, 300i64) };
     let (dis_code, dis_val, dis_sig) = if let Some(exp) = dis_exp {
-        (501i64, PyRep::Integer(unix_to_ft(exp)), exp as i64)
+        let c = if is_countdown(prev.4, exp, 900) { 502i64 } else { 501i64 };
+        (c, PyRep::Integer(unix_to_ft(exp)), (c << 40) | (exp as i64))
     } else { (500i64, PyRep::None, 500i64) };
 
     let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300 && dis_code == 500;
@@ -173,27 +169,27 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     let mut crim_transition: Option<(Vec<i64>, Vec<i64>, Vec<i64>)> = None;
     let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
     with_mut_combat_runtime(ctx, |rt| {
-        let prev_opt = rt.crimewatch_timer_states.get(&char_id).copied();
         if prev_opt.is_none() && is_all_idle { return; }
-        let prev = prev_opt.unwrap_or((0, 0, 0, 0, 0));
         if prev.0 != weap_sig { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
         if prev.1 != pvp_sig { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
         if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
         if prev.3 != crim_sig {
             updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
-            if crim_code == 301 {
+            let prev_c = prev.3 >> 40;
+            if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
                 crim_transition = Some((vec![], vec![], vec![char_id]));
-            } else if crim_code == 302 {
+            } else if matches!(crim_code, 302 | 304) && !matches!(prev_c, 302 | 304) {
                 crim_transition = Some((vec![], vec![char_id], vec![]));
-            } else if prev.3 != 0 && prev.3 != 300 {
+            } else if crim_code == 300 && prev.3 != 0 && prev.3 != 300 {
                 crim_transition = Some((vec![char_id], vec![], vec![]));
             }
         }
         if prev.4 != dis_sig {
             updates.push(("OnDisapprovalTimerUpdate", vec![PyRep::Integer(dis_code), dis_val]));
-            if dis_code == 501 {
+            let prev_d = prev.4 >> 40;
+            if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {
                 dis_transition = Some((vec![], vec![char_id]));
-            } else if prev.4 != 0 && prev.4 != 500 {
+            } else if dis_code == 500 && prev.4 != 0 && prev.4 != 500 {
                 dis_transition = Some((vec![char_id], vec![]));
             }
         }
@@ -727,33 +723,20 @@ pub async fn handle_crimewatch(
                 }
             };
             let crim_tuple = if st.is_criminal(now_unix) {
-                PyRep::Tuple(vec![
-                    PyRep::Integer(301),
-                    PyRep::Integer(unix_to_ft(st.criminal_flag_until_unix)),
-                ])
+                let code = if now_unix > st.criminal_flag_until_unix.saturating_sub(900) { 303 } else { 301 };
+                PyRep::Tuple(vec![PyRep::Integer(code), PyRep::Integer(unix_to_ft(st.criminal_flag_until_unix))])
             } else if st.is_suspect(now_unix) {
-                PyRep::Tuple(vec![
-                    PyRep::Integer(302),
-                    PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix)),
-                ])
+                let code = if now_unix > st.suspect_flag_until_unix.saturating_sub(900) { 304 } else { 302 };
+                PyRep::Tuple(vec![PyRep::Integer(code), PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix))])
             } else {
                 PyRep::Tuple(vec![PyRep::Integer(300), PyRep::None])
             };
-            // `crimewatchSvc.ProcessSessionChange` (`eve/client/script/ui/services/crimewatchSvc.pyj:126-143`)
-            // unpacks `(myCombatTimers, myEngagements, flaggedCharacters, safetyLevel)`.
+            let w_code = if now_unix > st.weapon_timer_until_unix.saturating_sub(60) { 102 } else { 101 };
+            let p_code = if now_unix > st.pvp_timer_until_unix.saturating_sub(900) { 202 } else { 201 };
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::Tuple(vec![
-                    timer(
-                        100,
-                        101,
-                        st.is_weapon_timer_active(now_unix)
-                            .then_some(st.weapon_timer_until_unix),
-                    ),
-                    timer(
-                        200,
-                        201,
-                        st.is_pvp_active(now_unix).then_some(st.pvp_timer_until_unix),
-                    ),
+                    timer(100, w_code, st.is_weapon_timer_active(now_unix).then_some(st.weapon_timer_until_unix)),
+                    timer(200, p_code, st.is_pvp_active(now_unix).then_some(st.pvp_timer_until_unix)),
                     timer(400, 401, npc_exp),
                     crim_tuple,
                     timer(500, 501, dis_exp),

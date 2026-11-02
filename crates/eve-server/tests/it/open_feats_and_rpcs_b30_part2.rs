@@ -11,11 +11,11 @@
 
 use crate::common;
 use eve_db::{
-    corp_roles, ActiveMissionRecord, CorporationRecord, InventoryFlag, InventoryItemRecord,
+    corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord,
     IskCents, MailRecord, MarketOrderRecord, OwnerNoteRecord, TrainedSkillRecord,
     VirtualServerClock, WorldRepository,
 };
-use eve_destiny::{Ball, CombatState, MovementMode};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
@@ -107,14 +107,40 @@ async fn test_b30_mail_no_global_cap_state_and_notifications_durability() {
         }
     });
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P2) {
+            ch.corporation_id = CORP_ID;
+        }
+        if let Some(c) = snap.corporations.get_mut(&CORP_ID) {
+            c.members.insert(P2);
+            c.alliance_id = Some(99_000_001);
+        }
+        snap.alliances.insert(99_000_001, eve_db::AllianceRecord {
+            alliance_id: 99_000_001, name: "B30 Alliance".into(), short_name: "B30A".into(),
+            executor_corp_id: CORP_ID, member_corp_ids: [CORP_ID].into_iter().collect(), ..Default::default()
+        });
+    });
+
     let mut s1 = login_select(&ctx, 9301, "demo", "demo-secret", P1).await;
+    s1.corporation_id = Some(CORP_ID);
+    s1.alliance_id = Some(99_000_001);
     let ml_rep = rpc(&ctx, &mut s1, "mailingListsMgr", "Create", &[PyRep::String("B30 Dispatch".into()), PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(250)]).await.unwrap();
-    let list_id = ml_rep.dict_get("listID").and_then(|v| v.as_i64()).or_else(|| ml_rep.as_i64()).unwrap_or(700_001);
+    let list_id = ml_rep.as_i64().unwrap();
     rpc(&ctx, &mut s1, "mailingListsMgr", "SaveWelcomeMail", &[PyRep::Integer(list_id), PyRep::String("Welcome".into()), PyRep::String("Body".into())]).await.unwrap();
 
     let mail_3002 = rpc(&ctx, &mut s1, "mailMgr", "SendMail", &[
         PyRep::List(vec![PyRep::Integer(P2)]), PyRep::None, PyRep::None,
         PyRep::String("Mail 3002".into()), PyRep::String("Delivered past 3001".into()),
+        PyRep::Integer(0), PyRep::Integer(0),
+    ]).await.unwrap().as_i64().unwrap();
+    let mail_corp = rpc(&ctx, &mut s1, "mailMgr", "SendMail", &[
+        PyRep::List(vec![PyRep::Integer(P2)]), PyRep::None, PyRep::Integer(CORP_ID),
+        PyRep::String("Corp Mail".into()), PyRep::String("Corp body".into()),
+        PyRep::Integer(0), PyRep::Integer(0),
+    ]).await.unwrap().as_i64().unwrap();
+    let mail_ally = rpc(&ctx, &mut s1, "mailMgr", "SendMail", &[
+        PyRep::List(vec![PyRep::Integer(P2)]), PyRep::None, PyRep::Integer(99_000_001),
+        PyRep::String("Ally Mail".into()), PyRep::String("Ally body".into()),
         PyRep::Integer(0), PyRep::Integer(0),
     ]).await.unwrap().as_i64().unwrap();
     let mail_trash = rpc(&ctx, &mut s1, "mailMgr", "SendMail", &[
@@ -159,12 +185,22 @@ async fn test_b30_mail_no_global_cap_state_and_notifications_durability() {
     assert!(p1_notifs.crowset_rows().unwrap().iter().any(|r| r.dbrow_get("notificationID") == Some(&PyRep::Integer(notif_p1)) && r.dbrow_get("processed") == Some(&PyRep::Bool(true))));
 
     let mut s2_re = login_select(&ctx2, 9304, "other", "other-secret", P2).await;
+    s2_re.corporation_id = Some(CORP_ID);
+    s2_re.alliance_id = Some(99_000_001);
     let p2_login_notifs = ctx2.drain_notifications_for_char(P2);
     assert!(p2_login_notifs.iter().any(|n| n.event == "OnNotificationReceived" && n.args.first() == Some(&PyRep::Integer(notif_offline))));
     let p2_unproc = rpc(&ctx2, &mut s2_re, "notificationMgr", "GetUnprocessed", &[]).await.unwrap();
     assert!(p2_unproc.crowset_rows().unwrap().iter().any(|r| r.dbrow_get("notificationID") == Some(&PyRep::Integer(notif_offline))));
     let notif_after = ctx2.create_character_notification(1_000_125, P2, 14, 2, "B30 post-restart").notification_id;
     assert!(notif_after > notif_offline);
+
+    // Verify mail headers, labels, mailing lists, and calendar events via RPCs post-restart
+    let hdrs_s = format!("{:?}", rpc(&ctx2, &mut s2_re, "mailMgr", "GetMailHeaders", &[PyRep::List(vec![PyRep::Integer(mail_3002), PyRep::Integer(mail_corp), PyRep::Integer(mail_ally)])]).await.unwrap());
+    assert!(hdrs_s.contains(&mail_3002.to_string()) && hdrs_s.contains(&mail_corp.to_string()) && hdrs_s.contains(&mail_ally.to_string()));
+    assert!(format!("{:?}", rpc(&ctx2, &mut s2_re, "mailMgr", "GetLabels", &[]).await.unwrap()).contains("B30 Intel"));
+    assert!(format!("{:?}", rpc(&ctx2, &mut s2_re, "mailingListsMgr", "GetJoinedLists", &[]).await.unwrap()).contains(&list_id.to_string()));
+    assert!(rpc(&ctx2, &mut s2_re, "mailingListsMgr", "GetWelcomeMail", &[PyRep::Integer(list_id)]).await.is_ok());
+    assert!(format!("{:?}", rpc(&ctx2, &mut s2_re, "calendarMgr", "GetEventList", &[PyRep::Integer(5), PyRep::Integer(2030)]).await.unwrap()).contains("B30 Formup"));
 
     ctx2.db.with_snapshot(|s| {
         assert_eq!(s.read_mails, read_b);
@@ -188,7 +224,7 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     let db_path = temp_db_path("market_lp");
     let base_u = 1_760_000_000u64;
     let ctx = open_fresh_ctx_at(&db_path, base_u);
-    let (buy_oid, sell_oid, p2_bid, p2_ask) = (910_001i64, 910_002i64, 910_004i64, 910_005i64);
+    let (p2_bid, p2_ask) = (910_004i64, 910_005i64);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_orders.retain(|_, o| o.region_id != AMARR_REGION_ID);
@@ -212,20 +248,49 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
         }
         snap.items.insert(720_001, make_item(720_001, 36, P1, AMARR_STATION_ID, InventoryFlag::Hangar, 100, false));
         snap.items.insert(720_002, make_item(720_002, 34, P1, AMARR_STATION_ID, InventoryFlag::Hangar, 50, false));
-        insert_expired_order(snap, buy_oid, P1, 35, true, IskCents(100_00), 100, IskCents(10_000_00), base_u);
-        insert_expired_order(snap, sell_oid, P1, 35, false, IskCents(200_00), 50, IskCents(0), base_u);
+        snap.items.insert(720_003, make_item(720_003, 35, P1, AMARR_STATION_ID, InventoryFlag::Hangar, 50, false));
         insert_expired_order(snap, p2_bid, P2, 36, true, IskCents(500_00), 40, IskCents(20_000_00), base_u);
         insert_expired_order(snap, p2_ask, P2, 36, false, IskCents(50_00), 40, IskCents(0), base_u);
     });
 
     let mut s1 = login_select(&ctx, 9401, "demo", "demo-secret", P1).await;
+    // Place P1 buy & sell orders with duration=1, then advance clock 86_500s to expire naturally
+    let _buy_oid = rpc(&ctx, &mut s1, "marketProxy", "PlaceBuyOrder", &[
+        PyRep::Integer(AMARR_STATION_ID), PyRep::Integer(35), PyRep::Real(100.0), PyRep::Integer(100),
+        PyRep::Integer(-1), PyRep::Integer(1), PyRep::Integer(1), PyRep::Bool(false),
+    ]).await.unwrap();
+    let sell_oid = rpc(&ctx, &mut s1, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![PyRep::Dict(vec![
+        (PyRep::String("itemID".into()), PyRep::Integer(720_003)), (PyRep::String("typeID".into()), PyRep::Integer(35)),
+        (PyRep::String("price".into()), PyRep::Real(200.0)), (PyRep::String("quantity".into()), PyRep::Integer(50)),
+        (PyRep::String("stationID".into()), PyRep::Integer(AMARR_STATION_ID)), (PyRep::String("duration".into()), PyRep::Integer(1)),
+    ])]), PyRep::Bool(false)]).await.unwrap().dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    let bal_escrowed = ctx.db.get_character(P1).unwrap().balance.0;
+    let _ = ctx.drain_notifications_for_char(P1);
+    ctx.advance_secs(86_500);
     // All 5 read RPCs exclude expired orders
     for m in ["GetRegionBest", "GetStationAsks", "GetCharOrders", "GetCorporationOrders"] {
         let rep = rpc(&ctx, &mut s1, "marketProxy", m, &[]).await.unwrap();
         assert!(!format!("{rep:?}").contains(&p2_ask.to_string()));
+        assert!(!format!("{rep:?}").contains(&sell_oid.to_string()));
     }
     let ord_rep = rpc(&ctx, &mut s1, "marketProxy", "GetOrders", &[PyRep::Integer(36)]).await.unwrap();
     assert!(!format!("{ord_rep:?}").contains(&p2_bid.to_string()));
+
+    // Refunded escrow + returned 50 units of type 35 to AMARR_STATION_ID hangar + OnMarketItemReceived
+    let bal_after_exp = ctx.db.get_character(P1).unwrap().balance.0;
+    assert_eq!(bal_after_exp - bal_escrowed, 10_000_00);
+    ctx.db.with_snapshot(|s| {
+        let pyerite_qty: i32 = s.items.values()
+            .filter(|i| i.owner_id == P1 && i.location_id == AMARR_STATION_ID && i.flag == InventoryFlag::Hangar && i.type_id == 35)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(pyerite_qty, 50);
+    });
+    let _ = rpc(&ctx, &mut s1, "marketProxy", "GetCharOrders", &[]).await.unwrap();
+    assert_eq!(ctx.db.get_character(P1).unwrap().balance.0, bal_after_exp);
+    let notifs = ctx.drain_notifications_for_char(P1);
+    let item_recv = notifs.iter().find(|n| n.event == "OnMarketItemReceived").unwrap();
+    assert_eq!(item_recv.args.last(), Some(&PyRep::Integer(AMARR_STATION_ID)));
 
     // All 3 match RPCs never match expired orders
     let bal_before = ctx.db.get_character(P1).unwrap().balance.0;
@@ -239,14 +304,6 @@ async fn test_b30_market_order_expiry_and_lp_durability() {
     assert_eq!(sell_err.code, "ImmediateOrderUnfilled");
     let _ = rpc(&ctx, &mut s1, "marketProxy", "BuyMultipleItems", &[PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(36), PyRep::Integer(10), PyRep::Real(100.0)])])]).await;
     assert_eq!(ctx.db.get_character(P1).unwrap().balance.0, bal_before);
-
-    // Refunded exactly once + OnMarketItemReceived carries stationID
-    assert_eq!(bal_before, 10_000_000_00 + 10_000_00);
-    let _ = rpc(&ctx, &mut s1, "marketProxy", "GetCharOrders", &[]).await.unwrap();
-    assert_eq!(ctx.db.get_character(P1).unwrap().balance.0, bal_before);
-    let notifs = ctx.drain_notifications_for_char(P1);
-    let item_recv = notifs.iter().find(|n| n.event == "OnMarketItemReceived").unwrap();
-    assert_eq!(item_recv.args.last(), Some(&PyRep::Integer(AMARR_STATION_ID)));
 
     // LP durability + logs + atomic failed purchase
     rpc(&ctx, &mut s1, "LPSvc", "TransferLPFromMyWalletToOtherCorp", &[PyRep::Integer(CORP_ID), PyRep::Integer(1_000_035), PyRep::Integer(6_000)]).await.unwrap();
@@ -287,30 +344,33 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     let base_u = day_start + 11 * 3_600 - 5;
     let ctx = open_fresh_ctx_at(&db_path, base_u);
     let sys_id = JITA_SYSTEM_ID;
-    let (ship_id, cargo_a, cargo_b, mod_id, mwd_id, pre_npc_id) = (620_000_001i64, 620_000_010i64, 620_000_011i64, 620_000_020i64, 620_000_030i64, 888_111_001i64);
+    let (ship_id, cargo_a, cargo_b, mod_id, gun_id, mwd_id) = (620_000_001i64, 620_000_010i64, 620_000_011i64, 620_000_020i64, 620_000_021i64, 620_000_030i64);
 
     let sys = ctx.systems.get_or_spawn(sys_id);
     let station_pos = ctx.sde.stations[&JITA_STATION_ID].position;
     let ship_ball = Ball { id: ship_id, type_id: 587, position: station_pos + DVec3::new(100.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
     sys.spawn_ball_with_meta(ship_ball.clone(), ctx.build_ship_combat_state(P1, ship_id, 587), ctx.build_ship_slim_meta(P1, 587)).await.unwrap();
-    sys.spawn_ball_with_combat(Ball { id: pre_npc_id, type_id: 10_019, position: DVec3::new(30_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }, CombatState::default()).await.unwrap();
+
+    let sec_agent = ctx.sde.agents.values().find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.station_id == Some(JITA_STATION_ID)).cloned()
+        .or_else(|| ctx.sde.agents.values().find(|a| a.agent_type_id == 2 && a.division_id == 24 && a.station_id.is_some()).cloned()).unwrap();
+    let ag_station = sec_agent.station_id.unwrap();
+    let ag_sys = sec_agent.solar_system_id.unwrap();
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.solar_system_id = sys_id; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = ship_id;
+            ch.standings.insert(sec_agent.agent_id, 9.0);
+            ch.standings.insert(sec_agent.corporation_id, 9.0);
         }
-        for stid in [11_584_u32, 3_435_u32, 3_436_u32] {
+        for stid in [11_584_u32, 3_435_u32, 3_436_u32, 3_300_u32, 3_301_u32, 3_311_u32] {
             snap.skills.entry(P1).or_default().insert(stid, TrainedSkillRecord { type_id: stid, level: 5, skill_points: 256_000.0 });
         }
         snap.items.insert(ship_id, make_item(ship_id, 587, P1, sys_id as i64, InventoryFlag::None, 1, true));
         snap.items.insert(cargo_a, make_item(cargo_a, 34, P1, ship_id, InventoryFlag::Cargo, 25, false));
         snap.items.insert(cargo_b, make_item(cargo_b, 34, P1, ship_id, InventoryFlag::Cargo, 25, false));
         snap.items.insert(mod_id, make_item(mod_id, 3528, P1, ship_id, InventoryFlag::LoSlot0, 1, true));
+        snap.items.insert(gun_id, make_item(gun_id, 2873, P1, ship_id, InventoryFlag::HiSlot0, 1, true));
         snap.items.insert(mwd_id, make_item(mwd_id, 12_198, P1, ship_id, InventoryFlag::Cargo, 1, true));
-        snap.active_missions.insert((P1, 3_019_001), ActiveMissionRecord {
-            mission_id: 500_001, character_id: P1, agent_id: 3_019_001, solar_system_id: sys_id,
-            state: "Accepted".into(), current_room_id: 1, npcs_remaining: 1, spawned_npc_ball_ids: vec![pre_npc_id], bookmark_id: None,
-        });
     });
 
     let mut sess = SessionState { user_id: Some(1), session_id: 9501, character_id: Some(P1), ship_id: Some(ship_id), solar_system_id: Some(sys_id), ..Default::default() };
@@ -342,19 +402,38 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     assert_eq!(sys.update_module_overload(ship_id, mod_id, false).await, Ok(false));
     assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| n.event == "OnGodmaShipEffect"));
 
-    // 3. `mission-downtime-respawn`: Downtime resets uncompleted mission dungeon and respawns wave on warp-in
+    // 3. `mission-downtime-respawn`: Accept real mission, warp in, kill NPC via dogmaIM, downtime resets & respawns on warp-in
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = Some(ag_station); ch.solar_system_id = ag_sys; }
+        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = ag_station; }
+    });
+    sess.station_id = Some(ag_station);
+    sess.solar_system_id = Some(ag_sys);
+    rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(2), PyRep::Integer(sec_agent.agent_id)]).await.unwrap();
+    let m_id = ctx.db.with_snapshot(|s| s.active_missions.keys().find_map(|&(c, mid)| (c == P1).then_some(mid)).unwrap());
+    rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(sec_agent.agent_id), PyRep::Integer(i64::from(m_id))]).await.unwrap();
+    let _ = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await.unwrap();
+    let ag_space = ctx.systems.get_or_spawn(ag_sys);
+    let ag_beyonce = ctx.bind_object(&sess, "beyonce", ag_sys as i64).unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
+    let (initial_npcs, first_npc) = ctx.db.with_snapshot(|s| (
+        s.active_missions[&(P1, m_id)].npcs_remaining,
+        s.active_missions[&(P1, m_id)].spawned_npc_ball_ids[0],
+    ));
+    if let (Ok(Some((_, mut sb))), Ok(Some((_, nb)))) = (ag_space.get_ball_snapshot(ship_id).await, ag_space.get_ball_snapshot(first_npc).await) {
+        sb.position = nb.position + DVec3::new(500.0, 0.0, 0.0);
+        let _ = ag_space.spawn_ball(sb).await;
+    }
+    rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(first_npc)]).await.unwrap();
+    ag_space.step_manual(10.0).await.unwrap();
+    let _ = rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("attack".into()), PyRep::Integer(first_npc)]).await;
     ctx.advance_secs(10);
     run_daily_downtime_and_jobs(&ctx);
-    assert!(sys.get_ball_snapshot(pre_npc_id).await.unwrap().is_none());
-    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, 3_019_001)].npcs_remaining, 4));
-    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&P1) { ch.station_id = None; ch.solar_system_id = sys_id; } });
-    sess.station_id = None;
-    sess.solar_system_id = Some(sys_id);
-    sys.spawn_ball_with_meta(ship_ball.clone(), ctx.build_ship_combat_state(P1, ship_id, 587), ctx.build_ship_slim_meta(P1, 587)).await.unwrap();
-    let beyonce_oid = ctx.bind_object(&sess, "beyonce", sys_id as i64).unwrap();
-    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(500_001)], &HashMap::new(), None).await.unwrap();
-    let respawned_ids = ctx.db.with_snapshot(|s| s.active_missions[&(P1, 3_019_001)].spawned_npc_ball_ids.clone());
-    assert_eq!(respawned_ids.len(), 4);
+    assert!(ag_space.get_ball_snapshot(first_npc).await.unwrap().is_none());
+    ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs.max(4)));
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
+    let respawned_ids = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].spawned_npc_ball_ids.clone());
+    assert_eq!(respawned_ids.len() as u32, initial_npcs.max(4));
     assert!(with_combat_runtime(&ctx, |rt| respawned_ids.iter().all(|id| rt.npc_entities.contains_key(id))));
 
     // 4. `mobile_warp_disruptor-lifecycle`: Anchor completion from anchor_start_unix, bubble re-created after restart, removed after 2 days
@@ -372,6 +451,8 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     let ctx2 = open_ctx_at(&db_path, mwd_u + 60);
     let null_sys2 = ctx2.systems.get_or_spawn(null_sys_id);
     assert!(null_sys2.get_ball_snapshot(mwd_id).await.unwrap().is_some());
+    null_sys2.spawn_ball_with_meta(Ball { id: ship_id, type_id: 587, position: DVec3::new(50_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx2.build_ship_combat_state(P1, ship_id, 587), ctx2.build_ship_slim_meta(P1, 587)).await.unwrap();
+    assert_eq!(null_sys2.is_ball_scrambled(ship_id).await.unwrap(), true);
     ctx2.advance_secs(172_900);
     run_daily_downtime_and_jobs(&ctx2);
     ctx2.db.with_snapshot(|s| assert!(!s.items.contains_key(&mwd_id)));
