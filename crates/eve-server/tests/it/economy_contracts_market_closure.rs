@@ -297,14 +297,14 @@ async fn test_e4_capital_shipyard_restrictions_and_exponential_research() {
     .expect("Freighter in High-Sec must succeed");
     assert!(ok_fr.dict_get("jobID").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
-    // Install a Blueprint with SDE materials to verify OnIndustryMaterials notification payload
+    // Install a subcap Frigate Blueprint with SDE materials to verify OnIndustryMaterials notification payload
     let mfg_bp_tid = ctx
         .sde
         .blueprints
         .values()
-        .find(|bp| !bp.materials.is_empty())
+        .find(|bp| !bp.materials.is_empty() && (bp.product_type_id == 587 || ctx.sde.types.get(&bp.product_type_id).is_some_and(|t| t.group_id == 25)))
         .map(|bp| bp.blueprint_type_id)
-        .expect("BP with materials in SDE");
+        .expect("Subcap frigate BP with materials in SDE");
     seed_bp_mats(mfg_bp_tid, JITA_STATION_ID);
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(710_102, make_item(710_102, mfg_bp_tid, char_id, JITA_STATION_ID, InventoryFlag::Hangar, 1, true));

@@ -45,25 +45,32 @@ pub struct CosmeticsMarketState {
     db: Arc<WorldRepository>,
     pub data: RwLock<CosmeticsMarketData>,
     pub skinr: Arc<SkinrCosmeticsState>,
+    macho_notify_sink: Arc<RwLock<Option<crate::quasar_gateway::MachoNotifySink>>>,
 }
 
 impl CosmeticsMarketState {
-    pub fn load(
+    pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>, skinr: Arc<SkinrCosmeticsState>) -> Arc<Self> {
+        Self::load_with_sink(db, sde, skinr, Arc::new(RwLock::new(None)))
+    }
+
+    pub fn load_with_sink(
         db: Arc<WorldRepository>,
         _sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
+        macho_notify_sink: Arc<RwLock<Option<crate::quasar_gateway::MachoNotifySink>>>,
     ) -> Arc<Self> {
         let data: CosmeticsMarketData = db.with_snapshot(|s| {
-            s.quasar_state_blobs
-                .get(BLOB_KEY)
-                .and_then(|j| serde_json::from_str(j).ok())
-                .unwrap_or_default()
+            s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
         });
-        Arc::new(Self {
-            db,
-            data: RwLock::new(data),
-            skinr,
-        })
+        Arc::new(Self { db, data: RwLock::new(data), skinr, macho_notify_sink })
+    }
+
+    fn emit_account_change(&self, char_id: i64, new_bal: IskCents) {
+        if let Some(sink) = self.macho_notify_sink.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            sink(crate::router::NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![
+                eve_proto::PyRep::String("cash".into()), eve_proto::PyRep::Integer(char_id), eve_proto::PyRep::Real(new_bal.to_wire_f64()),
+            ]);
+        }
     }
 
     fn save(&self) {
@@ -204,8 +211,8 @@ fn put_uuid(field: u32, uuid: &[u8; 16], out: &mut Vec<u8>) {
 
 fn put_isk(field: u32, units: u64, out: &mut Vec<u8>) {
     let mut b = Vec::new();
-    encode_varint_field(1, units, &mut b);
-    encode_varint_field(2, 0, &mut b);
+    encode_sint_field(1, i64::try_from(units).unwrap_or(i64::MAX), &mut b);
+    encode_sint_field(2, 0, &mut b);
     encode_bytes_field(field, &b, out);
 }
 
@@ -424,14 +431,39 @@ fn market_get_broker_fees(
     ))
 }
 
+fn paragon_hub_skill_reductions(st: &CosmeticsMarketState, cid: u32) -> (u64, usize) {
+    st.db.with_snapshot(|s| {
+        let Some(sk_map) = s.skills.get(&(cid as i64)) else {
+            return (0, 5);
+        };
+        let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u64).unwrap_or(0);
+        // 84217 Paragon Relations, 84218 Paragon Partnership, 84220 Executive Paragon Partnership: -1% vendor fee per level each
+        let fee_reduction_pct = (lvl(84217) + lvl(84218) + lvl(84220)).min(15);
+        // 81368 Hub Promotion (+1/lvl), 81369 Hub Algorithm Optimization (+5/lvl)
+        let max_listings = 5 + (lvl(81368) + lvl(81369) * 5) as usize;
+        (fee_reduction_pct, max_listings)
+    })
+}
+
+fn paragon_hub_tax_pct(st: &CosmeticsMarketState, cid: u32, target: &ListingTargetRecord) -> u64 {
+    match target {
+        ListingTargetRecord::Character(_) => 30,
+        ListingTargetRecord::Corporation(_) | ListingTargetRecord::Alliance(_) => 10,
+        ListingTargetRecord::Public => {
+            let (reduction, _) = paragon_hub_skill_reductions(st, cid);
+            20_u64.saturating_sub(reduction)
+        }
+    }
+}
+
 fn market_get_tax_rate(
-    _st: &CosmeticsMarketState,
+    st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
-    let _cid = require_char(ctx)?;
+    let cid = require_char(ctx)?;
     let target = parse_listing_target(sub(msg, 1));
-    let rate_units: i64 = if target.is_branded() { 10 } else { 20 };
+    let rate_units: i64 = paragon_hub_tax_pct(st, cid, &target) as i64;
     let mut tr = Vec::new();
     encode_sint_field(1, rate_units, &mut tr);
     encode_sint_field(2, 0, &mut tr);
@@ -589,6 +621,7 @@ fn component_initiate_purchase(
     };
     st.save();
 
+    let mut debited_bal: Option<IskCents> = None;
     let succeeded = st.db.with_mut_snapshot(|s| {
         let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
             return false;
@@ -598,6 +631,7 @@ fn component_initiate_purchase(
                 return false;
             };
             ch.balance = rem;
+            debited_bal = Some(rem);
         } else if let Some(total_plex) = checked_plex_total {
             if ch.plex_balance < total_plex {
                 return false;
@@ -610,7 +644,22 @@ fn component_initiate_purchase(
         let location_id = ch
             .station_id
             .or(ch.structure_id)
-            .unwrap_or(ch.home_station_id.max(60_003_760));
+            .unwrap_or_else(|| {
+                if st.skinr.sde.stations.contains_key(&ch.home_station_id) {
+                    ch.home_station_id
+                } else {
+                    st.skinr
+                        .sde
+                        .stations
+                        .keys()
+                        .copied()
+                        .min()
+                        .unwrap_or(ch.home_station_id)
+                }
+            });
+        if let (Some(total_cost), Some(rem)) = (checked_isk_total, debited_bal) {
+            s.append_journal(cid as i64, "ParagonHubComponentPurchase", IskCents(-total_cost.0), rem, format!("Paragon Hub component purchase ({quantity_u64}x)"));
+        }
         let item_id = s
             .items
             .keys()
@@ -635,15 +684,12 @@ fn component_initiate_purchase(
         );
         true
     });
-
+    if let Some(rem) = debited_bal { st.emit_account_change(cid as i64, rem); }
     queue_transaction_notice(cid, &tx_uuid, succeeded, now);
     let mut out = Vec::new();
     put_uuid(1, &tx_uuid, &mut out);
     encode_varint_field(2, u64::from(immediately_activate), &mut out);
-    Ok(any(
-        "eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse",
-        out,
-    ))
+    Ok(any("eve_public.cosmetic.market.component.listing.api.InitiatePurchaseListingResponse", out))
 }
 
 fn skin_visible_to(
@@ -856,8 +902,20 @@ fn skin_initiate_create(
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
     let now = ctx.now_unix();
 
-    let tx_uuid = {
+    let (_, max_listings) = paragon_hub_skill_reductions(st, cid);
+    let (tx_uuid, listing_key) = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+        let active_owned = data
+            .skin_listings
+            .values()
+            .filter(|l| l.seller_id == cid && l.expires_unix > now && l.quantity > 0)
+            .count();
+        if active_owned >= max_listings {
+            return Err((
+                STATUS_PRECONDITION_FAILED,
+                format!("Maximum active Paragon Hub listings ({max_listings}) reached"),
+            ));
+        }
         let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
         let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
         let avail = skinr_data
@@ -871,34 +929,13 @@ fn skin_initiate_create(
                 "Insufficient unactivated SKIN licenses for listing".to_string(),
             ));
         }
-        let tx = next_uuid(&mut data, b"COSMTXID");
-        let fee_paid = st.db.with_mut_snapshot(|s| {
-            let Some(ch) = s.characters.get_mut(&(cid as i64)) else {
-                return false;
-            };
-            let Some(rem) = ch.balance.checked_sub(broker_fee) else {
-                return false;
-            };
-            ch.balance = rem;
-            true
-        });
-        if !fee_paid {
-            drop(skinr_data);
-            drop(data);
-            st.save();
-            queue_transaction_notice(cid, &tx, false, now);
-            let mut out = Vec::new();
-            put_uuid(1, &tx, &mut out);
-            return Ok(any(
-                "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
-                out,
-            ));
-        }
         if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
             lic.unactivated = lic.unactivated.saturating_sub(u64::from(quantity));
             lic.escrowed = lic.escrowed.saturating_add(u64::from(quantity));
         }
+        let tx = next_uuid(&mut data, b"COSMTXID");
         let listing_uuid = next_uuid(&mut data, b"SKINLIST");
+        let lkey = hex(&listing_uuid);
         let rec = SkinListingRecord {
             uuid: listing_uuid,
             seller_id: cid,
@@ -911,9 +948,38 @@ fn skin_initiate_create(
             branded: target.is_branded(),
             target,
         };
-        data.skin_listings.insert(hex(&listing_uuid), rec);
-        tx
+        data.skin_listings.insert(lkey.clone(), rec);
+        (tx, lkey)
     };
+    let fee_paid_bal = st.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&(cid as i64))?;
+        let rem = ch.balance.checked_sub(broker_fee)?;
+        ch.balance = rem;
+        if broker_fee.0 > 0 {
+            s.append_journal(cid as i64, "ParagonHubListingBrokerFee", IskCents(-broker_fee.0), rem, format!("Paragon Hub SKIN listing broker fee ({quantity}x)"));
+        }
+        Some(rem)
+    });
+    let Some(new_bal) = fee_paid_bal else {
+        st.data.write().unwrap_or_else(|e| e.into_inner()).skin_listings.remove(&listing_key);
+        {
+            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
+            if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
+                lic.unactivated = lic.unactivated.saturating_add(u64::from(quantity));
+                lic.escrowed = lic.escrowed.saturating_sub(u64::from(quantity));
+            }
+        }
+        st.save();
+        queue_transaction_notice(cid, &tx_uuid, false, now);
+        let mut out = Vec::new();
+        put_uuid(1, &tx_uuid, &mut out);
+        return Ok(any(
+            "eve_public.cosmetic.market.skin.listing.api.InitiateCreateListingResponse",
+            out,
+        ));
+    };
+    if broker_fee.0 > 0 { st.emit_account_change(cid as i64, new_bal); }
     st.skinr.save();
     st.save();
     queue_transaction_notice(cid, &tx_uuid, true, now);
@@ -1002,6 +1068,7 @@ fn skin_initiate_purchase(
         let Some(l) = data.skin_listings.get(&key).cloned() else {
             return Err((STATUS_NOT_FOUND, "Skin listing not found".to_string()));
         };
+        if l.seller_id == cid { return Err((STATUS_BAD_REQUEST, "Cannot purchase your own SKIN listing".to_string())); }
         if l.expires_unix <= now {
             return Err((STATUS_BAD_REQUEST, "Skin listing has expired".to_string()));
         }
@@ -1037,7 +1104,7 @@ fn skin_initiate_purchase(
         }
     };
 
-    let tax_pct: u64 = if listing.branded { 10 } else { 20 };
+    let tax_pct: u64 = paragon_hub_tax_pct(st, listing.seller_id, &listing.target);
     let Some(tier_u32) = st.skin_tier_for_hex(&listing.skin_hex) else {
         rollback_listing_qty(st, &listing, quantity);
         return Err((
@@ -1128,6 +1195,7 @@ fn skin_initiate_purchase(
         None => None,
     };
 
+    let mut isk_balances: Option<(IskCents, i64, Option<IskCents>)> = None;
     let settled = st.db.with_mut_snapshot(|s| {
         let Some(buyer) = s.characters.get(&(cid as i64)) else {
             return false;
@@ -1141,23 +1209,20 @@ fn skin_initiate_purchase(
             return false;
         }
         if let Some((total_cost, net_credit)) = checked_isk_settlement {
-            if buyer.balance.checked_sub(total_cost).is_none() {
-                return false;
-            }
-            if let Some(seller) = s.characters.get(&(listing.seller_id as i64)) {
-                if seller.balance.checked_add(net_credit).is_none() {
-                    return false;
-                }
-            }
+            let Some(new_buyer_bal) = buyer.balance.checked_sub(total_cost) else { return false; };
+            if listing.seller_id != cid && s.characters.get(&(listing.seller_id as i64)).is_some_and(|sl| sl.balance.checked_add(net_credit).is_none()) { return false; }
             if let Some(b) = s.characters.get_mut(&(cid as i64)) {
-                b.balance = b.balance.checked_sub(total_cost).unwrap_or(b.balance);
-                if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) {
-                    *lp -= buyer_lp_fee;
-                }
+                b.balance = new_buyer_bal;
+                if let Some(lp) = b.loyalty_points.get_mut(&(PARAGON_CORP_ID as i64)) { *lp -= buyer_lp_fee; }
             }
-            if let Some(seller) = s.characters.get_mut(&(listing.seller_id as i64)) {
-                seller.balance = seller.balance.checked_add(net_credit).unwrap_or(seller.balance);
-            }
+            s.append_journal(cid as i64, "ParagonHubSkinPurchase", IskCents(-total_cost.0), new_buyer_bal, format!("Paragon Hub SKIN purchase ({quantity}x)"));
+            let new_seller_bal = if let Some(seller) = s.characters.get_mut(&(listing.seller_id as i64)) {
+                let Some(sb) = seller.balance.checked_add(net_credit) else { return false; };
+                seller.balance = sb;
+                s.append_journal(listing.seller_id as i64, "ParagonHubSkinSale", net_credit, sb, format!("Paragon Hub SKIN sale ({quantity}x)"));
+                Some(sb)
+            } else { None };
+            isk_balances = Some((new_buyer_bal, listing.seller_id as i64, new_seller_bal));
         } else if let Some((total_plex, net_plex)) = checked_plex_settlement {
             if buyer.plex_balance < total_plex {
                 return false;
@@ -1181,7 +1246,10 @@ fn skin_initiate_purchase(
         }
         true
     });
-
+    if let Some((b_bal, s_id, s_bal_opt)) = isk_balances {
+        st.emit_account_change(cid as i64, b_bal);
+        if let Some(s_bal) = s_bal_opt { if s_id != cid as i64 { st.emit_account_change(s_id, s_bal); } }
+    }
     if settled {
         {
             let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
@@ -1249,7 +1317,7 @@ pub fn register(
     sde: Arc<SdeRegistry>,
     skinr: Arc<SkinrCosmeticsState>,
 ) {
-    let state = CosmeticsMarketState::load(db, sde, skinr);
+    let state = CosmeticsMarketState::load_with_sink(db, sde, skinr, Arc::clone(&router.macho_notify_sink));
     let reg = |name: &'static str,
                f: fn(&CosmeticsMarketState, &AuthoritativeContext, &DynamicQuasarMessage) -> HandlerResult| {
         let st = Arc::clone(&state);

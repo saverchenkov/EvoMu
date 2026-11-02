@@ -11,14 +11,11 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 use super::{
-    check_session_change_timer_active, compute_pilot_warp_speed_au_s,
-    record_session_change_timer, sync_ship_cloak_and_mjfg_from_fitting,
-    wormhole_item_id_for_signature, AU_IN_METERS,
+    check_session_change_timer_active, compute_pilot_warp_speed_au_s, record_session_change_timer,
+    sync_ship_cloak_and_mjfg_from_fitting, wormhole_item_id_for_signature, AU_IN_METERS,
 };
-
 pub use crate::services::space_destiny::{
-    break_location_change_invulnerability, grant_location_change_invulnerability,
-    is_location_change_invulnerable,
+    break_location_change_invulnerability, grant_location_change_invulnerability, is_location_change_invulnerable,
 };
 
 const BEYONCE_SVC: &str = "beyonce";
@@ -49,14 +46,10 @@ pub(crate) async fn handle(
             )
             .await,
         ),
-        ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
-            Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs).await)
-        }
+        ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args, kwargs).await),
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
         // parity: rpc:beyonce.SetSessionCheck, rpc:beyonce.CmdDock
-        ("beyonce", "CmdDock") => {
-            Some(handle_dock(ctx, session, bound_entry, args).await)
-        }
+        ("beyonce", "CmdDock") => Some(handle_dock(ctx, session, bound_entry, args).await),
         ("beyonce", "Undock") => handle_undock(ctx, session, args, kwargs).await,
         ("beyonce", "SetSessionCheck") => {
             Some(crate::services::nav_warp_interdiction::handle_set_session_check(ctx, session, args).await)
@@ -942,6 +935,19 @@ async fn handle_cmd_stargate_jump(
         dest_sys_id as i64,
     );
     let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, dest_sys_id).await;
+    let dest_sec = ctx.sde.solar_systems.get(&dest_sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    let is_capsule_jump = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id == 670).unwrap_or(false));
+    if dest_sec >= 0.45
+        && !is_capsule_jump
+        && !crate::services::combat_crimewatch::is_concord_suppressed_in_system(ctx, dest_sys_id)
+    {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(char_id);
+        if st.is_criminal(now_unix) && st.pending_concord_arrival.is_none() {
+            let delay_sec = crate::combat::crimewatch::concord_delay_for_security(dest_sec);
+            st.pending_concord_arrival = Some((dest_sys_id, now_unix.saturating_add(delay_sec.ceil() as u64), ship_id, 0));
+        }
+    }
     ctx.quasar_gateway.on_session_changed(session, now_unix);
     if let Some(expiry) = zarzakh_lock_expiry {
         let _ = crate::services::quasar_sov_services::publish_stargate_lock_activated_notice(

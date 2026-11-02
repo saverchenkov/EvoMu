@@ -428,12 +428,6 @@ async fn activate_trace(
     }
 
     let entry_now = ctx.now_unix();
-    if gives_suspect {
-        ctx.crimewatch
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .trigger_suspect_flag(char_id, entry_now);
-    }
     let (pocket_id, room1_npcs) =
         crate::services::pve_special_sites_abyssal::enter_abyssal_pocket_with_trace(
             ctx,

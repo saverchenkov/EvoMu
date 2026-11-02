@@ -333,7 +333,7 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
             750_102,
             InventoryItemRecord {
                 item_id: 750_102,
-                type_id: 35_664, // Negotiator (-2 to 0)
+                type_id: 33141, // Negotiator (-2 to 0)
                 owner_id: char_id,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
@@ -345,39 +345,35 @@ async fn test_crimewatch_sec_status_gain_caps_and_tag_tier_bands() {
         );
     });
 
-    let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(lowsec_station));
+    let sec_office_st = ctx.sde.stations.values().filter_map(|st| {
+        let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+        (0.0 < sec && sec < 0.45 && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)
+            && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
+            .then_some(st.station_id)
+    }).min().unwrap_or(lowsec_station);
+    let mut sess = make_sess(char_id, ship_id, lowsec_sys, Some(sec_office_st));
     let wrong_band_err = dispatch_combat_rpc(
         &ctx,
         &mut sess,
         "crimewatch",
         "ApplyTagsForSecStatus",
-        &[PyRep::Integer(35_661), PyRep::Integer(1)],
+        &[PyRep::Real(-9.5), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
         &HashMap::new(),
     )
     .await
     .expect_err("Trainer tag must be refused at -6.0 sec status");
     assert!(!wrong_band_err.code.is_empty());
 
-    // 2. Negotiator tag (35664) at -0.3 gives full +0.5 -> 0.2 (consuming 1 tag), then refuses further tags >= 0.0
+    // 2. Negotiator tag (33141) at -0.3 raises security status to 0.0 (capped at 0.0 per V24)
     ctx.db.with_mut_snapshot(|s| {
-        if let Some(ch) = s.characters.get_mut(&char_id) {
-            ch.security_status = -0.3;
-            ch.balance = eve_db::IskCents::from_isk(20_000_000);
-        }
+        if let Some(ch) = s.characters.get_mut(&char_id) { ch.security_status = -0.3; ch.station_id = sess.station_id; }
+        if let Some(sh) = s.items.get_mut(&ship_id) { sh.location_id = sec_office_st; }
     });
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut sess,
-        "crimewatch",
-        "ApplyTagsForSecStatus",
-        &[PyRep::Integer(35_664), PyRep::Integer(2)],
-        &HashMap::new(),
-    )
-    .await
-    .expect("Negotiator tag at -0.3");
+    let _ = dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(0.2), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(2))])], &HashMap::new())
+        .await
+        .expect("Negotiator tag at -0.3");
     let sec_post_tag = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status).unwrap_or(-1.0));
-    assert!((sec_post_tag - 0.2).abs() < 1e-6, "Last tag at -0.3 must give full +0.5 -> 0.2 (got {sec_post_tag})");
-    assert!(dispatch_combat_rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35_664), PyRep::Integer(1)], &HashMap::new()).await.is_err());
+    assert!((sec_post_tag - 0.0).abs() < 1e-6, "Clone soldier tags must raise security status from -0.3 to 0.0 (got {sec_post_tag})");
 
     // 3. Real belt, mission, and incursion NPC kills through live combat/death pipeline cap at +5.0
     ctx.db.with_mut_snapshot(|s| {

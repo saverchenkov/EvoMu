@@ -434,7 +434,7 @@ async fn test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewal_and_re
         // activating Abyssal, Noise/Signal Random Jump, and Proving Grounds filaments
         let (mut att_sess, _, _) = setup_pilot_in_space(&ctx, 90_000_002).await;
         for (svc, method, args) in [
-            ("abyssal_content_manager", "ActivateAbyssalKey", vec![PyRep::Integer(47_765)]),
+            ("abyssalMgr", "AbyssalEntranceDeployment", vec![PyRep::Integer(47_765)]),
             ("randomJumpMgr", "ActivateRandomJumpFilament", vec![PyRep::Integer(1)]),
             ("pvpFilamentMgr", "JoinPVPQueue", vec![PyRep::Integer(1), PyRep::Integer(56_303)]),
         ] {

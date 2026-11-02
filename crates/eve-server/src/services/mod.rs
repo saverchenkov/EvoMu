@@ -80,6 +80,7 @@ pub mod notify_emitters_batch9_part2;
 pub mod notify_emitters_batch10;
 pub mod notify_emitters_b30;
 pub mod notify_emitters_b36;
+pub mod notify_emitters_b23;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
 pub mod operations_survey_handlers;

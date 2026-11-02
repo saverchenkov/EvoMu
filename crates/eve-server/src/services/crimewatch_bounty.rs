@@ -594,3 +594,311 @@ pub fn handle_bounty_proxy(
         _ => None,
     }
 }
+
+pub fn handle_apply_tags_for_sec_status(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let Some(station_id) = session.station_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NotDockedInStation".into(),
+            message: "Security status tag turn-in requires being docked at a CONCORD station".into(),
+        }));
+    };
+    let Some(st) = ctx.sde.stations.get(&station_id) else {
+        return Some(Err(BridgeRpcError {
+            code: "SecurityOfficeRequired".into(),
+            message: "Security status tags can only be turned in at a CONCORD/DED Security Office station".into(),
+        }));
+    };
+    let st_sec = ctx
+        .sde
+        .solar_systems
+        .get(&st.solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    if !(0.0 < st_sec && st_sec < 0.45)
+        || !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 27)
+    {
+        return Some(Err(BridgeRpcError {
+            code: "SecurityOfficeRequired".into(),
+            message: "Security status tags can only be turned in at a low-security CONCORD/DED Security Office station".into(),
+        }));
+    }
+    let Some(now_target_sec) = (if args.len() == 2 {
+        args[0].as_f64().filter(|v| v.is_finite())
+    } else {
+        None
+    }) else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidSecurityTagArguments".into(),
+            message: "ApplyTagsForSecStatus requires (targetSecStatus, tagsToUseDict)".into(),
+        }));
+    };
+    let PyRep::Dict(raw_tags) = &args[1] else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidSecurityTagArguments".into(),
+            message: "ApplyTagsForSecStatus second argument must be tagsToUseDict".into(),
+        }));
+    };
+    if raw_tags.is_empty() {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidQuantity".into(),
+            message: "tagsToUseDict must specify at least one tag".into(),
+        }));
+    }
+    let mut requested_by_type: [i32; 4] = [0; 4];
+    for (k, v) in raw_tags {
+        let Some(tag_type_id) = k.as_i64().and_then(|val| u32::try_from(val).ok()) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidSecurityTagType".into(),
+                message: "Invalid security tag typeID".into(),
+            }));
+        };
+        let Some(idx) = (33138..=33141).position(|id| id == tag_type_id) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidSecurityTagType".into(),
+                message: format!("Type {tag_type_id} is not a valid Clone Soldier Tag (33138..=33141)"),
+            }));
+        };
+        let Some(q) = v.as_i64().and_then(|val| i32::try_from(val).ok()).filter(|&q| q > 0) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidQuantity".into(),
+                message: "Tag quantity must be a positive integer".into(),
+            }));
+        };
+        requested_by_type[idx] = requested_by_type[idx].saturating_add(q);
+    }
+    let now_unix = ctx.now_unix();
+    let Some(sys_id) = session.solar_system_id.or_else(|| {
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+    }) else {
+        return Some(Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Character has no active solar system".into(),
+        }));
+    };
+
+    // DERIVED: CONCORD Security Office tag processing fees per Clone Soldier security band
+    let tag_bands: [(u32, f64, f64, i64); 4] = [
+        (33138, -10.0, -8.0, 1_000_000),
+        (33139, -8.0, -5.0, 2_000_000),
+        (33140, -5.0, -2.0, 5_000_000),
+        (33141, -2.0, 0.0, 10_000_000),
+    ];
+
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap
+            .characters
+            .get(&char_id)
+            .is_some_and(|ch| ch.station_id == Some(station_id))
+        {
+            return Err(BridgeRpcError {
+                code: "NotDockedInStation".into(),
+                message: "Character is not docked at this station".into(),
+            });
+        }
+        let orig_sec = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.security_status)
+            .unwrap_or(0.0);
+        let effective_target = now_target_sec.min(0.0);
+        if effective_target <= orig_sec + 1e-9 {
+            return Err(BridgeRpcError {
+                code: "InvalidTargetSecurityStatus".into(),
+                message: format!(
+                    "Target security status {now_target_sec:.2} must exceed current security status {orig_sec:.2} (max 0.0)"
+                ),
+            });
+        }
+        let ship_id_opt = session.ship_id.filter(|sid| {
+            snap.items
+                .get(sid)
+                .is_some_and(|s| s.location_id == station_id)
+        });
+        let mut cur_sec = orig_sec;
+        let mut total_fee_isk: i64 = 0;
+        let mut total_consumed: i32 = 0;
+        let mut changed_items: Vec<(eve_db::InventoryItemRecord, Option<eve_db::InventoryItemRecord>)> = Vec::new();
+        for (idx, (tag_type_id, min_band, max_band, fee_per_tag_isk)) in tag_bands.into_iter().enumerate() {
+            let req_qty = requested_by_type[idx];
+            if req_qty <= 0 || cur_sec + 1e-9 >= effective_target {
+                continue;
+            }
+            if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
+                return Err(BridgeRpcError {
+                    code: "SecurityTagBandMismatch".into(),
+                    message: format!(
+                        "Tag {tag_type_id} is only valid in security band [{min_band:.1}, {max_band:.1}); character is at {cur_sec:.2}"
+                    ),
+                });
+            }
+            let band_cap = ((max_band - cur_sec) / 0.5).ceil().max(1.0) as i32;
+            let target_cap = ((effective_target - cur_sec) / 0.5).ceil().max(0.0) as i32;
+            let max_needed = band_cap.min(target_cap);
+            if max_needed <= 0 {
+                continue;
+            }
+            let consumed_qty = req_qty.min(max_needed);
+            let mut matching_ids: Vec<(i64, i32)> = snap
+                .items
+                .values()
+                .filter(|i| {
+                    i.owner_id == char_id
+                        && i.type_id == tag_type_id
+                        && i.quantity > 0
+                        && ((i.location_id == station_id && i.flag == eve_db::InventoryFlag::Hangar)
+                            || (ship_id_opt.is_some_and(|sid| i.location_id == sid)
+                                && i.flag == eve_db::InventoryFlag::Cargo))
+                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
+                })
+                .map(|i| (i.item_id, i.quantity))
+                .collect();
+            matching_ids.sort_by_key(|&(iid, _)| iid);
+            let total_avail: i64 = matching_ids.iter().map(|&(_, q)| i64::from(q)).sum();
+            if total_avail < i64::from(consumed_qty) {
+                return Err(BridgeRpcError {
+                    code: "InsufficientSecurityTags".into(),
+                    message: format!("Missing {consumed_qty}x unlocked tag type {tag_type_id} in local station hangar or active ship cargo"),
+                });
+            }
+            let mut remaining = consumed_qty;
+            for (iid, _) in matching_ids {
+                if remaining <= 0 {
+                    break;
+                }
+                if let Some(old_item) = snap.items.get(&iid).cloned() {
+                    let take = old_item.quantity.min(remaining);
+                    remaining -= take;
+                    let new_item_opt = if let Some(it) = snap.items.get_mut(&iid) {
+                        if it.quantity > take {
+                            it.quantity -= take;
+                            it.version += 1;
+                            Some(it.clone())
+                        } else {
+                            snap.items.remove(&iid);
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    changed_items.push((old_item, new_item_opt));
+                }
+            }
+            cur_sec = (cur_sec + 0.5 * f64::from(consumed_qty)).min(0.0);
+            total_fee_isk = total_fee_isk.saturating_add(fee_per_tag_isk.saturating_mul(i64::from(consumed_qty)));
+            total_consumed = total_consumed.saturating_add(consumed_qty);
+        }
+        let total_fee = eve_db::IskCents::from_isk(total_fee_isk);
+        let cur_bal = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.balance)
+            .unwrap_or(eve_db::IskCents(0));
+        let Some(new_bal) = cur_bal.checked_sub(total_fee) else {
+            return Err(BridgeRpcError {
+                code: "InsufficientFunds".into(),
+                message: "Insufficient ISK for CONCORD Security Office tag processing fee".into(),
+            });
+        };
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.security_status = cur_sec;
+            ch.balance = new_bal;
+        }
+        snap.append_journal(
+            char_id,
+            "SecurityTagProcessing",
+            eve_db::IskCents(-total_fee.0),
+            new_bal,
+            format!("CONCORD Security Office tag turn-in ({total_consumed}x tags)"),
+        );
+        Ok((orig_sec, cur_sec, new_bal.to_wire_f64(), changed_items))
+    });
+
+    match res {
+        Ok((old_sec, new_sec, new_bal_f64, changed_items)) => {
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                rt.sec_status_transactions
+                    .entry(char_id)
+                    .or_default()
+                    .push(crate::services::combat_crimewatch::SecStatusTransaction {
+                        timestamp_unix: now_unix,
+                        old_sec,
+                        new_sec,
+                        delta: new_sec - old_sec,
+                        reason: "Clone Soldier Security Tag".into(),
+                        solar_system_id: sys_id,
+                        event_type_id: 385,
+                        other_owner_id: Some(1_000_125),
+                        other_type_id: None,
+                    });
+            });
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnAccountChange",
+                "charid",
+                vec![
+                    PyRep::String("cash".into()),
+                    PyRep::Integer(char_id),
+                    PyRep::Real(new_bal_f64),
+                ],
+            );
+            for (old_item, new_item_opt) in changed_items {
+                let (rem_qty, rem_loc) = new_item_opt
+                    .as_ref()
+                    .map(|i| (i.quantity, i.location_id))
+                    .unwrap_or((0, 6));
+                let (group_id, category_id) = ctx
+                    .sde
+                    .types
+                    .get(&old_item.type_id)
+                    .map(|t| (t.group_id as i64, t.category_id as i64))
+                    .unwrap_or((1224, 17));
+                let mut changes = vec![
+                    (PyRep::Integer(5), PyRep::Integer(old_item.quantity as i64)), // ixQuantity
+                    (PyRep::Integer(9), PyRep::Integer(old_item.quantity as i64)), // ixStackSize
+                ];
+                if new_item_opt.is_none() {
+                    changes.push((PyRep::Integer(3), PyRep::Integer(old_item.location_id))); // ixLocationID
+                }
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnItemChange",
+                    "charid",
+                    vec![
+                        PyRep::keyval([
+                            ("itemID", PyRep::Integer(old_item.item_id)),
+                            ("typeID", PyRep::Integer(old_item.type_id as i64)),
+                            ("ownerID", PyRep::Integer(old_item.owner_id)),
+                            ("locationID", PyRep::Integer(rem_loc)),
+                            ("flagID", PyRep::Integer(old_item.flag as i64)),
+                            ("quantity", PyRep::Integer(rem_qty as i64)),
+                            ("groupID", PyRep::Integer(group_id)),
+                            ("categoryID", PyRep::Integer(category_id)),
+                            ("stacksize", PyRep::Integer(rem_qty as i64)),
+                        ]),
+                        PyRep::Dict(changes),
+                        PyRep::Integer(old_item.location_id),
+                    ],
+                );
+            }
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSecurityStatusUpdate",
+                "charid",
+                vec![PyRep::Real(new_sec)],
+            );
+            Some(Ok(PyRep::keyval([
+                ("oldSecurityStatus", PyRep::Real(old_sec)),
+                ("newSecurityStatus", PyRep::Real(new_sec)),
+            ])))
+        }
+        Err(e) => Some(Err(e)),
+    }
+}

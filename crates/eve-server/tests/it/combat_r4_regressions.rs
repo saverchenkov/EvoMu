@@ -372,20 +372,41 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
         DVec3::ZERO,
     )
     .await;
-    sess.station_id = Some(lowsec_stn);
+    let sec_office_st = ctx
+        .sde
+        .stations
+        .values()
+        .find_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            let has_office = ctx
+                .sde
+                .station_operations
+                .get(&st.operation_id)
+                .is_some_and(|op| {
+                    op.services.iter().any(|sid| {
+                        ctx.sde.station_services.get(sid).is_some_and(|svc| {
+                            svc.name.eq_ignore_ascii_case("Security Office")
+                                || svc.name.eq_ignore_ascii_case("securityOffice")
+                        })
+                    })
+                });
+            (0.0 < sec && sec < 0.45 && has_office).then_some(st.station_id)
+        })
+        .unwrap_or(60_014_861);
+    sess.station_id = Some(sec_office_st);
 
     let remote_tag_id = 87_157_201i64;
     let locked_tag_id = 87_157_202i64;
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&char_id).unwrap();
-        ch.station_id = Some(lowsec_stn);
+        ch.station_id = Some(sec_office_st);
         ch.security_status = -8.5;
         // Tag in remote station 60_008_494
         snap.items.insert(
             remote_tag_id,
             item_rec(
                 remote_tag_id,
-                35661,
+                33138,
                 char_id,
                 60_008_494,
                 InventoryFlag::Hangar,
@@ -393,48 +414,27 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
                 false,
             ),
         );
-        // Tag in local station lowsec_stn but locked in an Outstanding contract
+        // Tag in local station but locked in an Outstanding contract
         snap.items.insert(
             locked_tag_id,
             item_rec(
                 locked_tag_id,
-                35661,
+                33138,
                 char_id,
-                lowsec_stn,
+                sec_office_st,
                 InventoryFlag::Hangar,
                 1,
                 false,
             ),
         );
-        snap.contracts.insert(
-            77_157_001,
-            ContractRecord {
-                contract_id: 77_157_001,
-                issuer_id: char_id,
-                issuer_corp_id: 1_000_125,
-                assignee_id: 0,
-                acceptor_id: None,
-                contract_type: "ItemExchange".into(),
-                status: "Outstanding".into(),
-                title: "Locked Tag".into(),
-                for_corp: false,
-                availability: "Public".into(),
-                start_station_id: 60_003_760,
-                end_station_id: 60_003_760,
-                price: IskCents::from_isk(1),
-                reward: IskCents(0),
-                collateral: IskCents(0),
-                item_ids: vec![locked_tag_id],
-                expiration_unix: 1_700_086_400,
-                buyout: IskCents(0),
-                current_bid: IskCents(0),
-                current_bidder_id: None,
-                requested_items: Vec::new(),
-                bid_history: Vec::new(),
-                date_issued_unix: 1_700_000_000,
-                num_days: 1,
-            },
-        );
+        snap.contracts.insert(77_157_001, ContractRecord {
+            contract_id: 77_157_001, issuer_id: char_id, issuer_corp_id: 1_000_125, assignee_id: 0, acceptor_id: None,
+            contract_type: "ItemExchange".into(), status: "Outstanding".into(), title: "Locked Tag".into(), for_corp: false,
+            availability: "Public".into(), start_station_id: 60_003_760, end_station_id: 60_003_760,
+            price: IskCents::from_isk(1), reward: IskCents(0), collateral: IskCents(0), item_ids: vec![locked_tag_id],
+            expiration_unix: 1_700_086_400, buyout: IskCents(0), current_bid: IskCents(0), current_bidder_id: None,
+            requested_items: Vec::new(), bid_history: Vec::new(), date_issued_unix: 1_700_000_000, num_days: 1,
+        });
     });
 
     let err = ctx
@@ -443,7 +443,7 @@ async fn test_r4_157_sec_tag_turn_in_requires_local_hangar_and_not_contract_lock
             "crimewatch",
             None,
             "ApplyTagsForSecStatus",
-            &[PyRep::Integer(35661), PyRep::Integer(1)],
+            &[PyRep::Real(-8.0), PyRep::Dict(vec![(PyRep::Integer(33138), PyRep::Integer(1))])],
             &kw,
             None,
         )

@@ -288,6 +288,17 @@ impl<'a> std::ops::DerefMut for CrimeWatchWriteGuard<'a> {
     }
 }
 
+pub fn concord_delay_for_security(sys_sec: f64) -> f64 {
+    match (sys_sec * 10.0).round() as i32 {
+        10 | 9 => 6.0,
+        8 => 8.0,
+        7 => 11.0,
+        6 => 14.0,
+        5 => 19.0,
+        _ => concord_response_delay_sec(sys_sec),
+    }
+}
+
 impl<'a> Drop for CrimeWatchWriteGuard<'a> {
     fn drop(&mut self) {
         if self.director.states != self.orig_states
@@ -380,14 +391,7 @@ impl CrimeWatchDirector {
         st.pvp_timer_until_unix = now_unix.saturating_add(900);
         st.criminal_flag_until_unix = now_unix.saturating_add(900);
         if sys_sec >= 0.45 {
-            let delay_sec = match (sys_sec * 10.0).round() as i32 {
-                10 | 9 => 6.0,
-                8 => 8.0,
-                7 => 11.0,
-                6 => 14.0,
-                5 => 19.0,
-                _ => concord_response_delay_sec(sys_sec),
-            };
+            let delay_sec = concord_delay_for_security(sys_sec);
             let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
             st.pending_concord_arrival = Some((sys_id, arrival_unix, helper_ship_id, 0));
             AggressionEvaluation::CriminalFlagTriggered {
@@ -448,14 +452,7 @@ impl CrimeWatchDirector {
                 // Normal High-sec or pod kill -> Criminal flag + CONCORD response
                 st.criminal_flag_until_unix = now_unix.saturating_add(900);
                 st.suspect_flag_until_unix = 0;
-                let delay_sec = match (sys_sec * 10.0).round() as i32 {
-                    10 | 9 => 6.0,
-                    8 => 8.0,
-                    7 => 11.0,
-                    6 => 14.0,
-                    5 => 19.0,
-                    _ => concord_response_delay_sec(sys_sec),
-                };
+                let delay_sec = concord_delay_for_security(sys_sec);
                 let arrival_unix = now_unix.saturating_add(delay_sec.ceil() as u64);
                 st.pending_concord_arrival = Some((sys_id, arrival_unix, ship_id, victim_char_id));
 

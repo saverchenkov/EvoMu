@@ -606,44 +606,28 @@ async fn test_crimewatch_duels_kill_rights_and_bounties_notifications() {
     assert_eq!(payout[0][0].dict_get("amount"), Some(&PyRep::Real(claimed)));
     assert_eq!(payout[0][0].dict_get("enemyTypeID"), Some(&PyRep::Integer(587)));
 
-    let security_office_svc_id = ctx
-        .sde
-        .station_services
-        .values()
-        .find(|s| s.name == "Security Office")
-        .map(|s| s.service_id)
-        .unwrap_or(26);
-    let concord_lowsec_station = ctx
+    let sec_office_st = ctx
         .sde
         .stations
         .values()
-        .find(|st| {
-            let is_concord = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137)
-                || st.owner_faction_id == Some(500_006);
-            let has_office = ctx
-                .sde
-                .station_operations
-                .get(&st.operation_id)
-                .is_some_and(|op| op.services.contains(&security_office_svc_id));
-            is_concord
-                && has_office
-                && ctx
-                    .sde
-                    .solar_systems
-                    .get(&st.solar_system_id)
-                    .is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45)
+        .filter_map(|st| {
+            let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+            (0.0 < sec
+                && sec < 0.45
+                && (st.owner_corporation_id == 1_000_125 || st.owner_corporation_id == 1_000_137)
+                && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27))
+            .then_some(st.station_id)
         })
-        .map(|st| st.station_id)
-        .unwrap_or(JITA_44);
+        .min()
+        .unwrap_or(60_014_861);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.security_status = -1.5;
-            ch.balance = eve_db::IskCents::from_f64_isk(50_000_000.0);
-            ch.station_id = Some(concord_lowsec_station);
+            ch.station_id = Some(sec_office_st);
         }
     });
-    s1.station_id = Some(concord_lowsec_station);
-    seed_item(&ctx, 970_001, 35664, P1, concord_lowsec_station, InventoryFlag::Hangar, 2);
-    call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(2)]).await;
+    s1.station_id = Some(sec_office_st);
+    seed_item(&ctx, 970_001, 33141, P1, sec_office_st, InventoryFlag::Hangar, 2);
+    call(&ctx, &mut s1, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(2))])]).await;
     assert_eq!(events(&ctx, P1, "OnSecurityStatusUpdate"), vec![vec![PyRep::Real(-0.5)]]);
 }

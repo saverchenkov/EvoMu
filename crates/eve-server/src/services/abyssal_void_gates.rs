@@ -591,6 +591,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .trigger_suspect_flag(char_id, now_u);
+        crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, char_id, now_u);
     }
     // DATA GAP: V24 content-finished timer_type enum mappings are Tranquility server-only
     ctx.notify(

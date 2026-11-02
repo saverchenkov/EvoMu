@@ -306,68 +306,34 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         rpc(&ctx, &mut sess, "crimewatch", "StartDuelChallenge", &[PyRep::Integer(OTHER)]).await;
         rpc(&ctx, &mut sess, "entity", "ChangeDroneSettings", &[PyRep::Bool(true), PyRep::Bool(true)]).await;
 
-        // Turn in a Clone Soldier Negotiator Tag (35664) via ApplyTagsForSecStatus while docked
-        let security_office_svc_id = ctx
-            .sde
-            .station_services
-            .values()
-            .find(|s| s.name == "Security Office")
-            .map(|s| s.service_id)
-            .unwrap_or(26);
-        let concord_lowsec_station = ctx
+        // Turn in a Clone Soldier Negotiator Tag (33141) via ApplyTagsForSecStatus while docked at a low-sec Security Office
+        let sec_office_st = ctx
             .sde
             .stations
             .values()
-            .find(|st| {
-                let is_concord = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137)
-                    || st.owner_faction_id == Some(500_006);
-                let has_office = ctx
-                    .sde
-                    .station_operations
-                    .get(&st.operation_id)
-                    .is_some_and(|op| op.services.contains(&security_office_svc_id));
-                is_concord
-                    && has_office
-                    && ctx
-                        .sde
-                        .solar_systems
-                        .get(&st.solar_system_id)
-                        .is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45)
+            .find_map(|st| {
+                let sec = ctx.sde.solar_systems.get(&st.solar_system_id)?.security_status;
+                (0.0 < sec && sec < 0.45 && eve_server::services::station_structure::npc_station_offers_service(&ctx.sde, st.station_id, 27)).then_some(st.station_id)
             })
-            .map(|st| st.station_id)
-            .unwrap_or(60_003_760);
-        let prev_station = sess.station_id;
-        sess.station_id = Some(concord_lowsec_station);
+            .unwrap_or(60_014_861);
+        let (orig_station, orig_sys) = (sess.station_id, sess.solar_system_id);
+        sess.station_id = Some(sec_office_st);
+        sess.solar_system_id = ctx.sde.stations.get(&sec_office_st).map(|s| s.solar_system_id);
         ctx.db.with_mut_snapshot(|snap| {
-            let station_id = concord_lowsec_station;
             let ch = snap.characters.get_mut(&PILOT).unwrap();
+            ch.station_id = Some(sec_office_st);
             ch.security_status = -1.0;
             ch.balance = IskCents::from_isk(500_000_000);
-            ch.station_id = Some(concord_lowsec_station);
-            snap.items.insert(
-                880_001,
-                InventoryItemRecord {
-                    item_id: 880_001,
-                    type_id: 35664,
-                    owner_id: PILOT,
-                    location_id: station_id,
-                    flag: InventoryFlag::Hangar,
-                    quantity: 1,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
+            snap.items.insert(880_001, InventoryItemRecord {
+                item_id: 880_001, type_id: 33141, owner_id: PILOT, location_id: sec_office_st, flag: InventoryFlag::Hangar,
+                quantity: 1, singleton: false, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+            });
         });
-        rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Integer(35664), PyRep::Integer(1)]).await;
-        sess.station_id = prev_station;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.characters.get_mut(&PILOT).unwrap().station_id = prev_station;
-        });
+        rpc(&ctx, &mut sess, "crimewatch", "ApplyTagsForSecStatus", &[PyRep::Real(-0.5), PyRep::Dict(vec![(PyRep::Integer(33141), PyRep::Integer(1))])]).await;
+        ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&PILOT).unwrap().station_id = orig_station; });
+        sess.station_id = orig_station;
+        sess.solar_system_id = orig_sys;
 
         // Undock, jump Turnur -> Zarzakh via CmdStargateJump (creates 6h Zarzakh gate lock),
         // then jump Zarzakh -> Thera via WormholeJump (creates 300s wormhole polarization)
@@ -480,6 +446,8 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
             assert!(sec_cols.iter().any(|c| c == col), "missing V24 column {col} in {sec_cols:?}");
         }
         assert!(!sec_rows.is_empty());
+        let sec_txt = format!("{sec_tx:?}");
+        assert!(sec_txt.contains("Integer(385)") && sec_txt.contains("Real(-0.5)"), "tag turn-in transaction must persist across SQLite restart: {sec_txt}");
         let bkr = rpc(&ctx2, &mut sess2, "bountyProxy", "GetBountiesAndKillRights", &[PyRep::List(vec![PyRep::Integer(OTHER)]), PyRep::List(vec![PyRep::Integer(OTHER)])]).await;
         assert!(format!("{bkr:?}").contains("5000000") && format!("{bkr:?}").contains("2500000"));
 

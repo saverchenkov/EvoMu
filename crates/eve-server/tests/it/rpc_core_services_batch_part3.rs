@@ -196,7 +196,7 @@ async fn test_rpc_map_svc_part1_batch() {
         reg.escalations_by_char.entry(cid).or_default().push(eve_server::services::pve_exploration::EscalatingPathEntry {
             instance_id: 910_001, character_id: cid, source_dungeon_id: 1001, expedition_dungeon_id: 2001,
             expedition_name: "Test Escalation".into(), destination_solar_system_id: 30_000_142, step_index: 1, total_steps: 4,
-            journal_text: "Test Escalation".into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001],
+            journal_text: "Test Escalation".into(), created_at_sec: now_unix, expires_at_sec: now_unix + 86_400, dungeons_entered: vec![1001], journal_entry_template_id: 280_001,
         });
     });
     let res = ctx

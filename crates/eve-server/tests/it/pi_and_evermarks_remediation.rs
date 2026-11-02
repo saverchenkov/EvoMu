@@ -473,7 +473,7 @@ async fn test_wallet_evermarks_sde_paragon_catalog_and_redemption() {
         false,
         ctx.now_unix(),
     );
-    assert_eq!(empty_rsp.status_code, 200);
+    assert_eq!(empty_rsp.status_code, 400);
     assert_eq!(
         ctx.db.with_snapshot(|s| s.characters[&char_id].loyalty_points.get(&PARAGON_CORP_ID).copied().unwrap_or(0)),
         0

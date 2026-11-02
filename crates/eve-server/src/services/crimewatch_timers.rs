@@ -52,45 +52,85 @@ pub fn evaluate_remote_assistance_legality(
     solar_system_id: u32,
     now_unix: u64,
 ) -> (&'static str, bool, bool) {
-    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
-    let recipient_sec = ctx.db.with_snapshot(|snap| snap.characters.get(&recipient_char_id).map(|c| c.security_status).unwrap_or(0.0));
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    let (recipient_sec, helper_ship_id) = ctx
+        .db
+        .with_snapshot(|snap| {
+            let r_sec = snap
+                .characters
+                .get(&recipient_char_id)
+                .map(|c| c.security_status)
+                .unwrap_or(0.0);
+            let h_ship = snap
+                .characters
+                .get(&helper_char_id)
+                .map(|c| c.active_ship_id)
+                .unwrap_or(0);
+            (r_sec, h_ship)
+        });
     let is_outlaw = recipient_sec <= -4.95;
 
     let rec_in_le = with_combat_runtime(ctx, |rt| {
-        rt.is_in_any_limited_engagement(recipient_char_id, now_unix)
+        let helper_les = rt.limited_engagements.get(&helper_char_id);
+        rt.limited_engagements
+            .get(&recipient_char_id)
+            .is_some_and(|m| {
+                m.iter().any(|(&pid, &exp)| {
+                    pid != helper_char_id
+                        && now_unix <= exp
+                        && !helper_les
+                            .and_then(|hm| hm.get(&pid))
+                            .is_some_and(|&hexp| now_unix <= hexp)
+                })
+            })
     });
-    let rec_in_war = ctx.db.with_snapshot(|snap| {
-        let Some(rec) = snap.characters.get(&recipient_char_id) else {
-            return false;
-        };
-        let rec_ent = rec.alliance_id.unwrap_or(rec.corporation_id);
-        snap.wars.values().any(|w| {
-            w.active && (w.aggressor_corp_id == rec_ent || w.defender_corp_id == rec_ent)
-        })
-    });
+    let rec_in_war = is_war_interference_assistance(ctx, helper_char_id, recipient_char_id, now_unix);
     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
     let rec_state = cw.get_or_create(recipient_char_id).clone();
     let rec_is_criminal = rec_state.is_criminal(now_unix);
     let rec_is_suspect = rec_state.is_suspect(now_unix);
 
-    let helper_state = cw.get_or_create(helper_char_id);
-    let res = if rec_is_criminal {
-        helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
-        helper_state.criminal_flag_until_unix = now_unix.saturating_add(900);
+    let res = if rec_is_criminal && sys_sec > 0.0 {
+        let _ = cw.handle_criminal_remote_assistance(
+            helper_char_id,
+            recipient_char_id,
+            helper_ship_id,
+            solar_system_id,
+            sys_sec,
+            now_unix,
+        );
         ("Criminal", true, false)
     } else if rec_in_le || rec_in_war {
-        helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
         if sys_sec >= 0.45 {
-            helper_state.criminal_flag_until_unix = now_unix.saturating_add(900);
+            let _ = cw.handle_criminal_remote_assistance(
+                helper_char_id,
+                recipient_char_id,
+                helper_ship_id,
+                solar_system_id,
+                sys_sec,
+                now_unix,
+            );
             ("Criminal", true, false)
         } else if sys_sec > 0.0 {
+            let helper_state = cw.get_or_create(helper_char_id);
+            helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
+            helper_state.pvp_timer_until_unix = helper_state.pvp_timer_until_unix.max(now_unix.saturating_add(900));
             helper_state.suspect_flag_until_unix = now_unix.saturating_add(900);
             ("Suspect", false, true)
         } else {
+            let helper_state = cw.get_or_create(helper_char_id);
+            helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
             ("Legal", false, false)
         }
     } else if rec_is_suspect || (is_outlaw && sys_sec >= 0.45) {
+        let helper_state = cw.get_or_create(helper_char_id);
         helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
+        helper_state.pvp_timer_until_unix = helper_state.pvp_timer_until_unix.max(now_unix.saturating_add(900));
         helper_state.suspect_flag_until_unix = now_unix.saturating_add(900);
         ("Suspect", false, true)
     } else {
@@ -786,32 +826,23 @@ pub async fn handle_crimewatch(
             let rows: Vec<Vec<PyRep>> = txs
                 .into_iter()
                 .map(|t| {
-                    let event_date_ft = (t.timestamp_unix as i64 + 11_644_473_600) * 10_000_000;
-                    let event_type_id = if t.event_type_id != 0 {
-                        t.event_type_id
-                    } else if t.reason.contains("Tag") {
-                        EVENT_SEC_STATUS_HAND_IN_TAGS
-                    } else if t.delta < 0.0 {
-                        EVENT_SEC_STATUS_ILLEGAL_AGGRESSION
-                    } else {
-                        EVENT_SEC_STATUS_KILL_PIRATE_NPC
+                    // V24 `appLogConst.pyj` `logConst.eventSecStatus*` constants for `GetSecurityStatusTransactions`
+                    let event_type_id = match t.reason.as_str() {
+                        "Clone Soldier Security Tag" | "eventSecStatusHandInTags" => 385_i64,
+                        "NPC Pirate Bounty" | "eventSecStatusKillPirateNpc" => 378_i64,
+                        "Illegal PvP Aggression" | "eventSecStatusIllegalAggression" => 379_i64,
+                        "eventSecStatusGmRollback" => 386_i64,
+                        _ => 380_i64,
                     };
-                    let other_owner_rep = t.other_owner_id.map(PyRep::Integer).unwrap_or(PyRep::None);
-                    let other_type_rep = t
-                        .other_type_id
-                        .map(|id| PyRep::Integer(id as i64))
-                        .unwrap_or(PyRep::None);
+                    let event_date = crate::sp6_lifecycle::unix_to_filetime(t.timestamp_unix);
                     vec![
-                        PyRep::Integer(event_date_ft),
+                        PyRep::Integer(event_date),
                         PyRep::Integer(event_type_id),
                         PyRep::Integer(t.solar_system_id as i64),
                         PyRep::Real(t.delta),
                         PyRep::Real(t.new_sec),
-                        other_owner_rep,
-                        other_type_rep,
-                        PyRep::Real(t.old_sec),
-                        PyRep::Real(t.new_sec),
-                        PyRep::String(t.reason),
+                        PyRep::None,
+                        PyRep::None,
                     ]
                 })
                 .collect();
@@ -824,9 +855,6 @@ pub async fn handle_crimewatch(
                     "newValue",
                     "otherOwnerID",
                     "otherTypeID",
-                    "oldSecurityStatus",
-                    "newSecurityStatus",
-                    "reason",
                 ],
                 rows,
             )))
@@ -981,122 +1009,9 @@ pub async fn handle_crimewatch(
         }
 
         ("crimewatch", "ApplyTagsForSecStatus") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(station_id) = session.station_id else {
-                return Some(Err(BridgeRpcError::user_error("NotDockedInStation")));
-            };
-            let security_office_svc_id = ctx.sde.station_services.values().find(|s| s.name == "Security Office").map(|s| s.service_id).unwrap_or(26);
-            let is_valid_concord_lowsec_office = ctx.sde.stations.get(&station_id).is_some_and(|st| {
-                let is_concord_owner = matches!(st.owner_corporation_id, 1_000_125 | 1_000_137) || st.owner_faction_id == Some(500_006);
-                let is_lowsec = ctx.sde.solar_systems.get(&st.solar_system_id).is_some_and(|sys| sys.security_status > 0.0 && sys.security_status < 0.45);
-                let has_sec_office = ctx.sde.station_operations.get(&st.operation_id).is_some_and(|op| op.services.contains(&security_office_svc_id));
-                is_concord_owner && is_lowsec && has_sec_office
-            });
-            if !is_valid_concord_lowsec_office {
-                return Some(Err(BridgeRpcError::user_error("SecurityOfficeRequired")));
-            }
-            let cur_sec = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status)).unwrap_or(0.0);
-            let (tag_type_id, raw_qty) = if args.len() >= 2 {
-                let Some(tid) = args[0].as_i64().and_then(|v| u32::try_from(v).ok()) else {
-                    return Some(Err(BridgeRpcError::user_error("InvalidSecurityTagType")));
-                };
-                let Some(q) = args[1].as_i64() else {
-                    return Some(Err(BridgeRpcError::user_error("InvalidTagQuantity")));
-                };
-                (tid, q)
-            } else {
-                let Some(q) = args.first().map(|a| a.as_i64()).unwrap_or(Some(1)) else {
-                    return Some(Err(BridgeRpcError::user_error("InvalidTagQuantity")));
-                };
-                let t = if cur_sec < -8.0 { 35661 } else if cur_sec < -5.0 { 35662 } else if cur_sec < -2.0 { 35663 } else { 35664 };
-                (t, q)
-            };
-            let Some(qty) = i32::try_from(raw_qty).ok().filter(|&q| q > 0) else {
-                return Some(Err(BridgeRpcError::user_error("InvalidTagQuantity")));
-            };
-            let now_unix = ctx.now_unix();
-            let Some(sys_id) = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))) else {
-                return Some(Err(BridgeRpcError::user_error("NoSolarSystem")));
-            };
-            // Clone Soldier Tag bands: 35661 [-10,-8), 35662 [-8,-5), 35663 [-5,-2), 35664 [-2,0).
-            // DERIVED (OF-36): EVE Uni Wiki (`Security_tags.md`) documents an additional ISK fee per tag
-            // when redeeming Clone Soldier tags at a CONCORD/DED Security Office without publishing the
-            // exact server-side ISK schedule; 1M/2M/3M/4M ISK per tier is a derived placeholder.
-            let band_opt = match tag_type_id {
-                35661 | 35514 => Some((-10.0, -8.0, eve_db::IskCents::from_isk(1_000_000))),
-                35662 | 35515 => Some((-8.0, -5.0, eve_db::IskCents::from_isk(2_000_000))),
-                35663 | 35516 => Some((-5.0, -2.0, eve_db::IskCents::from_isk(3_000_000))),
-                35664 | 35517 => Some((-2.0, 0.0, eve_db::IskCents::from_isk(4_000_000))),
-                _ => None,
-            };
-            let Some((min_band, max_band, fee_per_tag_cents)) = band_opt else {
-                return Some(Err(BridgeRpcError::user_error("InvalidSecurityTagType")));
-            };
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let cur_sec = snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0);
-                if cur_sec < min_band - 1e-6 || cur_sec >= max_band - 1e-6 {
-                    return Err(BridgeRpcError::user_error("SecurityTagBandMismatch"));
-                }
-                let ceiling = max_band.min(0.0);
-                let max_useful = (((ceiling - cur_sec) / 0.5) - 1e-9).ceil().max(1.0) as i32;
-                let effective_qty = qty.min(max_useful);
-                let Some(total_fee_cents) = fee_per_tag_cents.checked_mul_qty(i64::from(effective_qty)) else {
-                    return Err(BridgeRpcError::user_error("FeeOverflow"));
-                };
-                let ship_id_opt = session.ship_id;
-                let tag_item_id = snap.items.values().find(|i| {
-                    i.owner_id == char_id && i.type_id == tag_type_id && i.quantity >= effective_qty
-                        && ((i.location_id == station_id && i.flag == InventoryFlag::Hangar)
-                            || (ship_id_opt.is_some_and(|sid| i.location_id == sid) && i.flag == InventoryFlag::Cargo))
-                        && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                }).map(|i| i.item_id);
-                let Some(iid) = tag_item_id else {
-                    return Err(BridgeRpcError::user_error("InsufficientSecurityTags"));
-                };
-                let cur_bal = snap.characters.get(&char_id).map(|c| c.balance).unwrap_or(eve_db::IskCents(0));
-                let Some(new_bal) = cur_bal.checked_sub(total_fee_cents) else {
-                    return Err(BridgeRpcError::user_error("NotEnoughMoney"));
-                };
-                if let Some(it) = snap.items.get_mut(&iid) {
-                    if it.quantity > effective_qty {
-                        it.quantity -= effective_qty;
-                        it.version += 1;
-                    } else {
-                        snap.items.remove(&iid);
-                    }
-                }
-                let new_sec = (cur_sec + 0.5 * f64::from(effective_qty)).clamp(-10.0, 10.0);
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.balance = new_bal;
-                    ch.security_status = new_sec;
-                }
-                snap.append_journal(
-                    char_id,
-                    "SecurityTagFee",
-                    eve_db::IskCents(-total_fee_cents.0),
-                    new_bal,
-                    format!("Redeemed {effective_qty}x Clone Soldier Security Tag ({tag_type_id})"),
-                );
-                Ok((cur_sec, new_sec, new_bal.to_wire_f64()))
-            });
-            match res {
-                Ok((old_sec, new_sec, new_bal_isk)) => {
-                    with_mut_combat_runtime(ctx, |rt| {
-                        rt.sec_status_transactions.entry(char_id).or_default().push(SecStatusTransaction {
-                            timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
-                            reason: "Clone Soldier Security Tag".into(), solar_system_id: sys_id,
-                            event_type_id: EVENT_SEC_STATUS_HAND_IN_TAGS, other_owner_id: Some(1_000_125), other_type_id: Some(tag_type_id),
-                        });
-                    });
-                    ctx.notify(NotificationTarget::Character(char_id), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(new_sec)]);
-                    ctx.notify(NotificationTarget::Character(char_id), "OnAccountChange", "charid", vec![PyRep::String("cash".into()), PyRep::Integer(char_id), PyRep::Real(new_bal_isk)]);
-                    Some(Ok(PyRep::keyval([("oldSecurityStatus", PyRep::Real(old_sec)), ("newSecurityStatus", PyRep::Real(new_sec))])))
-                }
-                Err(e) => Some(Err(e)),
-            }
+            crate::services::combat_crimewatch::crimewatch_bounty::handle_apply_tags_for_sec_status(
+                ctx, session, args,
+            )
         }
 
         ("bountyProxy", _) => handle_bounty_proxy(ctx, session, service, method, args),
@@ -1106,73 +1021,29 @@ pub async fn handle_crimewatch(
             crate::services::security_mgr::handle_security_mgr_call(ctx, session, method, args)
         }
 
-        ("abyssal_content_manager", "ActivateAbyssalKey") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate Abyssal filament while docked".into() }));
-            }
-            if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
-                return Some(Err(e));
-            }
-            let Some(origin_sys) = session.solar_system_id.or_else(|| {
-                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-            }) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Character has no active solar system".into(),
-                }));
-            };
-            let ship_id = session.ship_id.unwrap_or(100_000_002);
-            if let Err(e) = crate::services::structure_control_ops::reject_if_controlling_structure(ctx, ship_id, "activate filament") {
-                return Some(Err(e));
-            }
-            let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(47_765);
-            let now_unix = ctx.now_unix();
-            let resolved = ctx.db.try_with_mut_snapshot(|snap| {
-                let found = snap.items.values()
-                    .find(|i| i.owner_id == char_id && (i.item_id == filament_arg || i.type_id as i64 == filament_arg) && i.quantity >= 1)
-                    .map(|i| (i.item_id, i.type_id));
-                let Some((iid, tid)) = found else {
-                    return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: format!("Abyssal filament {filament_arg} not found in character inventory") });
-                };
-                // SDE-driven: group 1979 (Abyssal Filaments), attribute 2761 = tier (0..=6)
-                let Some(tier) = ctx.sde.types.get(&tid).and_then(|t| (t.group_id == 1979).then(|| t.default_attributes.get(&2761).copied().unwrap_or(1.0) as u8)) else {
-                    return Err(BridgeRpcError { code: "InvalidAbyssalFilament".into(), message: format!("Type {tid} is not a valid T0-T6 Abyssal filament") });
-                };
-                let origin_sec = ctx.sde.solar_systems.get(&origin_sys).map(|s| s.security_status).unwrap_or(0.9);
-                if tier >= 4 && origin_sec >= 0.75 {
-                    return Err(BridgeRpcError { code: "FilamentDisallowedInHighSec".into(), message: "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems".into() });
-                }
-                if let Some(item) = snap.items.get_mut(&iid) {
-                    if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&iid); }
-                }
-                Ok((tid, tier, origin_sec))
-            });
-            let (filament_type_id, tier, origin_sec) = match resolved { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
-                ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
-            }
-            crate::sp6_lifecycle::register_abyssal_session(
-                ctx, char_id, ship_id, 32_000_001, origin_sys, now_unix, now_unix.saturating_add(1_200),
-            );
-            let (pocket_id, room1_npcs) = crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
-                ctx, session, char_id, filament_type_id, tier, origin_sys,
-            ).await;
-            Some(Ok(PyRep::keyval([
-                ("pocketID", PyRep::Integer(pocket_id)),
-                ("solarSystemID", PyRep::Integer(32_000_001)),
-                ("originSolarSystemID", PyRep::Integer(origin_sys as i64)),
-                ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
-                ("tier", PyRep::Integer(tier as i64)),
-                ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
-                ("currentRoom", PyRep::Integer(1)),
-                ("timerSeconds", PyRep::Integer(1_200)),
-                ("npcBallIDs", PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
-            ])))
-        }
-
         _ => None,
     }
+}
+
+pub(crate) fn is_war_interference_assistance(ctx: &ServerContext, helper_char_id: i64, beneficiary_char_id: i64, now_unix: u64) -> bool {
+    if !crate::sp6_lifecycle::has_active_pvp_timer(ctx, beneficiary_char_id, now_unix) {
+        return false;
+    }
+    ctx.db.with_snapshot(|snap| {
+        let (Some(helper), Some(ben)) = (snap.characters.get(&helper_char_id), snap.characters.get(&beneficiary_char_id)) else { return false; };
+        let (h_ent, b_ent) = (helper.alliance_id.unwrap_or(helper.corporation_id), ben.alliance_id.unwrap_or(ben.corporation_id));
+        snap.wars.values().any(|w| {
+            if !w.active || (!w.mutual && now_unix < w.started_unix.saturating_add(86_400)) { return false; }
+            if snap.war_state.wars.get(&w.war_id).and_then(|m| m.finish_at_unix).is_some_and(|f| now_unix >= f) { return false; }
+            let is_agg = |ent: i64, corp: i64| w.aggressor_corp_id == ent || w.aggressor_corp_id == corp;
+            let is_def_or_ally = |ent: i64, corp: i64| {
+                w.defender_corp_id == ent || w.defender_corp_id == corp
+                    || snap.war_state.negotiations.iter().any(|n| n.war_id == w.war_id && n.kind == eve_db::PersistedNegKind::Ally && n.status == "Accepted" && now_unix >= n.effective_unix.unwrap_or(0) && (n.from_corp == ent || n.from_corp == corp))
+            };
+            (is_agg(b_ent, ben.corporation_id) && !is_agg(h_ent, helper.corporation_id))
+                || (is_def_or_ally(b_ent, ben.corporation_id) && !is_def_or_ally(h_ent, helper.corporation_id))
+        })
+    })
 }
 
 /// Evaluates ship safety, triggers 60s Weapons Timer, applies CrimeWatch Suspect/Criminal/CONCORD/PvP
@@ -1281,24 +1152,39 @@ pub fn evaluate_and_record_remote_assistance(
         }
     });
     let Some(ben_id) = beneficiary_opt.filter(|&b| b != helper_char_id) else { return Ok(()); };
+    let ben_outlaw = ctx.db.with_snapshot(|snap| snap.characters.get(&ben_id).map(|c| c.security_status <= -4.95).unwrap_or(false));
     let (ben_criminal, ben_suspect) = {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(ben_id);
-        (st.is_criminal(now_unix), st.is_suspect(now_unix))
+        (st.is_criminal(now_unix), st.is_suspect(now_unix) || (ben_outlaw && sys_sec >= 0.45))
     };
     let ben_le_partners: Vec<i64> = with_combat_runtime(ctx, |rt| {
+        let helper_les = rt.limited_engagements.get(&helper_char_id);
         rt.limited_engagements.get(&ben_id)
-            .map(|m| m.iter().filter(|&(&pid, &exp)| pid != helper_char_id && now_unix <= exp).map(|(&pid, _)| pid).collect())
+            .map(|m| {
+                m.iter()
+                    .filter(|&(&pid, &exp)| {
+                        pid != helper_char_id
+                            && now_unix <= exp
+                            && !helper_les.and_then(|hm| hm.get(&pid)).is_some_and(|&hexp| now_unix <= hexp)
+                    })
+                    .map(|(&pid, _)| pid)
+                    .collect()
+            })
             .unwrap_or_default()
     });
+    let war_interference = is_war_interference_assistance(ctx, helper_char_id, ben_id, now_unix);
+    let third_party_interference = !ben_le_partners.is_empty() || war_interference;
     let safety = with_combat_runtime(ctx, |rt| rt.safety_levels.get(&helper_char_id).copied().unwrap_or(SafetyLevel::Red));
-    if ben_criminal && sys_sec > 0.0 && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow) {
+    if ((ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45))
+        && matches!(safety, SafetyLevel::Green | SafetyLevel::Yellow)
+    {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
-    if ((ben_suspect && sys_sec > 0.0) || !ben_le_partners.is_empty()) && safety == SafetyLevel::Green {
+    if ((ben_suspect && sys_sec > 0.0) || (third_party_interference && sys_sec > 0.0)) && safety == SafetyLevel::Green {
         return Err(BridgeRpcError::user_error("CantDoInCurrentSafetyLevel"));
     }
-    if ben_criminal && sys_sec > 0.0 {
+    if (ben_criminal && sys_sec > 0.0) || (third_party_interference && sys_sec >= 0.45) {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let _ = cw.handle_criminal_remote_assistance(helper_char_id, ben_id, helper_ship_id, sys_id, sys_sec, now_unix);
         drop(cw);
@@ -1306,25 +1192,24 @@ pub fn evaluate_and_record_remote_assistance(
         if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
             let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[], &[helper_char_id]);
         }
-    } else if ben_suspect && sys_sec > 0.0 {
+    } else if (ben_suspect || third_party_interference) && sys_sec > 0.0 {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         let st = cw.get_or_create(helper_char_id);
-        st.weapon_timer_until_unix = now_unix.saturating_add(60);
-        st.pvp_timer_until_unix = now_unix.saturating_add(900);
-        st.suspect_flag_until_unix = now_unix.saturating_add(900);
+        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
+        st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
+        st.suspect_flag_until_unix = st.suspect_flag_until_unix.max(now_unix.saturating_add(900));
         drop(cw);
         emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
         if ctx.db.with_snapshot(|snap| snap.characters.get(&helper_char_id).map(|c| c.solar_system_id)) != Some(sys_id) {
             let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[helper_char_id], &[]);
         }
+    } else if third_party_interference {
+        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+        let st = cw.get_or_create(helper_char_id);
+        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
+        st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
     }
     if !ben_le_partners.is_empty() {
-        {
-            let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-            let st = cw.get_or_create(helper_char_id);
-            st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix.saturating_add(60));
-            st.pvp_timer_until_unix = st.pvp_timer_until_unix.max(now_unix.saturating_add(900));
-        }
         with_mut_combat_runtime(ctx, |rt| {
             for &pid in &ben_le_partners {
                 rt.add_limited_engagement(helper_char_id, pid, now_unix);

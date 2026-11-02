@@ -453,7 +453,7 @@ async fn test_wallet_evermarks_and_item_trader() {
         Vec::new(),
     );
     let empty_rsp = ctx.quasar_gateway.handle_public_request(&sess, &empty_req, None, false, ctx.now_unix());
-    assert_eq!(empty_rsp.status_code, 200);
+    assert_eq!(empty_rsp.status_code, 400);
     assert_eq!(get_lp(&ctx, &mut sess, paragon_corp_id).await, mission_em);
 
     // Activate a real SDE SKINR coating component item & initiate validated SKINR sequencing jobs

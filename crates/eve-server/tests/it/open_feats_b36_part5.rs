@@ -223,8 +223,8 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         .values()
         .filter(|e| e.bounty_isk > 0.0)
         .min_by_key(|e| e.ball_id)
-        .map(|e| e.ball_id)
-        .expect("bounty belt rat");
+        .expect("spawned null-sec belt rat with positive bounty")
+        .ball_id;
     let belt_rat_bounty = ctx
         .npc_spawns
         .write()

@@ -624,7 +624,12 @@ async fn test_journey_cosmetics_store() {
     assert_eq!(pricing_rsp.status_code, STATUS_OK, "GetTierPricingRequest must return 200 OK");
     assert_eq!(pricing_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse");
 
-    let init_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", Vec::new()).await;
+    let cid = sess.character_id.unwrap();
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&cid) { ch.plex_balance = ch.plex_balance.max(500); }
+    });
+    let init_payload = vec![0x0A, 0x04, b'S', b'K', b'I', b'N', 0x1A, 0x07, 0x12, 0x03, 0x08, 0xCB, 0x04, 0x18, 0x01];
+    let init_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", init_payload).await;
     assert_eq!(init_rsp.status_code, STATUS_OK, "InitiateRequest must return 200 OK");
 
     let active_jobs_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.GetAllActiveRequest", Vec::new()).await;

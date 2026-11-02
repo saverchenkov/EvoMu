@@ -47,6 +47,26 @@ pub enum DungeonTriggerAction {
     UnlockGate,
     SpawnNpcGroup(u8),
     CompleteDungeon,
+    CameraInterest {
+        item_id: i64,
+        speed_bits: u64,
+        duration_bits: u64,
+    },
+    TriggerAmbientSound {
+        sound_id: i64,
+        entity_item_id: i64,
+        emitter_id: i64,
+    },
+    TriggerAudio {
+        audio_url: String,
+    },
+    TriggerMessage {
+        message_type: i64,
+        message_id: i64,
+    },
+    TriggerMusic {
+        music_trigger_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1039,6 +1059,7 @@ async fn apply_dungeon_trigger_actions_core(
     let mut complete_now = false;
     let mut progression_events = Vec::new();
     let mut recipient_char = char_id;
+    let mut notify_batch: Option<(i64, Vec<i64>, Vec<DungeonTriggerAction>)> = None;
 
     with_dungeon_runtime_store_db(db, |store| {
         let Some(inst) = store.instances.get_mut(&instance_id) else {
@@ -1052,6 +1073,8 @@ async fn apply_dungeon_trigger_actions_core(
         }
         if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
             let room_id = room.room_id;
+            let obj_ids: Vec<i64> = room.objects.iter().map(|o| o.ball_id).collect();
+            let mut n_acts = Vec::new();
             for (trig_id, act) in actions {
                 fired_count += 1;
                 let task_id = room_id * 100 + i64::from(trig_id);
@@ -1069,8 +1092,15 @@ async fn apply_dungeon_trigger_actions_core(
                         complete_now = true;
                         room_id * 10 + 99
                     }
+                    other => {
+                        n_acts.push(other);
+                        room_id * 10 + i64::from(trig_id)
+                    }
                 };
                 progression_events.push((task_id, next_obj_id));
+            }
+            if !n_acts.is_empty() {
+                notify_batch = Some((i64::from(inst.dungeon_id), obj_ids, n_acts));
             }
         }
         crate::services::pve_dungeon_runtime_rpc::record_dungeon_progression_events(
@@ -1079,31 +1109,20 @@ async fn apply_dungeon_trigger_actions_core(
         );
     });
     if !progression_events.is_empty() {
-        crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(
-            db,
-            pending_notifications,
-            notify_tx,
-            recipient_char,
-            &progression_events,
-        );
+        crate::services::pve_dungeon_runtime_rpc::dispatch_dungeon_notify_actions(db, pending_notifications, notify_tx, recipient_char, &progression_events);
+    }
+    if let Some((did, obj_ids, n_acts)) = notify_batch {
+        crate::services::notify_emitters_b23::dispatch_dungeon_trigger_notify_actions(db, pending_notifications, notify_tx, recipient_char, did, &obj_ids, n_acts);
     }
 
     if !groups_to_spawn.is_empty() {
         let spawn_list = db.with_mut_snapshot(|snap| {
-            let mut store: DungeonRuntimeStore = snap
-                .service_state_blobs
-                .get(DUNGEON_RUNTIME_BLOB_KEY)
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
+            let mut store: DungeonRuntimeStore = snap.service_state_blobs.get(DUNGEON_RUNTIME_BLOB_KEY).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             let mut to_spawn = Vec::new();
             if let Some(inst) = store.instances.get_mut(&instance_id) {
                 if let Some(room) = inst.rooms.get_mut(room_vec_idx) {
                     for grp_id in &groups_to_spawn {
-                        if let Some(grp) = room
-                            .npc_groups
-                            .iter_mut()
-                            .find(|g| g.group_id == *grp_id && !g.spawned)
-                        {
+                        if let Some(grp) = room.npc_groups.iter_mut().find(|g| g.group_id == *grp_id && !g.spawned) {
                             grp.spawned = true;
                             let mut offset_idx = 0usize;
                             for &(npc_tid, count) in &grp.npc_specs {
@@ -1111,11 +1130,7 @@ async fn apply_dungeon_trigger_actions_core(
                                     snap.next_entity_id += 1;
                                     let nid = snap.next_entity_id;
                                     let angle = (offset_idx as f64) * 0.9 + 0.4;
-                                    let npc_pos = [
-                                        room.position[0] + angle.cos() * 9_500.0,
-                                        room.position[1],
-                                        room.position[2] + angle.sin() * 9_500.0,
-                                    ];
+                                    let npc_pos = [room.position[0] + angle.cos() * 9_500.0, room.position[1], room.position[2] + angle.sin() * 9_500.0];
                                     offset_idx += 1;
                                     grp.npc_ball_ids.push(nid);
                                     to_spawn.push((nid, npc_tid, npc_pos));
@@ -1125,10 +1140,7 @@ async fn apply_dungeon_trigger_actions_core(
                     }
                 }
             }
-            if let Ok(json) = serde_json::to_string(&store) {
-                snap.service_state_blobs
-                    .insert(DUNGEON_RUNTIME_BLOB_KEY.to_string(), json);
-            }
+            if let Ok(json) = serde_json::to_string(&store) { snap.service_state_blobs.insert(DUNGEON_RUNTIME_BLOB_KEY.to_string(), json); }
             to_spawn
         });
 
@@ -1141,42 +1153,16 @@ async fn apply_dungeon_trigger_actions_core(
     }
 
     if complete_now {
-        despawn_completed_dungeon_core(
-            systems,
-            db,
-            pending_notifications,
-            notify_tx,
-            sys_id,
-            instance_id,
-            char_id,
-        )
-        .await;
+        despawn_completed_dungeon_core(systems, db, pending_notifications, notify_tx, sys_id, instance_id, char_id).await;
     }
 
     fired_count
 }
 
 pub(crate) async fn apply_dungeon_trigger_actions(
-    ctx: &ServerContext,
-    sys_id: SolarSystemId,
-    instance_id: i64,
-    room_vec_idx: usize,
-    actions: Vec<(u32, DungeonTriggerAction)>,
-    char_id: i64,
+    ctx: &ServerContext, sys_id: SolarSystemId, instance_id: i64, room_vec_idx: usize, actions: Vec<(u32, DungeonTriggerAction)>, char_id: i64,
 ) -> usize {
-    apply_dungeon_trigger_actions_core(
-        &ctx.systems,
-        &ctx.db,
-        &ctx.sde,
-        Some(&ctx.pending_notifications),
-        Some(&ctx.notify_tx),
-        sys_id,
-        instance_id,
-        room_vec_idx,
-        actions,
-        char_id,
-    )
-    .await
+    apply_dungeon_trigger_actions_core(&ctx.systems, &ctx.db, &ctx.sde, Some(&ctx.pending_notifications), Some(&ctx.notify_tx), sys_id, instance_id, room_vec_idx, actions, char_id).await
 }
 
 /// Evaluates `OnKill` triggers and room/dungeon completion when an NPC ball is destroyed in `sys_id`.

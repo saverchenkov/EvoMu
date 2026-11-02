@@ -33,6 +33,18 @@ pub struct EscalatingPathEntry {
     pub created_at_sec: u64,
     pub expires_at_sec: u64,
     pub dungeons_entered: Vec<u32>,
+    #[serde(default)]
+    pub journal_entry_template_id: u32,
+}
+
+impl EscalatingPathEntry {
+    pub fn effective_journal_entry_template_id(&self) -> u32 {
+        if self.journal_entry_template_id > 0 {
+            self.journal_entry_template_id
+        } else {
+            280_000 + u32::from(self.step_index.max(1))
+        }
+    }
 }
 
 pub fn find_escalation_destination_system_sde(sde: &eve_sde::SdeRegistry, origin_sys_id: SolarSystemId) -> SolarSystemId {
@@ -153,6 +165,8 @@ pub async fn create_escalation_expedition_core(
             created_at_sec: ts,
             expires_at_sec: ts + 86_400,
             dungeons_entered: vec![source_dungeon_id],
+            // DERIVED: synthetic expedition journal template message ID (no SDE escalation message table)
+            journal_entry_template_id: 280_001,
         };
         reg.escalations_by_char.entry(char_id).or_default().push(e.clone());
         (e, ts)
@@ -583,6 +597,7 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
             );
             let dest_kv = dungeon_kv_for_id(&ctx.sde, e.expedition_dungeon_id, &e.expedition_name);
             let src_kv = dungeon_kv_for_id(&ctx.sde, e.source_dungeon_id, &e.expedition_name);
+            let template_id = e.effective_journal_entry_template_id();
             vec![
                 PyRep::Integer(e.instance_id),
                 PyRep::Integer(i64::from(e.source_dungeon_id)),
@@ -597,7 +612,7 @@ pub fn get_my_escalating_path_details_rowset(ctx: &ServerContext, char_id: Chara
                 PyRep::Integer(e.created_at_sec as i64),
                 PyRep::Integer(e.expires_at_sec as i64),
                 PyRep::Integer(expiry_ft),
-                PyRep::Integer(i64::from(e.step_index)),
+                PyRep::Integer(i64::from(template_id)),
                 dungeon_kv,
                 dest_kv,
                 src_kv,
