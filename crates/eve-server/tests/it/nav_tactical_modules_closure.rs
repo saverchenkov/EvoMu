@@ -602,7 +602,7 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     ).await.expect("Warp to NPC station at 0m");
     let (_, w_sta) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let MovementMode::Warp { destination: dest_sta, .. } = w_sta.mode else { panic!("Expected Warp"); };
-    assert!((dest_sta.distance(station_pos) - (sta_ball.radius + 2_000.0)).abs() < 10.0, "NPC station landing must be on Zero Point Envelope (radius + 2,000m)");
+    assert!((dest_sta.distance(station_pos) - sta_ball.radius).abs() < 10.0, "NPC station landing must be on Zero Point Envelope (radius)");
 
     sys.spawn_ball(Ball {
         id: ship_a, type_id: 640, position: DVec3::from_array(struct_pos) - DVec3::new(10_000_000.0, 0.0, 0.0),
@@ -615,7 +615,7 @@ async fn test_collision_bumping_warp_landing_points_and_cloak_velocity() {
     ).await.expect("Warp to Upwell structure at 0m");
     let (_, w_struct) = sys.get_ball_snapshot(ship_a).await.unwrap().unwrap();
     let MovementMode::Warp { destination: dest_struct, .. } = w_struct.mode else { panic!("Expected Warp"); };
-    assert!((dest_struct.distance(DVec3::from_array(struct_pos)) - (struct_ball.radius + 2_000.0)).abs() < 10.0, "Structure landing must be on Zero Point Envelope (radius + 2,000m)");
+    assert!((dest_struct.distance(DVec3::from_array(struct_pos)) - struct_ball.radius).abs() < 10.0, "Structure landing must be on Zero Point Envelope (radius)");
 
     // 3. Cloak Velocity Penalty & Restoration (`feat:navigation.cloak-velocity-penalty`)
     for (cloak_tid, expected_mult) in [(11_370_u32, 0.10_f64), (11_577, 0.25), (11_578, 1.00)] {

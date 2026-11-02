@@ -118,12 +118,6 @@ async fn handle_cmd_warp_to_stuff(
         });
     }
     let sys_id = resolve_bound_or_session_sys(bound_entry, session)?;
-    if (32_000_000..=32_999_999).contains(&sys_id) {
-        return Err(BridgeRpcError {
-            code: "CannotWarpInAbyssalSpace".into(),
-            message: "Warp navigation is disabled inside Abyssal Deadspace".into(),
-        });
-    }
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
             code: "NoActiveShip".into(),
@@ -131,19 +125,14 @@ async fn handle_cmd_warp_to_stuff(
         });
     };
     let mjd_handle = ctx.systems.get_or_spawn(sys_id);
-    crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(&mjd_handle, ship_id).await?;
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(ctx, sys_id, ship_id, "warp").await?;
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp")?;
-    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
-    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+    crate::services::nav_warp_interdiction::validate_pre_warp_common(
         ctx,
         char_id,
         ship_id,
         sys_id,
-        "warp",
-        ctx.now_unix(),
-    )?;
+        &mjd_handle,
+    )
+    .await?;
     let (is_stuff_call, stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (
@@ -446,6 +435,7 @@ async fn handle_cmd_warp_to_stuff(
             ),
         });
     };
+    crate::services::nav_warp_interdiction::ensure_not_in_active_warp(&current_ball.mode)?;
 
     let preview_dir = (anchor_pos - current_ball.position).normalize_or_zero();
     let preview_dest = anchor_pos - preview_dir * min_range;
@@ -592,8 +582,10 @@ async fn handle_cmd_warp_to_stuff(
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
             // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
-            let _ = handle.stop_non_warp_module_cycles(ship_id).await;
-            crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+            crate::services::nav_warp_interdiction::on_warp_initiated_hooks(
+                ctx, &handle, char_id, ship_id, sys_id,
+            )
+            .await;
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );
@@ -1001,8 +993,6 @@ async fn handle_dock(
             message: "Dock requires an explicit station or structure ID argument".into(),
         });
     };
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "dock")?;
     let Some(sys_id) = bound_entry
         .map(|b| b.object_id as u32)
         .or(session.solar_system_id)
@@ -1037,6 +1027,8 @@ async fn handle_dock(
             }
         }
     }
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "dock")?;
     if args.get(1).and_then(|a| a.as_i64()).is_some_and(|req| req != ship_id) {
         return Err(BridgeRpcError {
             code: "InvalidShipId".into(),
@@ -1213,6 +1205,12 @@ async fn handle_dock(
             message: "Cannot dock while ship is still in warp".into(),
         });
     }
+    if is_structure && handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(BridgeRpcError {
+            code: "ShipWarpScrambled".into(),
+            message: "Cannot dock at an Upwell structure while ship is warp scrambled".into(),
+        });
+    }
     let target_radius = handle
         .get_ball_snapshot(dock_id)
         .await
@@ -1222,9 +1220,7 @@ async fn handle_dock(
         .filter(|&r| r > 0.0)
         .unwrap_or(sde_target_radius);
     let dist = ball.position.distance(target_pos);
-    let max_dock_dist = target_radius
-        + crate::services::nav_warp_interdiction::STATION_DOCKING_RING_STANDOFF_M
-        + 2_500.0;
+    let max_dock_dist = target_radius + 2_500.0;
     if dist > max_dock_dist {
         return Err(BridgeRpcError {
             code: "OutsideDockingPerimeter".into(),

@@ -129,15 +129,26 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     let warp_stop_ids: Vec<BallId> = ballpark
         .balls
         .iter()
-        .filter(|(&id, b)| matches!(b.mode, MovementMode::Warp { .. }) && ballpark.is_ball_scrambled(id))
+        .filter(|(&id, b)| {
+            matches!(
+                b.mode,
+                MovementMode::Warp {
+                    phase: eve_destiny::WarpPhase::Aligning,
+                    ..
+                }
+            ) && !ballpark
+                .combat_states
+                .get(&id)
+                .is_some_and(|cs| cs.is_emergency_warping)
+                && ballpark.is_ball_scrambled(id)
+        })
         .map(|(&id, _)| id)
         .collect();
     for id in warp_stop_ids {
         if let Some(ball) = ballpark.balls.get_mut(&id) {
             ball.velocity = DVec3::ZERO;
-            ball.speed_fraction = 0.0;
-            ball.mode = MovementMode::Stop;
         }
+        let _ = ballpark.set_mode(id, MovementMode::Stop);
     }
 
     // 5. Reconcile stacking-penalized target velocity modifiers (Stasis Webifier / Heavy Stasis Grappler / Stasis Webification Probe)

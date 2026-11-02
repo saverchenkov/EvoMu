@@ -529,3 +529,165 @@ async fn test_structure_docking_advances_waypoints_and_uses_sde_radius_fallback(
     );
 }
 
+#[tokio::test]
+async fn test_system_actor_post_entry_bubble_does_not_yank_active_warp() {
+    let ctx = Arc::new(build_ctx());
+    let jita_sys: u32 = 30_000_142;
+    let char_id: i64 = 900_991;
+    let ship_id: i64 = 100_991;
+    let sys = ctx.systems.get_or_spawn(jita_sys);
+
+    let origin = DVec3::ZERO;
+    let dest = DVec3::new(149_597_870_700.0, 0.0, 0.0); // 1 AU
+    let cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: origin,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::new_warp(origin, dest, 3.0),
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    )
+    .await
+    .unwrap();
+
+    // Step until ship transitions past WarpPhase::Aligning into active warp
+    for _ in 0..5 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let (_, mid_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        matches!(mid_ball.mode, MovementMode::Warp { phase, .. } if phase != eve_destiny::WarpPhase::Aligning),
+        "Ship should have exited Aligning into active warp, got {:?}",
+        mid_ball.mode
+    );
+
+    // Launch a warp disruption bubble at the destination AFTER warp entry
+    sys.add_warp_bubble(88_001, dest, 20_000.0).await.unwrap();
+
+    // Step through remaining warp ticks; SystemActor must NOT yank ship out of active warp
+    for _ in 0..45 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    let (_, final_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        final_ball.position.distance(dest) <= 3_000.0,
+        "Post-entry bubble must not yank active warp; ship landed at {:?} (dist {:.1} m from dest)",
+        final_ball.position,
+        final_ball.position.distance(dest)
+    );
+}
+
+#[tokio::test]
+async fn test_warp_vector_rejects_mid_warp_and_abyssal_and_cmd_dock_checks_upwell_tackle() {
+    let ctx = Arc::new(build_ctx());
+    let jita_sys: u32 = 30_000_142;
+    let char_id: i64 = 900_992;
+    let ship_id: i64 = 100_992;
+    let mut sess = seed_pilot(&ctx, char_id, ship_id, 587, jita_sys, false);
+    let corp_id = sess.corporation_id.unwrap_or(1_000_009);
+    let sys = ctx.systems.get_or_spawn(jita_sys);
+    let cs = ctx.build_ship_combat_state(char_id, ship_id, 587);
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 37.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 587),
+    )
+    .await
+    .unwrap();
+
+    // Seed a Warp Vector Data item (77825, group 4599) in ship cargo
+    let vec_item_id: i64 = 777_825;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            vec_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: vec_item_id,
+                type_id: 77825,
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 2,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    // 1. Mid-warp trajectory redirection via warpVectorMgr.UseVector must be rejected
+    sys.set_movement_mode(
+        ship_id,
+        MovementMode::Warp {
+            origin: DVec3::ZERO,
+            destination: DVec3::new(10_000_000.0, 0.0, 0.0),
+            warp_speed_au_s: 3.0,
+            total_distance: 10_000_000.0,
+            elapsed_warp_time: 1.0,
+            phase: eve_destiny::WarpPhase::Cruising,
+        },
+    )
+    .await
+    .unwrap();
+    let err_mid = rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_mid.code, "ShipAlreadyInWarp");
+
+    // 2. Abyssal Deadspace (32_000_001) must reject warpVectorMgr.UseVector
+    sys.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.solar_system_id = 32_000_001;
+        }
+    });
+    sess.solar_system_id = Some(32_000_001);
+    let err_abyss = rpc(&ctx, &mut sess, "warpVectorMgr", "UseVector", vec![PyRep::Integer(vec_item_id)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_abyss.code, "CannotWarpInAbyssalSpace");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.solar_system_id = jita_sys;
+        }
+    });
+    sess.solar_system_id = Some(jita_sys);
+
+    // 3. beyonce.CmdDock must reject scrambled/bubbled ships at Upwell structures
+    let structure_id: i64 = 1_000_000_999_002;
+    let structure_pos = DVec3::new(50_000_000.0, 0.0, 0.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut st = make_structure(structure_id, 35832, corp_id, jita_sys, "Test Citadel");
+        st.position = structure_pos.to_array();
+        snap.structures.insert(structure_id, st);
+    });
+    sys.set_movement_mode(ship_id, MovementMode::Stop).await.unwrap();
+    let _ = sys.set_ball_position(ship_id, structure_pos + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    sys.add_warp_bubble(88_002, structure_pos, 20_000.0).await.unwrap();
+
+    let err_dock = rpc(&ctx, &mut sess, "beyonce", "CmdDock", vec![PyRep::Integer(structure_id)])
+        .await
+        .unwrap_err();
+    assert_eq!(err_dock.code, "ShipWarpScrambled");
+}
+
+

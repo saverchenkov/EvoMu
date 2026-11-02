@@ -13,8 +13,8 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-/// Zero Point Envelope landing standoff (`2,000 m` outside target ball radius, inside the `radius + 2,500 m` `CmdDock` docking perimeter).
-pub const STATION_DOCKING_RING_STANDOFF_M: f64 = 2_000.0;
+/// Zero Point Envelope landing standoff (`0 m` outside target ball radius, so `<= 2,500 m` warp jitter lands inside the `radius + 2,500 m` docking perimeter).
+pub const STATION_DOCKING_RING_STANDOFF_M: f64 = 0.0;
 
 /// Per-pilot reactivation cooldown (`300 s` = 5 min) after consuming a Warp Vector Data item.
 pub const WARP_VECTOR_COOLDOWN_SECS: u64 = 300;
@@ -229,6 +229,97 @@ pub fn resolve_warp_landing_point(
     anchor_pos
 }
 
+/// Shared pre-warp restrictions for `CmdWarpToStuff`, `WarpToStuffAutopilot`, and `warpVectorMgr.UseVector`.
+pub(crate) async fn validate_pre_warp_common(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+    sys_handle: &crate::system_actor::SystemHandle,
+) -> Result<(), BridgeRpcError> {
+    if (32_000_000..=32_999_999).contains(&sys_id) {
+        return Err(BridgeRpcError {
+            code: "CannotWarpInAbyssalSpace".into(),
+            message: "Warp navigation is disabled inside Abyssal Deadspace".into(),
+        });
+    }
+    crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
+        sys_handle,
+        ship_id,
+    )
+    .await?;
+    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+        ctx, sys_id, ship_id, "warp",
+    )
+    .await?;
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
+    crate::services::space_navigation_advanced::check_immobilizing_module_active(
+        ctx, ship_id, "warp",
+    )?;
+    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
+    crate::services::combat_crimewatch::check_crimewatch_action_restriction(
+        ctx,
+        char_id,
+        ship_id,
+        sys_id,
+        "warp",
+        ctx.now_unix(),
+    )?;
+    Ok(())
+}
+
+/// Rejects mid-warp trajectory redirection once a ship has exited `WarpPhase::Aligning`.
+pub(crate) fn ensure_not_in_active_warp(mode: &MovementMode) -> Result<(), BridgeRpcError> {
+    if matches!(
+        mode,
+        MovementMode::Warp { phase, .. } if *phase != eve_destiny::WarpPhase::Aligning
+    ) {
+        return Err(BridgeRpcError {
+            code: "ShipAlreadyInWarp".into(),
+            message: "Cannot initiate or redirect warp while already in warp".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Shared warp-initiation side effects: halts active non-warp module cycles and abandons drones.
+pub(crate) async fn on_warp_initiated_hooks(
+    ctx: &ServerContext,
+    sys_handle: &crate::system_actor::SystemHandle,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) {
+    let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
+    crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+}
+
+fn rollback_warp_vector_reservation(
+    ctx: &ServerContext,
+    char_id: i64,
+    target_id: i64,
+    prev_item: eve_db::InventoryItemRecord,
+    prev_cd_until: Option<u64>,
+) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(target_id, prev_item);
+        let mut cd_map: HashMap<i64, u64> = snap
+            .service_state_blobs
+            .get("warp_vector_cooldown_until")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if let Some(old_cd) = prev_cd_until {
+            cd_map.insert(char_id, old_cd);
+        } else {
+            cd_map.remove(&char_id);
+        }
+        if let Ok(json) = serde_json::to_string(&cd_map) {
+            snap.service_state_blobs
+                .insert("warp_vector_cooldown_until".into(), json);
+        }
+    });
+}
+
 /// `warpVectorMgr.UseVector(itemID)` (`feat:navigation.warp-vector`):
 /// Validates consumable Warp Vector Data items in ship cargo (`group_id == 4599`, e.g. `77825`
 /// `Jovian Symbolic Navigator`), checking proximity to the system star (`attr 5432`), applying the
@@ -269,17 +360,8 @@ pub async fn handle_use_warp_vector(
         });
     }
 
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
-    crate::services::space_navigation_advanced::check_immobilizing_module_active(
-        ctx, ship_id, "warp",
-    )?;
-
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    crate::services::space_destiny::space_nav_travel::ensure_not_mjd_spooling(
-        &sys_handle,
-        ship_id,
-    )
-    .await?;
+    validate_pre_warp_common(ctx, char_id, ship_id, sys_id, &sys_handle).await?;
     let is_scrambled = sys_handle.is_ball_scrambled_sync(ship_id)
         || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
         || sys_handle
@@ -318,6 +400,7 @@ pub async fn handle_use_warp_vector(
             code: "ShipNotInSpace".into(),
             message: format!("Active ship {ship_id} is not in space in solar system {sys_id}"),
         })?;
+    ensure_not_in_active_warp(&ship_ball.mode)?;
 
     // `warpVectorMgr.UseVector(itemID)` only accepts an owned Warp Vector Data item (`group 4599`) in active ship cargo.
     let star_opt = ctx
@@ -463,32 +546,43 @@ pub async fn handle_use_warp_vector(
         Ok((dest_pos, dist_m, rem, vec_item, prev_cd))
     })?;
 
-    let warp_speed =
-        crate::services::space_destiny::compute_ship_warp_speed_au_s(ctx, ship_ball.type_id);
+    if let Err(e) = crate::services::pve_dungeon_runtime::check_deadspace_warp_allowed(
+        ctx,
+        sys_id,
+        ship_ball.position.to_array(),
+        dest_pos.to_array(),
+        dest_pos.to_array(),
+    ) {
+        rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);
+        return Err(e);
+    }
+    if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+        ctx,
+        sys_id,
+        dest_pos,
+        dest_pos,
+    )
+    .await
+    {
+        rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);
+        return Err(e);
+    }
+
+    let warp_speed = crate::services::space_destiny::compute_pilot_warp_speed_au_s(
+        ctx,
+        char_id,
+        sys_id,
+        ship_ball.type_id,
+    );
     let warp_mode = MovementMode::new_warp(ship_ball.position, dest_pos, warp_speed);
     if let Err(e) = sys_handle.set_movement_mode(ship_id, warp_mode).await {
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.items.insert(target_id, prev_item);
-            let mut cd_map: HashMap<i64, u64> = snap
-                .service_state_blobs
-                .get("warp_vector_cooldown_until")
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            if let Some(old_cd) = prev_cd_until {
-                cd_map.insert(char_id, old_cd);
-            } else {
-                cd_map.remove(&char_id);
-            }
-            if let Ok(json) = serde_json::to_string(&cd_map) {
-                snap.service_state_blobs
-                    .insert("warp_vector_cooldown_until".into(), json);
-            }
-        });
+        rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);
         return Err(BridgeRpcError {
             code: "WarpFailed".into(),
             message: e,
         });
     }
+    on_warp_initiated_hooks(ctx, &sys_handle, char_id, ship_id, sys_id).await;
 
     ctx.active_warps
         .lock()
