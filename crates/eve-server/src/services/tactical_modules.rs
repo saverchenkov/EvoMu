@@ -541,7 +541,13 @@ pub async fn activate_auto_targeting_system(
     }
 
     let ship_max = fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize;
-    let auto_tgt_bonus = mod_type.default_attributes.get(&193).copied().unwrap_or(2.0).round() as usize;
+    let auto_tgt_bonus = mod_type
+        .default_attributes
+        .get(&235)
+        .or_else(|| mod_type.default_attributes.get(&193))
+        .copied()
+        .unwrap_or(2.0)
+        .round() as usize;
     let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
     let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
     let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + auto_tgt_bonus;
@@ -572,20 +578,7 @@ pub async fn activate_auto_targeting_system(
         if dist > max_range {
             continue;
         }
-        let is_eligible_hostile = if ctx
-            .sde
-            .types
-            .get(&b.type_id)
-            .is_some_and(|t| t.category_id == 11)
-        {
-            true
-        } else if is_player_ship_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
-            let owner = ctx.db.with_snapshot(|s| s.items.get(&b.id).map(|i| i.owner_id).unwrap_or(0));
-            owner != char_id && !fleet_members.contains(&owner)
-        } else {
-            false
-        };
-        if is_eligible_hostile {
+        if super::mining_b33::is_auto_target_hostile_ball(ctx, sys, char_id, ship_id, b, &fleet_members).await {
             candidates.push((b.id, dist, b.radius.max(35.0)));
         }
     }
@@ -1149,6 +1142,7 @@ pub async fn activate_command_burst(
     });
 
     if clone_grade == 0 { return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into() }); }
+    super::mining_b33::ensure_command_burst_hull_allowed(&ctx.sde, mod_type, ship_type_id)?;
     let max_active_allowed = 2 + cmd_rig_bonus;
     if active_burst_count >= max_active_allowed { return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") }); }
 

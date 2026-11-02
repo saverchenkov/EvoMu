@@ -248,6 +248,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
+                crate::quasar_gateway::require_admin_role(ctx)?;
                 let skyhook_id = required_id(dyn_msg, 1, "Skyhook")?;
 
                 let (reag_type, reag_qty) = dyn_msg.get(2).and_then(|v| match v {
@@ -322,6 +323,7 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
+                crate::quasar_gateway::require_admin_role(ctx)?;
                 let skyhook_id = required_id(dyn_msg, 1, "Skyhook")?;
                 let now = ctx.now_unix();
                 let start = timestamp_secs(dyn_msg, 2)

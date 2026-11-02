@@ -632,50 +632,48 @@ async fn test_b33_mercenary_den_activities_and_notices_closure() {
 async fn test_b33_skyhook_admin_closure() {
     // parity: quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/admin/admin_pb2.pyj
     let ctx = ServerContext::new();
-    let cid = 90_000_050i64;
-    let corp_id = 1_000_009i64;
-    let skyhook_id = 1_070_000_001i64;
-    let sys_id = 30_000_142u32;
-    let mut sess = make_session(8, 50, cid, corp_id, true);
+    let (cid, corp_id, skyhook_id, sys_id) = (90_000_050i64, 1_000_009i64, 1_070_000_001i64, 30_000_142u32);
+    let mut player_sess = make_session(9, 50, cid, corp_id, false);
+    let mut admin_sess = make_session(8, 50, cid, corp_id, true);
 
     ctx.db.with_mut_snapshot(|snap| {
         seed_char(snap, cid, 50, corp_id, sys_id);
         seed_structure(snap, skyhook_id, corp_id, sys_id, TYPE_ORBITAL_SKYHOOK);
     });
 
-    // Skyhook admin ScheduleTheftVulnerabilityWindowRequest
+    // Non-admin player Director must be rejected with STATUS_FORBIDDEN on both admin endpoints
+    let mut mod_req = Vec::new();
+    encode_u64_id(1, skyhook_id as u64, &mut mod_req);
+    let r_mod_forbidden = quasar_rpc(&ctx, &mut player_sess, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", mod_req.clone()).await;
+    assert_eq!(r_mod_forbidden.status_code, STATUS_FORBIDDEN);
+
     let now = ctx.now_unix();
-    let mut bad_win = Vec::new();
-    encode_u64_id(1, skyhook_id as u64, &mut bad_win);
     let mut ts_start = Vec::new();
     encode_varint_field(1, now + 60, &mut ts_start);
+    let mut ts_end_ok = Vec::new();
+    encode_varint_field(1, now + 3_660, &mut ts_end_ok);
+    let mut good_win = Vec::new();
+    encode_u64_id(1, skyhook_id as u64, &mut good_win);
+    encode_bytes_field(2, &ts_start, &mut good_win);
+    encode_bytes_field(3, &ts_end_ok, &mut good_win);
+
+    let r_win_forbidden = quasar_rpc(&ctx, &mut player_sess, "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest", good_win.clone()).await;
+    assert_eq!(r_win_forbidden.status_code, STATUS_FORBIDDEN);
+
+    // Admin caller succeeds on ModifyReagentsRequest & ScheduleTheftVulnerabilityWindowRequest
+    let r_mod_ok = quasar_rpc(&ctx, &mut admin_sess, "eve_public.sovereignty.skyhook.api.admin.ModifyReagentsRequest", mod_req).await;
+    assert_eq!(r_mod_ok.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagents.get(&skyhook_id).copied()), Some((TYPE_MAGMATIC_GAS, 1200)));
+
+    let mut bad_win = Vec::new();
+    encode_u64_id(1, skyhook_id as u64, &mut bad_win);
     encode_bytes_field(2, &ts_start, &mut bad_win);
     let mut ts_end_bad = Vec::new();
     encode_varint_field(1, now + 200_000, &mut ts_end_bad);
     encode_bytes_field(3, &ts_end_bad, &mut bad_win);
-    let r_bad_win = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
-        bad_win,
-    )
-    .await;
-    assert_eq!(r_bad_win.status_code, STATUS_BAD_REQUEST);
+    assert_eq!(quasar_rpc(&ctx, &mut admin_sess, "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest", bad_win).await.status_code, STATUS_BAD_REQUEST);
 
-    let mut good_win = Vec::new();
-    encode_u64_id(1, skyhook_id as u64, &mut good_win);
-    encode_bytes_field(2, &ts_start, &mut good_win);
-    let mut ts_end_ok = Vec::new();
-    encode_varint_field(1, now + 3_660, &mut ts_end_ok);
-    encode_bytes_field(3, &ts_end_ok, &mut good_win);
-    let r_good_win = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest",
-        good_win,
-    )
-    .await;
+    let r_good_win = quasar_rpc(&ctx, &mut admin_sess, "eve_public.sovereignty.skyhook.api.admin.ScheduleTheftVulnerabilityWindowRequest", good_win).await;
     assert_eq!(r_good_win.status_code, STATUS_OK);
-    let win = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_theft_windows.get(&skyhook_id).copied());
-    assert_eq!(win, Some((now + 60, now + 3_660)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_theft_windows.get(&skyhook_id).copied()), Some((now + 60, now + 3_660)));
 }

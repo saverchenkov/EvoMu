@@ -131,15 +131,9 @@ fn compute_auto_fracture_delay_secs(
             if let Some(rig_t) = sde.types.get(&it.type_id) {
                 let attr_bonus = rig_t
                     .default_attributes
-                    .get(&2739)
-                    .or_else(|| rig_t.default_attributes.get(&2740))
-                    .or_else(|| rig_t.default_attributes.get(&2738))
+                    .get(&2707)
                     .copied()
-                    .unwrap_or(if rig_t.name.contains("Stability") || rig_t.name.contains("Moon") {
-                        20.0
-                    } else {
-                        0.0
-                    });
+                    .unwrap_or(0.0);
                 bonus_pct += attr_bonus.max(0.0);
             }
         }
