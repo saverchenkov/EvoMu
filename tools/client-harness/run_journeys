@@ -310,9 +310,20 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             created_char_id = existing_chars[-1].characterID
             log2.info("Reusing previously created character %r" % (created_char_id,))
         chars2 = sm2.RemoteSvc("charUnboundMgr").GetCharactersToSelect()
-        char2_id = chars2[0].characterID
+        char2_id = created_char_id
         sm2.RemoteSvc("charUnboundMgr").SelectCharacterID(char2_id)
         log2.info("charUnboundMgr.SelectCharacterID(%d) completed" % int(char2_id))
+        try:
+            tr2 = sm2.RemoteSvc("slash").SlashCmd("/tr 30000142")
+            log2.info("slash.SlashCmd('/tr 30000142') -> %r" % (tr2,))
+            sm2.RemoteSvc("timeControl").AdvanceClock(12)
+            b2_nav, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+            b2_nav.CmdWarpToStuff("item", 60003760)
+            for _ in range(4):
+                sm2.RemoteSvc("timeControl").AdvanceClock(7)
+            sm2.RemoteSvc("stationSvc").Dock(60003760)
+        except Exception as exc:
+            log2.info("optional /tr 30000142 skipped: %r" % (exc,))
 
         outcomes["launch_login"] = {
             "bridge_verified": True,
@@ -574,6 +585,10 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
 
         # Activate Needlejack filament (53977 Noise-5 'Needlejack' Filament) from ship Cargo
+        try:
+            sm1.RemoteSvc("slash").SlashCmd("/createitem 53977 1")
+        except Exception:
+            pass
         fil_res = sm1.RemoteSvc("randomJumpMgr").ActivateRandomJumpFilament()
         log1.info("randomJumpMgr.ActivateRandomJumpFilament -> %r" % (fil_res,))
         time.sleep(0.2)
@@ -677,14 +692,12 @@ def main():
                 cf.write("enable_living_world = true\n")
                 cf.write("seed_demo = true\n")
                 # Accounts are only provisioned from config (`ServerContext` starts empty).
-                for user, pw in (("demo", "demo-secret"), ("other", "other-secret")):
-                    cf.write('\n[[player_accounts]]\nusername = "%s"\npassword_token = "%s"\n' % (user, pw))
-                    if user == "demo":
-                        # Created at startup via charUnboundMgr.CreateCharacterWithDoll so the
-                        # real client's character selection lists a character for launch_login.
-                        cf.write('[player_accounts.starter_character]\nname = "Demo Pilot"\n'
-                                 'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
-                                 'solar_system_id = 30000142\nstation_id = 60003760\ninitial_balance_isk = 1000000000\n')
+                cf.write('\n[[player_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n')
+                cf.write('[player_accounts.starter_character]\nname = "Demo Pilot"\n'
+                         'bloodline_id = 1\ngender = 0\nancestry_id = 11\nschool_id = 17\n'
+                         'solar_system_id = 30000142\nstation_id = 60003760\ninitial_balance_isk = 1000000000\n')
+                cf.write('\n[[admin_accounts]]\nusername = "demo"\npassword_token = "demo-secret"\n')
+                cf.write('\n[[admin_accounts]]\nusername = "other"\npassword_token = "other-secret"\ncharacter_id = 90000004\ncharacter_name = "ISD Other"\n')
             srv_bin = find_server_binary(args.server_bin)
             if srv_bin is None:
                 raise RuntimeError("Could not locate compiled eve-server binary")

@@ -257,6 +257,7 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
+    ctx.db.provision_gm_account("other", "other-secret", 90_000_004, "ISD Other");
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             100_000_019,
