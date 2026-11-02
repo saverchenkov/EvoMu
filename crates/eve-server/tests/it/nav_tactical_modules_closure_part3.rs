@@ -590,3 +590,44 @@ async fn test_high_velocity_subwarp_collision_no_tunneling() {
                 || (*ball_a == gate.stargate_id && *ball_b == ship_id)
     )));
 }
+
+#[tokio::test]
+async fn test_emergency_warp_stopped_by_warp_scrambler_during_alignment() {
+    let ctx = build_ctx();
+    let sys_id = 30_004_609;
+    let origin = DVec3::new(65_000_000_000.0, 0.0, 0.0);
+    let (char_id, ship_id) = (94_087, 84_087);
+    let _sess = seed_pilot(&ctx, char_id, ship_id, 587, sys_id, false);
+    spawn_in_space(&ctx, char_id, ship_id, 587, sys_id, origin).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    // Disconnect unpointed ship -> initiates emergency logoff warp in Aligning phase
+    let disc = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("disconnect entry");
+    assert!(disc.emergency_warp_dest.is_some());
+    assert!(sys.get_combat_state(ship_id).await.unwrap().unwrap().is_emergency_warping);
+    let (_, pre) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(matches!(
+        pre.mode,
+        MovementMode::Warp {
+            phase: eve_destiny::WarpPhase::Aligning,
+            ..
+        }
+    ));
+
+    // Apply a warp scrambler while the emergency warp is aligning -> must stop the warp
+    sys.set_warp_scramble_strength(ship_id, 2).await.unwrap();
+    let _ = sys.step_manual(1.0).await.unwrap();
+    let (_, post) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        matches!(post.mode, MovementMode::Stop),
+        "Warp scrambler applied during emergency warp alignment must stop the ball: got {:?}",
+        post.mode
+    );
+    assert!(
+        !sys.get_combat_state(ship_id).await.unwrap().unwrap().is_emergency_warping,
+        "Stopping emergency warp via scrambler must clear is_emergency_warping"
+    );
+}
+

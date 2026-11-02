@@ -250,7 +250,7 @@ impl Ballpark {
         for i in 0..ball_keys.len() {
             let id_a = ball_keys[i];
             let group_a = self.ball_group_ids.get(&id_a).copied().unwrap_or(0);
-            let is_station_or_struct_a = matches!(group_a, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
+            let is_station_or_struct_a = matches!(group_a, 15 | 1404..=1410 | 1657 | 2016 | 2017)
                 || self
                     .ball_slim_meta
                     .get(&id_a)
@@ -266,14 +266,14 @@ impl Ballpark {
             for j in (i + 1)..ball_keys.len() {
                 let id_b = ball_keys[j];
                 let group_b = self.ball_group_ids.get(&id_b).copied().unwrap_or(0);
-                // Star (`group 6`), Asteroid Belt (`group 9`), and Abyssal Spatial Hazard Clouds (`group 1971`)
-                // are volumetric/system-origin markers that must not eject ships;
-                // solid celestial hulls (`group 7` Planet, `group 8` Moon), stations, structures, and gates collide normally.
-                if matches!(group_a, 6 | 9 | 1971) || matches!(group_b, 6 | 9 | 1971) {
+                // Star (`group 6`), Planet (`group 7`), Moon (`group 8`), Asteroid Belt (`group 9`),
+                // and Abyssal Spatial Hazard Clouds (`group 1971`) are background/volumetric celestials
+                // that must not eject ships at orbital sites, moon belts, or deadspace pockets.
+                if matches!(group_a, 6 | 7 | 8 | 9 | 1971) || matches!(group_b, 6 | 7 | 8 | 9 | 1971) {
                     continue;
                 }
                 let is_station_or_struct_b =
-                    matches!(group_b, 6 | 7 | 8 | 15 | 1404..=1410 | 1657 | 2016 | 2017)
+                    matches!(group_b, 15 | 1404..=1410 | 1657 | 2016 | 2017)
                         || self
                             .ball_slim_meta
                             .get(&id_b)
@@ -370,6 +370,9 @@ impl Ballpark {
                         bumped_dynamic_ids.insert(id_a);
                         bumped_dynamic_ids.insert(id_b);
                     } else if !is_static_a && is_static_b {
+                        if v_rel >= 0.0 && overlap > 10_000.0 {
+                            continue;
+                        }
                         if v_rel < 0.0 {
                             if let Some(ba) = self.balls.get_mut(&id_a) {
                                 ba.velocity -= normal * ((1.0 + restitution) * v_rel);
@@ -381,6 +384,9 @@ impl Ballpark {
                         }
                         bumped_dynamic_ids.insert(id_a);
                     } else if is_static_a && !is_static_b {
+                        if v_rel >= 0.0 && overlap > 10_000.0 {
+                            continue;
+                        }
                         if v_rel < 0.0 {
                             if let Some(bb) = self.balls.get_mut(&id_b) {
                                 bb.velocity += normal * ((1.0 + restitution) * v_rel);
