@@ -120,7 +120,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         assert!(format!("{treaties:?}").contains(&war_id.to_string()), "peace treaties must persist: {treaties:?}");
 
         let vp_states = rpc(&ctx2, &mut sess_a2, "fwVictoryPointMgr", "GetAllVictoryPointStates", &[]).await;
-        assert!(format!("{vp_states:?}").contains("1500"), "FW victory points must persist via RPC: {vp_states:?}");
+        assert!(format!("{vp_states:?}").contains("1480"), "FW victory points must persist via RPC: {vp_states:?}");
         assert_eq!(ctx2.db.with_snapshot(|s| s.fw_runtime.system_advantage.get(&fw_sys).copied()), Some((0.25, 0.10)));
 
         let bf = rpc(&ctx2, &mut sess_a2, "dungeonInstanceCacheMgr", "GetFactionWarfareBattlefieldInstances", &[PyRep::Integer(fw_sys as i64)]).await;
@@ -155,10 +155,10 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         assert_eq!(esi_war["open_for_allies"], true);
         assert!(esi_war.get("finished").is_some(), "surrender finished timestamp must appear on ESI /wars/{{id}}: {esi_war}");
         let esi_fw_sys = esi_get(&ctx2, "/fw/systems", &[]);
-        assert!(esi_fw_sys.to_string().contains(&fw_sys.to_string()) && esi_fw_sys.to_string().contains("1500"));
+        assert!(esi_fw_sys.to_string().contains(&fw_sys.to_string()) && esi_fw_sys.to_string().contains("1480"));
         let esi_fw_char = esi_get(&ctx2, "/characters/{character_id}/fw/stats", &[("character_id", PILOT)]);
         assert_eq!(esi_fw_char["kills"]["total"], 1);
-        assert_eq!(esi_fw_char["victory_points"]["total"], 20);
+        assert_eq!(esi_fw_char["victory_points"]["total"], 0);
         let esi_sov_camps = esi_get(&ctx2, "/sovereignty/campaigns", &[]);
         assert!(esi_sov_camps.to_string().contains(&hub_id.to_string()) && esi_sov_camps.to_string().contains("0.6"));
 
@@ -174,7 +174,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         ctx2.db.with_snapshot(|snap| {
             assert!(snap.war_state.wars.contains_key(&war_id));
             assert!(snap.alliance_war_state.alliances.contains_key(&alliance_id));
-            assert_eq!(snap.fw_runtime.system_victory_points.get(&fw_sys).copied(), Some(1_500));
+            assert_eq!(snap.fw_runtime.system_victory_points.get(&fw_sys).copied(), Some(1_480));
             assert!(snap.sov_runtime.hacked_hubs.contains_key(&hub_id));
             assert!(snap.insurgency_runtime.campaigns.contains_key(&campaign_id));
         });

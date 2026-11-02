@@ -1092,31 +1092,14 @@ pub async fn handle_crimewatch(
             match res {
                 Ok((old_sec, new_sec)) => {
                     with_mut_combat_runtime(ctx, |rt| {
-                        rt.sec_status_transactions
-                            .entry(char_id)
-                            .or_default()
-                            .push(SecStatusTransaction {
-                                timestamp_unix: now_unix,
-                                old_sec,
-                                new_sec,
-                                delta: new_sec - old_sec,
-                                reason: "Clone Soldier Security Tag".into(),
-                                solar_system_id: sys_id,
-                                event_type_id: 507, // logConst.eventSecStatusHandInTags
-                                other_owner_id: Some(1_000_125),
-                                other_type_id: Some(tag_type_id),
-                            });
+                        rt.sec_status_transactions.entry(char_id).or_default().push(SecStatusTransaction {
+                            timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
+                            reason: "Clone Soldier Security Tag".into(), solar_system_id: sys_id,
+                            event_type_id: 507, other_owner_id: Some(1_000_125), other_type_id: Some(tag_type_id),
+                        });
                     });
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnSecurityStatusUpdate",
-                        "charid",
-                        vec![PyRep::Real(new_sec)],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("oldSecurityStatus", PyRep::Real(old_sec)),
-                        ("newSecurityStatus", PyRep::Real(new_sec)),
-                    ])))
+                    ctx.notify(NotificationTarget::Character(char_id), "OnSecurityStatusUpdate", "charid", vec![PyRep::Real(new_sec)]);
+                    Some(Ok(PyRep::keyval([("oldSecurityStatus", PyRep::Real(old_sec)), ("newSecurityStatus", PyRep::Real(new_sec))])))
                 }
                 Err(e) => Some(Err(e)),
             }

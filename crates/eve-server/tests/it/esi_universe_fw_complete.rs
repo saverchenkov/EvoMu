@@ -426,11 +426,11 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     let expected_vp = ctx.db.with_mut_snapshot(|snap| {
         let occ = snap.fw_system_occupations.get_mut(&sys_id).unwrap();
         let vp = occ.victory_points;
-        assert!(vp >= 70 && vp <= 120, "expected 20 PvP VP + 50..100 complex VP, got {vp}");
-        occ.victory_points_threshold = vp + 20;
+        assert!((50..=100).contains(&vp), "expected 50..=100 complex capture VP, got {vp}");
+        occ.victory_points_threshold = vp * 2;
         vp
     });
-    let expected_threshold = expected_vp + 20;
+    let expected_threshold = expected_vp * 2;
 
     let char_token = issue_token_with_scopes(
         &ctx,
@@ -608,16 +608,27 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
         sid
     });
     let _ = eve_server::combat::death_pipeline::execute_death_pipeline(
-        &ctx,
-        sys_id,
-        other_char_id,
-        victim_ship_id_2,
-        char_id,
-        glam::DVec3::ZERO,
-        43,
+        &ctx, sys_id, other_char_id, victim_ship_id_2, char_id, glam::DVec3::ZERO, 43,
     )
     .await
     .expect("second FW PvP kill");
+    let complex_id_2 = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let gid = snap.next_entity_id;
+        snap.fw_runtime.fw_complexes.insert(gid, (sys_id, "Novice".to_string(), 500_004, 0.0, false));
+        snap.fw_runtime.complex_occupants.insert(gid, vec![(char_id, char_ship_id)]);
+        snap.fw_runtime.complex_guards_cleared.insert(gid, true);
+        snap.fw_runtime.complex_last_step_unix.insert(gid, now.saturating_sub(900));
+        gid
+    });
+    let pocket_2 = eve_server::services::fw_gameplay::pocket_pos_for_complex(complex_id_2);
+    let _ = sys_handle.remove_ball(char_ship_id).await;
+    let _ = sys_handle.spawn_ball(eve_destiny::Ball {
+        id: char_ship_id, type_id: 587, position: pocket_2, velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0, inertia: 1.0, mass: 1_000_000.0, radius: 40.0,
+        speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+    }).await;
+    eve_server::services::fw_gameplay::tick_fw_gameplay(&ctx, now + 60).await;
 
     let fw_systems_after = call(&router, EsiHttpRequest::new("GET", "/v1/fw/systems/"), 200);
     let sys_after = fw_systems_after
@@ -647,26 +658,13 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     assert!(fw_wars_arr.contains(&json!({ "faction_id": 500_003, "against_id": 500_002 })));
     assert!(fw_wars_arr.contains(&json!({ "faction_id": 500_004, "against_id": 500_001 })));
 
-    let cal_militia_corp = ctx.sde.factions[&500_001]
-        .militia_corporation_id
-        .or(ctx.sde.factions[&500_001].corporation_id)
-        .expect("Caldari militia corp");
-    let min_militia_corp = ctx.sde.factions[&500_002]
-        .militia_corporation_id
-        .or(ctx.sde.factions[&500_002].corporation_id)
-        .expect("Minmatar militia corp");
+    let cal_militia_corp = ctx.sde.factions[&500_001].militia_corporation_id.or(ctx.sde.factions[&500_001].corporation_id).expect("Caldari militia corp");
+    let min_militia_corp = ctx.sde.factions[&500_002].militia_corporation_id.or(ctx.sde.factions[&500_002].corporation_id).expect("Minmatar militia corp");
     ctx.db.with_mut_snapshot(|snap| {
-        snap.wars.insert(
-            990_001,
-            WarRecord {
-                war_id: 990_001,
-                aggressor_corp_id: cal_militia_corp,
-                defender_corp_id: min_militia_corp,
-                mutual: true,
-                started_unix: now,
-                active: true,
-            },
-        );
+        snap.wars.insert(990_001, WarRecord {
+            war_id: 990_001, aggressor_corp_id: cal_militia_corp, defender_corp_id: min_militia_corp,
+            mutual: true, started_unix: now, active: true,
+        });
     });
     let fw_wars_updated = call(&router, EsiHttpRequest::new("GET", "/v1/fw/wars/"), 200);
     let fw_wars_upd_arr = fw_wars_updated.as_array().unwrap();

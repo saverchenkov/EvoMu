@@ -391,6 +391,9 @@ pub async fn handle_npc_destroyed_in_space(
                             delta: new_sec - old_sec,
                             reason: "NPC Pirate Bounty".into(),
                             solar_system_id,
+                            event_type_id: 14, // logConst.eventSecStatusKill
+                            other_owner_id: None,
+                            other_type_id: None,
                         });
                     snap.combat_crimewatch_state = rt.to_persisted();
                 }

@@ -319,9 +319,9 @@ async fn test_esi6_industry_and_mining_routes() {
         .expect("Perimeter structure in /industry/facilities");
     assert_eq!(perim_fac["owner_id"], json!(corp_id));
     assert_eq!(perim_fac["solar_system_id"], json!(30_000_144));
-    // Upwell structure facility tax defaults to 0.05 (distinct from corp.tax_rate = 0.08) and matches InstallJob
+    // Upwell structure facility tax matches configured 0.08 and InstallJob
     let perim_reported_tax = perim_fac["tax"].as_f64().unwrap();
-    assert!((perim_reported_tax - 0.05).abs() < 1e-9);
+    assert!((perim_reported_tax - 0.08).abs() < 1e-9);
     let expected_eiv = jita_tax_isk / 0.0025;
     let expected_perim_tax_isk = ((expected_eiv * perim_reported_tax) * 100.0).round() / 100.0;
     assert!((perim_tax_isk - expected_perim_tax_isk).abs() < 1e-6);

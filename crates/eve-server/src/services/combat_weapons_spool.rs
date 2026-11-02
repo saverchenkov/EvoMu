@@ -839,32 +839,19 @@ pub async fn handle_ship_or_npc_destruction(
                     }
                 });
                 with_mut_combat_runtime(ctx, |rt| {
-                    rt.sec_status_transactions
-                        .entry(attacker_char_id)
-                        .or_default()
-                        .push(crate::services::combat_crimewatch::SecStatusTransaction {
-                            timestamp_unix: now_unix,
-                            old_sec,
-                            new_sec,
-                            delta: new_sec - old_sec,
-                            reason: "NPC Pirate Bounty".into(),
-                            solar_system_id: sys_id,
-                            event_type_id: 14, // logConst.eventSecStatusKill
-                            other_owner_id: None,
-                            other_type_id: None,
-                        });
+                    rt.sec_status_transactions.entry(attacker_char_id).or_default().push(
+                        crate::services::combat_crimewatch::SecStatusTransaction {
+                            timestamp_unix: now_unix, old_sec, new_sec, delta: new_sec - old_sec,
+                            reason: "NPC Pirate Bounty".into(), solar_system_id: sys_id,
+                            event_type_id: 14, other_owner_id: None, other_type_id: None,
+                        },
+                    );
                 });
             }
         }
     }
     if let Some(sh_info) = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_ball_id, Some(attacker_char_id)).await {
-        crate::services::insurgency_services::notify_stronghold_destruction(
-            &ctx.db,
-            Some(&ctx.quasar_gateway),
-            Some(&ctx.pending_notifications),
-            Some(&ctx.notify_tx),
-            &sh_info,
-        );
+        crate::services::insurgency_services::notify_stronghold_destruction(&ctx.db, Some(&ctx.quasar_gateway), Some(&ctx.pending_notifications), Some(&ctx.notify_tx), &sh_info);
     }
 
     let valid_assists: Vec<crate::services::combat_crimewatch::AssistLogEntry> = with_mut_combat_runtime(ctx, |rt| {
@@ -872,11 +859,8 @@ pub async fn handle_ship_or_npc_destruction(
         for key in [target_ball_id, victim_id] {
             if let Some(list) = rt.aggression_assist_log.remove(&key) {
                 for e in list {
-                    if now_unix.saturating_sub(e.last_action_unix)
-                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
-                        && !out
-                            .iter()
-                            .any(|x: &crate::services::combat_crimewatch::AssistLogEntry| x.attacker_char_id == e.attacker_char_id)
+                    if now_unix.saturating_sub(e.last_action_unix) <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                        && !out.iter().any(|x: &crate::services::combat_crimewatch::AssistLogEntry| x.attacker_char_id == e.attacker_char_id)
                     {
                         out.push(e);
                     }
