@@ -1033,6 +1033,13 @@ pub fn register_handlers(
                             .to_string(),
                     ));
                 }
+                if cur_ver.is_some() {
+                    return Err((
+                        crate::quasar_gateway::STATUS_SERVICE_UNAVAILABLE,
+                        "External TLS CDN not configured; use local client maptag definitions"
+                            .to_string(),
+                    ));
+                }
                 let latest = (24u32, 1u32, sde_cdn.solar_systems.len() as u32);
                 let mut out = Vec::new();
                 if no_local || cur_ver != Some(latest) {

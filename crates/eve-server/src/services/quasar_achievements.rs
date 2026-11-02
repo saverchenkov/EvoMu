@@ -1152,6 +1152,18 @@ pub fn register_achievement_handlers(
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
+            // V24.01 `FlatbufferContentProvider._send_http_request` unconditionally uses
+            // `httplib.HTTPSConnection` with CCP root CA verification. When a client sends
+            // `client_version` (`field 1`), returning `STATUS_SERVICE_UNAVAILABLE` lets
+            // `FlatbufferContentProvider._send_request` catch `ServiceUnavailableError` and
+            // fall back cleanly to local definitions without raising an uncaught `SSLError`.
+            if dyn_msg.get(1).is_some() {
+                return Err((
+                    crate::quasar_gateway::STATUS_SERVICE_UNAVAILABLE,
+                    "External TLS CDN not configured; use local client achievement definitions"
+                        .to_string(),
+                ));
+            }
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
             let url = format!("http://127.0.0.1:26004/cdn/achievements/v24.1.{count}/{hash}.json");

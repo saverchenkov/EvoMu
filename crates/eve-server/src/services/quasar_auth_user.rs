@@ -370,13 +370,15 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             let is_active = expiry > now;
 
             let mut lic_attr = Vec::new();
-            if is_active && expiry > 0 {
-                let mut exp_ts = Vec::new();
-                encode_varint_field(1, expiry, &mut exp_ts);
-                encode_bytes_field(2, &exp_ts, &mut lic_attr);
+            encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
+            let exp_seconds = if is_active && expiry > 0 {
+                expiry
             } else {
-                encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
-            }
+                1
+            };
+            let mut exp_ts = Vec::new();
+            encode_varint_field(1, exp_seconds, &mut exp_ts);
+            encode_bytes_field(2, &exp_ts, &mut lic_attr);
             let mut out = Vec::new();
             encode_bytes_field(1, &lic_attr, &mut out);
             Ok(GoogleAny {

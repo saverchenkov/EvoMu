@@ -245,6 +245,7 @@ fn ensure_character_career_goals_with_defs(
     goals: &mut Vec<CharacterCareerGoal>,
     defs: &[CareerGoalDef],
 ) {
+    goals.retain(|g| defs.iter().any(|d| d.uuid == g.uuid));
     for g in goals.iter_mut() {
         if g.def.activity_kind.is_empty() {
             if let Some(def) = defs.iter().find(|d| d.uuid == g.uuid) {
@@ -1080,31 +1081,36 @@ pub fn register_career_goal_handlers(
         }),
     );
 
-    // 2. eve_public.career.goal.api.GetDefinitionsRequest -> GetDefinitionsResponse
-    let mgr_defs = Arc::clone(&manager);
-    router.register_handler(
+    // 2. eve_public.career.goal.api.GetDefinitionsRequest (and .requests. alias) -> GetDefinitionsResponse
+    for req_name in [
         "eve_public.career.goal.api.GetDefinitionsRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            let defs = mgr_defs.load_definitions();
-            let mut out = Vec::new();
-            for def in &defs {
-                let mut gw = Vec::new();
-                encode_career_goal_definition_wire(def, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
-            }
-            for ms in &mgr_defs.milestones {
-                let mut mw = Vec::new();
-                encode_career_milestone_definition_wire(ms, &mut mw);
-                encode_bytes_field(1, &mw, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.GetDefinitionsResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
+        "eve_public.career.goal.api.requests.GetDefinitionsRequest",
+    ] {
+        let mgr_defs = Arc::clone(&manager);
+        router.register_handler(
+            req_name,
+            Arc::new(move |_ctx, _any, _dyn| {
+                let defs = mgr_defs.load_definitions();
+                let mut out = Vec::new();
+                for def in &defs {
+                    let mut gw = Vec::new();
+                    encode_career_goal_definition_wire(def, &mut gw);
+                    encode_bytes_field(1, &gw, &mut out);
+                }
+                for ms in &mgr_defs.milestones {
+                    let mut mw = Vec::new();
+                    encode_career_milestone_definition_wire(ms, &mut mw);
+                    encode_bytes_field(1, &mw, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.GetDefinitionsResponse"
+                    ),
+                    value: out,
+                })
+            }),
+        );
+    }
 
     // 3. eve_public.career.goal.api.ClaimRewardRequest -> ClaimRewardResponse
     let mgr = Arc::clone(&manager);

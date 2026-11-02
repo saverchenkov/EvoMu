@@ -137,7 +137,10 @@ pub fn build_client_global_config(
         Some(h) if h.contains(':') && !h.starts_with('[') => format!("[{h}]"),
         Some(h) => h.to_string(),
     };
-    cfg.insert("ejabberdAddress".to_string(), PyRep::String(host));
+    cfg.insert(
+        "ejabberdAddress".to_string(),
+        PyRep::ascii_bytes(host.as_bytes()),
+    );
 
     if let Ok(extra) = ctx.global_config_values.read() {
         for (k, v) in extra.iter() {

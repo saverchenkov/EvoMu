@@ -1312,8 +1312,21 @@ impl Ballpark {
                     guid: "effects.Warping".to_string(),
                     is_active: true,
                 };
+                // Disable client-side bump checks during warp alignment/transit (matching
+                // `evemu_Crucible` `DestinyManager::WarpTo`) and ensure `speed_fraction = 1.0`
+                // on the client ball even when warping from a stopped state.
+                let ev_massive = DestinyEvent::SetBallMassive {
+                    ball_id,
+                    is_massive: false,
+                };
+                let ev_speed = DestinyEvent::SetSpeedFraction {
+                    ball_id,
+                    fraction: 1.0,
+                };
                 extra_events.push(ev_act);
                 extra_events.push(ev_sfx);
+                extra_events.push(ev_massive);
+                extra_events.push(ev_speed);
             }
             _ => {}
         }

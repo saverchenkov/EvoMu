@@ -981,6 +981,16 @@ pub fn encode_destiny_event(stamp: u32, event: &DestinyEvent, park: Option<&Ball
                 PyRep::Integer((*warp_speed_au_s * 10.0).round() as i64),
             ]),
         ]),
+        DestinyEvent::SetBallMassive {
+            ball_id,
+            is_massive,
+        } => PyRep::Tuple(vec![
+            PyRep::String("SetBallMassive".into()),
+            PyRep::Tuple(vec![
+                PyRep::Integer(*ball_id),
+                PyRep::Integer(i64::from(*is_massive)),
+            ]),
+        ]),
         DestinyEvent::OnDamageStateChange {
             ball_id,
             shield_ratio,

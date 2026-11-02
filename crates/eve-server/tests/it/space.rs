@@ -621,8 +621,8 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         .drain_observer_updates(ship_id)
         .await
         .expect("drain movement observer updates");
-    // SetSpeedFraction, GotoDirection, FollowBall, Orbit, Stop, WarpTo + OnSpecialFX('effects.Warping')
-    assert_eq!(evs.len(), 7);
+    // SetSpeedFraction, GotoDirection, FollowBall, Orbit, Stop, WarpTo + OnSpecialFX('effects.Warping') + SetBallMassive(false) + SetSpeedFraction(1.0)
+    assert_eq!(evs.len(), 9);
     let encoded_updates = eve_proto::marshal::encode(&pyrep_updates);
     let decoded_updates =
         eve_proto::marshal::decode(&encoded_updates).expect("marshal roundtrip on movement updates");

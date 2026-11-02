@@ -588,6 +588,10 @@ pub enum DestinyEvent {
         destination: [f64; 3],
         warp_speed_au_s: f64,
     },
+    SetBallMassive {
+        ball_id: BallId,
+        is_massive: bool,
+    },
     OnDamageStateChange {
         ball_id: BallId,
         shield_ratio: f64,

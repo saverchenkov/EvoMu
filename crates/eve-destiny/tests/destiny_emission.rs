@@ -337,7 +337,15 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
     // (Destiny.xmlp:469-489). Both the warper and the grid neighbour get the same two actions.
     for obs in [SHIP_A, SHIP_B] {
         let actions = wire_for(&mut park, obs);
-        assert_eq!(names(&actions), vec!["WarpTo", "OnSpecialFX"], "observer {obs}");
+        assert_eq!(
+            names(&actions),
+            vec!["WarpTo", "OnSpecialFX", "SetBallMassive", "SetSpeedFraction"],
+            "observer {obs}"
+        );
+        assert_eq!(
+            args_of(&actions, "SetBallMassive")[0],
+            &[PyRep::Integer(SHIP_A), PyRep::Integer(0)]
+        );
         let warp = args_of(&actions, "WarpTo")[0];
         assert_eq!(warp, &[
             PyRep::Integer(SHIP_A),
@@ -385,6 +393,10 @@ async fn test_warp_to_and_special_fx_on_warp_start_and_exit() {
     assert!(matches!(park.balls[&SHIP_A].mode, MovementMode::Stop));
     assert!((park.balls[&SHIP_A].position - dest).length() < 1.0e6, "landed near destination");
     assert!(!names(&actions).iter().any(|n| n == "OnDeactivatingWarp" || n == "OnActivatingWarp"));
+    assert_eq!(
+        args_of(&actions, "SetBallMassive")[0],
+        &[PyRep::Integer(SHIP_A), PyRep::Integer(1)]
+    );
     let fx = args_of(&actions, "OnSpecialFX");
     assert_eq!(fx.len(), 1);
     assert_eq!(fx[0][5], PyRep::String("effects.Warping".into()));

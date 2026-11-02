@@ -790,6 +790,10 @@ impl Ballpark {
                 cs.sync_invuln_with_undock_timer = true;
             }
             let ev = DestinyEvent::Stop { ball_id };
+            let ev_massive = DestinyEvent::SetBallMassive {
+                ball_id,
+                is_massive: true,
+            };
             let ev_deact = DestinyEvent::OnDeactivatingWarp { ball_id };
             let ev_sfx = DestinyEvent::OnSpecialFX {
                 ball_id,
@@ -798,12 +802,14 @@ impl Ballpark {
                 is_active: false,
             };
             self.pending_events.push(ev.clone());
+            self.pending_events.push(ev_massive.clone());
             self.pending_events.push(ev_deact.clone());
             self.pending_events.push(ev_sfx.clone());
             if let Some(&gid) = self.ball_grid_ids.get(&ball_id) {
                 // `OnDeactivatingWarp` is raised by the client's own destiny tick; it is kept in
                 // `pending_events` for the simulation but never queued onto the wire.
                 self.queue_event_for_grid_observers(gid, None, &ev);
+                self.queue_event_for_grid_observers(gid, None, &ev_massive);
                 self.queue_event_for_grid_observers(gid, None, &ev_sfx);
             }
         }

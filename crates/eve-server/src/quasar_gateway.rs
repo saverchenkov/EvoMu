@@ -37,6 +37,7 @@ pub const STATUS_PRECONDITION_FAILED: u32 = 412;
 pub const STATUS_UNSUPPORTED_MEDIA_TYPE: u32 = 415;
 pub const STATUS_INTERNAL_ERROR: u32 = 500;
 pub const STATUS_NOT_IMPLEMENTED: u32 = 501;
+pub const STATUS_SERVICE_UNAVAILABLE: u32 = 503;
 pub const STATUS_GATEWAY_TIMEOUT: u32 = 504;
 
 /// Matches `EXPIRY_DELAY_SECS = 10` in `publicGateway/notice/notice_routing_cache.pyj`.
