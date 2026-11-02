@@ -1223,6 +1223,9 @@ impl Ballpark {
 
         let mut uncloaked = false;
         if let Some(cs) = self.combat_states.get_mut(&ball_id) {
+            if !matches!(mode, MovementMode::Warp { .. }) {
+                cs.is_emergency_warping = false;
+            }
             cs.undock_invulnerable_remaining_ticks = 0;
             cs.warp_exit_invulnerable_remaining_ticks = 0;
             cs.sync_invuln_with_undock_timer = false;

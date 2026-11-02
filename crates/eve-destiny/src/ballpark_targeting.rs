@@ -347,9 +347,6 @@ impl Ballpark {
                         DVec3::X
                     };
                     let overlap = min_dist - dist;
-                    if (is_static_a || is_static_b) && overlap > 5_000.0 {
-                        continue;
-                    }
                     let v_rel = (vel_a - vel_b).dot(normal);
 
                     if !is_static_a && !is_static_b {
@@ -464,12 +461,7 @@ impl Ballpark {
                 return true;
             }
         }
-        if !self.is_ball_bubble_immune(ball_id)
-            && !self
-                .combat_states
-                .get(&ball_id)
-                .is_some_and(|cs| cs.is_emergency_warping)
-        {
+        if !self.is_ball_bubble_immune(ball_id) {
             if let Some(ball) = self.balls.get(&ball_id) {
                 if self.warp_bubble_mgr.is_scrambled_at(ball.position) {
                     return true;

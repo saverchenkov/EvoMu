@@ -282,8 +282,10 @@ async fn test_warp_bubble_warp_entry_only_and_shuttle_emergency_exemptions() {
         assert_eq!(destination, dest, "Despawned bubble during alignment must not trap ship");
     }
 
-    // (b) is_emergency_warping disconnect warp toward a bubbled destination is exempt
-    bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(5002, bubble_center, 20_000.0));
+    // (b) is_emergency_warping disconnect warp is exempt from origin-bubble alignment cancellation,
+    //     but is still intercepted by destination drag/catch bubbles.
+    bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(5002, origin, 20_000.0));
+    bp.warp_bubble_mgr.add_bubble(eve_destiny::WarpBubble::new(5003, bubble_center, 20_000.0));
     let mut cs_emerg = eve_destiny::CombatState::default();
     cs_emerg.is_emergency_warping = true;
     bp.combat_states.insert(1002, cs_emerg);
@@ -292,12 +294,12 @@ async fn test_warp_bubble_warp_entry_only_and_shuttle_emergency_exemptions() {
         max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 37.0,
         speed_fraction: 0.0, mode: MovementMode::new_warp(origin, dest, 3.0),
     });
-    for _ in 0..5 {
-        bp.step(1.0);
-    }
-    if let MovementMode::Warp { destination, .. } = bp.balls[&1002].mode {
-        assert_eq!(destination, dest, "Emergency disconnect warp must be exempt from warp bubbles");
-    }
+    for _ in 0..5 { bp.step(1.0); }
+    let MovementMode::Warp { destination, phase, .. } = bp.balls[&1002].mode else {
+        panic!("Expected emergency warp to enter warp out of origin bubble");
+    };
+    assert_ne!(phase, eve_destiny::WarpPhase::Aligning, "Emergency warp must not be aborted by origin bubble");
+    assert!((destination.x - 99_980_000.0).abs() < 1e-3, "Emergency warp must still be caught by destination bubble");
 
     // (c) Newly spawned group 31 shuttle warping toward a bubbled destination is exempt
     bp.ball_group_ids.insert(1003, 31);

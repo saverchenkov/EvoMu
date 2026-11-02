@@ -492,3 +492,101 @@ async fn test_prealigned_warp_bubble_interception_no_overshoot() {
         assert!((destination.x - edge_x).abs() < 1e-3);
     }
 }
+
+#[tokio::test]
+async fn test_reconnect_in_space_clears_emergency_warp_bubble_immunity() {
+    let ctx = build_ctx();
+    let sys_id = 30_004_608;
+    let origin = DVec3::new(60_000_000_000.0, 0.0, 0.0);
+    let (char_id, ship_id) = (94_085, 84_085);
+    let _sess = seed_pilot(&ctx, char_id, ship_id, 587, sys_id, false);
+    spawn_in_space(&ctx, char_id, ship_id, 587, sys_id, origin).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    sys.add_interdiction_sphere(999_002, origin, 25_000.0).await.unwrap();
+
+    // Disconnect inside active bubble -> initiates emergency warp with is_emergency_warping = true
+    let disc = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
+        .await
+        .expect("disconnect entry");
+    assert!(disc.emergency_warp_dest.is_some());
+    assert!(sys.get_combat_state(ship_id).await.unwrap().unwrap().is_emergency_warping);
+
+    // Reconnect immediately while still < 10 km from orig_pos -> must clear is_emergency_warping
+    let reconn = eve_server::sp6_lifecycle::reconnect_character_in_space_sync(&ctx, char_id);
+    assert!(reconn.is_some());
+    assert!(
+        !sys.get_combat_state(ship_id).await.unwrap().unwrap().is_emergency_warping,
+        "reconnect_character_in_space_sync must unconditionally clear is_emergency_warping"
+    );
+
+    // Also verify Ballpark::set_mode clears is_emergency_warping on non-emergency mode transitions
+    {
+        let mut bp = sys.ballpark.write().unwrap();
+        bp.combat_states.get_mut(&ship_id).unwrap().is_emergency_warping = true;
+        bp.set_mode(ship_id, MovementMode::Stop).unwrap();
+        assert!(!bp.combat_states[&ship_id].is_emergency_warping);
+    }
+
+    // Reconnected pilot inside active bubble must be blocked from initiating warp
+    let warp_err = sys
+        .set_movement_mode(
+            ship_id,
+            MovementMode::new_warp(origin, origin + DVec3::new(1_000_000.0, 0.0, 0.0), 5.0),
+        )
+        .await;
+    assert!(warp_err.is_err(), "Reconnected pilot inside active warp bubble must not warp");
+}
+
+#[tokio::test]
+async fn test_high_velocity_subwarp_collision_no_tunneling() {
+    let ctx = build_ctx();
+    let sys_id = 30_000_142;
+    let (char_id, ship_id) = (94_086, 84_086);
+    let _sess = seed_pilot(&ctx, char_id, ship_id, 11_198, sys_id, false);
+    spawn_in_space(&ctx, char_id, ship_id, 11_198, sys_id, DVec3::new(70_000_000_000.0, 0.0, 0.0)).await;
+    let sys = ctx.systems.get_or_spawn(sys_id);
+
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == sys_id)
+        .expect("Jita stargate");
+    let (_, gate_ball) = sys.get_ball_snapshot(gate.stargate_id).await.unwrap().unwrap();
+    let mut cs = ctx.build_ship_combat_state(char_id, ship_id, 11_198);
+    cs.undock_invulnerable_remaining_ticks = 0;
+
+    // Place ship 500 m outside gate hull moving inward at 6,500 m/s (single-tick penetration > 5,000 m)
+    sys.spawn_ball_with_meta(
+        Ball {
+            id: ship_id,
+            type_id: 11_198,
+            position: gate.position + DVec3::new(gate_ball.radius + 500.0, 0.0, 0.0),
+            velocity: DVec3::new(-6_500.0, 0.0, 0.0),
+            max_velocity: 6_500.0,
+            inertia: 0.5,
+            mass: 1_500_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        cs,
+        ctx.build_ship_slim_meta(char_id, 11_198),
+    )
+    .await
+    .unwrap();
+
+    let tick = sys.step_manual(1.0).await.unwrap();
+    let (_, post) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    assert!(
+        post.position.distance(gate.position) >= gate_ball.radius + post.radius - 1e-3,
+        "High-velocity (> 6 km/s) ship must not tunnel through stargate hull"
+    );
+    assert!(post.velocity.x > 0.0, "High-velocity ship must bounce off stargate hull");
+    assert!(tick.events.iter().any(|e| matches!(
+        e,
+        eve_destiny::DestinyEvent::Collision { ball_a, ball_b }
+            if (*ball_a == ship_id && *ball_b == gate.stargate_id)
+                || (*ball_a == gate.stargate_id && *ball_b == ship_id)
+    )));
+}

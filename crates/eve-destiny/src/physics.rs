@@ -142,12 +142,17 @@ impl Ballpark {
                     || self
                         .combat_states
                         .get(&ball.id)
-                        .is_some_and(|cs| cs.is_interdiction_nullified || cs.is_emergency_warping);
-                let bubble_immune = is_nullified_or_shuttle;
-                // While still sub-warp aligning, entering or sitting in a bubble aborts alignment immediately.
+                        .is_some_and(|cs| cs.is_interdiction_nullified);
+                let is_emergency_warp = self
+                    .combat_states
+                    .get(&ball.id)
+                    .is_some_and(|cs| cs.is_emergency_warping);
+                // While still sub-warp aligning, entering or sitting in a bubble aborts alignment immediately,
+                // except for shuttles, active Interdiction Nullifiers, and disconnect emergency warps.
                 // Once in the warp tunnel (Accelerating/Cruising/Decelerating), newly anchored bubbles do not yank ships mid-flight.
                 if phase == WarpPhase::Aligning
-                    && !bubble_immune
+                    && !is_nullified_or_shuttle
+                    && !is_emergency_warp
                     && self.warp_bubble_mgr.is_scrambled_at(ball.position)
                 {
                     ball.velocity = DVec3::ZERO;
@@ -159,7 +164,7 @@ impl Ballpark {
 
                 let was_aligning = phase == WarpPhase::Aligning;
                 let mut pre_intercepted = false;
-                if !bubble_immune && phase == WarpPhase::Aligning {
+                if !is_nullified_or_shuttle && phase == WarpPhase::Aligning {
                     let to_dest = destination - ball.position;
                     let warp_dir = to_dest.normalize_or_zero();
                     let align_threshold = ball.max_velocity * (0.75 - 1e-12);
@@ -183,7 +188,7 @@ impl Ballpark {
                     &mut phase,
                     &mut elapsed_warp_time,
                 );
-                if !bubble_immune && !pre_intercepted && was_aligning && phase != WarpPhase::Aligning {
+                if !is_nullified_or_shuttle && !pre_intercepted && was_aligning && phase != WarpPhase::Aligning {
                     if let Some((_bid, intercept_pos)) =
                         self.warp_bubble_mgr.check_interception(origin, destination)
                     {
