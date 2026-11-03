@@ -5,7 +5,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST,
-    STATUS_FORBIDDEN,
+    STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use super::quasar_achievements::{
     emit_achievement_notices, encode_uuid_ident, extract_u32_ident, extract_u64_val,
@@ -121,27 +121,36 @@ pub fn register_achievement_admin_handlers(
         let Some(cid) = ctx.effective_character_id() else {
             return Err((STATUS_FORBIDDEN, "Active character required".into()));
         };
-        let aid = match dyn_msg.get(1) {
-            None => 2,
-            Some(v) => extract_u32_ident(v)
-                .filter(|&id| id > 0)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement ID".into()))?,
-        };
-        let delta = match dyn_msg.get(2) {
-            None => 1,
-            Some(v) => extract_u64_val(v)
-                .filter(|&d| d > 0)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid progress delta".into()))?,
-        };
+        let aid = dyn_msg
+            .get(1)
+            .and_then(extract_u32_ident)
+            .filter(|&id| id > 0)
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
+        let delta = dyn_msg
+            .get(2)
+            .and_then(extract_u64_val)
+            .filter(|&d| d > 0)
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid progress delta".into()))?;
 
-        let outcome = mgr_prog.add_progress(cid, aid, delta, ctx.now_unix());
+        let Some((ach, just_completed, new_milestones)) =
+            mgr_prog.add_progress(cid, aid, delta, ctx.now_unix())
+        else {
+            return Err((STATUS_NOT_FOUND, "Achievement not found".into()));
+        };
         mgr_prog.save_to_db();
 
-        let cat_id = mgr_prog.definitions.iter().find(|d| d.id == aid).map(|d| d.category_id).unwrap_or(1);
+        let cat_id = ach.def.category_id;
         let cat_score = mgr_prog.category_score(cid, cat_id);
-        if let Some((ach, just_completed, new_milestones)) = outcome {
-            emit_achievement_notices(cid, aid, cat_id, ach.progress, cat_score, just_completed, &new_milestones, ctx.now_unix());
-        }
+        emit_achievement_notices(
+            cid,
+            aid,
+            cat_id,
+            ach.progress,
+            cat_score,
+            just_completed,
+            &new_milestones,
+            ctx.now_unix(),
+        );
 
         Ok(GoogleEmpty.to_any())
     });
@@ -161,12 +170,11 @@ pub fn register_achievement_admin_handlers(
         let Some(cid) = ctx.effective_character_id() else {
             return Err((STATUS_FORBIDDEN, "Active character required".into()));
         };
-        let aid = match dyn_msg.get(1) {
-            None => 2,
-            Some(v) => extract_u32_ident(v)
-                .filter(|&id| id > 0)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement ID".into()))?,
-        };
+        let aid = dyn_msg
+            .get(1)
+            .and_then(extract_u32_ident)
+            .filter(|&id| id > 0)
+            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
         let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
         mgr_comp.save_to_db();
 
@@ -199,12 +207,11 @@ pub fn register_achievement_admin_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let aid = match dyn_msg.get(1) {
-                None => 2,
-                Some(v) => extract_u32_ident(v)
-                    .filter(|&id| id > 0)
-                    .ok_or_else(|| (STATUS_BAD_REQUEST, "Invalid achievement ID".into()))?,
-            };
+            let aid = dyn_msg
+                .get(1)
+                .and_then(extract_u32_ident)
+                .filter(|&id| id > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing or invalid achievement ID".into()))?;
             let _ = mgr.reset_achievement(cid, aid)?;
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())

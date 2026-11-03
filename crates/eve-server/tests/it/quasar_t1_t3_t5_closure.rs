@@ -5,7 +5,7 @@ use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess
 use eve_db::corp_roles;
 use eve_db::snapshot_ext::FwSystemOccupationRecord;
 use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
-use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_IMPLEMENTED, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::sov_services::{TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB};
 
@@ -507,14 +507,18 @@ async fn test_payment_schedule_omega_purchase_and_faction_activity_admin() {
 }
 
 #[tokio::test]
-async fn test_ai_assistant_chat_data_gap() {
-    // Kept untagged (open): Aura Guidance AI assistant requires external LLM service (DATA GAP).
+async fn test_ai_assistant_chat_sde_backed() {
     let ctx = ServerContext::new();
     let mut s = sess(92_007, PILOT, CORP, JITA, 0);
 
     let mut jita_req = Vec::new();
     encode_string_field(1, "Jita", &mut jita_req);
     let jita_res = rpc(&ctx, &mut s, "eve_public.ai.assistant.chat.api.QueryRequest", jita_req).await;
-    assert_eq!(jita_res.status_code, STATUS_NOT_IMPLEMENTED);
+    assert_eq!(jita_res.status_code, STATUS_OK);
+    let payload = jita_res.payload.expect("QueryResponse payload");
+    assert_eq!(
+        payload.normalized_type_name(),
+        "eve_public.ai.assistant.chat.api.QueryResponse"
+    );
 }
 

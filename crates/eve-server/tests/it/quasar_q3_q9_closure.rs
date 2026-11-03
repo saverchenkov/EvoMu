@@ -496,7 +496,7 @@ async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
     let ctx = ServerContext::new();
     let mut sess = make_session(1, 1, 90_000_001, 1_000_009);
 
-    // 1. AI assistant fails closed with STATUS_NOT_IMPLEMENTED (no generic schema-filler)
+    // 1. AI assistant returns SDE-backed / fallback QueryResponse
     let mut query_payload = Vec::new();
     encode_string_field(1, "How do I fit a Drake?", &mut query_payload);
     let ai_rsp = quasar_rpc(
@@ -506,7 +506,12 @@ async fn test_q5_q6_social_economy_and_ai_assistant_fail_closed() {
         query_payload,
     )
     .await;
-    assert_eq!(ai_rsp.status_code, STATUS_NOT_IMPLEMENTED);
+    assert_eq!(ai_rsp.status_code, STATUS_OK);
+    let ai_payload = ai_rsp.payload.expect("ai payload");
+    assert_eq!(
+        ai_payload.normalized_type_name(),
+        "eve_public.ai.assistant.chat.api.QueryResponse"
+    );
 
     // 2. Space CDN map-tag checkpoint validates request and returns SDE-backed checkpoint
     let cdn_bad = quasar_rpc(

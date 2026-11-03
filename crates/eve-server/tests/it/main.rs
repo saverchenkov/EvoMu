@@ -245,6 +245,7 @@ mod sov_fw_complete;
 mod sov_fw_complete_part2;
 mod space;
 mod space_filaments_jumps_complete;
+mod parity_quasar_batch_closure;
 mod space_mining;
 mod space_mining_part2;
 mod space_navigation_cyno;

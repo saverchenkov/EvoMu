@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_gateway::PublicGatewayRouter;
+use crate::quasar_gateway::{PublicGatewayRouter, STATUS_INTERNAL_ERROR};
 use super::quasar_progression_extra::ProgressionExtraManager;
 pub use super::quasar_campaign_handlers::extract_campaign_id;
 use eve_proto::quasar::{
@@ -219,19 +219,6 @@ pub const AUTHENTIC_CONTRIBUTION_METHODS: &[(&str, u32, u32, &str, &[(&str, &str
     ),
 ];
 
-pub const AUTHENTIC_TRIGGER_EVENTMATCHES: &[(&str, &[(&str, &str)])] = &[
-    ("FWComplexCaptured", &[("complex_type", "fw"), ("system", "loc")]),
-    ("ShipDamaged", &[("damage_amount", "qty"), ("target_type", "vessel")]),
-    ("ShipDestroyed", &[("victim_ship", "vessel"), ("system", "loc")]),
-    ("NPCDestroyed", &[("npc_type", "target"), ("bounty", "isk")]),
-    ("ItemManufactured", &[("blueprint", "mfg_type"), ("runs", "qty")]),
-    ("OreMined", &[("ore_type", "harvest"), ("units", "volume")]),
-    ("SignatureScanned", &[("sig_group", "sig"), ("difficulty", "diff")]),
-    ("MissionCompleted", &[("mission_id", "id"), ("agent_id", "agent")]),
-    ("ItemDelivered", &[("item_type", "haul"), ("quantity", "qty")]),
-    ("BountyEarned", &[("bounty_amount", "isk"), ("system", "loc")]),
-];
-
 /// Encodes a contribution method definition into protobuf wire format.
 pub fn encode_contribution_method_definition(
     name: &str,
@@ -348,13 +335,34 @@ pub fn register_campaign_definition_handlers(
     );
 
     // 2. eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest
+    let mgr_em = Arc::clone(&manager);
     router.register_handler(
         "eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest",
         Arc::new(move |_ctx, _any, _dyn| {
+            let sde = mgr_em.sde.as_ref().ok_or_else(|| {
+                (STATUS_INTERNAL_ERROR, "SDE trigger types unavailable".to_string())
+            })?;
+            let triggers = sde.load_trigger_types().map_err(|e| {
+                (STATUS_INTERNAL_ERROR, format!("Failed to load SDE trigger types: {e}"))
+            })?;
+            let mut sorted: Vec<_> = triggers.into_values().collect();
+            sorted.sort_by_key(|t| t.trigger_type_id);
+
             let mut out = Vec::new();
-            for (name, params) in AUTHENTIC_TRIGGER_EVENTMATCHES {
+            for info in sorted {
+                let name = if info.trigger_type_name.trim().is_empty() {
+                    format!("TriggerType_{}", info.trigger_type_id)
+                } else {
+                    info.trigger_type_name
+                };
+                let guard_obj = if info.allow_on_guard_object { "true" } else { "false" };
+                let guards = if info.allow_on_guards { "true" } else { "false" };
+                let params = [
+                    ("allow_on_guard_object", guard_obj),
+                    ("allow_on_guards", guards),
+                ];
                 let mut def_bytes = Vec::new();
-                encode_trigger_eventmatch_definition(name, params, &mut def_bytes);
+                encode_trigger_eventmatch_definition(&name, &params, &mut def_bytes);
                 encode_bytes_field(1, &def_bytes, &mut out);
             }
             Ok(GoogleAny {

@@ -127,6 +127,7 @@ pub mod quasar_campaign_handlers;
 pub mod quasar_campaign_objective_handlers;
 pub mod quasar_campaign_state;
 pub mod quasar_career_goals;
+pub mod quasar_career_goals_wire;
 pub mod quasar_cosmetics_live;
 pub mod quasar_cosmetics_market;
 pub mod quasar_cosmetics_market_types;

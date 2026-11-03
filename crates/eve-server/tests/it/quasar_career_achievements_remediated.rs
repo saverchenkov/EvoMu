@@ -342,7 +342,7 @@ async fn test_authentic_campaign_definitions_remediated() {
 
     let wm2 = WireMessage::decode(&r2_payload.value).expect("decode GetAllResponse");
     let triggers: Vec<_> = wm2.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(triggers.len(), 10, "Must return 10 authentic trigger eventmatches");
+    assert_eq!(triggers.len(), 51, "Must return 51 authentic SDE trigger eventmatches");
 }
 
 #[tokio::test]

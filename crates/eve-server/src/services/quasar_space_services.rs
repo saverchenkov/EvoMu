@@ -20,7 +20,7 @@
 
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
-    STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -997,16 +997,95 @@ pub fn register_handlers(
         );
     }
 
-    // 14. AI assistant (external LLM service DATA GAP — fail closed) & Space CDN map-tag checkpoint
-    router.register_handler(
-        "eve_public.ai.assistant.chat.api.QueryRequest",
-        Arc::new(|_ctx, _any, _dyn_msg| {
-            Err((
-                STATUS_NOT_IMPLEMENTED,
-                "DATA GAP: Aura Guidance AI assistant requires external LLM service".to_string(),
-            ))
-        }),
-    );
+    // 14. AI assistant (SDE-backed & character-context Aura Guidance) & Space CDN map-tag checkpoint
+    {
+        let sde_ai = Arc::clone(&sde);
+        let db_ai = Arc::clone(&db);
+        router.register_handler(
+            "eve_public.ai.assistant.chat.api.QueryRequest",
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let query = match dyn_msg.get(1) {
+                    Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                    _ => {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            "Query message must not be empty".to_string(),
+                        ))
+                    }
+                };
+                let query_lower = query.to_ascii_lowercase();
+
+                let matched_sys = sde_ai
+                    .solar_systems
+                    .values()
+                    .filter(|sys| {
+                        sys.name.len() >= 3
+                            && query_lower.contains(&sys.name.to_ascii_lowercase())
+                    })
+                    .max_by_key(|sys| sys.name.len());
+
+                let (response_text, is_fallback, param_pair) = if let Some(sys) = matched_sys {
+                    let msg = format!(
+                        "Solar system {} (ID {}, security {:.2}, region {}, constellation {}).",
+                        sys.name,
+                        sys.solar_system_id,
+                        sys.security_status,
+                        sys.region_id,
+                        sys.constellation_id
+                    );
+                    (msg, false, Some(("solar_system", sys.name.clone())))
+                } else if let Some(item_type) = sde_ai
+                    .types
+                    .values()
+                    .filter(|t| {
+                        t.published
+                            && t.name.len() >= 4
+                            && query_lower.contains(&t.name.to_ascii_lowercase())
+                    })
+                    .max_by_key(|t| t.name.len())
+                {
+                    let msg = format!(
+                        "Item type {} (type ID {}, volume {:.2} m3, mass {:.1} kg).",
+                        item_type.name, item_type.type_id, item_type.volume, item_type.mass
+                    );
+                    (msg, false, Some(("type_name", item_type.name.clone())))
+                } else {
+                    let cur_sys_id = caller_solar_system(ctx, &db_ai).unwrap_or(30_000_142);
+                    let (sys_name, sec) = sde_ai
+                        .solar_systems
+                        .get(&cur_sys_id)
+                        .map(|s| (s.name.clone(), s.security_status))
+                        .unwrap_or_else(|| ("Jita".to_string(), 0.95));
+                    let msg = format!(
+                        "Aura Guidance: You are currently in {} (security {:.2}). Ask about any solar system or ship/item type in New Eden.",
+                        sys_name, sec
+                    );
+                    (msg, true, Some(("solar_system", sys_name)))
+                };
+
+                let mut out = Vec::new();
+                encode_string_field(1, &response_text, &mut out);
+                encode_varint_field(2, u64::from(is_fallback), &mut out);
+
+                let mut fmt_msg = Vec::new();
+                encode_string_field(1, &response_text, &mut fmt_msg);
+                if let Some((pkey, pval)) = param_pair {
+                    let mut param = Vec::new();
+                    encode_string_field(1, pkey, &mut param);
+                    encode_string_field(2, &pval, &mut param);
+                    encode_bytes_field(2, &param, &mut fmt_msg);
+                }
+                encode_bytes_field(3, &fmt_msg, &mut out);
+
+                Ok(GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.ai.assistant.chat.api.QueryResponse"
+                    ),
+                    value: out,
+                })
+            }),
+        );
+    }
     {
         let sde_cdn = Arc::clone(&sde);
         router.register_handler(

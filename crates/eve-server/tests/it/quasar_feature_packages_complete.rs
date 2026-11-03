@@ -138,7 +138,7 @@ async fn test_quasar_campaign_definition_requests() {
     assert!(!r7_payload.value.is_empty(), "Eventmatch trigger definitions must not be empty");
     let em_wm = WireMessage::decode(&r7_payload.value).expect("decode eventmatch definitions");
     let em_entries: Vec<_> = em_wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(em_entries.len(), 10, "Must return authentic eventmatch trigger definitions");
+    assert_eq!(em_entries.len(), 51, "Must return 51 authentic SDE eventmatch trigger definitions");
 }
 
 #[tokio::test]
@@ -167,7 +167,7 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
     let mut sess = make_session(31_002, 1, 90_000_001, 98_000_001);
     sess.solar_system_id = Some(FW_SYS);
 
-    // 1. AI Assistant QueryRequest fails closed (external LLM DATA GAP)
+    // 1. AI Assistant QueryRequest validates empty message and returns QueryResponse on valid query
     let ai_req = make_public_request(
         &ctx,
         "eve_public.ai.assistant.chat.api.QueryRequest",
@@ -187,9 +187,35 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
         .await
         .expect("SendRequest QueryRequest");
     let r_ai = extract_response_proto(&ai_rep);
-    assert_eq!(r_ai.status_code, 501);
-    assert!(r_ai.status_message.contains("DATA GAP"));
+    assert_eq!(r_ai.status_code, 400);
     assert_eq!(r_ai.correlation_uuid, b"ai-01");
+
+    let mut ai_valid_payload = Vec::new();
+    eve_proto::quasar::encode_string_field(1, "Jita", &mut ai_valid_payload);
+    let ai_valid_req = make_public_request(
+        &ctx,
+        "eve_public.ai.assistant.chat.api.QueryRequest",
+        ai_valid_payload,
+        b"ai-02",
+    );
+    let ai_valid_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(ai_valid_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("SendRequest QueryRequest valid");
+    let r_ai_valid = extract_response_proto(&ai_valid_rep);
+    assert_eq!(r_ai_valid.status_code, STATUS_OK);
+    assert_eq!(
+        r_ai_valid.payload.unwrap().normalized_type_name(),
+        "eve_public.ai.assistant.chat.api.QueryResponse"
+    );
 
     // 3. Sovereignty Planet Resources API (star resources: quasar_sov_pirate_remediation)
     dispatch_and_verify_request(
