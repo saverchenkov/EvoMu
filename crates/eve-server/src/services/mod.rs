@@ -11,6 +11,7 @@ pub mod air_npe_nodegraph_pocket;
 pub mod air_npe_nodegraph_runner;
 pub mod abyssal_void_gates;
 pub mod abyssal_void_mgr;
+pub mod agents_mission_rewards;
 pub mod agents_missions;
 pub mod auth_cache;
 pub mod campaigns_and_milestones;

@@ -1281,11 +1281,16 @@ pub async fn handle(
                                     .or_insert(ActiveMissionRecord { mission_id: storyline_mission_id, character_id: char_id, agent_id: storyline_agent_id, solar_system_id: sl_sys_id, state: "Offered".into(), current_room_id: 1, npcs_remaining: sl_npcs, spawned_npc_ball_ids: Vec::new(), bookmark_id: None });
                             }
                         }
-                        Ok((new_st, t, storyline, bonus_paid, st_changes))
+                        let delivery_station = ctx.sde.agents.get(&m_agent_id).and_then(|a| a.station_id).or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id)).unwrap_or(60_003_760);
+                        let item_reward = crate::services::agents_mission_rewards::mint_mission_item_reward_in_snap(ctx, snap, char_id, delivery_station, &tmpl, ctx.sde.agents.get(&m_agent_id));
+                        Ok((new_st, t, storyline, bonus_paid, st_changes, item_reward))
                     });
 
                     match res {
-                        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes)) => {
+                        Ok((new_standing, tally, storyline_offered, bonus_paid, st_changes, item_reward)) => {
+                            if let Some(irw) = item_reward {
+                                crate::services::agents_mission_rewards::emit_mission_item_reward_notification(ctx, char_id, irw);
+                            }
                             notify_standing_changes(ctx, char_id, &st_changes);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionObjectivesCompleted", "charid", vec![PyRep::Integer(active_agent_id)]);
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("completed".into()), PyRep::Integer(active_agent_id)]);
@@ -1304,6 +1309,9 @@ pub async fn handle(
                                 ("newStanding", PyRep::Real(new_standing)),
                                 ("missionTally", PyRep::Integer(tally as i64)),
                                 ("storylineTriggered", PyRep::Bool(storyline_offered)),
+                                ("rewardItemID", item_reward.map_or(PyRep::None, |r| PyRep::Integer(r.item_id))),
+                                ("rewardItemTypeID", item_reward.map_or(PyRep::None, |r| PyRep::Integer(r.type_id as i64))),
+                                ("rewardItemQuantity", item_reward.map_or(PyRep::None, |r| PyRep::Integer(r.quantity as i64))),
                             ])))
                         }
                         Err(e) => Some(Err(e)),
