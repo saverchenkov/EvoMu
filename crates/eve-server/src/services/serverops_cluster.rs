@@ -59,23 +59,29 @@ fn default_constellation_worker_node(ctx: &ServerContext, solar_system_id: Solar
     workers[(key as usize) % pool_len]
 }
 
-fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, _old_factor: f64, _new_factor: f64) {
-    let now_unix = ctx.now_unix();
-    let new_sim_ft = ctx.now_blueos_filetime_ticks();
+fn emit_sim_clock_rebase(ctx: &ServerContext, solar_system_id: SolarSystemId, old_factor: f64, new_factor: f64) {
+    let now_wall_ft = ctx.now_blueos_filetime_ticks();
     let (old_sim_ft, new_sim_ft) = {
         let mut cn = ctx
             .systems
             .cluster_nodes
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let prev_sim_ft = cn
-            .sim_clock_anchoring
-            .get(&solar_system_id)
-            .map(|&(_, ft)| ft)
-            .unwrap_or(new_sim_ft);
-        let old_ft = prev_sim_ft.min(new_sim_ft);
-        cn.sim_clock_anchoring.insert(solar_system_id, (now_unix, new_sim_ft));
-        (old_ft, new_sim_ft)
+        let (old_ft, new_ft) = if let Some(&(anchor_wall_ft, anchor_sim_ft, prev_factor)) =
+            cn.sim_clock_anchoring.get(&solar_system_id)
+        {
+            let elapsed_wall_ft = now_wall_ft.saturating_sub(anchor_wall_ft);
+            let factor = prev_factor.clamp(0.10, 1.0);
+            let dilated_elapsed_ft = ((elapsed_wall_ft as f64) * factor).round() as i64;
+            (anchor_sim_ft, anchor_sim_ft.saturating_add(dilated_elapsed_ft))
+        } else {
+            let factor = old_factor.clamp(0.10, 1.0);
+            let seed_elapsed = (10_000_000.0 * factor).round() as i64;
+            (now_wall_ft.saturating_sub(seed_elapsed), now_wall_ft)
+        };
+        cn.sim_clock_anchoring
+            .insert(solar_system_id, (now_wall_ft, new_ft, new_factor.clamp(0.10, 1.0)));
+        (old_ft, new_ft)
     };
     // parity: notify:DoSimClockRebase
     ctx.notify(
@@ -559,6 +565,25 @@ pub fn step_downtime_countdown_warnings(ctx: &ServerContext, now_unix: u64) -> V
     newly_crossed
 }
 
+/// Enables or disables automatic scheduled daily downtime shutdown (`scheduled_downtime_enabled`, default `true`).
+pub fn set_scheduled_downtime_enabled(ctx: &ServerContext, enabled: bool) {
+    let mut cn = ctx
+        .systems
+        .cluster_nodes
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    cn.scheduled_downtime_enabled = enabled;
+}
+
+/// Returns whether automatic scheduled daily downtime shutdown is enabled (`true` by default).
+pub fn is_scheduled_downtime_enabled(ctx: &ServerContext) -> bool {
+    ctx.systems
+        .cluster_nodes
+        .read()
+        .map(|cn| cn.scheduled_downtime_enabled)
+        .unwrap_or(true)
+}
+
 /// Returns true if a downtime countdown warning was emitted for the UTC day containing `now_unix`.
 pub fn has_downtime_countdown_armed_for_day(ctx: &ServerContext, now_unix: u64) -> bool {
     let day_key = now_unix / 86_400;
@@ -938,10 +963,19 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             }
         }
         let mut sov_cnt = 0_i64;
-        let ess_cnt = 0_i64;
+        let mut ess_reset_systems: BTreeSet<u32> = BTreeSet::new();
         let mut decayed_hubs: Vec<(i64, u32)> = Vec::new();
         let mut changed_sov: Vec<(u32, HashMap<String, i64>)> = Vec::new();
         for (&sys_id, sov) in snap.system_states.iter_mut() {
+            if sov.ess_linked_character_id.is_some()
+                || sov.ess_link_started_tick.is_some()
+                || sov.ess_cycle_started_unix > 0
+            {
+                sov.ess_linked_character_id = None;
+                sov.ess_link_started_tick = None;
+                sov.ess_cycle_started_unix = 0;
+                ess_reset_systems.insert(sys_id);
+            }
             let mut decayed_here = false;
             if sov.sov_alliance_id.is_some() {
                 if sov.military_index > 1 {
@@ -977,6 +1011,30 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
                 ));
             }
         }
+
+        let ess_pulse_keys: Vec<(String, u32)> = snap
+            .service_state_blobs
+            .keys()
+            .filter_map(|k| {
+                k.strip_prefix("ess_reserve_pulses:")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .map(|sid| (k.clone(), sid))
+            })
+            .collect();
+        for (blob_key, sys_id) in ess_pulse_keys {
+            let st = super::space_destiny::get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
+            if st.reserve_linked_character_id.is_some()
+                || st.reserve_link_started_tick.is_some()
+                || st.link_started_unix.is_some()
+                || st.unlocked_until_unix > 0
+                || st.pulses_remaining > 0
+                || st.pulses_total > 0
+            {
+                snap.service_state_blobs.remove(&blob_key);
+                ess_reset_systems.insert(sys_id);
+            }
+        }
+        let ess_cnt = ess_reset_systems.len() as i64;
 
         for (hub_id, center_hour) in decayed_hubs {
             let _ = crate::services::sov_gameplay::sov_gameplay_entosis::apply_adm_scaled_vulnerability_window_in_snap(

@@ -117,7 +117,7 @@ async fn test_time_dilation_scales_physics_and_module_cycles_and_emits_clock_reb
     let old_sim = pair[0].as_i64().expect("oldSimTime must be i64");
     let new_sim = pair[1].as_i64().expect("newSimTime must be i64");
     let auth_now_ft = ctx.now_blueos_filetime_ticks();
-    assert!(old_sim <= new_sim, "DoSimClockRebase must never wind the client sim clock backward");
+    assert!(old_sim < new_sim, "DoSimClockRebase must advance sim clock forward (old={old_sim}, new={new_sim})");
     assert!(
         (auth_now_ft - new_sim).abs() <= 10_000_000,
         "DoSimClockRebase newSimTime ({new_sim}) must match authoritative destiny sim clock ({auth_now_ft})"
@@ -532,11 +532,8 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
             SystemDynamicState {
                 solar_system_id: null_sov_sys,
                 dbs_multiplier: 1.0,
-                ess_main_bank: IskCents::from_isk(1_000_000),
-                ess_reserve_bank: IskCents::from_isk(200_000),
-                ess_linked_character_id: None,
-                ess_link_started_tick: None,
-                ess_cycle_started_unix: 0,
+                ess_main_bank: IskCents::from_isk(1_000_000), ess_reserve_bank: IskCents::from_isk(200_000),
+                ess_linked_character_id: Some(P1), ess_link_started_tick: Some(42), ess_cycle_started_unix: now.saturating_sub(600),
                 ess_main_bank_contributors: Default::default(),
                 sov_alliance_id: Some(99_000_001),
                 military_index: 4,
@@ -625,6 +622,7 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
     assert!(report.get("rolledUpMarketHistoryPairs").copied().unwrap_or(0) >= 1);
     assert!(report.get("recomputedIndustrySystems").copied().unwrap_or(0) >= 5_000);
     assert!(report.get("sovSystemsDecayed").copied().unwrap_or(0) >= 1);
+    assert!(report.get("essBanksRolledOver").copied().unwrap_or(0) >= 1);
     assert_eq!(report.get("missionDeclinesReset"), Some(&1));
     assert!(report.get("expiredMarketOrders").copied().unwrap_or(0) >= 1);
     assert_eq!(report.get("missionNpcsRespawned"), Some(&1));
@@ -675,6 +673,7 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
         assert!(vuln_end - vuln_start > 7_200, "Sov Hub ADM decay must widen vulnerability window");
         assert_eq!(sov.ess_main_bank, IskCents::from_isk(1_000_000));
         assert_eq!(sov.ess_reserve_bank, IskCents::from_isk(200_000));
+        assert_eq!(sov.ess_linked_character_id, None, "Daily maintenance must reset stale ESS links");
 
         assert!(!snap.last_mission_decline_times.contains_key(&P1));
         assert_eq!(snap.active_missions[&(P1, 3_019_001)].current_room_id, 1);

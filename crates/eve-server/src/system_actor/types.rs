@@ -525,11 +525,12 @@ pub struct ClusterNodeRegistry {
     pub reinforced_nodes: HashMap<u32, SolarSystemId>,
     /// Explicit GM/operator Time Dilation overrides (`solar_system_id -> factor`).
     pub manual_tidi_overrides: HashMap<SolarSystemId, f64>,
-    /// Last emitted authoritative destiny FILETIME (`100ns` ticks) and wall unix timestamp per system.
-    pub sim_clock_anchoring: HashMap<SolarSystemId, (u64, i64)>,
+    /// Last emitted authoritative destiny `(anchor_wall_ft, anchor_sim_ft, tidi_factor)` per system.
+    pub sim_clock_anchoring: HashMap<SolarSystemId, (i64, i64, f64)>,
     pub node_load_tidi_threshold: usize,
     pub next_dedicated_node_id: u32,
     pub auto_tidi_enabled: bool,
+    pub scheduled_downtime_enabled: bool,
 }
 
 impl Default for ClusterNodeRegistry {
@@ -543,6 +544,7 @@ impl Default for ClusterNodeRegistry {
             node_load_tidi_threshold: DEFAULT_NODE_LOAD_TIDI_THRESHOLD,
             next_dedicated_node_id: 100,
             auto_tidi_enabled: false,
+            scheduled_downtime_enabled: true,
         }
     }
 }

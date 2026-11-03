@@ -87,6 +87,60 @@ pub fn check_starter_shipcaster_eligibility(
     Ok(())
 }
 
+pub(crate) fn emit_shipcaster_target_state_changed_core(
+    db: &eve_db::WorldRepository,
+    pending_notifications: Option<&std::sync::RwLock<std::collections::HashMap<i64, Vec<PendingMachoNotification>>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, PendingMachoNotification)>,
+    solar_system_id: u32,
+    item_id: i64,
+) {
+    let Some(pws) = pending_notifications else {
+        return;
+    };
+    let recipients: Vec<(i64, Option<u64>)> = db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| {
+                c.solar_system_id == solar_system_id
+                    && db
+                        .get_online_session(c.user_id)
+                        .is_some_and(|os| os.character_id == Some(c.character_id))
+            })
+            .map(|c| (c.character_id, Some(c.user_id)))
+            .collect()
+    });
+    if recipients.is_empty() {
+        return;
+    }
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let mut queues = pws.write().unwrap_or_else(|e| e.into_inner());
+    for (cid, uid) in recipients {
+        let args = vec![PyRep::Integer(item_id)];
+        let (packet, marshaled_packet) = ServerContext::build_macho_notification_packet(
+            cid,
+            uid,
+            "OnShipcasterTargetStateChanged",
+            "solarsystemid",
+            args.clone(),
+        );
+        let note = PendingMachoNotification {
+            recipient_char_id: cid,
+            event: "OnShipcasterTargetStateChanged".into(),
+            id_type: "solarsystemid".into(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        let q = queues.entry(cid).or_default();
+        if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+            q.remove(0);
+        }
+        q.push(note.clone());
+        let _ = notify_tx.send((cid, note));
+    }
+}
+
 /// Live combat ball-destruction hook (`router/context.rs`): disrupts/destroys a destroyed FW
 /// landing pad and promotes the next queued built pad for that faction if available.
 pub async fn on_landing_pad_ball_destroyed(ctx: &ServerContext, ball_id: i64) {
@@ -137,43 +191,8 @@ pub async fn on_landing_pad_ball_destroyed_core(
     };
     crate::services::cluster_macho_misc_services::persist_misc_state_arc(misc, sde, db);
     let _ = systems.get_or_spawn(pad_sys).remove_ball(ball_id).await;
-    if let Some(pws) = pending_notifications {
-        let now_ft = db.clock().now_blueos_filetime_ticks();
-        let mut target_systems = vec![(pad_sys, ball_id)];
-        if let Some((war_hq_sys, launcher_id)) = launcher_opt {
-            target_systems.push((war_hq_sys, launcher_id));
-        }
-        for (sys_id, item_id) in target_systems {
-            let recipients: Vec<(i64, u64)> = db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .filter(|c| c.solar_system_id == sys_id)
-                    .map(|c| (c.character_id, c.user_id))
-                    .collect()
-            });
-            for (cid, uid) in recipients {
-                let (packet, marshaled_packet) =
-                    crate::router::ServerContext::build_macho_notification_packet(
-                        cid,
-                        Some(uid),
-                        "OnShipcasterTargetStateChanged",
-                        "solarsystemid",
-                        vec![PyRep::Integer(item_id)],
-                    );
-                let note = PendingMachoNotification {
-                    recipient_char_id: cid,
-                    event: "OnShipcasterTargetStateChanged".into(),
-                    id_type: "solarsystemid".into(),
-                    args: vec![PyRep::Integer(item_id)],
-                    packet,
-                    marshaled_packet,
-                    created_filetime: now_ft,
-                };
-                if let Ok(mut guard) = pws.write() {
-                    guard.entry(cid).or_default().push(note.clone());
-                }
-                let _ = notify_tx.send((cid, note));
-            }
-        }
+    super::emit_shipcaster_target_state_changed_core(db, pending_notifications, notify_tx, pad_sys, ball_id);
+    if let Some((war_hq_sys, launcher_id)) = launcher_opt {
+        super::emit_shipcaster_target_state_changed_core(db, pending_notifications, notify_tx, war_hq_sys, launcher_id);
     }
 }

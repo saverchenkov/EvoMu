@@ -970,7 +970,7 @@ impl SystemHandle {
         }
         let step_hook = self.system_step_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(hook) = step_hook {
-            hook(self.solar_system_id, dt, destroyed_balls).await;
+            hook(self.solar_system_id, dt * self.tidi_factor(), destroyed_balls).await;
         }
         Ok(broadcast)
     }

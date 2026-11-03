@@ -1162,28 +1162,24 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
         let _ = crate::services::serverops_cluster::recompute_cluster_node_tidi(ctx);
     }
     let dt_sec = ctx.systems.downtime_utc_secs_of_day();
+    let sec_of_day = now_unix % 86_400;
+    let in_downtime_window = sec_of_day >= dt_sec && sec_of_day < dt_sec.saturating_add(900);
     let now_day_idx = now_unix.saturating_sub(dt_sec) / 86_400;
-    let crossed_downtime = with_mut_sp6_state(&ctx.db, |st, _snap| match st.last_downtime_day_idx {
+    let action = with_mut_sp6_state(&ctx.db, |st, _snap| match st.last_downtime_day_idx {
         Some(last_idx) if now_day_idx > last_idx => {
             st.last_downtime_day_idx = Some(now_day_idx);
-            true
+            if in_downtime_window { 2 } else { 1 }
         }
         None => {
             st.last_downtime_day_idx = Some(now_day_idx);
-            false
+            if in_downtime_window { 2 } else { 0 }
         }
-        _ => false,
+        _ => 0,
     });
-    if crossed_downtime {
-        let sec_of_day = now_unix % 86_400;
-        if sec_of_day >= dt_sec
-            && sec_of_day < dt_sec.saturating_add(900)
-            && crate::services::serverops_cluster::has_downtime_countdown_armed_for_day(ctx, now_unix)
-        {
-            let _ = crate::services::serverops_cluster::start_daily_downtime_window(ctx);
-        } else {
-            let _ = crate::services::serverops_cluster::execute_daily_maintenance_jobs(ctx);
-        }
+    if action == 2 && crate::services::serverops_cluster::is_scheduled_downtime_enabled(ctx) {
+        let _ = crate::services::serverops_cluster::start_daily_downtime_window(ctx);
+    } else if action > 0 {
+        let _ = crate::services::serverops_cluster::execute_daily_maintenance_jobs(ctx);
     } else {
         let _ = crate::services::serverops_cluster::maybe_complete_scheduled_downtime_restart(ctx, now_unix);
     }

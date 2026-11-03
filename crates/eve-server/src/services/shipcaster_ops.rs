@@ -47,13 +47,16 @@ fn is_capital_or_freighter_group(group_id: u32) -> bool {
     )
 }
 
+pub(crate) use shipcaster_ops_starter::emit_shipcaster_target_state_changed_core;
+
 fn emit_shipcaster_target_state_changed(ctx: &ServerContext, solar_system_id: u32, item_id: i64) {
     // parity: notify:OnShipcasterTargetStateChanged
-    ctx.notify(
-        NotificationTarget::SolarSystem(solar_system_id),
-        "OnShipcasterTargetStateChanged",
-        "solarsystemid2",
-        vec![PyRep::Integer(item_id)],
+    emit_shipcaster_target_state_changed_core(
+        &ctx.db,
+        Some(&ctx.pending_notifications),
+        &ctx.notify_tx,
+        solar_system_id,
+        item_id,
     );
 }
 
@@ -182,7 +185,8 @@ pub async fn deploy_fw_beacon_constructor(
         .solar_systems
         .get(&sys_id)
         .ok_or_else(|| rpc_err("InvalidSolarSystem", "Unknown solar system"))?;
-    if sys_id >= 31_000_000 || sys_id == 30_100_000 || sys_info.security_status >= 0.45 {
+    let rounded_sec = (sys_info.security_status * 10.0).round() / 10.0;
+    if sys_id >= 31_000_000 || sys_id == 30_100_000 || rounded_sec <= 0.0 || rounded_sec >= 0.45 {
         return Err(rpc_err(
             "InvalidBeaconDeploymentSystem",
             "Shipcaster Beacon Constructors can only be deployed in low-security Faction Warfare systems",
@@ -194,7 +198,13 @@ pub async fn deploy_fw_beacon_constructor(
         .shipcaster_sde_components()
         .map_err(|e| rpc_err("SdeError", e.to_string()))?;
 
-    let (constructor_tid, pad_item_id) = ctx.db.try_with_mut_snapshot(|snap| {
+    let pad = ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap.fw_system_occupations.contains_key(&sys_id) {
+            return Err(rpc_err(
+                "InvalidBeaconDeploymentSystem",
+                "Shipcaster Beacon Constructors can only be deployed in low-security Faction Warfare systems",
+            ));
+        }
         let char_war_faction = snap
             .characters
             .get(&char_id)
@@ -238,6 +248,40 @@ pub async fn deploy_fw_beacon_constructor(
             ));
         }
         let c_tid = item.type_id;
+        let required_materials: BTreeMap<u32, u32> = spec
+            .input_items
+            .iter()
+            .map(|(&tid, entry)| (tid, entry.required_qty))
+            .collect();
+        let alloc_id = snap.next_entity_id + 1;
+        let new_pad = with_misc_state(ctx, |st| {
+            if st
+                .landing_pads
+                .iter()
+                .any(|p| p.solar_system_id == sys_id && matches!(p.faction_id, 500_001..=500_004) && !p.is_disrupted)
+            {
+                return Err(rpc_err(
+                    "BeaconAlreadyExistsInSystem",
+                    "A Shipcaster Beacon or Constructor is already deployed in this solar system",
+                ));
+            }
+            let record = LandingPadRecord {
+                item_id: alloc_id,
+                type_id: c_tid,
+                built_type_id: spec.built_item_type_id,
+                solar_system_id: sys_id,
+                faction_id: pad_faction as i32,
+                is_built: false,
+                link_timestamp: 0,
+                is_disrupted: false,
+                position,
+                required_materials,
+                contributed_materials: BTreeMap::new(),
+            };
+            st.landing_pads.push(record.clone());
+            Ok(record)
+        })?;
+        snap.next_entity_id = alloc_id;
         if let Some(mut_item) = snap.items.get_mut(&constructor_item_id) {
             if mut_item.quantity > 1 {
                 mut_item.quantity -= 1;
@@ -245,40 +289,9 @@ pub async fn deploy_fw_beacon_constructor(
                 snap.items.remove(&constructor_item_id);
             }
         }
-        snap.next_entity_id += 1;
-        let alloc_id = snap.next_entity_id;
-        Ok::<(u32, i64), BridgeRpcError>((c_tid, alloc_id))
+        Ok::<LandingPadRecord, BridgeRpcError>(new_pad)
     })?;
 
-    let spec = &comps.under_construction[&constructor_tid];
-    let pad_faction = comps
-        .landing_pad_factions
-        .get(&spec.built_item_type_id)
-        .copied()
-        .unwrap_or(0) as i32;
-    let required_materials: BTreeMap<u32, u32> = spec
-        .input_items
-        .iter()
-        .map(|(&tid, entry)| (tid, entry.required_qty))
-        .collect();
-
-    let pad = LandingPadRecord {
-        item_id: pad_item_id,
-        type_id: constructor_tid,
-        built_type_id: spec.built_item_type_id,
-        solar_system_id: sys_id,
-        faction_id: pad_faction,
-        is_built: false,
-        link_timestamp: 0,
-        is_disrupted: false,
-        position,
-        required_materials,
-        contributed_materials: BTreeMap::new(),
-    };
-
-    with_misc_state(ctx, |st| {
-        st.landing_pads.push(pad.clone());
-    });
     persist_misc_state(ctx);
     spawn_or_replace_pad_ball(ctx, &pad).await;
     Ok(pad)
@@ -320,41 +333,38 @@ async fn contribute_fw_beacon_material_inner(
         return Err(rpc_err("CustomError", "Contributing materials requires an active solar system"));
     };
 
-    let pad_snapshot = with_misc_state(ctx, |st| {
-        st.landing_pads.iter().find(|p| p.item_id == pad_item_id).cloned()
-    })
-    .ok_or_else(|| rpc_err("LandingPadNotFound", format!("Beacon constructor {pad_item_id} not found")))?;
-
-    if pad_snapshot.solar_system_id != sys_id {
-        return Err(rpc_err("InvalidSolarSystem", "Pilot is not in the beacon constructor's solar system"));
-    }
-    if pad_snapshot.is_built {
-        return Err(rpc_err("BeaconAlreadyBuilt", "Shipcaster Beacon construction is already complete"));
-    }
-
     let comps = ctx
         .sde
         .shipcaster_sde_components()
         .map_err(|e| rpc_err("SdeError", e.to_string()))?;
-    let spec = comps.under_construction.get(&pad_snapshot.type_id).ok_or_else(|| {
-        rpc_err("InvalidBeaconConstructorType", "Pad does not carry an SDE underConstruction component")
+
+    let interaction_range_m = with_misc_state(ctx, |st| {
+        let pad = st
+            .landing_pads
+            .iter()
+            .find(|p| p.item_id == pad_item_id)
+            .ok_or_else(|| rpc_err("LandingPadNotFound", format!("Beacon constructor {pad_item_id} not found")))?;
+        if pad.solar_system_id != sys_id {
+            return Err(rpc_err("InvalidSolarSystem", "Pilot is not in the beacon constructor's solar system"));
+        }
+        if pad.is_built {
+            return Err(rpc_err("BeaconAlreadyBuilt", "Shipcaster Beacon construction is already complete"));
+        }
+        let spec = comps.under_construction.get(&pad.type_id).ok_or_else(|| {
+            rpc_err("InvalidBeaconConstructorType", "Pad does not carry an SDE underConstruction component")
+        })?;
+        Ok::<f64, BridgeRpcError>(spec.interaction_range_m)
     })?;
 
     let sys = ctx.systems.get_or_spawn(sys_id);
-    check_proximity(&sys, ship_id, pad_item_id, spec.interaction_range_m, "beacon constructor").await?;
+    check_proximity(&sys, ship_id, pad_item_id, interaction_range_m, "beacon constructor").await?;
 
-    let (mat_type_id, taken_qty) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (old_pad, mut updated_pad, taken_qty, newly_built) = ctx.db.try_with_mut_snapshot(|snap| {
         let char_war_faction = snap
             .characters
             .get(&char_id)
             .and_then(|c| c.war_faction_id)
             .unwrap_or(0);
-        if char_war_faction != i64::from(pad_snapshot.faction_id) {
-            return Err(rpc_err(
-                "FactionShipcasterAccessDenied",
-                "Only pilots enlisted in the owning militia may contribute construction materials",
-            ));
-        }
         let item = snap
             .items
             .get(&cargo_item_id)
@@ -368,22 +378,67 @@ async fn contribute_fw_beacon_material_inner(
             return Err(rpc_err("ItemNotInCargo", "Material stack must be an unlocked item in the active ship's cargo hold"));
         }
         let mat_tid = item.type_id;
-        let Some(&req_qty) = pad_snapshot.required_materials.get(&mat_tid) else {
-            return Err(rpc_err(
-                "InvalidConstructionMaterial",
-                format!("Type {mat_tid} is not required by constructor {}", pad_snapshot.type_id),
-            ));
-        };
-        let already = pad_snapshot.contributed_materials.get(&mat_tid).copied().unwrap_or(0);
-        let deficit = req_qty.saturating_sub(already);
-        if deficit == 0 {
-            return Err(rpc_err("MaterialRequirementAlreadyMet", "Material requirement is already satisfied"));
-        }
         let avail = u32::try_from(item.quantity.max(0)).unwrap_or(0);
-        let take = quantity.min(deficit).min(avail);
-        if take == 0 {
-            return Err(rpc_err("InsufficientMaterialQuantity", "No usable units available"));
-        }
+
+        let (old_pad, updated_pad, take, newly_built, lp_reward_opt) = with_misc_state(ctx, |st| {
+            let pad_mut = st
+                .landing_pads
+                .iter_mut()
+                .find(|p| p.item_id == pad_item_id)
+                .ok_or_else(|| rpc_err("LandingPadNotFound", format!("Beacon constructor {pad_item_id} not found")))?;
+            if pad_mut.solar_system_id != sys_id {
+                return Err(rpc_err("InvalidSolarSystem", "Pilot is not in the beacon constructor's solar system"));
+            }
+            if pad_mut.is_built {
+                return Err(rpc_err("BeaconAlreadyBuilt", "Shipcaster Beacon construction is already complete"));
+            }
+            if char_war_faction != i64::from(pad_mut.faction_id) {
+                return Err(rpc_err(
+                    "FactionShipcasterAccessDenied",
+                    "Only pilots enlisted in the owning militia may contribute construction materials",
+                ));
+            }
+            let spec = comps.under_construction.get(&pad_mut.type_id).ok_or_else(|| {
+                rpc_err("InvalidBeaconConstructorType", "Pad does not carry an SDE underConstruction component")
+            })?;
+            let Some(&req_qty) = pad_mut.required_materials.get(&mat_tid) else {
+                return Err(rpc_err(
+                    "InvalidConstructionMaterial",
+                    format!("Type {mat_tid} is not required by constructor {}", pad_mut.type_id),
+                ));
+            };
+            let already = pad_mut.contributed_materials.get(&mat_tid).copied().unwrap_or(0);
+            let deficit = req_qty.saturating_sub(already);
+            if deficit == 0 {
+                return Err(rpc_err("MaterialRequirementAlreadyMet", "Material requirement is already satisfied"));
+            }
+            let take = quantity.min(deficit).min(avail);
+            if take == 0 {
+                return Err(rpc_err("InsufficientMaterialQuantity", "No usable units available"));
+            }
+            let old_pad = pad_mut.clone();
+            let cur = pad_mut.contributed_materials.entry(mat_tid).or_insert(0);
+            *cur = cur.saturating_add(take);
+            let all_done = pad_mut
+                .required_materials
+                .iter()
+                .all(|(tid, &req)| pad_mut.contributed_materials.get(tid).copied().unwrap_or(0) >= req);
+            let newly_built = if all_done && !pad_mut.is_built {
+                pad_mut.is_built = true;
+                if pad_mut.built_type_id > 0 {
+                    pad_mut.type_id = pad_mut.built_type_id;
+                }
+                true
+            } else {
+                false
+            };
+            let lp_reward_opt = spec
+                .input_items
+                .get(&mat_tid)
+                .and_then(|in_spec| in_spec.lp_corp_id.filter(|_| in_spec.lp_per_unit > 0).map(|corp| (corp, in_spec.lp_per_unit)));
+            Ok((old_pad, pad_mut.clone(), take, newly_built, lp_reward_opt))
+        })?;
+
         let take_i32 = i32::try_from(take).unwrap_or(i32::MAX);
         if let Some(mut_item) = snap.items.get_mut(&cargo_item_id) {
             if mut_item.quantity > take_i32 {
@@ -392,51 +447,26 @@ async fn contribute_fw_beacon_material_inner(
                 snap.items.remove(&cargo_item_id);
             }
         }
-        if let Some(in_spec) = spec.input_items.get(&mat_tid) {
-            if let (Some(lp_corp), true) = (in_spec.lp_corp_id, in_spec.lp_per_unit > 0) {
-                let lp_gain = i64::from(in_spec.lp_per_unit) * i64::from(take);
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    let entry = ch.loyalty_points.entry(lp_corp).or_insert(0);
-                    *entry = entry.saturating_add(lp_gain);
-                }
+        if let Some((lp_corp, lp_per_unit)) = lp_reward_opt {
+            let lp_gain = i64::from(lp_per_unit) * i64::from(take);
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                let entry = ch.loyalty_points.entry(lp_corp).or_insert(0);
+                *entry = entry.saturating_add(lp_gain);
             }
         }
-        Ok::<(u32, u32), BridgeRpcError>((mat_tid, take))
+        Ok::<(LandingPadRecord, LandingPadRecord, u32, bool), BridgeRpcError>((
+            old_pad,
+            updated_pad,
+            take,
+            newly_built,
+        ))
     })?;
 
-    let newly_built = with_misc_state(ctx, |st| {
-        let pad_mut = st
-            .landing_pads
-            .iter_mut()
-            .find(|p| p.item_id == pad_item_id)
-            .expect("pad verified above");
-        let cur = pad_mut.contributed_materials.entry(mat_type_id).or_insert(0);
-        *cur = cur.saturating_add(taken_qty);
-
-        let all_done = pad_mut
-            .required_materials
-            .iter()
-            .all(|(tid, &req)| pad_mut.contributed_materials.get(tid).copied().unwrap_or(0) >= req);
-        if all_done && !pad_mut.is_built {
-            pad_mut.is_built = true;
-            if pad_mut.built_type_id > 0 {
-                pad_mut.type_id = pad_mut.built_type_id;
-            }
-            true
-        } else {
-            false
-        }
-    });
     if newly_built {
-        let _ = link_fw_landing_pad(ctx, pad_item_id);
+        if let Ok(linked_pad) = link_fw_landing_pad(ctx, pad_item_id) {
+            updated_pad = linked_pad;
+        }
     }
-    let updated_pad = with_misc_state(ctx, |st| {
-        st.landing_pads
-            .iter()
-            .find(|p| p.item_id == pad_item_id)
-            .cloned()
-            .expect("pad verified above")
-    });
 
     persist_misc_state(ctx);
     if updated_pad.is_built {
@@ -445,7 +475,7 @@ async fn contribute_fw_beacon_material_inner(
             emit_shipcaster_target_state_changed(ctx, updated_pad.solar_system_id, updated_pad.item_id);
         }
     }
-    emit_beacon_slim_item_change(ctx, &pad_snapshot, &updated_pad).await;
+    emit_beacon_slim_item_change(ctx, &old_pad, &updated_pad).await;
     Ok((updated_pad, taken_qty))
 }
 
