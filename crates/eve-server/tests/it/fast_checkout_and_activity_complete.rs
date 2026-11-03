@@ -618,6 +618,7 @@ async fn test_fast_checkout_buy_offer_payload_and_vault_reload() {
     let mut sess = login_pilot_char(&ctx, 1205, "demo", "demo-secret", CHAR_ID).await;
     let user_id = sess.user_id.expect("user_id");
 
+    common::seed_fast_checkout_plex_offer(&ctx, user_id, 1001, 110, 499);
     eve_server::services::fast_checkout_and_activity::set_user_fast_checkout_enabled(&ctx, user_id, true);
 
     let offers_rep = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[]).await.expect("GetOffersForUser");

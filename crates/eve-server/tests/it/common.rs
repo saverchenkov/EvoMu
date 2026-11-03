@@ -365,3 +365,49 @@ pub async fn clear_incursion_site_escort_waves(
     }
     panic!("failed to clear escort waves for incursion site {site_id}");
 }
+
+#[allow(dead_code)]
+pub fn seed_fast_checkout_plex_offer(ctx: &ServerContext, user_id: u64, offer_id: u32, plex_qty: u32, price_cents: u64) {
+    use eve_server::services::quasar_payment_store_types::{
+        add_user_quick_pay_token, save_store_catalog, PaymentTokenRecord, StoreCatalog,
+        StoreCategory, StoreOffer, StoreProduct,
+    };
+    ctx.db.with_mut_snapshot(|snap| {
+        save_store_catalog(
+            snap,
+            &StoreCatalog {
+                categories: vec![StoreCategory { id: 1, name: "PLEX".into(), description: "PLEX Packs".into() }],
+                products: vec![StoreProduct {
+                    id: 101,
+                    name: format!("{plex_qty} PLEX"),
+                    description: format!("{plex_qty} PLEX"),
+                    type_id: 44_992,
+                    quantity: plex_qty,
+                }],
+                offers: vec![StoreOffer {
+                    id: offer_id,
+                    name: format!("{plex_qty} PLEX"),
+                    description: format!("{plex_qty} PLEX"),
+                    category_id: 1,
+                    price_plex: 0,
+                    product_ids: vec![101],
+                    targeted: false,
+                    price_cents: Some(price_cents),
+                    currency: Some("USD".into()),
+                }],
+            },
+        );
+    });
+    add_user_quick_pay_token(
+        &ctx.db,
+        &ctx.quasar_gateway.pending_notices,
+        user_id,
+        PaymentTokenRecord {
+            id: 1,
+            user_id,
+            token_str: "tok_quick_1".into(),
+            is_quick_pay: true,
+            consumed: false,
+        },
+    );
+}

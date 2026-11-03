@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 
 /// Canonical corporation role definitions `(bitmask, client_role_name, esi_role_name)`
 /// shared by MachoNet `cache.Rowset("roles")` and ESI role decoders.
-pub(crate) const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = &[
+pub const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = &[
     (eve_db::corp_roles::ROLE_DIRECTOR, "Director", "Director"),
     (eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE, "Deliveries Hangar Take", "Deliveries_Take"),
     (eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY, "Deliveries Hangar Query", "Deliveries_Query"),

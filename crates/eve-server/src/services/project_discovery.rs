@@ -386,7 +386,7 @@ pub fn handle_project_discovery(
         "get_player_statistics" => {
             let res = read_player_state(ctx, char_id, |st| {
                 let proj = PyRep::Dict(vec![
-                    (PyRep::String("score".into()), PyRep::Real(st.accuracy)),
+                    (PyRep::String("score".into()), PyRep::Real(st.score)),
                     (PyRep::String("accuracy".into()), PyRep::Real(st.accuracy)),
                     (PyRep::String("rank".into()), PyRep::Integer(st.rank)),
                     (PyRep::String("experience".into()), PyRep::Real(st.experience)),
@@ -530,37 +530,36 @@ pub fn handle_project_discovery(
 
         // DERIVED (synthetic): DATA GAP — MMOS citizen science tasks and URLs are external backend data not in V24 client FSD.
         "get_new_task" => {
-            let (task_idx, pid, url) = with_player_state(ctx, char_id, |st, snap| {
+            let (task_idx, tid_str, url) = with_player_state(ctx, char_id, |st, snap| {
                 if st.current_task_index < st.last_submitted_task_index + 1 {
                     st.current_task_index = st.last_submitted_task_index + 1;
                 } else {
                     st.current_task_index += 1;
                 }
                 let idx = st.current_task_index;
-                let pid = st.project_id.clone();
-                let url = format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{idx}");
                 let mut store = load_discovery_store(snap);
                 let key = char_task_key(char_id, idx);
-                if !store.char_tasks.contains_key(&key) {
-                    insert_bounded_char_task(
-                        &mut store,
-                        char_id,
-                        idx,
-                        ProjectDiscoveryTaskData {
-                            task_id: format!("task_{idx}"),
-                            task_number: idx,
-                            project_id: pid.clone(),
-                            url: url.clone(),
-                            samples: st.max_bonus_samples.max(1),
-                            fetch_count: 0,
-                        },
-                    );
-                }
+                let task = if let Some(existing) = store.char_tasks.get(&key).cloned() {
+                    existing
+                } else if let Some(seeded) = store.tasks.get(&idx).cloned() {
+                    insert_bounded_char_task(&mut store, char_id, idx, seeded.clone());
+                    seeded
+                } else {
+                    let pid = st.project_id.clone();
+                    let created = ProjectDiscoveryTaskData {
+                        task_id: format!("task_{idx}"),
+                        task_number: idx,
+                        project_id: pid.clone(),
+                        url: format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{idx}"),
+                        samples: st.max_bonus_samples.max(1),
+                        fetch_count: 0,
+                    };
+                    insert_bounded_char_task(&mut store, char_id, idx, created.clone());
+                    created
+                };
                 save_discovery_store(snap, &store);
-                (idx, pid, url)
+                (idx, task.task_id, task.url)
             });
-            let _ = pid;
-            let tid_str = format!("task_{task_idx}");
             Some(Ok(PyRep::keyval([
                 ("task_id", PyRep::String(tid_str.clone())),
                 ("taskId", PyRep::String(tid_str.clone())),

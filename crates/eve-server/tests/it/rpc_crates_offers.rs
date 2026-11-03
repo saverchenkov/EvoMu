@@ -569,7 +569,8 @@ async fn test_fast_checkout_service_configuration_and_disablement() {
         .expect_err("BuyOffer when disabled must fail");
     assert_eq!(buy_disabled.code, "FastCheckoutDisabled");
 
-    // 2. Enable FastCheckout for user and read configured state
+    // 2. Enable FastCheckout for user, seed catalog PLEX offer and quick-pay token
+    common::seed_fast_checkout_plex_offer(&ctx, user_id, 1001, 110, 499);
     eve_server::services::fast_checkout_and_activity::set_user_fast_checkout_enabled(&ctx, user_id, true);
     let is_enabled_after = rpc(&ctx, &mut sess, "FastCheckoutService", "IsFastCheckoutEnabledForUser", &[])
         .await

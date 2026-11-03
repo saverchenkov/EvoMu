@@ -68,42 +68,37 @@ impl Default for UserFastCheckoutState {
     }
 }
 
-// DERIVED (synthetic): DATA GAP — FastCheckout PLEX store catalog is external web-store data not shipped in V24 client FSD.
-pub fn standard_plex_offers() -> Vec<FastCheckoutOfferRecord> {
-    vec![
-        FastCheckoutOfferRecord {
-            offer_id: 1001,
-            plex_amount: 110,
-            price_usd: 4.99,
-            name: "110 PLEX".into(),
-            description: "Standard pack of 110 PLEX".into(),
-            tags: vec!["starter".into(), "popular".into()],
-        },
-        FastCheckoutOfferRecord {
-            offer_id: 1002,
-            plex_amount: 240,
-            price_usd: 9.99,
-            name: "240 PLEX".into(),
-            description: "Standard pack of 240 PLEX".into(),
-            tags: vec!["popular".into()],
-        },
-        FastCheckoutOfferRecord {
-            offer_id: 1003,
-            plex_amount: 500,
-            price_usd: 19.99,
-            name: "500 PLEX".into(),
-            description: "Standard pack of 500 PLEX".into(),
-            tags: vec!["value".into()],
-        },
-        FastCheckoutOfferRecord {
-            offer_id: 1004,
-            plex_amount: 1100,
-            price_usd: 39.99,
-            name: "1100 PLEX".into(),
-            description: "Standard pack of 1100 PLEX".into(),
-            tags: vec!["best_value".into()],
-        },
-    ]
+fn load_catalog_plex_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<FastCheckoutOfferRecord> {
+    let catalog = crate::services::quasar_payment_store_types::read_store_catalog(snap);
+    let tags_map = crate::services::quasar_payment_store_types::read_store_offer_tags(snap);
+    catalog
+        .offers
+        .iter()
+        .filter_map(|offer| {
+            let cents = offer.price_cents.filter(|&c| c > 0)?;
+            let plex_amount: i64 = offer
+                .product_ids
+                .iter()
+                .filter_map(|pid| catalog.products.iter().find(|p| p.id == *pid))
+                .filter(|p| {
+                    p.type_id == crate::services::market_contracts::PLEX_TYPE_ID && p.quantity > 0
+                })
+                .map(|p| i64::from(p.quantity))
+                .sum();
+            if plex_amount <= 0 {
+                return None;
+            }
+            let tags = tags_map.get(&offer.id).cloned().unwrap_or_default();
+            Some(FastCheckoutOfferRecord {
+                offer_id: i64::from(offer.id),
+                plex_amount,
+                price_usd: (cents as f64) / 100.0,
+                name: offer.name.clone(),
+                description: offer.description.clone(),
+                tags,
+            })
+        })
+        .collect()
 }
 
 pub fn get_user_fast_checkout_state(ctx: &ServerContext, user_id: u64) -> UserFastCheckoutState {
@@ -295,52 +290,48 @@ fn handle_request_mining_cycle_output(
         });
     };
 
-    let (solar_system_id, moon_id, custom_ores) = ctx.db.with_snapshot(|snap| {
-        let Some(st) = snap.structures.get(&structure_id) else {
-            return Err(BridgeRpcError {
-                code: "StructureNotFound".into(),
-                message: format!("Structure {structure_id} not found"),
-            });
-        };
-
-        let caller_corp = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(0);
-        let is_corp_member = st.owner_corp_id != 0 && caller_corp == st.owner_corp_id;
-        let is_allowed = is_corp_member
-            || crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
-                snap,
-                structure_id,
-                char_id,
-            );
-        if !is_allowed {
-            return Err(BridgeRpcError {
-                code: "AccessDenied".into(),
-                message: "Character lacks corporation permissions for structure mining cycle output".into(),
-            });
+    ctx.db.with_snapshot(|snap| {
+        let efficiency = snap
+            .auto_moon_miners
+            .get(&structure_id)
+            .map(|r| r.efficiency)
+            .unwrap_or(0.40);
+        let info = crate::services::mining_advanced::mining_compression::inspect_metenox_drill(
+            &ctx.sde,
+            snap,
+            structure_id,
+            char_id,
+            efficiency,
+        )?;
+        if let Some(ext) = snap.moon_extractions.get(&structure_id) {
+            if !ext.moon_ores.is_empty() {
+                let sys_id = snap
+                    .structures
+                    .get(&structure_id)
+                    .map(|s| s.solar_system_id)
+                    .unwrap_or(0);
+                return Ok(PyRep::List(compute_mining_materials_per_cycle(
+                    &ctx.sde,
+                    sys_id,
+                    ext.moon_id,
+                    &ext.moon_ores,
+                )));
+            }
         }
-
-        let ext = snap.moon_extractions.get(&structure_id);
-        let sys_id = st.solar_system_id;
-        let m_id = if let Some(e) = ext {
-            e.moon_id
-        } else {
-            crate::services::mining_advanced::resolve_structure_moon_id(
-                &ctx.sde,
-                st.solar_system_id,
-                st.position,
-            )
-            .unwrap_or(0)
-        };
-        let ores = ext.map(|e| e.moon_ores.clone()).unwrap_or_default();
-        Ok((sys_id, m_id, ores))
-    })?;
-
-    let materials =
-        compute_mining_materials_per_cycle(&ctx.sde, solar_system_id, moon_id, &custom_ores);
-    Ok(PyRep::List(materials))
+        let tuples: Vec<PyRep> = info
+            .hourly_materials
+            .into_iter()
+            .map(|(tid, qty)| {
+                let uvol = ctx.sde.types.get(&tid).map(|t| t.volume).unwrap_or(0.1);
+                PyRep::Tuple(vec![
+                    PyRep::Integer(tid as i64),
+                    PyRep::Integer(qty as i64),
+                    PyRep::Real((qty as f64) * uvol),
+                ])
+            })
+            .collect();
+        Ok(PyRep::List(tuples))
+    })
 }
 
 fn handle_request_mining_details(
@@ -738,10 +729,15 @@ fn handle_get_offers_for_user(
     if !st.enabled {
         return Ok(PyRep::List(Vec::new()));
     }
-    let offers = st.cached_offers.clone().unwrap_or_else(standard_plex_offers);
+    let offers = match st.cached_offers.clone() {
+        Some(cached) if !cached.is_empty() => cached,
+        _ => ctx.db.with_snapshot(load_catalog_plex_offers),
+    };
     let session_token = format!("fc_token_{}_{}", user_id, ctx.now_unix());
     st.cached_session_token = Some(session_token);
-    st.cached_offers = Some(offers.clone());
+    if !offers.is_empty() {
+        st.cached_offers = Some(offers.clone());
+    }
     save_user_fast_checkout_state(ctx, user_id, &st);
 
     let plex_offers: Vec<PyRep> = offers
@@ -876,7 +872,10 @@ fn handle_buy_offer(
         });
     }
 
-    let offers = st.cached_offers.unwrap_or_else(standard_plex_offers);
+    let offers = match st.cached_offers {
+        Some(cached) if !cached.is_empty() => cached,
+        _ => ctx.db.with_snapshot(load_catalog_plex_offers),
+    };
     let Some(offer) = offers.iter().find(|o| o.offer_id == offer_id).cloned() else {
         return Err(BridgeRpcError {
             code: "OfferNotFound".into(),
@@ -903,7 +902,24 @@ fn handle_buy_offer(
             message: "Total PLEX quantity overflows i64".into(),
         })?;
 
+    let now_unix = ctx.now_unix();
+    let unit_cents = (offer.price_usd * 100.0).round().max(0.0) as u32;
+    let amount_in_cents = unit_cents.saturating_mul(quantity.min(i64::from(u32::MAX)) as u32);
     let (tx_id, rem_plex) = ctx.db.try_with_mut_snapshot(|snap| {
+        let tokens: Vec<crate::services::quasar_payment_store_types::PaymentTokenRecord> = snap
+            .service_state_blobs
+            .get("payment_tokens")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        if !tokens
+            .iter()
+            .any(|t| t.user_id == user_id && t.is_quick_pay && !t.consumed)
+        {
+            return Err(BridgeRpcError {
+                code: "PaymentTokenRequired".into(),
+                message: "No active quick-pay payment token for user".into(),
+            });
+        }
         let rem = snap
             .adjust_plex_vault(active_char_id.unwrap_or(user_id as i64), total_plex)
             .or_else(|| {
@@ -925,21 +941,26 @@ fn handle_buy_offer(
             total_plex,
             rem,
             "FastCheckout Purchase",
-            ctx.now_unix(),
+            now_unix,
         );
-        if let Some(cid) = active_char_id {
-            if let Some(ch) = snap.characters.get(&cid) {
-                snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                    entry_id: tid as i64,
-                    character_id: cid,
-                    entry_type: "PlexPurchaseFastCheckout".into(),
-                    amount: eve_db::IskCents(0),
-                    balance_after: ch.balance,
-                    reason: format!(
-                        "Fast checkout purchase: {total_plex} PLEX (offer {offer_id})"
-                    ),
-                });
-            }
+        let mut receipts: Vec<crate::services::quasar_payment_store_types::PaymentReceiptRecord> =
+            snap.service_state_blobs
+                .get("payment_receipts")
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default();
+        receipts.push(
+            crate::services::quasar_payment_store_types::PaymentReceiptRecord {
+                receipt_id: tid,
+                user_id,
+                offer_id: offer_id.to_string(),
+                amount_in_cents,
+                currency: "USD".to_string(),
+                timestamp_unix: now_unix,
+            },
+        );
+        if let Ok(serialized) = serde_json::to_string(&receipts) {
+            snap.service_state_blobs
+                .insert("payment_receipts".to_string(), serialized);
         }
         Ok::<_, BridgeRpcError>((tid, rem))
     })?;
