@@ -958,23 +958,73 @@ pub fn reconnect_character_in_space_sync(
             let disc_pos = disc_entry.map(|d| d.last_position);
             st.safe_logoffs.remove(&char_id);
 
+            let is_valid_space_pos = |arr: [f64; 3]| -> bool {
+                let pos = DVec3::from_array(arr);
+                if pos.length() < 10_000.0 {
+                    return false;
+                }
+                if let Some(sys) = ctx.sde.solar_systems.get(&sys_id) {
+                    for st in &sys.stations {
+                        let st_radius = ctx
+                            .sde
+                            .types
+                            .get(&st.station_type_id)
+                            .map(|t| t.radius)
+                            .unwrap_or(30_000.0)
+                            .max(20_000.0);
+                        if pos.distance(st.position) < st_radius {
+                            return false;
+                        }
+                    }
+                }
+                true
+            };
             let safe_fallback_pos = || -> [f64; 3] {
-                let p = ctx
+                if let Some(st) = ctx
                     .sde
                     .solar_systems
                     .get(&sys_id)
                     .and_then(|s| s.stations.first())
-                    .map(|st| st.position + DVec3::new(1_000.0, 0.0, 0.0))
-                    .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0));
-                [p.x, p.y, p.z]
+                {
+                    let dir = st
+                        .orbit_id
+                        .and_then(|oid| {
+                            ctx.sde
+                                .celestials_in_system(sys_id)
+                                .into_iter()
+                                .find(|c| c.celestial_id == oid)
+                        })
+                        .and_then(|cel| {
+                            let delta = st.position - cel.position;
+                            (delta.length_squared() > 1.0).then(|| delta.normalize())
+                        })
+                        .or_else(|| {
+                            (st.position.length_squared() > 1.0).then(|| st.position.normalize())
+                        })
+                        .unwrap_or(DVec3::X);
+                    let st_radius = ctx
+                        .sde
+                        .types
+                        .get(&st.station_type_id)
+                        .map(|t| t.radius)
+                        .unwrap_or(30_000.0)
+                        .max(25_000.0);
+                    let p = st.position + dir * (st_radius + 5_000.0);
+                    return [p.x, p.y, p.z];
+                }
+                if let Some(cel) = ctx.sde.celestials_in_system(sys_id).into_iter().next() {
+                    let p = cel.position + DVec3::X * (cel.radius.max(10_000.0) + 50_000.0);
+                    return [p.x, p.y, p.z];
+                }
+                [15_000_000_000.0, 0.0, 0.0]
             };
             let pos_arr = disc_pos
-                .filter(|p| DVec3::from_array(*p).length() >= 10_000.0)
+                .filter(|p| is_valid_space_pos(*p))
                 .or_else(|| {
                     snap.item_positions
                         .get(&ship_id)
                         .copied()
-                        .filter(|p| DVec3::from_array(*p).length() >= 10_000.0)
+                        .filter(|p| is_valid_space_pos(*p))
                 })
                 .unwrap_or_else(safe_fallback_pos);
             snap.item_positions.insert(ship_id, pos_arr);

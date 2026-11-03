@@ -92,14 +92,63 @@ impl CareerGoalDef {
         base + 1_000 + (self.uuid[15] as u32)
     }
 
-    /// Returns the UI activity group annotation value (`ui_annotations["group"]`).
-    pub fn effective_group(&self) -> &str {
-        if !self.activity_name.is_empty() {
-            &self.activity_name
-        } else if !self.activity_kind.is_empty() {
-            &self.activity_kind
-        } else {
-            "General"
+    /// Returns the canonical V24 `CAREER_PATH_GROUPS` activity group annotation key (`ui_annotations["group"]`).
+    pub fn effective_group(&self) -> &'static str {
+        let norm: String = self
+            .activity_name
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let kind = self.activity_kind.to_ascii_lowercase();
+        match self.career_id.clamp(1, 4) {
+            1 => match (norm.as_str(), kind.as_str()) {
+                ("scanning", _) | (_, "exploration") => "Scanning",
+                ("hacking", _) | (_, "hacking") => "Hacking",
+                ("advancedhacking", _) | (_, "advanced_hacking") => "AdvancedHacking",
+                ("wormholes", _) | (_, "wormholes") => "Wormholes",
+                ("gassites", _) | (_, "gas_sites") => "GasSites",
+                ("combatsites", _) | (_, "combat_sites") => "CombatSites",
+                ("navigation", _) | (_, "travel") => "Navigation",
+                ("advancednavigation", _) | (_, "advanced_travel") => "AdvancedNavigation",
+                ("projectdiscovery", _) | (_, "project_discovery") => "ProjectDiscovery",
+                _ => "CareerAgentMissions",
+            },
+            2 => match (norm.as_str(), kind.as_str()) {
+                ("market", _) | (_, "market") => "Market",
+                ("salvage", _) | (_, "salvage") => "Salvage",
+                ("resourceharvesting", _) | (_, "mining") => "ResourceHarvesting",
+                ("refining", _) | (_, "refining") => "Refining",
+                ("manufacturing", _) | (_, "manufacturing") => "Manufacturing",
+                ("distributionagent", _) | (_, "distribution_missions") => "DistributionAgent",
+                ("miningagent", _) | (_, "mining_missions") => "MiningAgent",
+                ("research", _) | (_, "research") => "Research",
+                _ => "IndustrialistCareerAgentsMissions",
+            },
+            3 => match (norm.as_str(), kind.as_str()) {
+                ("securityagent", _) | (_, "combat_missions") => "SecurityAgent",
+                ("abyssaldeadspace", _) | (_, "abyssal") => "AbyssalDeadspace",
+                ("combat", _) | (_, "combat") => "Combat",
+                ("bounties", _) | (_, "bounties") => "Bounties",
+                ("combatsites", _) | (_, "combat_sites") => "CombatSites",
+                ("epicarc", _) | (_, "epic_arc") => "EpicArc",
+                ("market", _) | (_, "market") => "Market",
+                ("standings", _) | (_, "standings") => "Standings",
+                ("loyaltypoints", _) | (_, "loyalty_points") => "LoyaltyPoints",
+                _ => "CareerAgentMissions",
+            },
+            _ => match (norm.as_str(), kind.as_str()) {
+                ("social", _) | (_, "social") => "Social",
+                ("electronicwarfare", _) | (_, "ewar") => "ElectronicWarfare",
+                ("combat", _) | (_, "combat") => "Combat",
+                ("pvp", _) | (_, "pvp") => "PvP",
+                ("capacitorwarfare", _) | (_, "cap_warfare") => "CapacitorWarfare",
+                ("factionwarfare", _) | (_, "faction_warfare") => "FactionWarfare",
+                ("support", _) | (_, "remote_repair") => "Support",
+                ("destruction", _) | (_, "destruction") => "Destruction",
+                ("duels", _) | (_, "duels") => "Duels",
+                _ => "CareerAgentMissions",
+            },
         }
     }
 
@@ -856,7 +905,11 @@ pub fn encode_career_milestone_definition_wire(ms: &CareerMilestoneDef, out: &mu
     encode_bytes_field(6, &encode_ui_annotation("description", &ms.description), &mut attr_bytes);
     encode_varint_field(7, 1, &mut attr_bytes);
     encode_varint_field(8, 0, &mut attr_bytes);
-    encode_varint_field(9, ms.career_id.unwrap_or(1).clamp(1, 4) as u64, &mut attr_bytes);
+    encode_varint_field(
+        9,
+        ms.career_id.map(|c| c.clamp(1, 4) as u64).unwrap_or(0),
+        &mut attr_bytes,
+    );
     encode_varint_field(10, 0, &mut attr_bytes);
     encode_varint_field(11, 0, &mut attr_bytes);
     if ms.sp_reward > 0.0 {
@@ -907,7 +960,11 @@ pub fn encode_internal_career_milestone_definition_wire(ms: &CareerMilestoneDef,
     encode_bytes_field(5, &encode_ui_annotation("subtype", subtype), &mut attr_bytes);
     encode_bytes_field(5, &encode_ui_annotation("name", &ms.description), &mut attr_bytes);
     encode_varint_field(6, 1, &mut attr_bytes);
-    encode_varint_field(7, ms.career_id.unwrap_or(1).clamp(1, 4) as u64, &mut attr_bytes);
+    encode_varint_field(
+        7,
+        ms.career_id.map(|c| c.clamp(1, 4) as u64).unwrap_or(0),
+        &mut attr_bytes,
+    );
     encode_varint_field(8, 0, &mut attr_bytes);
     if ms.sp_reward > 0.0 {
         let mut rtype = Vec::new();
