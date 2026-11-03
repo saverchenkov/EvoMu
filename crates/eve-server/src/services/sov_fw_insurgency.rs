@@ -935,17 +935,29 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(sys_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .filter(|id| ctx.sde.solar_systems.contains_key(id))
-                .or(session.solar_system_id)
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "GetSovStructuresInfoForSolarSystem requires a valid solarSystemID argument or active session solar system".into(),
-                }));
+            let sys_id = match args.first() {
+                Some(arg) if !matches!(arg, PyRep::None) => match arg
+                    .as_i64()
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|id| ctx.sde.solar_systems.contains_key(id))
+                {
+                    Some(id) => id,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidSolarSystemID".into(),
+                            message: "GetSovStructuresInfoForSolarSystem received an invalid solarSystemID".into(),
+                        }));
+                    }
+                },
+                _ => match session.solar_system_id {
+                    Some(id) => id,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "NoSolarSystem".into(),
+                            message: "GetSovStructuresInfoForSolarSystem requires a valid solarSystemID argument or active session solar system".into(),
+                        }));
+                    }
+                },
             };
             let now_unix = ctx.now_unix();
             let structs_list = ctx.db.with_snapshot(|snap| {

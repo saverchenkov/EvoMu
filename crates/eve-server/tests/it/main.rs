@@ -583,3 +583,4 @@ mod parity_fake_remediation_feat_part1;
 mod parity_rpc_batch_closure;
 mod parity_corp_combat_batch_closure;
 mod parity_corp_combat_batch_closure_part2;
+mod parity_rpc_batch2_closure;

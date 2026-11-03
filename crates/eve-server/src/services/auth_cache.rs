@@ -254,13 +254,39 @@ pub async fn handle(
         }
 
         ("cache", "Setting") => {
-            let (section, key, new_val) = match args {
-                [PyRep::String(s), PyRep::String(k), PyRep::String(v), ..] => (s.as_str(), k.as_str(), Some(v.as_str())),
+            let (section, key, new_val, clear_val) = match args {
+                [PyRep::String(s), PyRep::String(k), PyRep::String(v), ..]
+                    if !s.is_empty() && !k.is_empty() =>
+                {
+                    (s.as_str(), k.as_str(), Some(v.as_str()), false)
+                }
                 [PyRep::String(s), PyRep::String(k), PyRep::None, ..]
-                | [PyRep::String(s), PyRep::String(k)] => (s.as_str(), k.as_str(), None),
-                [PyRep::String(k)] => ("zsystem", k.as_str(), None),
-                _ => ("zsystem", "SP-Allowed-Extensions", None),
+                    if !s.is_empty() && !k.is_empty() =>
+                {
+                    (s.as_str(), k.as_str(), None, true)
+                }
+                [PyRep::String(s), PyRep::String(k)] if !s.is_empty() && !k.is_empty() => {
+                    (s.as_str(), k.as_str(), None, false)
+                }
+                [PyRep::String(k)] if !k.is_empty() => ("zsystem", k.as_str(), None, false),
+                _ => return Some(Err(BridgeRpcError::user_error("InvalidArguments"))),
             };
+            if clear_val {
+                if let Err(e) = ServerContext::require_auth(session) {
+                    return Some(Err(e));
+                }
+                if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "NotAuthorized".into(),
+                    }));
+                }
+                let blob_key = format!("cache_setting:{section}:{key}");
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.service_state_blobs.remove(&blob_key);
+                });
+                return Some(Ok(PyRep::None));
+            }
             if let Some(v) = new_val {
                 if let Err(e) = ServerContext::require_auth(session) {
                     return Some(Err(e));
