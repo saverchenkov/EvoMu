@@ -595,3 +595,5 @@ mod parity_npc_mining_batch_closure_part2;
 mod parity_fw_sov_batch_closure;
 mod parity_rpc_batch4_closure;
 mod parity_notify_batch4_closure;
+mod parity_pve_sov_remaining_closure;
+mod parity_pve_sov_remaining_closure_part2;

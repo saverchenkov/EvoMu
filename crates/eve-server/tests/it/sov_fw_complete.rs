@@ -264,9 +264,8 @@ async fn fw_corp_allowed_enlistment_factions_gate_member_enlistment() {
 
 #[tokio::test]
 async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
-    // parity: feat:sovereignty.sov-hub-anchor, feat:sovereignty.sov-changed-notifications
+    // parity: feat:sovereignty.sov-changed-notifications
     eve_testkit::attest(&[
-        "feat:sovereignty.sov-hub-anchor",
         "feat:sovereignty.sov-changed-notifications",
     ]);
 
