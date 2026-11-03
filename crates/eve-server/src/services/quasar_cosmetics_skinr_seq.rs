@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_cosmetics_skinr::{
-    any_msg, as_u64, parse_component_id, put_duration, put_seq, put_timestamp, require_char,
-    seq_of, str_of, sub, HandlerResult, SequencingJobRecord, SkinDesignRecord, SkinLayoutSlot,
-    SkinrCosmeticsState, ThirdPartySkinLicense, CATEGORY_SHIP,
+    any_msg, as_u64, encode_layout_slot, encode_skin_id, encode_skin_license_attrs,
+    encode_skin_license_id, parse_component_id, put_duration, put_seq, put_timestamp, require_char,
+    seq_of, str_of, sub, tier_base_duration_secs, tier_base_plex_cents, HandlerResult,
+    SequencingJobRecord, SkinDesignRecord, SkinLayoutSlot, SkinrCosmeticsState,
+    ThirdPartySkinLicense, CATEGORY_SHIP,
 };
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
@@ -39,63 +41,6 @@ fn job_seq_to_uuid(seq: u64) -> [u8; 16] {
 // ============================================================================
 // Wire Encoding Helpers for Custom 3rd-Party SKINs & Licenses
 // ============================================================================
-
-fn encode_skin_id(skin_hex: &str) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_string_field(1, skin_hex, &mut b);
-    b
-}
-
-fn encode_skin_license_id(character_id: u32, skin_hex: &str) -> Vec<u8> {
-    let mut b = Vec::new();
-    put_seq(1, character_id as u64, &mut b);
-    encode_bytes_field(2, &encode_skin_id(skin_hex), &mut b);
-    b
-}
-
-fn encode_skin_license_attrs(lic: &ThirdPartySkinLicense) -> Vec<u8> {
-    let mut b = Vec::new();
-    encode_varint_field(1, u64::from(lic.activated), &mut b);
-    encode_varint_field(2, lic.unactivated, &mut b);
-    encode_varint_field(3, lic.escrowed, &mut b);
-    put_timestamp(4, lic.first_acquired_unix, &mut b);
-    b
-}
-
-fn encode_layout_slot(slot: &SkinLayoutSlot) -> Vec<u8> {
-    let mut id_msg = Vec::new();
-    encode_varint_field(1, slot.slot_id as u64, &mut id_msg);
-
-    let mut cfg_msg = Vec::new();
-    if slot.is_pattern {
-        let mut pat_cfg = Vec::new();
-        let mut pat_id = Vec::new();
-        encode_varint_field(1, slot.component_id as u64, &mut pat_id);
-        encode_bytes_field(1, &pat_id, &mut pat_cfg);
-        if let Some(p_coat) = slot.primary_coating_id {
-            let mut pc = Vec::new();
-            encode_varint_field(1, p_coat as u64, &mut pc);
-            encode_bytes_field(2, &pc, &mut pat_cfg);
-        }
-        if let Some(s_coat) = slot.secondary_coating_id {
-            let mut sc = Vec::new();
-            encode_varint_field(1, s_coat as u64, &mut sc);
-            encode_bytes_field(3, &sc, &mut pat_cfg);
-        }
-        encode_bytes_field(2, &pat_cfg, &mut cfg_msg);
-    } else {
-        let mut coat_cfg = Vec::new();
-        let mut coat_id = Vec::new();
-        encode_varint_field(1, slot.component_id as u64, &mut coat_id);
-        encode_bytes_field(1, &coat_id, &mut coat_cfg);
-        encode_bytes_field(1, &coat_cfg, &mut cfg_msg);
-    }
-
-    let mut out = Vec::new();
-    encode_bytes_field(1, &id_msg, &mut out);
-    encode_bytes_field(2, &cfg_msg, &mut out);
-    out
-}
 
 fn encode_skin_attributes(rec: &SkinDesignRecord) -> Vec<u8> {
     let mut out = Vec::new();
@@ -643,7 +588,8 @@ fn skill_discounts_and_cap(state: &SkinrCosmeticsState, cid: Option<u32>) -> (u3
             return (0, 0, 5);
         };
         let lvl = |sid: u32| sk_map.get(&sid).map(|sk| sk.level as u32).unwrap_or(0);
-        let price_disc = ((lvl(81044) + lvl(81045) + lvl(81363) + lvl(81376)) * 2).min(25);
+        // Ship_SKINR.md:54: There are no skills or any other methods to reduce the PLEX cost.
+        let price_disc = 0;
         let sde_ind_disc = induction_time_disc_pct(lvl(81377))
             + induction_time_disc_pct(lvl(81372))
             + induction_time_disc_pct(lvl(81373))
@@ -662,8 +608,8 @@ fn handle_get_tier_pricing(
 ) -> HandlerResult {
     let (discount_pct, _, _) = skill_discounts_and_cap(state, ctx.effective_character_id());
     let mut out = Vec::new();
-    for (&tier, &min_pts) in &state.catalog.tier_thresholds {
-        let base_plex_cents = ((tier as u64) * 1_500).saturating_add(min_pts as u64 * 2);
+    for &tier in state.catalog.tier_thresholds.keys() {
+        let base_plex_cents = tier_base_plex_cents(tier);
         let discounted = base_plex_cents.saturating_mul(100 - discount_pct as u64) / 100;
 
         let mut tier_msg = Vec::new();
@@ -692,8 +638,8 @@ fn handle_get_tier_durations(
 ) -> HandlerResult {
     let (_, discount_pct, _) = skill_discounts_and_cap(state, ctx.effective_character_id());
     let mut out = Vec::new();
-    for (&tier, &min_pts) in &state.catalog.tier_thresholds {
-        let base_secs = ((tier as u64) * 3_600).saturating_add((min_pts as u64) * 10);
+    for &tier in state.catalog.tier_thresholds.keys() {
+        let base_secs = tier_base_duration_secs(tier);
         let discounted_secs = (base_secs.saturating_mul(100 - discount_pct as u64) / 100).max(600);
 
         let mut tier_msg = Vec::new();
@@ -986,19 +932,13 @@ fn handle_job_initiate(
 
     let comp_ids: Vec<u32> = required_comps.iter().map(|&(c, _)| c).collect();
     let (_pts, tier_level) = state.catalog.compute_points_and_tier(&comp_ids);
-    let min_pts = state
-        .catalog
-        .tier_thresholds
-        .get(&tier_level)
-        .copied()
-        .unwrap_or(0);
-    let base_plex_cents = ((tier_level as u64) * 1_500).saturating_add(min_pts as u64 * 2);
+    let base_plex_cents = tier_base_plex_cents(tier_level);
     let unit_plex_cents = (base_plex_cents.saturating_mul(100 - price_disc as u64) / 100).max(100);
     let total_plex_cents = unit_plex_cents.saturating_mul(u64::from(licenses_qty));
     let total_plex_cost = i64::try_from(total_plex_cents.saturating_add(99) / 100)
         .unwrap_or(i64::MAX);
 
-    let base_secs = ((tier_level as u64) * 3_600).saturating_add((min_pts as u64) * 10);
+    let base_secs = tier_base_duration_secs(tier_level);
     let planned_secs = (base_secs.saturating_mul(100 - dur_disc as u64) / 100).max(600);
     let award_evermarks = !slots.is_empty() && !required_comps.is_empty();
 
@@ -1073,8 +1013,16 @@ fn handle_job_initiate(
                 ch.plex_balance = rem_plex;
                 if award_evermarks {
                     let em_reward = 500_i64.saturating_mul(i64::from(licenses_qty));
+                    let corp_id = ch.corporation_id;
                     let cur = ch.loyalty_points.entry(EVERMARK_CORP_ID).or_insert(0);
                     *cur = cur.saturating_add(em_reward);
+                    if corp_id >= 98_000_000 {
+                        let corp_cur = s
+                            .corp_lp_balances
+                            .entry((corp_id, EVERMARK_CORP_ID))
+                            .or_insert(0);
+                        *corp_cur = corp_cur.saturating_add(em_reward);
+                    }
                     crate::services::lp_store::record_lp_reward_log(
                         s,
                         cid as i64,

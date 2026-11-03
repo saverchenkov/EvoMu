@@ -1274,3 +1274,100 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         |s: &Arc<SkinrCosmeticsState>, _ctx, _any: &GoogleAny, _d| handle_title_version_get_default(s)
     );
 }
+
+pub(super) fn tier_base_plex_cents(tier: u32) -> u64 {
+    let plex = match tier {
+        0 | 1 => 25,
+        2 => 30,
+        3 => 35,
+        4 => 40,
+        5 => 50,
+        6 => 60,
+        7 => 75,
+        8 => 90,
+        9 => 110,
+        t => 110 + u64::from(t - 9) * 20,
+    };
+    plex * 100
+}
+
+pub(super) fn tier_base_duration_secs(tier: u32) -> u64 {
+    let hours = match tier {
+        0 | 1 => 3,
+        2 => 7,
+        3 => 12,
+        4 => 19,
+        5 => 28,
+        6 => 40,
+        7 => 56,
+        8 => 75,
+        9 => 97,
+        10 => 121,
+        11 => 150,
+        12 => 184,
+        13 => 224,
+        14 => 271,
+        15 => 325,
+        16 => 386,
+        17 => 455,
+        t => 532 + u64::from(t - 18) * 80,
+    };
+    hours * 3_600
+}
+
+pub(super) fn encode_skin_id(skin_hex: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    encode_string_field(1, skin_hex, &mut b);
+    b
+}
+
+pub(super) fn encode_skin_license_id(character_id: u32, skin_hex: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_seq(1, character_id as u64, &mut b);
+    encode_bytes_field(2, &encode_skin_id(skin_hex), &mut b);
+    b
+}
+
+pub(super) fn encode_skin_license_attrs(lic: &ThirdPartySkinLicense) -> Vec<u8> {
+    let mut b = Vec::new();
+    encode_varint_field(1, u64::from(lic.activated), &mut b);
+    encode_varint_field(2, lic.unactivated, &mut b);
+    encode_varint_field(3, lic.escrowed, &mut b);
+    put_timestamp(4, lic.first_acquired_unix, &mut b);
+    b
+}
+
+pub(super) fn encode_layout_slot(slot: &SkinLayoutSlot) -> Vec<u8> {
+    let mut id_msg = Vec::new();
+    encode_varint_field(1, slot.slot_id as u64, &mut id_msg);
+
+    let mut cfg_msg = Vec::new();
+    if slot.is_pattern {
+        let mut pat_cfg = Vec::new();
+        let mut pat_id = Vec::new();
+        encode_varint_field(1, slot.component_id as u64, &mut pat_id);
+        encode_bytes_field(1, &pat_id, &mut pat_cfg);
+        if let Some(p_coat) = slot.primary_coating_id {
+            let mut pc = Vec::new();
+            encode_varint_field(1, p_coat as u64, &mut pc);
+            encode_bytes_field(2, &pc, &mut pat_cfg);
+        }
+        if let Some(s_coat) = slot.secondary_coating_id {
+            let mut sc = Vec::new();
+            encode_varint_field(1, s_coat as u64, &mut sc);
+            encode_bytes_field(3, &sc, &mut pat_cfg);
+        }
+        encode_bytes_field(2, &pat_cfg, &mut cfg_msg);
+    } else {
+        let mut coat_cfg = Vec::new();
+        let mut coat_id = Vec::new();
+        encode_varint_field(1, slot.component_id as u64, &mut coat_id);
+        encode_bytes_field(1, &coat_id, &mut coat_cfg);
+        encode_bytes_field(1, &coat_cfg, &mut cfg_msg);
+    }
+
+    let mut out = Vec::new();
+    encode_bytes_field(1, &id_msg, &mut out);
+    encode_bytes_field(2, &cfg_msg, &mut out);
+    out
+}

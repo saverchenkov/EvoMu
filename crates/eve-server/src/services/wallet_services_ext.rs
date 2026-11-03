@@ -314,7 +314,7 @@ pub fn handle(
                                     ..Default::default()
                                 },
                             );
-                        } else {
+                        } else if offer.category_id == 1 {
                             if let Some(ch) = snap.characters.get_mut(&char_id) {
                                 ch.clone_grade = 2;
                             }

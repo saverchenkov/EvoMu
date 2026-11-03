@@ -745,16 +745,30 @@ pub fn register_handlers(
 
                     let bal = match op.owner {
                         LpWalletOwner::Character(cid) => {
-                            let ch = snap.characters.get_mut(&i64::from(cid)).ok_or_else(|| {
-                                (STATUS_NOT_FOUND, format!("character {cid} not found"))
-                            })?;
-                            let entry = ch.loyalty_points.entry(i64::from(op.issuer_corp_id)).or_insert(0);
-                            if !already_done {
-                                *entry = entry
-                                    .checked_add(op.amount)
-                                    .ok_or_else(|| (STATUS_BAD_REQUEST, "LP balance overflow".into()))?;
+                            let (new_char_bal, corp_id) = {
+                                let ch = snap.characters.get_mut(&i64::from(cid)).ok_or_else(|| {
+                                    (STATUS_NOT_FOUND, format!("character {cid} not found"))
+                                })?;
+                                let entry = ch.loyalty_points.entry(i64::from(op.issuer_corp_id)).or_insert(0);
+                                if !already_done {
+                                    *entry = entry
+                                        .checked_add(op.amount)
+                                        .ok_or_else(|| (STATUS_BAD_REQUEST, "LP balance overflow".into()))?;
+                                }
+                                (*entry, ch.corporation_id)
+                            };
+                            if !already_done
+                                && op.amount > 0
+                                && i64::from(op.issuer_corp_id) == crate::services::lp_store::PARAGON_CORP_ID
+                                && corp_id >= 98_000_000
+                            {
+                                let corp_entry = snap
+                                    .corp_lp_balances
+                                    .entry((corp_id, crate::services::lp_store::PARAGON_CORP_ID))
+                                    .or_insert(0);
+                                *corp_entry = corp_entry.saturating_add(op.amount);
                             }
-                            (*entry).max(0) as u64
+                            new_char_bal.max(0) as u64
                         }
                         LpWalletOwner::Corporation(corp_id) => {
                             let entry = snap

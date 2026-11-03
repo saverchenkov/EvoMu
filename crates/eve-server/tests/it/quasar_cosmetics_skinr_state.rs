@@ -300,7 +300,7 @@ async fn skinr_custom_skins_licenses_and_sequencing_jobs() {
     assert_eq!(pricing_rsp.status_code, STATUS_OK);
     let pricing_msg = decode(&reg, pricing_rsp.payload.as_ref().unwrap());
     assert!(matches!(pricing_msg.get(1), Some(DynamicValue::Repeated(v)) if !v.is_empty()));
-    assert_eq!(pricing_msg.get(2), Some(&DynamicValue::Uint32(8)));
+    assert_eq!(pricing_msg.get(2), Some(&DynamicValue::Uint32(0)));
 
     let dur_rsp = rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierDurationsRequest", Vec::new()).await;
     assert_eq!(dur_rsp.status_code, STATUS_OK);
