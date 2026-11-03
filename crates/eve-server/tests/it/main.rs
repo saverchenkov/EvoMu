@@ -585,3 +585,4 @@ mod parity_corp_combat_batch_closure;
 mod parity_corp_combat_batch_closure_part2;
 mod parity_rpc_batch2_closure;
 mod parity_quasar_batch2_closure;
+mod parity_fleet_ind_batch_closure;

@@ -1204,6 +1204,12 @@ pub fn handle_industry_facilities_bps(
                         .into(),
                 }));
             }
+            if updates.iter().any(|&(act, rate)| act != 0 && rate > 0.10) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidFacilityTaxRate".into(),
+                    message: "Structure industry facility tax rate cannot exceed 10%".into(),
+                }));
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some((_, _, sys_id, ..)) = resolve_facility_modifiers_and_system(ctx, snap, facility_id) else {

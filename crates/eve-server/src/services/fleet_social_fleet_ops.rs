@@ -468,14 +468,15 @@ pub(super) async fn handle_fleet_ops(
                 .stored_formations
                 .get(&char_id)
                 .copied();
+            let (form_idx, spacing_idx) = if explicit_dest.is_some() { (4, 5) } else { (2, 3) };
             let formation_id = args
-                .get(2)
+                .get(form_idx)
                 .and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("formationID").and_then(|a| a.as_i64()))
                 .or_else(|| stored_form.map(|(fid, _, _)| fid))
                 .unwrap_or(0);
             let formation_spacing = args
-                .get(3)
+                .get(spacing_idx)
                 .and_then(|a| a.as_f64())
                 .or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64()))
                 .or_else(|| stored_form.map(|(_, sp, _)| sp))
