@@ -180,32 +180,34 @@ async fn notify_batch8_operations_npe_and_client_node_graphs() {
 
     // 4. Discover a real operation with tasks from SDE -> activate & skip_task -> OnOperationTaskSkipped
     let op_defs = get_operation_defs(&ctx.sde);
+    let empty_done = std::collections::HashSet::new();
     let is_skippable = |tid: i64| {
         op_defs.task_is_client_skippable.contains(&tid) || op_defs.task_is_optional.contains(&tid)
     };
     let (&op_id, tasks) = op_defs
         .op_tasks
         .iter()
-        .find(|(id, ts)| {
-            ts.len() >= 2
-                && !op_defs.op_prerequisites.contains_key(*id)
+        .filter(|(id, ts)| {
+            op_defs.are_prerequisites_met(**id, &empty_done)
+                && ts.len() >= 2
                 && is_skippable(ts[0])
         })
+        .min_by_key(|(id, _)| **id)
         .or_else(|| {
             op_defs
                 .op_tasks
                 .iter()
-                .find(|(_, ts)| ts.len() >= 2 && is_skippable(ts[0]))
+                .filter(|(id, ts)| op_defs.are_prerequisites_met(**id, &empty_done) && ts.len() >= 2)
+                .min_by_key(|(id, _)| **id)
         })
         .or_else(|| {
             op_defs
                 .op_tasks
                 .iter()
-                .find(|(id, ts)| ts.len() >= 2 && !op_defs.op_prerequisites.contains_key(*id))
+                .filter(|(id, ts)| op_defs.are_prerequisites_met(**id, &empty_done) && !ts.is_empty())
+                .min_by_key(|(id, _)| **id)
         })
-        .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| ts.len() >= 2))
-        .or_else(|| op_defs.op_tasks.iter().find(|(_, ts)| !ts.is_empty()))
-        .expect("at least one operation with tasks in SDE");
+        .expect("at least one prerequisite-free operation with tasks in SDE");
     let cat_id = op_defs
         .op_default_category
         .get(&op_id)

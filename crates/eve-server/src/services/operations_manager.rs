@@ -87,6 +87,7 @@ pub(super) fn push_operation_event(rec: &mut CharacterOperationsRecord, event_na
 pub fn sync_air_npe_skip(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, now_unix: u64) {
     let mut store = load_store(snap);
     let rec = store.by_character.entry(char_id).or_default();
+    let _ = rec.active_site_id.take();
     rec.tutorial_skipped = true;
     rec.tutorial_finished = Some(true);
     push_operation_event(rec, "skip_air_npe".to_string(), 0);
