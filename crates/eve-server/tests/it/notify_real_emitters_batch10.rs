@@ -129,13 +129,8 @@ async fn setup_pilot_in_space(
     sess
 }
 
-/// parity: FLAGGED_FAKE notify:OnAbyssalLocationEntered
-/// parity: FLAGGED_FAKE notify:OnAbyssalContentFinished
 /// parity: notify:OnSpaceWhiteOutStart
 /// parity: notify:OnDeathzoneStateUpdate
-/// parity: FLAGGED_FAKE notify:OnVoidSpaceEntered
-/// parity: FLAGGED_FAKE notify:OnVoidSpaceRelog
-/// parity: notify:OnVoidSpaceContentFinished
 #[tokio::test]
 async fn batch10_abyssal_void_whiteout_and_deathzone_notifications() {
     let ctx = ServerContext::new();

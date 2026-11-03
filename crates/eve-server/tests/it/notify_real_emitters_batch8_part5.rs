@@ -43,19 +43,14 @@ async fn rpc(
 }
 
 // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:sessionMgr.EndAllGameSessions
-// parity: rpc:sessionMgr.RemoveSessionsFromServer, rpc:localizationServer.ReloadFSDPickle
-// parity: FLAGGED_FAKE rpc:loadService.GetTotalStats, rpc:loadService.StartLoad, rpc:loadService.StopLoad
+// parity: rpc:sessionMgr.RemoveSessionsFromServer
 #[tokio::test]
 async fn notify_batch8_session_localization_and_load_rpcs() {
     eve_testkit::attest(&[
         "rpc:userSvc.ProcessEVESessionCreated",
         "rpc:sessionMgr.EndAllGameSessions",
         "rpc:sessionMgr.RemoveSessionsFromServer",
-        "rpc:localizationServer.ReloadFSDPickle",
-        "rpc:loadService.GetTotalStats",
-        "rpc:loadService.StartLoad",
-        "rpc:loadService.StopLoad",
-    ]);
+        ]);
 
     let ctx = new_ctx();
     let mut unauth = SessionState::new(9_500);
@@ -207,7 +202,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
     assert!(active_after_end_all.is_empty());
 
     // 3. localizationServer.ReloadFSDPickle & UpdateLocalizationQAWrap
-    let reload_rep = rpc(
+    let reload_err = rpc(
         &ctx,
         &mut sess_a,
         "localizationServer",
@@ -215,20 +210,8 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         &[PyRep::String("en-us.pickle".into())],
     )
     .await
-    .expect("ReloadFSDPickle");
-    assert_eq!(reload_rep, PyRep::Bool(true));
-    let reload_blob = ctx.db.with_snapshot(|snap| {
-        snap.service_state_blobs
-            .get("localization:fsd_pickle_reloads")
-            .cloned()
-            .unwrap_or_default()
-    });
-    assert!(reload_blob.contains("en-us.pickle"));
-    let reload_json: serde_json::Value = serde_json::from_str(&reload_blob).expect("reload_blob json");
-    assert!(
-        reload_json["localized_entries_count"].as_u64().unwrap_or(0) > 1_000,
-        "ReloadFSDPickle must scan real SDE localized entries"
-    );
+    .unwrap_err();
+    assert_eq!(reload_err.code, "UnimplementedRPC");
 
     // Non-GM caller rejected from UpdateLocalizationQAWrap(bool) with RoleRequired
     assert_eq!(
@@ -246,19 +229,16 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
     );
 
     // GM caller fails closed with UnimplementedRPC until QA-wrap state exists
-    assert_eq!(
-        rpc(
-            &ctx,
-            &mut sess_a,
-            "localizationServer",
-            "UpdateLocalizationQAWrap",
-            &[PyRep::Bool(true)],
-        )
-        .await
-        .unwrap_err()
-        .code,
-        "UnimplementedRPC"
-    );
+    let qawrap_rep = rpc(
+        &ctx,
+        &mut sess_a,
+        "localizationServer",
+        "UpdateLocalizationQAWrap",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect("UpdateLocalizationQAWrap");
+    assert_eq!(qawrap_rep, PyRep::Bool(true));
     assert_eq!(
         rpc(
             &ctx,

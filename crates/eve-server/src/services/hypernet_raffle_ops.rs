@@ -279,12 +279,36 @@ pub fn handle(
         }
         (
             "raffleProxy",
-            "SubscribeToRaffle"
-            | "UnsubscribeFromRaffle"
-            | "SubscribeToTickets"
-            | "UnSubscribeFromTickets",
+            method @ ("SubscribeToRaffle" | "UnsubscribeFromRaffle" | "SubscribeToTickets" | "UnSubscribeFromTickets"),
         ) => {
-            // const-ok: HyperNet client subscription notifications return None
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let is_subscribe = method.starts_with("Subscribe");
+            let sub_type = if method.contains("Tickets") { "tickets" } else { "raffle" };
+            
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut subs: HashMap<String, Vec<i64>> = snap.service_state_blobs
+                    .get("hypernet_subs")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                
+                // Some client calls pass an ID, others don't. We'll track both general and specific
+                let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let key = format!("{}:{}", sub_type, target_id);
+                
+                let entry = subs.entry(key).or_default();
+                if is_subscribe {
+                    if !entry.contains(&char_id) { entry.push(char_id); }
+                } else {
+                    entry.retain(|&x| x != char_id);
+                }
+                
+                if let Ok(js) = serde_json::to_string(&subs) {
+                    snap.service_state_blobs.insert("hypernet_subs".into(), js);
+                }
+            });
             Some(Ok(PyRep::None))
         }
         ("raffleProxy", "GetActiveHistoricPrices") => {
@@ -489,12 +513,26 @@ pub fn handle(
             match res {
                 Ok(rec) => {
                     let kv = raffle_to_keyval(&rec);
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnRaffleCreatedServer",
-                        "charid",
-                        vec![PyRep::Integer(rec.raffle_id), kv.clone()],
-                    );
+                    let mut targets = vec![char_id];
+                    ctx.db.with_snapshot(|snap| {
+                        if let Some(s) = snap.service_state_blobs.get("hypernet_subs") {
+                            if let Ok(subs) = serde_json::from_str::<HashMap<String, Vec<i64>>>(s) {
+                                if let Some(viewers) = subs.get("raffle:0") {
+                                    targets.extend(viewers);
+                                }
+                            }
+                        }
+                    });
+                    targets.sort_unstable();
+                    targets.dedup();
+                    for t in targets {
+                        ctx.notify(
+                            NotificationTarget::Character(t),
+                            "OnRaffleCreatedServer",
+                            "charid",
+                            vec![PyRep::Integer(rec.raffle_id), kv.clone()],
+                        );
+                    }
                     Some(Ok(kv))
                 }
                 Err(e) => Some(Err(e)),

@@ -44,7 +44,7 @@ fn make_player_session(
 #[tokio::test]
 async fn test_cluster_session_localization_qa_rpcs_e2e() {
     // parity: rpc:DB2.CallProc
-    // parity: FLAGGED_FAKE rpc:loadService.GetTotalStats, rpc:loadService.StartLoad, rpc:loadService.StopLoad, rpc:localizationServer.ReloadFSDPickle, rpc:raffleMgr.QA_SeedRaffles, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated
+    // parity: rpc:raffleMgr.QA_SeedRaffles, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
@@ -118,7 +118,7 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
         .expect_err("UpdateLocalizationQAWrap must fail-closed with UnimplementedRPC");
     assert_eq!(qa_wrap_err.code, "UnimplementedRPC");
 
-    ctx.dispatch_rpc(
+    let reload_err = ctx.dispatch_rpc(
         &mut gm,
         "localizationServer",
         None,
@@ -128,7 +128,8 @@ async fn test_cluster_session_localization_qa_rpcs_e2e() {
         None,
     )
     .await
-    .expect("ReloadFSDPickle");
+    .unwrap_err();
+    assert_eq!(reload_err.code, "UnimplementedRPC");
 
     // 4. DB2.CallProc & debug.Exec
     let polaris = ctx.dispatch_rpc(&mut gm, "DB2", None, "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw, None).await.expect("DB2.CallProc");

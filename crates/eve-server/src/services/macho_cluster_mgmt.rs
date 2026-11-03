@@ -481,6 +481,11 @@ pub fn handle(
                     message: "UserError: GM_InsufficientRole".into(),
                 }));
             }
+            let node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if node_id != 0 && node_id != 1i64 {
+                // Not our node
+                return Some(Ok(PyRep::None));
+            }
             let session_ids: Vec<i64> = match args.get(1) {
                 Some(PyRep::List(items) | PyRep::Tuple(items)) => {
                     items.iter().filter_map(|v| v.as_i64()).collect()
@@ -489,8 +494,12 @@ pub fn handle(
                 _ => Vec::new(),
             };
             for sid in &session_ids {
-                ctx.disconnect_session(*sid as u64, "RemoveSession", "Session removed from server");
-                ctx.release_session_bindings(*sid as u64);
+                if let Ok(u_sid) = u64::try_from(*sid) {
+                    if u_sid > 0 {
+                        ctx.disconnect_session(u_sid, "RemoveSession", "Session removed from server");
+                        ctx.release_session_bindings(u_sid);
+                    }
+                }
             }
             ctx.db.with_mut_snapshot(|snap| {
                 let mut active: Vec<i64> = snap
@@ -502,6 +511,20 @@ pub fn handle(
                 if let Ok(json) = serde_json::to_string(&active) {
                     snap.service_state_blobs.insert("active_sessions".into(), json);
                 }
+                
+                let mut registry: std::collections::HashMap<String, serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("session_registry")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                for sid in &session_ids {
+                    registry.remove(&sid.to_string());
+                }
+                if let Ok(json) = serde_json::to_string(&registry) {
+                    snap.service_state_blobs.insert("session_registry".into(), json);
+                }
+                
+
             });
             Some(Ok(PyRep::None))
         }

@@ -17,22 +17,18 @@ const PILOT2: i64 = 90_000_002;
 #[tokio::test]
 async fn test_rpc_missing_batch3_part1() {
     // parity: rpc:alert.LogModeChanged, rpc:alert.SendProxyStackTraceAlert
-    // parity: rpc:localizationServer.UpdateLocalizationQAWrap, rpc:localizationServer.ReloadFSDPickle
+    // parity: rpc:localizationServer.UpdateLocalizationQAWrap
     // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent
     // parity: rpc:machoNet.ReloadClientCodeHash, rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
-    // parity: FLAGGED_FAKE rpc:loadService.StartLoad, rpc:loadService.StopLoad
     eve_testkit::attest(&[
         "rpc:alert.LogModeChanged",
         "rpc:alert.SendProxyStackTraceAlert",
         "rpc:localizationServer.UpdateLocalizationQAWrap",
-        "rpc:localizationServer.ReloadFSDPickle",
         "rpc:clientStatLogger.LogString",
         "rpc:externalQueueMgr.PublishProxyEvent",
         "rpc:machoNet.ReloadClientCodeHash",
         "rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID",
-        "rpc:loadService.StartLoad",
-        "rpc:loadService.StopLoad",
-    ]);
+        ]);
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -349,17 +345,13 @@ async fn test_rpc_missing_batch3_part1() {
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part2() {
-    // parity: FLAGGED_FAKE rpc:loadService.SetConfig
     // parity: rpc:cache.Rowset, rpc:cache.Setting
-    // parity: FLAGGED_FAKE rpc:loadService.GetTotalStats
     // parity: rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
     // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc
     // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:debug.Exec
     eve_testkit::attest(&[
-        "rpc:loadService.SetConfig",
         "rpc:cache.Rowset",
         "rpc:cache.Setting",
-        "rpc:loadService.GetTotalStats",
         "rpc:sessionMgr.EndAllGameSessions",
         "rpc:sessionMgr.RemoveSessionsFromServer",
         "rpc:userSvc.ProcessEVESessionCreated",

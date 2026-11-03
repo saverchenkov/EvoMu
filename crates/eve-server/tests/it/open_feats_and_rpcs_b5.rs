@@ -83,7 +83,6 @@ fn kv_get<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_load_service_start_stop_and_stats() {
-    // parity: FLAGGED_FAKE rpc:loadService.GetTotalStats
     let ctx = new_ctx();
     let mut player_sess = setup_pilot(&ctx, PILOT_1, 0).await;
     let err = rpc(&ctx, &mut player_sess, "loadService", "StartLoad", &[])
@@ -253,8 +252,8 @@ async fn test_localization_server_and_user_svc_session_created() {
         &[PyRep::String("res:/localization/eve_en.pickle".into())],
     )
     .await
-    .expect("ReloadFSDPickle");
-    assert_eq!(reload_res, PyRep::Bool(true));
+    .unwrap_err();
+    assert_eq!(reload_res.code, "UnimplementedRPC");
 
     let sess_created = rpc(
         &ctx,

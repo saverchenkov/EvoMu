@@ -136,7 +136,7 @@
     "note": "Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail ESI routes partially closed; open operations remain."
   },
   "ESI-5": {
-    "assessment": "DONE",
+    "assessment": "PARTIAL",
     "note": "All 28 Alliance and Corporation ESI routes and 12 governance and lifecycle domain features closed with state-backed integration tests."
   },
   "ESI-6": {

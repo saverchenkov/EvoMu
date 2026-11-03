@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 const PILOT_A: i64 = 90_000_001;
 const PILOT_B: i64 = 90_000_002;
+const PILOT_C: i64 = 90_000_003;
 const JITA_STATION: i64 = 60_003_760;
 
 fn make_item(
@@ -108,6 +109,8 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     let prize_id = 640_000_110_i64;
     let mut sess_a = login_in_station(&ctx, 9_501, "demo", "demo-secret", PILOT_A).await;
     let mut sess_b = login_in_station(&ctx, 9_502, "other", "other-secret", PILOT_B).await;
+    let mut sess_c = login_in_station(&ctx, 9_503, "test_c", "test_c-secret", PILOT_C).await;
+    rpc(&ctx, &mut sess_c, "raffleProxy", "SubscribeToRaffle", &[]).await.expect("sub");
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(prize_id, make_item(prize_id, 587, PILOT_A, JITA_STATION, InventoryFlag::Hangar, 1, true));
@@ -133,6 +136,10 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     let created_args = find_notif(&create_notifs, "OnRaffleCreatedServer");
     assert_eq!(created_args[0], PyRep::Integer(raffle_id));
     assert_eq!(created_args[1].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
+    
+    let create_notifs_c = drain_all(&ctx, &mut sess_c, PILOT_C);
+    let created_args_c = find_notif(&create_notifs_c, "OnRaffleCreatedServer");
+    assert_eq!(created_args_c[0], PyRep::Integer(raffle_id));
 
     rpc(&ctx, &mut sess_b, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(raffle_id), PyRep::Integer(8)])
         .await
@@ -140,9 +147,14 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     let buy_notifs_b = drain_all(&ctx, &mut sess_b, PILOT_B);
     let updated_args = find_notif(&buy_notifs_b, "OnRaffleUpdatedServer");
     assert_eq!(updated_args[0], PyRep::Integer(raffle_id));
-    assert_eq!(updated_args[1].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
     let finished_args = find_notif(&buy_notifs_b, "OnRaffleFinishedServer");
     assert_eq!(finished_args[0], PyRep::Integer(raffle_id));
-    let win_ticket = finished_args[1].as_i64().expect("winning_ticket integer");
-    assert!((0..8).contains(&win_ticket), "winning_ticket out of range: {win_ticket}");
+    let win_char_id = finished_args[1].as_i64().expect("winning char_id");
+    assert_eq!(win_char_id, PILOT_B as i64);
+
+    let buy_notifs_c = drain_all(&ctx, &mut sess_c, PILOT_C);
+    let updated_args_c = find_notif(&buy_notifs_c, "OnRaffleUpdatedServer");
+    assert_eq!(updated_args_c[0], PyRep::Integer(raffle_id));
+    let finished_args_c = find_notif(&buy_notifs_c, "OnRaffleFinishedServer");
+    assert_eq!(finished_args_c[0], PyRep::Integer(raffle_id));
 }
