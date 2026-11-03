@@ -192,6 +192,13 @@ pub(crate) fn apply_doomsday_capsuleer_crimewatch(
         return;
     }
     let is_pod = matches!(victim_type_id, 670 | 33_328);
+    let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
+        ctx,
+        attacker_char_id,
+        vcid,
+        is_pod,
+        now_unix,
+    );
     {
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         cw.system_corruption_stages.insert(
@@ -219,13 +226,14 @@ pub(crate) fn apply_doomsday_capsuleer_crimewatch(
         attacker_char_id,
         now_unix,
     );
-    crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+    crate::services::combat_crimewatch::crimewatch_timers::record_illegal_pvp_penalties_if_new(
         ctx,
         attacker_char_id,
         vcid,
         sys_id,
         sys_sec,
         is_pod,
+        is_new_agg,
         now_unix,
     );
 }

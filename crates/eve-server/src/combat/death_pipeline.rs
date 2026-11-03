@@ -628,26 +628,41 @@ pub fn execute_death_pipeline_sync_inner(
                             ctx, sys_id,
                         ) >= 5;
                     if !(is_pod_kill && corr_stage5) {
-                        crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                        let is_new_agg = crate::services::combat_crimewatch::crimewatch_timers::is_new_pvp_aggression(
                             ctx,
                             attacker_char_id,
                             victim_char_id,
-                            sys_id,
-                            sys_sec,
                             is_pod_kill,
                             now_unix,
                         );
+                        if is_new_agg {
+                            crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
+                                ctx,
+                                attacker_char_id,
+                                victim_char_id,
+                                sys_id,
+                                sys_sec,
+                                is_pod_kill,
+                                now_unix,
+                            );
+                        }
                         // Grant 30-day Kill Right on illegal Highsec ship/pod kills and Lowsec capsule kills
                         if sys_sec >= 0.45 || is_pod_kill {
+                            let rt_expiries = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                                rt.kill_right_expires_unix.clone()
+                            });
                             let has_kr = ctx.db.with_snapshot(|snap| {
                                 snap.kill_rights.values().any(|kr| {
                                     kr.owner_id == victim_char_id
                                         && kr.target_id == attacker_char_id
                                         && !kr.is_active_suspect
-                                        && snap
-                                            .combat_crimewatch_state
-                                            .kill_right_expires_unix
+                                        && rt_expiries
                                             .get(&kr.kill_right_id)
+                                            .or_else(|| {
+                                                snap.combat_crimewatch_state
+                                                    .kill_right_expires_unix
+                                                    .get(&kr.kill_right_id)
+                                            })
                                             .is_some_and(|&exp| exp > now_unix)
                                 })
                             });

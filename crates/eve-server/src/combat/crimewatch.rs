@@ -624,16 +624,19 @@ impl CrimeWatchDirector {
                 .get(&sys_id)
                 .map(|s| s.security_status)
                 .unwrap_or(1.0);
-            let already_logged_sec =
+            let (already_logged_sec, rt_expiries) =
                 crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                    rt.sec_status_transactions
+                    let logged = rt
+                        .sec_status_transactions
                         .get(&criminal_char_id)
                         .is_some_and(|txs| {
                             txs.iter().any(|t| {
                                 t.solar_system_id == sys_id
+                                    && t.delta < 0.0
                                     && now_unix.saturating_sub(t.timestamp_unix) <= 30
                             })
-                        })
+                        });
+                    (logged, rt.kill_right_expires_unix.clone())
                 });
             if !already_logged_sec && sys_sec > 0.0 {
                 crate::services::combat_crimewatch::crimewatch_timers::apply_illegal_pvp_sec_status_loss(
@@ -654,10 +657,13 @@ impl CrimeWatchDirector {
                             kr.owner_id == victim_char_id
                                 && kr.target_id == criminal_char_id
                                 && !kr.is_active_suspect
-                                && snap
-                                    .combat_crimewatch_state
-                                    .kill_right_expires_unix
+                                && rt_expiries
                                     .get(&kr.kill_right_id)
+                                    .or_else(|| {
+                                        snap.combat_crimewatch_state
+                                            .kill_right_expires_unix
+                                            .get(&kr.kill_right_id)
+                                    })
                                     .is_some_and(|&exp| exp > now_unix)
                         })
                         .map(|kr| kr.kill_right_id)

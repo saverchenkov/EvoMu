@@ -1195,6 +1195,9 @@ pub async fn handle(
                         }
                         fb
                     });
+                    if dst_corp_owner > 0 || (116..=122).contains(&flag_u16) {
+                        let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, updated.item_id);
+                    }
                     if flag_u16 == 180 || flag == InventoryFlag::StructureDeedBay {
                         crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
                     }

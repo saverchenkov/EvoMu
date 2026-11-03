@@ -222,9 +222,9 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
             .await
             .expect("CmdAttackTarget lowsec pod");
     }
-    let (sec_after_cmd, kr_count_cmd, low_pod_kr_id) = ctx.db.with_snapshot(|s| {
+    let (sec_after_cmd, kr_count_cmd) = ctx.db.with_snapshot(|s| {
         let krs: Vec<_> = s.kill_rights.values().filter(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id).collect();
-        (s.characters[&criminal_id].security_status, krs.len(), krs[0].kill_right_id)
+        (s.characters[&criminal_id].security_status, krs.len())
     });
     assert!(sec_after_cmd < sec_before_cmd, "CmdAttackTarget low-sec pod must deduct sec status");
     assert_eq!(kr_count_cmd, 1, "two CmdAttackTarget cycles must create only 1 kill right");
@@ -262,14 +262,17 @@ async fn test_crimewatch_kill_rights_gain_and_sell_closure() {
     for _ in 0..10 { let _ = lowsec_handle.step_manual(1.0).await; }
     ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&victim_id).unwrap().active_ship_id = low_vic_pod);
     let _ = rpc(&ctx, &mut sess_crim_low, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("targetAttack".into()), PyRep::Integer(low_vic_pod)]).await.expect("Activate pod");
-    let (sec_post_pod, kr_after_pod) = ctx.db.with_snapshot(|s| (s.characters[&criminal_id].security_status, s.kill_rights.len()));
+    let (sec_post_pod, kr_after_pod, dogma_kr_id) = ctx.db.with_snapshot(|s| {
+        let krs: Vec<_> = s.kill_rights.values().filter(|kr| kr.owner_id == victim_id && kr.target_id == criminal_id).collect();
+        (s.characters[&criminal_id].security_status, krs.len(), krs[0].kill_right_id)
+    });
     assert!(sec_post_pod < sec_post_ship && kr_after_pod == 1, "low-sec pod hit after ship hit must deduct pod sec and grant 1 kill right");
-    let low_pod_exp = with_combat_runtime(&ctx, |rt| rt.kill_right_expires_unix.get(&low_pod_kr_id).copied())
+    let low_pod_exp = with_combat_runtime(&ctx, |rt| rt.kill_right_expires_unix.get(&dogma_kr_id).copied())
         .expect("30-day expiry recorded for low-sec pod kill right");
     assert_eq!(low_pod_exp, now + 30 * 86_400);
     // Clean up low-sec pod kill right and return criminal_id to highsec_sys before testing high-sec CONCORD kill right
     ctx.db.with_mut_snapshot(|s| {
-        s.kill_rights.remove(&low_pod_kr_id);
+        s.kill_rights.remove(&dogma_kr_id);
         if let Some(ch) = s.characters.get_mut(&criminal_id) {
             ch.solar_system_id = highsec_sys;
         }
