@@ -357,17 +357,42 @@ pub(crate) fn update_calendar_response_from_esi(
     event_id: i64,
     response_code: i64,
 ) -> Option<(i64, i64, i64, String, i64)> {
-    let out = {
+    let mut meta = None;
+    {
         let mut s = ctx.social_extras.lock().unwrap();
-        s.calendar_events.get_mut(&event_id).map(|ev| {
-            ev.responses.insert(char_id, response_code);
-            (ev.owner_id, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance)
-        })
-    };
-    if out.is_some() {
+        if !s.calendar_events.contains_key(&event_id) {
+            let db_ev = ctx.db.with_snapshot(|snap| snap.calendar_events.get(&event_id).cloned());
+            if let Some(ev) = db_ev {
+                s.next_id = s.next_id.max(ev.event_id);
+                s.calendar_events.insert(
+                    ev.event_id,
+                    CalendarEventState {
+                        event_id: ev.event_id,
+                        owner_id: ev.owner_id,
+                        creator_id: ev.creator_id,
+                        event_date_time: ev.event_date_time,
+                        duration: ev.duration,
+                        importance: ev.importance,
+                        title: ev.title,
+                        description: ev.description,
+                        _scope: ev.scope,
+                        responses: ev.responses,
+                        is_deleted: ev.is_deleted,
+                    },
+                );
+            }
+        }
+        if let Some(ev) = s.calendar_events.get_mut(&event_id) {
+            if !ev.is_deleted {
+                ev.responses.insert(char_id, response_code);
+                meta = Some((ev.owner_id, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance));
+            }
+        }
+    }
+    if meta.is_some() {
         sync_calendar_events_to_db(ctx);
     }
-    out
+    meta
 }
 
 pub fn hydrate_social_state_from_db(ctx: &ServerContext) {

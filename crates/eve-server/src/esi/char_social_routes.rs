@@ -215,7 +215,32 @@ fn load_merged_calendar_events(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
 
-    for (&eid, ev) in &snap.calendar_events {
+    let mut merged = snap.calendar_events.clone();
+    if let Ok(s) = ctx.social_extras.lock() {
+        for (&eid, ev) in &s.calendar_events {
+            let entry = merged.entry(eid).or_insert_with(|| eve_db::CalendarEventRecord {
+                event_id: ev.event_id,
+                owner_id: ev.owner_id,
+                creator_id: ev.creator_id,
+                event_date_time: ev.event_date_time,
+                duration: ev.duration,
+                importance: ev.importance,
+                title: ev.title.clone(),
+                description: ev.description.clone(),
+                scope: ev._scope.clone(),
+                responses: ev.responses.clone(),
+                is_deleted: ev.is_deleted,
+            });
+            if ev.is_deleted {
+                entry.is_deleted = true;
+            }
+            for (&cid, &r) in &ev.responses {
+                entry.responses.insert(cid, r);
+            }
+        }
+    }
+
+    for (&eid, ev) in &merged {
         if ev.is_deleted {
             events.remove(&eid);
             continue;
@@ -727,7 +752,10 @@ pub fn dispatch_char_social_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
-            let from_event: Option<i64> = match query_params.get("from_event") {
+            let from_event: Option<i64> = match query_params
+                .get("from_event")
+                .or_else(|| query_params.get("from_event_id"))
+            {
                 Some(raw) => match raw.parse::<i64>() {
                     Ok(v) if v > 0 => Some(v),
                     _ => {
@@ -932,21 +960,6 @@ pub fn dispatch_char_social_route(
                 response_code,
             );
             let ev_meta = if let Some(meta) = social_ev {
-                meta
-            } else if let Some(meta) = ctx.db.with_mut_snapshot(|snap| {
-                let ev = snap.calendar_events.get_mut(&event_id)?;
-                if ev.is_deleted {
-                    return None;
-                }
-                ev.responses.insert(char_id, response_code);
-                Some((
-                    ev.owner_id,
-                    ev.event_date_time,
-                    ev.duration,
-                    ev.title.clone(),
-                    ev.importance,
-                ))
-            }) {
                 meta
             } else {
                 let mut esi_guard = ctx

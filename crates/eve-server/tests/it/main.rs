@@ -610,3 +610,4 @@ mod parity_notify_market_item_received;
 mod parity_plan_canonical_closure;
 mod parity_plan_fake_closure;
 mod parity_ships_batch_closure;
+mod parity_esi_calendar_closure;
