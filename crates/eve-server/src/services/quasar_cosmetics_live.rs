@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 
 const BLOB_KEY: &str = "quasar_cosmetics_live";
 /// `corpRoleBrandManager` (V24 client `eve/common/lib/appConst.pyj`: 34359738368 = 1 << 35).
-pub const CORP_ROLE_BRAND_MANAGER: u64 = 1 << 35;
+pub const CORP_ROLE_BRAND_MANAGER: u64 = eve_db::corp_roles::ROLE_BRAND_MANAGER;
 /// SDE category of ships (`invCategories.categoryID` 6).
 const CATEGORY_SHIP: u32 = 6;
 

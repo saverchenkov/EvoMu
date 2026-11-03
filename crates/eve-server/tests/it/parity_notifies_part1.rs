@@ -8,13 +8,8 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::{
-    notify_emitters_b23, notify_emitters_batch8_ops,
-    pve_expeditions::EscalatingPathEntry,
-    pve_exploration::notify_pve_destruction_events,
-};
 use glam::DVec3;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 const PILOT_A: i64 = 90_000_001;
 const PILOT_B: i64 = 90_000_002;
@@ -309,6 +304,7 @@ async fn test_parity_notifies_operations_and_node_graphs() {
         .expect("/operation reset_progress");
     let reset_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&reset_n, "OnOperationsProgressReset").len(), 3);
+    assert_eq!(find_notif(&reset_n, "OnStopAllClientNodeGraphs").len(), 0);
 
     rpc(&ctx, &mut sess, "slash", "SlashCmd", &[PyRep::String("/operation reload_fsd".into())])
         .await
@@ -316,51 +312,8 @@ async fn test_parity_notifies_operations_and_node_graphs() {
     let reload_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&reload_n, "OnOperationsServerFSDReload").len(), 0);
 
-    let graph_ids: Vec<i64> = ctx.sde.node_graphs.keys().take(3).map(|&id| i64::from(id)).collect();
-    let (g1, g2, g3) = (graph_ids[0], graph_ids[1], graph_ids[2]);
-    let _inst_a = notify_emitters_batch8_ops::start_client_node_graph_instance(
-        &ctx,
-        PILOT_A,
-        g1,
-        1,
-        101,
-        BTreeMap::new(),
-    )
-    .expect("start graph 1");
-    let _inst_b = notify_emitters_batch8_ops::start_client_node_graph_instance(
-        &ctx,
-        PILOT_A,
-        g2,
-        2,
-        102,
-        BTreeMap::new(),
-    )
-    .expect("start graph 2");
-    let _inst_c = notify_emitters_batch8_ops::start_client_node_graph_instance(
-        &ctx,
-        PILOT_A,
-        g3,
-        3,
-        103,
-        BTreeMap::new(),
-    )
-    .expect("start graph 3");
-    let start_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&start_n, "OnStartClientNodeGraph")[0], PyRep::Integer(g1));
-
-    notify_emitters_batch8_ops::stop_active_operation_node_graph_for_category(&ctx, PILOT_A, 1);
-    let stop_cat_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&stop_cat_n, "OnStopClientNodeGraph"), &[PyRep::Integer(_inst_a)]);
-
-    notify_emitters_batch8_ops::stop_client_node_graph_instances_by_id(&ctx, PILOT_A, g2);
-    let stop_id_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&stop_id_n, "OnStopClientNodeGraphById"), &[PyRep::Integer(g2)]);
-
-    notify_emitters_batch8_ops::stop_all_client_node_graphs_for_char(&ctx, PILOT_A);
-    let stop_all_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&stop_all_n, "OnStopAllClientNodeGraphs").len(), 0);
-
-    // Drive real AIR NPE node-graph runner RPCs -> emits OnClientNodeGraphUpdate and OnClientNodeGraphMessage
+    // Drive real AIR NPE node-graph runner RPCs -> emits OnStartClientNodeGraph,
+    // OnClientNodeGraphUpdate, OnClientNodeGraphMessage, OnStopClientNodeGraph, OnStopClientNodeGraphById
     let mut npe_sess = SessionState::new(1105);
     common::login_pilot(&ctx, &mut npe_sess, "demo", "demo-secret").await;
     let doll = PyRep::keyval([("genderID", PyRep::Integer(1)), ("bloodlineID", PyRep::Integer(1))]);
@@ -396,7 +349,11 @@ async fn test_parity_notifies_operations_and_node_graphs() {
     )
     .await
     .expect("start_tutorial");
-    let _ = drain_all(&ctx, &mut npe_sess, npe_cid);
+    let start_n = drain_all(&ctx, &mut npe_sess, npe_cid);
+    let start_args = find_notif(&start_n, "OnStartClientNodeGraph");
+    assert_eq!(start_args.len(), 3);
+    assert_eq!(start_args[0], PyRep::Integer(716));
+    assert!(start_args[1].as_i64().unwrap_or(0) > 0);
     rpc(
         &ctx,
         &mut npe_sess,
@@ -414,83 +371,82 @@ async fn test_parity_notifies_operations_and_node_graphs() {
             .and_then(|v| v.as_str()),
         Some("pocket_entered")
     );
+    rpc(
+        &ctx,
+        &mut npe_sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("skip_tutorial".into())],
+    )
+    .await
+    .expect("skip_tutorial");
+    let stop_n = drain_all(&ctx, &mut npe_sess, npe_cid);
+    let stop_inst_args = find_notif(&stop_n, "OnStopClientNodeGraph");
+    assert_eq!(stop_inst_args.len(), 1);
+    assert!(stop_inst_args[0].as_i64().unwrap_or(0) > 0);
+    assert_eq!(find_notif(&stop_n, "OnStopClientNodeGraphById"), &[PyRep::Integer(716)]);
 }
 
 #[tokio::test]
 async fn test_parity_notifies_dungeons_cloak_and_space() {
-    // parity: notify:OnCloakModuleForceDeactivated, notify:OnDungeonCameraInterest
-    // parity: notify:OnDungeonTriggerAmbientSound, notify:OnDungeonTriggerAudio
-    // parity: notify:OnDungeonTriggerMessage, notify:OnDungeonTriggerMusic
-    // parity: notify:OnFleetEscalatingPathMessage, notify:OnProgressionRoomJoined
+    // parity: notify:OnCloakModuleForceDeactivated, notify:OnFleetEscalatingPathMessage, notify:OnProgressionRoomJoined
     eve_testkit::attest(&[
         "notify:OnCloakModuleForceDeactivated",
-        "notify:OnDungeonCameraInterest",
-        "notify:OnDungeonTriggerAmbientSound",
-        "notify:OnDungeonTriggerAudio",
-        "notify:OnDungeonTriggerMessage",
-        "notify:OnDungeonTriggerMusic",
         "notify:OnFleetEscalatingPathMessage",
         "notify:OnProgressionRoomJoined",
     ]);
     let ctx = new_ctx();
     let mut sess = setup_pilot_in_space(&ctx, 1104, "demo", "demo-secret", PILOT_A, 710_004, 622).await;
 
-    notify_emitters_b23::emit_cloak_module_force_deactivated(&ctx, PILOT_A, "TooCloseToObject", 1850.0);
-    let cloak_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&cloak_n, "OnCloakModuleForceDeactivated")[0], PyRep::String("TooCloseToObject".into()));
-
-    notify_emitters_b23::emit_dungeon_camera_interest_core(
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        None,
-        PILOT_A,
-        81_001,
-        1.5,
-        4.0,
-    );
-    notify_emitters_b23::emit_dungeon_trigger_ambient_sound_core(
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        None,
-        PILOT_A,
-        4001,
-        202,
-        81_001,
-        1,
-    );
-    notify_emitters_b23::emit_dungeon_trigger_audio_core(
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        None,
-        PILOT_A,
-        4001,
-        "res:/audio/dungeon.wav",
-    );
-    notify_emitters_b23::emit_dungeon_trigger_message_core(
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        None,
-        PILOT_A,
-        1,
-        9901,
-    );
-    notify_emitters_b23::emit_dungeon_trigger_music_core(
-        &ctx.db,
-        Some(&ctx.pending_notifications),
-        None,
-        PILOT_A,
-        4001,
-        303,
-    );
-    let dng_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&dng_n, "OnDungeonCameraInterest")[0], PyRep::Integer(81_001));
-    assert_eq!(find_notif(&dng_n, "OnDungeonTriggerAmbientSound")[0], PyRep::Integer(4001));
-    assert_eq!(find_notif(&dng_n, "OnDungeonTriggerAudio")[0], PyRep::Integer(4001));
-    assert_eq!(find_notif(&dng_n, "OnDungeonTriggerMessage"), &[PyRep::Integer(1), PyRep::Integer(9901)]);
-    assert_eq!(find_notif(&dng_n, "OnDungeonTriggerMusic")[0], PyRep::Integer(4001));
-
+    // 1. OnCloakModuleForceDeactivated via real beyonce.CmdStop on cloaked ship in Abyssal space
+    let sys_abyssal = 32_000_001_u32;
+    let cloak_type_id = ctx
+        .sde
+        .types
+        .values()
+        .find(|t| t.group_id == 330)
+        .map(|t| t.type_id)
+        .unwrap_or(11578);
+    sess.solar_system_id = Some(sys_abyssal);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.solar_system_id = sys_abyssal;
+        }
+        snap.items.insert(
+            710_099,
+            make_item(710_099, cloak_type_id, PILOT_A, 710_004, InventoryFlag::HiSlot0, 1, true),
+        );
+        snap.module_active_states.insert(710_099);
+    });
+    let abyss_oid = ctx.bind_object(&sess, "beyonce", i64::from(sys_abyssal)).expect("bind abyss beyonce");
+    let abyss_h = ctx.systems.get_or_spawn(sys_abyssal);
+    let _ = abyss_h.spawn_ball(make_ball(710_004, 622, DVec3::ZERO)).await;
+    let mut cs = eve_destiny::CombatState::default();
+    cs.is_cloaked = true;
+    let _ = abyss_h.set_combat_state(710_004, cs).await;
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(abyss_oid), "CmdStop", &[], &HashMap::new(), None)
+        .await
+        .expect("CmdStop cloaked in abyssal");
+    let cloak_n = drain_all(&ctx, &mut sess, PILOT_A);
+    let decloak_args = find_notif(&cloak_n, "OnCloakModuleForceDeactivated");
+    assert_eq!(decloak_args.len(), 2);
+    assert_eq!(decloak_args[0], PyRep::String("AbyssalDeadspaceCloakBlocked".into()));
+
+    // Restore PILOT_A to Jita for fleet escalation & dungeon progression checks
+    sess.solar_system_id = Some(SYS_JITA);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.solar_system_id = SYS_JITA;
+        }
+    });
+
+    // 2. OnFleetEscalatingPathMessage via real combat anomaly clear in a fleet
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&PILOT_A) {
+            c.fleet_id = Some(77_001);
+        }
+        if let Some(c) = snap.characters.get_mut(&PILOT_B) {
             c.fleet_id = Some(77_001);
         }
         let mut fl = eve_db::FleetRecord::default();
@@ -499,32 +455,60 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
         fl.members = vec![PILOT_A, PILOT_B];
         snap.fleets.insert(77_001, fl);
     });
-    let esc = EscalatingPathEntry {
-        instance_id: 500_001,
-        character_id: PILOT_A,
-        source_dungeon_id: 1001,
-        expedition_dungeon_id: 4002,
-        expedition_name: "Guristas Scout Outpost".to_string(),
-        destination_solar_system_id: SYS_JITA,
-        step_index: 2,
-        total_steps: 4,
-        journal_text: "Escalation".to_string(),
-        created_at_sec: ctx.now_unix_secs(),
-        expires_at_sec: ctx.now_unix_secs() + 86_400,
-        dungeons_entered: vec![],
-        journal_entry_template_id: 280_001,
-    };
-    notify_pve_destruction_events(
-        &ctx.db,
-        &ctx.pending_notifications,
-        &ctx.notify_tx,
-        PILOT_A,
-        None,
-        Some(esc),
-        None,
-    );
-    let esc_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&esc_n, "OnFleetEscalatingPathMessage"), &[PyRep::Integer(PILOT_A), PyRep::Integer(280_001)]);
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, SYS_JITA).await;
+    let site_id = "PVE-ANOM-30000142-1";
+    let _ = ctx.drain_notifications_for_char(PILOT_B);
+    let sys_h = ctx.systems.get_or_spawn(SYS_JITA);
+    for _ in 0..5 {
+        let (cleared, npcs) = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system[&SYS_JITA]
+                .iter()
+                .find(|s| s.site_id == site_id)
+                .map(|s| (s.cleared, s.active_npc_ball_ids.clone()))
+                .unwrap_or((true, Vec::new()))
+        });
+        if cleared {
+            break;
+        }
+        if npcs.is_empty() {
+            rpc(
+                &ctx,
+                &mut sess,
+                "scanSvc",
+                "EnterCombatAnomaly",
+                &[PyRep::String(site_id.into()), PyRep::Bool(true)],
+            )
+            .await
+            .expect("EnterCombatAnomaly");
+            continue;
+        }
+        ctx.set_mechanic_rng_seed(Some(3));
+        for nid in npcs {
+            let _ = sys_h
+                .apply_damage_with_attacker(
+                    nid,
+                    eve_destiny::DamageVector {
+                        em: 1.0e7,
+                        thermal: 1.0e7,
+                        kinetic: 1.0e7,
+                        explosive: 1.0e7,
+                    },
+                    Some(PILOT_A),
+                )
+                .await;
+            let _ = sys_h.remove_ball(nid).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    let esc_n: Vec<(String, Vec<PyRep>)> = ctx
+        .drain_notifications_for_char(PILOT_B)
+        .into_iter()
+        .map(|n| (n.event, n.args))
+        .collect();
+    let fleet_esc = find_notif(&esc_n, "OnFleetEscalatingPathMessage");
+    assert_eq!(fleet_esc.len(), 2);
+    assert_eq!(fleet_esc[0], PyRep::Integer(PILOT_A));
+    assert!(fleet_esc[1].as_i64().unwrap_or(0) > 0);
 
     let inst_id = eve_server::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
         &ctx,

@@ -130,7 +130,7 @@ fn check_corp_lp_role(
 ) -> Result<(), BridgeRpcError> {
     let allowed = eve_db::corp_roles::ROLE_DIRECTOR
         | eve_db::corp_roles::ROLE_ACCOUNTANT
-        | (1u64 << 42); // corpRoleBrandManager
+        | eve_db::corp_roles::ROLE_BRAND_MANAGER;
     let mut roles = if let Some(corp) = snap.corporations.get(&corp_id) {
         if corp.ceo_id == char_id {
             return Ok(());
@@ -978,7 +978,7 @@ pub fn handle(
                 let allowed_view_roles = eve_db::corp_roles::ROLE_DIRECTOR
                     | eve_db::corp_roles::ROLE_ACCOUNTANT
                     | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
-                    | (1u64 << 42); // corpRoleBrandManager
+                    | eve_db::corp_roles::ROLE_BRAND_MANAGER;
                 let is_ceo = snap
                     .corporations
                     .get(&corp_id)

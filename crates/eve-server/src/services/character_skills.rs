@@ -1325,12 +1325,6 @@ pub fn handle(
                         &tids,
                         Some("SkillInjected"),
                     );
-                    super::notify_emitters_missing::emit_server_brain_updated(
-                        ctx,
-                        char_id,
-                        now_ft,
-                        &tids,
-                    );
                     Some(Ok(PyRep::keyval([
                         ("typeID", PyRep::Integer(first_tid as i64)),
                         ("injected", PyRep::Bool(true)),

@@ -8,7 +8,6 @@ use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::notify_emitters_batch9;
 use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -75,12 +74,10 @@ async fn setup_pilot(ctx: &ServerContext, sid: u64) -> SessionState {
 #[tokio::test]
 async fn test_parity_notifies_seasons_campaigns_and_skills() {
     // parity: notify:OnSeasonOmegaRewardsClaimed, notify:OnSeasonalGoalCompleted, notify:OnSeasonalGoalsReset
-    // parity: notify:OnSkillBundleInjected
     eve_testkit::attest(&[
         "notify:OnSeasonOmegaRewardsClaimed",
         "notify:OnSeasonalGoalCompleted",
         "notify:OnSeasonalGoalsReset",
-        "notify:OnSkillBundleInjected",
     ]);
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, 1201).await;
@@ -138,24 +135,15 @@ async fn test_parity_notifies_seasons_campaigns_and_skills() {
         .expect("/season reset_goals");
     let reset_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&reset_n, "OnSeasonalGoalsReset").len(), 0);
-
-    notify_emitters_batch9::emit_skill_bundle_injected(&ctx, PILOT_A, 3, 75_000);
-    let skill_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&skill_n, "OnSkillBundleInjected"),
-        &[PyRep::Integer(3), PyRep::Integer(75_000)]
-    );
 }
 
 #[tokio::test]
 async fn test_parity_notifies_plex_dogma_and_brain() {
-    // parity: notify:OnEffectMessage, notify:OnPlexDepositFailed
-    // parity: notify:OnPlexWithdrawFailed, notify:OnServerBrainUpdated
+    // parity: notify:OnEffectMessage, notify:OnPlexDepositFailed, notify:OnPlexWithdrawFailed
     eve_testkit::attest(&[
         "notify:OnEffectMessage",
         "notify:OnPlexDepositFailed",
         "notify:OnPlexWithdrawFailed",
-        "notify:OnServerBrainUpdated",
     ]);
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, 1202).await;
@@ -226,53 +214,7 @@ async fn test_parity_notifies_plex_dogma_and_brain() {
         &[PyRep::String("NotEnoughPlex".into()), PyRep::Integer(5353)]
     );
 
-    // 3. OnServerBrainUpdated via skillMgr2.InjectSkillIntoBrain
-    let unlearned_skill = ctx.db.with_snapshot(|snap| {
-        let known = snap.skills.get(&PILOT_A);
-        *ctx.sde
-            .types
-            .iter()
-            .find(|(&id, t)| {
-                t.category_id == 16
-                    && t.published
-                    && known.map_or(true, |m| !m.contains_key(&id))
-            })
-            .map(|(id, _)| id)
-            .expect("unlearned skill in SDE")
-    });
-    let skill_book_id = 880_005_i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            skill_book_id,
-            InventoryItemRecord {
-                item_id: skill_book_id,
-                type_id: unlearned_skill,
-                owner_id: PILOT_A,
-                location_id: jita_station,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let _ = drain_all(&ctx, &mut sess, PILOT_A);
-    rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "InjectSkillIntoBrain",
-        &[PyRep::Integer(skill_book_id)],
-    )
-    .await
-    .expect("InjectSkillIntoBrain");
-    let brain_n = drain_all(&ctx, &mut sess, PILOT_A);
-    let brain_args = find_notif(&brain_n, "OnServerBrainUpdated");
-    assert_eq!(brain_args.len(), 1);
-    assert!(matches!(&brain_args[0], PyRep::Tuple(t) if t.len() == 2));
-
-    // 4. OnEffectMessage via mining_cycle::process_mining_cycles when capacitor runs dry
+    // 3. OnEffectMessage via mining_cycle::process_mining_cycles when capacitor runs dry
     let sys_jita = 30_000_142_u32;
     let miner_id = 880_011_i64;
     let rock_id = 880_012_i64;

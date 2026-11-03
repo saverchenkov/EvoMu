@@ -44,13 +44,6 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_abyssal_automated_pylons_and_weather_effects_penalties() {
-    // parity: feat:abyssal.automated-pylons
-    // parity: feat:abyssal.weather-effects-and-penalties
-    eve_testkit::attest(&[
-        "feat:abyssal.automated-pylons",
-        "feat:abyssal.weather-effects-and-penalties",
-    ]);
-
     let ctx = ServerContext::new();
     let char_id = 90_000_101_i64;
     let ship_id = 100_000_101_i64;
@@ -230,9 +223,6 @@ async fn test_abyssal_automated_pylons_and_weather_effects_penalties() {
 
 #[tokio::test]
 async fn test_fw_boosters_consumption_and_militia_lp_catalog() {
-    // parity: feat:fw.fw-boosters
-    eve_testkit::attest(&["feat:fw.fw-boosters"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(40_402);
@@ -309,9 +299,6 @@ async fn test_fw_boosters_consumption_and_militia_lp_catalog() {
 
 #[tokio::test]
 async fn test_pve_events_sites_and_world_event_tales() {
-    // parity: feat:pve.events-sites
-    eve_testkit::attest(&["feat:pve.events-sites"]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(40_403);
@@ -418,21 +405,6 @@ async fn test_pve_events_sites_and_world_event_tales() {
 
 #[tokio::test]
 async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
-    // parity: feat:quasar.sovereignty
-    // parity: feat:sovereignty.sov-hub-fuel
-    // parity: feat:sovereignty.sov-hub-upgrades
-    // parity: feat:sovereignty.sov-power
-    // parity: feat:sovereignty.sov-reagents
-    // parity: feat:sovereignty.sov-workforce
-    eve_testkit::attest(&[
-        "feat:quasar.sovereignty",
-        "feat:sovereignty.sov-hub-fuel",
-        "feat:sovereignty.sov-hub-upgrades",
-        "feat:sovereignty.sov-power",
-        "feat:sovereignty.sov-reagents",
-        "feat:sovereignty.sov-workforce",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let (jita, perimeter) = (30_000_142_u32, 30_000_144_u32);
@@ -548,19 +520,6 @@ async fn test_equinox_sov_hub_power_reagents_fuel_upgrades_and_workforce() {
 
 #[tokio::test]
 async fn test_mercenary_den_anarchy_development_mto_and_ui_photo_mode() {
-    // parity: feat:pve.mercenary-tactical-ops
-    // parity: feat:sovereignty.mercenary-den
-    // parity: feat:sovereignty.mercenary-den-anarchy-evolution
-    // parity: feat:sovereignty.mercenary-den-development-anarchy
-    // parity: feat:ui.photo-mode
-    eve_testkit::attest(&[
-        "feat:pve.mercenary-tactical-ops",
-        "feat:sovereignty.mercenary-den",
-        "feat:sovereignty.mercenary-den-anarchy-evolution",
-        "feat:sovereignty.mercenary-den-development-anarchy",
-        "feat:ui.photo-mode",
-    ]);
-
     let db_path = temp_sqlite_path("world_p4_mercden_photo");
     let ctx = open_sqlite_ctx(&db_path, true);
     let (null_sys, temp_planet, _, _, _) = find_nullsec_planets(&ctx);

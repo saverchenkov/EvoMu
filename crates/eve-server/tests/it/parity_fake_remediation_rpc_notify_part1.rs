@@ -266,8 +266,12 @@ async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
 async fn test_corp_role_bit_values_match_v24_client() {
     use eve_db::corp_roles;
 
+    // Exact bit values from V24 client `eve/common/lib/appConst.pyj` (`corpRole*` constants).
     let expected_v24_roles: &[(u64, &str)] = &[
         (1 << 0, "Director"),
+        (1 << 1, "Deliveries Hangar Take"),
+        (1 << 2, "Deliveries Hangar Query"),
+        (1 << 3, "Deliveries Hangar Container Take"),
         (1 << 7, "Personnel Manager"),
         (1 << 8, "Accountant"),
         (1 << 9, "Security Officer"),
@@ -296,6 +300,7 @@ async fn test_corp_role_bit_values_match_v24_client() {
         (1 << 32, "Account Can Take 6"),
         (1 << 33, "Account Can Take 7"),
         (1 << 34, "Diplomat"),
+        (1 << 35, "Brand Manager"),
         (1 << 41, "Equipment Config"),
         (1 << 42, "Container Can Take 1"),
         (1 << 43, "Container Can Take 2"),
@@ -315,21 +320,25 @@ async fn test_corp_role_bit_values_match_v24_client() {
         (1 << 57, "Infrastructure Tactical Officer"),
         (1 << 58, "Starbase Caretaker"),
         (1 << 59, "Fitting Manager"),
-        (1 << 60, "Brand Manager"),
-        (1 << 61, "Skill Plan Manager"),
-        (1 << 62, "Project Manager"),
+        (1 << 60, "Project Manager"),
+        (1 << 61, "Terrestrial Logistics Officer"),
+        (1 << 62, "Skill Plan Manager"),
     ];
 
     assert_eq!(corp_roles::ROLE_DIRECTOR, 1 << 0);
+    assert_eq!(corp_roles::ROLE_DELIVERIES_HANGAR_TAKE, 1 << 1);
+    assert_eq!(corp_roles::ROLE_DELIVERIES_HANGAR_QUERY, 1 << 2);
+    assert_eq!(corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE, 1 << 3);
+    assert_eq!(corp_roles::ROLE_BRAND_MANAGER, 1 << 35);
     assert_eq!(corp_roles::ROLE_TRADER, 1 << 54);
     assert_eq!(corp_roles::ROLE_CHAT_MANAGER, 1 << 55);
     assert_eq!(corp_roles::ROLE_CONTRACT_MANAGER, 1 << 56);
     assert_eq!(corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN, 1 << 57);
     assert_eq!(corp_roles::ROLE_STARBASE_CARETAKER, 1 << 58);
     assert_eq!(corp_roles::ROLE_FITTING_MANAGER, 1 << 59);
-    assert_eq!(corp_roles::ROLE_BRAND_MANAGER, 1 << 60);
-    assert_eq!(corp_roles::ROLE_SKILL_PLAN_MANAGER, 1 << 61);
-    assert_eq!(corp_roles::ROLE_PROJECT_MANAGER, 1 << 62);
+    assert_eq!(corp_roles::ROLE_PROJECT_MANAGER, 1 << 60);
+    assert_eq!(corp_roles::ROLE_TERRESTRIAL_LOGISTICS_OFFICER, 1 << 61);
+    assert_eq!(corp_roles::ROLE_SKILL_PLAN_MANAGER, 1 << 62);
 
     let ctx = new_ctx();
     let mut sess = SessionState::new(91_007);

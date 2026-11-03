@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, HashMap};
 /// shared by MachoNet `cache.Rowset("roles")` and ESI role decoders.
 pub(crate) const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = &[
     (eve_db::corp_roles::ROLE_DIRECTOR, "Director", "Director"),
+    (eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_TAKE, "Deliveries Hangar Take", "Deliveries_Take"),
+    (eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_QUERY, "Deliveries Hangar Query", "Deliveries_Query"),
+    (eve_db::corp_roles::ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE, "Deliveries Hangar Container Take", "Deliveries_Container_Take"),
     (eve_db::corp_roles::ROLE_PERSONNEL_MANAGER, "Personnel Manager", "Personnel_Manager"),
     (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant", "Accountant"),
     (eve_db::corp_roles::ROLE_SECURITY_OFFICER, "Security Officer", "Security_Officer"),
@@ -40,6 +43,7 @@ pub(crate) const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = &[
     (eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[5], "Account Can Take 6", "Account_Take_6"),
     (eve_db::corp_roles::ROLE_ACCOUNT_CAN_TAKE[6], "Account Can Take 7", "Account_Take_7"),
     (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat", "Diplomat"),
+    (eve_db::corp_roles::ROLE_BRAND_MANAGER, "Brand Manager", "Brand_Manager"),
     (eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG, "Equipment Config", "Config_Equipment"),
     (eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[0], "Container Can Take 1", "Container_Take_1"),
     (eve_db::corp_roles::ROLE_CONTAINER_CAN_TAKE[1], "Container Can Take 2", "Container_Take_2"),
@@ -59,9 +63,9 @@ pub(crate) const CORP_ROLE_DEFINITIONS: &[(u64, &str, &str)] = &[
     (eve_db::corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN, "Infrastructure Tactical Officer", "Infrastructure_Tactician"),
     (eve_db::corp_roles::ROLE_STARBASE_CARETAKER, "Starbase Caretaker", "Starbase_Caretaker"),
     (eve_db::corp_roles::ROLE_FITTING_MANAGER, "Fitting Manager", "Fitting_Manager"),
-    (eve_db::corp_roles::ROLE_BRAND_MANAGER, "Brand Manager", "Brand_Manager"),
-    (eve_db::corp_roles::ROLE_SKILL_PLAN_MANAGER, "Skill Plan Manager", "Skill_Plan_Manager"),
     (eve_db::corp_roles::ROLE_PROJECT_MANAGER, "Project Manager", "Project_Manager"),
+    (eve_db::corp_roles::ROLE_TERRESTRIAL_LOGISTICS_OFFICER, "Terrestrial Logistics Officer", "Terrestrial_Logistics_Officer"),
+    (eve_db::corp_roles::ROLE_SKILL_PLAN_MANAGER, "Skill Plan Manager", "Skill_Plan_Manager"),
 ];
 
 pub(crate) fn decode_corp_roles(mask: u64) -> Vec<&'static str> {

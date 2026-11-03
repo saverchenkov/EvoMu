@@ -11,15 +11,6 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_cyno_lighting_rules_beacons_and_covert_cyno() {
-    // parity: feat:modules.cyno-lighting-rules
-    // parity: feat:ships.cynosural-beacon-spawning
-    // parity: feat:ships.covert-cyno-beacon
-    eve_testkit::attest(&[
-        "feat:modules.cyno-lighting-rules",
-        "feat:ships.cynosural-beacon-spawning",
-        "feat:ships.covert-cyno-beacon",
-    ]);
-
     let ctx = build_ctx();
     let kw = HashMap::new();
     let jita_sys: u32 = 30_000_142; // 0.95 high-sec
@@ -138,13 +129,6 @@ async fn test_cyno_lighting_rules_beacons_and_covert_cyno() {
 
 #[tokio::test]
 async fn test_jump_drive_fatigue_and_titan_jump_portal_bridge() {
-    // parity: feat:ships.jump-drive-fatigue-accumulation
-    // parity: feat:ships.titan-jump-portal-bridge
-    eve_testkit::attest(&[
-        "feat:ships.jump-drive-fatigue-accumulation",
-        "feat:ships.titan-jump-portal-bridge",
-    ]);
-
     let ctx = build_ctx();
     let kw = HashMap::new();
     let origin_sys = NULL_SYS; // 30004759
@@ -263,13 +247,6 @@ async fn test_jump_drive_fatigue_and_titan_jump_portal_bridge() {
 
 #[tokio::test]
 async fn test_blockade_runner_scan_immunity_and_frigate_escape_bay() {
-    // parity: feat:ships.blockade-runner-cargo-scan-immunity
-    // parity: feat:ships.frigate-escape-bay
-    eve_testkit::attest(&[
-        "feat:ships.blockade-runner-cargo-scan-immunity",
-        "feat:ships.frigate-escape-bay",
-    ]);
-
     let ctx = build_ctx();
     let kw = HashMap::new();
     let sys_id = NULL_SYS;
@@ -348,13 +325,6 @@ async fn test_blockade_runner_scan_immunity_and_frigate_escape_bay() {
 
 #[tokio::test]
 async fn test_combat_insurance_void_and_expiry_and_pochven_loot_drop() {
-    // parity: feat:combat.insurance-void-and-expiry
-    // parity: feat:combat.pochven-loot-drop
-    eve_testkit::attest(&[
-        "feat:combat.insurance-void-and-expiry",
-        "feat:combat.pochven-loot-drop",
-    ]);
-
     let ctx = build_ctx();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();

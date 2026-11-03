@@ -56,24 +56,3 @@ pub fn emit_plex_withdraw_failed(
         vec![PyRep::String(error_key.to_string()), reference],
     );
 }
-
-/// Emits `OnServerBrainUpdated(brainData)` (`1` arg, `id_type = "charid"`).
-/// Matches `eve/client/script/dogma/clientDogmaLocation.pyj:DogmaLocation.OnServerBrainUpdated`.
-pub fn emit_server_brain_updated(
-    ctx: &ServerContext,
-    char_id: i64,
-    version: i64,
-    skill_type_ids: &[u32],
-) {
-    let mut gray_matter = Vec::with_capacity(skill_type_ids.len() * 4);
-    for &tid in skill_type_ids {
-        gray_matter.extend_from_slice(&tid.to_le_bytes());
-    }
-    let brain_data = PyRep::Tuple(vec![PyRep::Integer(version), PyRep::Buffer(gray_matter)]);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnServerBrainUpdated",
-        "charid",
-        vec![brain_data],
-    );
-}

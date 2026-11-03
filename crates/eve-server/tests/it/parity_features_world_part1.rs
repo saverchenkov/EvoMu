@@ -46,13 +46,6 @@ async fn spawn_ship(
 
 #[tokio::test]
 async fn test_abyssal_spatial_hazard_clouds_and_bioadaptive_cache_rewards() {
-    // parity: feat:abyssal.spatial-hazard-clouds
-    // parity: feat:abyssal.bioadaptive-cache-rewards
-    eve_testkit::attest(&[
-        "feat:abyssal.spatial-hazard-clouds",
-        "feat:abyssal.bioadaptive-cache-rewards",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(40_101);
@@ -319,15 +312,6 @@ async fn test_navigation_warp_landing_points_and_min_distance() {
 
 #[tokio::test]
 async fn test_pve_dungeon_system_and_agency_ui_services() {
-    // parity: feat:pve.dungeon-system
-    // parity: feat:ui.agency
-    // parity: feat:ui.info-panels
-    eve_testkit::attest(&[
-        "feat:pve.dungeon-system",
-        "feat:ui.agency",
-        "feat:ui.info-panels",
-    ]);
-
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = SessionState::new(40_103);

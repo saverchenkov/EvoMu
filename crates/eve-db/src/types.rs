@@ -965,7 +965,14 @@ pub struct FleetRecord {
 }
 
 pub mod corp_roles {
+    /// `corpRoleDirector` (V24 client `eve/common/lib/appConst.pyj`: `1 << 0`).
     pub const ROLE_DIRECTOR: u64 = 1 << 0;
+    /// `corpRoleDeliveriesHangarTake` (V24 client `eve/common/lib/appConst.pyj`: `1 << 1`).
+    pub const ROLE_DELIVERIES_HANGAR_TAKE: u64 = 1 << 1;
+    /// `corpRoleDeliveriesHangarQuery` (V24 client `eve/common/lib/appConst.pyj`: `1 << 2`).
+    pub const ROLE_DELIVERIES_HANGAR_QUERY: u64 = 1 << 2;
+    /// `corpRoleDeliveriesHangarContainerTake` (V24 client `eve/common/lib/appConst.pyj`: `1 << 3`).
+    pub const ROLE_DELIVERIES_HANGAR_CONTAINER_TAKE: u64 = 1 << 3;
     pub const ROLE_PERSONNEL_MANAGER: u64 = 1 << 7;
     pub const ROLE_ACCOUNTANT: u64 = 1 << 8;
     pub const ROLE_SECURITY_OFFICER: u64 = 1 << 9;
@@ -979,6 +986,8 @@ pub mod corp_roles {
     /// `corpRoleAccountCanTake1..7` (V24 client `appConst` / Crucible `EVE_Roles.h`: `1 << 27..=33`).
     pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [1 << 27, 1 << 28, 1 << 29, 1 << 30, 1 << 31, 1 << 32, 1 << 33];
     pub const ROLE_DIPLOMAT: u64 = 1 << 34;
+    /// `corpRoleBrandManager` (V24 client `eve/common/lib/appConst.pyj`: `34359738368 = 1 << 35`).
+    pub const ROLE_BRAND_MANAGER: u64 = 1 << 35;
     pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
     pub const ROLE_EQUIPMENT_CONFIG: u64 = 1 << 41;
     pub const ROLE_CONFIG_EQUIPMENT: u64 = ROLE_EQUIPMENT_CONFIG;
@@ -1006,12 +1015,12 @@ pub mod corp_roles {
     pub const ROLE_STARBASE_CARETAKER: u64 = 1 << 58;
     /// `corpRoleFittingManager` (V24 client `appConst` / Crucible `EVE_Roles.h:166`: `1 << 59`).
     pub const ROLE_FITTING_MANAGER: u64 = 1 << 59;
-    /// `corpRoleBrandManager` (V24 client `appConst`: `1 << 60`).
-    pub const ROLE_BRAND_MANAGER: u64 = 1 << 60;
-    /// `corpRoleSkillPlanManager` (V24 client `appConst`: `1 << 61`).
-    pub const ROLE_SKILL_PLAN_MANAGER: u64 = 1 << 61;
-    /// `corpRoleProjectManager` (V24 client `appConst`: `1 << 62`).
-    pub const ROLE_PROJECT_MANAGER: u64 = 1 << 62;
+    /// `corpRoleProjectManager` (V24 client `eve/common/lib/appConst.pyj`: `1152921504606846976 = 1 << 60`).
+    pub const ROLE_PROJECT_MANAGER: u64 = 1 << 60;
+    /// `corpRoleTerrestrialLogisticsOfficer` (V24 client `eve/common/lib/appConst.pyj`: `2305843009213693952 = 1 << 61`).
+    pub const ROLE_TERRESTRIAL_LOGISTICS_OFFICER: u64 = 1 << 61;
+    /// `corpRoleSkillPlanManager` (V24 client `eve/common/lib/appConst.pyj`: `4611686018427387904 = 1 << 62`).
+    pub const ROLE_SKILL_PLAN_MANAGER: u64 = 1 << 62;
     /// Hangar division access/take (bits `13..=26`) + wallet division take (`ROLE_ACCOUNT_CAN_TAKE`, bits `27..=33`)
     /// subject to the 24-hour corporation role maturation delay.
     pub const CORP_DELAYED_DIVISION_ROLE_MASK: u64 = ((1u64 << 21) - 1) << 13;
