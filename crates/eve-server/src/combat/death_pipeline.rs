@@ -933,6 +933,15 @@ pub fn execute_death_pipeline_sync_inner(
         fw_net_isk,
         killmail_id,
     );
+    if !is_pod && attacker_char_id > 0 && attacker_char_id != victim_char_id {
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+            ctx,
+            attacker_char_id,
+            &["DestroyCapsuleerShips"],
+            1,
+            Some(sys_id as i64),
+        );
+    }
 
     Ok(DeathPipelineResult {
         wreck_item_id,

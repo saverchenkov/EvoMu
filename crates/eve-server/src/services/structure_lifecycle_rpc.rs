@@ -656,12 +656,31 @@ pub async fn apply_damage_structure_or_ball(
         return Ok(Some((0.0, false, false)));
     }
     let att_opt = (attacker_char_id > 0).then_some(attacker_char_id);
-    Ok(sys_handle
+    let hit = sys_handle
         .apply_damage_with_attacker(target_ball_id, dmg, att_opt)
         .await
         .ok()
         .flatten()
-        .map(|(a, d, _)| (a, d, d)))
+        .map(|(a, d, _)| (a, d, d));
+    if let Some((applied, _, _)) = hit {
+        if applied >= 1.0 && attacker_char_id > 0 {
+            let is_ship = ctx.db.with_snapshot(|s| {
+                s.items.get(&target_ball_id).is_some_and(|i| {
+                    ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+                })
+            });
+            if is_ship {
+                crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                    ctx,
+                    attacker_char_id,
+                    &["DamageShips"],
+                    applied.round() as u64,
+                    Some(sys_id as i64),
+                );
+            }
+        }
+    }
+    Ok(hit)
 }
 
 

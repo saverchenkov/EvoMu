@@ -1033,6 +1033,7 @@ pub async fn destroy_specialized_npc_with_hint(
         killer_char_id,
         effective_bounty,
     );
+    if killer_char_id > 0 { crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(ctx, killer_char_id, &["DamageNPCShips", "DestroyNPCShips"], 1, Some(solar_system_id as i64)); }
 
     let wreck_type_id = if archetype == "Sleeper" {
         30495 // Sleeper Large Intermediate Wreck (`attr 901 = -15.0`)

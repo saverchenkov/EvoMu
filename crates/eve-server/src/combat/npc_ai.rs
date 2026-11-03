@@ -985,6 +985,13 @@ impl NpcSpawnManager {
             Ok::<_, String>(bounty)
         });
         if res.is_ok() && killer_char_id > 0 {
+            crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+                ctx,
+                killer_char_id,
+                &["DamageNPCShips", "DestroyNPCShips"],
+                1,
+                Some(sys_id as i64),
+            );
             crate::services::agents_missions::on_mission_npc_destroyed_core(
                 &ctx.db,
                 sys_id,
