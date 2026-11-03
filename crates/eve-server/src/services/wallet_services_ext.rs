@@ -105,7 +105,11 @@ pub fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // --- New Eden Store (`storeManager`, `feat:wallet.nes-store` & `feat:removed.aurum-currency`) ---
+        // parity: rpc:storeManager.get_categories
         ("storeManager", "get_categories") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let catalog = ctx
                 .db
                 .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
@@ -122,7 +126,11 @@ pub fn handle(
                 .collect();
             Some(Ok(PyRep::List(items)))
         }
+        // parity: rpc:storeManager.get_products
         ("storeManager", "get_products") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let catalog = ctx
                 .db
                 .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
@@ -142,7 +150,11 @@ pub fn handle(
                 .collect();
             Some(Ok(PyRep::List(prods)))
         }
+        // parity: rpc:storeManager.get_offers
         ("storeManager", "get_offers") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let catalog = ctx
                 .db
                 .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
@@ -172,19 +184,28 @@ pub fn handle(
                 .collect();
             Some(Ok(PyRep::List(offers)))
         }
+        // parity: rpc:storeManager.can_purchase_offer, rpc:storeManager.buy_offer
         ("storeManager", "can_purchase_offer") | ("storeManager", "buy_offer") => {
             let (user_id, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let offer_id = args
+            let offer_id = match args
                 .first()
+                .or_else(|| _kwargs.get("offer_id").or_else(|| _kwargs.get("offerID")))
                 .and_then(|a| match a {
                     PyRep::Integer(i) => Some(*i),
                     PyRep::String(s) => s.trim_start_matches("VEVC-").parse::<i64>().ok(),
                     _ => None,
-                })
-                .unwrap_or(0);
+                }) {
+                Some(id) if id > 0 => id,
+                _ => {
+                    return Some(Err(rpc_err(
+                        "InvalidArguments",
+                        "storeManager offer_id must be a positive integer",
+                    )))
+                }
+            };
             let currency = args
                 .get(1)
                 .and_then(|a| a.as_str())
@@ -196,12 +217,26 @@ pub fn handle(
                     "Legacy Aurum (AUR) currency was removed; New Eden Store offers use PLEX (PLX)",
                 )));
             }
-            let qty = args
+            if !currency.eq_ignore_ascii_case("PLX") && !currency.eq_ignore_ascii_case("PLEX") {
+                return Some(Err(rpc_err(
+                    "InvalidCurrency",
+                    format!("Unsupported store currency: {currency}"),
+                )));
+            }
+            let qty = match args
                 .get(2)
                 .and_then(|a| a.as_i64())
                 .or_else(|| _kwargs.get("quantity").and_then(|v| v.as_i64()))
-                .unwrap_or(1)
-                .max(1);
+            {
+                Some(q) if q <= 0 => {
+                    return Some(Err(rpc_err(
+                        "InvalidQuantity",
+                        "Purchase quantity must be a positive integer",
+                    )))
+                }
+                Some(q) => q,
+                None => 1,
+            };
 
             let catalog = ctx
                 .db

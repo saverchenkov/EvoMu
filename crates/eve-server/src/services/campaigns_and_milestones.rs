@@ -370,12 +370,15 @@ pub async fn handle(
         ("loginCampaignManager", "claim_reward") => {
             Some(handle_login_campaign_claim_reward(ctx, session))
         }
+        // parity: rpc:seasonalLoginCampaignManager.get_active_campaign
         ("seasonalLoginCampaignManager", "get_active_campaign") => {
             Some(handle_seasonal_login_get_active_campaign(ctx, session))
         }
+        // parity: rpc:seasonalLoginCampaignManager.get_claim_history
         ("seasonalLoginCampaignManager", "get_claim_history") => {
             Some(handle_seasonal_login_get_claim_history(ctx, session))
         }
+        // parity: rpc:seasonalLoginCampaignManager.claim_reward
         ("seasonalLoginCampaignManager", "claim_reward") => {
             Some(handle_seasonal_login_claim_reward(ctx, session))
         }

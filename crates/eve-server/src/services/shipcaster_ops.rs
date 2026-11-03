@@ -844,7 +844,11 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        // parity: rpc:shipCasterLandingPadMgr.GetAllLandingPads
         ("shipCasterLandingPadMgr", "GetAllLandingPads") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let pads = with_misc_state(ctx, |st| {
                 st.landing_pads
                     .iter()
@@ -855,9 +859,27 @@ pub async fn handle(
             Some(Ok(PyRep::List(pads)))
         }
 
+        // parity: rpc:shipCasterLandingPadMgr.GetFactionLandingPads
         ("shipCasterLandingPadMgr", "GetFactionLandingPads") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let faction_id = match args.first().and_then(|a| a.as_i64()) {
-                Some(fid) => i32::try_from(fid).unwrap_or(0),
+                Some(fid) if fid > 0 => match i32::try_from(fid) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Some(Err(rpc_err(
+                            "InvalidArguments",
+                            "GetFactionLandingPads factionID out of range",
+                        )))
+                    }
+                },
+                Some(_) => {
+                    return Some(Err(rpc_err(
+                        "InvalidArguments",
+                        "GetFactionLandingPads requires positive factionID",
+                    )))
+                }
                 None => {
                     return Some(Err(rpc_err(
                         "InvalidArguments",
@@ -875,7 +897,11 @@ pub async fn handle(
             Some(Ok(PyRep::List(pads)))
         }
 
+        // parity: rpc:shipCasterLauncherMgr.GetFactionsWithShipcaster
         ("shipCasterLauncherMgr", "GetFactionsWithShipcaster") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let factions = with_misc_state(ctx, |st| {
                 let mut set = BTreeSet::new();
                 for l in &st.launchers {
@@ -890,6 +916,7 @@ pub async fn handle(
             Some(Ok(PyRep::List(factions)))
         }
 
+        // parity: rpc:starterShipcasterTravelMgr.CanCharacterJump
         ("starterShipcasterTravelMgr", "CanCharacterJump") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -899,6 +926,7 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(eligible)))
         }
 
+        // parity: rpc:starterShipcasterTravelMgr.CmdJumpThroughStarterShipcaster
         ("starterShipcasterTravelMgr", "CmdJumpThroughStarterShipcaster") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
@@ -1024,6 +1052,7 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
 
+        // parity: rpc:shipcasterTravelMgr.CmdJumpThroughShipcaster
         ("shipcasterTravelMgr", "CmdJumpThroughShipcaster") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
