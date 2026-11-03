@@ -958,9 +958,25 @@ pub fn reconnect_character_in_space_sync(
             let disc_pos = disc_entry.map(|d| d.last_position);
             st.safe_logoffs.remove(&char_id);
 
+            let safe_fallback_pos = || -> [f64; 3] {
+                let p = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .and_then(|s| s.stations.first())
+                    .map(|st| st.position + DVec3::new(1_000.0, 0.0, 0.0))
+                    .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0));
+                [p.x, p.y, p.z]
+            };
             let pos_arr = disc_pos
-                .or_else(|| snap.item_positions.get(&ship_id).copied())
-                .unwrap_or([0.0, 0.0, 0.0]);
+                .filter(|p| DVec3::from_array(*p).length() >= 10_000.0)
+                .or_else(|| {
+                    snap.item_positions
+                        .get(&ship_id)
+                        .copied()
+                        .filter(|p| DVec3::from_array(*p).length() >= 10_000.0)
+                })
+                .unwrap_or_else(safe_fallback_pos);
             snap.item_positions.insert(ship_id, pos_arr);
             if let Some(ship_item) = snap.items.get_mut(&ship_id) {
                 ship_item.location_id = sys_id as i64;
