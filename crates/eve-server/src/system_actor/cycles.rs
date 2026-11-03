@@ -385,8 +385,14 @@ pub(crate) fn step_cycles_and_capacitor(
             if cycle.is_auto_targeter {
                 let agg = auto_target_aggressors.get(&cycle.ship_id).map(|v| v.as_slice()).unwrap_or(&[]);
                 let fleet_ships = crate::services::mining_b33::fleet_ship_ids_for_ship(db_opt.as_ref(), cycle.ship_id);
+                let char_faction = db_opt.as_ref().and_then(|db| {
+                    db.with_snapshot(|s| {
+                        let owner = cycle.owner_char_id.or_else(|| s.items.get(&cycle.ship_id).map(|i| i.owner_id))?;
+                        s.characters.get(&owner).and_then(|c| c.war_faction_id)
+                    })
+                });
                 crate::services::mining_b33::run_auto_targeter_ballpark_tick(
-                    ballpark, cycle.ship_id, cycle.auto_target_max_range, cycle.auto_target_max_locks, cycle.auto_target_scan_res, agg, &fleet_ships,
+                    ballpark, sde_opt.as_deref(), char_faction, cycle.ship_id, cycle.auto_target_max_range, cycle.auto_target_max_locks, cycle.auto_target_scan_res, agg, &fleet_ships,
                 );
             }
 

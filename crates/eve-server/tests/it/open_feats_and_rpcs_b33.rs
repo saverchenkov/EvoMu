@@ -332,6 +332,7 @@ async fn test_b33_foreman_bursts_and_harvester_validity() {
     let full_str = dict_get(&burst_rep, "buffStrength").and_then(|v| v.as_f64()).unwrap();
     let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;
     p.ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&ind_core_id); });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
     let no_core_str = dict_get(&rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(burst_id)]).await.unwrap(), "buffStrength").and_then(|v| v.as_f64()).unwrap();
     assert!((full_str / no_core_str - 1.10).abs() < 1e-4, "Large Ind Core I must scale strength by 1.10x");
     let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(burst_id)]).await;

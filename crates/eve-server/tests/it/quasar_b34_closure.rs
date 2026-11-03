@@ -253,7 +253,7 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
             .collect(),
         _ => Vec::new(),
     };
-    assert_eq!(uuids.len(), 5, "Expected exact 5 canonical daily goals");
+    assert_eq!(uuids.len(), 6, "Expected exact 6 canonical daily goals (5 daily + 1 daily bonus)");
     let g1 = uuids[0];
     let g2 = uuids[1];
 
@@ -321,7 +321,7 @@ async fn test_b34_daily_goal_admin_and_events_closure() {
     let after_exp_rsp = quasar_rpc(&ctx, &mut admin_sess, "eve.dailygoal.api.GetAllRequest", Vec::new()).await;
     let after_exp_dyn = reg.decode_dynamic("eve.dailygoal.api.GetAllResponse", &after_exp_rsp.payload.unwrap().value).unwrap();
     let Some(DynamicValue::Repeated(rem_items)) = after_exp_dyn.get(1) else { panic!("expected repeated goals"); };
-    assert_eq!(rem_items.len(), 4, "Expired standard template goal must not be resurrected");
+    assert_eq!(rem_items.len(), 5, "Expired standard template goal must not be resurrected");
 }
 
 // ============================================================================

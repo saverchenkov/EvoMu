@@ -39,6 +39,9 @@ async fn b34_auto_targeting_and_cargo_expanders() {
         }
     });
     spawn_in_space(&ctx, 94002, 84002, 587, NULL_SYS, DVec3::new(15_000.0, 0.0, 0.0)).await;
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
+        rt.add_limited_engagement(94001, 94002, ctx.now_unix() + 900);
+    });
 
     let act = rpc(&ctx, &mut sess, "dogmaIM", "Activate", vec![PyRep::Integer(74001), PyRep::String("default".into())])
         .await

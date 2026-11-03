@@ -995,19 +995,6 @@ pub(crate) async fn handle_module_cycles(
                                         remove_cid = Some(charge_item.item_id);
                                     }
                                 }
-                            } else if mod_type.group_id == 1770 && active_burst_charge_tid.is_none() {
-                                if let Some(cargo_charge) = snap.items.values_mut().find(|i| {
-                                    i.location_id == ship_id
-                                        && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
-                                        && i.quantity > 0
-                                        && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 1771)
-                                }) {
-                                    active_burst_charge_tid = Some(cargo_charge.type_id);
-                                    cargo_charge.quantity = cargo_charge.quantity.saturating_sub(1);
-                                    if cargo_charge.quantity == 0 {
-                                        remove_cid = Some(cargo_charge.item_id);
-                                    }
-                                }
                             }
                             if let Some(rcid) = remove_cid {
                                 snap.items.remove(&rcid);

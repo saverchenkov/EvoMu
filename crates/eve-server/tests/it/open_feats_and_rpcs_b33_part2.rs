@@ -407,7 +407,7 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
             id: late_npc_id, type_id: ANGEL_ROGUE_NPC, position: p.ship_pos + DVec3::new(7_000.0, 0.0, 0.0),
             velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop,
         },
-        eve_destiny::CombatState::default(),
+        eve_destiny::CombatState { signature_radius: 0.0, ..Default::default() },
         eve_destiny::SlimItemMeta { group_id: 550, category_id: 11, owner_id: 500_010, ..Default::default() },
     ).await.unwrap();
     // Friendly remote repairer active on p.ship_id must NOT be auto-locked as hostile
@@ -434,10 +434,36 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
     sys_handle.step_manual(11.0).await.unwrap();
     let cycle_locks = sys_handle.get_target_locks(p.ship_id).await.unwrap();
     let late_lock = cycle_locks.iter().find(|l| l.target_id == late_npc_id).expect("Repeating Auto Targeting System cycle must lock late-arriving hostile NPC");
-    let expected_lock_ms = eve_destiny::combat::compute_lock_time_seconds(fit.ship.get_attribute(564, &p.ctx.sde).max(1.0), 50.0) * 1000.0;
-    assert!((late_lock.lock_time_ms - expected_lock_ms).abs() < 1e-3, "ATS must use ship scanResolution ({expected_lock_ms}ms), got {}", late_lock.lock_time_ms);
+    let npc_sig = p.ctx.sde.types.get(&ANGEL_ROGUE_NPC).and_then(|t| t.default_attributes.get(&552).copied()).filter(|&s| s > 0.0).unwrap_or(50.0);
+    let expected_lock_ms = eve_destiny::combat::compute_lock_time_seconds(fit.ship.get_attribute(564, &p.ctx.sde).max(1.0), npc_sig) * 1000.0;
+    assert!((late_lock.lock_time_ms - expected_lock_ms).abs() < 1e-3, "ATS must use ship scanResolution & target signatureRadius ({expected_lock_ms}ms), got {}", late_lock.lock_time_ms);
     assert!(!cycle_locks.iter().any(|l| l.target_id == neutral_ship_id), "Repeating Auto Targeting System cycle must not lock neutral player ship");
     assert!(!cycle_locks.iter().any(|l| l.target_id == friendly_rep_ship), "Repeating Auto Targeting System cycle must not lock friendly remote repairer");
+
+    // CONCORD (301) and Gate Sentry Gun (99) on grid must NOT be auto-locked; bloomed CombatState::signature_radius must govern lock time
+    let (concord_id, sentry_id, bloomed_rat_id) = (9_500_105_i64, 9_500_106_i64, 9_500_107_i64);
+    sys_handle.spawn_ball_with_meta(
+        Ball { id: concord_id, type_id: 11_957, position: p.ship_pos + DVec3::new(4_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta { group_id: 301, category_id: 11, owner_id: 500_019, ..Default::default() },
+    ).await.unwrap();
+    sys_handle.spawn_ball_with_meta(
+        Ball { id: sentry_id, type_id: 16_670, position: p.ship_pos + DVec3::new(4_500.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta { group_id: 99, category_id: 11, owner_id: 500_002, ..Default::default() },
+    ).await.unwrap();
+    sys_handle.spawn_ball_with_meta(
+        Ball { id: bloomed_rat_id, type_id: ANGEL_ROGUE_NPC, position: p.ship_pos + DVec3::new(8_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 200.0, inertia: 1.0, mass: 1e6, radius: 20.0, speed_fraction: 0.0, mode: MovementMode::Stop },
+        eve_destiny::CombatState { signature_radius: 180.0, ..Default::default() },
+        eve_destiny::SlimItemMeta { group_id: 550, category_id: 11, owner_id: 500_010, ..Default::default() },
+    ).await.unwrap();
+    let _ = rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(ats_id)]).await;
+    let _ = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(ats_id)]).await.unwrap();
+    let jita_locks2 = sys_handle.get_target_locks(p.ship_id).await.unwrap();
+    assert!(!jita_locks2.iter().any(|l| l.target_id == concord_id || l.target_id == sentry_id), "ATS must NOT auto-lock CONCORD or Empire Sentry Guns");
+    let bloom_lock = jita_locks2.iter().find(|l| l.target_id == bloomed_rat_id).expect("ATS must auto-lock hostile rat");
+    let expected_bloom_ms = eve_destiny::combat::compute_lock_time_seconds(fit.ship.get_attribute(564, &p.ctx.sde).max(1.0), 180.0) * 1000.0;
+    assert!((bloom_lock.lock_time_ms - expected_bloom_ms).abs() < 1e-3, "ATS must use CombatState::signature_radius (180m), got {}", bloom_lock.lock_time_ms);
 
     // Null-sec passive neutral player is NOT auto-locked; active offensive aggressor IS auto-locked on initial activation
     let null_sys: u32 = 30_004_759;
@@ -536,4 +562,17 @@ async fn test_b33_ancillary_remote_repairers_and_auto_targeting_system() {
         let reload_ms = dict_get(&load_rep, "reloadTimeMs").and_then(|v| v.as_f64()).unwrap_or(0.0);
         assert!((reload_ms - 60_000.0).abs() < 1e-3, "Ancillary remote repairer {mod_id} reload must be 60s (60000 ms), got {reload_ms}");
     }
+
+    // 3. Unloaded Mining Foreman Burst II with charges ONLY in Cargo must fail with NoChargesLoaded (no cargo bypass)
+    let (cargo_burst_id, cargo_charge_id) = (9_500_009_i64, 9_500_010_i64);
+    insert_item(&p.ctx, cargo_burst_id, 43_551, CHAR_ID, p.ship_id, InventoryFlag::HiSlot4, 1);
+    insert_item(&p.ctx, cargo_charge_id, 42_830, CHAR_ID, p.ship_id, InventoryFlag::Cargo, 10);
+    p.ctx.invalidate_ship_fitting(p.ship_id);
+    let cargo_burst_err = rpc(&mut p, "dogmaIM", None, "Activate", &[PyRep::Integer(cargo_burst_id)]).await.unwrap_err();
+    assert!(cargo_burst_err.contains("NoChargesLoaded"), "Unloaded Command Burst must not consume charges from Cargo: {cargo_burst_err}");
+    assert_eq!(
+        p.ctx.db.with_snapshot(|s| s.items.get(&cargo_charge_id).map(|i| i.quantity)),
+        Some(10),
+        "Cargo burst charges must remain untouched when burst slot is unloaded"
+    );
 }

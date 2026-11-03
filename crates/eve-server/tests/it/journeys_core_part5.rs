@@ -385,7 +385,7 @@ async fn test_journey_daily_goals_events() {
     assert_eq!(all_rsp.status_code, STATUS_OK);
     let wm = WireMessage::decode(&all_rsp.payload.unwrap().value).expect("decode GetAllCurrentResponse");
     let goal_fields: Vec<&WireField> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_fields.len(), 5, "must return 5 SDE-seeded daily goals");
+    assert_eq!(goal_fields.len(), 6, "must return 6 SDE-seeded daily goals (5 daily + 1 daily bonus)");
 
     // 2. Progress ScanSignature daily goal via real gameplay pathway & verify ProgressedNotice
     for sig_id in 800_001..=800_005 {

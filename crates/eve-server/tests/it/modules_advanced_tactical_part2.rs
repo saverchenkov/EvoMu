@@ -490,8 +490,26 @@ async fn target_spectrum_breaker_cehe_rsb_rtc_ancillary_remote_and_auto_targeter
     ally_sess.station_id = None;
     spawn_in_space(&ctx, 91052, 81052, 624, NULL_SYS, DVec3::new(0.0, 20_000.0, 0.0)).await;
     spawn_in_space(&ctx, 91053, 81053, 642, NULL_SYS, DVec3::new(5_000.0, 20_000.0, 0.0)).await;
+    sys.spawn_ball_with_meta(
+        eve_destiny::Ball {
+            id: 81_099,
+            type_id: 2_372,
+            position: DVec3::new(10_000.0, 20_000.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 200.0,
+            inertia: 1.0,
+            mass: 1e6,
+            radius: 35.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        },
+        eve_destiny::CombatState::default(),
+        eve_destiny::SlimItemMeta { group_id: 550, category_id: 11, owner_id: 500_010, ..Default::default() },
+    )
+    .await
+    .unwrap();
 
-    // Auto Targeting System II: passive +3 maxLockedTargets & active auto-locking of ships within 60 km obeying lock-time rules
+    // Auto Targeting System II: passive +3 maxLockedTargets & active auto-locking of hostile targets within 60 km obeying lock-time rules
     let logi_info = rpc(&ctx, &mut logi_sess, "dogmaIM", "GetAllInfo", vec![PyRep::Bool(true), PyRep::Bool(true)]).await.unwrap();
     let base_maller_locks = ctx.sde.types.get(&624).and_then(|t| t.default_attributes.get(&192).copied()).unwrap_or(6.0);
     assert!(
@@ -499,9 +517,10 @@ async fn target_spectrum_breaker_cehe_rsb_rtc_ancillary_remote_and_auto_targeter
         "Auto Targeting System II must add +3 maxLockedTargets while online"
     );
     let ats_res = rpc(&ctx, &mut logi_sess, "dogmaIM", "Activate", vec![PyRep::Integer(71066)]).await.expect("activate Auto Targeting System II");
-    assert!(ats_res.dict_get("lockingCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 1, "Auto Targeting System II must initiate locks on nearby ships");
+    assert!(ats_res.dict_get("lockingCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 1, "Auto Targeting System II must initiate locks on nearby hostile targets");
     let init_locks = sys.get_target_locks(81052).await.unwrap();
-    assert!(init_locks.iter().any(|l| l.target_id == 81053 && !l.locked && l.lock_time_ms > 0.0), "Auto-Targeter locks must obey normal lock-time rules");
+    assert!(init_locks.iter().any(|l| l.target_id == 81_099 && !l.locked && l.lock_time_ms > 0.0), "Auto-Targeter locks must obey normal lock-time rules");
+    rpc(&ctx, &mut logi_sess, "dogmaIM", "AddTarget", vec![PyRep::Integer(81053)]).await.unwrap();
     for _ in 0..15 {
         let _ = sys.tick().await;
     }

@@ -151,11 +151,10 @@ async fn test_warp_to_and_warp_special_fx_emitted_on_warp() {
     let warp = find(&actions, "WarpTo");
     assert_eq!(warp.len(), 1);
     let w = warp[0];
-    assert_eq!(w.len(), 6, "WarpTo(entityID, x, y, z, distance, warpSpeed)");
+    assert_eq!(w.len(), 5, "WarpTo(entityID, x, y, z, warpSpeed)");
     assert_eq!(w[0], PyRep::Integer(ship_id));
     assert_eq!((real(&w[1]), real(&w[2]), real(&w[3])), (destination.x, destination.y, destination.z));
-    assert!(matches!(w[4], PyRep::Integer(_)), "distance is an int");
-    assert_eq!(w[5], PyRep::Integer((warp_speed_au_s * 10.0).round() as i64), "warpSpeed is AU/s x 10");
+    assert_eq!(w[4], PyRep::Integer((warp_speed_au_s * 10.0).round() as i64), "warpSpeed is AU/s x 10");
 
     let fx = find(&actions, "OnSpecialFX");
     assert_eq!(fx.len(), 1, "warp start emits one OnSpecialFX");

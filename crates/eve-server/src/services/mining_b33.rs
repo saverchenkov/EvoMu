@@ -691,8 +691,33 @@ pub fn fleet_ship_ids_for_ship(
         .unwrap_or_else(|| vec![ship_id])
 }
 
+/// Returns `true` if an `Entity` (`category_id == 11`) with `group_id` is a hostile NPC rat/drone,
+/// excluding CONCORD, Police, Gate/Station Sentry Guns, Customs Officials, static/non-combatant
+/// entities, and friendly Faction Warfare militia entities.
+pub fn is_hostile_npc_group(group_id: u32, char_faction_id: Option<i64>) -> bool {
+    if matches!(
+        group_id,
+        99 | 180 | 182 | 297 | 298 | 301 | 306 | 319 | 323 | 335 | 446 | 925 | 952 | 1207 | 1872 | 1927 | 1928 | 4073 | 4494 | 4572 | 4576 | 4771
+    ) {
+        return false;
+    }
+    let is_amarr_caldari_fw = matches!(group_id, 1167 | 1169 | 1175 | 1176 | 1180 | 1183 | 4431 | 4432 | 5063 | 5064);
+    if is_amarr_caldari_fw {
+        return matches!(char_faction_id, Some(500_002 | 500_004));
+    }
+    let is_gallente_minmatar_fw = matches!(
+        group_id,
+        1166 | 1168 | 1177 | 1178 | 1179 | 1181 | 1182 | 1184 | 1185 | 1186 | 4433 | 4434 | 5065 | 5066
+    );
+    if is_gallente_minmatar_fw {
+        return matches!(char_faction_id, Some(500_001 | 500_003));
+    }
+    true
+}
+
 /// Returns `true` if `ball` is a genuinely hostile/aggressing target for Auto-Targeting System:
-/// an NPC entity (`category_id == 11`), or a non-fleet capsuleer with active combat aggression
+/// a hostile NPC entity (`category_id == 11`, excluding CONCORD, Empire sentry/customs guns, and
+/// friendly militia entities), or any non-fleet entity/capsuleer with active combat aggression
 /// against `char_id`/`ship_id` (active offensive/EWAR cycle, criminal flag, or active limited
 /// engagement). Unaggressed outlaws, suspects, passive null-sec neutrals, and friendly remote
 /// assistance ships are never auto-locked.
@@ -705,8 +730,17 @@ pub async fn is_auto_target_hostile_ball(
     fleet_members: &[i64],
     active_aggressors: &[i64],
 ) -> bool {
-    if ctx.sde.types.get(&ball.type_id).is_some_and(|t| t.category_id == 11) {
-        return true;
+    if active_aggressors.contains(&ball.id) {
+        let owner = ctx.db.with_snapshot(|s| s.items.get(&ball.id).map(|i| i.owner_id).unwrap_or(0));
+        if owner == 0 || (owner != char_id && !fleet_members.contains(&owner)) {
+            return true;
+        }
+    }
+    if let Some(t) = ctx.sde.types.get(&ball.type_id) {
+        if t.category_id == 11 {
+            let char_faction = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
+            return is_hostile_npc_group(t.group_id, char_faction);
+        }
     }
     if !crate::services::tactical_modules::is_player_ship_ball(
         Some(&ctx.sde),
@@ -719,9 +753,6 @@ pub async fn is_auto_target_hostile_ball(
     let owner = ctx.db.with_snapshot(|s| s.items.get(&ball.id).map(|i| i.owner_id).unwrap_or(0));
     if owner != 0 && (owner == char_id || fleet_members.contains(&owner)) {
         return false;
-    }
-    if active_aggressors.contains(&ball.id) {
-        return true;
     }
     let now_unix = ctx.now_unix();
     let crimewatch_hostile = ctx
@@ -737,11 +768,14 @@ pub async fn is_auto_target_hostile_ball(
 }
 
 /// Evaluates a repeating Auto-Targeting System cycle tick inside `ballpark`, locking only
-/// hostile NPCs (`category_id == 11`) or non-fleet ships with active offensive cycles targeting
-/// `ship_id` while obeying normal lock-time rules (`locked = false`, `lock_time_ms > 0.0`).
+/// hostile NPCs (`category_id == 11`, excluding CONCORD/sentry/friendly militia) or non-fleet
+/// ships with active offensive cycles targeting `ship_id` while obeying normal lock-time rules
+/// using target Dogma `signatureRadius` (`CombatState::signature_radius` -> SDE `attr 552` -> `b.radius`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_auto_targeter_ballpark_tick(
     ballpark: &mut eve_destiny::Ballpark,
+    sde: Option<&SdeRegistry>,
+    char_faction_id: Option<i64>,
     ship_id: eve_destiny::BallId,
     max_range: f64,
     max_locks: usize,
@@ -767,13 +801,33 @@ pub fn run_auto_targeter_ballpark_tick(
             {
                 return None;
             }
-            let is_hostile = match ballpark.ball_slim_meta(b.id) {
-                Some(m) if m.category_id == 11 => true,
-                Some(m) if m.category_id == 6 => aggressors.contains(&b.id),
-                Some(_) => false,
-                None => aggressors.contains(&b.id),
+            let is_hostile = if aggressors.contains(&b.id) {
+                true
+            } else {
+                match ballpark.ball_slim_meta(b.id) {
+                    Some(m) if m.category_id == 11 => is_hostile_npc_group(m.group_id, char_faction_id),
+                    Some(m) if m.category_id == 6 => false,
+                    Some(_) => false,
+                    None => sde
+                        .and_then(|reg| reg.types.get(&b.type_id))
+                        .is_some_and(|t| t.category_id == 11 && is_hostile_npc_group(t.group_id, char_faction_id)),
+                }
             };
-            is_hostile.then(|| (b.id, dist, b.radius.max(35.0)))
+            if !is_hostile {
+                return None;
+            }
+            let sig = ballpark
+                .combat_states
+                .get(&b.id)
+                .map(|cs| cs.signature_radius)
+                .filter(|&s| s > 0.0)
+                .or_else(|| {
+                    sde.and_then(|reg| reg.types.get(&b.type_id))
+                        .and_then(|t| t.default_attributes.get(&552).copied())
+                        .filter(|&s| s > 0.0)
+                })
+                .unwrap_or(b.radius);
+            Some((b.id, dist, sig))
         })
         .collect();
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));

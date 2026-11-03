@@ -563,7 +563,22 @@ pub async fn activate_auto_targeting_system(
             continue;
         }
         if super::mining_b33::is_auto_target_hostile_ball(ctx, sys, char_id, ship_id, b, &fleet_members, &active_aggressors).await {
-            candidates.push((b.id, dist, b.radius.max(35.0)));
+            let sig = sys
+                .get_combat_state(b.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|cs| cs.signature_radius)
+                .filter(|&s| s > 0.0)
+                .or_else(|| {
+                    ctx.sde
+                        .types
+                        .get(&b.type_id)
+                        .and_then(|t| t.default_attributes.get(&552).copied())
+                        .filter(|&s| s > 0.0)
+                })
+                .unwrap_or(b.radius);
+            candidates.push((b.id, dist, sig));
         }
     }
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1144,7 +1159,7 @@ pub async fn activate_command_burst(
                 && is_valid_charge_type(i.type_id)
                 && charge_tid_opt.is_none_or(|req| i.type_id == req)
         };
-        if let Some(found) = snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i)).or_else(|| snap.items.values().find(|i| is_burst_charge(i))) {
+        if let Some(found) = snap.items.values().find(|i| Some(i.flag) == mod_flag && is_burst_charge(i)) {
             (Some(found.type_id), Some(found.item_id))
         } else {
             (None, None)
@@ -1228,7 +1243,7 @@ pub async fn activate_command_burst(
             if dbuff_id > 0 {
                 let mod_val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
                 let mult = c_type.default_attributes.get(&mult_attr).copied().unwrap_or(0.0);
-                let val = if mod_val < 0.0 { mod_val * (1.0 + ind_core_strength_bonus) } else { mult * total_strength_mult };
+                let val = if mod_val < 0.0 { mod_val } else { mult * total_strength_mult };
                 raw_buffs.push((dbuff_id, val));
             }
         }
