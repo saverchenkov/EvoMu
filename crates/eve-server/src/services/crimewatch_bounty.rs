@@ -835,7 +835,7 @@ pub fn handle_apply_tags_for_sec_status(
                         reason: "Clone Soldier Security Tag".into(),
                         solar_system_id: sys_id,
                         event_type_id: 385,
-                        other_owner_id: Some(1_000_125),
+                        other_owner_id: None,
                         other_type_id: None,
                     });
             });
