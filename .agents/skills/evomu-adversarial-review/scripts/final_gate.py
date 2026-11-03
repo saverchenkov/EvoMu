@@ -8,7 +8,7 @@ on the current working tree. It is deliberately mechanical and slow. Every check
      closed (DONE or audited NA), no FLAGGED_FAKE rows, and no ledger rows removed.
   2. Final claims review: the latest FINAL claims review on this exact tree is PASS (not PASS_WITH_ISSUES). It must
      come from `run_review.py --final`, which uses the final reviewer chain (EVOMU_FINAL_REVIEW_CHAIN, default
-     opus-5.5-high > gemini-pro-next > gemini-launch-candidate-high > gemini-flash-next; fallback only on
+     gemini-4-carbon-high > opus-5.5-high > gemini-pro-next > gemini-launch-candidate-high > gemini-flash-next; fallback only on
      quota/capacity errors; user decision 2026-10-23). Routine (non --final) PASS reviews don't count.
   3. Gap audit: the latest gap audit on this exact tree is CLEAN.
   4. Line coverage (cargo llvm-cov, whole workspace) >= EVOMU_MIN_LINE_COVERAGE (default 90).
@@ -112,7 +112,7 @@ def main():
     cr = latest({"reviews": finals}, tree, "claims")
     ga = latest(state, tree, "gap-audit")
     final_models = [m.strip() for m in os.environ.get(
-        "EVOMU_FINAL_REVIEW_CHAIN", "opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+        "EVOMU_FINAL_REVIEW_CHAIN", "gemini-4-carbon-high,opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
     if not (cr and cr.get("verdict") == "PASS" and cr.get("model") in final_models):
         cr = rl.reviewed_by_code(root, verdicts=("PASS",), mode="claims", models=final_models, tree=tree,
                                  final_only=True) or cr

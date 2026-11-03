@@ -5,8 +5,8 @@ description: >-
   this skill before it (a) claims any milestone, fix, or review finding is done, implemented,
   "verified", or "passing"; (b) runs `git commit` or `git push`; (c) edits status claims in
   PLAN.md / README.md / docs/; or (d) ends a turn in which EvoMu source changed.
-  It launches a separate headless Jetski CLI (`agy`) reviewer pinned to Claude Opus 5.5 (Medium)
-  (`opus-5.5-medium`), which verifies claims against the code, runs tests honestly,
+  It launches a separate headless Jetski CLI (`agy`) reviewer prioritizing Gemini 4 Carbon (High)
+  (`gemini-4-carbon-high`), which verifies claims against the code, runs tests honestly,
   audits exploits, and returns PASS / PASS_WITH_ISSUES / FAIL.
 ---
 
@@ -18,7 +18,7 @@ EvoMu's coding agent has a documented history of overstating progress. Examples:
 - inflating coverage by adding unrelated method names to existing handlers;
 - committing a macOS Santa bypass.
 
-This skill brings in an **independent reviewer**. It is a separate agent running Claude Opus 5.5 (Medium) (`opus-5.5-medium`) with fresh context. Its verdict, not your own judgment, decides whether you may describe work as done.
+This skill brings in an **independent reviewer**. It is a separate agent running Gemini 4 Carbon (High) (`gemini-4-carbon-high`, falling back down the chain on quota) with fresh context. Its verdict, not your own judgment, decides whether you may describe work as done.
 
 ## When to run (mandatory)
 Run the review **before** any of the following:
@@ -34,7 +34,7 @@ Run the review **before** any of the following:
    ```bash
    /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md
    ```
-   - It gathers the diff since the last reviewed commit, collects static parity, metrics and a toolchain audit, calls the headless LLM reviewer (`opus-5.5-medium` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins), and when the code review returns `PASS` or `PASS_WITH_ISSUES`, runs `cargo test --workspace --no-fail-fast` once (wrappers scrubbed, isolated target dir) and verifies real parity (automatically downgrading to `FAIL` if any test fails). Don't pass `--model`; it's ignored unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
+   - It gathers the diff since the last reviewed commit, collects static parity, metrics and a toolchain audit, calls the headless LLM reviewer (`gemini-4-carbon-high` > `opus-5.5-medium` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins), and when the code review returns `PASS` or `PASS_WITH_ISSUES`, runs `cargo test --workspace --no-fail-fast` once (wrappers scrubbed, isolated target dir) and verifies real parity (automatically downgrading to `FAIL` if any test fails). Don't pass `--model`; it's ignored unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
    - Exit codes: `0` PASS, `1` PASS_WITH_ISSUES, `2` FAIL, `3` INVALID/ERROR.
    - Useful flags: `--base <ref>`, `--skip-tests` (recorded in the report as *not executed*), `--dry-run` (collect context and print the command only).
    - `--launcher jetski-chat` opens an interactive Jetski chat instead. It can't pin the model or record a verdict, so use it only for manual sessions.
@@ -43,7 +43,7 @@ Run the review **before** any of the following:
    - **FAIL:** fix every P0, plus every FALSE claim or reword it, then rerun. Don't commit, push, or tell the user the work is done.
    - **PASS_WITH_ISSUES:** you may commit. Tell the user the verdict and list the P1s, or fix them and rerun.
    - **PASS:** proceed.
-   - **UNAVAILABLE (exit 4):** every reviewer model in the `auto` chain (`opus-5.5-medium`, `gemini-pro-next`, `gemini-launch-candidate-high`, `gemini-flash-next`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
+   - **UNAVAILABLE (exit 4):** every reviewer model in the `auto` chain (`gemini-4-carbon-high`, `opus-5.5-medium`, `gemini-pro-next`, `gemini-launch-candidate-high`, `gemini-flash-next`) was out of quota or capacity. **Nothing was reviewed.** Follow `AGENTS.md` → "Reviewer unavailable": local `wip/*` branches only, no merge or push to `main`, and queue per-task reviews for when quota returns.
    - **Fallback reviews:** a verdict from a fallback model counts for commits like any other. The final gate still requires a PASS from the primary model.
    - **INVALID / ERROR:** the reviewer wrote to its snapshot, or it failed. Rerun. (Reviews run in a temporary snapshot worktree of the reviewed commit, so your own edits during a review don't invalidate it.) If `agy` is not authenticated, ask the user to run `agy` interactively once.
 5. **Report honestly.** Always tell the user the verdict word, the report path, the number of blocking findings, and whether tests actually executed (`tests_executed` in the report header). Never describe a result more favorably than the report does.
@@ -69,7 +69,7 @@ Per-change reviews check **precision** (is what you claim true?). Completeness i
   - Verdict: `CLEAN` or `GAPS`.
 - **Final gate.** `scripts/final_gate.py` is the definition of done. It requires, on the same tree:
   - 100% of the ledger closed, from a fresh full test run;
-  - a `PASS` **final** claims review (`run_review.py --final`; reviewer chain `opus-5.5-high` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins) and a `CLEAN` gap audit. Routine reviews don't count. Run `--final` once per milestone tree that is otherwise ready; it uses scarce Opus High quota;
+  - a `PASS` **final** claims review (`run_review.py --final`; reviewer chain `gemini-4-carbon-high` > `opus-5.5-high` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins) and a `CLEAN` gap audit. Routine reviews don't count. Run `--final` once per milestone tree that is otherwise ready;
   - line coverage ≥ 90% (`cargo llvm-cov`) and mutation score ≥ 85% (`cargo mutants`);
   - every journey in `references/parity/client_journeys.json` passing on the real V24 client via `tools/client-harness/run_journeys`, with zero `UnimplementedRPC`, panics or client tracebacks.
 

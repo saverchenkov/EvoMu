@@ -42,18 +42,18 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
-# Default reviewer mode (user decision 2026-10-22): `--model auto` tries each model in this order and uses the first
+    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-4-carbon-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+# Default reviewer mode (user decision 2026-11-02): `--model auto` tries each model in this order and uses the first
 # one that has quota/capacity. Callers must not pin a weaker model; an explicit --model / EVOMU_REVIEW_MODEL other
 # than `auto` is ignored unless EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1 (set only on the user's instruction).
 AUTO_MODE = "auto"
 AUTO_CHAIN = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_AUTO_CHAIN", "opus-5.5-medium,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
-# Final-acceptance reviewer chain (user decision 2026-10-23): `--final` claims reviews try Opus 5.5 High first, then
-# fall back on quota/capacity errors only. final_gate.py only accepts a PASS recorded with "final": true. Use it
-# sparingly: one --final review per milestone tree that is otherwise ready for final_gate.py, not for routine work.
+    "EVOMU_REVIEW_AUTO_CHAIN", "gemini-4-carbon-high,opus-5.5-medium,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+# Final-acceptance reviewer chain (user decision 2026-11-02): `--final` claims reviews try Gemini 4 Carbon High first
+# (ahead of Opus 5.5 High), then fall back on quota/capacity errors only. final_gate.py only accepts a PASS recorded
+# with "final": true. Use it sparingly: one --final review per milestone tree that is otherwise ready for final_gate.py.
 FINAL_CHAIN = [m.strip() for m in os.environ.get(
-    "EVOMU_FINAL_REVIEW_CHAIN", "opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+    "EVOMU_FINAL_REVIEW_CHAIN", "gemini-4-carbon-high,opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
 # Readable EvoMu model names -> agy model ids. agy's own id for Gemini Pro Next is literally "auto"; we never pass
 # EvoMu's AUTO_MODE to agy, only the resolved chain entries.
 AGY_MODEL_IDS = {"gemini-pro-next": "auto"}
