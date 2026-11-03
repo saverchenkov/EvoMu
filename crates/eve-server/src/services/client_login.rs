@@ -120,6 +120,7 @@ pub async fn handle(
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let mut st = ctx.alert_telemetry.lock().ok()?;
+            let mut newly_primed = None;
             let entry = match st.stack_traces.get(&hash) {
                 Some(e) => *e,
                 None => {
@@ -132,10 +133,18 @@ pub async fn handle(
                         }
                     }
                     st.stack_traces.insert(hash, e);
+                    newly_primed = Some(e);
                     e
                 }
             };
             drop(st);
+            if let Some((eid, mode_byte)) = newly_primed {
+                crate::services::notify_emitters_missing::emit_bean_prime(
+                    ctx,
+                    crate::router::NotificationTarget::All,
+                    vec![(hash, eid, mode_byte.to_string())],
+                );
+            }
             // One line only: the client trace is diagnostic text, not a server fault.
             let first_line: String = trace.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
                 .chars().take(200).collect();

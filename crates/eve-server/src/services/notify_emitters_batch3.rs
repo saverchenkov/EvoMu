@@ -687,23 +687,18 @@ pub fn emit_community_fittings_updated(ctx: &ServerContext) {
     );
 }
 
-/// Emits `OnLoginMilestoneAchieved(milestoneID, iskAmount, shouldStartAnimating)`.
+/// Emits `OnLoginMilestoneAchieved(milestoneID, iskAmount)`.
 pub fn emit_login_milestone_achieved(
     ctx: &ServerContext,
     char_id: i64,
     milestone_id: i64,
     isk_amount: f64,
-    should_animate: bool,
 ) {
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnLoginMilestoneAchieved",
         "charid",
-        vec![
-            PyRep::Integer(milestone_id),
-            PyRep::Real(isk_amount),
-            PyRep::Bool(should_animate),
-        ],
+        vec![PyRep::Integer(milestone_id), PyRep::Real(isk_amount)],
     );
 }
 

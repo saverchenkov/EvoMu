@@ -600,3 +600,4 @@ mod parity_pve_sov_remaining_closure_part2;
 mod parity_pve_ui_quasar_closure;
 mod parity_quasar_remaining_closure;
 mod parity_quasar_remaining_closure_part2;
+mod parity_notify_missing1_closure;
