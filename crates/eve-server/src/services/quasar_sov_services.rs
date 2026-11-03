@@ -55,7 +55,7 @@ pub fn register_handlers(
     let desc = Arc::clone(&router.descriptors);
 
     // 1. eve_public.sovereignty.skyhook.api handlers
-    super::quasar_sov_skyhook::register_query_handlers(router, Arc::clone(&db));
+    super::quasar_sov_skyhook::register_query_handlers(router, Arc::clone(&db), Arc::clone(&sde));
     {
         let db_act = Arc::clone(&db);
         let pending = Arc::clone(&router.pending_notices);

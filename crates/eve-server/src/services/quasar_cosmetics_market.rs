@@ -56,13 +56,20 @@ impl CosmeticsMarketState {
 
     pub fn load_with_sink(
         db: Arc<WorldRepository>,
-        _sde: Arc<SdeRegistry>,
+        sde: Arc<SdeRegistry>,
         skinr: Arc<SkinrCosmeticsState>,
         macho_notify_sink: Arc<RwLock<Option<crate::quasar_gateway::MachoNotifySink>>>,
     ) -> Arc<Self> {
-        let data: CosmeticsMarketData = db.with_snapshot(|s| {
+        let mut data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs.get(BLOB_KEY).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
         });
+        if seed_component_listings_if_empty(&mut data, &sde) {
+            if let Ok(json) = serde_json::to_string(&data) {
+                db.with_mut_snapshot(|s| {
+                    s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
+                });
+            }
+        }
         Arc::new(Self { db, data: RwLock::new(data), skinr, macho_notify_sink })
     }
 

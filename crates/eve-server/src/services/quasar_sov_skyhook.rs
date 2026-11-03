@@ -14,6 +14,7 @@ use super::sov_services::TYPE_ORBITAL_SKYHOOK;
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED};
 use eve_db::{WorldRepository, WorldStateSnapshot};
 use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
+use eve_sde::SdeRegistry;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ fn open_window(snap: &WorldStateSnapshot, id: i64, now: u64) -> Option<(u64, u64
 
 /// Encodes the shared skyhook body: `skyhook(1)`, `reagent_simulations(2)`, `active(3)`,
 /// `theft_vulnerability(5)` and `workforce(7)`.
-fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
+fn encode_skyhook(snap: &WorldStateSnapshot, sde: &SdeRegistry, id: i64, now: u64) -> Vec<u8> {
     let mut b = Vec::new();
     id_field(1, id as u64, &mut b);
     if let Some((reagent_type, stock)) = snap.sov_runtime.skyhook_reagents.get(&id).copied() {
@@ -56,7 +57,7 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
         let mut r_def = Vec::new();
         id_field(1, u64::from(reagent_type), &mut r_def);
         let mut amt = Vec::new();
-        encode_varint_field(1, 50, &mut amt);
+        encode_varint_field(1, super::sov_gameplay::SKYHOOK_HOURLY_REAGENT_YIELD, &mut amt);
         encode_varint_field(2, 3_600, &mut amt);
         encode_bytes_field(2, &amt, &mut r_def);
         encode_bytes_field(4, &r_def, &mut b);
@@ -73,11 +74,25 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
         None => encode_varint_field(1, 0, &mut theft),
     }
     encode_bytes_field(5, &theft, &mut b);
-    if let Some(planet_id) = snap.sov_runtime.skyhook_planets.get(&id).copied() {
-        id_field(6, planet_id as u64, &mut b);
+    let planet_id = snap.sov_runtime.skyhook_planets.get(&id).copied();
+    if let Some(pid) = planet_id {
+        id_field(6, pid as u64, &mut b);
     }
+    let wf_amount = match (planet_id, snap.structures.get(&id).map(|s| s.solar_system_id)) {
+        (Some(pid), Some(sys_id)) if active => sde
+            .celestials_in_system(sys_id)
+            .into_iter()
+            .find(|c| c.celestial_id == pid)
+            .map(|c| super::quasar_sov_hub::planet_yield(c.type_id).1)
+            .unwrap_or(0),
+        _ => 0,
+    };
     let mut wf = Vec::new();
-    encode_varint_field(2, 1, &mut wf); // Workforce.none: skyhook workforce is not simulated
+    if wf_amount > 0 {
+        encode_varint_field(1, wf_amount, &mut wf);
+    } else {
+        encode_varint_field(2, 1, &mut wf);
+    }
     encode_bytes_field(7, &wf, &mut b);
     b
 }
@@ -94,9 +109,10 @@ fn sorted_skyhooks(snap: &WorldStateSnapshot, pred: impl Fn(&eve_db::UpwellStruc
 }
 
 /// Registers skyhook query handlers.
-pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
+pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) {
     {
         let db = Arc::clone(&db);
+        let sde = Arc::clone(&sde);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -107,7 +123,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                         return Err::<Vec<u8>, RpcError>((STATUS_NOT_FOUND, format!("Skyhook {id} not found")));
                     }
                     let _ = super::sov_gameplay::advance_skyhook_reagents_in_snap(snap, id, now);
-                    Ok(encode_skyhook(snap, id, now))
+                    Ok(encode_skyhook(snap, &sde, id, now))
                 })?;
                 Ok(any("eve_public.sovereignty.skyhook.api.GetResponse", body))
             }),
@@ -115,6 +131,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
     }
     {
         let db = Arc::clone(&db);
+        let sde = Arc::clone(&sde);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetAllLocalRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
@@ -130,7 +147,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                     let mut out = Vec::new();
                     id_field(1, u64::from(sys), &mut out);
                     for id in sorted_skyhooks(snap, |s| s.solar_system_id == sys) {
-                        encode_bytes_field(2, &encode_skyhook(snap, id, ctx.now_unix()), &mut out);
+                        encode_bytes_field(2, &encode_skyhook(snap, &sde, id, ctx.now_unix()), &mut out);
                     }
                     Ok::<_, RpcError>(out)
                 })?;
@@ -140,6 +157,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
     }
     {
         let db = Arc::clone(&db);
+        let sde = Arc::clone(&sde);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.GetAllByCorporationRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -147,7 +165,7 @@ pub fn register_query_handlers(router: &PublicGatewayRouter, db: Arc<WorldReposi
                 let out = db.with_snapshot(|snap| {
                     let mut out = Vec::new();
                     for id in sorted_skyhooks(snap, |s| s.owner_corp_id == corp) {
-                        encode_bytes_field(1, &encode_skyhook(snap, id, ctx.now_unix()), &mut out);
+                        encode_bytes_field(1, &encode_skyhook(snap, &sde, id, ctx.now_unix()), &mut out);
                     }
                     out
                 });
