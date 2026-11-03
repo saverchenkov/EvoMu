@@ -345,6 +345,7 @@ mod sp6_logoff_and_server_tick_part2;
 mod sp7_cluster_scheduler_and_reload;
 mod rpc_beyonce_dogma_contracts_complete;
 mod security_p0_exploits;
+mod parity_skinr_den_invariants;
 mod plan_unblock_invariants_and_lifecycle;
 mod wormhole_restrictions_and_buckets;
 mod notifications_server_push_sweep;
