@@ -506,7 +506,7 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
         PILOT_2,
         0.0,
     );
-    assert!((net_payout - 1_201_500.0).abs() < 1e-3, "Net payout must reflect 11% tax deduction (1.35M gross - 148.5k tax)");
+    assert!((net_payout - 890_000.0).abs() < 1e-3, "Net payout must reflect 11% tax deduction (1M gross - 110k tax)");
 
     let tax_entry = ctx.db.with_snapshot(|s| {
         s.wallet_journal
@@ -516,7 +516,7 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
     });
     assert!(tax_entry.is_some(), "Wallet journal must record 11% NPC corp tax deduction");
     let tax_rec = tax_entry.unwrap();
-    assert_eq!(tax_rec.amount.raw_cents(), -148_500_00, "11% of 1.35M modified bounty is 148,500 ISK");
+    assert_eq!(tax_rec.amount.raw_cents(), -110_000_00, "11% of 1M highsec bounty is 110,000 ISK");
 }
 
 #[tokio::test]

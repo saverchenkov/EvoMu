@@ -339,9 +339,17 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     for _ in 0..10 {
         let _ = sys.try_step_full_tick(1.0);
     }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let titan_notifs = ctx.drain_notifications_for_char(titan_char);
-    let victim_notifs = ctx.drain_notifications_for_char(v_200_char);
+    let (mut titan_notifs, mut victim_notifs) = (Vec::new(), Vec::new());
+    for _ in 0..500 {
+        titan_notifs.extend(ctx.drain_notifications_for_char(titan_char));
+        victim_notifs.extend(ctx.drain_notifications_for_char(v_200_char));
+        if titan_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1)
+            && victim_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(titan_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1), "Attacker OnDamageMessage must be emitted at t=15s");
     assert!(victim_notifs.iter().any(|n| n.event == "OnDamageMessage" && n.args.len() == 1), "Hit player victim must receive incoming OnDamageMessage at t=15s");
 
@@ -351,13 +359,10 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, titan_char, NULL_SYS, titan_ship).await;
     assert!(!sys.get_combat_state(titan_ship).await.unwrap().unwrap().is_tethered, "Titan caster must remain tether-locked for the full 300s after firing Lance");
     assert!(ctx.dispatch_rpc(&mut titan_sess, "beyonce", Some(titan_beyonce), "CmdGotoDirection", &[PyRep::Real(0.0), PyRep::Real(1.0), PyRep::Real(0.0)], &kw, None).await.is_err(), "Titan caster must remain subwarp-immobilized during 300s lock");
-    // Killmail generated for destroyed Rifter at 150km with Titan recorded as attacker!
-    let has_lance_killmail = ctx.db.with_snapshot(|snap| {
-        snap.killmails.values().any(|km| {
-            km.victim_character_id == v_150_char && km.attacker_character_id == titan_char
-        })
-    });
-    assert!(has_lance_killmail, "Lance beam kill at t=15s must record Titan attacker on killmail");
+    assert!(
+        ctx.db.with_snapshot(|s| s.killmails.values().any(|k| k.victim_character_id == v_150_char && k.attacker_character_id == titan_char)),
+        "Lance beam kill at t=15s must record Titan attacker on killmail"
+    );
 
     let cs_200_after = sys.get_combat_state(v_200km).await.unwrap().unwrap();
     let cs_350_after = sys.get_combat_state(v_350km).await.unwrap().unwrap();
@@ -369,7 +374,7 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     // Step another tick: Lance Doomsday does NOT warp-scramble victims (only caster is locked for 300s)
     let _ = sys.try_step_full_tick(1.0);
     assert!(!sys.is_ball_scrambled(v_200km).await.unwrap(), "Hit victim must NOT be warp-scrambled by standard Lance Doomsday");
-    assert!(ctx.dispatch_rpc(&mut v_200_sess, "beyonce", Some(v_200_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)], &kw, None).await.is_ok(), "Hit victim can warp freely");
+    ctx.dispatch_rpc(&mut v_200_sess, "beyonce", Some(v_200_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)], &kw, None).await.expect("Hit victim can warp freely");
     assert!(ctx.dispatch_rpc(&mut titan_sess, "beyonce", Some(titan_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)], &kw, None).await.is_err(), "Titan caster cannot warp during 300s lock");
 }
 
