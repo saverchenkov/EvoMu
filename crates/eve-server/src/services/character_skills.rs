@@ -451,7 +451,7 @@ pub fn handle(
             Some(Ok(end_ft.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
 
-        ("skillMgr2", "SaveSkillQueue") => {
+        ("skillMgr2", "SaveSkillQueue" | "SaveNewQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
