@@ -306,6 +306,22 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
     let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(3), PyRep::Integer(7)], &kw, None).await.unwrap();
     let sv_active = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].secondary_vector_target);
     assert_eq!(sv_active, Some((7, 3)));
+
+    // Verify SelfRepair heals 5..=10 per turn for 3 turns and exceeds max_virus_coherence
+    let max_coh = with_pve_exploration_reg(&ctx, |reg| {
+        let g = reg.hacking_games.get_mut(&(PILOT_1, data_can_id)).unwrap();
+        g.virus_coherence = g.max_virus_coherence;
+        g.max_virus_coherence
+    });
+    let mut prev_coh = max_coh;
+    for tid in [3_i64, 4, 5] {
+        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(data_can_id), PyRep::Integer(tid)], &kw, None).await.unwrap();
+        let cur_coh = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].virus_coherence);
+        assert!((5..=10).contains(&(cur_coh - prev_coh)), "SelfRepair must heal 5..=10 per turn");
+        prev_coh = cur_coh;
+    }
+    assert!(prev_coh > max_coh, "SelfRepair must allow virus_coherence to exceed max_virus_coherence");
+    assert_eq!(with_pve_exploration_reg(&ctx, |reg| reg.self_repair_turns.get(&(PILOT_1, data_can_id)).copied()), None);
 }
 
 // ============================================================================

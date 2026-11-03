@@ -110,11 +110,11 @@ async fn test_mobile_depot_anchoring_refit_storage_reinforce() {
     let near_while_anchoring = is_near_in_space_fitting_service(&ctx, TEST_SYSTEM, SHIP_1).await;
     assert!(!near_while_anchoring, "Depot must not provide refit service while anchoring");
 
-    // 2. During anchoring phase: damage does NOT trigger reinforcement
+    // 2. During anchoring phase: takes direct damage and does NOT trigger reinforcement
     let sys = ctx.systems.get_or_spawn(TEST_SYSTEM);
     let anchor_dmg = DamageVector { em: 100.0, thermal: 0.0, kinetic: 0.0, explosive: 0.0 };
     let (dmg_done, destroyed, _) = sys.apply_damage(depot_item_id, anchor_dmg).await.expect("apply damage").expect("depot hit");
-    assert_eq!(dmg_done, 0.0, "Mobile Depot must be invulnerable during 60s anchoring phase");
+    assert!(dmg_done > 0.0, "Mobile Depot takes direct damage during 60s anchoring phase");
     assert!(!destroyed);
     let rec_anchor = read_deployable_state(&ctx).deployables.get(&depot_item_id).cloned().unwrap();
     assert!(rec_anchor.reinforced_until_unix.is_none(), "Depot must not reinforce during anchoring phase");

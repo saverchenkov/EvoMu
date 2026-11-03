@@ -518,8 +518,8 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let (lava_t, lava_sec0, lava_insec0, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     let (ice_t, _, ice_insec0, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&ice_skyhook]);
-    assert_eq!((lava_t, lava_sec0, lava_insec0), (TYPE_MAGMATIC_GAS, 0, 500));
-    assert_eq!((ice_t, ice_insec0), (TYPE_SUPERIONIC_ICE, 500));
+    assert_eq!((lava_t, lava_sec0, lava_insec0), (TYPE_MAGMATIC_GAS, 250, 250));
+    assert_eq!((ice_t, ice_insec0), (TYPE_SUPERIONIC_ICE, 250));
 
     let t0 = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
@@ -537,13 +537,13 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     ctx.advance_secs(SKYHOOK_MATURITY_CYCLE_SECS / 2);
     let (_, lava_sec12, lava_insec12, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
     let (_, ice_sec12, ice_insec12, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&ice_skyhook]);
-    assert_eq!((lava_sec12, lava_insec12), (250, 250));
+    assert_eq!((lava_sec12, lava_insec12), (375, 125));
     assert_eq!((lava_sec12, lava_insec12), (ice_sec12, ice_insec12));
 
     let sk_proto = rpc(&ctx, &mut s_dir, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, lava_skyhook as u64))
         .await.payload.unwrap().value;
     let sim = field(&field(&sk_proto, 2).unwrap(), 2).unwrap();
-    assert_eq!((varint(&sim, 1), varint(&sim, 2)), (Some(250), Some(250)));
+    assert_eq!((varint(&sim, 1), varint(&sim, 2)), (Some(375), Some(125)));
 
     // 3. Live Orbital Skyhook Reagent Silo ship-link theft (`dogmaIM.Activate` -> `<= 10%` shield -> `InitiateLink` -> 600s tick).
     let thief_cid = 90_000_077i64;
@@ -604,13 +604,13 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(drain_quasar(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.skyhook.api.SkyhookReagentsSimulatedNotice"));
     let (_, final_sec, final_insec, _) = ctx.db.with_snapshot(|s| s.sov_runtime.skyhook_reagent_bays[&lava_skyhook]);
-    assert_eq!((final_sec, final_insec), (253, 0));
+    assert_eq!((final_sec, final_insec), (376, 0));
     let balls = ctx.systems.get_or_spawn(sys_id).list_balls().await.unwrap();
     let can_ball = balls.iter().find(|b| b.type_id == 23).expect("Cargo Container 23 spawned in space");
     let stolen_qty: i32 = ctx.db.with_snapshot(|s| {
         s.items.values().filter(|i| i.location_id == can_ball.id && i.type_id == TYPE_MAGMATIC_GAS).map(|i| i.quantity).sum()
     });
-    assert_eq!(stolen_qty, 247);
+    assert_eq!(stolen_qty, 124);
 
     let full_cargo_item_id = 991_999i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -642,7 +642,7 @@ async fn test_skyhook_anchoring_linear_maturity_and_live_silo_ship_link_theft() 
         &ctx, &mut s_dir, "beyonce", "CallComponentFromClient",
         &[PyRep::Integer(lava_skyhook), PyRep::String("orbitalSkyhook".into()), PyRep::String("ExtractReagentsToShip".into())],
     ).await.expect("ExtractReagentsToShip");
-    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(253));
+    assert_eq!(ext_rep.dict_get("extractedQuantity").and_then(|v| v.as_i64()), Some(376));
 
     drop(ctx);
     let ctx_restarted = open_sqlite_ctx(&db_path, false);

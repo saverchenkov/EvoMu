@@ -290,8 +290,8 @@ async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
     set_skill_level(&ctx, char_a, 28_880, 0); // Nanite Interfacing L0
 
     // 1. Streaming per-tick paste deduction + clean mid-repair halt when cargo paste is exhausted!
-    // Mega Pulse Laser II (`3057`, 20 m3, 40 HP) at 20.0 HP damage requires 8 paste over ~7.46s (2.68 HP/s).
-    // Seed only 3 paste in cargo -> 1 consumed at t=0, 2 streamed over ticks, then repair halts cleanly at 3/8 (12.5 HP remaining)!
+    // Mega Pulse Laser II (`3057`, SDE attr 1277 = 0.5 paste/HP) at 20.0 HP damage requires 10 paste.
+    // Seed only 3 paste in cargo -> 1 consumed at t=0, 2 streamed over ticks, then repair halts cleanly at 3/10 (14.0 HP remaining)!
     let mod_stream: i64 = 77_201;
     let paste_stack: i64 = 77_202;
     give_item(&ctx, mod_stream, 3_057, char_a, ship_a, InventoryFlag::HiSlot1, 1);
@@ -300,7 +300,7 @@ async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
 
     let rep_start = rpc(&ctx, &mut sess_a, "dogmaIM", "InitiateModuleRepair", vec![PyRep::Integer(mod_stream)]).await.unwrap();
     assert_eq!(rep_start.dict_get("pasteConsumed"), Some(&PyRep::Integer(1)), "Only 1 paste unit deducted at t=0");
-    assert_eq!(rep_start.dict_get("totalPasteRequired"), Some(&PyRep::Integer(8)));
+    assert_eq!(rep_start.dict_get("totalPasteRequired"), Some(&PyRep::Integer(10)));
     assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&paste_stack).unwrap().quantity), 2, "2 paste units remain in cargo at t=0");
 
     for _ in 0..8 {
@@ -311,8 +311,8 @@ async fn test_nanite_repair_paste_streaming_and_cargo_refund_capacity() {
     assert!(!sys.is_module_being_nanite_repaired_sync(ship_a, mod_stream), "Repair must halt cleanly when cargo paste is exhausted");
     let dmg_after_exhaust = ctx.db.with_snapshot(|s| s.items.get(&mod_stream).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     assert!(
-        (dmg_after_exhaust - 12.5).abs() < 0.05,
-        "Exhausting 3 of 8 required paste must repair exactly 3/8 of 20 HP (12.5 HP left), got {dmg_after_exhaust}"
+        (dmg_after_exhaust - 14.0).abs() < 0.05,
+        "Exhausting 3 of 10 required paste must repair exactly 3/10 of 20 HP (14.0 HP left), got {dmg_after_exhaust}"
     );
 
     // 2. Cargo capacity guard on cancellation refund: filling cargo to 100% hull capacity before t=0 StopModuleRepair

@@ -562,9 +562,8 @@ pub async fn handle_pve_hacking(
                 if !core_destroyed && game.virus_coherence > 0 {
                     if let Some(rem) = reg.self_repair_turns.get_mut(&(char_id, container_id)) {
                         if *rem > 0 {
-                            let heal = 5 + ((tile_idx as i32) % 6);
-                            game.virus_coherence =
-                                (game.virus_coherence + heal).min(game.max_virus_coherence);
+                            let heal = 5 + (ctx.mechanic_rng.try_next_u64().unwrap_or(0) % 6) as i32;
+                            game.virus_coherence += heal;
                             *rem -= 1;
                             if *rem == 0 {
                                 reg.self_repair_turns.remove(&(char_id, container_id));

@@ -470,6 +470,7 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     ctx.advance_secs(10);
     run_daily_downtime_and_jobs(&ctx);
     ctx.db.with_snapshot(|s| assert_eq!(s.active_missions[&(P1, m_id)].npcs_remaining, initial_npcs));
+    let ag_beyonce = ctx.bind_object(&sess, "beyonce", i64::from(m_sys)).unwrap();
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
     let respawned_ids = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].spawned_npc_ball_ids.clone());
     assert_eq!(respawned_ids.len() as u32, initial_npcs);

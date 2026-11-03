@@ -244,12 +244,29 @@ pub(crate) async fn pulse_complex_60s(
     active_ship: i64,
     parked: &[(i64, u32)],
 ) {
+    let beacon = ctx.db.with_snapshot(|s| {
+        s.system_states
+            .get(&sys_id)
+            .and_then(|st| st.fw_complex_position)
+            .map(DVec3::from_array)
+            .unwrap_or(DVec3::ZERO)
+    });
+    let off_grid = beacon + DVec3::new(500_000.0, 500_000.0, 0.0);
     for &(pship, psys) in parked {
-        let _ = ctx
-            .systems
-            .get_or_spawn(psys)
-            .set_ball_position(pship, DVec3::new(900_000.0, 900_000.0, 0.0))
-            .await;
+        let p_off = if psys == sys_id {
+            off_grid
+        } else {
+            ctx.db
+                .with_snapshot(|s| {
+                    s.system_states
+                        .get(&psys)
+                        .and_then(|st| st.fw_complex_position)
+                        .map(DVec3::from_array)
+                        .unwrap_or(DVec3::ZERO)
+                })
+                + DVec3::new(500_000.0, 500_000.0, 0.0)
+        };
+        let _ = ctx.systems.get_or_spawn(psys).set_ball_position(pship, p_off).await;
     }
     set_pilot_location(ctx, active_sess, sys_id, None);
     ctx.db.with_mut_snapshot(|s| {
@@ -257,13 +274,11 @@ pub(crate) async fn pulse_complex_60s(
         for &(pship, _) in parked { s.sp6_lifecycle.ship_combat_hp.remove(&pship); }
         if let Some(it) = s.items.get_mut(&active_ship) { it.location_id = i64::from(sys_id); }
     });
-    place_ship_ball(ctx, sys_id, active_cid, active_ship, 22_456, DVec3::new(5_000.0, 0.0, 0.0)).await;
+    place_ship_ball(ctx, sys_id, active_cid, active_ship, 22_456, beacon + DVec3::new(5_000.0, 0.0, 0.0)).await;
     let sys_h = ctx.systems.get_or_spawn(sys_id);
     sys_h.step_manual(60.0).await.unwrap();
     eve_server::sp6_lifecycle::tick_background_cluster(ctx).await;
-    let _ = sys_h
-        .set_ball_position(active_ship, DVec3::new(900_000.0, 900_000.0, 0.0))
-        .await;
+    let _ = sys_h.set_ball_position(active_ship, off_grid).await;
 }
 
 async fn measure_live_pvp_loot_drop_fraction(

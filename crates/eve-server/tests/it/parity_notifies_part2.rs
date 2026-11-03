@@ -337,8 +337,13 @@ async fn test_parity_notifies_plex_dogma_and_brain() {
     let _ = sys.set_combat_state(ship_id, cs).await;
     let _ = eve_server::services::mining_cycle::process_mining_cycles(&ctx).await;
     let eff_n = drain_all(&ctx, &mut sess, PILOT_A);
+    let eff_args = find_notif(&eff_n, "OnEffectMessage");
+    assert_eq!(eff_args[0], PyRep::String("NotEnoughEnergy".into()));
+    assert_eq!(eff_args[1].dict_get("moduleID"), Some(&PyRep::Integer(miner_id)));
     assert_eq!(
-        find_notif(&eff_n, "OnEffectMessage")[0],
-        PyRep::String("EffectDeactivatedOutOfCap".into())
+        eff_args[1].dict_get("effectname"),
+        Some(&PyRep::String("miningLaser".into()))
     );
+    assert!(eff_args[1].dict_get("need").is_some());
+    assert_eq!(eff_args[1].dict_get("got"), Some(&PyRep::Real(0.0)));
 }

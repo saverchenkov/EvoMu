@@ -211,11 +211,27 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert_eq!(start_rep.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(40), "Relic Analyzer I base virusCoherence (attr 1909) is 40");
     assert_eq!(start_rep.dict_get("virusStrength").and_then(|v| v.as_i64()), Some(20), "Relic Analyzer I base virusStrength (attr 1910) is 20");
 
-    // Utility slots start empty until a DataCache node is revealed; revealing tile 1 collects PolymorphicShield into slot 0
+    // Utility slots start empty until a DataCache node is revealed; revealing the PolymorphicShield DataCache collects it
     let empty_util_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect_err("empty utility slot");
     assert_eq!(empty_util_err.code, "UtilitySlotEmpty");
-    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(relic_can_id), PyRep::Integer(1)], &kw, None).await.expect("Reveal DataCache at tile 1");
-    let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement PolymorphicShield");
+    let poly_idx = with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games[&(90_000_001, relic_can_id)].tiles.iter()
+            .find(|t| t.utility_drop.as_ref().is_some_and(|u| format!("{u:?}") == "PolymorphicShield"))
+            .unwrap().tile_index
+    });
+    let mut poly_path: Vec<u32> = (1..=(poly_idx / 6)).map(|r| r * 6).collect();
+    poly_path.extend(((poly_idx / 6) * 6 + 1)..=poly_idx);
+    for idx in poly_path {
+        for _ in 0..5 {
+            let r = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(relic_can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("Reveal DataCache");
+            if idx == poly_idx || r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 { break; }
+        }
+    }
+    let poly_slot = with_pve_exploration_reg(&ctx, |reg| {
+        reg.hacking_games[&(90_000_001, relic_can_id)].utilities.iter()
+            .position(|u| u.as_ref().is_some_and(|k| format!("{k:?}") == "PolymorphicShield")).unwrap()
+    });
+    let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(poly_slot as i64), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement PolymorphicShield");
     assert_eq!(util_rep.dict_get("polymorphicShieldCharges").and_then(|v| v.as_i64()), Some(2));
 
     // Traverse adjacent tiles to the SystemCore tile and destroy it to win the hack and trigger Loot Spew
@@ -317,16 +333,29 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert_eq!(multichar_err.code, "HackingGameAlreadyInProgress");
     assert_eq!(multichar_err.message, "Another pilot is already hacking this container");
 
-    // Pilot 1 fails minigame via virus coherence reaching 0 on Firewall (strength 20 > 10)
-    for adj_idx in [1_i64, 2] {
-        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to tile 3");
+    // Pilot 1 fails minigame via virus coherence reaching 0 on a defensive node (strength > 0)
+    let def_path = with_pve_exploration_reg(&ctx, |reg| {
+        let tiles = &reg.hacking_games[&(90_000_001, can3_id)].tiles;
+        let core_idx = tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index;
+        tiles.iter().filter(|t| t.strength > 0 && t.tile_index > 0 && t.tile_index != core_idx).find_map(|t| {
+            let p1: Vec<u32> = (1..=(t.tile_index / 6)).map(|r| r * 6).chain(((t.tile_index / 6) * 6 + 1)..=t.tile_index).collect();
+            if !p1.contains(&core_idx) { return Some(p1); }
+            let p2: Vec<u32> = (1..=(t.tile_index % 6)).chain((1..=(t.tile_index / 6)).map(|r| r * 6 + (t.tile_index % 6))).collect();
+            (!p2.contains(&core_idx)).then_some(p2)
+        }).unwrap()
+    });
+    let (&def_idx, prefix_path) = def_path.split_last().unwrap();
+    for &idx in prefix_path {
+        for _ in 0..5 {
+            with_pve_exploration_reg(&ctx, |reg| { if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) { g.virus_coherence = 100; } });
+            let r = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("reveal path to defensive node");
+            if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 { break; }
+        }
     }
     with_pve_exploration_reg(&ctx, |reg| {
-        if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) {
-            g.virus_coherence = 10;
-        }
+        if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) { g.virus_coherence = 1; g.polymorphic_shield_charges = 0; }
     });
-    let fail_step = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(3)], &kw, None).await.expect("click tile fail");
+    let fail_step = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(def_idx as i64)], &kw, None).await.expect("click tile fail");
     assert_eq!(fail_step.dict_get("status").and_then(|v| v.as_str()), Some("Failed"));
     // QuitHackingAttempt on already Failed game should not double-increment failure count
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can3_id)], &kw, None).await.expect("quit after fail");

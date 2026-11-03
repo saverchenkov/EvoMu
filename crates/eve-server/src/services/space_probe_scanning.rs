@@ -16,6 +16,9 @@ use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
 use std::collections::HashMap;
 
+pub const PROBE_STATE_INACTIVE: i32 = 0; pub const PROBE_STATE_IDLE: i32 = 1; pub const PROBE_STATE_MOVING: i32 = 2;
+pub const PROBE_STATE_WARPING: i32 = 3; pub const PROBE_STATE_SCANNING: i32 = 4; pub const PROBE_STATE_RETURNING: i32 = 5;
+
 // parity: feat:scanning.probe-target-classes, feat:scanning.probe-range-deviation
 pub fn is_combat_scanner_probe(sde: &SdeRegistry, probe_type_id: u32) -> bool {
     sde.types
@@ -759,10 +762,10 @@ async fn handle_request_scans(
                 max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
                 let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
                 let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
-                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(2)]);
+                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_WARPING as i64)]);
                 let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(warp_ms)]);
                 if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-                    if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = 2; }
+                    if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = PROBE_STATE_WARPING; }
                 }
             }
         }
@@ -1082,9 +1085,10 @@ async fn handle_request_scans(
     let scan_ms = (10_000.0 * (1.0 - 0.05 * astro_lvl)).round().max(2_000.0) as i64;
     let scan_end_ft = max_warp_end_ft + scan_ms * 10_000;
     if max_warp_end_ft == warp_ft {
-        for p in &active_probes {
-            let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(3)]);
+        if let Ok(mut pm) = ctx.active_scanner_probes.write() {
+            for p in &active_probes { if let Some(mp) = pm.get_mut(&p.probe_id) { mp.state = PROBE_STATE_SCANNING; } }
         }
+        for p in &active_probes { let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(PROBE_STATE_SCANNING as i64)]); }
     }
     let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(max_warp_end_ft), PyRep::Integer(scan_ms), PyRep::List(scan_probe_ids.clone())]);
     let p_ids: Vec<i64> = active_probes.iter().map(|p| p.probe_id).collect();
@@ -1272,7 +1276,7 @@ async fn handle_recover_probes(
 
     let rec_ids: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
     for p in &recovered_probes {
-        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(4)]);
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(PROBE_STATE_RETURNING as i64)]);
     }
     if count > 0 {
         let idle_kvs: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
@@ -1294,15 +1298,15 @@ async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState
     let mut reconnected_ids = Vec::new();
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
         for p in map.values_mut() {
-            if p.owner_char_id == char_id && p.solar_system_id == sys_id && (p.state == 0 || (ship_id != 0 && p.ship_id != ship_id && p.state > 0)) {
-                p.state = 1;
+            if p.owner_char_id == char_id && p.solar_system_id == sys_id && (p.state == PROBE_STATE_INACTIVE || (ship_id != 0 && p.ship_id != ship_id && p.state > 0)) {
+                p.state = PROBE_STATE_IDLE;
                 if ship_id != 0 { p.ship_id = ship_id; }
                 reconnected_ids.push(p.probe_id);
             }
         }
     }
     for &pid in &reconnected_ids {
-        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(1)]);
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);
     }
     let count = reconnected_ids.len() as i64;
     Some(Ok(PyRep::keyval([
@@ -1345,14 +1349,14 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         for p in probe_map.values_mut() {
             if p.warp_end_ft.is_some_and(|end_ft| now_ft >= end_ft) {
                 p.warp_end_ft = None;
-                p.state = 3;
+                p.state = PROBE_STATE_SCANNING;
                 due_warps.push((p.owner_char_id, p.probe_id));
             }
         }
     }
     for (char_id, pid) in due_warps {
         crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, pid);
-        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(3)]);
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_SCANNING as i64)]);
     }
     let due_scans = ctx.db.with_mut_snapshot(|snap| {
         let all: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
@@ -1363,10 +1367,10 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
     });
     for (char_id, p_ids, scan_probe_ids, rows, idle_probes, _) in due_scans {
         if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-            for pid in &p_ids { if let Some(p) = probe_map.get_mut(pid) { if p.state == 3 || p.state == 2 { p.state = 1; } } }
+            for pid in &p_ids { if let Some(p) = probe_map.get_mut(pid) { if p.state == PROBE_STATE_SCANNING || p.state == PROBE_STATE_WARPING { p.state = PROBE_STATE_IDLE; } } }
         }
         for pid in p_ids {
-            let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(1)]);
+            let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);
         }
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows), PyRep::List(Vec::new())]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);

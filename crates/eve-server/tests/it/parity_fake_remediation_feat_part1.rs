@@ -129,7 +129,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         "Difficulty 3 board must include RestorationNode"
     );
 
-    // 2. SelfRepair heals 5..=10 coherence per turn for 3 turns capped at max_virus_coherence,
+    // 2. SelfRepair heals 5..=10 coherence per turn for 3 turns without a max_virus_coherence cap,
     //    and 2nd hack failure on a standard Data/Relic container self-destructs with 0.0 ship damage.
     let ctx = make_context();
     let kw: HashMap<String, PyRep> = HashMap::new();
@@ -213,7 +213,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
 
     with_pve_exploration_reg(&ctx, |reg| {
         let g = reg.hacking_games.get_mut(&(char_id, can_id)).unwrap();
-        g.virus_coherence = (g.max_virus_coherence - 12).max(1);
+        g.virus_coherence = (g.max_virus_coherence - 5).max(1);
         g.utilities[0] = Some(HackingUtilityKind::SelfRepair);
         for t in g.tiles.iter_mut().take(4) {
             t.kind = HackingNodeKind::Empty;
@@ -239,6 +239,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         let g = &reg.hacking_games[&(char_id, can_id)];
         (g.virus_coherence, g.max_virus_coherence)
     });
+    let mut prev_coh = base_coh;
     for turn in 1..=3_u32 {
         let _ = ctx
             .dispatch_rpc(
@@ -252,6 +253,15 @@ async fn test_hacking_node_types_and_failure_outcome() {
             )
             .await
             .expect("Click tile");
+        let cur_coh = with_pve_exploration_reg(&ctx, |reg| {
+            reg.hacking_games[&(char_id, can_id)].virus_coherence
+        });
+        let delta = cur_coh - prev_coh;
+        assert!(
+            (5..=10).contains(&delta),
+            "SelfRepair turn {turn} must heal 5..=10 coherence, got {delta}"
+        );
+        prev_coh = cur_coh;
     }
     let (after_coh, rem_sr) = with_pve_exploration_reg(&ctx, |reg| {
         (
@@ -260,9 +270,9 @@ async fn test_hacking_node_types_and_failure_outcome() {
         )
     });
     assert!(after_coh > base_coh, "SelfRepair must heal virus coherence");
-    assert_eq!(
-        after_coh, max_coh,
-        "SelfRepair must clamp virus coherence at max_virus_coherence (got {base_coh} -> {after_coh}, max {max_coh})"
+    assert!(
+        after_coh > max_coh,
+        "SelfRepair must allow virus coherence to exceed max_virus_coherence (got {base_coh} -> {after_coh}, max {max_coh})"
     );
     assert_eq!(rem_sr, None, "self_repair_turns must be cleaned up after 3 turns");
 

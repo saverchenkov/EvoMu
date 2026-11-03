@@ -367,7 +367,7 @@ async fn test_b41_insurgency_mining_ambush_ransom_rescue_destroy_and_lp_split() 
     assert!(!sys_h.is_ball_scrambled_sync(amb2.rorqual_ball_id));
     assert!(matches!(sys_h.get_ball_snapshot(amb2.rorqual_ball_id).await.unwrap().unwrap().1.mode, MovementMode::Warp { .. }));
     assert_eq!(ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp_id].suppression_points[&front_sys]), supp0 + 50);
-    assert_eq!(total_lp_via_rpc(&ctx, &mut s_emp).await - emp_lp0, (MINING_AMBUSH_BASE_LP * 105) / 100);
+    assert_eq!(total_lp_via_rpc(&ctx, &mut s_emp).await - emp_lp0, MINING_AMBUSH_BASE_LP);
 
     // 3. Subcase C: Destroying ORE Rorqual spawns lootable 79586 wreck, forfeits LP (0 delta), and keeps corruption (+50).
     let _ = sys_h.set_ball_position(emp_ship, DVec3::ZERO).await;

@@ -423,13 +423,14 @@ async fn test_killrights_hacking_and_interference() {
         .await
         .expect("UsedUtilityElementOnVirus");
     assert_eq!(util_rep.dict_get("usedSlot"), Some(&PyRep::Integer(0)));
-    assert_eq!(util_rep.dict_get("virusCoherence"), Some(&PyRep::Integer(90)));
+    assert_eq!(util_rep.dict_get("virusCoherence"), Some(&PyRep::Integer(60)));
 
-    // Verify utility slot was consumed in server-side game state
+    // Verify utility slot was consumed and 3-turn SelfRepair HoT activated in server-side game state
     with_pve_exploration_reg(&ctx, |reg| {
         let game = reg.hacking_games.get(&(p1_char, container_id)).expect("game exists");
         assert_eq!(game.utilities.get(0), Some(&None), "Utility slot 0 consumed");
-        assert_eq!(game.virus_coherence, 90, "Virus coherence repaired to 90");
+        assert_eq!(game.virus_coherence, 60, "Virus coherence unchanged until turn clicks");
+        assert_eq!(reg.self_repair_turns.get(&(p1_char, container_id)), Some(&3), "SelfRepair 3-turn HoT active");
     });
 
     // 2b. hackingMgr.QuitHackingAttempt supports V24 0-arg call (resolving active session by character_id)

@@ -329,7 +329,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
     let path = std::env::temp_dir().join(format!("evomu_d6_pve_abyss_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-    let base_time: u64 = 1_760_100_000;
+    let base_time: u64 = 1_760_093_700; // 10:55 UTC so Restart 1 (+300s) lands at 11:00 UTC downtime window
     let hack_sig_id = format!("DAT-{JITA_SYSTEM_ID}");
     let dat_pos = [-32_000_000.0, 28_000_000.0, -10_000_000.0];
     let trace_origin = [2_000_000.0, -75_000.0, 42_000.0];

@@ -465,14 +465,18 @@ pub fn flush_npc_bounty_tick(
         .map(|s| s.security_status)
         .unwrap_or(0.5);
     let is_kspace_nullsec = sys_sec <= 0.0 && solar_system_id < 31_000_000;
-    let dbs_mult = ctx
-        .db
-        .with_snapshot(|s| {
-            s.system_states
-                .get(&solar_system_id)
-                .map(|st| st.dbs_multiplier)
-        })
-        .unwrap_or(1.35);
+    let dbs_mult = if is_kspace_nullsec {
+        ctx.db
+            .with_snapshot(|s| {
+                s.system_states
+                    .get(&solar_system_id)
+                    .map(|st| st.dbs_multiplier)
+                    .filter(|&m| m > 0.0)
+            })
+            .unwrap_or(1.35)
+    } else {
+        1.0
+    };
 
     let (char_corp_id, is_player_corp, resolved_tax_rate) = ctx.db.with_snapshot(|s| {
         let cid = s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);

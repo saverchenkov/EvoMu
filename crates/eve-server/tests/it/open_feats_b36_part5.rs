@@ -76,7 +76,7 @@ async fn test_b36_ess_main_autopayout_and_reserve_bank_key_tiers() {
         "feat:pve.ess-reserve-bank-key-tiers",
     ]);
     let ctx = Arc::new(ServerContext::new());
-    crate::common::pin_clock(&ctx);
+    ctx.set_clock(Arc::new(VirtualServerClock::with_fixed_base(1_800_014_400)));
     let kw = HashMap::new();
 
     let sys_id = ctx

@@ -163,7 +163,10 @@ async fn test_remediated_probe_scanning_lifecycle_notifications() {
     let coords = PyRep::List((0..8).map(|i| PyRep::List(vec![PyRep::Real(500_000.0 + (i as f64) * 500.0), PyRep::Real(2_000.0), PyRep::Real(0.0), PyRep::Integer(2)])).collect());
     rpc(&ctx, &mut sess, "scanMgr", "RequestScans", &[coords]).await.unwrap();
     let immediate = drain_all(&ctx, &mut sess, PILOT_A);
-    assert!(immediate.iter().any(|(e, _)| e == "OnProbeStateChanged"), "moving probes must emit OnProbeStateChanged");
+    assert!(
+        immediate.iter().any(|(e, a)| e == "OnProbeStateChanged" && a.get(1) == Some(&PyRep::Integer(3))),
+        "warping probes must emit OnProbeStateChanged(Warping=3)"
+    );
     assert_eq!(find_notif(&immediate, "OnProbeWarpStart").len(), 5);
     let started = find_notif(&immediate, "OnSystemScanStarted");
     let scan_ms = started[1].as_i64().unwrap_or(0);
@@ -174,11 +177,22 @@ async fn test_remediated_probe_scanning_lifecycle_notifications() {
     ctx.advance_secs(15);
     let after_tick = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(after_tick.iter().filter(|(e, _)| e == "OnProbeWarpEnd").count(), 8);
+    assert!(
+        after_tick.iter().any(|(e, a)| e == "OnProbeStateChanged" && a.get(1) == Some(&PyRep::Integer(4))),
+        "warp end / scan start must emit OnProbeStateChanged(Scanning=4)"
+    );
+    assert!(
+        after_tick.iter().any(|(e, a)| e == "OnProbeStateChanged" && a.get(1) == Some(&PyRep::Integer(1))),
+        "scan completion must emit OnProbeStateChanged(Idle=1)"
+    );
     assert!(after_tick.iter().any(|(e, _)| e == "OnSystemScanStopped"));
 
     rpc(&ctx, &mut sess, "scanMgr", "RecoverProbes", &[]).await.unwrap();
     let recover_notifs = drain_all(&ctx, &mut sess, PILOT_A);
-    assert!(recover_notifs.iter().any(|(e, a)| e == "OnProbeStateChanged" && a.get(1) == Some(&PyRep::Integer(4))));
+    assert!(
+        recover_notifs.iter().any(|(e, a)| e == "OnProbeStateChanged" && a.get(1) == Some(&PyRep::Integer(5))),
+        "RecoverProbes must emit OnProbeStateChanged(Returning=5)"
+    );
 }
 
 // parity: notify:OnCampaignEnrollmentChanged, notify:OnCharacterPermanentlyBanned

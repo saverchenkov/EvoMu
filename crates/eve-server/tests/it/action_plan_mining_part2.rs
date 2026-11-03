@@ -44,6 +44,7 @@ async fn test_action_plan_mn13_to_mn16_moons_metenox_sites_ledgers() {
 
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    eve_server::services::serverops_cluster::set_scheduled_downtime_enabled(&ctx, false);
     let kw = HashMap::new();
     let char_id = 90_000_001i64;
     let mut sess = setup_pilot_session(&ctx, char_id).await;

@@ -297,6 +297,17 @@ async fn consume_cycle_capacitor(ctx: &ServerContext, cycle: &ActiveMiningCycle)
         }
     };
     if cs.capacitor + 1e-9 < need {
+        super::notify_emitters_missing::emit_effect_message(
+            ctx,
+            cycle.char_id,
+            "NotEnoughEnergy",
+            &[
+                ("effectname", PyRep::String(cycle.effect_name.clone())),
+                ("need", PyRep::Real(need)),
+                ("got", PyRep::Real(cs.capacitor)),
+                ("moduleID", PyRep::Integer(cycle.module_id)),
+            ],
+        );
         return Err(err(
             MiningStopReason::CapacitorEmpty,
             format!("Module needs {need} GJ, capacitor has {:.2} GJ", cs.capacitor),
@@ -771,15 +782,7 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
     for mut cycle in cycles {
         let tidi = crate::services::serverops_cluster::get_system_tidi_factor(ctx, cycle.solar_system_id).clamp(0.1, 1.0);
         loop {
-            if let Err(e) = check_requirements(ctx, &cycle).await {
-                if e.code == "NotEnoughCapacitor" {
-                    super::notify_emitters_missing::emit_effect_message(
-                        ctx,
-                        cycle.char_id,
-                        "EffectDeactivatedOutOfCap",
-                        &[("moduleID", PyRep::Integer(cycle.module_id))],
-                    );
-                }
+            if check_requirements(ctx, &cycle).await.is_err() {
                 stop_module(ctx, &cycle);
                 break;
             }
@@ -821,12 +824,6 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
                 if let Some(last) = outcomes.last_mut() {
                     last.stop = Some(MiningStopReason::CapacitorEmpty);
                 }
-                super::notify_emitters_missing::emit_effect_message(
-                    ctx,
-                    cycle.char_id,
-                    "EffectDeactivatedOutOfCap",
-                    &[("moduleID", PyRep::Integer(cycle.module_id))],
-                );
                 stop_module(ctx, &cycle);
                 break;
             }

@@ -627,9 +627,14 @@ async fn test_zarzakh_fulcrum_gates_dscan_size_bubbles_and_docking() {
         .expect_err("Active weapons timer from scripted WDFG point must block Fulcrum docking");
     assert_eq!(timer_err.code, "FulcrumRefusesTimerActive");
     ctx.advance_secs(65);
+    let retribution_err = rpc(&ctx, &mut neutral_dock, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)])
+        .await
+        .expect_err("15-minute Zarzakh disapproval timer must still block Fulcrum docking at +65s");
+    assert_eq!(retribution_err.code, "FulcrumRefusesTimerActive");
+    ctx.advance_secs(845);
     rpc(&ctx, &mut neutral_dock, "beyonce", "CmdDock", &[PyRep::Integer(FULCRUM_STATION_ID)])
         .await
-        .expect("Neutral pilot should dock at The Fulcrum once weapons timer expires");
+        .expect("Neutral pilot should dock at The Fulcrum once weapons and Zarzakh disapproval timers expire");
     let reloaded = persist_and_reopen_sqlite(&ctx, "b8_fulcrum_dock");
     assert_eq!(reloaded.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.station_id)), Some(FULCRUM_STATION_ID));
 }

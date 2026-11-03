@@ -973,7 +973,9 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
             {
                 sov.ess_linked_character_id = None;
                 sov.ess_link_started_tick = None;
-                sov.ess_cycle_started_unix = 0;
+                if sov.ess_main_bank.0 <= 0 {
+                    sov.ess_cycle_started_unix = 0;
+                }
                 ess_reset_systems.insert(sys_id);
             }
             let mut decayed_here = false;
