@@ -14,7 +14,7 @@ use std::sync::{OnceLock, RwLock};
 
 #[path = "fitting_conduit_jump.rs"]
 mod fitting_conduit_jump;
-pub(crate) use fitting_conduit_jump::*;
+pub use fitting_conduit_jump::*;
 
 const ATTR_CONSUMPTION_TYPE: AttributeId = 713;
 const ATTR_CONSUMPTION_QUANTITY: AttributeId = 714;
@@ -51,6 +51,7 @@ pub(crate) struct FleetModuleBeacon {
 }
 
 pub fn is_ship_cyno_active(ctx: &ServerContext, ship_id: i64) -> bool {
+    sweep_expired_cyno_beacons(ctx);
     let key = ctx_key(ctx);
     let now_unix = ctx.now_unix_secs();
     if let Ok(state) = cyno_state().read() {
@@ -79,6 +80,7 @@ pub(crate) struct ActiveJumpBridge {
     pub beacon: FleetModuleBeacon,
     pub distance_ly: f64,
     pub expires_at_unix: u64,
+    pub portal_ball_id: i64,
 }
 
 #[derive(Default)]
@@ -116,7 +118,15 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     let now = ctx.now_unix_secs();
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
     st.destroyed_beacons.retain(|_, b| b.expires_at_unix > now);
-    st.bridges.retain(|&(k, _), br| !(k == key && br.bridger_ship_id == ship_id));
+    let mut removed_bridges = Vec::new();
+    st.bridges.retain(|&(k, _), br| {
+        if k == key && br.bridger_ship_id == ship_id {
+            removed_bridges.push((br.origin_system_id, br.portal_ball_id));
+            false
+        } else {
+            true
+        }
+    });
     let matched: Vec<(usize, i64)> = st
         .beacons
         .iter()
@@ -127,6 +137,12 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
         if let Some(mut b) = st.beacons.remove(&k) {
             b.expires_at_unix = now + 15;
             st.destroyed_beacons.insert(k, b);
+        }
+    }
+    drop(st);
+    for (sys_id, ball_id) in removed_bridges {
+        if ball_id != 0 {
+            ctx.systems.get_or_spawn(sys_id).try_remove_ball(ball_id);
         }
     }
 }
@@ -166,85 +182,7 @@ fn type_attr(ctx: &ServerContext, t: &eve_sde::InvType, aid: AttributeId) -> f64
         .unwrap_or_else(|| ctx.sde.attributes.get(&aid).map(|a| a.default_value).unwrap_or(0.0))
 }
 
-fn hull_allowed(ctx: &ServerContext, mod_type: &eve_sde::InvType, ship_type: &eve_sde::InvType) -> bool {
-    let mut groups = Vec::new();
-    let mut types = Vec::new();
-    for (aid, &val) in &mod_type.default_attributes {
-        if val <= 0.0 {
-            continue;
-        }
-        let Some(name) = ctx.sde.attributes.get(aid).map(|a| a.name.as_str()) else {
-            continue;
-        };
-        if name.starts_with("canFitShipGroup") {
-            groups.push(val as u32);
-        } else if name.starts_with("canFitShipType") {
-            types.push(val as TypeId);
-        }
-    }
-    (groups.is_empty() && types.is_empty())
-        || groups.contains(&ship_type.group_id)
-        || types.contains(&ship_type.type_id)
-}
 
-fn ship_accepts_beacon(ctx: &ServerContext, ship_type: &eve_sde::InvType, beacon_type_id: TypeId) -> bool {
-    let list_id = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_TARGET_BEACON_TYPELIST) as u32;
-    let (Some(list), Some(beacon)) = (ctx.sde.type_lists.get(&list_id), ctx.sde.types.get(&beacon_type_id)) else {
-        return false;
-    };
-    list.contains(beacon)
-}
-
-fn csprng_unit_f64(ctx: &ServerContext) -> f64 {
-    if let Some(u) = ctx.mechanic_rng.try_unit_f64() {
-        return u;
-    }
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut z = seq
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(ctx.now_blueos_filetime_ticks() as u64);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^= z >> 31;
-    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
-}
-
-/// Samples a uniform 3D point on the 5 km sphere centered at `beacon_pos` (`feat:navigation.jump-arrival-placement`).
-pub(super) fn random_arrival_position(ctx: &ServerContext, beacon_pos: DVec3) -> DVec3 {
-    let u1 = csprng_unit_f64(ctx);
-    let u2 = csprng_unit_f64(ctx);
-    let z = u1 * 2.0 - 1.0;
-    let theta = u2 * std::f64::consts::TAU;
-    let r_xy = (1.0 - z * z).max(0.0).sqrt();
-    beacon_pos + DVec3::new(r_xy * theta.cos(), z, r_xy * theta.sin()) * 5_000.0
-}
-
-/// Places destroyed-beacon jump arrivals outside the destination star's photosphere (`feat:navigation.jump-arrival-placement`).
-pub(super) fn star_arrival_position(ctx: &ServerContext, dest_sys: u32) -> DVec3 {
-    let star_radius = ctx
-        .sde
-        .celestials_in_system(dest_sys)
-        .into_iter()
-        .find(|c| c.group_id == 6)
-        .map(|c| c.radius)
-        .unwrap_or(65_000_000.0)
-        .max(1_000_000.0);
-    random_arrival_position(ctx, DVec3::new(star_radius + 25_000.0, 0.0, 0.0))
-}
-
-fn is_covert_ops_cloak_capable(ctx: &ServerContext, ship_type: &eve_sde::InvType) -> bool {
-    if let Some(cct) = ctx.sde.types.get(&11578) {
-        if hull_allowed(ctx, cct, ship_type) {
-            return true;
-        }
-    }
-    matches!(ship_type.group_id, 830 | 833 | 834 | 963 | 1202 | 5087)
-        || matches!(
-            ship_type.type_id,
-            32790 | 33468 | 33470 | 33553 | 33697 | 34590 | 42245 | 77114 | 85086 | 85087 | 89607
-        )
-}
 
 fn beacon_type_for_module(ctx: &ServerContext, mod_type: &eve_sde::InvType) -> Option<TypeId> {
     let want_covert = type_attr(ctx, mod_type, ATTR_IS_COVERT) > 0.0;

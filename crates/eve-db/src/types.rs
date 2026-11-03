@@ -236,6 +236,7 @@ pub enum InventoryFlag {
     ServiceSlot7 = 171,
     StructureFuel = 172,
     Deliveries = 173,
+    FrigateEscapeBay = 177,
     SpecializedMobileDepotHold = 179,
     StructureDeedBay = 180,
     SpecializedIceHold = 181,
@@ -249,7 +250,6 @@ impl InventoryFlag {
     #[allow(non_upper_case_globals)] pub const GasHold: InventoryFlag = InventoryFlag::SpecializedGasHold;
     #[allow(non_upper_case_globals)] pub const IceHold: InventoryFlag = InventoryFlag::SpecializedIceHold;
     #[allow(non_upper_case_globals)] pub const MobileDepotHold: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
-    #[allow(non_upper_case_globals)] pub const FrigateEscapeBay: InventoryFlag = InventoryFlag::SpecializedMobileDepotHold;
     #[allow(non_upper_case_globals)] pub const InfrastructureHold: InventoryFlag = InventoryFlag::SpecializedInfrastructureHold;
     #[allow(non_upper_case_globals)] pub const CorpHangar: InventoryFlag = InventoryFlag::CorpSAG1;
 
@@ -330,6 +330,7 @@ impl InventoryFlag {
             171 => Self::ServiceSlot7,
             172 => Self::StructureFuel,
             173 => Self::Deliveries,
+            177 => Self::FrigateEscapeBay,
             179 => Self::SpecializedMobileDepotHold,
             180 => Self::StructureDeedBay,
             181 => Self::SpecializedIceHold,

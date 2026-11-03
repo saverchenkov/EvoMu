@@ -414,7 +414,7 @@ pub(crate) async fn handle_multi_add(
     let dest_is_struct_fuel = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag)
         && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
     let is_ship_hold = !dest_is_struct_fuel
-        && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
+        && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 177 | 179 | 181 | 182 | 185);
     let eval_cargo_cap = if flag_u16 == 5 {
         ctx.get_or_rebuild_ship_fitting(char_id, new_loc)
             .ok()

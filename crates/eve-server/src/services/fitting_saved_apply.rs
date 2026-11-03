@@ -87,7 +87,7 @@ pub async fn handle_fit_ships(
                         };
                         let is_allowed_flag = matches!(
                             u16_flg,
-                            5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158 | 133..=151 | 179 | 181 | 182 | 185
+                            5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158 | 133..=151 | 177 | 179 | 181 | 182 | 185
                         );
                         if !is_allowed_flag {
                             return Some(Err(BridgeRpcError {
@@ -517,7 +517,7 @@ pub async fn handle_fit_ships(
 
             for &(tid, flag, _) in &desired_items {
                 let flag_u16 = flag as u16;
-                let is_specialized_hold = matches!(flag_u16, 133..=151 | 179 | 181 | 182 | 185);
+                let is_specialized_hold = matches!(flag_u16, 133..=151 | 177 | 179 | 181 | 182 | 185);
                 if is_specialized_hold {
                     let Some(item_type) = ctx.sde.types.get(&tid) else {
                         return Err(BridgeRpcError {
@@ -533,7 +533,8 @@ pub async fn handle_fit_ships(
                         143 => item_type.category_id == 8,
                         148 => item_type.group_id == 1027,
                         149 => matches!(item_type.category_id, 42 | 43),
-                        179 => matches!(item_type.group_id, 4168),
+                        177 => matches!(item_type.group_id, 25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 2001),
+                        179 => matches!(item_type.group_id, 4168 | 25 | 324 | 830 | 831 | 834 | 893 | 1283 | 1527 | 2001),
                         181 => item_type.category_id == 25,
                         150 | 185 => matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
                             || matches!(item_type.group_id, 423 | 1136 | 4729),
@@ -553,7 +554,7 @@ pub async fn handle_fit_ships(
                     }
                 }
             }
-            let mut checked_spec_flags: Vec<u16> = desired_items.iter().map(|(_, f, _)| *f as u16).filter(|&fl| matches!(fl, 133..=151 | 179 | 181 | 182 | 185)).collect();
+            let mut checked_spec_flags: Vec<u16> = desired_items.iter().map(|(_, f, _)| *f as u16).filter(|&fl| matches!(fl, 133..=151 | 177 | 179 | 181 | 182 | 185)).collect();
             checked_spec_flags.sort_unstable();
             checked_spec_flags.dedup();
             for flg in checked_spec_flags {
@@ -562,7 +563,7 @@ pub async fn handle_fit_ships(
                     134 | 151 => ship_type.and_then(|t| t.default_attributes.get(&1556).copied().or_else(|| t.default_attributes.get(&1770).copied())).unwrap_or(0.0),
                     136 => ship_type.and_then(|t| t.default_attributes.get(&1558).copied()).unwrap_or(0.0),
                     135 => ship_type.and_then(|t| t.default_attributes.get(&1557).copied().or_else(|| t.default_attributes.get(&1556).copied())).unwrap_or(0.0),
-                    179 => ship_type.and_then(|t| t.default_attributes.get(&3020).copied().or_else(|| t.default_attributes.get(&5325).copied())).unwrap_or(0.0),
+                    177 | 179 => ship_type.and_then(|t| t.default_attributes.get(&3020).copied().or_else(|| t.default_attributes.get(&5325).copied())).unwrap_or(0.0),
                     181 => ship_type.and_then(|t| t.default_attributes.get(&3136).copied().or_else(|| t.default_attributes.get(&1556).copied())).unwrap_or(0.0),
                     150 | 185 => ship_type.and_then(|t| t.default_attributes.get(&5646).copied()).unwrap_or(0.0),
                     182 => ship_type.and_then(|t| t.default_attributes.get(&5646).copied().or_else(|| t.default_attributes.get(&3227).copied())).unwrap_or(0.0),
@@ -605,7 +606,7 @@ pub async fn handle_fit_ships(
             let flag_u16 = flag as u16;
             let is_allowed_flag = matches!(
                 flag_u16,
-                5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158 | 133..=151 | 179 | 181 | 182 | 185
+                5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158 | 133..=151 | 177 | 179 | 181 | 182 | 185
             );
             if !is_allowed_flag {
                 return Err(BridgeRpcError {
@@ -854,7 +855,7 @@ pub(crate) fn is_item_allowed_in_ship_hold(
         148 => item_type.group_id == 1027,
         149 => matches!(item_type.category_id, 42 | 43),
         // Frigate Escape Bay
-        179 => {
+        177 | 179 => {
             item_type.group_id == 1246
                 || (ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0
                     && matches!(
@@ -896,7 +897,7 @@ pub(crate) fn get_ship_hold_capacity(
         135 => ship_type.default_attributes.get(&1557).copied()
             .or_else(|| ship_type.default_attributes.get(&1556).copied())
             .unwrap_or(0.0),
-        179 => ship_type
+        177 | 179 => ship_type
             .default_attributes
             .get(&3020)
             .copied()

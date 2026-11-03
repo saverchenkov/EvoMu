@@ -44,7 +44,7 @@ pub(crate) async fn board_stored_ship(
         return Err(err("ShipNotBoardable", format!("Item {stored_id} is not an assembled ship")));
     }
     let host_id = if host_arg != 0 { host_arg } else { stored.location_id };
-    let is_feb = (stored.flag as u16) == 179 || custom_flag == Some(179);
+    let is_feb = matches!(stored.flag as u16, 177 | 179) || matches!(custom_flag, Some(177 | 179));
     let in_bay = is_ship_bay_flag(stored.flag as u16) || custom_flag.is_some_and(is_ship_bay_flag) || is_feb;
     if stored.location_id != host_id || !in_bay {
         return Err(err("ShipNotInMaintenanceBay", format!("Ship {stored_id} is not stored in the ship maintenance bay of {host_id}")));
@@ -756,7 +756,7 @@ pub(crate) async fn ship_scoop_and_store(
                         return Err(err("InvalidFrigateGroup", "Frigate Escape Bay only accepts frigates"));
                     }
                     let existing_feb = snap.items.values().any(|i| {
-                        i.location_id == host_ship_id && (i.flag as u16) == 179 && i.item_id != target_ship_id
+                        i.location_id == host_ship_id && matches!(i.flag as u16, 177 | 179) && i.item_id != target_ship_id
                     });
                     if existing_feb {
                         return Err(err("CapacityExceeded", "Frigate Escape Bay can hold at most 1 assembled frigate"));
@@ -875,7 +875,7 @@ pub(crate) async fn ship_scoop_and_store(
                         return Err(err("InvalidFrigateGroup", "Frigate Escape Bay only accepts frigates"));
                     }
                     let existing_feb = snap.items.values().any(|i| {
-                        i.location_id == host_ship_id && (i.flag as u16) == 179 && i.item_id != target_ship_id
+                        i.location_id == host_ship_id && matches!(i.flag as u16, 177 | 179) && i.item_id != target_ship_id
                     });
                     if existing_feb {
                         return Err(err("CapacityExceeded", "Frigate Escape Bay can hold at most 1 assembled frigate"));
@@ -1052,7 +1052,7 @@ pub(crate) async fn ship_scoop_and_store(
                         return Err(err("InvalidFrigateGroup", "Frigate Escape Bay only accepts frigates"));
                     }
                     let existing_feb = snap.items.values().any(|i| {
-                        i.location_id == host_ship_id && (i.flag as u16) == 179 && i.item_id != target_ship_id
+                        i.location_id == host_ship_id && matches!(i.flag as u16, 177 | 179) && i.item_id != target_ship_id
                     });
                     if existing_feb {
                         return Err(err("CapacityExceeded", "Frigate Escape Bay can hold at most 1 assembled frigate"));

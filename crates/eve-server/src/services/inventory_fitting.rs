@@ -151,7 +151,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 164..=172 | 179..=182 | 185) {
+                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 164..=172 | 177 | 179..=182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
@@ -932,7 +932,7 @@ pub async fn handle(
             }
 
             let dest_is_struct_fuel = crate::services::structure_acl_defense_rules::is_structure_fuel_flag(flag) && ctx.db.with_snapshot(|s| s.structures.contains_key(&new_loc));
-            let dest_is_ship_hold = !dest_is_struct_fuel && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
+            let dest_is_ship_hold = !dest_is_struct_fuel && matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 177 | 179 | 181 | 182 | 185);
             if dest_is_ship_hold {
                 let eval_cargo_cap = (flag_u16 == 5).then(|| {
                     ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok()
@@ -948,8 +948,8 @@ pub async fn handle(
                     if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, item_type, ship_type) {
                         return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
                     }
-                    if flag_u16 == 179
-                        && ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0
+                    if matches!(flag_u16, 177 | 179)
+                        && (ship_type.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0 || matches!(ship_type.group_id, 27 | 898 | 900))
                         && item_type.category_id == 6
                     {
                         if !moving_item.singleton || moving_item.quantity != 1 {
@@ -962,7 +962,7 @@ pub async fn handle(
                             return Err(BridgeRpcError { code: "ShipHasItemsInCargo".into(), message: "UserError: Frigate in Frigate Escape Bay cannot contain non-charge cargo items".into() });
                         }
                         let existing_frigate = snap.items.values().any(|i| {
-                            i.location_id == new_loc && (i.flag as u16) == 179 && i.item_id != item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
+                            i.location_id == new_loc && matches!(i.flag as u16, 177 | 179) && i.item_id != item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 6)
                         });
                         if existing_frigate {
                             return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: "UserError: Frigate Escape Bay can hold at most 1 assembled frigate".into() });
@@ -972,7 +972,7 @@ pub async fn handle(
                     if flag_u16 != 5 && hold_capacity <= 0.0 {
                         return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Ship {} does not have a specialized hold for flag {flag_u16} (capacity 0 m³)", ship_type.name) });
                     }
-                    if flag_u16 != 179 && hold_capacity > 0.0 {
+                    if !matches!(flag_u16, 177 | 179) && hold_capacity > 0.0 {
                         let used_vol: f64 = snap.items.values()
                             .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
                             .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();

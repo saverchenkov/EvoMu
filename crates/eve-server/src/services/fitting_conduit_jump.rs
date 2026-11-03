@@ -9,6 +9,115 @@
 use super::*;
 use eve_destiny::MovementMode;
 
+pub(super) fn hull_allowed(ctx: &ServerContext, mod_type: &eve_sde::InvType, ship_type: &eve_sde::InvType) -> bool {
+    let mut groups = Vec::new();
+    let mut types = Vec::new();
+    for (aid, &val) in &mod_type.default_attributes {
+        if val <= 0.0 {
+            continue;
+        }
+        let Some(name) = ctx.sde.attributes.get(aid).map(|a| a.name.as_str()) else {
+            continue;
+        };
+        if name.starts_with("canFitShipGroup") {
+            groups.push(val as u32);
+        } else if name.starts_with("canFitShipType") {
+            types.push(val as TypeId);
+        }
+    }
+    (groups.is_empty() && types.is_empty())
+        || groups.contains(&ship_type.group_id)
+        || types.contains(&ship_type.type_id)
+}
+
+pub(super) fn ship_accepts_beacon(ctx: &ServerContext, ship_type: &eve_sde::InvType, beacon_type_id: TypeId) -> bool {
+    let list_id = type_attr(ctx, ship_type, ATTR_JUMP_DRIVE_TARGET_BEACON_TYPELIST) as u32;
+    let (Some(list), Some(beacon)) = (ctx.sde.type_lists.get(&list_id), ctx.sde.types.get(&beacon_type_id)) else {
+        return false;
+    };
+    list.contains(beacon)
+}
+
+pub(super) fn csprng_unit_f64(ctx: &ServerContext) -> f64 {
+    if let Some(u) = ctx.mechanic_rng.try_unit_f64() {
+        return u;
+    }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut z = seq
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(ctx.now_blueos_filetime_ticks() as u64);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+}
+
+pub(super) fn random_arrival_position(ctx: &ServerContext, beacon_pos: DVec3) -> DVec3 {
+    let u1 = csprng_unit_f64(ctx);
+    let u2 = csprng_unit_f64(ctx);
+    let z = u1 * 2.0 - 1.0;
+    let theta = u2 * std::f64::consts::TAU;
+    let r_xy = (1.0 - z * z).max(0.0).sqrt();
+    beacon_pos + DVec3::new(r_xy * theta.cos(), z, r_xy * theta.sin()) * 5_000.0
+}
+
+pub(super) fn star_arrival_position(ctx: &ServerContext, dest_sys: u32) -> DVec3 {
+    let star_radius = ctx
+        .sde
+        .celestials_in_system(dest_sys)
+        .into_iter()
+        .find(|c| c.group_id == 6)
+        .map(|c| c.radius)
+        .unwrap_or(65_000_000.0)
+        .max(1_000_000.0);
+    random_arrival_position(ctx, DVec3::new(star_radius + 25_000.0, 0.0, 0.0))
+}
+
+pub(super) fn is_covert_ops_cloak_capable(ctx: &ServerContext, ship_type: &eve_sde::InvType) -> bool {
+    if let Some(cct) = ctx.sde.types.get(&11578) {
+        if hull_allowed(ctx, cct, ship_type) {
+            return true;
+        }
+    }
+    matches!(ship_type.group_id, 830 | 833 | 834 | 963 | 1202 | 5087)
+        || matches!(
+            ship_type.type_id,
+            32790 | 33468 | 33470 | 33553 | 33697 | 34590 | 42245 | 77114 | 85086 | 85087 | 89607
+        )
+}
+
+#[allow(dead_code)]
+pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
+    let (now, ctx_k) = (ctx.now_unix_secs(), ctx_key(ctx));
+    let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());
+    let mut expired_beacons = Vec::new();
+    st.beacons.retain(|&(k, _), b| {
+        if k == ctx_k && b.expires_at_unix <= now {
+            expired_beacons.push((b.char_id, b.solar_system_id, b.beacon_id, b.beacon_type_id));
+            false
+        } else {
+            true
+        }
+    });
+    let mut expired_bridges = Vec::new();
+    st.bridges.retain(|&(k, _), br| {
+        if k == ctx_k && br.expires_at_unix <= now {
+            expired_bridges.push((br.origin_system_id, br.portal_ball_id));
+            false
+        } else {
+            true
+        }
+    });
+    drop(st);
+    cleanup_expired_beacons(ctx, expired_beacons);
+    for (sys_id, ball_id) in expired_bridges {
+        if ball_id != 0 {
+            ctx.systems.get_or_spawn(sys_id).try_remove_ball(ball_id);
+        }
+    }
+}
+
 fn ship_has_fitted_covert_cloak(
     snap: &eve_db::WorldStateSnapshot,
     ctx: &ServerContext,
@@ -192,6 +301,26 @@ pub(super) async fn bridge_to_fleet_beacon(
             return Err(e);
         }
     }
+    let portal_ball_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        snap.next_entity_id
+    });
+    let bridger_pos = sys.get_ball_position_sync(ship_id).unwrap_or(DVec3::ZERO);
+    let portal_pos = bridger_pos + DVec3::new(100.0, 0.0, 0.0);
+    let _ = sys
+        .spawn_ball(Ball {
+            id: portal_ball_id,
+            type_id: 32731, // Default Physical Portal
+            position: portal_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 1.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
     let expires_at_unix = ctx.now_unix_secs() + duration_s.round() as u64;
     cyno_state()
         .write()
@@ -208,6 +337,7 @@ pub(super) async fn bridge_to_fleet_beacon(
                 beacon: beacon.clone(),
                 distance_ly: dist,
                 expires_at_unix,
+                portal_ball_id,
             },
         );
     if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, char_id)) {
@@ -229,6 +359,8 @@ pub(super) async fn bridge_to_fleet_beacon(
         ("moduleID", PyRep::Integer(portal_id)),
         ("beaconID", PyRep::Integer(beacon.beacon_id)),
         ("solarSystemID", PyRep::Integer(beacon.solar_system_id as i64)),
+        ("portalBallID", PyRep::Integer(portal_ball_id)),
+        ("bridgeBallID", PyRep::Integer(portal_ball_id)),
         ("distanceLY", PyRep::Real(dist)),
         ("activationConsumptionTypeID", PyRep::Integer(act_type as i64)),
         ("activationConsumptionQuantity", PyRep::Integer(if act_type != 0 { act_qty } else { 0 })),
@@ -821,7 +953,8 @@ pub(crate) async fn handle_cyno_portal(
                 .await
                 .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
         ),
-        ("beyonce", "CmdBridgeToFleetModuleBeacon") => {
+        // rpc-lint: allow legacy client alias CmdBridgeThroughStargate
+        ("beyonce", "CmdBridgeToFleetModuleBeacon" | "CmdBridgeThroughStargate") => {
             Some(bridge_to_fleet_beacon(ctx, session, args, false).await)
         }
         ("beyonce", "CmdBridgeToFleetDeployableBeacon") => {
@@ -837,7 +970,8 @@ pub(crate) async fn handle_cyno_portal(
                 .await
                 .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),
         ),
-        ("beyonce", "CmdJumpThroughFleet") => Some(
+        // rpc-lint: allow legacy client alias CmdJumpThroughPortal
+        ("beyonce", "CmdJumpThroughFleet" | "CmdJumpThroughPortal") => Some(
             jump_through_fleet(ctx, session, args)
                 .await
                 .map(|o| jump_outcome_rep(&o, session.solar_system_id.unwrap_or(0))),

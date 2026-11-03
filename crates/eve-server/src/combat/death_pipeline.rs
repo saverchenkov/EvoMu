@@ -296,16 +296,18 @@ pub fn execute_death_pipeline_sync_inner(
                 .sde
                 .types
                 .get(&victim_ship_type_id)
-                .and_then(|t| t.default_attributes.get(&3020).copied())
-                .unwrap_or(0.0)
-                > 0.0;
+                .map(|t| {
+                    t.default_attributes.get(&3020).copied().unwrap_or(0.0) > 0.0
+                        || matches!(t.group_id, 27 | 898 | 900)
+                })
+                .unwrap_or(false);
             if has_feb {
                 snap.items
                     .values()
                     .find(|i| {
                         i.location_id == victim_ship_id
                             && i.singleton
-                            && (i.flag as u16) == 179
+                            && matches!(i.flag as u16, 177 | 179)
                             && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
                                 matches!(
                                     t.group_id,
@@ -406,7 +408,7 @@ pub fn execute_death_pipeline_sync_inner(
             if let Some(esc_item) = snap.items.get(&esc_id) {
                 dropped_km.push(eve_db::KillmailItemEntry {
                     type_id: esc_item.type_id,
-                    flag: 179,
+                    flag: esc_item.flag as u16,
                     qty_dropped: 0,
                     qty_destroyed: 0,
                     singleton: true,

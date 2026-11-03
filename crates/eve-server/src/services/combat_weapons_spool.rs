@@ -400,7 +400,7 @@ pub async fn handle_ship_or_npc_destruction(
                     .find(|i| {
                         i.location_id == target_ball_id
                             && i.singleton
-                            && (i.flag as u16) == 179
+                            && matches!(i.flag as u16, 177 | 179)
                             && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
                                 matches!(
                                     t.group_id,
@@ -459,7 +459,7 @@ pub async fn handle_ship_or_npc_destruction(
                 // parity: feat:ships.frigate-escape-bay - frigate survives and is recorded on killmail
                 dropped_entries.push(eve_db::KillmailItemEntry {
                     type_id: esc_item.type_id,
-                    flag: 179,
+                    flag: esc_item.flag as u16,
                     qty_dropped: 0,
                     qty_destroyed: 0,
                     singleton: true,
