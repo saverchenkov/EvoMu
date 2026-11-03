@@ -13,9 +13,10 @@ use crate::services::pve_exploration::{
     HackingUtilityKind, PveExplorationRegistry, SpewedLootCan,
 };
 pub use crate::services::pve_hacking_board::{
-    build_hacking_grid_procedural, detonate_ghost_site, detonate_ghost_site_with_can,
-    hacking_tile_distance_indicator, handle_second_hack_failure_explosion,
-    resolve_fitted_analyzer_virus_stats, resolve_hacking_turn_combat,
+    build_hacking_grid_procedural, build_hacking_grid_procedural_with_sde, detonate_ghost_site,
+    detonate_ghost_site_with_can, hacking_tile_distance_indicator,
+    handle_second_hack_failure_explosion, resolve_fitted_analyzer_virus_stats,
+    resolve_hacking_turn_combat,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -410,15 +411,30 @@ pub async fn handle_pve_hacking(
             } else {
                 2
             };
+            let container_type_id = ctx
+                .db
+                .with_snapshot(|s| s.items.get(&container_id).map(|i| i.type_id));
+            let sde_tier = container_type_id
+                .and_then(|tid| ctx.sde.get_type(tid))
+                .and_then(|t| t.default_attributes.get(&1919).copied())
+                .filter(|&v| v >= 1.0)
+                .map(|v| (v as u8).clamp(1, 5));
             let difficulty = args
                 .get(4)
                 .and_then(|a| a.as_i64())
                 .map(|d| (d as u8).clamp(min_difficulty, 5))
-                .unwrap_or(min_difficulty);
+                .unwrap_or_else(|| sde_tier.map(|t| t.max(min_difficulty)).unwrap_or(min_difficulty));
             let rng_seed = ctx.mechanic_rng.try_next_u64().unwrap_or(0);
             let game = with_pve_exploration_reg(ctx, |reg| {
                 let game_id = 500_000 + next_pve_seq(reg);
-                let tiles = build_hacking_grid_procedural(container_id, is_relic, difficulty, rng_seed);
+                let tiles = build_hacking_grid_procedural_with_sde(
+                    Some(&ctx.sde),
+                    container_id,
+                    container_type_id,
+                    is_relic,
+                    difficulty,
+                    rng_seed,
+                );
                 let g = HackingGameSession {
                     game_id,
                     character_id: char_id,

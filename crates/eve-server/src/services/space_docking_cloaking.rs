@@ -30,47 +30,48 @@ pub struct WormholeBuckets {
     pub mass_stability_description: &'static str,
 }
 
-// parity: feat:wormholes.mass-reduction-and-destabilization
-pub fn derive_wormhole_buckets(
-    wh: &CosmicSignatureRecord,
-    now_unix: u64,
-    sde: &eve_sde::SdeRegistry,
-) -> WormholeBuckets {
-    derive_wormhole_buckets_raw(
-        wh.destination_system_id.unwrap_or(0),
-        wh.max_jump_mass_kg,
-        wh.remaining_mass_kg,
-        wh.max_mass_kg,
-        wh.created_unix,
-        wh.lifetime_seconds,
-        wh.collapsed,
-        now_unix,
-        sde,
+// parity: feat:wormholes.mass-reduction-and-destabilization, feat:wormholes.lifetime-decay-stages, feat:navigation.wormhole-info-buckets
+pub fn derive_wormhole_buckets(wh: &CosmicSignatureRecord, now_unix: u64, sde: &eve_sde::SdeRegistry) -> WormholeBuckets {
+    derive_wormhole_buckets_for_type(
+        wh.wormhole_type_id, wh.destination_system_id.unwrap_or(0), wh.max_jump_mass_kg,
+        wh.remaining_mass_kg, wh.max_mass_kg, wh.created_unix, wh.lifetime_seconds, wh.collapsed, now_unix, sde,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn derive_wormhole_buckets_raw(
-    dest_sys: u32,
-    max_jump_mass_kg: f64,
-    remaining_mass_kg: f64,
-    max_mass_kg: f64,
-    created_unix: u64,
-    lifetime_seconds: u64,
-    collapsed: bool,
-    now_unix: u64,
-    sde: &eve_sde::SdeRegistry,
+    dest_sys: u32, max_jump_mass_kg: f64, remaining_mass_kg: f64, max_mass_kg: f64,
+    created_unix: u64, lifetime_seconds: u64, collapsed: bool, now_unix: u64, sde: &eve_sde::SdeRegistry,
 ) -> WormholeBuckets {
-    let wh_class_id = sde.solar_systems.get(&dest_sys).and_then(|s| {
-        s.wormhole_class_id.or_else(|| {
-            sde.constellations
-                .get(&s.constellation_id)
-                .and_then(|c| c.wormhole_class_id)
-                .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
-        })
-    });
+    derive_wormhole_buckets_for_type(
+        None, dest_sys, max_jump_mass_kg, remaining_mass_kg, max_mass_kg, created_unix, lifetime_seconds, collapsed, now_unix, sde,
+    )
+}
 
-    // DERIVED: Destination classification resolved from SDE solar system, constellation, or region wormholeClassID
+#[allow(clippy::too_many_arguments)]
+pub fn derive_wormhole_buckets_for_type(
+    wh_type_id: Option<u32>, dest_sys: u32, max_jump_mass_kg: f64, remaining_mass_kg: f64, max_mass_kg: f64,
+    created_unix: u64, lifetime_seconds: u64, collapsed: bool, now_unix: u64, sde: &eve_sde::SdeRegistry,
+) -> WormholeBuckets {
+    let wh_type = wh_type_id.and_then(|tid| sde.wormhole_types.get(&tid));
+    let eff_jump_mass = if max_jump_mass_kg > 0.0 { max_jump_mass_kg } else { wh_type.map(|w| w.max_jump_mass).unwrap_or(0.0) };
+    let eff_max_mass = if max_mass_kg > 0.0 { max_mass_kg } else { wh_type.map(|w| w.max_stable_mass).unwrap_or(0.0) };
+    let eff_lifetime = if lifetime_seconds > 0 { lifetime_seconds } else { wh_type.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(0) };
+
+    let wh_class_id = sde
+        .solar_systems
+        .get(&dest_sys)
+        .and_then(|s| {
+            s.wormhole_class_id.or_else(|| {
+                sde.constellations
+                    .get(&s.constellation_id)
+                    .and_then(|c| c.wormhole_class_id)
+                    .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+            })
+        })
+        .or_else(|| wh_type.map(|w| w.target_system_class).filter(|&c| c > 0));
+
+    // DERIVED: Destination classification resolved from SDE solar system/constellation/region wormholeClassID or sde_wormhole_types.target_system_class
     let dest_class = match wh_class_id {
         Some(12) => "Thera",
         Some(14..=18) => "Drifter",
@@ -87,23 +88,23 @@ pub fn derive_wormhole_buckets_raw(
         }
     };
 
-    // DERIVED: Ship size category bucket thresholds derived from mass
-    let max_ship_size = if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 20_000_000.0 {
+    // DERIVED: Ship size category bucket thresholds derived from sde_wormhole_types.max_jump_mass (5M, 62M, 375M/410M, 1B/2B kg)
+    let max_ship_size = if eff_jump_mass > 0.0 && eff_jump_mass <= 20_000_000.0 {
         "Small"
-    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 62_000_000.0 {
+    } else if eff_jump_mass > 0.0 && eff_jump_mass <= 62_000_000.0 {
         "Medium"
-    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 375_000_000.0 {
+    } else if eff_jump_mass > 0.0 && eff_jump_mass <= 500_000_000.0 {
         "Large"
-    } else if max_jump_mass_kg > 375_000_000.0 {
+    } else if eff_jump_mass > 500_000_000.0 {
         "Extra Large"
     } else {
         "Large"
     };
 
-    // DERIVED: Lifetime stage bucket intervals derived from elapsed time
+    // DERIVED: Lifetime stage bucket intervals derived from elapsed time against sde_wormhole_types.max_stable_time_min
     let elapsed = now_unix.saturating_sub(created_unix);
-    let remaining_seconds = lifetime_seconds.saturating_sub(elapsed);
-    let lifetime_bucket = if collapsed || lifetime_seconds == 0 || elapsed >= lifetime_seconds || remaining_seconds == 0 {
+    let remaining_seconds = eff_lifetime.saturating_sub(elapsed);
+    let lifetime_bucket = if collapsed || eff_lifetime == 0 || elapsed >= eff_lifetime || remaining_seconds == 0 {
         "expired"
     } else if remaining_seconds < 3_600 {
         "<1h"
@@ -124,8 +125,8 @@ pub fn derive_wormhole_buckets_raw(
         "This wormhole is reaching the end of its natural lifetime"
     };
 
-    // DERIVED: Mass stability bucket threshold derived from mass ratio
-    let mass_ratio = if max_mass_kg > 0.0 { remaining_mass_kg / max_mass_kg } else { 0.0 };
+    // DERIVED: Mass stability bucket threshold derived from remaining_mass_kg / sde_wormhole_types.max_stable_mass
+    let mass_ratio = if eff_max_mass > 0.0 { remaining_mass_kg / eff_max_mass } else { 0.0 };
     let (mass_stability_bucket, mass_stability_description) = if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
         ("<10%", "This wormhole has had its stability critically disrupted")
     } else if mass_ratio < 0.50 {
@@ -394,7 +395,7 @@ pub async fn ensure_system_signatures_and_anomalies(
                     })
                     .await;
             }
-            let (_, wh_size, _, wh_age, _) = compute_wormhole_stages(sig, now_unix);
+            let (_, wh_size, _, wh_age, _) = compute_wormhole_stages_with_sde(sig, now_unix, Some(&ctx.sde));
             let _ = sys_handle
                 .set_ball_wormhole_stages(wh_item_id, wh_age, wh_size)
                 .await;
@@ -653,7 +654,7 @@ pub async fn collapse_expired_wormholes_in_system(
                         } else {
                             wormhole_item_id_for_signature(sys_id, &s.signature_id)
                         };
-                        let (_, wh_size, _, wh_age, _) = compute_wormhole_stages(s, now_unix);
+                        let (_, wh_size, _, wh_age, _) = compute_wormhole_stages_with_sde(s, now_unix, Some(&ctx.sde));
                         (ball_id, wh_age, wh_size)
                     })
                     .collect()
@@ -676,19 +677,27 @@ pub async fn expire_and_respawn_wormholes_in_cluster(ctx: &ServerContext, now_un
     sweep_expired_wormholes(ctx, None, now_unix).await;
 }
 
-pub fn compute_wormhole_stages(
+pub fn compute_wormhole_stages(wh: &CosmicSignatureRecord, now_unix: u64) -> (&'static str, f64, &'static str, i64, bool) {
+    compute_wormhole_stages_with_sde(wh, now_unix, None)
+}
+
+pub fn compute_wormhole_stages_with_sde(
     wh: &CosmicSignatureRecord,
     now_unix: u64,
+    sde: Option<&eve_sde::SdeRegistry>,
 ) -> (&'static str, f64, &'static str, i64, bool) {
+    let wh_type = sde.and_then(|s| wh.wormhole_type_id.and_then(|tid| s.wormhole_types.get(&tid)));
+    let eff_lifetime = if wh.lifetime_seconds > 0 { wh.lifetime_seconds } else { wh_type.map(|w| (w.max_stable_time_min * 60.0) as u64).unwrap_or(0) };
+    let eff_max_mass = if wh.max_mass_kg > 0.0 { wh.max_mass_kg } else { wh_type.map(|w| w.max_stable_mass).unwrap_or(0.0) };
     let elapsed = now_unix.saturating_sub(wh.created_unix);
-    let remaining_seconds = wh.lifetime_seconds.saturating_sub(elapsed);
-    let lifetime_pct = if wh.lifetime_seconds == 0 || elapsed >= wh.lifetime_seconds {
+    let remaining_seconds = eff_lifetime.saturating_sub(elapsed);
+    let lifetime_pct = if eff_lifetime == 0 || elapsed >= eff_lifetime {
         0.0
     } else {
-        remaining_seconds as f64 / wh.lifetime_seconds as f64
+        remaining_seconds as f64 / eff_lifetime as f64
     };
     let (lifetime_stage, wormhole_age) =
-        if wh.collapsed || wh.lifetime_seconds == 0 || elapsed >= wh.lifetime_seconds || remaining_seconds == 0 {
+        if wh.collapsed || eff_lifetime == 0 || elapsed >= eff_lifetime || remaining_seconds == 0 {
             ("Collapsed_Expired", 3)
         } else if remaining_seconds < 4 * 3_600 {
             ("ReachingEndOfLifetime", 2)
@@ -698,11 +707,7 @@ pub fn compute_wormhole_stages(
             ("BeginningToDecay", 0)
         };
 
-    let mass_pct = if wh.max_mass_kg > 0.0 {
-        wh.remaining_mass_kg / wh.max_mass_kg
-    } else {
-        0.0
-    };
+    let mass_pct = if eff_max_mass > 0.0 { wh.remaining_mass_kg / eff_max_mass } else { 0.0 };
     let (mass_stage, wormhole_size) = if wh.remaining_mass_kg <= 0.0 {
         ("Collapsed_Exhausted", 0.0)
     } else if mass_pct < 0.10 {
@@ -713,13 +718,7 @@ pub fn compute_wormhole_stages(
         ("Stable", 1.0)
     };
     let is_collapsed = wh.collapsed || lifetime_pct <= 0.0 || wh.remaining_mass_kg <= 0.0;
-    (
-        mass_stage,
-        wormhole_size,
-        lifetime_stage,
-        wormhole_age,
-        is_collapsed,
-    )
+    (mass_stage, wormhole_size, lifetime_stage, wormhole_age, is_collapsed)
 }
 
 // parity: feat:wormholes.mass-reduction-and-destabilization
@@ -1030,7 +1029,7 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
             }
 
             let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
-                compute_wormhole_stages(&sigs[wh_idx], now_unix);
+                compute_wormhole_stages_with_sde(&sigs[wh_idx], now_unix, Some(&ctx.sde));
             let buckets = derive_wormhole_buckets(&sigs[wh_idx], now_unix, &ctx.sde);
             let rem_mass = sigs[wh_idx].remaining_mass_kg;
             let parent_snapshot = sigs[wh_idx].clone();

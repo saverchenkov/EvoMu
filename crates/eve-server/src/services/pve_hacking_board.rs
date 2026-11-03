@@ -229,6 +229,61 @@ pub fn hacking_tile_distance_indicator(tile_idx: u32, tiles: &[HackingTileState]
         .clamp(1, 5)
 }
 
+/// Resolved per-tier hacking minigame node coherence and strength stats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HackingNodeStats {
+    pub core_coh: i32,
+    pub core_str: i32,
+    pub fw_coh: i32,
+    pub fw_str: i32,
+    pub av_coh: i32,
+    pub av_str: i32,
+    pub support_coh: i32,
+    pub support_str: i32,
+}
+
+/// Resolves effective hacking tier (`1..=5`) and node coherence/strength stats from SDE
+/// container `default_attributes` (`1919 tierDifficulty`, `1927 hackable`) when available.
+///
+/// DERIVED: `evomu_sde.sqlite` stores `1919 tierDifficulty` (`1.0..=5.0`) and `1927 hackable`
+/// on hackable container types (`group_id = 1207` etc.) and `1909 virusCoherence` /
+/// `1910 virusStrength` on analyzer modules (`group_id = 538`), but does not include separate
+/// `invTypes` rows for internal minigame nodes (`SystemCore`, `Firewall`, `Antivirus`,
+/// `RestorationNode`, `VirusSuppressor`). Per-tier node stats are derived from EVE's
+/// hacking minigame tier scaling.
+// parity: feat:pve.hacking-node-types, feat:exploration.hacking-coherence-and-strength
+pub fn resolve_hacking_node_stats(
+    sde: Option<&eve_sde::SdeRegistry>,
+    container_type_id: Option<u32>,
+    is_relic: bool,
+    difficulty: u8,
+) -> (u8, HackingNodeStats) {
+    let sde_tier = sde
+        .and_then(|s| container_type_id.and_then(|tid| s.get_type(tid)))
+        .and_then(|t| t.default_attributes.get(&1919).copied())
+        .filter(|&v| v >= 1.0)
+        .map(|v| (v as u8).clamp(1, 5));
+    let diff = if difficulty == 0 {
+        sde_tier.unwrap_or(2)
+    } else if let Some(st) = sde_tier {
+        difficulty.max(st).clamp(1, 5)
+    } else {
+        difficulty.clamp(1, 5)
+    };
+    let d = diff as i32;
+    let stats = HackingNodeStats {
+        core_coh: 20 + d * 10 + if is_relic { 10 } else { 0 },
+        core_str: 10 + ((d - 1) * 2),
+        fw_coh: 20 + d * 4,
+        fw_str: 10 + d * 2,
+        av_coh: 14 + d * 2,
+        av_str: 15 + d * 3,
+        support_coh: 14 + d * 2,
+        support_str: 10,
+    };
+    (diff, stats)
+}
+
 /// Builds a 24-node hexagonal hacking board containing a `SystemCore`, Defensive Subsystems
 /// (`Firewall`, `Antivirus`, `RestorationNode`, `VirusSuppressor`), Utility Subsystems
 /// (`SelfRepair`, `KernelRot`, `PolymorphicShield`, `SecondaryVector`), `DataCache` nodes
@@ -241,7 +296,21 @@ pub fn build_hacking_grid_procedural(
     difficulty: u8,
     rng_seed: u64,
 ) -> Vec<HackingTileState> {
-    let diff = difficulty.clamp(1, 5);
+    build_hacking_grid_procedural_with_sde(None, container_id, None, is_relic, difficulty, rng_seed)
+}
+
+/// SDE-aware variant of [`build_hacking_grid_procedural`] that resolves container `1919 tierDifficulty`
+/// from `sde` when `container_type_id` is known.
+// parity: feat:pve.hacking-node-types, feat:exploration.hacking-node-network, feat:exploration.hacking-coherence-and-strength
+pub fn build_hacking_grid_procedural_with_sde(
+    sde: Option<&eve_sde::SdeRegistry>,
+    container_id: ItemId,
+    container_type_id: Option<u32>,
+    is_relic: bool,
+    difficulty: u8,
+    rng_seed: u64,
+) -> Vec<HackingTileState> {
+    let (diff, stats) = resolve_hacking_node_stats(sde, container_type_id, is_relic, difficulty);
     let mut state = rng_seed
         ^ (container_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ ((diff as u64) << 32)
@@ -257,18 +326,16 @@ pub fn build_hacking_grid_procedural(
         .filter(|&idx| hacking_hex_distance(0, idx) >= 3)
         .collect();
     let core_idx = core_candidates[(next_u64() as usize) % core_candidates.len()];
-    let core_coh = 20 + (diff as i32) * 10 + if is_relic { 10 } else { 0 };
-    let core_str = 10 + ((diff as i32 - 1) * 2);
-
-    // Firewall: high coherence, lower strength
-    let fw_coh = 20 + (diff as i32) * 4;
-    let fw_str = 10 + (diff as i32) * 2;
-    // Anti-Virus: lower coherence, high strength
-    let av_coh = 14 + (diff as i32) * 2;
-    let av_str = 15 + (diff as i32) * 3;
-    // Restoration Node & Virus Suppressor
-    let support_coh = 14 + (diff as i32) * 2;
-    let support_str = 10;
+    let HackingNodeStats {
+        core_coh,
+        core_str,
+        fw_coh,
+        fw_str,
+        av_coh,
+        av_str,
+        support_coh,
+        support_str,
+    } = stats;
 
     let mut pool: Vec<(HackingNodeKind, i32, i32, Option<HackingUtilityKind>)> =
         Vec::with_capacity(22);
@@ -432,14 +499,16 @@ pub fn resolve_hacking_turn_combat(
             }
         } else {
             // Data Cache concealed a Defensive Subsystem
+            let (_, concealed_stats) =
+                resolve_hacking_node_stats(None, None, game.is_relic, inferred_diff);
             if tile_idx % 2 == 0 {
                 t_ref.kind = HackingNodeKind::Firewall;
-                t_ref.coherence = 20 + (inferred_diff as i32) * 4;
-                t_ref.strength = 10 + (inferred_diff as i32) * 2;
+                t_ref.coherence = concealed_stats.fw_coh;
+                t_ref.strength = concealed_stats.fw_str;
             } else {
                 t_ref.kind = HackingNodeKind::Antivirus;
-                t_ref.coherence = 14 + (inferred_diff as i32) * 2;
-                t_ref.strength = 15 + (inferred_diff as i32) * 3;
+                t_ref.coherence = concealed_stats.av_coh;
+                t_ref.strength = concealed_stats.av_str;
             }
         }
     } else if t_ref.kind == HackingNodeKind::UtilitySubsystem {

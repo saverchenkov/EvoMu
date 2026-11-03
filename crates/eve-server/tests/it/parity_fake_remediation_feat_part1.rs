@@ -7,22 +7,25 @@
 //! - `feat:pve.hacking-failure-outcome`
 //! - `feat:sovereignty.skyhook-reagent-maturity`
 
-use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_db::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg, HackingNodeKind, HackingUtilityKind,
 };
-use eve_server::services::pve_hacking_board::build_hacking_grid_procedural;
+use eve_server::services::pve_hacking_board::{
+    build_hacking_grid_procedural, build_hacking_grid_procedural_with_sde,
+    resolve_hacking_node_stats,
+};
 use eve_server::services::sov_gameplay::sov_gameplay_skyhook::advance_skyhook_reagents_in_snap;
-use eve_server::services::space_destiny::derive_wormhole_buckets_raw;
+use eve_server::services::space_destiny::{
+    derive_wormhole_buckets, derive_wormhole_buckets_raw, wormhole_item_id_for_signature,
+};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn make_context() -> ServerContext {
-    let db = Arc::new(WorldRepository::new_empty());
-    ServerContext::with_repository(db)
+    ServerContext::new()
 }
 
 fn make_session(char_id: i64, sys_id: u32, ship_id: i64) -> SessionState {
@@ -44,15 +47,17 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     ]);
 
     let ctx = make_context();
-    let now = 1_750_000_000_u64;
-    let lifetime = 48 * 3_600_u64;
+    crate::common::pin_clock(&ctx);
+    let now = ctx.now_unix();
+    let b041 = ctx.sde.wormhole_types.get(&30_645).expect("Wormhole B041 in SDE");
+    let lifetime = (b041.max_stable_time_min * 60.0) as u64; // 2880 min = 48h
 
     // > 24h remaining (36h left): >1 day bucket, not yet begun to decay
     let fresh = derive_wormhole_buckets_raw(
         30_000_142,
-        20_000_000.0,
-        1_000_000_000.0,
-        1_000_000_000.0,
+        b041.max_jump_mass,
+        b041.max_stable_mass,
+        b041.max_stable_mass,
         now,
         lifetime,
         false,
@@ -60,6 +65,7 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
         &ctx.sde,
     );
     assert_eq!(fresh.lifetime_bucket, ">1 day");
+    assert_eq!(fresh.max_ship_size, "Extra Large");
     assert_eq!(
         fresh.lifetime_description,
         "This wormhole has not yet begun to decay"
@@ -68,9 +74,9 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     // 4h..=24h remaining (12h left): <1 day bucket, beginning to decay
     let decaying = derive_wormhole_buckets_raw(
         30_000_142,
-        20_000_000.0,
-        1_000_000_000.0,
-        1_000_000_000.0,
+        b041.max_jump_mass,
+        b041.max_stable_mass,
+        b041.max_stable_mass,
         now,
         lifetime,
         false,
@@ -86,9 +92,9 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     // < 4h remaining (2h left): <4h bucket, reaching end of natural lifetime
     let eol = derive_wormhole_buckets_raw(
         30_000_142,
-        20_000_000.0,
-        1_000_000_000.0,
-        1_000_000_000.0,
+        b041.max_jump_mass,
+        b041.max_stable_mass,
+        b041.max_stable_mass,
         now,
         lifetime,
         false,
@@ -99,6 +105,172 @@ async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
     assert_eq!(
         eol.lifetime_description,
         "This wormhole is reaching the end of its natural lifetime"
+    );
+
+    // Verify SDE wormhole type attributes drive ship size & destination class buckets
+    for (wtid, expected_size, expected_dest) in [
+        (34_134_u32, "Small", "C1-3"),       // Wormhole E004 (5M kg -> C1)
+        (30_579_u32, "Medium", "C1-3"),      // Wormhole Z971 (62M kg -> C1)
+        (30_677_u32, "Large", "High-Sec"),   // Wormhole B274 (375M kg -> High-Sec)
+        (56_026_u32, "Large", "Null-Sec"),   // Wormhole C729 (410M kg)
+        (30_645_u32, "Extra Large", "C6"),   // Wormhole B041 (1B kg -> C6)
+    ] {
+        let sig = CosmicSignatureRecord {
+            signature_id: format!("SDE-{wtid}"),
+            solar_system_id: 30_000_142,
+            sig_group: "Wormhole".into(),
+            type_name: ctx.sde.wormhole_types[&wtid].name.clone(),
+            position: [1_000.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            wormhole_type_id: Some(wtid),
+            destination_system_id: None,
+            created_unix: now,
+            lifetime_seconds: 0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 500_000_000.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        };
+        let b = derive_wormhole_buckets(&sig, now + 60, &ctx.sde);
+        assert_eq!(b.max_ship_size, expected_size, "wtid {wtid}");
+        assert_eq!(b.destination_class, expected_dest, "wtid {wtid}");
+    }
+
+    // Verify live MachoNet scanMgr.GetSystemScanMgr & wormholeMgr.WormholeJump RPCs
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_099_i64;
+    let mut sess = make_session(char_id, sys_id, ship_id);
+    let kw: HashMap<String, PyRep> = HashMap::new();
+    let b274 = &ctx.sde.wormhole_types[&30_677];
+    let wh_sig_id = "WH-SDE-LIVE".to_string();
+    let wh_item_id = wormhole_item_id_for_signature(sys_id, &wh_sig_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 605, // Heron
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![CosmicSignatureRecord {
+                signature_id: wh_sig_id.clone(),
+                solar_system_id: sys_id,
+                sig_group: "Wormhole".into(),
+                type_name: b274.name.clone(),
+                position: [500.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(30_677),
+                destination_system_id: Some(30_002_187),
+                created_unix: now.saturating_sub(22 * 3_600), // 2h left of 24h -> <4h
+                lifetime_seconds: (b274.max_stable_time_min * 60.0) as u64,
+                max_mass_kg: b274.max_stable_mass,
+                remaining_mass_kg: b274.max_stable_mass * 0.25, // <50%
+                max_jump_mass_kg: b274.max_jump_mass,
+                collapsed: false,
+            }],
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 605,
+            position: glam::DVec3::new(500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: wh_item_id,
+            type_id: 26_272,
+            position: glam::DVec3::new(500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: b274.max_stable_mass,
+            radius: 1_500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Rigid,
+        })
+        .await;
+
+    let scan_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "GetSystemScanMgr",
+            &[PyRep::Integer(i64::from(sys_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("scanMgr.GetSystemScanMgr");
+    let sig_kv = scan_rep
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l
+                .iter()
+                .find(|item| item.dict_get("signatureID") == Some(&PyRep::String(wh_sig_id.clone()))),
+            _ => None,
+        })
+        .expect("WH-SDE-LIVE in GetSystemScanMgr");
+    assert_eq!(
+        sig_kv.dict_get("maxShipSize"),
+        Some(&PyRep::String("Large".into()))
+    );
+    assert_eq!(
+        sig_kv.dict_get("lifetimeBucket"),
+        Some(&PyRep::String("<4h".into()))
+    );
+    assert_eq!(
+        sig_kv.dict_get("massStabilityBucket"),
+        Some(&PyRep::String("<50%".into()))
+    );
+
+    let jump_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "wormholeMgr",
+            None,
+            "WormholeJump",
+            &[PyRep::Integer(wh_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("wormholeMgr.WormholeJump");
+    assert_eq!(
+        jump_rep.dict_get("lifetimeBucket"),
+        Some(&PyRep::String("<4h".into()))
+    );
+    assert_eq!(
+        jump_rep.dict_get("lifetimeDescription"),
+        Some(&PyRep::String(
+            "This wormhole is reaching the end of its natural lifetime".into()
+        ))
     );
 }
 
@@ -132,6 +304,16 @@ async fn test_hacking_node_types_and_failure_outcome() {
     // 2. SelfRepair heals 5..=10 coherence per turn for 3 turns without a max_virus_coherence cap,
     //    and 2nd hack failure on a standard Data/Relic container self-destructs with 0.0 ship damage.
     let ctx = make_context();
+    let (tier1, stats1) = resolve_hacking_node_stats(Some(&ctx.sde), Some(21_683), false, 0);
+    let (tier3, stats3) = resolve_hacking_node_stats(Some(&ctx.sde), Some(21_685), false, 0);
+    assert_eq!(tier1, 1);
+    assert_eq!(tier3, 3);
+    assert!(stats3.core_coh > stats1.core_coh && stats3.fw_coh > stats1.fw_coh);
+    let sde_tiles =
+        build_hacking_grid_procedural_with_sde(Some(&ctx.sde), 77_004, Some(21_685), false, 0, 1_750_000_000);
+    assert!(sde_tiles
+        .iter()
+        .any(|t| t.kind == HackingNodeKind::RestorationNode));
     let kw: HashMap<String, PyRep> = HashMap::new();
     let char_id = 90_000_001_i64;
     let sys_id = 30_002_813_u32; // Low-sec
@@ -154,6 +336,12 @@ async fn test_hacking_node_types_and_failure_outcome() {
     });
 
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
         snap.items.insert(
             ship_id,
             InventoryItemRecord {

@@ -5,7 +5,7 @@
 
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::space_destiny::{
-    compute_wormhole_stages, derive_wormhole_buckets, ensure_system_signatures_and_anomalies,
+    compute_wormhole_stages_with_sde, derive_wormhole_buckets, ensure_system_signatures_and_anomalies,
     system_wormhole_profile, wormhole_item_id_for_signature, AU_IN_METERS,
 };
 use eve_db::types::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag};
@@ -522,7 +522,7 @@ async fn handle_get_system_scan_mgr(
                 ]);
             }
             if resolved {
-                let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) = compute_wormhole_stages(&s, now_unix);
+                let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) = compute_wormhole_stages_with_sde(&s, now_unix, Some(&ctx.sde));
                 let buckets = derive_wormhole_buckets(&s, now_unix, &ctx.sde);
                 kv.extend([
                     ("typeID", s.wormhole_type_id.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None)),
@@ -927,7 +927,7 @@ async fn handle_request_scans(
             ]);
         }
         if resolved {
-            let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) = compute_wormhole_stages(&sig, now_unix);
+            let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) = compute_wormhole_stages_with_sde(&sig, now_unix, Some(&ctx.sde));
             let buckets = derive_wormhole_buckets(&sig, now_unix, &ctx.sde);
             kv.extend([
                 ("typeID", sig.wormhole_type_id.map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None)),
