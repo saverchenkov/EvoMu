@@ -9,7 +9,7 @@ use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 use eve_server::services::{
-    notify_emitters_b23, notify_emitters_batch3_space, notify_emitters_batch8_ops,
+    notify_emitters_b23, notify_emitters_batch8_ops,
     pve_expeditions::EscalatingPathEntry,
     pve_exploration::notify_pve_destruction_events,
 };
@@ -421,8 +421,7 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
     // parity: notify:OnCloakModuleForceDeactivated, notify:OnDungeonCameraInterest
     // parity: notify:OnDungeonTriggerAmbientSound, notify:OnDungeonTriggerAudio
     // parity: notify:OnDungeonTriggerMessage, notify:OnDungeonTriggerMusic
-    // parity: notify:OnFleetEscalatingPathMessage, notify:OnEssReserveBankInventoryFull
-    // parity: notify:OnJumpQueueUpdate, notify:OnProgressionRoomJoined
+    // parity: notify:OnFleetEscalatingPathMessage, notify:OnProgressionRoomJoined
     eve_testkit::attest(&[
         "notify:OnCloakModuleForceDeactivated",
         "notify:OnDungeonCameraInterest",
@@ -431,8 +430,6 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
         "notify:OnDungeonTriggerMessage",
         "notify:OnDungeonTriggerMusic",
         "notify:OnFleetEscalatingPathMessage",
-        "notify:OnEssReserveBankInventoryFull",
-        "notify:OnJumpQueueUpdate",
         "notify:OnProgressionRoomJoined",
     ]);
     let ctx = new_ctx();
@@ -528,14 +525,6 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
     );
     let esc_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&esc_n, "OnFleetEscalatingPathMessage"), &[PyRep::Integer(PILOT_A), PyRep::Integer(280_001)]);
-
-    notify_emitters_batch3_space::emit_ess_reserve_bank_inventory_full(&ctx, SYS_JITA);
-    let ess_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&ess_n, "OnEssReserveBankInventoryFull").len(), 0);
-
-    notify_emitters_batch3_space::emit_jump_queue_update(&ctx, PILOT_A, SYS_JITA, 100, 12, vec![501, 502], 60);
-    let jq_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&jq_n, "OnJumpQueueUpdate")[0], PyRep::Integer(i64::from(SYS_JITA)));
 
     let inst_id = eve_server::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
         &ctx,

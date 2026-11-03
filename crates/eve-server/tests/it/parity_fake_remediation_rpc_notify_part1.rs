@@ -261,3 +261,100 @@ async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     let npc_notifs = drain_all(&ctx, &mut s_a, PILOT_A);
     assert!(npc_notifs.iter().any(|(e, _)| e == "OnNpcTimerUpdate"));
 }
+
+#[tokio::test]
+async fn test_corp_role_bit_values_match_v24_client() {
+    use eve_db::corp_roles;
+
+    let expected_v24_roles: &[(u64, &str)] = &[
+        (1 << 0, "Director"),
+        (1 << 7, "Personnel Manager"),
+        (1 << 8, "Accountant"),
+        (1 << 9, "Security Officer"),
+        (1 << 10, "Factory Manager"),
+        (1 << 11, "Station Manager"),
+        (1 << 12, "Auditor"),
+        (1 << 13, "Hangar Can Take 1"),
+        (1 << 14, "Hangar Can Take 2"),
+        (1 << 15, "Hangar Can Take 3"),
+        (1 << 16, "Hangar Can Take 4"),
+        (1 << 17, "Hangar Can Take 5"),
+        (1 << 18, "Hangar Can Take 6"),
+        (1 << 19, "Hangar Can Take 7"),
+        (1 << 20, "Hangar Can Query 1"),
+        (1 << 21, "Hangar Can Query 2"),
+        (1 << 22, "Hangar Can Query 3"),
+        (1 << 23, "Hangar Can Query 4"),
+        (1 << 24, "Hangar Can Query 5"),
+        (1 << 25, "Hangar Can Query 6"),
+        (1 << 26, "Hangar Can Query 7"),
+        (1 << 27, "Account Can Take 1"),
+        (1 << 28, "Account Can Take 2"),
+        (1 << 29, "Account Can Take 3"),
+        (1 << 30, "Account Can Take 4"),
+        (1 << 31, "Account Can Take 5"),
+        (1 << 32, "Account Can Take 6"),
+        (1 << 33, "Account Can Take 7"),
+        (1 << 34, "Diplomat"),
+        (1 << 41, "Equipment Config"),
+        (1 << 42, "Container Can Take 1"),
+        (1 << 43, "Container Can Take 2"),
+        (1 << 44, "Container Can Take 3"),
+        (1 << 45, "Container Can Take 4"),
+        (1 << 46, "Container Can Take 5"),
+        (1 << 47, "Container Can Take 6"),
+        (1 << 48, "Container Can Take 7"),
+        (1 << 49, "Can Rent Office"),
+        (1 << 50, "Can Rent Factory Slot"),
+        (1 << 51, "Can Rent Research Slot"),
+        (1 << 52, "Junior Accountant"),
+        (1 << 53, "Starbase Config"),
+        (1 << 54, "Trader"),
+        (1 << 55, "Chat Manager"),
+        (1 << 56, "Contract Manager"),
+        (1 << 57, "Infrastructure Tactical Officer"),
+        (1 << 58, "Starbase Caretaker"),
+        (1 << 59, "Fitting Manager"),
+        (1 << 60, "Brand Manager"),
+        (1 << 61, "Skill Plan Manager"),
+        (1 << 62, "Project Manager"),
+    ];
+
+    assert_eq!(corp_roles::ROLE_DIRECTOR, 1 << 0);
+    assert_eq!(corp_roles::ROLE_TRADER, 1 << 54);
+    assert_eq!(corp_roles::ROLE_CHAT_MANAGER, 1 << 55);
+    assert_eq!(corp_roles::ROLE_CONTRACT_MANAGER, 1 << 56);
+    assert_eq!(corp_roles::ROLE_INFRASTRUCTURE_TACTICIAN, 1 << 57);
+    assert_eq!(corp_roles::ROLE_STARBASE_CARETAKER, 1 << 58);
+    assert_eq!(corp_roles::ROLE_FITTING_MANAGER, 1 << 59);
+    assert_eq!(corp_roles::ROLE_BRAND_MANAGER, 1 << 60);
+    assert_eq!(corp_roles::ROLE_SKILL_PLAN_MANAGER, 1 << 61);
+    assert_eq!(corp_roles::ROLE_PROJECT_MANAGER, 1 << 62);
+
+    let ctx = new_ctx();
+    let mut sess = SessionState::new(91_007);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(PILOT_A)]).await.unwrap();
+
+    let PyRep::Rowset { rows, .. } = rpc(&ctx, &mut sess, "cache", "Rowset", &[PyRep::String("roles".into())]).await.unwrap() else {
+        panic!("expected Rowset");
+    };
+    let actual: Vec<(u64, String)> = rows
+        .into_iter()
+        .map(|r| {
+            let id = r[0].as_i64().expect("roleID integer") as u64;
+            let name = r[1].as_str().expect("roleName string").to_string();
+            (id, name)
+        })
+        .collect();
+
+    for &(bit, expected_name) in expected_v24_roles {
+        let found: Vec<&str> = actual
+            .iter()
+            .filter_map(|(id, name)| (*id == bit).then_some(name.as_str()))
+            .collect();
+        assert_eq!(found, vec![expected_name], "mismatch for role bit 1 << {}", bit.trailing_zeros());
+    }
+    assert_eq!(actual.len(), expected_v24_roles.len(), "unexpected extra/missing roles in cache.Rowset(\"roles\")");
+}
+

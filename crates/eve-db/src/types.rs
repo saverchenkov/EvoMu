@@ -972,25 +972,46 @@ pub mod corp_roles {
     pub const ROLE_FACTORY_MANAGER: u64 = 1 << 10;
     pub const ROLE_STATION_MANAGER: u64 = 1 << 11;
     pub const ROLE_AUDITOR: u64 = 1 << 12;
-    pub const ROLE_RENT_FACTORY_FACILITY: u64 = 1 << 17;
-    pub const ROLE_RENT_RESEARCH_FACILITY: u64 = 1 << 18;
+    /// `corpRoleHangarCanTake1..7` (V24 client `appConst` / Crucible `EVE_Roles.h`: `1 << 13..=19`).
+    pub const ROLE_HANGAR_CAN_TAKE: [u64; 7] = [1 << 13, 1 << 14, 1 << 15, 1 << 16, 1 << 17, 1 << 18, 1 << 19];
+    /// `corpRoleHangarCanQuery1..7` (V24 client `appConst` / Crucible `EVE_Roles.h`: `1 << 20..=26`).
+    pub const ROLE_HANGAR_CAN_QUERY: [u64; 7] = [1 << 20, 1 << 21, 1 << 22, 1 << 23, 1 << 24, 1 << 25, 1 << 26];
+    /// `corpRoleAccountCanTake1..7` (V24 client `appConst` / Crucible `EVE_Roles.h`: `1 << 27..=33`).
+    pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [1 << 27, 1 << 28, 1 << 29, 1 << 30, 1 << 31, 1 << 32, 1 << 33];
     pub const ROLE_DIPLOMAT: u64 = 1 << 34;
+    pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
     pub const ROLE_EQUIPMENT_CONFIG: u64 = 1 << 41;
     pub const ROLE_CONFIG_EQUIPMENT: u64 = ROLE_EQUIPMENT_CONFIG;
-    pub const ROLE_STARBASE_CONFIG: u64 = 1 << 53;
-    pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
-    /// `corpRoleRentOffice` (V24 client `eve/common/lib/appConst`).
+    /// `corpRoleContainerCanTake1..7` (V24 client `appConst` / Crucible `EVE_Roles.h`: `1 << 42..=48`).
+    pub const ROLE_CONTAINER_CAN_TAKE: [u64; 7] = [1 << 42, 1 << 43, 1 << 44, 1 << 45, 1 << 46, 1 << 47, 1 << 48];
+    /// `corpRoleRentOffice` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:156`: `1 << 49`).
     pub const ROLE_RENT_OFFICE: u64 = 1 << 49;
-    /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst`).
+    /// `corpRoleRentFactorySlot` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:157`: `1 << 50`).
+    pub const ROLE_RENT_FACTORY_FACILITY: u64 = 1 << 50;
+    /// `corpRoleRentResearchSlot` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:158`: `1 << 51`).
+    pub const ROLE_RENT_RESEARCH_FACILITY: u64 = 1 << 51;
+    /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:159`: `1 << 52`).
     pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 52;
-    /// `corpRoleTrader` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h`: 1 << 20).
-    pub const ROLE_TRADER: u64 = 1 << 20;
-    /// `corpRoleContractManager` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:163`: 72057594037927936).
+    /// `corpRoleStarbaseConfig` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:160`: `1 << 53`).
+    pub const ROLE_STARBASE_CONFIG: u64 = 1 << 53;
+    /// `corpRoleTrader` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:161`: `1 << 54`).
+    pub const ROLE_TRADER: u64 = 1 << 54;
+    /// `corpRoleChatManager` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:162`: `1 << 55`).
+    pub const ROLE_CHAT_MANAGER: u64 = 1 << 55;
+    /// `corpRoleContractManager` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:163`: `1 << 56`).
     pub const ROLE_CONTRACT_MANAGER: u64 = 1 << 56;
-    /// `corpRoleProjectManager` (Corporation freelance & projects management).
-    pub const ROLE_PROJECT_MANAGER: u64 = 1 << 6;
-    /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.
-    pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [1 << 27, 1 << 28, 1 << 29, 1 << 30, 1 << 31, 1 << 32, 1 << 33];
+    /// `corpRoleInfrastructureTacticalOfficer` (V24 client `appConst` / Crucible `EVE_Roles.h:164`: `1 << 57`).
+    pub const ROLE_INFRASTRUCTURE_TACTICIAN: u64 = 1 << 57;
+    /// `corpRoleStarbaseCaretaker` (V24 client `appConst` / Crucible `EVE_Roles.h:165`: `1 << 58`).
+    pub const ROLE_STARBASE_CARETAKER: u64 = 1 << 58;
+    /// `corpRoleFittingManager` (V24 client `appConst` / Crucible `EVE_Roles.h:166`: `1 << 59`).
+    pub const ROLE_FITTING_MANAGER: u64 = 1 << 59;
+    /// `corpRoleBrandManager` (V24 client `appConst`: `1 << 60`).
+    pub const ROLE_BRAND_MANAGER: u64 = 1 << 60;
+    /// `corpRoleSkillPlanManager` (V24 client `appConst`: `1 << 61`).
+    pub const ROLE_SKILL_PLAN_MANAGER: u64 = 1 << 61;
+    /// `corpRoleProjectManager` (V24 client `appConst`: `1 << 62`).
+    pub const ROLE_PROJECT_MANAGER: u64 = 1 << 62;
     /// Hangar division access/take (bits `13..=26`) + wallet division take (`ROLE_ACCOUNT_CAN_TAKE`, bits `27..=33`)
     /// subject to the 24-hour corporation role maturation delay.
     pub const CORP_DELAYED_DIVISION_ROLE_MASK: u64 = ((1u64 << 21) - 1) << 13;

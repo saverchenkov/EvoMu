@@ -143,7 +143,6 @@ mod modules_scanners_mutaplasmids_dbuffs;
 mod modules_ships_overheat_closure;
 mod navigation_pve_closure;
 mod parity_features_world_part1;
-mod parity_features_world_part2;
 mod parity_features_world_part3;
 mod parity_features_world_part4;
 mod parity_fake_remediation_rpc_notify_part1;

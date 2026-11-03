@@ -868,7 +868,7 @@ pub fn handle(
                     if corp.ceo_id != char_id
                         && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_ACCOUNTANT)
                         && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
-                        && !eve_db::corp_roles::has_role(role_mask, 1u64 << 20) // corpRoleTrader
+                        && !eve_db::corp_roles::has_role(role_mask, eve_db::corp_roles::ROLE_TRADER)
                     {
                         return Err(BridgeRpcError {
                             code: "CorpRoleRequired".into(),

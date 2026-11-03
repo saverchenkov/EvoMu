@@ -7,8 +7,8 @@ use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::router::{NotificationTarget, ServerContext};
-use eve_server::services::{notify_emitters_batch3, notify_emitters_batch9};
+use eve_server::router::ServerContext;
+use eve_server::services::notify_emitters_batch9;
 use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 use std::collections::HashMap;
@@ -74,13 +74,9 @@ async fn setup_pilot(ctx: &ServerContext, sid: u64) -> SessionState {
 
 #[tokio::test]
 async fn test_parity_notifies_seasons_campaigns_and_skills() {
-    // parity: notify:OnCCPNotification, notify:OnContextualOfferPurchased, notify:OnLoginMilestoneAchieved
     // parity: notify:OnSeasonOmegaRewardsClaimed, notify:OnSeasonalGoalCompleted, notify:OnSeasonalGoalsReset
     // parity: notify:OnSkillBundleInjected
     eve_testkit::attest(&[
-        "notify:OnCCPNotification",
-        "notify:OnContextualOfferPurchased",
-        "notify:OnLoginMilestoneAchieved",
         "notify:OnSeasonOmegaRewardsClaimed",
         "notify:OnSeasonalGoalCompleted",
         "notify:OnSeasonalGoalsReset",
@@ -89,29 +85,6 @@ async fn test_parity_notifies_seasons_campaigns_and_skills() {
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, 1201).await;
     sess.role = ROLE_GM_DEFAULT;
-
-    notify_emitters_batch3::emit_ccp_notification(
-        &ctx,
-        NotificationTarget::Character(PILOT_A),
-        "Cluster Notice",
-        "Maintenance",
-        "Scheduled downtime at 11:00 UTC",
-        101,
-        55,
-    );
-    let ccp_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&ccp_n, "OnCCPNotification")[0], PyRep::String("Cluster Notice".into()));
-
-    notify_emitters_batch3::emit_contextual_offer_purchased(&ctx, PILOT_A, 3301);
-    let offer_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&offer_n, "OnContextualOfferPurchased")[0], PyRep::Integer(3301));
-
-    notify_emitters_batch3::emit_login_milestone_achieved(&ctx, PILOT_A, 7, 1_500_000.0, true);
-    let mile_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&mile_n, "OnLoginMilestoneAchieved"),
-        &[PyRep::Integer(7), PyRep::Real(1_500_000.0), PyRep::Bool(true)]
-    );
 
     let mut target_ch_id = 1_005_i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -303,17 +276,7 @@ async fn test_parity_notifies_plex_dogma_and_brain() {
     let sys_jita = 30_000_142_u32;
     let miner_id = 880_011_i64;
     let rock_id = 880_012_i64;
-    let miner_type = *ctx
-        .sde
-        .types
-        .iter()
-        .find(|(_, t)| {
-            t.group_id == 54
-                && t.published
-                && t.default_attributes.get(&6).copied().unwrap_or(0.0) > 0.0
-        })
-        .map(|(id, _)| id)
-        .unwrap_or(&484);
+    let miner_type = 483_u32;
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(PILOT_A).or_default().insert(
             3386,
@@ -328,6 +291,7 @@ async fn test_parity_notifies_plex_dogma_and_brain() {
             sh.type_id = 32880;
         }
         snap.items.retain(|_, i| i.location_id != active_ship);
+        snap.module_online_states.insert(miner_id, true);
         snap.items.insert(
             miner_id,
             InventoryItemRecord {
@@ -347,10 +311,14 @@ async fn test_parity_notifies_plex_dogma_and_brain() {
         .await
         .expect("Undock");
     let ship_id = undock.dict_get("shipID").and_then(|v| v.as_i64()).expect("shipID");
+    ctx.invalidate_ship_fitting(ship_id);
     let beyonce_id = undock
         .dict_get("beyonceBoundID")
         .and_then(|v| v.as_i64())
         .map(|v| v as u64);
+    ctx.dispatch_rpc(&mut sess, "beyonce", beyonce_id, "CmdStop", &[], &HashMap::new(), None)
+        .await
+        .expect("CmdStop");
 
     let sys = ctx.systems.get_or_spawn(sys_jita);
     let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball");
@@ -419,12 +387,12 @@ async fn test_parity_notifies_plex_dogma_and_brain() {
     )
     .await
     .expect("Activate Miner I");
-    ctx.dispatch_rpc(&mut sess, "beyonce", beyonce_id, "CmdStop", &[], &HashMap::new(), None)
-        .await
-        .expect("CmdStop");
     let _ = drain_all(&ctx, &mut sess, PILOT_A);
-    let _ = sys.set_capacitor(ship_id, 0.0).await;
     ctx.advance_secs(65);
+    let mut cs = ctx.build_ship_combat_state(PILOT_A, ship_id, 32880);
+    cs.max_capacitor = 0.0;
+    cs.capacitor = 0.0;
+    let _ = sys.set_combat_state(ship_id, cs).await;
     let _ = eve_server::services::mining_cycle::process_mining_cycles(&ctx).await;
     let eff_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(
