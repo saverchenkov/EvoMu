@@ -590,6 +590,99 @@ pub fn emit_tale_remove_for_constellation(
     }
 }
 
+pub fn emit_incursion_completion_combat_notifications(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    sde: &eve_sde::SdeRegistry,
+    pending_notifications: Option<&std::sync::RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
+    notify_tx: Option<&tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>>,
+    result: &crate::services::pve_incursion_sites::IncursionCompletionResult,
+) {
+    let now_s = db.clock().now_unix_secs();
+    let info = crate::services::pve_special_sites::with_pve_special_reg_db(db, now_s, |reg| {
+        reg.incursions
+            .values()
+            .find(|inc| inc.sites.iter().any(|s| s.site_id == result.site_id))
+            .map(|inc| (inc.constellation_id, inc.tale_id))
+    });
+    let Some((cid, tale_id)) = info else { return; };
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let payload = PyRep::keyval([
+        ("influence", PyRep::Real(result.influence)),
+        ("lastUpdated", PyRep::Integer(now_ft)),
+    ]);
+    let inf_args = vec![PyRep::Integer(tale_id), payload];
+
+    let chars = db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter_map(|c| {
+                sde.solar_systems.get(&c.solar_system_id).and_then(|sys| {
+                    (sys.constellation_id == cid).then_some(c.character_id)
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+
+    for target_char_id in chars {
+        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+            target_char_id,
+            None,
+            "OnInfluenceUpdate",
+            "solarsystemid",
+            inf_args.clone(),
+        );
+        let notif = crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: target_char_id,
+            event: "OnInfluenceUpdate".into(),
+            id_type: "solarsystemid".into(),
+            args: inf_args.clone(),
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        };
+        if let Some(pend) = pending_notifications {
+            if let Ok(mut map) = pend.write() {
+                map.entry(target_char_id).or_default().push(notif.clone());
+            }
+        }
+        if let Some(tx) = notify_tx {
+            let _ = tx.send((target_char_id, notif));
+        }
+
+        if result.incursion_ended {
+            let rem_args = vec![
+                PyRep::Integer(tale_id),
+                PyRep::Integer(1),
+                PyRep::Integer(crate::services::pve_incursion_sites::INCURSION_TALE_TEMPLATE_ID as i64),
+            ];
+            let (packet_rem, marshaled_packet_rem) = crate::router::ServerContext::build_macho_notification_packet(
+                target_char_id,
+                None,
+                "OnTaleRemove",
+                "solarsystemid",
+                rem_args.clone(),
+            );
+            let notif_rem = crate::router::cache_notifications::PendingMachoNotification {
+                recipient_char_id: target_char_id,
+                event: "OnTaleRemove".into(),
+                id_type: "solarsystemid".into(),
+                args: rem_args,
+                packet: packet_rem,
+                marshaled_packet: marshaled_packet_rem,
+                created_filetime: now_ft,
+            };
+            if let Some(pend) = pending_notifications {
+                if let Ok(mut map) = pend.write() {
+                    map.entry(target_char_id).or_default().push(notif_rem.clone());
+                }
+            }
+            if let Some(tx) = notify_tx {
+                let _ = tx.send((target_char_id, notif_rem));
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 6. System Effects, ESS, Mining, Industry, SimClock, WhiteOut, Deathzone, Map
 // ---------------------------------------------------------------------------
@@ -816,6 +909,123 @@ pub fn sync_deathzone_state_notifications(ctx: &ServerContext, sys_id: u32) {
                 PyRep::Integer(ship_id),
                 tracking_data,
             ],
+        );
+    }
+}
+
+pub fn emit_expedition_combat_notifications(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &std::sync::RwLock<
+        std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        crate::router::cache_notifications::PendingMachoNotification,
+    )>,
+    cleared_site_id: Option<&str>,
+    new_escalation: Option<&crate::services::pve_expeditions::EscalatingPathEntry>,
+    advanced_step: Option<&crate::services::pve_expeditions::EscalatingPathEntry>,
+) {
+    let push_sys = |sys_id: u32, event: &str, args: Vec<PyRep>| {
+        let recipients: Vec<i64> = db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| c.solar_system_id == sys_id && c.station_id.is_none() && c.structure_id.is_none())
+                .map(|c| c.character_id)
+                .collect()
+        });
+        for cid in recipients {
+            crate::services::notify_emitters_b36::push_char_notification_with_db(
+                db,
+                Some(pending_notifications),
+                Some(notify_tx),
+                cid,
+                event,
+                args.clone(),
+            );
+        }
+    };
+
+    if let Some(site_id) = cleared_site_id {
+        if let Some(rest) = site_id.strip_prefix("EXP-") {
+            if let Some((inst_s, step_s)) = rest.rsplit_once('-') {
+                if let (Ok(inst_id), Ok(step_idx)) = (inst_s.parse::<i64>(), step_s.parse::<u8>()) {
+                    let old_sig_id = crate::services::pve_expeditions::expedition_sig_id(inst_id, step_idx);
+                    let site_info = db.with_mut_snapshot(|snap| {
+                        let found = snap
+                            .owner_notes
+                            .get(&crate::services::pve_exploration::PVE_EXPLORATION_NOTE_ID)
+                            .and_then(|n| {
+                                serde_json::from_str::<crate::services::pve_exploration::PveExplorationRegistry>(&n.note).ok()
+                            })
+                            .and_then(|reg| {
+                                reg.sites_by_system.iter().find_map(|(&sys, list)| {
+                                    list.iter()
+                                        .find(|s| s.site_id == site_id)
+                                        .map(|s| (sys, s.dungeon_id))
+                                })
+                            });
+                        if let Some((sys, _)) = found {
+                            if let Some(sigs) = snap.cosmic_signatures.get_mut(&sys) {
+                                for sig in sigs.iter_mut().filter(|s| s.signature_id == old_sig_id) {
+                                    sig.collapsed = true;
+                                }
+                            }
+                        }
+                        found
+                    });
+                    if let Some((sys_id, did)) = site_info {
+                        push_sys(
+                            sys_id,
+                            "OnDungeonInstanceRemoved",
+                            vec![
+                                PyRep::Integer(i64::from(sys_id)),
+                                PyRep::Integer(inst_id),
+                                PyRep::String(old_sig_id),
+                                PyRep::Integer(i64::from(did)),
+                            ],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    for esc in [new_escalation, advanced_step].into_iter().flatten() {
+        let sig_id = crate::services::pve_expeditions::expedition_sig_id(esc.instance_id, esc.step_index);
+        let sys_id = esc.destination_solar_system_id;
+        let now_u = db.clock().now_unix_secs();
+        db.with_mut_snapshot(|snap| {
+            let list = snap.cosmic_signatures.entry(sys_id).or_default();
+            if !list.iter().any(|s| s.signature_id == sig_id) {
+                list.push(eve_db::CosmicSignatureRecord {
+                    signature_id: sig_id.clone(),
+                    solar_system_id: sys_id,
+                    sig_group: "Combat Site".to_string(),
+                    type_name: esc.expedition_name.clone(),
+                    signal_strength: 0.5,
+                    position: [-45_000_000.0, 15_000_000.0, 30_000_000.0],
+                    wormhole_type_id: None,
+                    destination_system_id: None,
+                    max_jump_mass_kg: 0.0,
+                    max_mass_kg: 0.0,
+                    remaining_mass_kg: 0.0,
+                    created_unix: now_u,
+                    lifetime_seconds: 86_400,
+                    collapsed: false,
+                });
+            }
+        });
+        let instance = PyRep::keyval([
+            ("instanceID", PyRep::Integer(esc.instance_id)),
+            ("dungeonID", PyRep::Integer(i64::from(esc.expedition_dungeon_id))),
+            ("signatureID", PyRep::String(sig_id)),
+            ("scanStrengthValue", PyRep::Real(0.5)),
+        ]);
+        push_sys(
+            sys_id,
+            "OnDungeonInstanceAdded",
+            vec![PyRep::Integer(i64::from(sys_id)), instance],
         );
     }
 }

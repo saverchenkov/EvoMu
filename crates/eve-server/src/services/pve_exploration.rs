@@ -201,7 +201,7 @@ pub struct PveExplorationRegistry {
     pub sentry_last_fire_sim_s: HashMap<i64, f64>,
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
-const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
+pub const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
 
 pub fn ctx_pve_key(ctx: &ServerContext) -> usize {
     std::sync::Arc::as_ptr(&ctx.db) as usize
@@ -524,6 +524,14 @@ pub fn notify_pve_destruction_events(
     new_escalation: Option<EscalatingPathEntry>,
     advanced_step: Option<EscalatingPathEntry>,
 ) {
+    crate::services::notify_emitters_batch10::emit_expedition_combat_notifications(
+        db,
+        pending_notifications,
+        notify_tx,
+        cleared_site_id.as_deref(),
+        new_escalation.as_ref(),
+        advanced_step.as_ref(),
+    );
     let now_ft = db.clock().now_blueos_filetime_ticks();
     let mut to_send = Vec::new();
 

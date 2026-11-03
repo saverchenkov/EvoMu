@@ -441,7 +441,7 @@ pub async fn advance_expedition_step(
             .map(|e| (e.destination_solar_system_id, e.expedition_dungeon_id, e.step_index))
     });
     let updated = advance_expedition_step_core(&ctx.db, &ctx.sde, &ctx.systems, char_id, instance_id).await?;
-    if let (Some((prev_sys, prev_did, prev_step)), Some(ref entry)) = (prev_info, &updated) {
+    if let Some((prev_sys, prev_did, prev_step)) = prev_info {
         let old_sig_id = expedition_sig_id(instance_id, prev_step);
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(list) = snap.cosmic_signatures.get_mut(&prev_sys) {
@@ -457,20 +457,22 @@ pub async fn advance_expedition_step(
             &old_sig_id,
             i64::from(prev_did),
         );
-        crate::services::notify_emitters_batch3_space::emit_escalation_created_or_advanced(
-            ctx,
-            char_id,
-            entry.instance_id,
-            entry.expedition_dungeon_id,
-            true,
-        );
-        if entry.step_index > prev_step {
-            let exp_pos = [
-                -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
-                15_000_000.0,
-                30_000_000.0,
-            ];
-            register_and_emit_expedition_signature(ctx, entry, exp_pos);
+        if let Some(ref entry) = updated {
+            crate::services::notify_emitters_batch3_space::emit_escalation_created_or_advanced(
+                ctx,
+                char_id,
+                entry.instance_id,
+                entry.expedition_dungeon_id,
+                true,
+            );
+            if entry.step_index > prev_step {
+                let exp_pos = [
+                    -45_000_000.0 + (entry.step_index as f64) * 5_000_000.0,
+                    15_000_000.0,
+                    30_000_000.0,
+                ];
+                register_and_emit_expedition_signature(ctx, entry, exp_pos);
+            }
         }
     }
     Ok(updated)

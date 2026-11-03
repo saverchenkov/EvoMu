@@ -189,6 +189,11 @@ impl ServerContext {
                     if let (Some(Ok(r)), Some(gw)) = (&inc, gww.upgrade()) {
                         crate::services::pve_incursion_sites::notify_incursion_site_completed(&gw, &db, sys_id, r);
                     }
+                    if let Some(Ok(r)) = &inc {
+                        crate::services::notify_emitters_batch10::emit_incursion_completion_combat_notifications(
+                            &db, &sde, pw.upgrade().as_deref(), Some(&tx), r,
+                        );
+                    }
                     let acct_changes = crate::services::pve_special_sites::on_special_site_npc_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     let _ = crate::services::pve_special_sites_abyssal::on_abyssal_room_npc_destroyed_core(&sys, &db, sys_id, npc_id).await;
                     crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await;
