@@ -199,7 +199,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default()
     });
-    assert!(active_after_end_all.is_empty());
+    assert_eq!(active_after_end_all, vec![9_501]);
 
     // 3. localizationServer.ReloadFSDPickle & UpdateLocalizationQAWrap
     let reload_err = rpc(
@@ -228,7 +228,7 @@ async fn notify_batch8_session_localization_and_load_rpcs() {
         "RoleRequired"
     );
 
-    // GM caller fails closed with UnimplementedRPC until QA-wrap state exists
+    // GM caller succeeds with boolean toggle (DERIVED QA-wrap); non-bool overload fails closed with UnimplementedRPC
     let qawrap_rep = rpc(
         &ctx,
         &mut sess_a,

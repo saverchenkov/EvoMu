@@ -287,24 +287,36 @@ pub fn handle(
             };
             let is_subscribe = method.starts_with("Subscribe");
             let sub_type = if method.contains("Tickets") { "tickets" } else { "raffle" };
-            
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if target_id < 0 {
+                return Some(Err(rpc_err("InvalidArgument", "Subscription target must be non-negative")));
+            }
+            let key = format!("{}:{}", sub_type, target_id);
+
             ctx.db.with_mut_snapshot(|snap| {
-                let mut subs: HashMap<String, Vec<i64>> = snap.service_state_blobs
+                let mut subs: BTreeMap<String, Vec<i64>> = snap
+                    .service_state_blobs
                     .get("hypernet_subs")
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
-                
-                // Some client calls pass an ID, others don't. We'll track both general and specific
-                let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-                let key = format!("{}:{}", sub_type, target_id);
-                
-                let entry = subs.entry(key).or_default();
+
                 if is_subscribe {
-                    if !entry.contains(&char_id) { entry.push(char_id); }
-                } else {
+                    if subs.len() >= 256 && !subs.contains_key(&key) {
+                        if let Some(first_k) = subs.keys().next().cloned() {
+                            subs.remove(&first_k);
+                        }
+                    }
+                    let entry = subs.entry(key).or_default();
+                    if !entry.contains(&char_id) && entry.len() < 256 {
+                        entry.push(char_id);
+                    }
+                } else if let Some(entry) = subs.get_mut(&key) {
                     entry.retain(|&x| x != char_id);
+                    if entry.is_empty() {
+                        subs.remove(&key);
+                    }
                 }
-                
+
                 if let Ok(js) = serde_json::to_string(&subs) {
                     snap.service_state_blobs.insert("hypernet_subs".into(), js);
                 }
@@ -665,30 +677,43 @@ pub fn handle(
                         PyRep::Integer(r.raffle_id),
                         PyRep::Integer(r.sold_tickets.len() as i64),
                     )]);
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnRaffleUpdatedServer",
-                        "charid",
-                        vec![PyRep::Integer(r.raffle_id), kv.clone()],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnTicketsUpdatedServer",
-                        "charid",
-                        vec![sold_dict.clone()],
-                    );
-                    if r.creator_id != char_id {
+                    let mut raffle_targets = vec![char_id, r.creator_id];
+                    let mut ticket_targets = vec![char_id, r.creator_id];
+                    ctx.db.with_snapshot(|snap| {
+                        if let Some(s) = snap.service_state_blobs.get("hypernet_subs") {
+                            if let Ok(subs) = serde_json::from_str::<BTreeMap<String, Vec<i64>>>(s) {
+                                for k in ["raffle:0".to_string(), format!("raffle:{}", r.raffle_id)] {
+                                    if let Some(viewers) = subs.get(&k) {
+                                        raffle_targets.extend(viewers);
+                                    }
+                                }
+                                for k in ["tickets:0".to_string(), format!("tickets:{}", r.raffle_id)] {
+                                    if let Some(viewers) = subs.get(&k) {
+                                        ticket_targets.extend(viewers);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    raffle_targets.sort_unstable();
+                    raffle_targets.dedup();
+                    ticket_targets.sort_unstable();
+                    ticket_targets.dedup();
+
+                    for &t in &raffle_targets {
                         ctx.notify(
-                            NotificationTarget::Character(r.creator_id),
+                            NotificationTarget::Character(t),
                             "OnRaffleUpdatedServer",
                             "charid",
                             vec![PyRep::Integer(r.raffle_id), kv.clone()],
                         );
+                    }
+                    for &t in &ticket_targets {
                         ctx.notify(
-                            NotificationTarget::Character(r.creator_id),
+                            NotificationTarget::Character(t),
                             "OnTicketsUpdatedServer",
                             "charid",
-                            vec![sold_dict],
+                            vec![sold_dict.clone()],
                         );
                     }
                     if let Some(winner_id) = r.winner_id {
@@ -696,26 +721,16 @@ pub fn handle(
                             .winning_ticket
                             .map(|t| PyRep::Integer(i64::from(t)))
                             .unwrap_or(PyRep::None);
-                        ctx.notify(
-                            NotificationTarget::Character(winner_id),
-                            "OnRaffleFinishedServer",
-                            "charid",
-                            vec![PyRep::Integer(r.raffle_id), win_ticket_rep.clone()],
-                        );
-                        if r.creator_id != winner_id {
+                        let mut finish_targets = raffle_targets;
+                        finish_targets.push(winner_id);
+                        finish_targets.sort_unstable();
+                        finish_targets.dedup();
+                        for t in finish_targets {
                             ctx.notify(
-                                NotificationTarget::Character(r.creator_id),
+                                NotificationTarget::Character(t),
                                 "OnRaffleFinishedServer",
                                 "charid",
                                 vec![PyRep::Integer(r.raffle_id), win_ticket_rep.clone()],
-                            );
-                        }
-                        if char_id != winner_id && char_id != r.creator_id {
-                            ctx.notify(
-                                NotificationTarget::Character(char_id),
-                                "OnRaffleFinishedServer",
-                                "charid",
-                                vec![PyRep::Integer(r.raffle_id), win_ticket_rep],
                             );
                         }
                     }

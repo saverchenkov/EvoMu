@@ -137,7 +137,7 @@
   },
   "ESI-5": {
     "assessment": "PARTIAL",
-    "note": "All 28 Alliance and Corporation ESI routes and 12 governance and lifecycle domain features closed with state-backed integration tests."
+    "note": "Alliance and Corporation ESI routes and governance features partially closed; open ESI rows remain."
   },
   "ESI-6": {
     "assessment": "PARTIAL",

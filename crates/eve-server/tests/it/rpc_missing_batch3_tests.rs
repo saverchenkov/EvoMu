@@ -17,13 +17,11 @@ const PILOT2: i64 = 90_000_002;
 #[tokio::test]
 async fn test_rpc_missing_batch3_part1() {
     // parity: rpc:alert.LogModeChanged, rpc:alert.SendProxyStackTraceAlert
-    // parity: rpc:localizationServer.UpdateLocalizationQAWrap
     // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent
     // parity: rpc:machoNet.ReloadClientCodeHash, rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
     eve_testkit::attest(&[
         "rpc:alert.LogModeChanged",
         "rpc:alert.SendProxyStackTraceAlert",
-        "rpc:localizationServer.UpdateLocalizationQAWrap",
         "rpc:clientStatLogger.LogString",
         "rpc:externalQueueMgr.PublishProxyEvent",
         "rpc:machoNet.ReloadClientCodeHash",
@@ -119,7 +117,7 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(proxy_traces.is_some(), "alert_proxy_traces must be persisted");
     assert!(proxy_traces.unwrap().contains("777888"));
 
-    // 3. rpc:localizationServer.UpdateLocalizationQAWrap (role-gated boolean toggle + GetAllTextChanges wrapping)
+    // 3. localizationServer.UpdateLocalizationQAWrap (DERIVED role-gated boolean toggle + GetAllTextChanges wrapping)
     let mut unpriv_loc_sess = SessionState::new(902_099);
     common::login_pilot(&ctx, &mut unpriv_loc_sess, "other", "other-secret").await;
     unpriv_loc_sess.role = 0;

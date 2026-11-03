@@ -582,12 +582,12 @@ pub fn handle_get_all_text_changes(
     session: &SessionState,
     _args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_auth(session)?;
-    let key_id = session.session_id as i64;
+    let user_id = ServerContext::require_auth(session)?;
+    let key_id = user_id as i64;
     ctx.db.with_snapshot(|snap| {
         let qa_wrap = snap
             .service_state_blobs
-            .get("localization:qa_wrap_sessions")
+            .get("localization:qa_wrap_users")
             .and_then(|s| serde_json::from_str::<BTreeMap<i64, bool>>(s).ok())
             .and_then(|m| m.get(&key_id).copied())
             .unwrap_or(false);
@@ -604,6 +604,7 @@ pub fn handle_get_all_text_changes(
                     .into_iter()
                     .map(|(id, txt)| {
                         let rendered = if qa_wrap {
+                            // DERIVED: [QA:{id}] {txt} wrap format is derived (client qaSettings.pyj source not in repo).
                             format!("[QA:{id}] {txt}")
                         } else {
                             txt
@@ -622,7 +623,7 @@ pub fn handle_update_localization_qa_wrap(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_auth(session)?;
+    let user_id = ServerContext::require_auth(session)?;
     let qa_roles = eve_machonet::service_roles::ROLE_QA
         | eve_db::service_roles::ROLE_GMH
         | eve_db::service_roles::ROLE_GML
@@ -646,11 +647,11 @@ pub fn handle_update_localization_qa_wrap(
             "UpdateLocalizationQAWrap requires a boolean enableQaWrap flag",
         ));
     };
-    let key_id = session.session_id as i64;
+    let key_id = user_id as i64;
     ctx.db.with_mut_snapshot(|snap| {
         let mut map: BTreeMap<i64, bool> = snap
             .service_state_blobs
-            .get("localization:qa_wrap_sessions")
+            .get("localization:qa_wrap_users")
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
         if enabled {
@@ -665,7 +666,7 @@ pub fn handle_update_localization_qa_wrap(
         }
         if let Ok(json) = serde_json::to_string(&map) {
             snap.service_state_blobs
-                .insert("localization:qa_wrap_sessions".into(), json);
+                .insert("localization:qa_wrap_users".into(), json);
         }
     });
     Ok(PyRep::Bool(enabled))

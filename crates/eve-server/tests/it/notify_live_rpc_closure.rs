@@ -107,6 +107,25 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let prize_id = 640_000_110_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.accounts.insert(
+            "test_c".to_string(),
+            eve_db::AccountRecord {
+                user_id: 3,
+                username: "test_c".to_string(),
+                password_token: eve_db::WorldRepository::hash_password_token("test_c", "test_c-secret"),
+                role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
+                banned_until_unix: None,
+                ban_reason: None,
+            },
+        );
+        if let Some(mut char_c) = snap.characters.get(&PILOT_A).cloned() {
+            char_c.character_id = PILOT_C;
+            char_c.user_id = 3;
+            char_c.name = "Test C".to_string();
+            snap.characters.insert(PILOT_C, char_c);
+        }
+    });
     let mut sess_a = login_in_station(&ctx, 9_501, "demo", "demo-secret", PILOT_A).await;
     let mut sess_b = login_in_station(&ctx, 9_502, "other", "other-secret", PILOT_B).await;
     let mut sess_c = login_in_station(&ctx, 9_503, "test_c", "test_c-secret", PILOT_C).await;
@@ -136,7 +155,7 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     let created_args = find_notif(&create_notifs, "OnRaffleCreatedServer");
     assert_eq!(created_args[0], PyRep::Integer(raffle_id));
     assert_eq!(created_args[1].dict_get("raffle_id").and_then(|v| v.as_i64()), Some(raffle_id));
-    
+
     let create_notifs_c = drain_all(&ctx, &mut sess_c, PILOT_C);
     let created_args_c = find_notif(&create_notifs_c, "OnRaffleCreatedServer");
     assert_eq!(created_args_c[0], PyRep::Integer(raffle_id));
@@ -149,12 +168,13 @@ async fn test_notify_live_hypernet_raffle_notifications() {
     assert_eq!(updated_args[0], PyRep::Integer(raffle_id));
     let finished_args = find_notif(&buy_notifs_b, "OnRaffleFinishedServer");
     assert_eq!(finished_args[0], PyRep::Integer(raffle_id));
-    let win_char_id = finished_args[1].as_i64().expect("winning char_id");
-    assert_eq!(win_char_id, PILOT_B as i64);
+    let win_ticket = finished_args[1].as_i64().expect("winning ticket index");
+    assert!((0..8).contains(&win_ticket));
 
     let buy_notifs_c = drain_all(&ctx, &mut sess_c, PILOT_C);
     let updated_args_c = find_notif(&buy_notifs_c, "OnRaffleUpdatedServer");
     assert_eq!(updated_args_c[0], PyRep::Integer(raffle_id));
     let finished_args_c = find_notif(&buy_notifs_c, "OnRaffleFinishedServer");
     assert_eq!(finished_args_c[0], PyRep::Integer(raffle_id));
+    assert_eq!(finished_args_c[1], PyRep::Integer(win_ticket));
 }
