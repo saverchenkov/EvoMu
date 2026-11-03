@@ -398,3 +398,103 @@ pub fn is_sentry_disabled_by_corruption(ctx: &ServerContext, solar_system_id: So
 pub fn is_faction_police_suppressed(ctx: &ServerContext, solar_system_id: SolarSystemId) -> bool {
     crate::services::insurgency_services::insurgency_system_corruption_stage(ctx, solar_system_id) >= 2
 }
+
+/// Resolves authentic Empire Navy patrol ship types `(cruiser, frigate)` for an empire faction (`feat:npc.navy-npc`).
+pub fn navy_patrol_ship_types_for_faction(faction_id: u32) -> (u32, u32) {
+    match faction_id {
+        500_001 => (52_936, 52_934), // Caldari: State Navy Cerberus + State Navy Raptor
+        500_002 => (52_959, 52_957), // Minmatar: Republic Fleet Muninn + Republic Fleet Claw
+        500_003 => (52_927, 52_925), // Amarr: Imperial Navy Zealot + Imperial Navy Crusader
+        500_004 => (52_950, 52_948), // Gallente: Federal Navy Deimos + Federal Navy Taranis
+        _ => (52_936, 52_934),
+    }
+}
+
+/// Ensures an Empire Navy patrol fleet is spawned in empire-owned solar systems (`feat:npc.navy-npc`).
+pub async fn step_empire_navy_patrols(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+) -> Vec<i64> {
+    if is_concord_suppressed_in_system(ctx, solar_system_id)
+        || is_faction_police_suppressed(ctx, solar_system_id)
+    {
+        return Vec::new();
+    }
+    let Some(_convoy_id) = ctx.living_world.ensure_system_navy_patrol(solar_system_id, &ctx.sde) else {
+        return Vec::new();
+    };
+    let sys_faction = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .and_then(|sys| {
+            sys.stations
+                .first()
+                .and_then(|st| st.owner_faction_id.filter(|&f| f > 0).map(|f| f as u32))
+                .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id.filter(|&f| f > 0)))
+                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id.filter(|&f| f > 0)))
+        })
+        .unwrap_or(500_001);
+    if !matches!(sys_faction, 500_001..=500_004) {
+        return Vec::new();
+    }
+
+    let already_present = with_mut_combat_runtime(ctx, |rt| {
+        rt.npc_entities
+            .values()
+            .any(|n| n.archetype == "Navy" && n.solar_system_id == solar_system_id)
+    });
+    if already_present {
+        return Vec::new();
+    }
+
+    let handle = ctx.systems.get_or_spawn(solar_system_id);
+    let piloted_ship_pos = {
+        let ship_id_opt = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.solar_system_id == solar_system_id && c.station_id.is_none() && c.active_ship_id > 0)
+                .map(|c| c.active_ship_id)
+        });
+        if let Some(sid) = ship_id_opt {
+            handle.get_ball_snapshot(sid).await.ok().flatten().map(|(_, b)| b.position)
+        } else {
+            None
+        }
+    };
+    let anchor_pos = piloted_ship_pos
+        .or_else(|| {
+            ctx.sde
+                .stargates()
+                .values()
+                .filter(|g| g.from_solar_system_id == solar_system_id)
+                .min_by_key(|g| g.stargate_id)
+                .map(|g| g.position)
+        })
+        .or_else(|| {
+            ctx.sde
+                .solar_systems
+                .get(&solar_system_id)
+                .and_then(|s| s.stations.first().map(|st| st.position))
+        })
+        .unwrap_or(DVec3::new(15_000.0, 0.0, 0.0));
+
+    let (cruiser_tid, frigate_tid) = navy_patrol_ship_types_for_faction(sys_faction);
+    let mut spawned = Vec::new();
+    for (idx, tid) in [cruiser_tid, frigate_tid].into_iter().enumerate() {
+        let pos = anchor_pos + DVec3::new(2_500.0 + (idx as f64) * 800.0, 0.0, 500.0);
+        let bid = spawn_specialized_npc_entity(
+            ctx,
+            solar_system_id,
+            tid,
+            "Navy",
+            sys_faction,
+            pos,
+        )
+        .await;
+        if bid > 0 {
+            spawned.push(bid);
+        }
+    }
+    spawned
+}

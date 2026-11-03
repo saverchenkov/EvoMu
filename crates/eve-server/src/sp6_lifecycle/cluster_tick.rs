@@ -1338,6 +1338,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
 
     for (sys_id, handle) in active_handles {
         let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, sys_id).await;
+        let _ = crate::services::combat_npc_police::step_empire_navy_patrols(ctx, sys_id).await;
         {
             let mut mgr = ctx
                 .npc_spawns

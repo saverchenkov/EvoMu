@@ -181,7 +181,7 @@ pub async fn spawn_specialized_npc_entity(
         && (sde_derived == "Pirate"
             || matches!(
                 archetype_hint,
-                "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry"
+                "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
             ))
     {
         archetype_hint

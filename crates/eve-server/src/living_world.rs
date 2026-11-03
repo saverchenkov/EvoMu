@@ -1227,6 +1227,47 @@ impl LivingWorldDirector {
         convoy_id
     }
 
+    /// Ensures an `EmpireNavyPatrol` entry exists in `solar_system_id` for empire-owned systems (`feat:npc.navy-npc`).
+    pub fn ensure_system_navy_patrol(
+        &self,
+        solar_system_id: SolarSystemId,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Option<i64> {
+        let sys = sde.solar_systems.get(&solar_system_id)?;
+        let faction_id = sys
+            .stations
+            .first()
+            .and_then(|st| st.owner_faction_id.filter(|&f| f > 0).map(|f| f as u32))
+            .or_else(|| sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id.filter(|&f| f > 0)))
+            .or_else(|| sde.regions.get(&sys.region_id).and_then(|r| r.faction_id.filter(|&f| f > 0)))?;
+        if !matches!(faction_id, 500_001..=500_004) {
+            return None;
+        }
+        let convoy_id = 800_300_000 + (solar_system_id as i64 % 100_000);
+        let ship_type_id = match faction_id {
+            500_001 => 52_936, // State Navy Cerberus
+            500_002 => 52_959, // Republic Fleet Muninn
+            500_003 => 52_927, // Imperial Navy Zealot
+            500_004 => 52_950, // Federal Navy Deimos
+            _ => 52_936,
+        };
+        let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+        convoys.entry(convoy_id).or_insert(LivingWorldConvoy {
+            convoy_id,
+            archetype: NpcArchetype::EmpireNavyPatrol,
+            ship_type_id,
+            origin_system_id: solar_system_id,
+            current_system_id: solar_system_id,
+            destination_system_id: solar_system_id,
+            destination_station_id: sys.stations.first().map(|s| s.station_id).unwrap_or(0),
+            cargo_type_id: 0,
+            cargo_quantity: 0,
+            lod_level: 2,
+            destroyed: false,
+        });
+        Some(convoy_id)
+    }
+
     /// Advances all active NPC mining operations on living-world ticks (`feat:npc.mining-op-npc`, `feat:mining.npc-mining-ops`).
     pub async fn step_all_mining_ops(
         &self,
