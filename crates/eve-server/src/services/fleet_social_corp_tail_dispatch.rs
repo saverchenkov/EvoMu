@@ -332,7 +332,7 @@ pub fn handle_corp_gov_tail(
                             .sum::<i64>()
                     })
                     .unwrap_or(0)
-                    .max(1);
+                    .max(10);
                 snap.corp_governance
                     .entry(corp_id)
                     .or_default()

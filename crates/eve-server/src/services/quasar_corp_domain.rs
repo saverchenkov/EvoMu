@@ -817,7 +817,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let limit = d.with_snapshot(|s| {
                 s.corp_member_limits.get(&corpid).copied()
                     .or_else(|| s.corp_governance.get(&corpid).and_then(|g| g.member_limit.map(|l| l as i64)))
-                    .unwrap_or(500)
+                    .unwrap_or(10)
             });
             let mut out = Vec::new();
             encode_varint_field(1, limit.max(0) as u64, &mut out);

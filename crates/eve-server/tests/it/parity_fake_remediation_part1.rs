@@ -445,6 +445,30 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
     );
     assert_eq!(base_limit, json!(10));
 
+    let mut ceo_sess = SessionState::new(70_104);
+    ceo_sess.user_id = Some(1);
+    ceo_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    ceo_sess.character_id = Some(ceo_id);
+    ceo_sess.corporation_id = Some(corp_id);
+    ceo_sess.alliance_id = Some(alliance_id);
+    ceo_sess.corp_role = ROLE_DIRECTOR;
+
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "UpdateCorporationAbilities",
+        &[],
+    )
+    .await;
+    let untrained_rpc_limit = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/members/limit/"),
+        Some(&tok),
+    );
+    assert_eq!(untrained_rpc_limit, json!(10));
+
     let sde_bonus = ctx
         .sde
         .types
@@ -463,14 +487,6 @@ async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
             },
         );
     });
-
-    let mut ceo_sess = SessionState::new(70_104);
-    ceo_sess.user_id = Some(1);
-    ceo_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
-    ceo_sess.character_id = Some(ceo_id);
-    ceo_sess.corporation_id = Some(corp_id);
-    ceo_sess.alliance_id = Some(alliance_id);
-    ceo_sess.corp_role = ROLE_DIRECTOR;
 
     rpc_call(
         &ctx,
