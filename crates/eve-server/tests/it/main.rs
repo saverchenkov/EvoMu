@@ -608,3 +608,4 @@ mod parity_notify_batch2_closure;
 mod parity_notify_missing2_closure;
 mod parity_notify_market_item_received;
 mod parity_plan_canonical_closure;
+mod parity_plan_fake_closure;
