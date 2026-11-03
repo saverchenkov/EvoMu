@@ -278,7 +278,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 Some(DynamicValue::Message(rew)) => rew.get(1).and_then(|c| match c {
                     DynamicValue::Message(cm) => cm.get(1).and_then(|u| match u {
                         DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| v.saturating_mul(target_prog)),
-                        DynamicValue::Int64(v) => Some(v.saturating_mul(target_prog)),
+                        DynamicValue::Int64(v) | DynamicValue::Sint64(v) => Some(v.saturating_mul(target_prog)),
                         _ => None,
                     }),
                     DynamicValue::Uint64(v) => i64::try_from(*v).ok(),
@@ -533,6 +533,27 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }),
     );
 
+    // 8b. GetAllUnredeemedRequest -> GetAllUnredeemedResponse
+    let state_unred = Arc::clone(&state);
+    router.register_handler(
+        "eve_public.freelance.project.api.GetAllUnredeemedRequest",
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_FORBIDDEN, "Character required".to_string()))?;
+            let projects = state_unred.projects.read().unwrap_or_else(|e| e.into_inner());
+
+            let mut out = Vec::new();
+            for p in projects.values().filter(|p| p.contributors.get(&cid).is_some_and(|(_, unredeemed)| *unredeemed > 0)) {
+                encode_uuid_field(1, &p.uuid, &mut out);
+            }
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetAllUnredeemedResponse"),
+                value: out,
+            })
+        }),
+    );
+
     // 9. GetParticipationDetailsRequest -> GetParticipationDetailsResponse
     let state_part = Arc::clone(&state);
     router.register_handler(
@@ -686,10 +707,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }),
     );
 
-    // 15. AbandonRequest -> AbandonResponse
+    // 15. ResignRequest -> ResignResponse
     let state_abandon = Arc::clone(&state);
     router.register_handler(
-        "eve_public.freelance.project.api.AbandonRequest",
+        "eve_public.freelance.project.api.ResignRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1))
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
@@ -720,7 +741,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             );
 
             Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.AbandonResponse"),
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.ResignResponse"),
                 value: Vec::new(),
             })
         }),
@@ -1158,6 +1179,33 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         }),
     );
 
+    // 20b. eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest -> GetStatusResponse
+    let state_delivery_status = Arc::clone(&state);
+    router.register_handler(
+        "eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusRequest",
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing delivery UUID".into()))?;
+            let projects = state_delivery_status.projects.read().unwrap_or_else(|e| e.into_inner());
+            let p = projects
+                .get(&uuid)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Delivery project not found".into()))?;
+            let mut out = Vec::new();
+            let field_num = if p.current_progress > 0 {
+                2
+            } else if p.state == 1 {
+                1
+            } else {
+                3
+            };
+            encode_bytes_field(field_num, &[], &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.GetStatusResponse"),
+                value: out,
+            })
+        }),
+    );
+
     // 21. eve_public.freelance.contributionmethod.definition.api.GetAllLatestRequest
     {
         let sde = Arc::clone(&router.sde);
@@ -1288,10 +1336,7 @@ fn encode_single_freelance_def(name: &str, val: &serde_json::Value, out: &mut Ve
 
 fn extract_uuid(val: Option<&DynamicValue>) -> Option<Vec<u8>> {
     match val {
-        Some(DynamicValue::Message(sub)) => match sub.get(1) {
-            Some(DynamicValue::Bytes(b)) => Some(b.clone()),
-            _ => None,
-        },
+        Some(DynamicValue::Message(sub)) => extract_uuid(sub.get(1)),
         Some(DynamicValue::Bytes(b)) => Some(b.clone()),
         _ => None,
     }

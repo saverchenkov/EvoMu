@@ -470,14 +470,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     let db_ta_list = Arc::clone(&db);
     router.register_handler(
         "eve_public.store.targetaudience.offer.api.ListRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
             let cat = db_ta_list.with_snapshot(read_store_catalog);
-            let mut out = Vec::new();
-            for off in cat.offers.iter().filter(|o| o.targeted) {
-                let mut entry = Vec::new();
-                encode_varint_field(1, off.id as u64, &mut entry);
-                encode_bytes_field(1, &entry, &mut out);
-            }
+            let out = encode_targeted_offer_list_response(&cat.offers, uid, dyn_msg);
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.store.targetaudience.offer.api.ListResponse"
@@ -1023,8 +1019,8 @@ fn register_payment_token_and_purchase_handlers(
             let now_unix = ctx.now_unix();
             let active_char_id = ctx.effective_character_id().map(|c| c as i64);
 
-            let (receipt_id, maybe_omega_notice) = db_purchase
-                .try_with_mut_snapshot(|snap| -> Result<(u64, Option<GoogleAny>), String> {
+            let (receipt_id, maybe_omega_notice, maybe_sched_id) = db_purchase
+                .try_with_mut_snapshot(|snap| -> Result<(u64, Option<GoogleAny>, Option<u64>), String> {
                     let catalog = read_store_catalog(snap);
                     let offer = catalog
                         .offers
@@ -1157,6 +1153,7 @@ fn register_payment_token_and_purchase_handlers(
 
                     let is_omega = offer_id == 1001 || offer.category_id == 1;
                     let mut omega_notice = None;
+                    let mut sched_id_opt = None;
                     if is_omega {
                         let (new_expiry, notice) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
                             snap,
@@ -1164,7 +1161,8 @@ fn register_payment_token_and_purchase_handlers(
                             30 * 86_400 * u64::from(qty),
                             now_unix,
                         );
-                        upsert_user_payment_schedule_in_snapshot(snap, uid, 1, new_expiry, &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
+                        let sched_id = upsert_user_payment_schedule_in_snapshot(snap, uid, 1, new_expiry, &format!("VEVC-{}", offer.id), 30 * qty, now_unix);
+                        sched_id_opt = Some(sched_id);
                         omega_notice = Some(notice);
                     }
 
@@ -1187,7 +1185,7 @@ fn register_payment_token_and_purchase_handlers(
                         snap.service_state_blobs.insert("payment_receipts".to_string(), serialized);
                     }
 
-                    Ok((rid, omega_notice))
+                    Ok((rid, omega_notice, sched_id_opt))
                 })
                 .map_err(|err_str| {
                     if let Some((code_str, msg)) = err_str.split_once(':') {
@@ -1203,6 +1201,9 @@ fn register_payment_token_and_purchase_handlers(
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
                     .push((NoticeScope::User(uid as i32), notice));
+            }
+            if let Some(sched_id) = maybe_sched_id {
+                publish_schedule_set_notice(&router_pending_purchase, uid, sched_id, 1);
             }
 
             let mut receipt = Vec::new();

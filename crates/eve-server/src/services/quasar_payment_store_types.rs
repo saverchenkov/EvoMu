@@ -195,12 +195,23 @@ pub fn process_due_payment_schedules(
     });
 
     if !failed_scheds.is_empty() {
-        let _ = router_notices;
         for (uid, sched_id) in failed_scheds {
             let mut notice_bytes = Vec::new();
             let mut sched_ident = Vec::new();
             encode_varint_field(1, sched_id, &mut sched_ident);
             encode_bytes_field(1, &sched_ident, &mut notice_bytes);
+            router_notices
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((
+                    NoticeScope::User(uid as i32),
+                    GoogleAny {
+                        type_url: format!(
+                            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
+                        ),
+                        value: notice_bytes.clone(),
+                    },
+                ));
             crate::services::quasar_social_chat::ctx_queue_notice(
                 NoticeScope::User(uid as i32),
                 GoogleAny {
@@ -266,6 +277,82 @@ pub fn upsert_user_payment_schedule_in_snapshot(
             .insert("payment_schedules".to_string(), serialized);
     }
     sched_id
+}
+
+pub fn publish_schedule_set_notice(
+    pending_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+    sched_id: u64,
+    schedule_type: u32,
+) {
+    let mut notice_bytes = Vec::new();
+    let mut sched_ident = Vec::new();
+    encode_varint_field(1, sched_id, &mut sched_ident);
+    encode_bytes_field(1, &sched_ident, &mut notice_bytes);
+    encode_varint_field(2, u64::from(schedule_type), &mut notice_bytes);
+    pending_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((
+            NoticeScope::User(user_id as i32),
+            GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.SetNotice"
+                ),
+                value: notice_bytes,
+            },
+        ));
+}
+
+pub fn encode_targeted_offer_list_response(
+    offers: &[StoreOffer],
+    uid: u64,
+    dyn_msg: &eve_proto::quasar::DynamicQuasarMessage,
+) -> Vec<u8> {
+    let (page_size, offset) = match dyn_msg.get(1) {
+        Some(DynamicValue::Message(page)) => {
+            let sz = page
+                .get(1)
+                .and_then(|v| match v {
+                    DynamicValue::Uint32(u) if *u > 0 => Some(*u as usize),
+                    DynamicValue::Int32(i) if *i > 0 => Some(*i as usize),
+                    DynamicValue::Uint64(u) if *u > 0 => Some(*u as usize),
+                    _ => None,
+                })
+                .unwrap_or(50);
+            let off = page
+                .get(2)
+                .and_then(|v| match v {
+                    DynamicValue::String(s) => s.parse::<usize>().ok(),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            (sz, off)
+        }
+        _ => (50, 0),
+    };
+    let targeted: Vec<&StoreOffer> = offers.iter().filter(|o| o.targeted).collect();
+    let end = offset.saturating_add(page_size).min(targeted.len());
+    let slice = if offset < targeted.len() {
+        &targeted[offset..end]
+    } else {
+        &[]
+    };
+    let mut out = Vec::new();
+    for off in slice {
+        let (mut u_b, mut o_b, mut entry) = (Vec::new(), Vec::new(), Vec::new());
+        encode_varint_field(1, uid, &mut u_b);
+        encode_string_field(1, &off.id.to_string(), &mut o_b);
+        encode_bytes_field(1, &u_b, &mut entry);
+        encode_bytes_field(2, &o_b, &mut entry);
+        encode_bytes_field(1, &entry, &mut out);
+    }
+    if end < targeted.len() {
+        let mut next_page = Vec::new();
+        encode_string_field(1, &end.to_string(), &mut next_page);
+        encode_bytes_field(2, &next_page, &mut out);
+    }
+    out
 }
 
 pub fn publish_quick_pay_added_notice(
