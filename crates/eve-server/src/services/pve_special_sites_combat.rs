@@ -361,5 +361,229 @@ pub async fn on_special_site_npc_destroyed_core(
             }
         }
     }
+
+    // 3. Check Seasonal Event sites
+    let mut seasonal_escorts = Vec::new();
+    let seasonal_res = with_pve_special_reg_db(db, now_sec, |reg| {
+        let mut found = None;
+        if let Some(list) = reg.seasonal_event_sites.get_mut(&solar_system_id) {
+            for site in list.iter_mut() {
+                if site.boss_npc_ball_id == npc_ball_id && !site.completed {
+                    site.completed = true;
+                    seasonal_escorts = site.escort_ball_ids.clone();
+                    found = Some((
+                        site.dungeon_id,
+                        site.instance_id,
+                        site.dungeon_name.clone(),
+                        site.reward_isk,
+                        site.reward_points,
+                        site.loot_type_id,
+                    ));
+                    break;
+                }
+            }
+        }
+        found.map(|(did, iid, dname, isk, pts, ltid)| {
+            reg.next_seq += 1;
+            let loot_item_id = 1_895_800_000 + reg.next_seq;
+            (did, iid, dname, isk, pts, ltid, loot_item_id)
+        })
+    });
+
+    if let Some((did, iid, dname, reward_isk, reward_points, loot_tid, loot_item_id)) = seasonal_res {
+        if !seasonal_escorts.is_empty() {
+            let sys_handle = _systems.get_or_spawn(solar_system_id);
+            for ebid in seasonal_escorts {
+                sys_handle.try_remove_ball(ebid);
+            }
+        }
+        let anom_key = format!("dng-{did}-{iid}");
+        let spawned_cid = db.with_mut_snapshot(|snap| {
+            if let Some(list) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
+                for a in list.iter_mut() {
+                    if a.anomaly_id == anom_key {
+                        a.cleared = true;
+                    }
+                }
+            }
+            if let Some(cid) = killer_char_id {
+                let mut ship_id = 0;
+                if let Some(ch) = snap.characters.get_mut(&cid) {
+                    ch.balance = ch
+                        .balance
+                        .checked_add(IskCents::from_isk(reward_isk))
+                        .unwrap_or(ch.balance);
+                    let new_bal = ch.balance;
+                    acct_changes.push((cid, new_bal.to_wire_f64()));
+                    ship_id = ch.active_ship_id;
+                    snap.append_journal(
+                        cid,
+                        "BountyPrizes",
+                        IskCents::from_isk(reward_isk),
+                        new_bal,
+                        format!("Seasonal Event Site Completion ({dname})"),
+                    );
+                }
+                let mut st = crate::services::season_manager::load_season_state_from_blobs(snap, cid);
+                st.season_points = st.season_points.saturating_add(reward_points);
+                crate::services::season_manager::save_season_state_to_blobs(snap, cid, &st);
+                deposit_loot_into_ship_or_container_in_snapshot(
+                    snap,
+                    _sde,
+                    cid,
+                    solar_system_id,
+                    ship_id,
+                    &[(loot_item_id, loot_tid, 1)],
+                )
+            } else {
+                None
+            }
+        });
+        if let Some(container_id) = spawned_cid {
+            let sys_handle = _systems.get_or_spawn(solar_system_id);
+            let _ = sys_handle
+                .spawn_ball(make_site_npc_ball(container_id, 23, DVec3::new(1.5e11, 2.0e10, -1.0e11)))
+                .await;
+        }
+    }
+
     acct_changes
+}
+
+/// Spawns seasonal event sites in `sys_id` during an active seasonal event window and despawns expired ones.
+pub async fn ensure_seasonal_event_sites_for_system(
+    ctx: &ServerContext,
+    sys_id: SolarSystemId,
+) -> Vec<crate::services::pve_special_sites::SeasonalEventSiteRecord> {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let now_sec = ctx.now_unix();
+    let season = ctx.db.with_snapshot(|snap| {
+        if snap
+            .service_state_blobs
+            .contains_key(crate::services::season_fsd::SEASON_CONFIG_KEY)
+        {
+            crate::services::season_fsd::load_season_config(snap)
+        } else {
+            crate::services::season_fsd::load_seasons_catalog(snap, &ctx.sde, now_ft)
+                .into_values()
+                .find(|s| now_ft >= s.start_time_ft && now_ft <= s.end_time_ft)
+                .unwrap_or_else(|| crate::services::season_fsd::load_season_config(snap))
+        }
+    });
+    let in_window = now_ft >= season.start_time_ft && now_ft <= season.end_time_ft;
+
+    let (expired_balls, expired_anom_ids, mut active_sites) = with_pve_special_reg(ctx, |reg| {
+        let mut exp_balls = Vec::new();
+        let mut exp_anoms = Vec::new();
+        if let Some(list) = reg.seasonal_event_sites.get_mut(&sys_id) {
+            list.retain(|s| {
+                let valid = !s.completed && now_ft >= s.window_start_ft && now_ft <= s.window_end_ft;
+                if !valid {
+                    exp_balls.push(s.boss_npc_ball_id);
+                    exp_balls.extend_from_slice(&s.escort_ball_ids);
+                    exp_anoms.push(format!("dng-{}-{}", s.dungeon_id, s.instance_id));
+                }
+                valid
+            });
+        }
+        let active = reg.seasonal_event_sites.get(&sys_id).cloned().unwrap_or_default();
+        (exp_balls, exp_anoms, active)
+    });
+
+    if !expired_balls.is_empty() || !expired_anom_ids.is_empty() {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        for bid in expired_balls {
+            sys_handle.try_remove_ball(bid);
+        }
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(list) = snap.cosmic_anomalies.get_mut(&sys_id) {
+                list.retain(|a| !expired_anom_ids.contains(&a.anomaly_id));
+            }
+        });
+    }
+
+    if in_window && active_sites.is_empty() {
+        let (dungeon_id, dungeon_name) = ctx
+            .sde
+            .dungeons
+            .get(&47)
+            .map(|d| (d.dungeon_id, d.name.clone()))
+            .or_else(|| {
+                ctx.sde
+                    .dungeons
+                    .values()
+                    .find(|d| d.archetype_id == Some(45))
+                    .map(|d| (d.dungeon_id, d.name.clone()))
+            })
+            .unwrap_or((47, "Crimson Hand Supply Depot".to_string()));
+        let boss_type_id = ctx
+            .sde
+            .types
+            .values()
+            .find(|t| t.published && t.group_id == 550)
+            .map(|t| t.type_id)
+            .unwrap_or(24242);
+        let loot_type_id = if ctx.sde.types.contains_key(&2048) { 2048 } else { 34 };
+
+        let new_site = with_pve_special_reg(ctx, |reg| {
+            reg.next_seq += 1;
+            let inst_id = 1_895_000_000 + reg.next_seq;
+            reg.next_seq += 1;
+            let boss_bid = 1_895_500_000 + reg.next_seq;
+            reg.next_seq += 1;
+            let escort_bid = 1_895_500_000 + reg.next_seq;
+            let rec = crate::services::pve_special_sites::SeasonalEventSiteRecord {
+                instance_id: inst_id,
+                season_id: season.season_id,
+                dungeon_id,
+                dungeon_name: dungeon_name.clone(),
+                solar_system_id: sys_id,
+                window_start_ft: season.start_time_ft,
+                window_end_ft: season.end_time_ft,
+                boss_npc_ball_id: boss_bid,
+                boss_type_id,
+                escort_ball_ids: vec![escort_bid],
+                reward_isk: 750_000,
+                reward_points: 25,
+                loot_type_id,
+                completed: false,
+            };
+            reg.seasonal_event_sites.entry(sys_id).or_default().push(rec.clone());
+            rec
+        });
+
+        let pos = DVec3::new(1.5e11, 2.0e10, -1.0e11);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.cosmic_anomalies.entry(sys_id).or_default().push(eve_db::CosmicAnomalyRecord {
+                anomaly_id: format!("dng-{}-{}", new_site.dungeon_id, new_site.instance_id),
+                solar_system_id: sys_id,
+                anomaly_type: "SeasonalEventSite".to_string(),
+                name: new_site.dungeon_name.clone(),
+                position: [pos.x, pos.y, pos.z],
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 0.0,
+                created_unix: now_sec,
+                lifetime_seconds: 86_400,
+                cleared: false,
+            });
+        });
+
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let boss_ball = make_site_npc_ball(
+            new_site.boss_npc_ball_id,
+            new_site.boss_type_id,
+            pos + DVec3::new(2_500.0, 0.0, 0.0),
+        );
+        let escort_ball = make_site_npc_ball(
+            new_site.escort_ball_ids[0],
+            new_site.boss_type_id,
+            pos + DVec3::new(-2_500.0, 0.0, 0.0),
+        );
+        let _ = sys_handle.spawn_ball(boss_ball).await;
+        let _ = sys_handle.spawn_ball(escort_ball).await;
+        active_sites.push(new_site);
+    }
+
+    active_sites
 }

@@ -614,7 +614,7 @@ pub fn handle_project_discovery(
         }
 
         // DERIVED (synthetic): DATA GAP — MMOS classification consensus grading and XP/AK rewards are external backend data not in V24 client FSD.
-        "post_classification" => {
+        "post_classification" | "submit" => {
             if args.len() < 2 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidClassification".into(),

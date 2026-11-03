@@ -1001,7 +1001,11 @@ pub async fn handle(
     match method {
         "GetCombatAnomalyInstances" => {
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let by_dungeon = registry_instances(ctx, sys_id, false);
+            let _ = crate::services::pve_special_sites::ensure_seasonal_event_sites_for_system(ctx, sys_id).await;
+            let mut by_dungeon = registry_instances(ctx, sys_id, false);
+            for (did, iids) in anomaly_instances(ctx, sys_id, "SeasonalEventSite") {
+                by_dungeon.entry(did).or_default().extend(iids);
+            }
             Some(Ok(instances_reply(sys_id, by_dungeon)))
         }
         "GetCombatAnomaliesCount" => {

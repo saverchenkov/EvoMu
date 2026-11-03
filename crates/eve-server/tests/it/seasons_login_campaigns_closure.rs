@@ -484,12 +484,15 @@ async fn test_login_campaigns_seasonal_and_milestones() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
-    // Positive milestoneID fails closed with UnimplementedRPC because milestone reward
-    // definitions are server-authored and not present in client FSD data (DATA GAP: feat:pve.milestones).
-    let claim_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+    // Positive milestoneID succeeds once and rejects duplicate claims
+    let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
-        .expect_err("ClaimRewards must fail closed with UnimplementedRPC");
-    assert_eq!(claim_err.code, "UnimplementedRPC");
+        .expect("ClaimRewards(1) must succeed once");
+    assert_eq!(claim_res, PyRep::None);
+    let dup_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .expect_err("duplicate ClaimRewards(1) must fail");
+    assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 }
 
 #[tokio::test]

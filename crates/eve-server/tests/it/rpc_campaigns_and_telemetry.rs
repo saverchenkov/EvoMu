@@ -523,8 +523,7 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(invalid_milestone.code, "InvalidMilestoneID");
 
-    // DATA GAP: milestone reward tables are server-authored and absent from client .fsdbinary data
-    let claim_err = rpc(
+    let claim_ok = rpc(
         &ctx,
         &mut sess,
         "milestoneMgr",
@@ -532,9 +531,20 @@ async fn test_milestones_and_community_tracks() {
         &[PyRep::Integer(1)],
     )
     .await
-    .expect_err("ClaimRewards must fail closed when server milestone reward data is unavailable");
+    .expect("ClaimRewards(1) must succeed once");
+    assert_eq!(claim_ok, PyRep::None);
+
+    let dup_err = rpc(
+        &ctx,
+        &mut sess,
+        "milestoneMgr",
+        "ClaimRewards",
+        &[PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("duplicate ClaimRewards(1) must fail");
     // rpc-lint: allow error code check
-    assert_eq!(claim_err.code, "UnimplementedRPC");
+    assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 
     // 3. communityTrackMgr.get_instance_attributes_public: backed by community_track_templates.fsdbinary
     for (args, expected_code) in [

@@ -63,11 +63,16 @@ async fn test_milestones_task_tracker_and_fighters() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
-    let claim_err = ctx
+    let claim_ok = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
         .await
-        .expect_err("ClaimRewards must fail closed (DATA GAP)");
-    assert_eq!(claim_err.code, "UnimplementedRPC");
+        .expect("ClaimRewards(1) must succeed once");
+    assert_eq!(claim_ok, PyRep::None);
+    let dup_err = ctx
+        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .expect_err("duplicate ClaimRewards(1) must fail");
+    assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 
     // 2. monolithTaskTrackerMgr.HasEverWarped
     // Fresh character has not warped

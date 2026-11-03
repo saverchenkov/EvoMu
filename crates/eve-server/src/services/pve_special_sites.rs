@@ -95,6 +95,24 @@ pub struct SystemInterferenceRecord {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeasonalEventSiteRecord {
+    pub instance_id: i64,
+    pub season_id: i64,
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub solar_system_id: SolarSystemId,
+    pub window_start_ft: i64,
+    pub window_end_ft: i64,
+    pub boss_npc_ball_id: i64,
+    pub boss_type_id: u32,
+    pub escort_ball_ids: Vec<i64>,
+    pub reward_isk: i64,
+    pub reward_points: i64,
+    pub loot_type_id: u32,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoidSpaceSessionRecord {
     pub char_id: CharacterId,
     pub ship_id: ItemId,
@@ -144,6 +162,8 @@ pub struct PveSpecialSitesRegistry {
     pub interference_by_system: HashMap<SolarSystemId, SystemInterferenceRecord>,
     #[serde(default)]
     pub crab_beacons: HashMap<i64, crate::services::pve_crab_beacons::CrabBeaconRecord>,
+    #[serde(default)]
+    pub seasonal_event_sites: HashMap<SolarSystemId, Vec<SeasonalEventSiteRecord>>,
     #[serde(default)]
     pub sim_clock_sec: u64,
     #[serde(default)]

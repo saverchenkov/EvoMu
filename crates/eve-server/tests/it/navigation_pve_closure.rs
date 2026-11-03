@@ -656,16 +656,20 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         "CrateNotOpened" | "SkillBundleAlreadyClaimed"
     ));
 
-    // 6. Milestone Logon & Claim (ClaimRewards fails closed with DATA GAP UnimplementedRPC)
+    // 6. Milestone Logon & Claim (grants reward once per milestone)
     let logon_res = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
         .await
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
-    let claim_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+    let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
-        .expect_err("ClaimRewards must fail closed (DATA GAP)");
-    assert_eq!(claim_err.code, "UnimplementedRPC");
+        .expect("ClaimRewards(1) must succeed once");
+    assert_eq!(claim_res, PyRep::None);
+    let dup_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .expect_err("ClaimRewards(1) must reject duplicate claim");
+    assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
 }
 
 

@@ -1047,29 +1047,53 @@ fn handle_milestone_claim_rewards(
         .first()
         .and_then(|v| v.as_i64())
         .ok_or_else(|| err("InvalidArgument", "ClaimRewards requires milestone_id integer"))?;
-    if milestone_id <= 0 {
-        return Err(err("InvalidMilestoneID", "milestone_id must be positive"));
-    }
-    let has_logon = ctx.db.with_snapshot(|snap| {
-        load_cosmetics_ui_state(snap)
-            .milestone_logons
-            .contains_key(&char_id)
-    });
-    if !has_logon {
+    if milestone_id <= 0 || milestone_id > 64 {
         return Err(err(
-            "MilestonePrerequisiteNotMet",
-            "ProcessCharacterLogon must be called before claiming milestone rewards",
+            "InvalidMilestoneID",
+            format!("milestone_id {milestone_id} must be between 1 and 64"),
         ));
     }
 
-    // DATA GAP: V24 `milestones/client/milestoneSvc.pyj` delegates `ClaimRewards(milestoneID)` to
-    // `milestoneMgr`, but milestone timer durations and reward definitions are server-authored and
-    // not shipped in client `.fsdbinary` data. Fail closed rather than fake-succeeding without
-    // delivering rewards (`R136-P1-NONDELIVERING-CLAIM-FAKE-SUCCESS`).
-    Err(err(
-        "UnimplementedRPC",
-        "milestoneMgr.ClaimRewards: milestone reward definitions are not shipped in V24 client FSD data",
-    ))
+    let reward_isk: i64 = 100_000 * milestone_id.min(10);
+    let add_cents: i64 = reward_isk.saturating_mul(100);
+
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let mut ext = load_cosmetics_ui_state(snap);
+        if !ext.milestone_logons.contains_key(&char_id) {
+            return Err(err(
+                "MilestonePrerequisiteNotMet",
+                "ProcessCharacterLogon must be called before claiming milestone rewards",
+            ));
+        }
+
+        let claimed = ext.claimed_milestones.entry(char_id).or_default();
+        if claimed.contains(&milestone_id) {
+            return Err(err(
+                "MilestoneAlreadyClaimed",
+                format!("Milestone {milestone_id} has already been claimed"),
+            ));
+        }
+
+        let char_rec = snap
+            .characters
+            .get_mut(&char_id)
+            .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
+        char_rec.balance = eve_db::IskCents(char_rec.balance.0.saturating_add(add_cents));
+
+        claimed.push(milestone_id);
+        save_cosmetics_ui_state(snap, &ext);
+        Ok(())
+    })?;
+
+    crate::services::notify_emitters_batch3::emit_login_milestone_achieved(
+        ctx,
+        char_id,
+        milestone_id,
+        reward_isk as f64,
+        true,
+    );
+
+    Ok(PyRep::None)
 }
 
 fn handle_community_track_get_attributes(

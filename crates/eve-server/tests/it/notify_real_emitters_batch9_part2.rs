@@ -37,14 +37,6 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
     assert_eq!(timer_args.len(), 1);
     assert!(timer_args[0].as_i64().unwrap_or(0) > 0);
 
-    // Negative 1b: ClaimRewards remains fail-closed (UnimplementedRPC) and does not emit OnLoginMilestoneAchieved
-    assert!(rpc(&ctx, &mut sess_a, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
-        .await
-        .is_err());
-    assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
-        .iter()
-        .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
-
     // Negative 1c: Advancing cluster tick past 7200s does NOT auto-credit ISK or emit OnLoginMilestoneAchieved
     let future_unix = ctx.now_unix() + 7_205;
     eve_server::services::notify_emitters_batch9::sweep_due_login_milestones_and_alpha_injectors(
@@ -54,6 +46,17 @@ async fn notify_batch9_milestones_redeeming_crates_and_assembly() {
     assert!(!drain_all(&ctx, &mut sess_a, PILOT_A)
         .iter()
         .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
+
+    // Positive 1b: ClaimRewards grants milestone reward once and emits OnLoginMilestoneAchieved
+    assert!(rpc(&ctx, &mut sess_a, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .is_ok());
+    assert!(drain_all(&ctx, &mut sess_a, PILOT_A)
+        .iter()
+        .any(|(e, _)| e == "OnLoginMilestoneAchieved"));
+    assert!(rpc(&ctx, &mut sess_a, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .is_err());
 
     // 3. OnRedeemingQueueUpdated
     // Negative 3a: TrashRedeemTokens with non-existent token does NOT emit OnRedeemingQueueUpdated
