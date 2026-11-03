@@ -192,6 +192,16 @@ async fn test_sov_skyhooks_and_structures_audit() {
     sess.corporation_id = Some(corp_id);
     sess.alliance_id = Some(alliance_id);
 
+    let sys_handle = ctx.systems.get_or_spawn(null_sys);
+    if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+        let p = [ship_ball.position.x, ship_ball.position.y, ship_ball.position.z];
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(s) = snap.structures.get_mut(&ihub_id) {
+                s.position = [p[0] + 1000.0, p[1], p[2]];
+            }
+        });
+    }
+
     // 1. AcquireSkyhooks (read-only verification)
     let initial_claim_tick = ctx.db.with_snapshot(|s| {
         s.system_states.get(&null_sys).map(|st| st.last_sov_claim_tick)

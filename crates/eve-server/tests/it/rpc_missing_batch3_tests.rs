@@ -460,13 +460,11 @@ async fn test_rpc_missing_batch3_part2() {
     assert!(!remaining_sessions.contains("1002"));
 
     // 15. rpc:userSvc.ProcessEVESessionCreated
-    let saved_cid = sess2.character_id.take();
     let wrong_char_err = ctx
         .dispatch_rpc(&mut sess2, "userSvc", None, "ProcessEVESessionCreated", &[PyRep::Integer(PILOT1)], &kw, None)
         .await
-        .expect_err("foreign character_id must be rejected");
+        .expect_err("foreign character_id must be rejected even when session.character_id is set");
     assert_eq!(wrong_char_err.message, "CharacterDoesNotBelongToUser");
-    sess2.character_id = saved_cid;
 
     let process_sess_res = ctx
         .dispatch_rpc(&mut sess1, "userSvc", None, "ProcessEVESessionCreated", &[PyRep::Integer(PILOT1), PyRep::Integer(1001)], &kw, None)

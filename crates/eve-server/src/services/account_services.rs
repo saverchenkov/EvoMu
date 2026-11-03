@@ -1077,9 +1077,16 @@ fn handle_inner(
         ("userSvc", "ProcessEVESessionCreated") => {
             let uid = ServerContext::require_auth(session)?;
             let sess_id = session.session_id;
-            let char_id = session
-                .character_id
-                .or_else(|| args.first().and_then(|a| a.as_i64()));
+            let requested_char_id = args.first().and_then(|a| a.as_i64());
+            let char_id = requested_char_id.or(session.character_id);
+            if let (Some(sess_cid), Some(req_cid)) = (session.character_id, requested_char_id) {
+                if sess_cid != req_cid {
+                    return Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "CharacterDoesNotBelongToUser".into(),
+                    });
+                }
+            }
             if let Some(cid) = char_id {
                 let belongs = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).is_some_and(|c| c.user_id == uid)

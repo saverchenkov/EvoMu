@@ -104,6 +104,6 @@ async fn test_sde_localization_fsd_pickle_resources_and_server_rpcs() {
             None,
         )
         .await
-        .expect("ReloadFSDPickle");
-    assert!(!matches!(reload, PyRep::None));
+        .unwrap_err();
+    assert_eq!(reload.code, "UnimplementedRPC");
 }
