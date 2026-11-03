@@ -10,6 +10,7 @@ mod abyssal_deadspace_closure;
 mod abyssal_deadspace_closure_part2;
 mod abyssal_deadspace_closure_part3;
 mod abyssal_room_combat;
+mod parity_abyssal_closure;
 mod account_admin_complete;
 mod account_features_parity;
 mod action_plan_char_progression;
