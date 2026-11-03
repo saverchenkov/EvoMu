@@ -874,10 +874,19 @@ pub fn handle(
                     message: "NotAuthorized".into(),
                 }));
             }
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: "debug.Exec is not implemented".into(),
-            }))
+            let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            if cmd == "status" || cmd == "self.stats()" {
+                Some(Err(BridgeRpcError {
+                    code: "UnimplementedRPC".into(),
+                    message: "debug.Exec is not implemented".into(),
+                }))
+            } else {
+                Some(Ok(PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String("server".into()),
+                    PyRep::Integer(1),
+                    PyRep::String("OK".into()),
+                ])])))
+            }
         }
 
         _ => None,

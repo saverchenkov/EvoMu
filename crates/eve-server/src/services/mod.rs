@@ -86,6 +86,7 @@ pub mod notify_emitters_b30;
 pub mod notify_emitters_b36;
 pub mod notify_emitters_b23;
 pub mod notify_emitters_missing;
+pub mod notify_emitters_missing2;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
 pub mod operations_survey_handlers;

@@ -915,10 +915,19 @@ pub fn handle(
                     message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
                 }));
             }
-            Some(Err(BridgeRpcError {
-                code: "UnimplementedRPC".into(),
-                message: "FSD pickle hot-reloading is not implemented".into(),
-            }))
+            if args.is_empty() {
+                crate::services::notify_emitters_missing2::emit_update_localization_text_cache(
+                    ctx,
+                    crate::router::NotificationTarget::All,
+                    None,
+                );
+                Some(Ok(PyRep::Bool(true)))
+            } else {
+                Some(Err(BridgeRpcError {
+                    code: "UnimplementedRPC".into(),
+                    message: "FSD pickle hot-reloading is not implemented".into(),
+                }))
+            }
         }
         ("clientStatLogger", "LogString") => {
             if let Err(e) = ServerContext::require_auth(session) {
