@@ -1178,7 +1178,11 @@ fn handle_contacts_notifications_calendar(
         | ("addressbook", "BlockOwners")
         | ("charMgr", "BlockOwners")
         | ("addressbook", "UnblockOwners")
-        | ("charMgr", "UnblockOwners") => {
+        | ("charMgr", "UnblockOwners")
+        | ("addressbook", "CreateLabel")
+        | ("addressbook", "GetLabels")
+        | ("addressbook", "EditLabel")
+        | ("addressbook", "DeleteLabel") => {
             let empty_kw = HashMap::new();
             crate::services::character_skills::character_contacts::handle_contacts(
                 ctx, session, "charMgr", method, args, &empty_kw,

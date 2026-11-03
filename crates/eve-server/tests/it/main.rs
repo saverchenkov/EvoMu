@@ -33,6 +33,8 @@ mod character_creation_sheet;
 mod character_creation_sheet_part2;
 mod character_creation_sheet_part3;
 mod character_esi_social_mail;
+mod character_esi_social_mail_part2;
+mod character_esi_social_mail_part3;
 mod character_esi_wallet_loyalty;
 mod character_progression;
 mod character_progression_part2;

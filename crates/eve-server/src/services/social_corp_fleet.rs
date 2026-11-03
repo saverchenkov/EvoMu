@@ -802,6 +802,15 @@ pub async fn handle(
             };
             let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
             let prev = ctx.db.with_mut_snapshot(|snap| {
+                let ctype = if snap.alliances.contains_key(&contact_id) {
+                    "alliance"
+                } else if snap.corporations.contains_key(&contact_id)
+                    || ctx.sde.npc_corporations.contains_key(&contact_id)
+                {
+                    "corporation"
+                } else {
+                    "character"
+                };
                 let list = snap.alliance_contacts.entry(aid).or_default();
                 let prev = list
                     .iter()
@@ -810,7 +819,7 @@ pub async fn handle(
                 list.retain(|c| c.contact_id != contact_id);
                 list.push(eve_db::SocialContactRecord {
                     contact_id,
-                    contact_type: "character".into(),
+                    contact_type: ctype.into(),
                     standing,
                     is_watched: false,
                     is_blocked: false,
