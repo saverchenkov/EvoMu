@@ -203,7 +203,7 @@ async fn test_quasar_public_gateway_domains_part_a() {
             _ => None,
         })
         .expect("cdn url");
-    assert!(cdn_url.starts_with("http://127.0.0.1:26004/cdn/maptags/v24.1."));
+    assert!(cdn_url.contains("/maptags/v24.1.") && cdn_url.ends_with("/universe.fb"));
 }
 
 #[tokio::test]

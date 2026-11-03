@@ -1046,8 +1046,13 @@ pub fn register_handlers(
                     let crc_val = ((sde_cdn.solar_systems.len() as u32).wrapping_mul(2654435761))
                         ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
                         ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));
+                    let cdn_base = std::env::var("EVOMU_CDN_BASE_URL")
+                        .ok()
+                        .map(|s| s.trim_end_matches('/').to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
                     let url = format!(
-                        "http://127.0.0.1:26004/cdn/maptags/v{}.{}.{}/universe.fb",
+                        "{cdn_base}/maptags/v{}.{}.{}/universe.fb",
                         latest.0, latest.1, latest.2
                     );
                     let mut ver_buf = Vec::new();

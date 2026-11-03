@@ -370,27 +370,12 @@ pub struct SkinrCosmeticsState {
 
 impl SkinrCosmeticsState {
     pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) -> Arc<Self> {
-        let mut data = db.with_snapshot(|s| {
+        let data = db.with_snapshot(|s| {
             s.quasar_state_blobs
                 .get(SKINR_BLOB_KEY)
                 .and_then(|j| serde_json::from_str::<SkinrCosmeticsData>(j).ok())
                 .unwrap_or_default()
         });
-        if data.title_definitions.is_empty() && !sde.schools.is_empty() {
-            let mut school_ids: Vec<u32> = sde.schools.keys().copied().collect();
-            school_ids.sort_unstable();
-            data.title_definitions = school_ids
-                .into_iter()
-                .filter_map(|sid| {
-                    let sc = sde.schools.get(&sid)?;
-                    Some(TitleDefinitionRecord {
-                        title_id: sid,
-                        name: sc.name.clone(),
-                        internal_name: format!("school_{sid}"),
-                    })
-                })
-                .collect();
-        }
         let catalog = SkinrStaticCatalog::load(&sde);
         Arc::new(Self {
             db,
@@ -1067,8 +1052,13 @@ fn handle_title_def_get_latest(
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let ver = data.title_def_version;
     let crc = compute_title_def_crc(&data.title_definitions, ver, &lang);
+    let cdn_base = std::env::var("EVOMU_CDN_BASE_URL")
+        .ok()
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
     let url = format!(
-        "http://127.0.0.1:26004/cdn/cosmetics/character/title/definitions/v{}.{}.{}/{}.json",
+        "{cdn_base}/cosmetics/character/title/definitions/v{}.{}.{}/{}.json",
         ver[0], ver[1], ver[2], lang
     );
 

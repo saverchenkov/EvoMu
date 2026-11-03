@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 
+use eve_db::types::TrainedSkillRecord;
 use eve_db::{InventoryFlag, InventoryItemRecord};
-use eve_destiny::wire::{encode_destiny_event, encode_destiny_updates};
-use eve_destiny::{Ballpark, DestinyEvent, MovementMode};
+use eve_destiny::{Ball, Ballpark, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
@@ -103,35 +103,178 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
-// parity: destiny:OnDroneActivityChange
-#[test]
-fn test_parity_misc_destiny_on_drone_activity_change() {
-    let event = DestinyEvent::OnDroneActivityChange {
-        drone_id: 420_001,
-        activity_state: 2,
+fn extract_destiny_actions(updates: &PyRep) -> Vec<(String, Vec<PyRep>)> {
+    let bytes = eve_proto::marshal::encode(updates);
+    let decoded = eve_proto::marshal::decode(&bytes).expect("DoDestinyUpdate marshal round-trip");
+    assert_eq!(&decoded, updates);
+    let PyRep::List(entries) = decoded else {
+        panic!("expected DoDestinyUpdate list, got {decoded:?}");
     };
-    let encoded = encode_destiny_event(100, &event, None);
-    let PyRep::Tuple(outer) = &encoded else {
-        panic!("expected outer stamp tuple, got {encoded:?}");
-    };
-    assert_eq!(outer.len(), 2);
-    assert_eq!(outer[0], PyRep::Integer(100));
-    let PyRep::Tuple(action) = &outer[1] else {
-        panic!("expected action tuple, got {:?}", outer[1]);
-    };
-    assert_eq!(action.len(), 2);
-    assert_eq!(action[0].as_str(), Some("OnDroneActivityChange"));
-    let PyRep::Tuple(args) = &action[1] else {
-        panic!("expected drone activity args tuple, got {:?}", action[1]);
-    };
-    assert_eq!(args.as_slice(), &[PyRep::Integer(420_001), PyRep::Integer(2)]);
+    entries
+        .into_iter()
+        .map(|entry| {
+            let PyRep::Tuple(outer) = entry else {
+                panic!("expected (stamp, action) tuple, got {entry:?}");
+            };
+            assert!(matches!(outer[0], PyRep::Integer(_)));
+            let PyRep::Tuple(action) = &outer[1] else {
+                panic!("expected (actionName, args) tuple, got {:?}", outer[1]);
+            };
+            let name = action[0].as_str().expect("action name").to_string();
+            let args = match &action[1] {
+                PyRep::Tuple(t) => t.clone(),
+                other => vec![other.clone()],
+            };
+            (name, args)
+        })
+        .collect()
+}
 
-    let update = encode_destiny_updates(100, std::slice::from_ref(&event), None);
-    let PyRep::List(events_list) = update else {
-        panic!("expected DoDestinyUpdate event list, got {update:?}");
+// parity: destiny:OnDroneActivityChange
+#[tokio::test]
+async fn test_parity_misc_destiny_on_drone_activity_change() {
+    eve_testkit::attest(&["destiny:OnDroneActivityChange"]);
+    let ctx = new_ctx();
+    let mut sess = authed_demo_session(&ctx, 8100).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(PILOT_A).or_default().insert(
+            3436,
+            TrainedSkillRecord {
+                type_id: 3436,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
+
+    let kw = HashMap::new();
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("stationSvc.Undock");
+    let ship_id = sess.ship_id.expect("active ship after Undock");
+    let sys_id = sess.solar_system_id.expect("solar system after Undock");
+
+    let drone_item_id = 99_770_001;
+    let target_id = 99_770_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship_item) = snap.items.get_mut(&ship_id) {
+            ship_item.type_id = 626;
+            ship_item.version += 1;
+        }
+        snap.items.insert(
+            drone_item_id,
+            InventoryItemRecord {
+                item_id: drone_item_id,
+                type_id: 2454,
+                owner_id: PILOT_A,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let (_, ship_ball) = handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .expect("ship ball snapshot")
+        .expect("ship ball in space");
+    let target_cs = ctx.build_type_combat_state(587);
+    handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: target_id,
+                type_id: 587,
+                position: ship_ball.position + DVec3::new(2_000.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 300.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            target_cs,
+        )
+        .await
+        .expect("spawn target ball");
+
+    let launched = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "LaunchDrones",
+            &[PyRep::List(vec![PyRep::Integer(drone_item_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ship.LaunchDrones");
+    let PyRep::List(launched_ids) = launched else {
+        panic!("expected launched drone ball IDs list, got {launched:?}");
     };
-    assert_eq!(events_list.len(), 1);
-    assert_eq!(events_list[0], encoded);
+    let drone_ball_id = launched_ids[0].as_i64().expect("launched drone ball_id");
+    let _ = handle.drain_observer_updates(ship_id).await;
+
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "entity",
+            None,
+            "CmdEngage",
+            &[
+                PyRep::List(vec![PyRep::Integer(drone_ball_id)]),
+                PyRep::Integer(target_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdEngage");
+    let (_tick, _evs, engage_updates) = handle
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain observer updates after CmdEngage");
+    let engage_actions = extract_destiny_actions(&engage_updates);
+    assert!(
+        engage_actions
+            .iter()
+            .any(|(name, args)| name == "OnDroneActivityChange"
+                && args.as_slice() == [PyRep::Integer(drone_ball_id), PyRep::Integer(1)]),
+        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=1) in DoDestinyUpdate, got {engage_actions:?}"
+    );
+
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "entity",
+            None,
+            "CmdReturnHome",
+            &[PyRep::List(vec![PyRep::Integer(drone_ball_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdReturnHome");
+    let (_tick, _evs, return_updates) = handle
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain observer updates after CmdReturnHome");
+    let return_actions = extract_destiny_actions(&return_updates);
+    assert!(
+        return_actions
+            .iter()
+            .any(|(name, args)| name == "OnDroneActivityChange"
+                && args.as_slice() == [PyRep::Integer(drone_ball_id), PyRep::Integer(0)]),
+        "expected OnDroneActivityChange(drone_id={drone_ball_id}, activity_state=0) in DoDestinyUpdate, got {return_actions:?}"
+    );
 }
 
 // parity: sde:res:/localizationfsd/localization_fsd_it.pickle
@@ -184,7 +327,6 @@ async fn test_parity_misc_quasar_sovereignty_resource_star_requests() {
     );
 }
 
-// parity: plan:C-5, plan:MN-01
 #[tokio::test]
 async fn test_parity_misc_plan_c5_and_mn01_mining_sde_and_belts() {
     let ctx = new_ctx();
@@ -211,7 +353,6 @@ async fn test_parity_misc_plan_c5_and_mn01_mining_sde_and_belts() {
     );
 }
 
-// parity: plan:Q-3, plan:Q-4
 #[tokio::test]
 async fn test_parity_misc_plan_q3_and_q4_quasar_identity_and_progression() {
     let ctx = new_ctx();
@@ -254,7 +395,6 @@ async fn test_parity_misc_plan_q3_and_q4_quasar_identity_and_progression() {
     );
 }
 
-// parity: plan:Q-7, plan:Q-8
 #[tokio::test]
 async fn test_parity_misc_plan_q7_and_q8_quasar_space_and_sovereignty() {
     let ctx = new_ctx();
@@ -325,7 +465,6 @@ async fn test_parity_misc_plan_q7_and_q8_quasar_space_and_sovereignty() {
     assert_eq!(major, 1);
 }
 
-// parity: plan:T-2
 #[test]
 fn test_parity_misc_plan_t2_sde_and_dogma_effects_sweep() {
     let ctx = new_ctx();
@@ -344,7 +483,6 @@ fn test_parity_misc_plan_t2_sde_and_dogma_effects_sweep() {
     );
 }
 
-// parity: plan:T-8, plan:T-9
 #[tokio::test]
 async fn test_parity_misc_plan_t8_and_t9_invariants_and_restart() {
     let ctx = new_ctx();
@@ -401,7 +539,6 @@ async fn test_parity_misc_plan_t8_and_t9_invariants_and_restart() {
     assert_eq!(persisted.quantity, 500);
 }
 
-// parity: plan:T-10, plan:T-11
 #[tokio::test]
 async fn test_parity_misc_plan_t10_and_t11_client_oracle_and_destiny_diff() {
     let ctx = new_ctx();

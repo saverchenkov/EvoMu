@@ -1070,13 +1070,6 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             if !found {
                 return Err((STATUS_BAD_REQUEST, format!("Failed precondition: no items of type {target_type_id} available to deliver")));
             }
-            let _ = db.add_or_stack_item(
-                corpid as i64,
-                consumed_loc,
-                eve_db::InventoryFlag::CorpDeliveries,
-                target_type_id,
-                delivered_units,
-            );
 
             // 3. Re-verify project is still active under write lock; if cancelled concurrently, refund consumed items
             let mut completed = false;
@@ -1104,6 +1097,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 let _ = db.add_or_stack_item(cid as i64, consumed_loc, eve_db::InventoryFlag::Hangar, target_type_id, delivered_units);
                 return Err((STATUS_BAD_REQUEST, "Project no longer active".into()));
             }
+            let _ = db.add_or_stack_item(
+                corpid as i64,
+                consumed_loc,
+                eve_db::InventoryFlag::CorpDeliveries,
+                target_type_id,
+                delivered_units,
+            );
             state_deliver.sync_to_db();
 
             // 1. ContributionSucceededNotice

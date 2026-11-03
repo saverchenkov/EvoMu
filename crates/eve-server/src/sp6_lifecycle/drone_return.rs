@@ -88,6 +88,13 @@ pub async fn handle_cmd_return_bay(
                     target_id: Some(ship_id),
                 },
             ).await;
+            let _ = sys_handle.emit_destiny_event(
+                d.ball_id,
+                eve_destiny::DestinyEvent::OnDroneActivityChange {
+                    drone_id: d.ball_id,
+                    activity_state: 4,
+                },
+            ).await;
             let notif_args = vec![
                 PyRep::Integer(d.ball_id),
                 PyRep::Integer(char_id),

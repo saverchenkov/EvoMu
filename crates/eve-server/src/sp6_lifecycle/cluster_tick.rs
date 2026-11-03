@@ -1209,6 +1209,10 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     crate::services::mining_advanced::tick_all_metenox_moon_drills(ctx, prev_metenox_tick, now_unix);
     crate::services::mining_advanced::tick_all_moon_extractions(ctx).await;
     crate::services::mining_b33::tick_phased_asteroid_fields(ctx, now_unix).await;
+    crate::services::quasar_payment_store_types::process_due_payment_schedules(&ctx.db, &ctx.quasar_gateway.pending_notices, now_unix);
+    for (scope, payload, ts) in crate::services::quasar_social_chat::drain_local_notices() {
+        let _ = ctx.quasar_gateway.publish_notice(scope, payload, ts);
+    }
     ctx.advance_skill_queues(1.0);
 
     ctx.db.with_mut_snapshot(|snap| {

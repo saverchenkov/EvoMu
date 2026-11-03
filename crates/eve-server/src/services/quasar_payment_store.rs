@@ -598,19 +598,10 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 
     // 10b. eve_public.payment.schedule.api.GetActiveByTypeRequest -> GetActiveByTypeResponse
     let db_sched_type = Arc::clone(&db);
-    let router_pending_sched = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve_public.payment.schedule.api.GetActiveByTypeRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let uid = ctx.effective_user_id().filter(|&u| u > 0).ok_or_else(|| (STATUS_UNAUTHORIZED, "Authentication required".to_string()))? as u64;
-            let effective_now = db_sched_type
-                .with_snapshot(|snap| {
-                    snap.service_state_blobs
-                        .get("__server_now_unix")
-                        .and_then(|s| s.parse::<u64>().ok())
-                })
-                .unwrap_or_else(|| db_sched_type.clock().now_unix_secs());
-            process_due_payment_schedules(&db_sched_type, &router_pending_sched, effective_now);
             let stype = dyn_msg
                 .get(1)
                 .and_then(|v| match v {

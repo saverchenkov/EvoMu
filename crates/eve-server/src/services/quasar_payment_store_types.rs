@@ -122,19 +122,71 @@ pub fn process_due_payment_schedules(
             .get("payment_tokens")
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
+        let catalog = read_store_catalog(snap);
+        let mut receipts: Vec<PaymentReceiptRecord> = snap
+            .service_state_blobs
+            .get("payment_receipts")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let mut receipts_changed = false;
+        let mut omega_renewals: Vec<(u64, u64)> = Vec::new();
         let mut failed = Vec::new();
         scheds.retain_mut(|s| {
             if s.next_payment_unix == 0 || s.next_payment_unix > now_unix {
                 return true;
             }
             if tokens.iter().any(|t| t.user_id == s.user_id && t.is_quick_pay && !t.consumed) {
-                s.next_payment_unix = now_unix + u64::from(s.interval_days.max(1)) * 86_400;
+                let interval_secs = u64::from(s.interval_days.max(1)) * 86_400;
+                s.next_payment_unix = now_unix + interval_secs;
+                let numeric_offer_id = s
+                    .offer_id
+                    .strip_prefix("VEVC-")
+                    .unwrap_or(&s.offer_id)
+                    .parse::<u32>()
+                    .ok();
+                let offer = numeric_offer_id
+                    .and_then(|oid| catalog.offers.iter().find(|o| o.id == oid));
+                let amount_in_cents = offer
+                    .and_then(|o| o.price_cents)
+                    .map(|c| c.min(u64::from(u32::MAX)) as u32)
+                    .unwrap_or(0);
+                let currency = offer
+                    .and_then(|o| o.currency.clone())
+                    .unwrap_or_else(|| "USD".to_string());
+                snap.next_entity_id += 1;
+                let rid = snap.next_entity_id as u64;
+                receipts.push(PaymentReceiptRecord {
+                    receipt_id: rid,
+                    user_id: s.user_id,
+                    offer_id: s.offer_id.clone(),
+                    amount_in_cents,
+                    currency,
+                    timestamp_unix: now_unix,
+                });
+                receipts_changed = true;
+                if s.schedule_type == 1 {
+                    omega_renewals.push((s.user_id, interval_secs));
+                }
                 true
             } else {
                 failed.push((s.user_id, s.id));
                 false
             }
         });
+        for (uid, interval_secs) in omega_renewals {
+            let _ = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                snap,
+                uid,
+                interval_secs,
+                now_unix,
+            );
+        }
+        if receipts_changed {
+            if let Ok(serialized) = serde_json::to_string(&receipts) {
+                snap.service_state_blobs
+                    .insert("payment_receipts".to_string(), serialized);
+            }
+        }
         if let Ok(serialized) = serde_json::to_string(&scheds) {
             snap.service_state_blobs
                 .insert("payment_schedules".to_string(), serialized);

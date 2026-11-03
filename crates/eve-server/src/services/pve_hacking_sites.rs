@@ -438,6 +438,7 @@ pub async fn handle_pve_hacking(
                     status: "InProgress".into(),
                 };
                 reg.hacking_games.insert((char_id, container_id), g.clone());
+                reg.self_repair_turns.remove(&(char_id, container_id));
                 g
             });
 
@@ -562,8 +563,12 @@ pub async fn handle_pve_hacking(
                     if let Some(rem) = reg.self_repair_turns.get_mut(&(char_id, container_id)) {
                         if *rem > 0 {
                             let heal = 5 + ((tile_idx as i32) % 6);
-                            game.virus_coherence += heal;
+                            game.virus_coherence =
+                                (game.virus_coherence + heal).min(game.max_virus_coherence);
                             *rem -= 1;
+                            if *rem == 0 {
+                                reg.self_repair_turns.remove(&(char_id, container_id));
+                            }
                         }
                     }
                 }
@@ -625,8 +630,10 @@ pub async fn handle_pve_hacking(
                 let is_structure = game.site_id.starts_with("STRUCTURE_");
                 let mut failed_twice = false;
                 if game.status == "Won" {
+                    reg.self_repair_turns.remove(&(char_id, container_id));
                     if !is_structure { reg.hacked_containers.insert((game.solar_system_id, container_id)); }
                 } else if game.status == "Failed" {
+                    reg.self_repair_turns.remove(&(char_id, container_id));
                     if is_structure {
                         let fc = reg.structure_char_failures.entry((game.character_id, container_id)).or_insert(0);
                         *fc += 1;
@@ -773,6 +780,7 @@ pub async fn handle_pve_hacking(
                 }));
             };
             let (removed, second_fail_info, ghost_detonate_info) = with_pve_exploration_reg(ctx, |reg| {
+                reg.self_repair_turns.remove(&(char_id, container_id));
                 if let Some(game) = reg.hacking_games.remove(&(char_id, container_id)) {
                     let mut explode_info = None;
                     let mut ghost_info = None;

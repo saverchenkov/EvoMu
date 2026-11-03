@@ -129,7 +129,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
         "Difficulty 3 board must include RestorationNode"
     );
 
-    // 2. SelfRepair heals 5..=10 coherence per turn for 3 turns with no max_virus_coherence cap,
+    // 2. SelfRepair heals 5..=10 coherence per turn for 3 turns capped at max_virus_coherence,
     //    and 2nd hack failure on a standard Data/Relic container self-destructs with 0.0 ship damage.
     let ctx = make_context();
     let kw: HashMap<String, PyRep> = HashMap::new();
@@ -213,7 +213,7 @@ async fn test_hacking_node_types_and_failure_outcome() {
 
     with_pve_exploration_reg(&ctx, |reg| {
         let g = reg.hacking_games.get_mut(&(char_id, can_id)).unwrap();
-        g.virus_coherence = g.max_virus_coherence;
+        g.virus_coherence = (g.max_virus_coherence - 12).max(1);
         g.utilities[0] = Some(HackingUtilityKind::SelfRepair);
         for t in g.tiles.iter_mut().take(4) {
             t.kind = HackingNodeKind::Empty;
@@ -235,8 +235,10 @@ async fn test_hacking_node_types_and_failure_outcome() {
         .await
         .expect("Activate SelfRepair");
 
-    let base_coh =
-        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, can_id)].virus_coherence);
+    let (base_coh, max_coh) = with_pve_exploration_reg(&ctx, |reg| {
+        let g = &reg.hacking_games[&(char_id, can_id)];
+        (g.virus_coherence, g.max_virus_coherence)
+    });
     for turn in 1..=3_u32 {
         let _ = ctx
             .dispatch_rpc(
@@ -251,12 +253,18 @@ async fn test_hacking_node_types_and_failure_outcome() {
             .await
             .expect("Click tile");
     }
-    let after_coh =
-        with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(char_id, can_id)].virus_coherence);
-    assert!(
-        (base_coh + 15..=base_coh + 30).contains(&after_coh),
-        "SelfRepair over 3 turns must heal 15..=30 above max_virus_coherence (got {base_coh} -> {after_coh})"
+    let (after_coh, rem_sr) = with_pve_exploration_reg(&ctx, |reg| {
+        (
+            reg.hacking_games[&(char_id, can_id)].virus_coherence,
+            reg.self_repair_turns.get(&(char_id, can_id)).copied(),
+        )
+    });
+    assert!(after_coh > base_coh, "SelfRepair must heal virus coherence");
+    assert_eq!(
+        after_coh, max_coh,
+        "SelfRepair must clamp virus coherence at max_virus_coherence (got {base_coh} -> {after_coh}, max {max_coh})"
     );
+    assert_eq!(rem_sr, None, "self_repair_turns must be cleaned up after 3 turns");
 
     // Trigger 2nd failure on a standard container in low-sec -> self-destructs with 0.0 explosionDamage
     for attempt in 1..=2 {

@@ -901,9 +901,25 @@ pub fn handle(
         ("localizationServer", "UpdateLocalizationQAWrap") => Some(
             crate::services::notify_emitters_batch9_part2::handle_update_localization_qa_wrap(ctx, session, args),
         ),
-        ("localizationServer", "ReloadFSDPickle") => Some(
-            crate::services::notify_emitters_batch9_part2::handle_reload_fsd_pickle(ctx, session, args),
-        ),
+        ("localizationServer", "ReloadFSDPickle") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let qa = eve_db::service_roles::ROLE_GMH
+                | eve_db::service_roles::ROLE_GML
+                | eve_machonet::service_roles::ROLE_PROGRAMMER
+                | eve_machonet::service_roles::ROLE_CONTENT;
+            if !session.has_gm_role() && (session.role & qa) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "RoleRequired".into(),
+                    message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
+                }));
+            }
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "FSD pickle hot-reloading is not implemented".into(),
+            }))
+        }
         ("clientStatLogger", "LogString") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));

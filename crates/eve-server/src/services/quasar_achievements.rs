@@ -1152,7 +1152,12 @@ pub fn register_achievement_handlers(
             }
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
-            let url = format!("http://127.0.0.1:26004/cdn/achievements/v24.1.{count}/{hash}.json");
+            let cdn_base = std::env::var("EVOMU_CDN_BASE_URL")
+                .ok()
+                .map(|s| s.trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
+            let url = format!("{cdn_base}/achievements/v24.1.{count}/{hash}.json");
 
             let mut checkpoint = Vec::new();
             encode_string_field(1, &url, &mut checkpoint);

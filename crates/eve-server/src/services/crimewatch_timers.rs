@@ -526,6 +526,12 @@ pub fn is_new_pvp_aggression(ctx: &ServerContext, attacker_char_id: i64, victim_
         .unwrap_or(true)
 }
 
+fn is_disapproval_system(sde: &eve_sde::SdeRegistry, sys_id: u32) -> bool {
+    sde.solar_systems.get(&sys_id).is_some_and(|s| {
+        s.region_id == 10_001_000 || s.name.eq_ignore_ascii_case("Zarzakh")
+    })
+}
+
 pub fn on_weapon_aggression_post_hook(
     ctx: &ServerContext,
     attacker_char_id: i64,
@@ -535,7 +541,7 @@ pub fn on_weapon_aggression_post_hook(
 ) {
     if victim_char_opt.is_none() {
         with_mut_combat_runtime(ctx, |rt| rt.trigger_npc_timer(attacker_char_id, now_unix));
-    } else if sys_id == 30_100_000 {
+    } else if is_disapproval_system(&ctx.sde, sys_id) {
         with_mut_combat_runtime(ctx, |rt| {
             rt.disapproval_flags.insert(attacker_char_id, now_unix.saturating_add(900));
         });
@@ -546,7 +552,7 @@ pub fn on_weapon_aggression_post_hook(
 pub fn record_illegal_pvp_penalties_if_new(
     ctx: &ServerContext, attacker_char_id: i64, victim_char_id: i64, sys_id: u32, sys_sec: f64, is_pod: bool, is_new_agg: bool, now_unix: u64,
 ) {
-    if sys_id == 30_100_000 {
+    if is_disapproval_system(&ctx.sde, sys_id) {
         with_mut_combat_runtime(ctx, |rt| {
             rt.disapproval_flags.insert(attacker_char_id, now_unix.saturating_add(900));
         });

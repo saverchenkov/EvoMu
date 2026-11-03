@@ -77,7 +77,7 @@ pub fn handle(
         ("account", "GetTransactions") => Some(get_journal(ctx, session, args)),
         ("marketProxy", "CharGetTransactions") => Some(market_transactions(ctx, session, args, false)),
         ("marketProxy", "CorpGetTransactions") => Some(market_transactions(ctx, session, args, true)),
-        ("invbroker", "DepositPlexToVault") => Some(deposit_plex(ctx, session, args)),
+        ("invbroker", "DepositPlexToVault") => Some(deposit_plex(ctx, session, args, kwargs)),
         ("invbroker", "WithdrawPlexFromVault") => Some(withdraw_plex(ctx, session, args, kwargs)),
         _ => None,
     }
@@ -359,9 +359,22 @@ fn deposit_plex_inner(
     })
 }
 
-fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn deposit_plex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (entity_id, user_id, tx_id, rem_plex, qty) = deposit_plex_inner(ctx, session, char_id, args)?;
+    let (entity_id, user_id, tx_id, rem_plex, qty) = match deposit_plex_inner(ctx, session, char_id, args) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
+                super::notify_emitters_missing::emit_plex_deposit_failed(ctx, char_id, &e.code, reference);
+            }
+            return Err(e);
+        }
+    };
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnPlexDeposited",
@@ -565,7 +578,15 @@ fn withdraw_plex(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (rep, final_item_id, user_id, tx_id, rem_plex, qty) =
-        withdraw_plex_inner(ctx, session, char_id, args, kwargs)?;
+        match withdraw_plex_inner(ctx, session, char_id, args, kwargs) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
+                    super::notify_emitters_missing::emit_plex_withdraw_failed(ctx, char_id, &e.code, reference);
+                }
+                return Err(e);
+            }
+        };
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnPlexItemAddedToInventory",

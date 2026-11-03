@@ -300,8 +300,7 @@ pub async fn handle_weapons(
                 crate::services::combat_crimewatch::crimewatch_timers::on_weapon_aggression_post_hook(ctx, char_id, victim_char_opt, sys_id, now_unix);
                 record_killmail_assist_action(ctx, tid, char_id, attacker_ball.type_id, m.type_id, 0.0, true, now_unix);
                 if let Some(vcid) = victim_char_opt {
-                    crate::services::combat_crimewatch::crimewatch_timers::on_weapon_aggression_post_hook(ctx, char_id, victim_char_opt, sys_id, now_unix);
-                record_killmail_assist_action(
+                    record_killmail_assist_action(
                         ctx,
                         vcid,
                         char_id,

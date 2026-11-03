@@ -7,7 +7,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::router::{NotificationTarget, ServerContext};
+use eve_server::router::ServerContext;
 use eve_server::services::{
     notify_emitters_b23, notify_emitters_batch3_space, notify_emitters_batch8_ops,
     pve_expeditions::EscalatingPathEntry,
@@ -318,7 +318,7 @@ async fn test_parity_notifies_operations_and_node_graphs() {
 
     let graph_ids: Vec<i64> = ctx.sde.node_graphs.keys().take(3).map(|&id| i64::from(id)).collect();
     let (g1, g2, g3) = (graph_ids[0], graph_ids[1], graph_ids[2]);
-    let inst_a = notify_emitters_batch8_ops::start_client_node_graph_instance(
+    let _inst_a = notify_emitters_batch8_ops::start_client_node_graph_instance(
         &ctx,
         PILOT_A,
         g1,
@@ -348,25 +348,9 @@ async fn test_parity_notifies_operations_and_node_graphs() {
     let start_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&start_n, "OnStartClientNodeGraph")[0], PyRep::Integer(g1));
 
-    ctx.notify(
-        NotificationTarget::Character(PILOT_A),
-        "OnClientNodeGraphUpdate",
-        "charid",
-        vec![PyRep::Integer(inst_a), PyRep::List(vec![PyRep::Integer(10)]), PyRep::Dict(vec![])],
-    );
-    ctx.notify(
-        NotificationTarget::Character(PILOT_A),
-        "OnClientNodeGraphMessage",
-        "charid",
-        vec![PyRep::Integer(inst_a), PyRep::Integer(10), PyRep::String("step_completed".into()), PyRep::Integer(1)],
-    );
-    let msg_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&msg_n, "OnClientNodeGraphUpdate")[0], PyRep::Integer(inst_a));
-    assert_eq!(find_notif(&msg_n, "OnClientNodeGraphMessage")[0], PyRep::Integer(inst_a));
-
     notify_emitters_batch8_ops::stop_active_operation_node_graph_for_category(&ctx, PILOT_A, 1);
     let stop_cat_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&stop_cat_n, "OnStopClientNodeGraph"), &[PyRep::Integer(inst_a)]);
+    assert_eq!(find_notif(&stop_cat_n, "OnStopClientNodeGraph"), &[PyRep::Integer(_inst_a)]);
 
     notify_emitters_batch8_ops::stop_client_node_graph_instances_by_id(&ctx, PILOT_A, g2);
     let stop_id_n = drain_all(&ctx, &mut sess, PILOT_A);
@@ -375,6 +359,61 @@ async fn test_parity_notifies_operations_and_node_graphs() {
     notify_emitters_batch8_ops::stop_all_client_node_graphs_for_char(&ctx, PILOT_A);
     let stop_all_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&stop_all_n, "OnStopAllClientNodeGraphs").len(), 0);
+
+    // Drive real AIR NPE node-graph runner RPCs -> emits OnClientNodeGraphUpdate and OnClientNodeGraphMessage
+    let mut npe_sess = SessionState::new(1105);
+    common::login_pilot(&ctx, &mut npe_sess, "demo", "demo-secret").await;
+    let doll = PyRep::keyval([("genderID", PyRep::Integer(1)), ("bloodlineID", PyRep::Integer(1))]);
+    let portrait = PyRep::keyval([("backgroundID", PyRep::Integer(1))]);
+    let npe_cid = rpc(
+        &ctx,
+        &mut npe_sess,
+        "charUnboundMgr",
+        "CreateCharacterWithDoll",
+        &[
+            PyRep::String("NPE Notify Pilot".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(11),
+            doll,
+            portrait,
+            PyRep::Integer(17),
+        ],
+    )
+    .await
+    .expect("CreateCharacterWithDoll")
+    .as_i64()
+    .expect("npe_cid");
+    rpc(&ctx, &mut npe_sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(npe_cid)])
+        .await
+        .expect("SelectCharacterID npe");
+    rpc(
+        &ctx,
+        &mut npe_sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("start_tutorial".into())],
+    )
+    .await
+    .expect("start_tutorial");
+    let _ = drain_all(&ctx, &mut npe_sess, npe_cid);
+    rpc(
+        &ctx,
+        &mut npe_sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("new_eden_cinematic_ended".into())],
+    )
+    .await
+    .expect("new_eden_cinematic_ended");
+    let msg_n = drain_all(&ctx, &mut npe_sess, npe_cid);
+    assert!(!find_notif(&msg_n, "OnClientNodeGraphUpdate").is_empty());
+    assert_eq!(
+        find_notif(&msg_n, "OnClientNodeGraphMessage")
+            .get(2)
+            .and_then(|v| v.as_str()),
+        Some("pocket_entered")
+    );
 }
 
 #[tokio::test]
@@ -498,12 +537,27 @@ async fn test_parity_notifies_dungeons_cloak_and_space() {
     let jq_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&jq_n, "OnJumpQueueUpdate")[0], PyRep::Integer(i64::from(SYS_JITA)));
 
-    ctx.notify(
-        NotificationTarget::Character(PILOT_A),
-        "OnProgressionRoomJoined",
-        "charid",
-        vec![PyRep::Integer(4001), PyRep::Integer(11), PyRep::List(vec![]), PyRep::List(vec![]), PyRep::Integer(1)],
-    );
+    let inst_id = eve_server::services::pve_dungeon_runtime::spawn_sde_dungeon_runtime_instance(
+        &ctx,
+        PILOT_A,
+        SYS_JITA,
+        2001,
+        "Deadspace",
+        [120_000_000.0, 0.0, 80_000_000.0],
+        true,
+    )
+    .await
+    .expect("spawn_sde_dungeon_runtime_instance");
+    let dng_state = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, inst_id)
+        .expect("get_dungeon_instance_state");
+    let entry_gate_id = dng_state.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let sys_h = ctx.systems.get_or_spawn(SYS_JITA);
+    let entry_gate_pos = sys_h.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap().1.position;
+    let _ = sys_h.set_ball_position(710_004, entry_gate_pos + DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    rpc(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)])
+        .await
+        .expect("ActivateAccelerationGate");
     let pr_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&pr_n, "OnProgressionRoomJoined")[0], PyRep::Integer(4001));
+    assert_eq!(find_notif(&pr_n, "OnProgressionRoomJoined").len(), 5);
 }

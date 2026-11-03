@@ -3,12 +3,14 @@
 #![forbid(unsafe_code)]
 
 use crate::common;
+use eve_db::{AsteroidRecord, InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::{service_roles::ROLE_GM_DEFAULT, SessionState};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::{NotificationTarget, ServerContext};
-use eve_server::services::{
-    notify_emitters_batch3, notify_emitters_batch9, notify_emitters_missing,
-};
+use eve_server::services::{notify_emitters_batch3, notify_emitters_batch9};
+use eve_server::system_actor::AsteroidState;
+use glam::DVec3;
 use std::collections::HashMap;
 
 const PILOT_A: i64 = 90_000_001;
@@ -173,133 +175,260 @@ async fn test_parity_notifies_seasons_campaigns_and_skills() {
 }
 
 #[tokio::test]
-async fn test_parity_notifies_missing_client_and_economy() {
-    // parity: notify:OnBeanPrime, notify:OnClearFetchedData, notify:OnClientEvent_MarketItemReceived
-    // parity: notify:OnEffectMessage, notify:OnFlaggedListsChange, notify:OnNotificationUndeleted
-    // parity: notify:OnOfferReceived, notify:OnPlexDepositFailed
+async fn test_parity_notifies_plex_dogma_and_brain() {
+    // parity: notify:OnEffectMessage, notify:OnPlexDepositFailed
+    // parity: notify:OnPlexWithdrawFailed, notify:OnServerBrainUpdated
     eve_testkit::attest(&[
-        "notify:OnBeanPrime",
-        "notify:OnClearFetchedData",
-        "notify:OnClientEvent_MarketItemReceived",
         "notify:OnEffectMessage",
-        "notify:OnFlaggedListsChange",
-        "notify:OnNotificationUndeleted",
-        "notify:OnOfferReceived",
         "notify:OnPlexDepositFailed",
+        "notify:OnPlexWithdrawFailed",
+        "notify:OnServerBrainUpdated",
     ]);
     let ctx = new_ctx();
     let mut sess = setup_pilot(&ctx, 1202).await;
 
-    notify_emitters_missing::emit_bean_prime(&ctx, PILOT_A, &[(101, 2, 133_000_000_000_000_000)]);
-    let bean_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&bean_n, "OnBeanPrime").len(), 1);
-
-    notify_emitters_missing::emit_clear_fetched_data(&ctx, PILOT_A);
-    let clear_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&clear_n, "OnClearFetchedData").len(), 0);
-
-    notify_emitters_missing::emit_client_market_item_received(&ctx, PILOT_A, 88_001, 34, 4, 60_003_760);
-    let mkt_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&mkt_n, "OnClientEvent_MarketItemReceived"),
-        &[PyRep::Integer(88_001), PyRep::Integer(34), PyRep::Integer(4), PyRep::Integer(60_003_760)]
-    );
-
-    notify_emitters_missing::emit_effect_message(
+    // 1. OnPlexDepositFailed via invbroker.DepositPlexToVault with reference
+    let jita_station = 60_003_760_i64;
+    let trit_id = 880_001_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_A) {
+            ch.station_id = Some(jita_station);
+        }
+        snap.adjust_plex_vault(PILOT_A, 50);
+        snap.items.insert(
+            trit_id,
+            InventoryItemRecord {
+                item_id: trit_id,
+                type_id: 34,
+                owner_id: PILOT_A,
+                location_id: jita_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    sess.station_id = Some(jita_station);
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    assert!(rpc(
         &ctx,
-        PILOT_A,
-        "CannotActivateCloakWhileTargeted",
-        &[("targetCount", PyRep::Integer(1))],
-    );
-    let eff_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&eff_n, "OnEffectMessage")[0], PyRep::String("CannotActivateCloakWhileTargeted".into()));
-
-    notify_emitters_missing::emit_flagged_lists_change(&ctx, PILOT_A);
-    let flag_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&flag_n, "OnFlaggedListsChange").len(), 0);
-
-    let undel_res = notify_emitters_missing::handle_undelete_notifications(
-        &ctx,
-        PILOT_A,
-        &[501, 502],
+        &mut sess,
+        "invbroker",
+        "DepositPlexToVault",
+        &[
+            PyRep::Integer(jita_station),
+            PyRep::Integer(trit_id),
+            PyRep::Integer(10),
+            PyRep::Integer(4242),
+        ],
     )
-    .expect("handle_undelete_notifications");
-    assert_eq!(undel_res, PyRep::Integer(2));
-    let undel_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&undel_n, "OnNotificationUndeleted"),
-        &[PyRep::List(vec![PyRep::Integer(501), PyRep::Integer(502)])]
-    );
-
-    notify_emitters_missing::emit_contextual_offer_received(&ctx, PILOT_A, 4401, 77_001, 110);
-    let offer_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&offer_n, "OnOfferReceived")[0], PyRep::Integer(4401));
-
-    notify_emitters_missing::emit_plex_deposit_failed(&ctx, PILOT_A, 9001, 500, "InsufficientPlex");
+    .await
+    .is_err());
     let dep_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(
         find_notif(&dep_n, "OnPlexDepositFailed"),
-        &[PyRep::Integer(9001), PyRep::Integer(500), PyRep::String("InsufficientPlex".into())]
+        &[PyRep::String("NotPlex".into()), PyRep::Integer(4242)]
     );
-}
 
-#[tokio::test]
-async fn test_parity_notifies_missing_plex_dogma_and_ui() {
-    // parity: notify:OnPlexWithdrawFailed, notify:OnProgressionTaskWidgetUpdate, notify:OnRecommendationsChanged
-    // parity: notify:OnServerBrainUpdated, notify:OnServerMapDataPush, notify:OnStartConversation
-    // parity: notify:OnUpdateLocalizationTextCache, notify:OnUpdateServiceMapping
-    eve_testkit::attest(&[
-        "notify:OnPlexWithdrawFailed",
-        "notify:OnProgressionTaskWidgetUpdate",
-        "notify:OnRecommendationsChanged",
-        "notify:OnServerBrainUpdated",
-        "notify:OnServerMapDataPush",
-        "notify:OnStartConversation",
-        "notify:OnUpdateLocalizationTextCache",
-        "notify:OnUpdateServiceMapping",
-    ]);
-    let ctx = new_ctx();
-    let mut sess = setup_pilot(&ctx, 1203).await;
-
-    notify_emitters_missing::emit_plex_withdraw_failed(&ctx, PILOT_A, 9001, 250, "VaultLocked");
+    // 2. OnPlexWithdrawFailed via invbroker.WithdrawPlexFromVault with reference
+    let mut wd_kwargs = HashMap::new();
+    wd_kwargs.insert("reference".to_string(), PyRep::Integer(5353));
+    assert!(ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "WithdrawPlexFromVault",
+            &[PyRep::Integer(99_999)],
+            &wd_kwargs,
+            None,
+        )
+        .await
+        .is_err());
     let wd_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(
         find_notif(&wd_n, "OnPlexWithdrawFailed"),
-        &[PyRep::Integer(9001), PyRep::Integer(250), PyRep::String("VaultLocked".into())]
+        &[PyRep::String("NotEnoughPlex".into()), PyRep::Integer(5353)]
     );
 
-    notify_emitters_missing::emit_progression_task_widget_update(&ctx, PILOT_A, 10, 20, 3, 5);
-    let prog_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&prog_n, "OnProgressionTaskWidgetUpdate")[0], PyRep::Integer(10));
-    assert_eq!(find_notif(&prog_n, "OnProgressionTaskWidgetUpdate")[1], PyRep::Integer(20));
-
-    notify_emitters_missing::emit_recommendations_changed(&ctx, PILOT_A);
-    let rec_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&rec_n, "OnRecommendationsChanged").len(), 0);
-
-    notify_emitters_missing::emit_server_brain_updated(&ctx, PILOT_A, 42, vec![1, 2, 3, 4]);
+    // 3. OnServerBrainUpdated via skillMgr2.InjectSkillIntoBrain
+    let unlearned_skill = ctx.db.with_snapshot(|snap| {
+        let known = snap.skills.get(&PILOT_A);
+        *ctx.sde
+            .types
+            .iter()
+            .find(|(&id, t)| {
+                t.category_id == 16
+                    && t.published
+                    && known.map_or(true, |m| !m.contains_key(&id))
+            })
+            .map(|(id, _)| id)
+            .expect("unlearned skill in SDE")
+    });
+    let skill_book_id = 880_005_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            skill_book_id,
+            InventoryItemRecord {
+                item_id: skill_book_id,
+                type_id: unlearned_skill,
+                owner_id: PILOT_A,
+                location_id: jita_station,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "InjectSkillIntoBrain",
+        &[PyRep::Integer(skill_book_id)],
+    )
+    .await
+    .expect("InjectSkillIntoBrain");
     let brain_n = drain_all(&ctx, &mut sess, PILOT_A);
+    let brain_args = find_notif(&brain_n, "OnServerBrainUpdated");
+    assert_eq!(brain_args.len(), 1);
+    assert!(matches!(&brain_args[0], PyRep::Tuple(t) if t.len() == 2));
+
+    // 4. OnEffectMessage via mining_cycle::process_mining_cycles when capacitor runs dry
+    let sys_jita = 30_000_142_u32;
+    let miner_id = 880_011_i64;
+    let rock_id = 880_012_i64;
+    let miner_type = *ctx
+        .sde
+        .types
+        .iter()
+        .find(|(_, t)| {
+            t.group_id == 54
+                && t.published
+                && t.default_attributes.get(&6).copied().unwrap_or(0.0) > 0.0
+        })
+        .map(|(id, _)| id)
+        .unwrap_or(&484);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(PILOT_A).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        let active_ship = snap.characters.get(&PILOT_A).map(|c| c.active_ship_id).unwrap_or(0);
+        if let Some(sh) = snap.items.get_mut(&active_ship) {
+            sh.type_id = 32880;
+        }
+        snap.items.retain(|_, i| i.location_id != active_ship);
+        snap.items.insert(
+            miner_id,
+            InventoryItemRecord {
+                item_id: miner_id,
+                type_id: miner_type,
+                owner_id: PILOT_A,
+                location_id: active_ship,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let undock = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[])
+        .await
+        .expect("Undock");
+    let ship_id = undock.dict_get("shipID").and_then(|v| v.as_i64()).expect("shipID");
+    let beyonce_id = undock
+        .dict_get("beyonceBoundID")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as u64);
+
+    let sys = ctx.systems.get_or_spawn(sys_jita);
+    let (_, ship_ball) = sys.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball");
+    let rock_pos = ship_ball.position + DVec3::new(2_000.0, 0.0, 0.0);
+    ctx.db.spawn_asteroid(AsteroidRecord {
+        asteroid_id: rock_id,
+        solar_system_id: sys_jita,
+        belt_id: 40_000_001,
+        type_id: 1230,
+        quantity: 10_000,
+        initial_quantity: 10_000,
+        position: (rock_pos.x, rock_pos.y, rock_pos.z),
+        radius: 100.0,
+    });
+    let _ = sys
+        .spawn_asteroid(
+            AsteroidState {
+                asteroid_id: rock_id,
+                belt_id: 40_000_001,
+                type_id: 1230,
+                initial_units: 10_000,
+                remaining_units: 10_000,
+                unit_volume: 0.1,
+                depleted: false,
+                respawn_at_tick: None,
+            },
+            Ball {
+                id: rock_id,
+                type_id: 1230,
+                position: rock_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e10,
+                radius: 100.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        )
+        .await;
+    rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(rock_id)])
+        .await
+        .expect("AddTarget");
+    for _ in 0..30 {
+        if sys
+            .get_target_locks(ship_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|l| l.target_id == rock_id && l.locked)
+        {
+            break;
+        }
+        sys.step_manual(1.0).await.unwrap();
+    }
+    rpc(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[
+            PyRep::Integer(miner_id),
+            PyRep::String("miningLaser".into()),
+            PyRep::Integer(rock_id),
+        ],
+    )
+    .await
+    .expect("Activate Miner I");
+    ctx.dispatch_rpc(&mut sess, "beyonce", beyonce_id, "CmdStop", &[], &HashMap::new(), None)
+        .await
+        .expect("CmdStop");
+    let _ = drain_all(&ctx, &mut sess, PILOT_A);
+    let _ = sys.set_capacitor(ship_id, 0.0).await;
+    ctx.advance_secs(65);
+    let _ = eve_server::services::mining_cycle::process_mining_cycles(&ctx).await;
+    let eff_n = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(
-        find_notif(&brain_n, "OnServerBrainUpdated"),
-        &[PyRep::Integer(42), PyRep::Buffer(vec![1, 2, 3, 4])]
+        find_notif(&eff_n, "OnEffectMessage")[0],
+        PyRep::String("EffectDeactivatedOutOfCap".into())
     );
-
-    notify_emitters_missing::emit_server_map_data_push(&ctx, PILOT_A, 30_000_142, 1200, 18);
-    let map_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(
-        find_notif(&map_n, "OnServerMapDataPush")[0].dict_get("solarSystemID").and_then(|v| v.as_i64()),
-        Some(30_000_142)
-    );
-
-    notify_emitters_missing::emit_start_conversation(&ctx, PILOT_A, 601, 3_019_582, &[1, 2]);
-    let conv_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&conv_n, "OnStartConversation")[0], PyRep::Integer(601));
-
-    notify_emitters_missing::emit_update_localization_text_cache(&ctx, PILOT_A, &[(55_001, "en-us", "Updated")]);
-    let loc_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&loc_n, "OnUpdateLocalizationTextCache").len(), 1);
-
-    notify_emitters_missing::emit_update_service_mapping(&ctx, PILOT_A, &[("beyonce", 1001)]);
-    let svc_n = drain_all(&ctx, &mut sess, PILOT_A);
-    assert_eq!(find_notif(&svc_n, "OnUpdateServiceMapping").len(), 1);
 }

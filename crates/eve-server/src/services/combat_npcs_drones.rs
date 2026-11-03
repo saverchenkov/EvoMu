@@ -815,6 +815,10 @@ pub async fn handle_npcs_drones(
                     drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id,
                     activity_state: 0, type_id: d.type_id, controller_owner_id: char_id, target_id: None,
                 }).await;
+                let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneActivityChange {
+                    drone_id: d.ball_id,
+                    activity_state: 0,
+                }).await;
                 let notif_args = vec![
                     PyRep::Integer(d.ball_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
                     PyRep::Integer(0), PyRep::Integer(d.type_id as i64),
@@ -935,6 +939,10 @@ pub async fn handle_npcs_drones(
                 let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneStateChange {
                     drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id, activity_state: 1,
                     type_id: d.type_id, controller_owner_id: char_id, target_id: Some(target_id),
+                }).await;
+                let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneActivityChange {
+                    drone_id: d.ball_id,
+                    activity_state: 1,
                 }).await;
                 let notif_args = vec![
                     PyRep::Integer(d.ball_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
@@ -1078,6 +1086,10 @@ pub async fn handle_npcs_drones(
                     let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
                         drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: st,
                         type_id: tid, controller_owner_id: char_id, target_id: Some(target_char_id),
+                    }).await;
+                    let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneActivityChange {
+                        drone_id: bid,
+                        activity_state: st,
                     }).await;
                 }
             }

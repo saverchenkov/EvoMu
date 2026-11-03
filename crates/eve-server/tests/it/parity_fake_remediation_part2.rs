@@ -255,7 +255,7 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let router = EsiRouter::new(Arc::clone(&ctx));
     let mut s = sess(70_202, 90_000_001, 98_000_001, 30_000_142, 0);
 
-    // 1. Character title definitions GetLatestRequest returns local EsiRouter CDN URL with SDE-backed definitions
+    // 1. Character title definitions GetLatestRequest returns CDN URL; no school-synthesized titles
     let latest_rsp = rpc(
         &ctx,
         &mut s,
@@ -269,12 +269,13 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let url_bytes = field(&cp, 1).expect("url");
     let url = String::from_utf8(url_bytes).expect("utf8 url");
     let path = url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP CDN URL");
+    assert_eq!(path, "/cdn/cosmetics/character/title/definitions/v24.1.0/en-us.json");
     let cdn_http = router.handle_request(&EsiHttpRequest::new("GET", path));
     assert_eq!(cdn_http.status_code, 200);
     let parsed_defs: Value = serde_json::from_slice(&cdn_http.body).expect("title defs JSON");
-    assert_eq!(parsed_defs.as_array().unwrap().len(), ctx.sde.schools.len());
+    assert_eq!(parsed_defs, json!([]));
 
-    // 3. Space CDN GetUpdateRequest returns local EsiRouter maptag binary bundle
+    // 3. Space CDN GetUpdateRequest returns configurable CDN URL; EsiRouter does not serve invented MAPT binary
     let mut no_local = Vec::new();
     encode_varint_field(2, 1, &mut no_local);
     let space_rsp = rpc(&ctx, &mut s, "eve_public.space.api.cdn.GetUpdateRequest", no_local).await;
@@ -282,9 +283,9 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let space_cp = field(&space_rsp.payload.unwrap().value, 1).expect("space checkpoint");
     let space_url = String::from_utf8(field(&space_cp, 1).unwrap()).unwrap();
     let space_path = space_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
+    assert_eq!(space_path, format!("/cdn/maptags/v24.1.{}/universe.fb", ctx.sde.solar_systems.len()));
     let map_http = router.handle_request(&EsiHttpRequest::new("GET", space_path));
-    assert_eq!(map_http.status_code, 200);
-    assert!(map_http.body.starts_with(b"MAPT"));
+    assert_eq!(map_http.status_code, 404);
 
     // 4. Achievement definition CDN GetLatestRequest returns local EsiRouter JSON bundle
     let ach_rsp = rpc(
@@ -298,8 +299,12 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
     let ach_cp = field(&ach_rsp.payload.unwrap().value, 1).expect("ach checkpoint");
     let ach_url = String::from_utf8(field(&ach_cp, 1).unwrap()).unwrap();
     let ach_path = ach_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
+    let ach_mgr = &ctx.quasar_gateway.progression.achievements;
+    assert_eq!(ach_path, format!("/cdn/achievements/v24.1.{}/{}.json", ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash));
     let ach_http = router.handle_request(&EsiHttpRequest::new("GET", ach_path));
     assert_eq!(ach_http.status_code, 200);
+    let ach_defs: Value = serde_json::from_slice(&ach_http.body).expect("ach defs JSON");
+    assert_eq!(ach_defs.as_array().unwrap().len(), ach_mgr.sde_achievement_count);
 }
 
 #[tokio::test]
@@ -388,7 +393,7 @@ async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
         &ctx,
         &mut mgr_sess,
         "eve_public.freelance.project.api.CreateRequest",
-        create_req,
+        create_req.clone(),
     )
     .await;
     assert_eq!(create_rsp.status_code, STATUS_OK);
@@ -453,6 +458,27 @@ async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
         redeem_notices.iter().any(|(t, _)| t.ends_with("ParticipantRewardRedeemedNotice")),
         "RedeemRewardRequest must emit ParticipantRewardRedeemedNotice"
     );
+
+    // 5. Cancelled project DeliverRequest must fail without duplicating items into CorpDeliveries
+    let create_rsp2 = rpc(&ctx, &mut mgr_sess, "eve_public.freelance.project.api.CreateRequest", create_req).await;
+    assert_eq!(create_rsp2.status_code, STATUS_OK);
+    let id_msg2 = field(&create_rsp2.payload.unwrap().value, 1).expect("project2 Identifier");
+    assert_eq!(rpc(&ctx, &mut pilot_sess, "eve_public.freelance.project.api.CommitRequest", id_msg2.clone()).await.status_code, STATUS_OK);
+    assert_eq!(rpc(&ctx, &mut mgr_sess, "eve_public.freelance.project.api.CloseRequest", id_msg2.clone()).await.status_code, STATUS_OK);
+    let mut deliver_req2 = id_msg2;
+    encode_varint_field(4, 100, &mut deliver_req2);
+    assert_ne!(
+        rpc(&ctx, &mut pilot_sess, "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", deliver_req2)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    ctx.db.with_snapshot(|snap| {
+        let pilot_qty: i32 = snap.items.values().filter(|i| i.owner_id == pilot_id && i.type_id == 34 && i.flag == InventoryFlag::Hangar).map(|i| i.quantity).sum();
+        let corp_deliv_qty: i32 = snap.items.values().filter(|i| i.owner_id == corp_id && i.type_id == 34 && i.flag == InventoryFlag::CorpDeliveries).map(|i| i.quantity).sum();
+        assert_eq!(pilot_qty, 300);
+        assert_eq!(corp_deliv_qty, 200);
+    });
 }
 
 #[tokio::test]
@@ -501,13 +527,22 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
                 }],
             },
         );
-        let tokens = vec![PaymentTokenRecord {
-            id: 88,
-            user_id: 1,
-            token_str: "tok_live_88".into(),
-            is_quick_pay: true,
-            consumed: false,
-        }];
+        let tokens = vec![
+            PaymentTokenRecord {
+                id: 88,
+                user_id: 1,
+                token_str: "tok_live_88".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 89,
+                user_id: 1,
+                token_str: "tok_live_89".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
         snap.service_state_blobs
             .insert("payment_tokens".into(), serde_json::to_string(&tokens).unwrap());
     });
@@ -557,17 +592,7 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
         STATUS_OK
     );
 
-    // Disable quick-pay tokens -> emits QuickPayRemovedNotice
-    assert_eq!(
-        rpc(&ctx, &mut s, "eve_public.payment.token.api.DisableAllRequest", Vec::new())
-            .await
-            .status_code,
-        STATUS_OK
-    );
-    let tok_notices = drain(&mut rx);
-    assert!(tok_notices.iter().any(|(t, _)| t.ends_with("QuickPayRemovedNotice")));
-
-    // 4. Advance clock past 30-day billing cycle with no quick-pay token -> PaymentFailedNotice & CancelledNotice
+    // 4. Advance clock past 30-day billing cycle with quick-pay token -> GetActiveByType is pure read, tick renews & records receipt
     let sched_due: u64 = ctx.db.with_snapshot(|snap| {
         snap.service_state_blobs
             .get("payment_schedules")
@@ -579,8 +604,60 @@ async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
     ctx.advance_secs(advance);
     let mut by_type = Vec::new();
     encode_varint_field(1, 1, &mut by_type);
-    let _ = rpc(&ctx, &mut s, "eve_public.payment.schedule.api.GetActiveByTypeRequest", by_type).await;
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.payment.schedule.api.GetActiveByTypeRequest", by_type.clone())
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    let receipts_before_tick: usize = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("payment_receipts")
+            .and_then(|j| serde_json::from_str::<Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord>>(j).ok())
+            .map(|v| v.len())
+            .unwrap_or(0)
+    });
+    assert_eq!(receipts_before_tick, 1);
+
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let (renewed_due, receipts_after_tick) = ctx.db.with_snapshot(|snap| {
+        let due = snap
+            .service_state_blobs
+            .get("payment_schedules")
+            .and_then(|j| serde_json::from_str::<Vec<PaymentScheduleRecord>>(j).ok())
+            .and_then(|v| v.first().map(|s| s.next_payment_unix))
+            .unwrap();
+        let rcpts = snap
+            .service_state_blobs
+            .get("payment_receipts")
+            .and_then(|j| serde_json::from_str::<Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord>>(j).ok())
+            .unwrap_or_default();
+        (due, rcpts)
+    });
+    assert!(renewed_due > sched_due);
+    assert_eq!(receipts_after_tick.len(), 2);
+    assert_eq!(receipts_after_tick[1].amount_in_cents, 1_999);
+
+    // 5. Disable quick-pay tokens, advance past renewed due date, and tick -> PaymentFailedNotice & CancelledNotice
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.payment.token.api.DisableAllRequest", Vec::new())
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    let tok_notices = drain(&mut rx);
+    assert!(tok_notices.iter().any(|(t, _)| t.ends_with("QuickPayRemovedNotice")));
+
+    let advance2 = renewed_due.saturating_add(60).saturating_sub(ctx.now_unix() as u64);
+    ctx.advance_secs(advance2);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let sched_notices = drain(&mut rx);
     assert!(sched_notices.iter().any(|(t, _)| t.ends_with("PaymentFailedNotice")));
     assert!(sched_notices.iter().any(|(t, _)| t.ends_with("CancelledNotice")));
+    assert_ne!(
+        rpc(&ctx, &mut s, "eve_public.payment.schedule.api.GetActiveByTypeRequest", by_type)
+            .await
+            .status_code,
+        STATUS_OK
+    );
 }
