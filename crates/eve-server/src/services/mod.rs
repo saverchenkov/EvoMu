@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 pub mod account_services;
+pub mod air_npe_nodegraph_pocket;
+pub mod air_npe_nodegraph_runner;
 pub mod abyssal_void_gates;
 pub mod abyssal_void_mgr;
 pub mod agents_missions;

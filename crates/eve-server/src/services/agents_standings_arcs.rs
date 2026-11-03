@@ -1208,15 +1208,26 @@ pub async fn handle_extended(
 
         ("air_npe", "get_air_npe_state") | ("air_npe", "is_air_npe_enabled") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (curr_node, completed) = ctx.db.with_snapshot(|snap| {
-                snap.npe_progress
-                    .get(&char_id)
-                    .map(|n| (n.current_node_id, n.completed))
-                    .unwrap_or((1, false))
+            let (graph_id, curr_node, state_id, completed) = ctx.db.with_snapshot(|snap| {
+                if let Some(runner) = crate::services::air_npe_nodegraph_runner::load_runner_state(snap, char_id) {
+                    (
+                        u32::try_from(runner.master_client_graph_id).unwrap_or(716),
+                        runner.checkpoint_id,
+                        runner.state_id,
+                        runner.completed,
+                    )
+                } else if let Some(npe) = snap.npe_progress.get(&char_id) {
+                    let gid = if npe.node_graph_id > 0 { npe.node_graph_id } else { 473 };
+                    let st = if npe.completed { 3 } else { 0 };
+                    (gid, npe.current_node_id, st, npe.completed)
+                } else {
+                    (473, 1, 0, false)
+                }
             });
             Some(Ok(PyRep::keyval([
-                ("nodeGraphID", PyRep::Integer(473)),
-                ("currentNodeID", PyRep::Integer(curr_node as i64)),
+                ("nodeGraphID", PyRep::Integer(i64::from(graph_id))),
+                ("currentNodeID", PyRep::Integer(i64::from(curr_node))),
+                ("stateID", PyRep::Integer(state_id)),
                 ("completed", PyRep::Bool(completed)),
                 ("enabled", PyRep::Bool(true)),
             ])))

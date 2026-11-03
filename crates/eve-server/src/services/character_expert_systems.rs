@@ -95,7 +95,7 @@ fn expert_systems_to_py_dict(records: &BTreeMap<i64, ExpertSystemRecord>) -> PyR
 
 pub fn handle(
     ctx: &ServerContext,
-    session: &SessionState,
+    session: &mut SessionState,
     service: &str,
     method: &str,
     args: &[PyRep],
@@ -309,6 +309,14 @@ pub fn handle(
             };
 
             let res = ctx.db.with_snapshot(|snap| {
+                if let Some(bb_val) =
+                    crate::services::air_npe_nodegraph_runner::query_blackboard_value(
+                        snap, char_id, graph_id, bb_key,
+                    )
+                {
+                    return bb_val;
+                }
+
                 if let Some(npe) = snap.npe_progress.get(&char_id) {
                     if npe.node_graph_id == graph_id as u32 {
                         if bb_key == "current_node_id" {
@@ -416,16 +424,24 @@ pub fn handle(
                 }
             });
 
-            // DATA GAP: V24 operation node graph mappings and client node graph instance protocol are Tranquility server-only;
-            // do not emit OnClientNodeGraphUpdate without active server-started graph instance.
-            crate::services::notify_emitters_batch8_ops::on_client_graph_message(
+            if !crate::services::air_npe_nodegraph_runner::on_client_graph_message(
                 ctx,
+                session,
                 char_id,
                 graph_id,
                 node_id,
                 msg_name,
                 &msg_data,
-            );
+            ) {
+                crate::services::notify_emitters_batch8_ops::on_client_graph_message(
+                    ctx,
+                    char_id,
+                    graph_id,
+                    node_id,
+                    msg_name,
+                    &msg_data,
+                );
+            }
 
             Some(Ok(PyRep::None))
         }
@@ -453,36 +469,20 @@ pub fn stop_active_operation_node_graph(ctx: &ServerContext, char_id: i64, cat_i
     crate::services::notify_emitters_batch8_ops::stop_active_operation_node_graph_for_category(ctx, char_id, cat_id);
 }
 
-/// Marks AIR NPE completed for `char_id` and removes any active NPE node-graph blackboard from `service_state_blobs`.
-// DATA GAP: V24 AIR NPE client node graph ID is Tranquility server-only
+/// Marks AIR NPE completed for `char_id`, stops any active AIR NPE client graphs and pocket,
+/// and removes any active NPE node-graph blackboard from `service_state_blobs`.
 pub fn skip_air_npe_and_stop_graph(
     ctx: &ServerContext,
     char_id: i64,
     now_unix: u64,
 ) -> Result<(u32, u32, bool), BridgeRpcError> {
-    let (graph_id, curr_node, completed) = ctx.db.try_with_mut_snapshot(|snap| {
-        let (gid, cnode, comp) = {
-            let npe = snap.npe_progress.entry(char_id).or_insert_with(|| eve_db::NpeProgressRecord {
-                character_id: char_id,
-                node_graph_id: 0,
-                current_node_id: 1,
-                completed: false,
-                career_goal_progress: Default::default(),
-                claimed_goals: Default::default(),
-            });
-            npe.completed = true;
-            npe.current_node_id = 4;
-            (npe.node_graph_id, npe.current_node_id, npe.completed)
-        };
-        if gid > 0 {
+    let (graph_id, curr_node, completed) =
+        crate::services::air_npe_nodegraph_runner::on_skip_air_npe(ctx, None, char_id, now_unix)?;
+    if graph_id > 0 {
+        ctx.db.with_mut_snapshot(|snap| {
             snap.service_state_blobs
-                .remove(&node_graph_bb_blob_key(char_id, i64::from(gid)));
-        }
-        crate::services::operations_manager::sync_air_npe_skip(snap, char_id, now_unix);
-        Ok::<_, BridgeRpcError>((gid, cnode, comp))
-    })?;
-    // DATA GAP: V24 AIR NPE client node graph ID is Tranquility server-only;
-    // do not emit OnStopClientNodeGraphById with invented graph IDs.
-    crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
+                .remove(&node_graph_bb_blob_key(char_id, i64::from(graph_id)));
+        });
+    }
     Ok((graph_id, curr_node, completed))
 }

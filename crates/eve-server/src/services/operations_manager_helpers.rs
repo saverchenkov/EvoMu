@@ -930,6 +930,9 @@ pub fn record_server_operation_event(
         ctx.now_unix(),
     );
     emit_operation_reward_notifications(ctx, char_id, &outcome);
+    crate::services::air_npe_nodegraph_runner::on_server_gameplay_event(
+        ctx, char_id, event_name, params,
+    );
     if let Some((cat_id, op_id, tid)) = completed_task {
         ctx.notify(
             NotificationTarget::Character(char_id),

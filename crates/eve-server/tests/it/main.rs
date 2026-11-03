@@ -5,6 +5,7 @@
 
 mod common;
 mod abyssal_and_void_space_suite;
+mod air_npe_nodegraph_runner;
 mod abyssal_deadspace_closure;
 mod abyssal_deadspace_closure_part2;
 mod abyssal_deadspace_closure_part3;

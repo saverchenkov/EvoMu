@@ -1048,59 +1048,25 @@ pub fn handle(
                 if state_id <= 0 {
                     return Some(Err(BridgeRpcError::user_error("InvalidTutorialState")));
                 }
-                ctx.db.with_mut_snapshot(|snap| {
-                    let mut store = load_store(snap);
-                    let rec = store.by_character.entry(char_id).or_default();
-                    rec.tutorial_finished = Some(false);
-                    rec.tutorial_skipped = false;
-                    rec.tutorial_state = state_id;
-                    if let Some(p) = path_id {
-                        rec.career_path = p;
-                    }
-                    push_operation_event(rec, event_name, state_id);
-                    save_store(snap, &store, now);
-                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
-                        eve_db::NpeProgressRecord {
-                            character_id: char_id,
-                            node_graph_id: 0,
-                            current_node_id: 1,
-                            completed: false,
-                            career_goal_progress: Default::default(),
-                            claimed_goals: Default::default(),
-                        }
-                    });
-                    npe.completed = false;
-                    npe.current_node_id = 1;
-                });
-                crate::services::notify_emitters_batch8_ops::on_tutorial_started(ctx, char_id, state_id);
+                crate::services::air_npe_nodegraph_runner::on_start_tutorial(
+                    ctx, session, char_id, state_id, path_id,
+                );
                 return Some(Ok(PyRep::Bool(true)));
             }
 
             if event_name == "skip_tutorial" {
-                let had_active = ctx.db.with_mut_snapshot(|snap| {
-                    let mut store = load_store(snap);
-                    let rec = store.by_character.entry(char_id).or_default();
-                    let had_site = rec.active_site_id.take().is_some();
-                    let active = rec.tutorial_finished == Some(false) || had_site;
-                    rec.tutorial_skipped = true;
-                    rec.tutorial_finished = Some(true);
-                    push_operation_event(rec, event_name, 0);
-                    save_store(snap, &store, now);
-                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
-                        eve_db::NpeProgressRecord {
-                            character_id: char_id,
-                            node_graph_id: 0,
-                            current_node_id: 1,
-                            completed: false,
-                            career_goal_progress: Default::default(),
-                            claimed_goals: Default::default(),
-                        }
-                    });
-                    npe.completed = true;
-                    npe.current_node_id = 4;
-                    active
+                let had_active = ctx.db.with_snapshot(|snap| {
+                    let store = load_store(snap);
+                    store.by_character.get(&char_id).is_some_and(|rec| {
+                        rec.tutorial_finished == Some(false) || rec.active_site_id.is_some()
+                    })
                 });
-                crate::services::notify_emitters_batch8_ops::on_tutorial_skipped(ctx, char_id);
+                let _ = crate::services::air_npe_nodegraph_runner::on_skip_air_npe(
+                    ctx,
+                    Some(session),
+                    char_id,
+                    now,
+                );
                 if had_active {
                     crate::services::notify_emitters_batch10::emit_progression_left(ctx, char_id);
                 }
@@ -1223,6 +1189,16 @@ pub fn handle(
                     save_store(snap, &store, now);
                 });
                 return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if let Some(npe_rep) = crate::services::air_npe_nodegraph_runner::on_client_npe_event(
+                ctx,
+                session,
+                char_id,
+                &event_name,
+                extra_data,
+            ) {
+                return Some(Ok(npe_rep));
             }
 
             Some(handle_operation_task_client_event(
