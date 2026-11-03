@@ -955,7 +955,8 @@ pub async fn destroy_specialized_npc_with_hint(
             .or_else(|| rt.destroyed_npc_cache.remove(&npc_ball_id))
     });
     let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
-    let had_tracked_npc = npc_opt.is_some() || convoy_opt.is_some();
+    let mining_hauler_convoy = convoy_opt.is_none().then(|| ctx.living_world.get_mining_hauler_convoy(npc_ball_id)).flatten();
+    let had_tracked_npc = npc_opt.is_some() || convoy_opt.is_some() || mining_hauler_convoy.is_some();
     let sde_bounty = |tid: u32| -> f64 {
         ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&481).copied()).unwrap_or(0.0)
     };
@@ -964,6 +965,14 @@ pub async fn destroy_specialized_npc_with_hint(
         None => {
             if let Some(ref conv) = convoy_opt {
                 ("Hauler".to_string(), sde_bounty(conv.ship_type_id), None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)))
+            } else if mining_hauler_convoy.is_some() {
+                let tid = ball_opt.as_ref().map(|b| b.type_id).or_else(|| hint.map(|(t, _)| t)).unwrap_or(648);
+                let cargo = ctx.db.with_mut_snapshot(|snap| {
+                    let found = snap.items.iter().find(|(_, i)| i.location_id == npc_ball_id && i.flag == InventoryFlag::Cargo && i.quantity > 0).map(|(&id, i)| (id, i.type_id, i.quantity as i64));
+                    if let Some((id, _, _)) = found { snap.items.remove(&id); }
+                    found.map(|(_, t, q)| (t, q))
+                });
+                ("Hauler".to_string(), sde_bounty(tid), None, Some(tid), 500_001, cargo)
             } else {
                 let tid = ball_opt
                     .as_ref()

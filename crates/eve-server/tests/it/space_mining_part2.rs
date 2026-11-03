@@ -32,6 +32,33 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     )
     .await
     .expect("Login");
+    let ship_id = ctx.db.with_snapshot(|snap| snap.characters[&90_000_001].active_ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, i| !(i.location_id == ship_id && i.flag == eve_db::types::InventoryFlag::HiSlot0));
+        snap.items.insert(
+            750_000_902,
+            eve_db::InventoryItemRecord {
+                item_id: 750_000_902,
+                type_id: 483, // Miner I
+                owner_id: 90_000_001,
+                location_id: ship_id,
+                flag: eve_db::types::InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(750_000_902, true);
+        snap.skills.entry(90_000_001).or_default().insert(
+            3386,
+            eve_db::TrainedSkillRecord {
+                type_id: 3386,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+    });
     ctx.dispatch_rpc(
         &mut sess,
         "charUnboundMgr",
@@ -50,7 +77,7 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
         .expect("Undock");
     let PyRep::KeyVal(undock_kv) = &undock else { panic!("Expected KeyVal") };
     let beyonce_id = undock_kv["beyonceBoundID"].as_i64().unwrap() as u64;
-    let ship_id = undock_kv["shipID"].as_i64().unwrap();
+    assert_eq!(ship_id, undock_kv["shipID"].as_i64().unwrap());
 
     let jita = ctx.systems.get_or_spawn(30_000_142);
     let (_, ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();

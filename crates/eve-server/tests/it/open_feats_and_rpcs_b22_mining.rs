@@ -361,9 +361,9 @@ async fn test_b22_mining_excavator_npc_hauler_and_belt_ores() {
     let convoy_id = ctx.living_world.ensure_system_mining_op(tanoo_sys, &ctx.sde);
     ctx.living_world.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("step 0");
 
-    assert_eq!(ctx.living_world.hauler_cargo_units(convoy_id), 0, "Hauler starts empty at belt");
-    // Advance ticks until Venture ore hold (50,000 units) fills and hauler delivers to destination station
-    let mut delivered = false;
+    assert_eq!(ctx.living_world.hauler_cargo_units(&ctx.db, convoy_id), 0, "Hauler starts empty at belt");
+    // Advance ticks until Venture ore hold fills and hauler loads ore for multi-tick warp transit
+    let mut loaded_in_transit = false;
     for _ in 0..90 {
         ctx.advance_secs(60);
         let step = ctx
@@ -371,12 +371,50 @@ async fn test_b22_mining_excavator_npc_hauler_and_belt_ores() {
             .step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)
             .await
             .expect("step mining");
-        if step.hauled_to_station {
-            delivered = true;
+        if ctx.living_world.hauler_cargo_units(&ctx.db, convoy_id) > 0 {
+            loaded_in_transit = true;
+            assert!(!step.hauled_to_station, "Hauler must not teleport ore in 0 ticks on departure");
             assert_eq!(step.convoy_cargo_units, 0);
             break;
         }
     }
-    assert!(delivered, "Hauler must deliver ore to station when miner ore hold fills");
-    assert_eq!(ctx.living_world.hauler_cargo_units(convoy_id), 0, "Hauler cargo is empty after offload");
+    assert!(loaded_in_transit, "Hauler must load mined ore into eve-db when miner hold fills");
+    let in_transit_qty = ctx.living_world.hauler_cargo_units(&ctx.db, convoy_id);
+    assert!(in_transit_qty > 0);
+
+    // Next tick completes multi-tick warp transit and delivers ore to destination station
+    ctx.advance_secs(60);
+    let deliver_step = ctx
+        .living_world
+        .step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)
+        .await
+        .expect("step deliver");
+    assert!(deliver_step.hauled_to_station, "Hauler must deliver ore after multi-tick transit");
+    assert_eq!(ctx.living_world.hauler_cargo_units(&ctx.db, convoy_id), 0, "Hauler cargo is empty after offload");
+
+    // 4. Test destroying an in-transit hauler drops a wreck with its persisted ore cargo
+    let convoy_id_2 = ctx.living_world.ensure_system_mining_op(30_000_144, &ctx.sde);
+    let perim_handle = ctx.systems.get_or_spawn(30_000_144);
+    let _ = perim_handle.populate_asteroid_belt_entities().await.expect("populate perim belts");
+    ctx.living_world.step_npc_mining_op(convoy_id_2, &ctx.systems, &ctx.db, &ctx.sde).await.expect("p step 0");
+    for _ in 0..90 {
+        ctx.advance_secs(60);
+        ctx.living_world.step_npc_mining_op(convoy_id_2, &ctx.systems, &ctx.db, &ctx.sde).await.expect("p step");
+        if ctx.living_world.hauler_cargo_units(&ctx.db, convoy_id_2) > 0 {
+            break;
+        }
+    }
+    let dropped_expected = ctx.living_world.hauler_cargo_units(&ctx.db, convoy_id_2);
+    assert!(dropped_expected > 0, "Second hauler must be loaded in transit");
+    let hauler_ball_2 = convoy_id_2 + 1_000_000;
+    let (wreck_id, _, _) = eve_server::services::combat_crimewatch::combat_npc_ai::destroy_specialized_npc_with_hint(&ctx, 30_000_144, hauler_ball_2, 90_000_001, None).await;
+    assert!(wreck_id > 0, "Destroying in-transit hauler must spawn a wreck");
+    let wreck_ore_qty: i32 = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .filter(|i| i.location_id == wreck_id && i.type_id != 34 && i.type_id != 35)
+            .map(|i| i.quantity)
+            .sum()
+    });
+    assert!(wreck_ore_qty >= dropped_expected, "In-transit hauler wreck must contain its mined ore cargo");
 }

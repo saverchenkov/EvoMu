@@ -65,7 +65,6 @@ pub struct LivingWorldDirector {
     routes: RwLock<HashMap<i64, ConvoyRouteState>>,
     hauler_cooldowns: RwLock<HashMap<SolarSystemId, std::time::Instant>>,
     mining_last_step: RwLock<HashMap<i64, u64>>,
-    hauler_cargo: RwLock<HashMap<i64, i32>>,
 }
 
 impl Default for LivingWorldDirector {
@@ -155,18 +154,32 @@ impl LivingWorldDirector {
             routes: RwLock::new(HashMap::new()),
             hauler_cooldowns: RwLock::new(HashMap::new()),
             mining_last_step: RwLock::new(HashMap::new()),
-            hauler_cargo: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Returns the current ore units carried by the companion hauler for `convoy_id`.
-    pub fn hauler_cargo_units(&self, convoy_id: i64) -> i32 {
-        self.hauler_cargo
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&convoy_id)
-            .copied()
-            .unwrap_or(0)
+    /// Returns the current ore units persisted in `eve-db` on the companion hauler for `convoy_id`.
+    pub fn hauler_cargo_units(&self, db: &WorldRepository, convoy_id: i64) -> i32 {
+        let hauler_ball_id = convoy_id + 1_000_000;
+        db.with_snapshot(|snap| {
+            snap.items
+                .values()
+                .filter(|item| {
+                    item.location_id == hauler_ball_id
+                        && item.flag == eve_db::InventoryFlag::Cargo
+                        && item.quantity > 0
+                })
+                .map(|item| item.quantity)
+                .sum()
+        })
+    }
+
+    /// Resolves the parent `MiningOp` convoy for an NPC mining companion `hauler_ball_id`.
+    pub fn get_mining_hauler_convoy(&self, hauler_ball_id: i64) -> Option<LivingWorldConvoy> {
+        if hauler_ball_id <= 1_000_000 {
+            return None;
+        }
+        self.get_convoy(hauler_ball_id - 1_000_000)
+            .filter(|c| c.archetype == NpcArchetype::MiningOp)
     }
 
     /// Explicitly seeds demo convoys `800_000_001..=800_000_003` for tests or `--seed-demo` (`S-5`).
@@ -550,10 +563,10 @@ impl LivingWorldDirector {
             .and_then(|sys| sys.stations.iter().find(|st| st.station_id == dest_station_id))
             .map(|st| st.position)
             .unwrap_or(belt_hauler_pos + DVec3::new(100_000_000.0, 0.0, 0.0));
-        let in_transit_cargo = self.hauler_cargo_units(convoy_id);
+        let in_transit_cargo = self.hauler_cargo_units(db, convoy_id);
         let hauler_snap = handle.get_ball_snapshot(hauler_ball_id).await.ok().flatten();
         if in_transit_cargo > 0 {
-            if let Some((_, hb)) = hauler_snap {
+            if let Some((_, hb)) = hauler_snap.as_ref() {
                 if (hb.position - dest_station_pos).length() > 5_000.0 {
                     let _ = handle
                         .set_movement_mode(
@@ -562,6 +575,13 @@ impl LivingWorldDirector {
                         )
                         .await;
                 }
+            } else {
+                // Hauler was destroyed in transit; clear any uncollected cargo items from DB
+                db.with_mut_snapshot(|snap| {
+                    snap.items.retain(|_, item| {
+                        !(item.location_id == hauler_ball_id && item.flag == eve_db::InventoryFlag::Cargo)
+                    });
+                });
             }
         } else if hauler_snap.is_none() {
             let hauler_tid = hauler_type_for_system(sde, sys_id);
@@ -640,92 +660,115 @@ impl LivingWorldDirector {
         let mut hauled = false;
         let mut final_cargo = current_cargo + extraction.mined_units as i32;
         let hold_full = (final_cargo as f64) * ore_unit_vol >= ore_hold_m3 - 1e-6;
+        let (sys_region_id, owner_corp_id) = sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|sys| {
+                let corp = sys
+                    .stations
+                    .iter()
+                    .find(|st| st.station_id == dest_station_id)
+                    .or_else(|| sys.stations.first())
+                    .map(|st| st.owner_corporation_id)
+                    .unwrap_or(1_000_035);
+                (sys.region_id, corp)
+            })
+            .unwrap_or((10_000_002, 1_000_035));
 
-        // When miner ore hold is full (or hauler has in-transit cargo), transfer to hauler, warp to station, and offload
-        if in_transit_cargo > 0 || hold_full {
-            hauled = true;
-            let added_units = if in_transit_cargo > 0 { in_transit_cargo } else { final_cargo };
+        if in_transit_cargo > 0 {
+            if let Some((_, hb)) = hauler_snap {
+                let arrived = (hb.position - dest_station_pos).length() <= 5_000.0 || elapsed_tick_secs >= 15.0;
+                if arrived {
+                    hauled = true;
+                    let _ = handle.remove_ball(hauler_ball_id).await;
+                    db.with_mut_snapshot(|snap| {
+                        snap.items.retain(|_, item| {
+                            !(item.location_id == hauler_ball_id && item.flag == eve_db::InventoryFlag::Cargo)
+                        });
+                        let ore_price = snap
+                            .market_orders
+                            .values()
+                            .filter(|o| !o.is_bid && o.region_id == sys_region_id && o.type_id == ore_type_id && o.price.0 > 0)
+                            .map(|o| o.price)
+                            .min()
+                            .unwrap_or_else(|| {
+                                sde.types
+                                    .get(&ore_type_id)
+                                    .map(|t| IskCents::from_f64_isk(t.base_price.max(5.0)))
+                                    .unwrap_or_else(|| IskCents::from_isk(5))
+                            });
+                        let mut found_order = false;
+                        for order in snap.market_orders.values_mut() {
+                            if !order.is_bid
+                                && order.is_npc
+                                && order.station_id == dest_station_id
+                                && order.type_id == ore_type_id
+                            {
+                                order.vol_remaining += in_transit_cargo;
+                                order.vol_entered += in_transit_cargo;
+                                found_order = true;
+                                break;
+                            }
+                        }
+                        if !found_order {
+                            snap.next_entity_id += 1;
+                            let oid = snap.next_entity_id;
+                            snap.market_orders.insert(
+                                oid,
+                                eve_db::MarketOrderRecord {
+                                    order_id: oid,
+                                    owner_id: owner_corp_id,
+                                    station_id: dest_station_id,
+                                    region_id: sys_region_id,
+                                    type_id: ore_type_id,
+                                    is_bid: false,
+                                    price: ore_price,
+                                    vol_entered: in_transit_cargo,
+                                    vol_remaining: in_transit_cargo,
+                                    min_volume: 1,
+                                    is_npc: true,
+                                    escrow: IskCents(0),
+                                },
+                            );
+                        }
+                    });
+                    let hauler_tid = hauler_type_for_system(sde, sys_id);
+                    let (h_ball, h_combat) = sde_ball_and_combat(sde, hauler_ball_id, hauler_tid, dest_station_pos);
+                    let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
+                    let _ = handle
+                        .set_movement_mode(
+                            hauler_ball_id,
+                            eve_destiny::MovementMode::new_warp(dest_station_pos, belt_hauler_pos, 3.0),
+                        )
+                        .await;
+                }
+            }
+        } else if hold_full {
+            // Load mined ore onto hauler in eve-db and initiate warp to destination station (multi-tick transit)
+            let loaded_units = final_cargo;
+            final_cargo = 0;
+            db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let item_id = snap.next_entity_id;
+                snap.items.insert(
+                    item_id,
+                    eve_db::InventoryItemRecord {
+                        item_id,
+                        type_id: ore_type_id,
+                        owner_id: owner_corp_id,
+                        location_id: hauler_ball_id,
+                        flag: eve_db::InventoryFlag::Cargo,
+                        quantity: loaded_units,
+                        singleton: false,
+                        version: 1,
+                        ..Default::default()
+                    },
+                );
+            });
             let _ = handle
                 .set_movement_mode(
                     hauler_ball_id,
                     eve_destiny::MovementMode::new_warp(belt_hauler_pos, dest_station_pos, 3.0),
-                )
-                .await;
-            let _ = handle.remove_ball(hauler_ball_id).await;
-            let (sys_region_id, owner_corp_id) = sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|sys| {
-                    let corp = sys
-                        .stations
-                        .iter()
-                        .find(|st| st.station_id == dest_station_id)
-                        .or_else(|| sys.stations.first())
-                        .map(|st| st.owner_corporation_id)
-                        .unwrap_or(1_000_035);
-                    (sys.region_id, corp)
-                })
-                .unwrap_or((10_000_002, 1_000_035));
-            db.with_mut_snapshot(|snap| {
-                let ore_price = snap
-                    .market_orders
-                    .values()
-                    .filter(|o| !o.is_bid && o.region_id == sys_region_id && o.type_id == ore_type_id && o.price.0 > 0)
-                    .map(|o| o.price)
-                    .min()
-                    .unwrap_or_else(|| {
-                        sde.types
-                            .get(&ore_type_id)
-                            .map(|t| IskCents::from_f64_isk(t.base_price.max(5.0)))
-                            .unwrap_or_else(|| IskCents::from_isk(5))
-                    });
-                let mut found_order = false;
-                for order in snap.market_orders.values_mut() {
-                    if !order.is_bid
-                        && order.is_npc
-                        && order.station_id == dest_station_id
-                        && order.type_id == ore_type_id
-                    {
-                        order.vol_remaining += added_units;
-                        order.vol_entered += added_units;
-                        found_order = true;
-                        break;
-                    }
-                }
-                if !found_order {
-                    snap.next_entity_id += 1;
-                    let oid = snap.next_entity_id;
-                    snap.market_orders.insert(
-                        oid,
-                        eve_db::MarketOrderRecord {
-                            order_id: oid,
-                            owner_id: owner_corp_id,
-                            station_id: dest_station_id,
-                            region_id: sys_region_id,
-                            type_id: ore_type_id,
-                            is_bid: false,
-                            price: ore_price,
-                            vol_entered: added_units,
-                            vol_remaining: added_units,
-                            min_volume: 1,
-                            is_npc: true,
-                            escrow: IskCents(0),
-                        },
-                    );
-                }
-            });
-            self.hauler_cargo
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&convoy_id);
-            final_cargo = 0;
-            let hauler_tid = hauler_type_for_system(sde, sys_id);
-            let (h_ball, h_combat) = sde_ball_and_combat(sde, hauler_ball_id, hauler_tid, dest_station_pos);
-            let _ = handle.spawn_ball_with_combat(h_ball, h_combat).await;
-            let _ = handle
-                .set_movement_mode(
-                    hauler_ball_id,
-                    eve_destiny::MovementMode::new_warp(dest_station_pos, belt_hauler_pos, 3.0),
                 )
                 .await;
         }

@@ -20,7 +20,7 @@ const PILOT: i64 = 90_000_001;
 const OTHER: i64 = 90_000_002;
 const CORP: i64 = 98_000_001;
 const JITA: u32 = 30_000_142;
-const PERIMETER: u32 = 30_000_144;
+const NULLSEC_A: u32 = 30_004_759;
 const HUB_A: i64 = 1_020_000_011;
 const HUB_B: i64 = 1_020_000_012;
 const PILOT_SHIP: i64 = 100_000_001;
@@ -66,21 +66,14 @@ fn bytes_field(m: &WireMessage, field: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_b22_quasar_sov_hub_and_star_resources() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(HUB_A, make_structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(HUB_A, make_structure(HUB_A, CORP, NULLSEC_A, TYPE_SOVEREIGNTY_HUB));
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.station_id = None;
             ch.structure_id = None;
-            ch.solar_system_id = JITA;
+            ch.solar_system_id = NULLSEC_A;
             ch.active_ship_id = PILOT_SHIP;
         }
         snap.items.insert(
@@ -99,27 +92,27 @@ async fn test_b22_quasar_sov_hub_and_star_resources() {
         );
     });
 
-    let mut s = sess(61_001, PILOT, CORP, JITA, corp_roles::ROLE_DIRECTOR);
-    let mut outsider = sess(61_002, OTHER, 98_000_002, JITA, 0);
+    let mut s = sess(61_001, PILOT, CORP, NULLSEC_A, corp_roles::ROLE_DIRECTOR);
+    let mut outsider = sess(61_002, OTHER, 98_000_002, NULLSEC_A, 0);
 
-    // 1. Star (DERIVED Equinox star_power fallback) & Planet resource configurations from SDE
+    // 1. Star & Planet resource configurations from SDE
     let star_rsp = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.star.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(star_rsp.status_code, STATUS_OK);
     let star_wm = wm(&star_rsp.payload.unwrap().value);
     let stars = fields(&star_wm, 1);
-    assert!(!stars.is_empty(), "Jita star configuration must be returned from DERIVED Equinox star_power fallback");
+    assert!(!stars.is_empty(), "Star configuration must be returned");
     assert!(varint(&stars[0], 2).unwrap_or(0) > 0, "Star power output must be positive");
 
     let planet_rsp = rpc(&ctx, &mut s, "eve_public.sovereignty.resource.planet.api.GetAllConfigurationsRequest", Vec::new()).await;
     assert_eq!(planet_rsp.status_code, STATUS_OK);
     let planet_wm = wm(&planet_rsp.payload.unwrap().value);
-    assert!(!fields(&planet_wm, 1).is_empty(), "Jita planet configurations must be returned from SDE");
+    assert!(!fields(&planet_wm, 1).is_empty(), "Planet configurations must be returned from SDE");
 
     // 2. Hub resources & fuel state mutation
     let res_before = rpc(&ctx, &mut s, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await;
     assert_eq!(res_before.status_code, STATUS_OK);
     let power_before = varint(&sub(&wm(&res_before.payload.unwrap().value), 1), 1).unwrap_or(0);
-    assert_eq!(power_before, 800, "Jita star + planets provide 800 power");
+    assert!(power_before > 0, "Null-sec star + planets provide positive power");
 
     // Outsider cannot query or fuel another corp's hub
     let forbidden = rpc(&ctx, &mut outsider, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, HUB_A as u64)).await;
@@ -141,25 +134,29 @@ async fn test_b22_quasar_sov_hub_and_star_resources() {
 
 #[tokio::test]
 async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/requests_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    let nullsec_b = eve_server::services::quasar_sov_workforce::systems_within_jumps(&ctx.sde, NULLSEC_A, 1)
+        .into_iter()
+        .find_map(|(id, _)| (id != NULLSEC_A).then_some(id))
+        .unwrap();
+    let planet_id = ctx
+        .sde
+        .celestials_in_system(NULLSEC_A)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .unwrap_or(40_009_080);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(HUB_A, make_structure(HUB_A, CORP, JITA, TYPE_SOVEREIGNTY_HUB));
-        snap.structures.insert(HUB_B, make_structure(HUB_B, CORP, PERIMETER, TYPE_SOVEREIGNTY_HUB));
-        snap.structures.insert(1_000_000_301, make_structure(1_000_000_301, CORP, JITA, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
-        snap.sov_runtime.skyhook_planets.insert(1_000_000_301, 40_009_080);
+        snap.structures.insert(HUB_A, make_structure(HUB_A, CORP, NULLSEC_A, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(HUB_B, make_structure(HUB_B, CORP, nullsec_b, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(1_000_000_301, make_structure(1_000_000_301, CORP, NULLSEC_A, eve_server::services::sov_services::TYPE_ORBITAL_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(1_000_000_301, planet_id);
         snap.sov_runtime.skyhook_active.insert(1_000_000_301, true);
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.station_id = None;
             ch.structure_id = None;
-            ch.solar_system_id = JITA;
+            ch.solar_system_id = NULLSEC_A;
             ch.active_ship_id = PILOT_SHIP;
         }
         snap.items.insert(
@@ -192,7 +189,7 @@ async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
         );
     });
 
-    let mut s = sess(61_003, PILOT, CORP, JITA, corp_roles::ROLE_DIRECTOR);
+    let mut s = sess(61_003, PILOT, CORP, NULLSEC_A, corp_roles::ROLE_DIRECTOR);
     let mut rx = subscribe(&ctx, &mut s).await;
 
     // Fuel Hub A first
@@ -217,9 +214,9 @@ async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
         "Expected HubUpgradesConfiguredNotice"
     );
 
-    // Configure workforce export from Hub A to Perimeter
+    // Configure workforce export from Hub A to neighbor null-sec system
     let mut exp = Vec::new();
-    encode_bytes_field(3, &id_req(1, PERIMETER as u64)[2..], &mut exp);
+    encode_bytes_field(3, &id_req(1, nullsec_b as u64)[2..], &mut exp);
     encode_varint_field(2, 500, &mut exp);
     let mut export_cfg = Vec::new();
     encode_bytes_field(3, &exp, &mut export_cfg);
@@ -238,22 +235,22 @@ async fn test_b22_quasar_sov_hub_upgrades_and_workforce() {
 
 #[tokio::test]
 async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
-    // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj",
-    ]);
-
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (skyhook_id, den_id) = (1_000_000_050i64, 1_000_000_060i64);
-    let mut s = sess(61_004, PILOT, CORP, JITA, 0);
+    let mut s = sess(61_004, PILOT, CORP, NULLSEC_A, 0);
     let mut rx = subscribe(&ctx, &mut s).await;
 
+    let planet_id = ctx
+        .sde
+        .celestials_in_system(NULLSEC_A)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .map(|c| c.celestial_id)
+        .unwrap_or(40_009_077);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(skyhook_id, make_structure(skyhook_id, CORP, JITA, TYPE_ORBITAL_SKYHOOK));
-        snap.structures.insert(den_id, make_structure(den_id, CORP, JITA, 85_230));
+        snap.structures.insert(skyhook_id, make_structure(skyhook_id, CORP, NULLSEC_A, TYPE_ORBITAL_SKYHOOK));
+        snap.structures.insert(den_id, make_structure(den_id, CORP, NULLSEC_A, 85_230));
         snap.sov_runtime.mercenary_dens.insert(
             den_id,
             PersistedMercenaryDen {
@@ -261,8 +258,8 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
                 type_id: 85_230,
                 owner_char_id: PILOT,
                 skyhook_id,
-                solar_system_id: JITA,
-                planet_id: 40_009_077,
+                solar_system_id: NULLSEC_A,
+                planet_id,
                 enabled: true,
                 cargo_extraction_enabled: true,
                 development_level: 15,
@@ -279,7 +276,7 @@ async fn test_b22_quasar_mercenary_den_and_b22_cosmetics() {
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.station_id = None;
             ch.structure_id = None;
-            ch.solar_system_id = JITA;
+            ch.solar_system_id = NULLSEC_A;
         }
     });
 

@@ -542,7 +542,10 @@ async fn test_npc_mining_op_derived_hauler_replenishment() {
     let step = director.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.unwrap();
     assert!(step.mined_units > 0, "NPC mining op must deplete asteroid quantity over ticks");
     assert!(step.remaining_asteroid_units < 60_000);
-    assert!(step.hauled_to_station);
+    assert!(!step.hauled_to_station);
+    ctx.advance_secs(60);
+    let deliver_step = director.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.unwrap();
+    assert!(deliver_step.hauled_to_station);
     let vol_after: i32 = ctx.db.with_snapshot(|snap| {
         snap.market_orders
             .values()

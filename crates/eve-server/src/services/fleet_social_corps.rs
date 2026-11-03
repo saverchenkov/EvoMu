@@ -523,8 +523,10 @@ pub(super) fn handle_corps(
             let Some(corp_id) = session.corporation_id else {
                 return Some(Err(BridgeRpcError { code: "NoCorporation".into(), message: "Character has no active corporation".into() }));
             };
-            if args.len() >= 14 || args.first().and_then(|a| a.as_str()).is_some() {
+            let dict_payload = args.first().and_then(|a| match a { PyRep::Dict(d) => Some(d.as_slice()), _ => None });
+            if args.len() >= 14 || args.first().and_then(|a| a.as_str()).is_some() || dict_payload.is_some() {
                 let default_h = ["1st Division", "2nd Division", "3rd Division", "4th Division", "5th Division", "6th Division", "7th Division"];
+                let dict_str = |k: &str| dict_payload.and_then(|entries| entries.iter().find(|(ek, _)| ek.as_str() == Some(k)).and_then(|(_, ev)| ev.as_str()));
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                         return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
@@ -538,21 +540,23 @@ pub(super) fn handle_corps(
                     let h_divs = snap.corp_hangar_divisions.entry(corp_id).or_default();
                     for i in 0..7usize {
                         let d_id = (i + 1) as u8;
-                        if let Some(h_name) = args.get(i).and_then(|a| a.as_str()) {
+                        let h_key = format!("division{d_id}");
+                        if let Some(h_name) = args.get(i).and_then(|a| a.as_str()).or_else(|| dict_str(&h_key)) {
                             let old_h = h_divs.get(&d_id).cloned().unwrap_or_else(|| default_h[i].to_string());
                             if old_h != h_name {
-                                diff.push((PyRep::String(format!("division{d_id}")), PyRep::Tuple(vec![PyRep::String(old_h), PyRep::String(h_name.to_string())])));
+                                diff.push((PyRep::String(h_key), PyRep::Tuple(vec![PyRep::String(old_h), PyRep::String(h_name.to_string())])));
                             }
                             h_divs.insert(d_id, h_name.to_string());
                         }
                     }
                     for i in 0..7usize {
                         let d_id = (i + 1) as u8;
-                        if let Some(w_name) = args.get(7 + i).and_then(|a| a.as_str()) {
+                        let w_key = format!("walletDivision{d_id}");
+                        if let Some(w_name) = args.get(7 + i).and_then(|a| a.as_str()).or_else(|| dict_str(&w_key)) {
                             if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == d_id) {
                                 let old_w = std::mem::replace(&mut div.name, w_name.to_string());
                                 if old_w != w_name {
-                                    diff.push((PyRep::String(format!("walletDivision{d_id}")), PyRep::Tuple(vec![PyRep::String(old_w), PyRep::String(w_name.to_string())])));
+                                    diff.push((PyRep::String(w_key), PyRep::Tuple(vec![PyRep::String(old_w), PyRep::String(w_name.to_string())])));
                                 }
                             }
                         }
@@ -561,7 +565,7 @@ pub(super) fn handle_corps(
                 });
                 return match res {
                     Ok(diff) => {
-                        let first_h = args.first().and_then(|a| a.as_str()).unwrap_or("1st Division").to_string();
+                        let first_h = args.first().and_then(|a| a.as_str()).or_else(|| dict_str("division1")).unwrap_or("1st Division").to_string();
                         if !diff.is_empty() {
                             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Dict(diff)]);
                         }

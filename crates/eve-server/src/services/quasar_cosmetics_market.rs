@@ -84,30 +84,24 @@ impl CosmeticsMarketState {
     }
 
     fn sync_from_blob(&self) {
-        let (comp_empty, skin_empty) = {
-            let d = self.data.read().unwrap_or_else(|e| e.into_inner());
-            (d.component_listings.is_empty(), d.skin_listings.is_empty())
-        };
-        if !comp_empty && !skin_empty {
-            return;
-        }
         let persisted: Option<CosmeticsMarketData> = self.db.with_snapshot(|s| {
             s.quasar_state_blobs
                 .get(BLOB_KEY)
                 .and_then(|j| serde_json::from_str(j).ok())
         });
         if let Some(p) = persisted {
-            if !p.component_listings.is_empty() || !p.skin_listings.is_empty() {
-                let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
-                for (k, v) in p.component_listings {
-                    data.component_listings.entry(k).or_insert(v);
-                }
-                for (k, v) in p.skin_listings {
-                    data.skin_listings.entry(k).or_insert(v);
-                }
-                if data.next_seq < p.next_seq {
-                    data.next_seq = p.next_seq;
-                }
+            let mut data = self.data.write().unwrap_or_else(|e| e.into_inner());
+            if data.component_listings.is_empty() && !p.component_listings.is_empty() {
+                data.component_listings = p.component_listings;
+            }
+            if data.skin_listings.is_empty() && !p.skin_listings.is_empty() {
+                data.skin_listings = p.skin_listings;
+            }
+            if data.transactions.is_empty() && !p.transactions.is_empty() {
+                data.transactions = p.transactions;
+            }
+            if data.next_seq < p.next_seq {
+                data.next_seq = p.next_seq;
             }
         }
     }
@@ -1146,7 +1140,7 @@ fn skin_initiate_purchase(
     });
     if buyer_lp < buyer_lp_fee {
         rollback_listing_qty(st, &listing, quantity);
-        record_tx(st, tx_uuid, now, false, Some(cid), Some(listing.seller_id), CosmeticTransactionDetails::PurchasingSkin);
+        record_tx(st, tx_uuid, now, false, Some(cid), None, CosmeticTransactionDetails::PurchasingSkin);
         queue_transaction_notice(cid, &tx_uuid, false, now);
         return Err((STATUS_PRECONDITION_FAILED, "Insufficient EverMarks for buyer fee".to_string()));
     }
@@ -1293,7 +1287,15 @@ fn skin_initiate_purchase(
     } else {
         rollback_listing_qty(st, &listing, quantity);
     }
-    record_tx(st, tx_uuid, now, settled, Some(cid), Some(listing.seller_id), CosmeticTransactionDetails::PurchasingSkin);
+    record_tx(
+        st,
+        tx_uuid,
+        now,
+        settled,
+        Some(cid),
+        settled.then_some(listing.seller_id),
+        CosmeticTransactionDetails::PurchasingSkin,
+    );
     queue_transaction_notice(cid, &tx_uuid, settled, now);
     let mut out = Vec::new();
     put_uuid(1, &tx_uuid, &mut out);

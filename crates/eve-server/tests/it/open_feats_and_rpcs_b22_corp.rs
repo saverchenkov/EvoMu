@@ -327,10 +327,9 @@ async fn test_b22_corp_governance_shares_dividends_ceo_divisions_autokick() {
 
 #[tokio::test]
 async fn test_b22_corp_projects_and_npc_corp_rules() {
-    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-contribution-methods, feat:corporation.corp-project-reward-pool
+    // parity: feat:corporation.corp-project-close-expiry, feat:corporation.corp-project-reward-pool
     eve_testkit::attest(&[
         "feat:corporation.corp-project-close-expiry",
-        "feat:corporation.corp-project-contribution-methods",
         "feat:corporation.corp-project-reward-pool",
     ]);
 

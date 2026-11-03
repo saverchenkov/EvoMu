@@ -310,8 +310,14 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
     let expected_mined = if ctx.sde.types.contains_key(&32880) { 1_600 } else { 800 };
     assert_eq!(step_result.mined_units, expected_mined);
     assert!(step_result.remaining_asteroid_units > 0);
-    assert!(step_result.hauled_to_station);
+    assert!(!step_result.hauled_to_station);
     assert_eq!(step_result.convoy_cargo_units, 0);
+    assert!(director.hauler_cargo_units(&ctx.db, convoy_id) >= 50_000);
+
+    ctx.advance_secs(60);
+    let deliver_result = director.step_npc_mining_op(convoy_id, &ctx.systems, &ctx.db, &ctx.sde).await.expect("deliver_result");
+    assert!(deliver_result.hauled_to_station);
+    assert_eq!(director.hauler_cargo_units(&ctx.db, convoy_id), 0);
 
     let market_order = ctx.db.with_snapshot(|snap| {
         snap.market_orders.values().find(|o| !o.is_bid && o.station_id == dest_station_id && o.type_id == ore_type_id).cloned()
