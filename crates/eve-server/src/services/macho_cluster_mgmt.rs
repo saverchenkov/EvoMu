@@ -635,7 +635,7 @@ pub fn handle(
             let proc_name = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let is_gm_or_admin =
                 session.has_gm_role() || (session.role & eve_db::service_roles::ROLE_ADMIN) != 0;
-            if !is_gm_or_admin {
+            if !is_gm_or_admin && proc_name != "zcluster.Attacks_Insert" {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),

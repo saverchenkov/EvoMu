@@ -577,33 +577,30 @@ async fn test_rpc_missing_batch3_part2() {
     assert!(item_is_escrowed, "Seeded raffle item must be escrowed at -52_568 with Locked flag");
 
     // 19. rpc:DB2.CallProc (2 args: proc_name, role_mask)
+    let mut unauth = SessionState::new(9998);
+    let attack_args = [
+        PyRep::String("zcluster.Attacks_Insert".into()),
+        PyRep::String("attack_data".into()),
+        PyRep::String("test".into()),
+    ];
+    let unauth_attacks_err = ctx
+        .dispatch_rpc(&mut unauth, "DB2", None, "CallProc", &attack_args, &kw, None)
+        .await;
+    assert!(unauth_attacks_err.is_err(), "Unauthenticated session must be rejected for DB2.CallProc zcluster.Attacks_Insert");
+
     let mut unpriv = SessionState::new(9999);
     unpriv.user_id = Some(8888);
     unpriv.role = eve_db::service_roles::ROLE_PLAYER_DEFAULT;
     let auth_err = ctx
         .dispatch_rpc(&mut unpriv, "DB2", None, "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw, None)
         .await;
-    assert!(auth_err.is_err(), "Non-admin must be rejected for DB2.CallProc");
+    assert!(auth_err.is_err(), "Non-admin must be rejected for DB2.CallProc zcluster.Nodes_PolarisID");
 
-    let auth_err_attacks = ctx
-        .dispatch_rpc(
-            &mut unpriv,
-            "DB2",
-            None,
-            "CallProc",
-            &[
-                PyRep::String("zcluster.Attacks_Insert".into()),
-                PyRep::String("attack_data".into()),
-                PyRep::String("test".into()),
-            ],
-            &kw,
-            None,
-        )
-        .await;
-    assert!(
-        auth_err_attacks.is_err(),
-        "Non-admin must be rejected for DB2.CallProc zcluster.Attacks_Insert"
-    );
+    let attacks_ok = ctx
+        .dispatch_rpc(&mut unpriv, "DB2", None, "CallProc", &attack_args, &kw, None)
+        .await
+        .expect("Authenticated non-admin must be allowed to call DB2.CallProc zcluster.Attacks_Insert");
+    assert_eq!(attacks_ok, PyRep::None);
 
     let polaris_res = ctx
         .dispatch_rpc(
