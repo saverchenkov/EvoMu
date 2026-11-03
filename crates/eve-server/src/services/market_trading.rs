@@ -1304,6 +1304,8 @@ pub fn handle(
                         ctx.notify(NotificationTarget::Character(seller_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, matched_oid, "Change", false));
                     }
                     for (iid, tid, flag_id, loc_id) in delivered_items {
+                        // "OnMarketItemReceived" is emitted by the server; the client-local
+                        // "OnClientEvent_MarketItemReceived" is scattered internally by MarketQuote.
                         ctx.notify(NotificationTarget::Character(char_id), "OnMarketItemReceived", "charid", vec![PyRep::Integer(iid), PyRep::Integer(tid as i64), PyRep::Integer(flag_id), PyRep::Integer(loc_id)]);
                     }
                     ctx.notify(NotificationTarget::Character(char_id), "OnOwnOrdersChanged", "charid", crate::services::market_price_history::build_own_order_changed_payload(ctx, order_id, if filled_immediately { "Change" } else { "Add" }, use_corp));
