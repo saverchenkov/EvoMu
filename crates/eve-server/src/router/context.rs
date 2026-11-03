@@ -721,6 +721,7 @@ impl ServerContext {
             let dt_sec = self.systems.downtime_utc_secs_of_day();
             if secs >= 86_400 || (prev_unix.saturating_sub(dt_sec) / 86_400) < (now_after.saturating_sub(dt_sec) / 86_400) {
                 crate::services::fleet_social::execute_pending_auto_kicks_on_downtime(self);
+                crate::services::fw_services::process_pending_fw_captures_on_downtime(self);
             }
             crate::services::implant_plugging::purge_expired_boosters_all(
                 self,

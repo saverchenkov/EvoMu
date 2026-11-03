@@ -352,6 +352,8 @@ async fn test_sov_hub_anchor_claim_and_loss_notifications_parity() {
     ctx.advance_secs(300 + ENTOSIS_HUB_BASE_CAPTURE_SECS as u64 + 10);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "HullReinforced");
+    ctx.advance_secs(48 * 3_600 + 1);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     let _ = drain_notif_events(&ctx, PILOT);
     for _ in 0..9 {

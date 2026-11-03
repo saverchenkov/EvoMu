@@ -1135,8 +1135,10 @@ pub fn maybe_complete_scheduled_downtime_restart(ctx: &ServerContext, now_unix: 
 pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> {
     let disconnected = initiate_cluster_downtime_shutdown(ctx) as i64;
     let mut report = execute_daily_maintenance_jobs(ctx);
+    let fw_captured = crate::services::fw_services::process_pending_fw_captures_on_downtime(ctx) as i64;
     let restart_epoch = complete_cluster_downtime_restart(ctx) as i64;
     report.insert("disconnectedSessions".into(), disconnected);
+    report.insert("fwSystemsCaptured".into(), fw_captured);
     report.insert("clusterRestartEpoch".into(), restart_epoch);
     report
 }

@@ -109,9 +109,21 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),
             };
+            let db_key = crate::services::tactical_modules::db_ptr_key(&ctx.db);
+            let removed_entosis = {
+                let mut tst = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
+                if tst.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|l| l.module_id == module_id) {
+                    if let Some(link) = tst.entosis_active_links.remove(&(db_key, ship_id)) {
+                        tst.entosis_target_cycles.remove(&(db_key, link.target_id, ship_id));
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
             let deact_res = fit.deactivate_module(module_id, &ctx.sde);
             if let Err(e) = deact_res {
-                if removed_cycle_delay.is_none() && !is_mining {
+                if removed_cycle_delay.is_none() && !is_mining && !removed_entosis {
                     return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
                 }
             }

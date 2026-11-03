@@ -590,3 +590,4 @@ mod parity_quasar_batch3_closure;
 mod parity_pve_nav_batch_closure;
 mod parity_npc_mining_batch_closure;
 mod parity_npc_mining_batch_closure_part2;
+mod parity_fw_sov_batch_closure;

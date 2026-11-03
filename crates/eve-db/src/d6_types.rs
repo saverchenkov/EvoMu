@@ -292,6 +292,9 @@ pub struct PersistedFwState {
     pub ihub_vulnerable_since_unix: HashMap<u32, u64>,
     #[serde(default)]
     pub last_ihub_attacked_unix: HashMap<u32, u64>,
+    /// Pending FW system captures awaiting daily downtime: `solar_system_id -> new_occupier_faction_id`.
+    #[serde(default)]
+    pub pending_downtime_captures: HashMap<u32, i64>,
     #[serde(default)]
     pub corp_war_factions: HashMap<i64, i64>,
     /// Pilots inside a FW complex pocket after `keeper.ActivateAccelerationGate`: `complex_id -> Vec<(char_id, ship_id)>`.
@@ -499,6 +502,12 @@ pub struct PersistedSovState {
     /// Active Sovereignty Hub Threat Detection anomaly NPC entity IDs (`ball_id`) persisted across restarts.
     #[serde(default)]
     pub sov_upgrade_combat_npcs: BTreeSet<i64>,
+    /// Last unix timestamp when Sovereignty Development Indices (Military/Industrial) were decayed for `solar_system_id`.
+    #[serde(default)]
+    pub sov_dev_decay_last_unix: HashMap<u32, u64>,
+    /// Last unix timestamp when unattended Command Nodes were regenerated for `hub_id`.
+    #[serde(default)]
+    pub command_node_regen_last_unix: HashMap<i64, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

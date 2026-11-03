@@ -346,6 +346,49 @@ pub fn capture_warzone_system(
     Ok((res.0, res.1, res.2))
 }
 
+/// Executes queued FW system captures whose Infrastructure Hubs were destroyed before daily downtime.
+pub fn process_pending_fw_captures_on_downtime(ctx: &ServerContext) -> usize {
+    let pending: Vec<(u32, i64)> = ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_runtime.pending_downtime_captures.drain().collect()
+    });
+    let mut captured = 0usize;
+    for (sys_id, new_fac) in pending {
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(o) = snap.fw_system_occupations.get_mut(&sys_id) {
+                o.victory_points = o.victory_points_threshold;
+                snap.fw_runtime
+                    .system_victory_points
+                    .insert(sys_id, o.victory_points_threshold);
+            }
+            if let Some(ss) = snap.system_states.get_mut(&sys_id) {
+                ss.fw_contested_pct = 100.0;
+            }
+        });
+        if capture_warzone_system(ctx, sys_id, new_fac).is_ok() {
+            captured += 1;
+            let new_corp = crate::services::fw_gameplay::militia_lp_corp_id(&ctx.sde, new_fac);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.fw_runtime.ihub_vulnerable.insert(sys_id, false);
+                snap.fw_runtime.ihub_tiers.insert(sys_id, 0);
+                snap.fw_runtime.ihub_lp_donations.insert(sys_id, 0);
+                snap.insurgency_runtime
+                    .surrender_ihub_vulnerable_unix
+                    .remove(&sys_id);
+                for st in snap.structures.values_mut() {
+                    if st.solar_system_id == sys_id && st.type_id == crate::services::fw_gameplay::TYPE_FW_IHUB {
+                        st.owner_corp_id = new_corp;
+                        st.shield_hp = 5_000.0;
+                        st.armor_hp = 5_000.0;
+                        st.hull_hp = 8_000.0;
+                        st.state = "ShieldVulnerable".into();
+                    }
+                }
+            });
+        }
+    }
+    captured
+}
+
 /// Transitions a Faction Warfare bunker's vulnerability state and emits `OnFacWarBunkerVulnerable` or `OnFacWarBunkerNonVulnerable`.
 pub fn set_facwar_bunker_vulnerable(ctx: &ServerContext, sys_id: u32, attacker_id: i64, vulnerable: bool) {
     let now = ctx.now_unix();

@@ -22,7 +22,7 @@ pub use fw_gameplay_rpc::*;
 use crate::router::ServerContext;
 use crate::services::fw_services::{
     add_victory_points, calculate_capture_speed_multiplier,
-    calculate_fw_lp_reward, capture_warzone_system, complete_fw_dungeon_and_objective,
+    calculate_fw_lp_reward, complete_fw_dungeon_and_objective, set_facwar_bunker_vulnerable,
     compute_system_frontline_status, fw_opposing_faction,
     spawn_battlefield_site, update_system_advantage, STATUS_COMMAND, STATUS_FRONTLINE,
     STATUS_REARGUARD,
@@ -786,29 +786,22 @@ pub async fn apply_fw_or_insurgency_structure_damage(
         if st.hull_hp > 0.0 {
             return Ok((sys_id, None, st.shield_hp, st.armor_hp, st.hull_hp));
         }
-        // Reset I-Hub under the new occupying militia corporation!
-        st.owner_corp_id = militia_lp_corp_id(&ctx.sde, att_fac);
-        st.shield_hp = 5_000.0;
-        st.armor_hp = 5_000.0;
-        st.hull_hp = 8_000.0;
-        st.state = "ShieldVulnerable".into();
+        // Queue system capture for the next daily downtime (`feat:fw.system-capture`).
+        st.state = "Destroyed".into();
+        st.shield_hp = 0.0;
+        st.armor_hp = 0.0;
+        st.hull_hp = 0.0;
+        snap.fw_runtime.pending_downtime_captures.insert(sys_id, att_fac);
+        snap.fw_runtime.ihub_vulnerable.insert(sys_id, false);
         Ok((sys_id, Some(att_fac), 0.0, 0.0, 0.0))
     })?;
 
     if let Some(new_fac) = flipped_to {
-        let _ = capture_warzone_system(ctx, sys_id, new_fac)?;
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.fw_runtime.ihub_vulnerable.insert(sys_id, false);
-            snap.fw_runtime.ihub_tiers.insert(sys_id, 0);
-            snap.fw_runtime.ihub_lp_donations.insert(sys_id, 0);
-            snap.insurgency_runtime
-                .surrender_ihub_vulnerable_unix
-                .remove(&sys_id);
-        });
+        set_facwar_bunker_vulnerable(ctx, sys_id, new_fac, false);
         return Ok(PyRep::keyval([
             ("structureID", PyRep::Integer(structure_id)),
-            ("state", PyRep::String("Captured".into())),
-            ("newOccupierFactionID", PyRep::Integer(new_fac)),
+            ("state", PyRep::String("Destroyed".into())),
+            ("pendingOccupierFactionID", PyRep::Integer(new_fac)),
             ("shieldHP", PyRep::Real(0.0)),
             ("armorHP", PyRep::Real(0.0)),
             ("hullHP", PyRep::Real(0.0)),

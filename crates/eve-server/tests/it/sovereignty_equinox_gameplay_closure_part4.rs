@@ -424,6 +424,8 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "HullReinforced");
+    ctx.advance_secs(48 * 3_600 + 1);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     let nodes: Vec<(i64, u32, [f64; 3])> = ctx.db.with_snapshot(|s| {
         let mut v: Vec<_> = s.sov_runtime.command_nodes.iter().map(|(&nid, &(_, nsys, _))| (nid, nsys, s.item_positions[&nid])).collect();
         v.sort_by_key(|x| x.0);
@@ -493,6 +495,8 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
     ctx.advance_secs(hub_capture_wait);
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.structures[&hub_id].state.clone()), "HullReinforced");
+    ctx.advance_secs(48 * 3_600 + 1);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(ctx.db.with_snapshot(|s| s.sov_runtime.command_nodes.len()), 4);
 
     // Multi-attacker unification: Attacker 1 captures 5 nodes (-0.35, prog drops 0.60 -> 0.25).
