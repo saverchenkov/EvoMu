@@ -1090,7 +1090,6 @@ fn handle_milestone_claim_rewards(
         char_id,
         milestone_id,
         reward_isk as f64,
-        true,
     );
 
     Ok(PyRep::None)
