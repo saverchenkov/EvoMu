@@ -319,10 +319,6 @@ async fn test_skinr_sequencing_job_natural_completion_notice() {
     // Advance clock by 30 days so planned_duration_secs elapses naturally
     ctx.clock.read().unwrap().advance_secs(30 * 86_400);
 
-    let plex_before_early = ctx
-        .db
-        .with_snapshot(|snap| snap.characters.get(&PILOT).map(|c| c.plex_balance))
-        .unwrap_or(0);
 
     // Without calling GetAllActiveRequest first:
     // 1. CompleteEarlyRequest on an already-elapsed job must reject and deduct 0 PLEX.
