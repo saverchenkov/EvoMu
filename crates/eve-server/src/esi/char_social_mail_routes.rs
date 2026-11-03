@@ -300,14 +300,22 @@ pub fn dispatch_char_social_mail_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                let labels = ctx
-                    .esi_state
+                let mut labels = snap
                     .char_contact_labels
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
                     .get(&char_id)
                     .cloned()
                     .unwrap_or_default();
+                if labels.is_empty() {
+                    labels = ctx
+                        .esi_state
+                        .char_contact_labels
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&char_id)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                labels.sort_by_key(|(lid, _)| *lid);
                 let out: Vec<Value> = labels
                     .into_iter()
                     .map(|(lid, lname)| json!({ "label_id": lid, "label_name": lname }))
@@ -328,29 +336,50 @@ pub fn dispatch_char_social_mail_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
-                let list = ctx
-                    .esi_state
-                    .corp_contacts
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&corp_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let out: Vec<Value> = list
-                    .into_iter()
-                    .map(|c| {
-                        let mut obj = json!({
-                            "contact_id": c.contact_id,
-                            "contact_type": c.contact_type,
-                            "standing": c.standing,
-                            "is_watched": c.is_watched,
-                        });
-                        if !c.label_ids.is_empty() {
-                            obj["label_ids"] = json!(c.label_ids);
-                        }
-                        obj
-                    })
-                    .collect();
+                let out: Vec<Value> = if let Some(db_list) =
+                    snap.corp_contacts.get(&corp_id).filter(|l| !l.is_empty())
+                {
+                    let mut sorted = db_list.clone();
+                    sorted.sort_by_key(|c| c.contact_id);
+                    sorted
+                        .into_iter()
+                        .map(|c| {
+                            let mut obj = json!({
+                                "contact_id": c.contact_id,
+                                "contact_type": c.contact_type,
+                                "standing": c.standing,
+                                "is_watched": c.is_watched,
+                            });
+                            if !c.label_ids.is_empty() {
+                                obj["label_ids"] = json!(c.label_ids);
+                            }
+                            obj
+                        })
+                        .collect()
+                } else {
+                    let list = ctx
+                        .esi_state
+                        .corp_contacts
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&corp_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    list.into_iter()
+                        .map(|c| {
+                            let mut obj = json!({
+                                "contact_id": c.contact_id,
+                                "contact_type": c.contact_type,
+                                "standing": c.standing,
+                                "is_watched": c.is_watched,
+                            });
+                            if !c.label_ids.is_empty() {
+                                obj["label_ids"] = json!(c.label_ids);
+                            }
+                            obj
+                        })
+                        .collect()
+                };
                 RouteExecutionResult::ok_json(json!(out), 300)
             }))
         }
@@ -367,14 +396,22 @@ pub fn dispatch_char_social_mail_route(
                         format!("Corporation {corp_id} not found"),
                     );
                 }
-                let labels = ctx
-                    .esi_state
+                let mut labels: Vec<(i64, String)> = snap
                     .corp_contact_labels
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
                     .get(&corp_id)
-                    .cloned()
+                    .map(|l| l.iter().map(|(id, name, _)| (*id, name.clone())).collect())
                     .unwrap_or_default();
+                if labels.is_empty() {
+                    labels = ctx
+                        .esi_state
+                        .corp_contact_labels
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&corp_id)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                labels.sort_by_key(|(lid, _)| *lid);
                 let out: Vec<Value> = labels
                     .into_iter()
                     .map(|(lid, lname)| json!({ "label_id": lid, "label_name": lname }))
@@ -395,28 +432,48 @@ pub fn dispatch_char_social_mail_route(
                         format!("Alliance {alliance_id} not found"),
                     );
                 }
-                let list = ctx
-                    .esi_state
-                    .alliance_contacts
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&alliance_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let out: Vec<Value> = list
-                    .into_iter()
-                    .map(|c| {
-                        let mut obj = json!({
-                            "contact_id": c.contact_id,
-                            "contact_type": c.contact_type,
-                            "standing": c.standing,
-                        });
-                        if !c.label_ids.is_empty() {
-                            obj["label_ids"] = json!(c.label_ids);
-                        }
-                        obj
-                    })
-                    .collect();
+                let out: Vec<Value> = if let Some(db_list) =
+                    snap.alliance_contacts.get(&alliance_id).filter(|l| !l.is_empty())
+                {
+                    let mut sorted = db_list.clone();
+                    sorted.sort_by_key(|c| c.contact_id);
+                    sorted
+                        .into_iter()
+                        .map(|c| {
+                            let mut obj = json!({
+                                "contact_id": c.contact_id,
+                                "contact_type": c.contact_type,
+                                "standing": c.standing,
+                            });
+                            if !c.label_ids.is_empty() {
+                                obj["label_ids"] = json!(c.label_ids);
+                            }
+                            obj
+                        })
+                        .collect()
+                } else {
+                    let list = ctx
+                        .esi_state
+                        .alliance_contacts
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&alliance_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    list.into_iter()
+                        .map(|c| {
+                            let mut obj = json!({
+                                "contact_id": c.contact_id,
+                                "contact_type": c.contact_type,
+                                "standing": c.standing,
+                            });
+                            if !c.label_ids.is_empty() {
+                                obj["label_ids"] = json!(c.label_ids);
+                            }
+                            obj
+                        })
+                        .collect()
+                };
                 RouteExecutionResult::ok_json(json!(out), 300)
             }))
         }
@@ -433,14 +490,22 @@ pub fn dispatch_char_social_mail_route(
                         format!("Alliance {alliance_id} not found"),
                     );
                 }
-                let labels = ctx
-                    .esi_state
+                let mut labels = snap
                     .alliance_contact_labels
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
                     .get(&alliance_id)
                     .cloned()
                     .unwrap_or_default();
+                if labels.is_empty() {
+                    labels = ctx
+                        .esi_state
+                        .alliance_contact_labels
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&alliance_id)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                labels.sort_by_key(|(lid, _)| *lid);
                 let out: Vec<Value> = labels
                     .into_iter()
                     .map(|(lid, lname)| json!({ "label_id": lid, "label_name": lname }))
@@ -807,15 +872,24 @@ pub fn dispatch_char_social_mail_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                let lists = ctx
+                let mut by_id: std::collections::BTreeMap<i64, String> = snap
+                    .mailing_lists
+                    .values()
+                    .filter(|ml| ml.members.contains_key(&char_id) || ml.owner_id == char_id)
+                    .map(|ml| (ml.list_id, ml.name.clone()))
+                    .collect();
+                if let Some(esi_lists) = ctx
                     .esi_state
                     .mail_lists
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&char_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let out: Vec<Value> = lists
+                {
+                    for (id, name) in esi_lists {
+                        by_id.entry(*id).or_insert_with(|| name.clone());
+                    }
+                }
+                let out: Vec<Value> = by_id
                     .into_iter()
                     .map(|(id, name)| {
                         json!({

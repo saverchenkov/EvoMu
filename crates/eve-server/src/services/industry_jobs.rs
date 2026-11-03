@@ -382,7 +382,7 @@ pub fn handle_industry_jobs(
                                 ),
                             });
                         }
-                    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883 | 902)
+                    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883)
                         && bp.product_type_id != 28606
                     {
                         if ctx.sde.solar_systems.get(&fac_sys_id).map(|s| s.region_id) == Some(10_000_070) {
@@ -1214,9 +1214,7 @@ pub fn handle_industry_jobs(
                                 }
                             }
                         }
-                        if remove_bpc {
-                            snap.items.remove(&job.blueprint_item_id);
-                        }
+                        if remove_bpc { snap.items.remove(&job.blueprint_item_id); }
                         let inv_prob = if meta.inv_prob > 0.0 {
                             meta.inv_prob
                         } else {
@@ -1230,9 +1228,7 @@ pub fn handle_industry_jobs(
                         };
                         let server_roll = ctx.next_invention_roll(job.job_id as u64, char_id as u64, now_unix);
                         if server_roll >= inv_prob {
-                            if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
-                                j_mut.status = "Failed".into();
-                            }
+                            if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Failed".into(); }
                             return Ok(Ok((0, 0, job)));
                         }
                         if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); }
@@ -1246,29 +1242,12 @@ pub fn handle_industry_jobs(
                         dyn_attrs.insert(ATTR_BLUEPRINT_ME, out_me);
                         dyn_attrs.insert(ATTR_BLUEPRINT_TE, out_te);
                         let t2_bpc_type_id: TypeId = if job.product_type_id > 0 { job.product_type_id } else { 11372 };
-                        let out_flag = if meta.use_corp && out_owner_id != char_id {
-                            restore_blueprint_flag(out_owner_id, &meta)
-                        } else {
-                            InventoryFlag::Hangar
-                        };
-                        snap.items.insert(
-                            bpc_item_id,
-                            InventoryItemRecord {
-                                item_id: bpc_item_id,
-                                type_id: t2_bpc_type_id,
-                                owner_id: out_owner_id,
-                                location_id: job.facility_id,
-                                flag: out_flag,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                dynamic_attributes: dyn_attrs,
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: true,
-                                blueprint_runs_remaining: Some(out_runs),
-                            },
-                        );
+                        let out_flag = if meta.use_corp && out_owner_id != char_id { restore_blueprint_flag(out_owner_id, &meta) } else { InventoryFlag::Hangar };
+                        snap.items.insert(bpc_item_id, InventoryItemRecord {
+                            item_id: bpc_item_id, type_id: t2_bpc_type_id, owner_id: out_owner_id, location_id: job.facility_id,
+                            flag: out_flag, quantity: 1, singleton: true, version: 1, dynamic_attributes: dyn_attrs,
+                            source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: true, blueprint_runs_remaining: Some(out_runs),
+                        });
                         return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
                     }
 

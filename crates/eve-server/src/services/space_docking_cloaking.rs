@@ -109,15 +109,17 @@ pub fn derive_wormhole_buckets_raw(
         "<1h"
     } else if remaining_seconds < 4 * 3_600 {
         "<4h"
-    } else {
+    } else if remaining_seconds <= 24 * 3_600 {
         "<1 day"
+    } else {
+        ">1 day"
     };
 
     // Show-info lifetime strings for the 3 remaining-lifetime bands (>24h, 4h-24h, <4h).
     let lifetime_description = if remaining_seconds > 24 * 3_600 && !collapsed {
-        "This wormhole is beginning to decay, and probably won't last another day"
+        "This wormhole has not yet begun to decay"
     } else if remaining_seconds >= 4 * 3_600 && !collapsed {
-        "This wormhole is not yet beginning to decay"
+        "This wormhole is beginning to decay, and probably won't last another day"
     } else {
         "This wormhole is reaching the end of its natural lifetime"
     };

@@ -558,6 +558,15 @@ pub async fn handle_pve_hacking(
 
                 let (kind_name, rem_coh, eff_str, core_destroyed) =
                     resolve_hacking_turn_combat(&mut game, tile_idx);
+                if !core_destroyed && game.virus_coherence > 0 {
+                    if let Some(rem) = reg.self_repair_turns.get_mut(&(char_id, container_id)) {
+                        if *rem > 0 {
+                            let heal = 5 + ((tile_idx as i32) % 6);
+                            game.virus_coherence += heal;
+                            *rem -= 1;
+                        }
+                    }
+                }
 
                 let mut spewed = Vec::new();
                 let mut puzzle_solved = false;
@@ -874,7 +883,7 @@ pub async fn handle_pve_hacking(
                 game.utilities[slot_idx] = None;
                 match util {
                     HackingUtilityKind::SelfRepair => {
-                        game.virus_coherence = (game.virus_coherence + 30).min(game.max_virus_coherence);
+                        reg.self_repair_turns.insert((char_id, container_id), 3);
                     }
                     HackingUtilityKind::KernelRot => {
                         if let Some(tid) = target_tile_u32 {
@@ -998,7 +1007,7 @@ pub async fn handle_pve_hacking(
                 game.utilities[slot_idx] = None;
                 match util {
                     HackingUtilityKind::SelfRepair => {
-                        game.virus_coherence = (game.virus_coherence + 30).min(game.max_virus_coherence);
+                        reg.self_repair_turns.insert((char_id, container_id), 3);
                     }
                     HackingUtilityKind::KernelRot => {
                         if let Some(t) = game.tiles.get_mut(target_tile_idx) {

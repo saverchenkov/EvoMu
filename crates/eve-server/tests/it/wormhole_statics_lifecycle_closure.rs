@@ -422,19 +422,19 @@ async fn test_wormhole_statics_decay_stages_respawn_and_k162_materialization() {
     };
     assert_eq!(
         find_sig_desc(early_sigs, "WST-DEC-48H").as_deref(),
-        Some("This wormhole is beginning to decay, and probably won't last another day")
+        Some("This wormhole has not yet begun to decay")
     );
     assert_eq!(
         find_sig_desc(early_sigs, "WND-DEC-36H").as_deref(),
-        Some("This wormhole is beginning to decay, and probably won't last another day")
+        Some("This wormhole has not yet begun to decay")
     );
     assert_eq!(
         find_sig_desc(early_sigs, "WND-DEC-24H").as_deref(),
-        Some("This wormhole is not yet beginning to decay")
+        Some("This wormhole is beginning to decay, and probably won't last another day")
     );
     assert_eq!(
         find_sig_desc(early_sigs, "WND-DEC-16H").as_deref(),
-        Some("This wormhole is not yet beginning to decay")
+        Some("This wormhole is beginning to decay, and probably won't last another day")
     );
 
     // Advance +13h (total +14h): 16h wormhole has 2h remaining (<4h -> reaching end of natural lifetime, wormholeAge = 2)

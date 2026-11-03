@@ -500,6 +500,92 @@ impl EsiRouter {
                         None,
                     );
                 }
+                p if p.starts_with("/cdn/cosmetics/character/title/definitions/")
+                    && p.ends_with(".json") =>
+                {
+                    let skinr =
+                        crate::services::quasar_cosmetics_skinr::SkinrCosmeticsState::load(
+                            Arc::clone(&self.ctx.db),
+                            Arc::clone(&self.ctx.sde),
+                        );
+                    let data = skinr.data.read().unwrap_or_else(|e| e.into_inner());
+                    let ver = data.title_def_version;
+                    let prefix = format!(
+                        "/cdn/cosmetics/character/title/definitions/v{}.{}.{}/",
+                        ver[0], ver[1], ver[2]
+                    );
+                    if !p.starts_with(&prefix) {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            404,
+                            "Character title definitions version not found",
+                            true,
+                        );
+                    }
+                    let body = serde_json::to_vec(&data.title_definitions)
+                        .unwrap_or_else(|_| b"[]".to_vec());
+                    return self.finalize_cached_response(
+                        req,
+                        now,
+                        req_id,
+                        compat_date,
+                        remain_initial,
+                        reset_initial,
+                        200,
+                        body,
+                        3600,
+                        false,
+                        None,
+                        None,
+                    );
+                }
+                p if p.starts_with("/cdn/maptags/") && p.ends_with("/universe.fb") => {
+                    let expected = format!(
+                        "/cdn/maptags/v24.1.{}/universe.fb",
+                        self.ctx.sde.solar_systems.len()
+                    );
+                    if p != expected {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            404,
+                            "Maptag checkpoint bundle not found",
+                            true,
+                        );
+                    }
+                    let mut sys_ids: Vec<u32> =
+                        self.ctx.sde.solar_systems.keys().copied().collect();
+                    sys_ids.sort_unstable();
+                    let mut body = Vec::with_capacity(8 + sys_ids.len() * 12);
+                    body.extend_from_slice(b"MAPT");
+                    body.extend_from_slice(&(sys_ids.len() as u32).to_le_bytes());
+                    for sid in sys_ids {
+                        if let Some(sys) = self.ctx.sde.solar_systems.get(&sid) {
+                            body.extend_from_slice(&sid.to_le_bytes());
+                            body.extend_from_slice(&sys.constellation_id.to_le_bytes());
+                            body.extend_from_slice(&sys.region_id.to_le_bytes());
+                        }
+                    }
+                    return self.finalize_cached_response(
+                        req,
+                        now,
+                        req_id,
+                        compat_date,
+                        remain_initial,
+                        reset_initial,
+                        200,
+                        body,
+                        3600,
+                        false,
+                        None,
+                        None,
+                    );
+                }
                 _ => {}
             }
         }

@@ -536,7 +536,7 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
     fit_mod(&ctx, &mut bane_sess, 81015, 71017, 77399, 28).await.expect("fit Disruptive Lance on Bane");
     fit_mod(&ctx, &mut bane_sess, 81015, 71018, 11370, 29).await.expect("fit Cloak on Bane");
     give_item(&ctx, 71019, 16275, 91015, 81015, InventoryFlag::Cargo, 500);
-    give_item(&ctx, 71020, 17887, 91015, 81015, InventoryFlag::Cargo, 30_000);
+    give_item(&ctx, 71020, 16274, 91015, 81015, InventoryFlag::Cargo, 30_000);
     bane_sess.station_id = None;
     spawn_in_space(&ctx, 91015, 81015, 77283, NULL_SYS, DVec3::new(0.0, 0.0, 0.0)).await;
 
@@ -562,7 +562,7 @@ async fn siege_triage_and_disruptive_lance_v24_mechanics() {
     assert!((lance_res.dict_get("remoteRepairImpedance").and_then(|v| v.as_f64()).unwrap_or(0.0) - 0.50).abs() < 1e-4);
 
     let rem_iso = ctx.db.with_snapshot(|s| s.items.get(&71020).map(|i| i.quantity).unwrap_or(0));
-    assert_eq!(rem_iso, 5_000, "Disruptive Lance must consume 25,000 isotopes");
+    assert_eq!(rem_iso, 10_000, "Disruptive Lance must consume 20,000 isotopes from SDE attr 714");
 
     // Victim cannot warp/jump/dock and has 50% incoming remote repair impedance
     let beyonce_id = ctx.bind_object(&mut victim_sess, "beyonce", NULL_SYS as i64).unwrap();

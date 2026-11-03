@@ -585,9 +585,7 @@ pub async fn activate_auto_targeting_system(
 
     let mut auto_locked = Vec::new();
     for (tid, _dist, sig) in candidates {
-        if locked_count >= max_locked {
-            break;
-        }
+        if locked_count >= max_locked { break; }
         let lock_time_ms = eve_destiny::combat::compute_lock_time_seconds(scan_res, sig) * 1000.0;
         if sys.add_target_lock(ship_id, TargetLock {
             target_id: tid,
@@ -600,11 +598,7 @@ pub async fn activate_auto_targeting_system(
             auto_locked.push((tid, lock_time_ms));
         }
     }
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_active_states.insert(module_id);
-    });
-
+    ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.insert(module_id); });
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
         ("active", PyRep::Bool(true)),
@@ -707,6 +701,7 @@ pub async fn activate_superweapon_with_args(
             return Err(BridgeRpcError { code: "SkillMissing".into(), message: "Activating a Disruptive Lance requires Disruptive Lance Operation (77739) and Lancer Dreadnoughts (77738)".into() });
         }
 
+        let ship_type_opt = ctx.sde.types.get(&ship_type_id);
         let base_cap = mod_type.default_attributes.get(&6).copied().unwrap_or(30_000.0);
         let cap_cost = base_cap * (1.0 - 0.05 * (op_lvl.min(5) as f64));
         let cur_cap_opt = if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
@@ -718,22 +713,24 @@ pub async fn activate_superweapon_with_args(
             None
         };
 
-        // Pre-validate and consume 25,000 isotopes BEFORE applying capacitor drain, beam damage, or debuffs (#203)
+        // Pre-validate and consume SDE-defined isotopes (attrs 713/714) BEFORE applying capacitor drain, beam damage, or debuffs (#203)
+        let lance_fuel_tid = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(16274);
+        let lance_fuel_qty = mod_type.default_attributes.get(&714).map(|&v| v.round() as i32).unwrap_or(20_000);
         let consumed_fuel = ctx.db.with_mut_snapshot(|snap| {
-            let is_fuel = |i: &&eve_db::InventoryItemRecord| i.location_id == ship_id && matches!(i.type_id, 16274 | 17887..=17889) && matches!(i.flag as u16, 5 | 133);
-            let cand = snap.items.values().find(|i| is_fuel(i) && (i.flag as u16) == 133 && i.quantity >= 25_000)
-                .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity >= 25_000))
-                .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity > 0))
+            let is_fuel = |i: &&eve_db::InventoryItemRecord| i.location_id == ship_id && i.type_id == lance_fuel_tid && matches!(i.flag as u16, 5 | 133) && i.quantity > 0;
+            let cand = snap.items.values().find(|i| is_fuel(i) && (i.flag as u16) == 133 && i.quantity >= lance_fuel_qty)
+                .or_else(|| snap.items.values().find(|i| is_fuel(i) && i.quantity >= lance_fuel_qty))
+                .or_else(|| snap.items.values().find(|i| is_fuel(i)))
                 .map(|i| (i.item_id, i.quantity));
             match cand {
-                Some((fid, avail)) if avail >= 25_000 => {
+                Some((fid, avail)) if avail >= lance_fuel_qty => {
                     let mut rem = 0;
-                    if let Some(it) = snap.items.get_mut(&fid) { it.quantity -= 25_000; rem = it.quantity; }
+                    if let Some(it) = snap.items.get_mut(&fid) { it.quantity -= lance_fuel_qty; rem = it.quantity; }
                     if rem <= 0 { snap.items.remove(&fid); }
-                    Ok(25_000)
+                    Ok(lance_fuel_qty)
                 }
-                Some((_, avail)) => Err(format!("Insufficient lance fuel: need 25000, have {avail}")),
-                None => Err("Missing required lance isotopes".to_string()),
+                Some((_, avail)) => Err(format!("Insufficient lance fuel (type {lance_fuel_tid}): need {lance_fuel_qty}, have {avail}")),
+                None => Err(format!("Missing required lance isotopes (type {lance_fuel_tid}, quantity {lance_fuel_qty})")),
             }
         }).map_err(|message| BridgeRpcError { code: "InsufficientFuel".into(), message })?;
 
@@ -742,18 +739,27 @@ pub async fn activate_superweapon_with_args(
         }
 
         let base_range = mod_type.default_attributes.get(&54).copied().unwrap_or(50_000.0);
-        let effective_range = base_range * (1.0 + 0.20 * (lancer_lvl.min(5) as f64));
-        let titan_lance_base = 51_000.0;
-        let lance_damage = (titan_lance_base / 3.0) * (1.0 + 0.10 * (lancer_lvl.min(5) as f64));
-        let dmg_vec = if mod_type.default_attributes.get(&114).copied().unwrap_or(0.0) > 0.0 {
-            DamageVector::new(lance_damage, 0.0, 0.0, 0.0)
-        } else if mod_type.default_attributes.get(&118).copied().unwrap_or(0.0) > 0.0 {
-            DamageVector::new(0.0, lance_damage, 0.0, 0.0)
-        } else if mod_type.default_attributes.get(&117).copied().unwrap_or(0.0) > 0.0 {
-            DamageVector::new(0.0, 0.0, lance_damage, 0.0)
-        } else {
-            DamageVector::new(0.0, 0.0, 0.0, lance_damage)
-        };
+        let range_bonus_pct = ship_type_opt.and_then(|t| t.default_attributes.get(&5418).copied()).unwrap_or(20.0);
+        let dmg_bonus_pct = ship_type_opt.and_then(|t| t.default_attributes.get(&5417).copied()).unwrap_or(10.0);
+        let effective_range = base_range * (1.0 + (range_bonus_pct / 100.0) * (lancer_lvl.min(5) as f64));
+        let dmg_mult = 1.0 + (dmg_bonus_pct / 100.0) * (lancer_lvl.min(5) as f64);
+        let em_base = mod_type.default_attributes.get(&114).copied().unwrap_or(0.0);
+        let ex_base = mod_type.default_attributes.get(&116).copied().unwrap_or(0.0);
+        let ki_base = mod_type.default_attributes.get(&117).copied().unwrap_or(0.0);
+        let th_base = mod_type.default_attributes.get(&118).copied().unwrap_or(0.0);
+        let dmg_dur_ms = mod_type.default_attributes.get(&2264).copied().unwrap_or(15_000.0);
+        let dmg_cycle_ms = mod_type.default_attributes.get(&2265).copied().unwrap_or(1_000.0).max(100.0);
+        let num_ticks = (dmg_dur_ms / dmg_cycle_ms).round().max(1.0);
+        let per_tick_dmg = DamageVector::new(em_base * dmg_mult, th_base * dmg_mult, ki_base * dmg_mult, ex_base * dmg_mult);
+        let total_dmg_vec = DamageVector::new(
+            per_tick_dmg.em * num_ticks,
+            per_tick_dmg.thermal * num_ticks,
+            per_tick_dmg.kinetic * num_ticks,
+            per_tick_dmg.explosive * num_ticks,
+        );
+        let lance_damage = total_dmg_vec.total();
+        let neut_amount_gj = mod_type.default_attributes.get(&2260).copied().unwrap_or(35_000.0);
+        let victim_debuff_secs = (mod_type.default_attributes.get(&5412).copied().unwrap_or(60_000.0) / 1000.0).round() as u64;
 
         let all_balls = sys.list_balls().await.unwrap_or_default();
         let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
@@ -767,10 +773,10 @@ pub async fn activate_superweapon_with_args(
                 let to_ball = b.position - ship_pos;
                 let along_beam = to_ball.dot(beam_dir);
                 if along_beam >= 100.0 && along_beam <= effective_range && (to_ball - beam_dir * along_beam).length() <= beam_radius {
-                    let (applied, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
+                    let (applied, destroyed) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys, sys_id, char_id, b.id, total_dmg_vec, 10.0, now_unix).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
                     crate::services::combat_crimewatch::record_killmail_assist_action(ctx, b.id, char_id, ship_type_id, mod_type_id, applied, false, now_unix);
                     if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
-                        v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
+                        v_cs.capacitor = (v_cs.capacitor - neut_amount_gj).max(0.0);
                         v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
                         v_cs.is_mwd_mjd_disabled = true;
                         v_cs.is_tethered = false;
@@ -788,7 +794,7 @@ pub async fn activate_superweapon_with_args(
             let mut st = ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner());
             st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
             for &vid in &hit_targets {
-                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300);
+                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + victim_debuff_secs);
             }
         }
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
@@ -796,13 +802,14 @@ pub async fn activate_superweapon_with_args(
 
         return Ok(PyRep::keyval([
             ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(true)),
-            ("totalDamageApplied", PyRep::Real(lance_damage)), ("titanLanceBaseDamage", PyRep::Real(titan_lance_base)),
+            ("totalDamageApplied", PyRep::Real(lance_damage)), ("perTickDamage", PyRep::Real(per_tick_dmg.total())),
             ("capacitorCost", PyRep::Real(cap_cost)), ("effectiveRangeMeters", PyRep::Real(effective_range)),
-            ("neutralizerAmountGJ", PyRep::Real(10_000.0)), ("remoteRepairMultiplier", PyRep::Real(0.50)),
-            ("remoteRepairImpedance", PyRep::Real(0.50)), ("jumpDockTetherCloakLockSeconds", PyRep::Real(300.0)),
-            ("casterLockSeconds", PyRep::Integer(300)), ("victimPointDurationSeconds", PyRep::Real(60.0)),
-            ("victimDebuffSeconds", PyRep::Integer(60)), ("hitCount", PyRep::Integer(hit_targets.len() as i64)),
+            ("neutralizerAmountGJ", PyRep::Real(neut_amount_gj)), ("remoteRepairMultiplier", PyRep::Real(0.50)),
+            ("remoteRepairImpedance", PyRep::Real(0.50)), ("jumpDockTetherCloakLockSeconds", PyRep::Real(victim_debuff_secs as f64)),
+            ("casterLockSeconds", PyRep::Integer(300)), ("victimPointDurationSeconds", PyRep::Real(victim_debuff_secs as f64)),
+            ("victimDebuffSeconds", PyRep::Integer(victim_debuff_secs as i64)), ("hitCount", PyRep::Integer(hit_targets.len() as i64)),
             ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
+            ("fuelTypeID", PyRep::Integer(lance_fuel_tid as i64)),
             ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
         ]));
     }
@@ -876,18 +883,20 @@ pub async fn activate_superweapon_with_args(
     let ex_dmg = mod_type.default_attributes.get(&116).copied().unwrap_or(0.0);
     let ki_dmg = mod_type.default_attributes.get(&117).copied().unwrap_or(0.0);
     let th_dmg = mod_type.default_attributes.get(&118).copied().unwrap_or(0.0);
-    let dmg_vec = if em_dmg + ex_dmg + ki_dmg + th_dmg > 0.0 {
-        DamageVector::new(em_dmg, th_dmg, ki_dmg, ex_dmg)
-    } else {
-        DamageVector::new(600_000.0, 600_000.0, 600_000.0, 600_000.0)
-    };
+    let dmg_vec = DamageVector::new(em_dmg, th_dmg, ki_dmg, ex_dmg);
     let total_raw_damage = dmg_vec.em + dmg_vec.thermal + dmg_vec.kinetic + dmg_vec.explosive;
 
     let mut hit_targets = Vec::new();
     let default_fwd = ship_ball.as_ref().map(|b| if b.velocity.length_squared() > 1e-4 { b.velocity.normalize() } else { DVec3::X }).unwrap_or(DVec3::X);
+    let beam_len = mod_type.default_attributes.get(&54).copied().unwrap_or(200_000.0);
+    let beam_radius = mod_type.default_attributes.get(&2263).copied().unwrap_or(2_500.0);
+    let warmup_s = mod_type.default_attributes.get(&2262).copied().unwrap_or(15_000.0) / 1000.0;
+    let dmg_dur_ms = mod_type.default_attributes.get(&2264).copied().unwrap_or(15_000.0);
+    let dmg_cycle_ms = mod_type.default_attributes.get(&2265).copied().unwrap_or(1_000.0).max(100.0);
+    let num_ticks = (dmg_dur_ms / dmg_cycle_ms).round().max(1.0) as i32;
+    let lock_secs = (mod_type.default_attributes.get(&2427).copied().unwrap_or(300_000.0) / 1000.0).round() as u64;
 
     if is_slash {
-        // Titan Lance Doomsday (`superWeaponMgr.ActivateSlashModule(moduleID, startDir, endDir)`): 300km directional beam after 15s warmup
         let raw_dir = match (parse_vec3_arg(args.get(1)), parse_vec3_arg(args.get(2))) {
             (Some(p0), Some(p1)) if (p1 - p0).length_squared() > 1e-4 => Some(p1 - p0),
             (Some(p0), Some(p1)) => Some(if p0.length_squared() > 1e-4 { p0 } else { p1 }),
@@ -899,14 +908,14 @@ pub async fn activate_superweapon_with_args(
                 if b.id != ship_id && is_combatant_ship_or_entity_ball(Some(&ctx.sde), Some(&ctx.db), b.id, b.type_id) {
                     let rel = b.position - sb.position;
                     let al = rel.dot(beam_dir);
-                    if (0.0..=300_000.0).contains(&al) && (rel - beam_dir * al).length() <= 20_000.0 { hit_targets.push(b.id); }
+                    if (0.0..=beam_len).contains(&al) && (rel - beam_dir * al).length() <= beam_radius { hit_targets.push(b.id); }
                 }
             }
         }
-        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key_of(ctx), ship_id), now_unix + 300);
+        ctx.tactical_state.write().unwrap_or_else(|e| e.into_inner()).lance_caster_lock_until.insert((db_key_of(ctx), ship_id), now_unix + lock_secs);
         let _ = sys.add_module_cycle(crate::system_actor::ActiveModuleCycle {
             ship_id, module_id, module_type_id: mod_type_id, owner_char_id: Some(char_id),
-            effect_name: "superWeaponLanceWarmup".into(), repeat: 0, duration_s: 15.0,
+            effect_name: "superWeaponLanceWarmup".into(), repeat: num_ticks - 1, duration_s: warmup_s,
             immobilize_self: true, damage_vector: dmg_vec, lance_beam_dir: Some(beam_dir), ..Default::default()
         }).await;
     } else if let Some(tb) = single_target_ball {
@@ -919,7 +928,7 @@ pub async fn activate_superweapon_with_args(
     }
 
     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
-    ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
+    ctx.record_module_reactivation_delay(ship_id, module_id, lock_secs as f64);
 
     ctx.notify(NotificationTarget::Character(char_id), "OnGodmaShipEffect", "charid", vec![PyRep::Integer(module_id), PyRep::String("superWeapon".into()), PyRep::Bool(true)]);
     if !is_slash {
@@ -938,10 +947,10 @@ pub async fn activate_superweapon_with_args(
         ("moduleID", PyRep::Integer(module_id)), ("shipID", PyRep::Integer(ship_id)), ("slashMode", PyRep::Bool(is_slash)),
         ("totalDamageApplied", PyRep::Real(if is_slash { 0.0 } else { total_raw_damage })),
         ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
-        ("warmupSeconds", PyRep::Real(if is_slash { 15.0 } else { 0.0 })),
-        ("tickCount", PyRep::Integer(1)),
-        ("immobilizeSeconds", PyRep::Real(if is_slash { 300.0 } else { 30.0 })), ("jumpBlockSeconds", PyRep::Real(300.0)),
-        ("jumpWarpSuppressionSeconds", PyRep::Real(if is_slash { 300.0 } else { 0.0 })),
+        ("warmupSeconds", PyRep::Real(if is_slash { warmup_s } else { 0.0 })),
+        ("tickCount", PyRep::Integer(if is_slash { num_ticks as i64 } else { 1 })),
+        ("immobilizeSeconds", PyRep::Real(if is_slash { lock_secs as f64 } else { 30.0 })), ("jumpBlockSeconds", PyRep::Real(lock_secs as f64)),
+        ("jumpWarpSuppressionSeconds", PyRep::Real(0.0)),
         ("hitTargetIDs", PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect())),
     ]))
 }
@@ -955,13 +964,16 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
     pending_cycle_actions: &mut Vec<crate::system_actor::PendingCycleAction>,
     destroyed_balls: &mut Vec<(i64, Option<i64>)>,
 ) {
+    let _ = tactical_state;
     let Some(ship_ball) = ballpark.balls.get(&cycle.ship_id) else { return };
     let ship_pos = ship_ball.position;
     let attacker_ship_type_id = ship_ball.type_id;
     let beam_dir = cycle.lance_beam_dir.unwrap_or(DVec3::X);
-    let beam_len = 300_000.0;
-    // DERIVED: Titan Lance Doomsday beam cylinder radius (20 km cone/cylinder)
-    let beam_radius = 20_000.0;
+    let mod_attrs = sde_opt.as_ref().and_then(|s| s.types.get(&cycle.module_type_id)).map(|t| &t.default_attributes);
+    let beam_len = mod_attrs.and_then(|a| a.get(&54).copied()).unwrap_or(200_000.0);
+    let beam_radius = mod_attrs.and_then(|a| a.get(&2263).copied()).unwrap_or(2_500.0);
+    let dmg_sig = mod_attrs.and_then(|a| a.get(&552).copied()).unwrap_or(5_000.0).max(1.0);
+    let lock_s = mod_attrs.and_then(|a| a.get(&2427).copied()).unwrap_or(300_000.0) / 1000.0;
     let candidates: Vec<(i64, u32, DVec3)> = ballpark.balls.values().filter(|b| b.id != cycle.ship_id && is_combatant_ship_or_entity_ball(sde_opt.as_ref(), db_opt.as_ref(), b.id, b.type_id)).map(|b| (b.id, b.type_id, b.position)).collect();
     let mut hits = Vec::new();
     for (bid, _tid, bpos) in candidates {
@@ -969,27 +981,22 @@ pub(crate) fn fire_lance_warmup_in_ballpark(
         let along = to_b.dot(beam_dir);
         let perp = (to_b - beam_dir * along).length();
         if along > 0.0 && along <= beam_len && perp <= beam_radius {
+            let target_sig = ballpark.combat_states.get(&bid).map(|cs| cs.signature_radius.max(1.0)).unwrap_or(dmg_sig);
+            let sig_scale = (target_sig / dmg_sig).min(1.0);
+            let scaled_dmg = cycle.damage_vector.scaled(sig_scale);
             let mut applied_dmg = 0.0;
-            if let Some((app, destroyed, _)) = ballpark.apply_damage_to_ball(bid, cycle.damage_vector) {
+            if let Some((app, destroyed, _)) = ballpark.apply_damage_to_ball(bid, scaled_dmg) {
                 applied_dmg = app;
                 if destroyed { destroyed_balls.push((bid, cycle.owner_char_id)); }
             }
             if let Some(v_cs) = ballpark.combat_states.get_mut(&bid) {
-                v_cs.lance_disrupted_remaining_s = 300.0;
                 v_cs.is_tethered = false;
-                v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
             }
             hits.push((bid, applied_dmg));
         }
     }
-    if let Some(db) = db_opt.as_ref() {
-        let db_key = std::sync::Arc::as_ptr(db) as usize;
-        let now_unix = db.clock().now_unix_secs();
-        let mut st = tactical_state.write().unwrap_or_else(|e| e.into_inner());
-        for &(vid, _) in &hits { st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 300); }
-    }
     if let Some(c_cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
-        c_cs.lance_disrupted_remaining_s = c_cs.lance_disrupted_remaining_s.max(285.0);
+        c_cs.lance_disrupted_remaining_s = c_cs.lance_disrupted_remaining_s.max((lock_s - 15.0).max(0.0));
         c_cs.is_tethered = false;
     }
     if let Some(c_ball) = ballpark.balls.get_mut(&cycle.ship_id) {

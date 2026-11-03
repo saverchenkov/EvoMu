@@ -780,7 +780,7 @@ pub fn handle(
                                 state.pending_scoped_role_grants.remove(&tid);
                             }
                         }
-                        state.role_audit_log.push((char_id, tid, old_role, new_role, now_unix));
+                        state.role_audit_log.push((tid, char_id, old_role, new_role, now_unix));
                         changed_members.push((tid, old_role, new_role, effective_role));
                     }
                     let released_controllers =

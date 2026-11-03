@@ -485,12 +485,17 @@ async fn notify_batch2_probe_scanning_abyssal_and_void_space() {
     let scan_notifs = drain_all(&ctx, &mut sess, PILOT_A);
     assert_eq!(find_notif(&scan_notifs, "OnProbeWarpStart").len(), 5);
     assert!(!scan_notifs.iter().any(|(e, _)| e == "OnProbeWarpEnd"));
+    assert!(!scan_notifs.iter().any(|(e, _)| e == "OnSystemScanStopped"));
     let started_args = find_notif(&scan_notifs, "OnSystemScanStarted");
-    assert_eq!((started_args.len(), &started_args[1]), (3, &PyRep::Integer(4_000)));
+    assert_eq!(started_args.len(), 3);
     assert!(matches!(started_args[2], PyRep::List(ref l) if l.len() == 8));
-    let stopped_args = find_notif(&scan_notifs, "OnSystemScanStopped");
+    ctx.advance_secs(15);
+    let post_scan_notifs = drain_all(&ctx, &mut sess, PILOT_A);
+    assert_eq!(post_scan_notifs.iter().filter(|(e, _)| e == "OnProbeWarpEnd").count(), 8);
+    assert!(post_scan_notifs.iter().any(|(e, _)| e == "OnProbeStateChanged"));
+    let stopped_args = find_notif(&post_scan_notifs, "OnSystemScanStopped");
     assert!(matches!(stopped_args[0], PyRep::List(ref l) if l.len() == 8));
-    let idle_args = find_notif(&scan_notifs, "OnProbesIdle");
+    let idle_args = find_notif(&post_scan_notifs, "OnProbesIdle");
     assert!(matches!(idle_args[0], PyRep::List(ref l) if l.len() == 8 && l[0].dict_get("probeID").is_some()));
 
     // Already-connected probes must NOT emit OnProbeStateChanged on ReconnectToLostProbes

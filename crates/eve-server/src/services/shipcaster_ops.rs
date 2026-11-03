@@ -875,65 +875,6 @@ pub async fn handle(
             Some(Ok(PyRep::List(pads)))
         }
 
-        ("ship", "LaunchForSelf") | ("ship", "LaunchFromShip") => {
-            let item_id = args.first().and_then(|a| match a {
-                PyRep::Integer(id) => Some(*id),
-                PyRep::List(list) | PyRep::Tuple(list) => list.first().and_then(|x| x.as_i64()),
-                _ => None,
-            })?;
-            let is_beacon_constructor = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&item_id)
-                    .and_then(|it| {
-                        ctx.sde
-                            .shipcaster_sde_components()
-                            .ok()
-                            .map(|c| c.under_construction.contains_key(&it.type_id))
-                    })
-                    .unwrap_or(false)
-            });
-            if !is_beacon_constructor {
-                return None;
-            }
-            if args.get(1..=3).is_some_and(|coords| coords.iter().any(|a| matches!(a, PyRep::Real(v) if !v.is_finite()))) {
-                return Some(Err(rpc_err("InvalidCoordinates", "Launch coordinates must be finite numbers")));
-            }
-            let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) else {
-                return Some(Err(rpc_err("NotInSpace", "Active ship in space is required to launch a beacon constructor")));
-            };
-            let h = ctx.systems.get_or_spawn(sys_id);
-            let Some((_, ship_ball)) = h.get_ball_snapshot(ship_id).await.ok().flatten() else {
-                return Some(Err(rpc_err("ShipNotInSpace", "Active ship is not spawned in space")));
-            };
-            if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-                return Some(Err(rpc_err("CannotLaunchWhileWarping", "Cannot deploy beacon constructor while in warp")));
-            }
-            if h.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
-                return Some(Err(rpc_err("CannotLaunchWhileCloaked", "Cannot deploy beacon constructor while cloaked")));
-            }
-            let pos = if let (Some(x), Some(y), Some(z)) = (
-                args.get(1).and_then(|a| a.as_f64()),
-                args.get(2).and_then(|a| a.as_f64()),
-                args.get(3).and_then(|a| a.as_f64()),
-            ) {
-                if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-                    return Some(Err(rpc_err("InvalidCoordinates", "Launch coordinates must be finite numbers")));
-                }
-                let requested = DVec3::new(x, y, z);
-                if requested.distance(ship_ball.position) > 10_000.0 {
-                    return Some(Err(rpc_err("OutOfRange", "Deployment coordinates exceed maximum 10km launch range")));
-                }
-                requested
-            } else {
-                ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0)
-            };
-            Some(
-                deploy_fw_beacon_constructor(ctx, session, item_id, pos)
-                    .await
-                    .map(|pad| PyRep::List(vec![pad.to_keyval()])),
-            )
-        }
-
         ("shipCasterLauncherMgr", "GetFactionsWithShipcaster") => {
             let factions = with_misc_state(ctx, |st| {
                 let mut set = BTreeSet::new();

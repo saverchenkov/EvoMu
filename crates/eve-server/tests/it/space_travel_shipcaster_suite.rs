@@ -110,24 +110,26 @@ async fn deploy_and_complete_beacon(
     });
     let h = ctx.systems.get_or_spawn(warzone_sys);
     spawn_ship_at(ctx, &h, char_id, ship_id, DVec3::new(101_000.0, 0.0, 0.0)).await;
-    let launched = rpc(
+    let dropped = rpc(
         ctx,
         sess,
         "ship",
-        "LaunchForSelf",
+        "Drop",
         &[
             PyRep::List(vec![PyRep::Integer(cid)]),
-            PyRep::Real(100_000.0),
-            PyRep::Real(0.0),
-            PyRep::Real(0.0),
+            PyRep::Integer(char_id),
+            PyRep::Bool(false),
         ],
     )
     .await
-    .expect("LaunchForSelf beacon constructor");
-    let PyRep::List(launched_list) = launched else {
-        panic!("expected LaunchForSelf list");
+    .expect("Drop beacon constructor");
+    let PyRep::Dict(dropped_map) = dropped else {
+        panic!("expected Drop dict");
     };
-    let pad_id = kv_i64(&launched_list[0], "itemID");
+    let pad_id = match &dropped_map[0] {
+        (PyRep::Integer(k), PyRep::List(ids)) if *k == cid => ids[0].as_i64().expect("pad_id"),
+        other => panic!("unexpected Drop entry: {other:?}"),
+    };
     let comps = ctx.sde.shipcaster_sde_components().expect("SDE components");
     let spec = &comps.under_construction[&constructor_type_id];
     let mut qty_dict = Vec::new();

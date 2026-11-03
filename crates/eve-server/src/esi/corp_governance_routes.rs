@@ -10,15 +10,41 @@ use std::collections::{BTreeMap, HashMap};
 
 const CORP_ROLE_TABLE: &[(u64, &str)] = &[
     (eve_db::corp_roles::ROLE_DIRECTOR, "Director"),
-    (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant"),
-    (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior_Accountant"),
-    (eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT, "Config_Equipment"),
-    (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat"),
-    (eve_db::corp_roles::ROLE_FACTORY_MANAGER, "Factory_Manager"),
+    (eve_db::corp_roles::ROLE_PROJECT_MANAGER, "Project_Manager"),
     (eve_db::corp_roles::ROLE_PERSONNEL_MANAGER, "Personnel_Manager"),
+    (eve_db::corp_roles::ROLE_ACCOUNTANT, "Accountant"),
     (eve_db::corp_roles::ROLE_SECURITY_OFFICER, "Security_Officer"),
+    (eve_db::corp_roles::ROLE_FACTORY_MANAGER, "Factory_Manager"),
     (eve_db::corp_roles::ROLE_STATION_MANAGER, "Station_Manager"),
     (eve_db::corp_roles::ROLE_AUDITOR, "Auditor"),
+    (1 << 13, "Hangar_Take_1"),
+    (1 << 14, "Hangar_Take_2"),
+    (1 << 15, "Hangar_Take_3"),
+    (1 << 16, "Hangar_Take_4"),
+    (1 << 17, "Hangar_Take_5"),
+    (1 << 18, "Hangar_Take_6"),
+    (1 << 19, "Hangar_Take_7"),
+    (eve_db::corp_roles::ROLE_TRADER, "Trader"),
+    (1 << 21, "Deliveries_Take"),
+    (1 << 22, "Deliveries_Query"),
+    (1 << 23, "Container_Take_1"),
+    (1 << 24, "Container_Take_2"),
+    (1 << 25, "Container_Take_3"),
+    (1 << 26, "Container_Take_4"),
+    (1 << 27, "Account_Take_1"),
+    (1 << 28, "Account_Take_2"),
+    (1 << 29, "Account_Take_3"),
+    (1 << 30, "Account_Take_4"),
+    (1 << 31, "Account_Take_5"),
+    (1 << 32, "Account_Take_6"),
+    (1 << 33, "Account_Take_7"),
+    (eve_db::corp_roles::ROLE_DIPLOMAT, "Diplomat"),
+    (eve_db::corp_roles::ROLE_STARBASE_OPERATOR, "Starbase_Defense_Operator"),
+    (eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT, "Config_Equipment"),
+    (eve_db::corp_roles::ROLE_RENT_OFFICE, "Rent_Office"),
+    (eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT, "Junior_Accountant"),
+    (eve_db::corp_roles::ROLE_STARBASE_CONFIG, "Starbase_Fuel_Technician"),
+    (eve_db::corp_roles::ROLE_CONTRACT_MANAGER, "Contract_Manager"),
 ];
 
 pub(crate) fn decode_corp_roles(mask: u64) -> Vec<&'static str> {
@@ -346,7 +372,8 @@ pub fn dispatch_corp_governance_route(
                 if let Some(&stored_limit) = snap.corp_member_limits.get(&corp_id) {
                     return RouteExecutionResult::ok_json(json!(stored_limit), 3600);
                 }
-                // DERIVED: sum SDE dogma attribute 191 (maxCorporationMembersBonus) across CEO's trained skills.
+                // Compute from SDE dogma attribute 191 (maxCorporationMembersBonus) across CEO's trained skills,
+                // defaulting to EVE's base 10-member limit when CEO has no Corporation Management skills.
                 let mut limit: i64 = 0;
                 if let Some(ceo_skills) = snap.skills.get(&corp.ceo_id) {
                     for skill in ceo_skills.values() {
@@ -360,6 +387,9 @@ pub fn dispatch_corp_governance_route(
                             limit += (bonus.round() as i64) * i64::from(skill.level);
                         }
                     }
+                }
+                if limit <= 0 {
+                    limit = 10;
                 }
                 RouteExecutionResult::ok_json(json!(limit), 3600)
             }))

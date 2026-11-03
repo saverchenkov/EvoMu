@@ -400,7 +400,7 @@ pub fn tale_matches_completed_encounter(
         "Data" | "Relic" | "Ghost" | "SleeperCache" | "WormholeCombat" | "DrifterHive" | "Homefront" => {
             dungeon_id != 0 && tale_template_id == dungeon_id
         }
-        "CombatAnomaly" | "CombatSignature" | "DED" | "Expedition" => {
+        "CombatAnomaly" | "CombatSignature" | "DED" | "Expedition" | "Event" | "EventSite" => {
             if tale_template_id == inc_tpl || matches!(dng_arch, Some(27..=30 | 38 | 44 | 61..=65)) {
                 return dungeon_id != 0 && tale_template_id == dungeon_id;
             }

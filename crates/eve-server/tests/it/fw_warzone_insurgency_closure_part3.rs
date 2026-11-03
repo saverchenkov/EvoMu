@@ -115,7 +115,9 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     assert_eq!(act_tup[1].dict_get("phase").and_then(|v| v.as_str()), Some("Active"));
 
     let _ = drain_notif_events(&ctx, pir_cid);
+    let front_beacon = ctx.db.with_snapshot(|s| s.system_states[&front_sys].fw_complex_position.expect("insurgency beacon spawned"));
     let sys_front_h = ctx.systems.get_or_spawn(front_sys);
+    let _ = sys_front_h.spawn_ball(make_ball(pir_ship, 621, DVec3::from_array(front_beacon))).await;
     for _ in 0..3 {
         sys_front_h.step_manual(60.0).await.unwrap();
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -261,9 +263,10 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     });
     s_pir.solar_system_id = Some(hs_sys);
     fit_siege_artillery(&ctx, pir_cid, pir_ship, 999_200);
+    let hs_beacon = ctx.db.with_snapshot(|s| s.system_states[&hs_sys].fw_complex_position.expect("insurgency beacon spawned"));
     let hs_h = ctx.systems.get_or_spawn(hs_sys);
     let cs_pir_hs = ctx.build_ship_combat_state(pir_cid, pir_ship, 19_722);
-    let _ = hs_h.spawn_ball_with_combat(make_ball(pir_ship, 19_722, DVec3::ZERO), cs_pir_hs).await;
+    let _ = hs_h.spawn_ball_with_combat(make_ball(pir_ship, 19_722, DVec3::from_array(hs_beacon)), cs_pir_hs).await;
     for _ in 0..5 {
         hs_h.step_manual(60.0).await.unwrap();
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -274,7 +277,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     let neutral_ship = 100_000_033i64;
     let _s_neut = register_online_pilot(
         &ctx, 83_003, "demo3", "demo3-secret", neutral_cid, 98_000_033, None,
-        hs_sys, neutral_ship, 621, DVec3::new(2_500.0, 0.0, 0.0), 0,
+        hs_sys, neutral_ship, 621, DVec3::from_array(hs_beacon) + DVec3::new(2_500.0, 0.0, 0.0), 0,
     ).await;
     lock_target_via_rpc(&ctx, &mut s_pir, hs_sys, pir_ship, neutral_ship).await;
     rpc_call(&ctx, &mut s_pir, "dogmaIM", "Activate", &[PyRep::Integer(999_200), PyRep::Integer(neutral_ship)])
@@ -291,7 +294,7 @@ async fn test_pirate_insurgency_lifecycle_spread_and_stage5_highsec_lowsec_effec
     let pod_id = 100_000_034i64;
     let _s_pod = register_online_pilot(
         &ctx, 83_004, "demo4", "demo4-secret", pod_cid, 98_000_034, None,
-        hs_sys, pod_id, 670, DVec3::new(2_800.0, 0.0, 0.0), 0,
+        hs_sys, pod_id, 670, DVec3::from_array(hs_beacon) + DVec3::new(2_800.0, 0.0, 0.0), 0,
     ).await;
     ctx.advance_secs(25);
     lock_target_via_rpc(&ctx, &mut s_pir, hs_sys, pir_ship, pod_id).await;

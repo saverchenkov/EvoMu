@@ -797,37 +797,34 @@ pub(crate) async fn handle_mining_and_deactivate(
 }
 
 /// Computes `(paste_needed, repair_rate_hp_per_s, duration_s)` for in-space Nanite Repair Paste
-/// repair (`feat:modules.nanite-repair-paste-in-space`), scaling paste consumption with module
-/// volume (`volume / 5.0`), `Thermodynamics (28164)` (`-5%/lvl`), and `Nanite Operation (28879)`
-/// (`-5%/lvl`, SDE attr `1294`), and scaling repair speed with `Nanite Interfacing (28880)`
-/// (`+20%/lvl`, SDE attr `1295`).
+/// repair (`feat:modules.nanite-repair-paste-in-space`) from SDE attributes:
+/// - `shipBrokenModuleRepairCostMultiplier` (attr `1277`, default `0.5` paste per HP of damage)
+/// - `shipBrokenRepairCostMultiplierBonus` (attr `1294` on `Nanite Operation 28879`, `-5%/lvl`)
+/// - `moduleRepairRate` (attr `1267`, default `10.0` HP/s)
+/// - `moduleRepairRateBonus` (attr `1295` on `Nanite Interfacing 28880`, `+20%/lvl`)
 pub(crate) fn compute_nanite_repair_params(
     mod_type: Option<&eve_sde::InvType>,
     cur_dmg: f64,
-    max_hp: f64,
-    thermo_lvl: u8,
+    _max_hp: f64,
+    _thermo_lvl: u8,
     nanite_op_lvl: u8,
     nanite_interfacing_lvl: u8,
 ) -> (i32, f64, f64) {
-    // DERIVED: 5.0 m³ reference small-module volume (clamped 1..=250) from EVE University Nanite Repair Paste mechanics
-    let vol_scale = mod_type
-        .map(|t| (t.volume / 5.0).clamp(1.0, 250.0))
-        .unwrap_or(1.0);
-    // DERIVED: 4.0 paste per 5 m³ unit at 100% heat damage (synthesized from EVE University Nanite Repair Paste guide)
-    let base_full_cost = (4.0 * vol_scale).max(1.0);
-    let skill_cost_mult = (1.0 - 0.05 * (nanite_op_lvl.min(5) as f64))
-        * (1.0 - 0.05 * (thermo_lvl.min(5) as f64));
-    let raw_paste = (cur_dmg.max(0.0) / max_hp.max(1.0)) * base_full_cost * skill_cost_mult;
+    let cost_per_hp = mod_type
+        .and_then(|t| t.default_attributes.get(&1277).copied())
+        .filter(|&v| v > 0.0)
+        .unwrap_or(0.5);
+    let skill_cost_mult = 1.0 - 0.05 * (nanite_op_lvl.min(5) as f64);
+    let raw_paste = cur_dmg.max(0.0) * cost_per_hp * skill_cost_mult;
     let paste_needed = if cur_dmg <= 0.0 {
         0
     } else {
         (raw_paste - 1e-9).ceil().max(1.0) as i32
     };
-    // DERIVED: 0.67 HP/s base repair rate per 5 m³ unit when SDE attr 1267 (naniteRepairRate) is absent
     let base_rate = mod_type
         .and_then(|t| t.default_attributes.get(&1267).copied())
         .filter(|&v| v > 0.0)
-        .unwrap_or(0.67 * vol_scale);
+        .unwrap_or(10.0);
     let repair_rate_hp_per_s = base_rate * (1.0 + 0.20 * (nanite_interfacing_lvl.min(5) as f64));
     let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
     (paste_needed, repair_rate_hp_per_s, duration_s)

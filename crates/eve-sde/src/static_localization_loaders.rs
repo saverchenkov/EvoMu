@@ -22,7 +22,7 @@ pub struct LocalizationMainBundle {
     pub labels: HashMap<u32, LocalizationLabelEntry>,
 }
 
-/// Normalizes an ESI / FSD language tag (`en`, `en-us`, `de`, `es`, `fr`, `ja`, `ko`, `ru`, `zh`)
+/// Normalizes an ESI / FSD language tag (`en`, `en-us`, `de`, `es`, `fr`, `it`, `ja`, `ko`, `ru`, `zh`)
 /// to its canonical `localization_fsd_<lang>.pickle` suffix.
 pub fn normalize_localization_fsd_lang(lang: &str) -> Option<&'static str> {
     let primary = lang
@@ -42,6 +42,7 @@ pub fn normalize_localization_fsd_lang(lang: &str) -> Option<&'static str> {
         "de" => Some("de"),
         "es" => Some("es"),
         "fr" => Some("fr"),
+        "it" => Some("it"),
         "ja" => Some("ja"),
         "ko" => Some("ko"),
         "ru" => Some("ru"),

@@ -57,8 +57,8 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
         snap.module_active_states.remove(&mod_5m3);
     });
 
-    // 3. Volume scaling at 20.0 HP (50% of 40 HP) with Thermo 0, Nanite Op 0, Nanite Interfacing 0:
-    // 5 m³ -> 2 paste, 10 m³ -> 4 paste, 20 m³ -> 8 paste
+    // 3. SDE Nanite Repair Paste formula at 20.0 HP with Thermo 0, Nanite Op 0, Nanite Interfacing 0:
+    // SDE attrs: shipBrokenModuleRepairCostMultiplier (1277) = 0.5 paste/HP -> 20 * 0.5 = 10 paste; moduleRepairRate (1267) = 10.0 HP/s
     set_skill(&ctx, char_id, 28164, 0); // Thermodynamics 0
     set_skill(&ctx, char_id, 28879, 0); // Nanite Operation 0
     set_skill(&ctx, char_id, 28880, 0); // Nanite Interfacing 0
@@ -77,22 +77,20 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     let rate_5 = rep_5.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
     let rate_10 = rep_10.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
     let rate_20 = rep_20.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
-    assert_eq!((c5, c10, c20), (2, 4, 8), "Paste cost must scale linearly with module volume (5m3 / 10m3 / 20m3)");
-    assert!((rate_5 - 0.67).abs() < 1e-3 && (rate_10 - 1.34).abs() < 1e-3 && (rate_20 - 2.68).abs() < 1e-3, "Repair rate must scale with module volume ({rate_5}, {rate_10}, {rate_20})");
+    assert_eq!((c5, c10, c20), (10, 10, 10), "SDE paste cost = ceil(20.0 * 0.5) = 10 across module volumes");
+    assert!((rate_5 - 10.0).abs() < 1e-3 && (rate_10 - 10.0).abs() < 1e-3 && (rate_20 - 10.0).abs() < 1e-3, "SDE base repair rate = 10.0 HP/s ({rate_5}, {rate_10}, {rate_20})");
 
-    // Shield booster (type 10838, carries SDE attr 1231 overloadShieldBonus) must also scale paste cost by volume, not attr 1231
+    // Shield booster (type 10838, carries SDE attr 1231 overloadShieldBonus) also uses 0.5 paste/HP (20 HP -> 10 paste)
     let mod_sb = 971_304;
     give_item(&ctx, mod_sb, 10838, char_id, ship_id, InventoryFlag::MedSlot0, 1);
     let sb_type = ctx.sde.types.get(&10838).unwrap();
     assert!(sb_type.default_attributes.contains_key(&1231), "Shield booster 10838 must carry attr 1231");
-    let sb_hp = sb_type.default_attributes.get(&9).copied().unwrap_or(40.0);
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.get_mut(&mod_sb).unwrap().dynamic_attributes.insert(3, sb_hp * 0.5);
+        snap.items.get_mut(&mod_sb).unwrap().dynamic_attributes.insert(3, 20.0);
     });
     let rep_sb = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_sb)], &kw, None).await.expect("Repair shield booster");
     let c_sb = rep_sb.dict_get("totalPasteRequired").and_then(|v| v.as_i64()).unwrap();
-    let expected_sb = ((0.5 * 4.0 * (sb_type.volume / 5.0).clamp(1.0, 250.0)) - 1e-9).ceil().max(1.0) as i64;
-    assert_eq!(c_sb, expected_sb, "Shield booster paste cost must derive from volume, not attr 1231");
+    assert_eq!(c_sb, 10, "Shield booster paste cost must use SDE 0.5 paste/HP (10 paste for 20 HP)");
     let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopModuleRepair", &[PyRep::Integer(mod_sb)], &kw, None).await;
 
     // Negative: duplicate InitiateModuleRepair on an already-repairing module rejected & preserves paste;
@@ -104,48 +102,48 @@ async fn test_b35_04_nanite_repair_paste_in_space() {
     assert!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Overload", &[PyRep::Integer(mod_5m3)], &kw, None).await.is_err(), "Cannot Overload module while undergoing nanite repair");
     assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_5m3), PyRep::Integer(ship_id), PyRep::Integer(5)], &kw, None).await.is_err(), "Cannot unfit module while undergoing nanite repair");
 
-    // 4. Step 3s mid-cycle and call StopModuleRepair on mod_20m3: partial repair committed & paste streamed incrementally!
+    // 4. Step 1s mid-cycle and call StopModuleRepair on mod_20m3: partial repair committed & paste streamed incrementally!
     let paste_before_step = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
-    let _ = sys.step_manual(3.0).await;
+    let _ = sys.step_manual(1.0).await;
     let paste_after_step = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
-    assert!(paste_after_step < paste_before_step && paste_after_step >= 500 - 10, "Paste must stream incrementally over ticks (not 100% upfront): before={paste_before_step}, after={paste_after_step}");
+    assert!(paste_after_step < paste_before_step && paste_after_step >= 500 - 15, "Paste must stream incrementally over ticks: before={paste_before_step}, after={paste_after_step}");
     let stop_res = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopModuleRepair", &[PyRep::Integer(mod_20m3)], &kw, None).await.expect("StopModuleRepair");
     let rem_dmg = stop_res.dict_get("remainingDamage").and_then(|v| v.as_f64()).unwrap();
     let refunded = stop_res.dict_get("pasteRefunded").and_then(|v| v.as_i64()).unwrap();
     let paste_after_stop = ctx.db.with_snapshot(|s| s.items.get(&paste_id).unwrap().quantity);
     let db_dmg_mid = ctx.db.with_snapshot(|s| s.items.get(&mod_20m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
-    assert!(rem_dmg > 10.0 && rem_dmg < 14.0, "3s at 2.68 HP/s must repair ~8.04 HP of 20 HP (remaining {rem_dmg})");
+    assert!((rem_dmg - 10.0).abs() < 1e-2, "1s at 10.0 HP/s must leave ~10.0 HP of 20.0 HP (remaining {rem_dmg})");
     assert!((db_dmg_mid - rem_dmg).abs() < 1e-3, "Partial repair must be persisted to item DAMAGE attribute");
     assert_eq!(paste_after_stop, paste_after_step + refunded as i32);
 
-    // Step remaining 32s -> mod_5m3 and mod_10m3 complete repair all the way to 0.0 DAMAGE!
-    let _ = sys.step_manual(32.0).await;
+    // Step remaining 5s -> mod_5m3 and mod_10m3 complete repair all the way to 0.0 DAMAGE!
+    let _ = sys.step_manual(5.0).await;
     let dmg_5_done = ctx.db.with_snapshot(|s| s.items.get(&mod_5m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     let dmg_10_done = ctx.db.with_snapshot(|s| s.items.get(&mod_10m3).unwrap().dynamic_attributes.get(&3).copied().unwrap_or(0.0));
     assert!(dmg_5_done <= 1e-6 && dmg_10_done <= 1e-6, "Stepped modules must finish repairing to 0.0 DAMAGE");
 
-    // 5. Thermodynamics V (28164), Nanite Operation V (28879) (-5%/lvl), and Nanite Interfacing V (28880) (+20%/lvl)
+    // 5. Thermodynamics V (28164) does NOT reduce paste cost; Nanite Operation V (28879) (-5%/lvl -> -25%), Nanite Interfacing V (28880) (+20%/lvl -> +100% rate = 20.0 HP/s)
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&mod_20m3).unwrap().dynamic_attributes.insert(3, 20.0);
     });
-    set_skill(&ctx, char_id, 28164, 5); // Thermodynamics V -> -25%
+    set_skill(&ctx, char_id, 28164, 5); // Thermodynamics V -> no paste reduction in SDE
     set_skill(&ctx, char_id, 28879, 0);
     let rep_thermo = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_20m3)], &kw, None).await.expect("Repair with Thermo V");
     let c_thermo = rep_thermo.dict_get("totalPasteRequired").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(c_thermo, 6, "Thermodynamics V (-25%) must reduce 8 paste to 6 paste");
+    assert_eq!(c_thermo, 10, "Thermodynamics V must NOT reduce Nanite Repair Paste cost (remains 10)");
     let _ = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "StopModuleRepair", &[PyRep::Integer(mod_20m3)], &kw, None).await;
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.get_mut(&mod_20m3).unwrap().dynamic_attributes.insert(3, 20.0);
     });
-    set_skill(&ctx, char_id, 28879, 5); // Nanite Operation V -> additional -25% (8 * 0.75 * 0.75 = 4.5 -> 5)
-    set_skill(&ctx, char_id, 28880, 5); // Nanite Interfacing V -> +100% rate (5.36 HP/s on 20 m³)
+    set_skill(&ctx, char_id, 28879, 5); // Nanite Operation V -> -25% (10 * 0.75 = 7.5 -> 8)
+    set_skill(&ctx, char_id, 28880, 5); // Nanite Interfacing V -> +100% rate (20.0 HP/s)
     let rep_all_v = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "InitiateModuleRepair", &[PyRep::Integer(mod_20m3)], &kw, None).await.expect("Repair with all V");
     let c_all_v = rep_all_v.dict_get("totalPasteRequired").and_then(|v| v.as_i64()).unwrap();
     let rate_v = rep_all_v.dict_get("repairRateHpPerSec").and_then(|v| v.as_f64()).unwrap();
-    assert!(c_all_v < c_thermo, "Nanite Operation V must further reduce paste cost ({c_all_v} < {c_thermo})");
-    assert!((rate_v - 5.36).abs() < 1e-2, "Nanite Interfacing V must double 20m³ repair rate to 5.36 HP/s (got {rate_v})");
-    let _ = sys.step_manual(20.0).await;
+    assert_eq!(c_all_v, 8, "Nanite Operation V (-25%) must reduce 10 paste to 8 paste");
+    assert!((rate_v - 20.0).abs() < 1e-2, "Nanite Interfacing V (+100%) must double repair rate to 20.0 HP/s (got {rate_v})");
+    let _ = sys.step_manual(5.0).await;
 
     // 6. Burned-out module (40.0 / 40.0 HP) IS repaired when docked at station OR tethered/at Upwell structure!
     ctx.db.with_mut_snapshot(|snap| {

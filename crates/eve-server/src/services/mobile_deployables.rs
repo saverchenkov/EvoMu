@@ -54,7 +54,7 @@ pub const MIN_CYNO_INHIBITOR_TO_INHIBITOR_DISTANCE_M: f64 = 200_000.0;
 pub const DEPOT_ANCHOR_TIME_SECS: u64 = 60;
 pub const DEPOT_REINFORCE_DURATION_SECS: u64 = 2 * 86_400; // 48 hours (2 days)
 pub const DEPOT_LIFETIME_SECS: u64 = 30 * 86_400; // 30 days
-pub const DEPOT_REINFORCE_SHIELD_THRESHOLD: f64 = 0.0; // 0% shield HP (<= 1e-6)
+pub const DEPOT_REINFORCE_SHIELD_THRESHOLD: f64 = 0.25; // 25% shield HP
 pub const MTU_LIFETIME_SECS: u64 = 2 * 86_400; // 2 days
 pub const MMJU_ACTIVATION_DELAY_SECS: u64 = 60; // 1 minute
 pub const MMJU_LIFETIME_SECS: u64 = 2 * 86_400; // 2 days
@@ -895,14 +895,10 @@ pub fn handle_ball_damage_in_actor(
                 }
             }
 
-            // Invulnerable during 60-second anchoring countdown
+            // During 60-second anchoring countdown or when unanchored: takes direct damage and can be destroyed without reinforcement
             let anchoring_until_unix = rec.anchor_start_unix.saturating_add(rec.anchor_duration_secs);
-            if !rec.is_unanchored && !rec.anchor_completed && rec.anchor_start_unix > 0 && anchoring_until_unix > now_unix {
-                return Some((0.0, false, ball_snap));
-            }
-
-            // Unanchored: takes direct damage, never reinforces
-            if rec.is_unanchored {
+            let is_anchoring = !rec.anchor_completed && rec.anchor_start_unix > 0 && anchoring_until_unix > now_unix;
+            if rec.is_unanchored || is_anchoring {
                 let (applied, destroyed) = cs.apply_damage(damage);
                 if destroyed {
                     ballpark.balls.remove(&ball_id);
@@ -910,7 +906,7 @@ pub fn handle_ball_damage_in_actor(
                 return Some((applied, destroyed, ball_snap));
             }
 
-            // Reinforcement threshold at 0% shield HP (`<= 1e-6`)
+            // Reinforcement threshold at 25% shield HP once anchored
             let shield_threshold = (cs.max_shield_hp * DEPOT_REINFORCE_SHIELD_THRESHOLD).max(0.0);
             if cs.shield_hp > shield_threshold + 1e-6 {
                 let damage_to_threshold = (cs.shield_hp - shield_threshold).max(0.0);

@@ -466,7 +466,7 @@ async fn b34_cyno_covert_cyno_portal_jammer_and_lance() {
     fit_mod(&ctx, &mut bane_sess, 84054, 74056, 77398, 27).await.expect("fit Disruptive Lance");
     fit_mod(&ctx, &mut bane_sess, 84054, 74057, 20280, 28).await.expect("fit Siege Module I");
     give_item(&ctx, 74058, 16275, 94054, 84054, InventoryFlag::Cargo, 500);
-    give_item(&ctx, 74059, 17888, 94054, 84054, InventoryFlag::Cargo, 50_000);
+    give_item(&ctx, 74059, 17889, 94054, 84054, InventoryFlag::Cargo, 50_000);
     bane_sess.station_id = None;
     spawn_in_space(&ctx, 94054, 84054, 77288, NULL_SYS, DVec3::ZERO).await;
     rpc(&ctx, &mut bane_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74057), PyRep::String("default".into())])
@@ -475,6 +475,6 @@ async fn b34_cyno_covert_cyno_portal_jammer_and_lance() {
     let lance = rpc(&ctx, &mut bane_sess, "dogmaIM", "Activate", vec![PyRep::Integer(74056), PyRep::String("default".into())])
         .await
         .expect("activate Disruptive Lance");
-    assert!((lance.dict_get("totalDamageApplied").and_then(|v| v.as_f64()).unwrap_or(0.0) - 25_500.0).abs() < 1.0);
-    assert_eq!(lance.dict_get("neutralizerAmountGJ").and_then(|v| v.as_f64()), Some(10_000.0));
+    assert!((lance.dict_get("totalDamageApplied").and_then(|v| v.as_f64()).unwrap_or(0.0) - 382_500.0).abs() < 1.0);
+    assert_eq!(lance.dict_get("neutralizerAmountGJ").and_then(|v| v.as_f64()), Some(31_000.0));
 }

@@ -825,15 +825,25 @@ pub fn handle_batch3_gm_slash_cmd(
         }
         "/campaign" if parts.get(1).is_some_and(|s| s.eq_ignore_ascii_case("enroll")) => {
             let campaign_id = parts.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(1);
+            let target_cid = parts.get(3).and_then(|s| s.parse::<i64>().ok()).unwrap_or(caller_cid);
             ctx.db.with_mut_snapshot(|snap| {
+                let mut enrollments: HashMap<i64, i64> = snap
+                    .service_state_blobs
+                    .get("login_campaign_enrollments")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                enrollments.insert(target_cid, campaign_id);
+                if let Ok(json) = serde_json::to_string(&enrollments) {
+                    snap.service_state_blobs.insert("login_campaign_enrollments".into(), json);
+                }
                 let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-                ext.active_login_campaign_id = Some(campaign_id);
-                ext.login_campaign_claimed_days.remove(&caller_cid);
+                ext.login_campaign_claimed_days.remove(&target_cid);
                 crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
             });
-            emit_campaign_enrollment_changed(ctx, caller_cid);
+            emit_campaign_enrollment_changed(ctx, target_cid);
             Some(Ok(PyRep::keyval([
                 ("campaignID", PyRep::Integer(campaign_id)),
+                ("characterID", PyRep::Integer(target_cid)),
                 ("enrolled", PyRep::Bool(true)),
             ])))
         }

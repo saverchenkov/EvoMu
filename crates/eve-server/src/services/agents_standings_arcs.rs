@@ -874,42 +874,61 @@ pub async fn handle_extended(
 
         ("agentMgr", "GetPlausibleMissionIDs") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let target_aid = args.first().and_then(|a| a.as_i64()).or_else(|| {
-                ctx.bound_objects.read().ok().and_then(|map| {
-                    map.values()
-                        .filter(|b| b.session_id == session.session_id && b.service == "agentMgr" && b.object_id > 0)
-                        .max_by_key(|b| b.bound_id)
-                        .map(|b| b.object_id)
-                })
-            });
-            let mut plausible: Vec<u32> = Vec::new();
-            if let Some(aid) = target_aid {
-                if let Some(_agent) = ctx.sde.agents.get(&aid) {
-                    for mid in ctx.sde.missions.keys().take(25) {
-                        plausible.push(*mid);
-                    }
-                }
-            } else {
-                let active_aids = ctx.db.with_snapshot(|snap| {
-                    snap.active_missions.iter()
-                        .filter(|((cid, _), _)| *cid == char_id)
-                        .map(|(_, m)| m.agent_id)
-                        .collect::<Vec<_>>()
+            let explicit_aid = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+            let target_aid = explicit_aid
+                .or_else(|| {
+                    ctx.bound_objects.read().ok().and_then(|map| {
+                        map.values()
+                            .filter(|b| b.session_id == session.session_id && b.service == "agentMgr" && b.object_id > 0)
+                            .max_by_key(|b| b.bound_id)
+                            .map(|b| b.object_id)
+                    })
                 });
-                for aid in active_aids {
-                    if let Some(_agent) = ctx.sde.agents.get(&aid) {
-                        for mid in ctx.sde.missions.keys().take(25) {
-                            plausible.push(*mid);
+            let mut agent_ids: Vec<i64> = Vec::new();
+            if let Some(aid) = target_aid {
+                if !ctx.sde.agents.contains_key(&aid) {
+                    return Some(Err(BridgeRpcError {
+                        code: "AgentNotFound".into(),
+                        message: format!("Agent {aid} not found in SDE"),
+                    }));
+                }
+                agent_ids.push(aid);
+            } else {
+                ctx.db.with_snapshot(|snap| {
+                    for ((cid, _), m) in &snap.active_missions {
+                        if *cid == char_id && m.agent_id > 0 {
+                            agent_ids.push(m.agent_id);
                         }
                     }
-                    if plausible.len() >= 25 { break; }
-                }
-                if plausible.is_empty() {
-                    for mid in ctx.sde.missions.keys().take(15) { plausible.push(*mid); }
+                });
+                agent_ids.sort_unstable();
+                agent_ids.dedup();
+            }
+            let mut plausible: Vec<u32> = Vec::new();
+            for aid in agent_ids {
+                if let Some(agent) = ctx.sde.agents.get(&aid) {
+                    let is_heraldry = agent.agent_type_id == 13 || agent.division_id == 37;
+                    let mut matching: Vec<u32> = ctx
+                        .sde
+                        .missions
+                        .values()
+                        .filter(|m| {
+                            if is_heraldry {
+                                m.content_template.as_deref().unwrap_or_default().contains("Heraldry")
+                            } else {
+                                crate::services::agents_missions::agents_missions_helpers::mission_matches_agent_pool(m, agent)
+                            }
+                        })
+                        .map(|m| m.mission_id)
+                        .collect();
+                    matching.sort_unstable();
+                    matching.truncate(25);
+                    plausible.extend(matching);
                 }
             }
             plausible.sort_unstable();
             plausible.dedup();
+            plausible.truncate(25);
             Some(Ok(PyRep::List(plausible.into_iter().map(|m| PyRep::Integer(m as i64)).collect())))
         }
 

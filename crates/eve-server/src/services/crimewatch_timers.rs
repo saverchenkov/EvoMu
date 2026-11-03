@@ -526,9 +526,33 @@ pub fn is_new_pvp_aggression(ctx: &ServerContext, attacker_char_id: i64, victim_
         .unwrap_or(true)
 }
 
+pub fn on_weapon_aggression_post_hook(
+    ctx: &ServerContext,
+    attacker_char_id: i64,
+    victim_char_opt: Option<i64>,
+    sys_id: u32,
+    now_unix: u64,
+) {
+    if victim_char_opt.is_none() {
+        with_mut_combat_runtime(ctx, |rt| rt.trigger_npc_timer(attacker_char_id, now_unix));
+    } else if sys_id == 30_100_000 {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.disapproval_flags.insert(attacker_char_id, now_unix.saturating_add(900));
+        });
+    }
+    emit_crimewatch_timer_notifications(ctx, attacker_char_id, now_unix);
+}
+
 pub fn record_illegal_pvp_penalties_if_new(
     ctx: &ServerContext, attacker_char_id: i64, victim_char_id: i64, sys_id: u32, sys_sec: f64, is_pod: bool, is_new_agg: bool, now_unix: u64,
 ) {
+    if sys_id == 30_100_000 {
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.disapproval_flags.insert(attacker_char_id, now_unix.saturating_add(900));
+        });
+        emit_crimewatch_timer_notifications(ctx, attacker_char_id, now_unix);
+        return;
+    }
     if !is_new_agg || sys_sec <= 0.0 {
         return;
     }

@@ -384,8 +384,14 @@ async fn test_shipcaster_and_starter_travel_closure() {
             });
             cid
         });
-        let launched = rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::List(vec![PyRep::Integer(cid)]), PyRep::Real(pos.x), PyRep::Real(pos.y), PyRep::Real(pos.z)]).await.expect("LaunchForSelf");
-        let pad_id = match launched { PyRep::List(v) => kv_i64(&v[0], "itemID"), _ => 0 };
+        let dropped = rpc(&ctx, &mut sess, "ship", "Drop", &[PyRep::List(vec![PyRep::Integer(cid)]), PyRep::Integer(char_id), PyRep::Bool(false)]).await.expect("Drop");
+        let pad_id = match dropped {
+            PyRep::Dict(v) => v.into_iter().find_map(|(k, val)| match (k, val) {
+                (PyRep::Integer(ik), PyRep::List(ids)) if ik == cid => ids.first().and_then(|x| x.as_i64()),
+                _ => None,
+            }).unwrap_or(0),
+            _ => 0,
+        };
         let reqs = eve_server::services::cluster_macho_misc_services::with_misc_state(&ctx, |st| {
             st.landing_pads.iter().find(|p| p.item_id == pad_id).map(|p| p.required_materials.clone()).unwrap_or_default()
         });

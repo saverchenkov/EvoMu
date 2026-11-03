@@ -368,6 +368,7 @@ async fn test_so5_scanning_dscan_probes_and_acceleration_gates() {
     assert_eq!(wh_full["signalStrength"], PyRep::Real(1.0));
     assert_eq!(wh_full["deviation"], PyRep::Real(0.0));
 
+    ctx.advance_secs(15);
     let scan_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(scan_notifs.iter().any(|n| n.event == "OnSystemScanStarted"), "RequestScans must emit OnSystemScanStarted");
     assert!(scan_notifs.iter().any(|n| n.event == "OnSystemScanStopped"), "RequestScans must emit OnSystemScanStopped");

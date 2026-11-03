@@ -214,26 +214,56 @@ pub async fn handle(
 
         ("cache", "Rowset") => {
             let table_name = args.first().and_then(|a| a.as_str()).unwrap_or("roles");
-            let (columns, rows) = if table_name == "roles" {
-                (
-                    vec!["roleID".into(), "roleName".into()],
-                    vec![
-                        vec![PyRep::Integer(1), PyRep::String("Director".into())],
-                        vec![PyRep::Integer(1 << 7), PyRep::String("Personnel Manager".into())],
-                        vec![PyRep::Integer(1 << 8), PyRep::String("Accountant".into())],
-                        vec![PyRep::Integer(1 << 9), PyRep::String("Security Officer".into())],
-                        vec![PyRep::Integer(1 << 10), PyRep::String("Factory Manager".into())],
-                        vec![PyRep::Integer(1 << 11), PyRep::String("Station Manager".into())],
-                        vec![PyRep::Integer(1 << 12), PyRep::String("Auditor".into())],
-                    ],
-                )
-            } else {
-                (
-                    vec!["roleID".into(), "roleName".into()],
-                    vec![vec![PyRep::Integer(1), PyRep::String("DefaultRole".into())]],
-                )
+            let rowset = match table_name {
+                "roles" => {
+                    let roles: &[(i64, &str)] = &[
+                        (1 << 0, "Director"), (1 << 6, "Project Manager"), (1 << 7, "Personnel Manager"),
+                        (1 << 8, "Accountant"), (1 << 9, "Security Officer"), (1 << 10, "Factory Manager"),
+                        (1 << 11, "Station Manager"), (1 << 12, "Auditor"), (1 << 13, "Hangar Can Take 1"),
+                        (1 << 14, "Hangar Can Take 2"), (1 << 15, "Hangar Can Take 3"), (1 << 16, "Hangar Can Take 4"),
+                        (1 << 17, "Hangar Can Take 5"), (1 << 18, "Hangar Can Take 6"), (1 << 19, "Hangar Can Take 7"),
+                        (1 << 20, "Trader"), (1 << 21, "Hangar Can Query 1"), (1 << 22, "Hangar Can Query 2"),
+                        (1 << 23, "Hangar Can Query 3"), (1 << 24, "Hangar Can Query 4"), (1 << 25, "Hangar Can Query 5"),
+                        (1 << 26, "Hangar Can Query 6"), (1 << 27, "Account Can Take 1"), (1 << 28, "Account Can Take 2"),
+                        (1 << 29, "Account Can Take 3"), (1 << 30, "Account Can Take 4"), (1 << 31, "Account Can Take 5"),
+                        (1 << 32, "Account Can Take 6"), (1 << 33, "Account Can Take 7"), (1 << 34, "Diplomat"),
+                        (1 << 35, "Infrastructure Tactician"), (1 << 36, "Starbase Caretaker"), (1 << 37, "Fitting Manager"),
+                        (1 << 38, "Terrestrial Combat Officer"), (1 << 39, "Terrestrial Logistics Officer"),
+                        (1 << 40, "Starbase Config"), (1 << 41, "Equipment Config"), (1 << 42, "Brand Manager"),
+                        (1 << 43, "Skill Plan Manager"), (1 << 49, "Rent Office"), (1 << 50, "Rent Factory Facility"),
+                        (1 << 51, "Rent Research Facility"), (1 << 52, "Junior Accountant"), (1 << 53, "Starbase Configurator"),
+                        (1 << 54, "Chat Manager"), (1 << 56, "Contract Manager"),
+                    ];
+                    let rows = roles.iter().map(|&(id, name)| vec![PyRep::Integer(id), PyRep::String((*name).into())]).collect();
+                    PyRep::Rowset { columns: vec!["roleID".into(), "roleName".into()], rows }
+                }
+                "races" => {
+                    let mut ids: Vec<u32> = ctx.sde.races.keys().copied().collect();
+                    ids.sort_unstable();
+                    let rows = ids.into_iter().filter_map(|id| ctx.sde.races.get(&id).map(|r| vec![PyRep::Integer(i64::from(r.race_id)), PyRep::String(r.name.clone())])).collect();
+                    PyRep::Rowset { columns: vec!["raceID".into(), "raceName".into()], rows }
+                }
+                "factions" => {
+                    let mut ids: Vec<u32> = ctx.sde.factions.keys().copied().collect();
+                    ids.sort_unstable();
+                    let rows = ids.into_iter().filter_map(|id| ctx.sde.factions.get(&id).map(|f| vec![PyRep::Integer(i64::from(f.faction_id)), PyRep::String(f.name.clone())])).collect();
+                    PyRep::Rowset { columns: vec!["factionID".into(), "factionName".into()], rows }
+                }
+                "bloodlines" => {
+                    let mut ids: Vec<u32> = ctx.sde.bloodlines.keys().copied().collect();
+                    ids.sort_unstable();
+                    let rows = ids.into_iter().filter_map(|id| ctx.sde.bloodlines.get(&id).map(|b| vec![PyRep::Integer(i64::from(b.bloodline_id)), PyRep::String(b.name.clone()), PyRep::Integer(i64::from(b.race_id))])).collect();
+                    PyRep::Rowset { columns: vec!["bloodlineID".into(), "bloodlineName".into(), "raceID".into()], rows }
+                }
+                "ancestries" => {
+                    let mut ids: Vec<u32> = ctx.sde.ancestries.keys().copied().collect();
+                    ids.sort_unstable();
+                    let rows = ids.into_iter().filter_map(|id| ctx.sde.ancestries.get(&id).map(|a| vec![PyRep::Integer(i64::from(a.ancestry_id)), PyRep::String(a.name.clone()), PyRep::Integer(i64::from(a.bloodline_id))])).collect();
+                    PyRep::Rowset { columns: vec!["ancestryID".into(), "ancestryName".into(), "bloodlineID".into()], rows }
+                }
+                _ => return Some(Err(BridgeRpcError::user_error("UnknownCacheRowset"))),
             };
-            Some(Ok(PyRep::Rowset { columns, rows }))
+            Some(Ok(rowset))
         }
 
         ("cache", "Setting") => {

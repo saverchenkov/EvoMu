@@ -376,12 +376,19 @@ pub fn sync_stage_gated_insurgency_sites_in_snap(
         .collect();
 
     if let Some(&(pirate_fac, fob_sys)) = covering.first() {
+        let beacon_pos = {
+            let celestials = sde.celestials_in_system(sys_id);
+            if let Some(c) = celestials.first() {
+                [c.position.x + 250_000.0, c.position.y, c.position.z - 150_000.0]
+            } else {
+                [250_000.0, 0.0, -150_000.0]
+            }
+        };
         let c_st = {
             let st = snap.system_states.entry(sys_id).or_default();
             st.solar_system_id = sys_id;
             if st.fw_complex_position.is_none() {
-                // DERIVED (synthetic): baseline warzone complex capture beacon coordinates at grid origin.
-                st.fw_complex_position = Some([0.0, 0.0, 0.0]);
+                st.fw_complex_position = Some(beacon_pos);
             }
             st.insurgency_corruption_stage
         };

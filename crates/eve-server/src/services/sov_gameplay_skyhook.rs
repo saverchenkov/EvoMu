@@ -137,7 +137,10 @@ pub fn advance_skyhook_reagents_in_snap(
         }
     }
     if harvested_now > 0 {
-        insecure_qty = insecure_qty.saturating_add(harvested_now);
+        let to_secure = harvested_now / 2;
+        let to_surplus = harvested_now - to_secure;
+        secure_qty = secure_qty.saturating_add(to_secure);
+        insecure_qty = insecure_qty.saturating_add(to_surplus);
         batch_qty = insecure_qty;
     }
     last_ts = now_unix;

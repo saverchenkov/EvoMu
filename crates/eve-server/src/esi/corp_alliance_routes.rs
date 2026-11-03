@@ -415,9 +415,8 @@ pub fn dispatch_corp_alliance_route(
                 let mut out = Vec::new();
                 for cid in member_ids {
                     let assigned = snap.corp_role_assignments.get(&(corp_id, cid));
-                    let roles_mask = assigned
-                        .map(|a| a.roles)
-                        .unwrap_or_else(|| corp.member_roles.get(&cid).copied().unwrap_or(0));
+                    let roles_mask = assigned.map_or(0, |a| a.roles)
+                        | corp.member_roles.get(&cid).copied().unwrap_or(0);
                     let grantable_mask = assigned.map(|a| a.grantable_roles).unwrap_or(0);
                     let hq_mask = assigned.map(|a| a.roles_at_hq).unwrap_or(0);
                     let grantable_hq_mask = assigned.map(|a| a.grantable_roles_at_hq).unwrap_or(0);
@@ -684,12 +683,22 @@ pub fn dispatch_corp_alliance_route(
                         if let Some(&(ws, we)) =
                             snap.structure_vulnerability_windows.get(&s.structure_id)
                         {
-                            let reinforce_hour = ((ws / 3600) % 24) as i64;
+                            let reinforce_hour = if ws < 24 {
+                                ws as i64
+                            } else {
+                                ((ws / 3600) % 24) as i64
+                            };
                             obj["reinforce_hour"] = json!(reinforce_hour);
                             if we > 0 {
                                 let next_reinforce_hour = timer_meta
                                     .and_then(|m| m.next_reinforce_hour)
-                                    .unwrap_or(((we / 3600) % 24) as i64);
+                                    .unwrap_or_else(|| {
+                                        if we < 24 {
+                                            we as i64
+                                        } else {
+                                            ((we / 3600) % 24) as i64
+                                        }
+                                    });
                                 let next_apply = timer_meta
                                     .and_then(|m| m.next_reinforce_apply_unix)
                                     .unwrap_or(we);

@@ -103,6 +103,76 @@ pub fn cancel_user_payment_schedule(
     removed
 }
 
+pub fn process_due_payment_schedules(
+    db: &WorldRepository,
+    router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    now_unix: u64,
+) {
+    let failed_scheds: Vec<(u64, u64)> = db.with_mut_snapshot(|snap| {
+        let mut scheds: Vec<PaymentScheduleRecord> = snap
+            .service_state_blobs
+            .get("payment_schedules")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        if !scheds.iter().any(|s| s.next_payment_unix > 0 && s.next_payment_unix <= now_unix) {
+            return Vec::new();
+        }
+        let tokens: Vec<PaymentTokenRecord> = snap
+            .service_state_blobs
+            .get("payment_tokens")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let mut failed = Vec::new();
+        scheds.retain_mut(|s| {
+            if s.next_payment_unix == 0 || s.next_payment_unix > now_unix {
+                return true;
+            }
+            if tokens.iter().any(|t| t.user_id == s.user_id && t.is_quick_pay && !t.consumed) {
+                s.next_payment_unix = now_unix + u64::from(s.interval_days.max(1)) * 86_400;
+                true
+            } else {
+                failed.push((s.user_id, s.id));
+                false
+            }
+        });
+        if let Ok(serialized) = serde_json::to_string(&scheds) {
+            snap.service_state_blobs
+                .insert("payment_schedules".to_string(), serialized);
+        }
+        failed
+    });
+
+    if !failed_scheds.is_empty() {
+        let _ = router_notices;
+        for (uid, sched_id) in failed_scheds {
+            let mut notice_bytes = Vec::new();
+            let mut sched_ident = Vec::new();
+            encode_varint_field(1, sched_id, &mut sched_ident);
+            encode_bytes_field(1, &sched_ident, &mut notice_bytes);
+            crate::services::quasar_social_chat::ctx_queue_notice(
+                NoticeScope::User(uid as i32),
+                GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.PaymentFailedNotice"
+                    ),
+                    value: notice_bytes.clone(),
+                },
+                now_unix,
+            );
+            crate::services::quasar_social_chat::ctx_queue_notice(
+                NoticeScope::User(uid as i32),
+                GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
+                    ),
+                    value: notice_bytes,
+                },
+                now_unix,
+            );
+        }
+    }
+}
+
 pub fn upsert_user_payment_schedule_in_snapshot(
     snap: &mut eve_db::WorldStateSnapshot,
     uid: u64,

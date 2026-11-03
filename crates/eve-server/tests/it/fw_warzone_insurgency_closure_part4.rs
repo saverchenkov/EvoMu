@@ -91,12 +91,16 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
 
     // Give Empire pilot 1 pulse of Suppression contribution on `front_sys` before Pirate corrupts 5 systems to Stage 5.
+    let front_beacon = DVec3::from_array(ctx.db.with_snapshot(|s| s.system_states[&front_sys].fw_complex_position.expect("insurgency beacon spawned")));
     let front_h = ctx.systems.get_or_spawn(front_sys);
-    let _ = front_h.spawn_ball(make_ball(pir_ship, 621, DVec3::new(90_000.0, 0.0, 0.0))).await;
-    let _ = front_h.spawn_ball(make_ball(emp_ship, 639, DVec3::ZERO)).await;
+    let _ = front_h.remove_ball(pir_ship).await;
+    let _ = front_h.remove_ball(emp_ship).await;
+    let _ = front_h.spawn_ball(make_ball(pir_ship, 621, front_beacon + DVec3::new(90_000.0, 0.0, 0.0))).await;
+    let _ = front_h.spawn_ball(make_ball(emp_ship, 639, front_beacon)).await;
     front_h.step_manual(60.0).await.unwrap();
     eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
-    let _ = front_h.spawn_ball(make_ball(emp_ship, 639, DVec3::new(90_000.0, 0.0, 0.0))).await;
+    let _ = front_h.remove_ball(emp_ship).await;
+    let _ = front_h.spawn_ball(make_ball(emp_ship, 639, front_beacon + DVec3::new(90_000.0, 0.0, 0.0))).await;
 
     let emp_lp0 = ctx.db.with_snapshot(|s| s.characters[&emp_cid].loyalty_points.get(&1_000_180).copied().unwrap_or(0));
     let pir_lp0: i64 = ctx.db.with_snapshot(|s| s.characters[&pir_cid].loyalty_points.values().sum());
@@ -105,14 +109,18 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     // Corrupt 5 campaign systems to Stage 5 via live 60s destiny pulses (Stage 3 on `front_sys` spreads the 5th stargate-connected system!).
     for idx in 0..5usize {
-        let target_sys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp1].systems[idx]);
+        let (target_sys, target_beacon) = ctx.db.with_snapshot(|s| (
+            s.insurgency_runtime.campaigns[&camp1].systems[idx],
+            s.system_states[&s.insurgency_runtime.campaigns[&camp1].systems[idx]].fw_complex_position.expect("insurgency beacon spawned"),
+        ));
         s_pir.solar_system_id = Some(target_sys);
         ctx.db.with_mut_snapshot(|s| {
             s.characters.get_mut(&pir_cid).unwrap().solar_system_id = target_sys;
             s.items.get_mut(&pir_ship).unwrap().location_id = target_sys as i64;
         });
         let sys_h = ctx.systems.get_or_spawn(target_sys);
-        let _ = sys_h.spawn_ball(make_ball(pir_ship, 621, DVec3::ZERO)).await;
+        let _ = sys_h.remove_ball(pir_ship).await;
+        let _ = sys_h.spawn_ball(make_ball(pir_ship, 621, DVec3::from_array(target_beacon))).await;
         for _ in 0..5 {
             sys_h.step_manual(60.0).await.unwrap();
             eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -200,15 +208,16 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
     );
 
     // Verify Suppression Stage 3 and Stage 5 do NOT spread insurgency, AND Stage 5 Suppression blocks Corruption Stage 3 spread!
-    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(pir_ship, 621, DVec3::new(90_000.0, 0.0, 0.0))).await;
+    let _ = ctx.systems.get_or_spawn(front_sys).spawn_ball(make_ball(pir_ship, 621, front_beacon + DVec3::new(90_000.0, 0.0, 0.0))).await;
     let first_sys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[0]);
     s_emp.solar_system_id = Some(first_sys);
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&emp_cid).unwrap().solar_system_id = first_sys;
         s.items.get_mut(&emp_ship).unwrap().location_id = first_sys as i64;
     });
+    let first_beacon = DVec3::from_array(ctx.db.with_snapshot(|s| s.system_states[&first_sys].fw_complex_position.expect("insurgency beacon spawned")));
     let sh0 = ctx.systems.get_or_spawn(first_sys);
-    let _ = sh0.spawn_ball(make_ball(emp_ship, 19_722, DVec3::ZERO)).await;
+    let _ = sh0.spawn_ball(make_ball(emp_ship, 19_722, first_beacon)).await;
     for _ in 0..5 {
         sh0.step_manual(60.0).await.unwrap();
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -222,7 +231,7 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
         s.characters.get_mut(&pir_cid).unwrap().solar_system_id = first_sys;
         s.items.get_mut(&pir_ship).unwrap().location_id = first_sys as i64;
     });
-    let _ = sh0.spawn_ball(make_ball(pir_ship, 621, DVec3::ZERO)).await;
+    let _ = sh0.spawn_ball(make_ball(pir_ship, 621, first_beacon)).await;
     for _ in 0..3 {
         sh0.step_manual(60.0).await.unwrap();
         eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -232,14 +241,17 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     // Spread `camp2` to 5th and 6th systems via Corruption Stage 3 on unsuppressed `systems[1]` and `systems[2]`.
     for idx in 1..=2usize {
-        let csys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[idx]);
+        let (csys, c_beacon) = ctx.db.with_snapshot(|s| (
+            s.insurgency_runtime.campaigns[&camp2].systems[idx],
+            s.system_states[&s.insurgency_runtime.campaigns[&camp2].systems[idx]].fw_complex_position.expect("insurgency beacon spawned"),
+        ));
         s_pir.solar_system_id = Some(csys);
         ctx.db.with_mut_snapshot(|s| {
             s.characters.get_mut(&pir_cid).unwrap().solar_system_id = csys;
             s.items.get_mut(&pir_ship).unwrap().location_id = csys as i64;
         });
         let sh = ctx.systems.get_or_spawn(csys);
-        let _ = sh.spawn_ball(make_ball(pir_ship, 621, DVec3::ZERO)).await;
+        let _ = sh.spawn_ball(make_ball(pir_ship, 621, DVec3::from_array(c_beacon))).await;
         for _ in 0..3 {
             sh.step_manual(60.0).await.unwrap();
             eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
@@ -250,14 +262,17 @@ async fn test_pirate_fob_docking_siege_ambition_surrender_ihub_and_payouts() {
 
     // Suppress `systems[1..5]` to Stage 5 (making 5 Stage-5-suppressed systems total) and pulse `systems[5]` 3 times to 600 pts!
     for idx in 1..6usize {
-        let tsys = ctx.db.with_snapshot(|s| s.insurgency_runtime.campaigns[&camp2].systems[idx]);
+        let (tsys, t_beacon) = ctx.db.with_snapshot(|s| (
+            s.insurgency_runtime.campaigns[&camp2].systems[idx],
+            s.system_states[&s.insurgency_runtime.campaigns[&camp2].systems[idx]].fw_complex_position.expect("insurgency beacon spawned"),
+        ));
         s_emp.solar_system_id = Some(tsys);
         ctx.db.with_mut_snapshot(|s| {
             s.characters.get_mut(&emp_cid).unwrap().solar_system_id = tsys;
             s.items.get_mut(&emp_ship).unwrap().location_id = tsys as i64;
         });
         let sh = ctx.systems.get_or_spawn(tsys);
-        let _ = sh.spawn_ball(make_ball(emp_ship, 19_722, DVec3::ZERO)).await;
+        let _ = sh.spawn_ball(make_ball(emp_ship, 19_722, DVec3::from_array(t_beacon))).await;
         let pulses = if idx < 5 { 5 } else { 3 };
         for _ in 0..pulses {
             sh.step_manual(60.0).await.unwrap();

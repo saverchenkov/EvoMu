@@ -384,12 +384,13 @@ pub async fn activate_scan_probe_launcher(
     }
 
     let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt);
+    let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add((max_flight_time_s.round() as i64).saturating_mul(10_000_000));
+    let pos_tuple = PyRep::Tuple(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)]);
     for &pid in &allocated_probe_ids {
         let probe_kv = PyRep::keyval([
-            ("probeID", PyRep::Integer(pid)),
-            ("typeID", PyRep::Integer(probe_type_id as i64)),
-            ("scanRange", PyRep::Real(scan_range_m)),
-            ("expiry", PyRep::Integer(now_unix as i64 + max_flight_time_s as i64)),
+            ("probeID", PyRep::Integer(pid)), ("typeID", PyRep::Integer(probe_type_id as i64)),
+            ("scanRange", PyRep::Real(scan_range_m)), ("expiry", PyRep::Integer(expiry_ft)),
+            ("pos", pos_tuple.clone()), ("destination", pos_tuple.clone()), ("state", PyRep::Integer(1)),
         ]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
     }
@@ -743,52 +744,42 @@ async fn handle_request_scans(
     }
 
     let warp_ft = ctx.now_blueos_filetime_ticks();
-    let warp_end_ft = warp_ft + 10_000_000;
+    let mut max_warp_end_ft = warp_ft;
     for (pid, new_pos) in moved_balls {
         if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(pid).await {
             let old_pos = b.position;
+            let dist = (old_pos - new_pos).length();
             b.position = new_pos;
             let _ = sys_handle.spawn_ball(b).await;
-            if (old_pos - new_pos).length_squared() > 1.0 {
+            if dist > 1.0 {
+                let p_tid = ctx.active_scanner_probes.read().ok().and_then(|m| m.get(&pid).map(|p| p.probe_type_id)).unwrap_or(30_013);
+                let warp_au: f64 = ctx.sde.types.get(&p_tid).and_then(|t| t.default_attributes.get(&600).copied()).unwrap_or(20.0).max(1.0);
+                let warp_ms = if dist > 250_000.0 { ((dist / (warp_au * AU_IN_METERS)) * 1000.0).round().clamp(500.0, 60_000.0) as i64 } else { ((dist / 1_000.0) * 1000.0).round().clamp(200.0, 5_000.0) as i64 };
+                let p_end_ft = warp_ft + warp_ms * 10_000;
+                max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
                 let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
                 let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
-                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(1000)]);
+                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(2)]);
+                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(warp_ms)]);
                 if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-                    if let Some(p) = probe_map.get_mut(&pid) {
-                        p.warp_end_ft = Some(warp_end_ft);
-                    }
+                    if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = 2; }
                 }
             }
         }
     }
 
-    let active_probes: Vec<crate::router::ActiveScannerProbe> = ctx
-        .active_scanner_probes
-        .read()
-        .ok()
-        .map(|map| {
-            map.values()
-                .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0)
-                .cloned()
-                .collect()
-        })
+    let active_probes: Vec<crate::router::ActiveScannerProbe> = ctx.active_scanner_probes.read().ok()
+        .map(|map| map.values().filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0).cloned().collect())
         .unwrap_or_default();
-
     if active_probes.is_empty() {
-        return Some(Err(BridgeRpcError {
-            code: "NoActiveProbes".into(),
-            message: "No active scanner probes in space".into(),
-        }));
+        return Some(Err(BridgeRpcError { code: "NoActiveProbes".into(), message: "No active scanner probes in space".into() }));
     }
     let balls = sys_handle.list_balls().await.unwrap_or_default();
-    let inhibitor_positions =
-        crate::services::space_destiny::space_cyno_filaments::active_scan_inhibitor_positions(ctx, sys_id, &balls);
+    let inhibitor_positions = crate::services::space_destiny::space_cyno_filaments::active_scan_inhibitor_positions(ctx, sys_id, &balls);
     let caller_ship_id = session.ship_id.or_else(|| active_probes.first().map(|p| p.ship_id));
-    if let Some(csid) = caller_ship_id {
-        if let Some(cb) = balls.iter().find(|b| b.id == csid) {
-            if inhibitor_positions.iter().any(|pos| cb.position.distance(*pos) <= 30_000.0) {
-                return Some(Ok(PyRep::List(Vec::new())));
-            }
+    if let Some(cb) = caller_ship_id.and_then(|csid| balls.iter().find(|b| b.id == csid)) {
+        if inhibitor_positions.iter().any(|pos| cb.position.distance(*pos) <= 30_000.0) {
+            return Some(Ok(PyRep::List(Vec::new())));
         }
     }
 
@@ -1087,10 +1078,21 @@ async fn handle_request_scans(
 
     let scan_probe_ids: Vec<PyRep> = active_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
     let idle_probes: Vec<PyRep> = active_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
-    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(ctx.now_blueos_filetime_ticks()), PyRep::Integer(4000), PyRep::List(scan_probe_ids.clone())]);
-    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows.clone()), PyRep::List(Vec::new())]);
-    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
-
+    let astro_lvl: f64 = ctx.db.with_snapshot(|s| s.skills.get(&char_id).and_then(|m| m.get(&3412)).map(|sk| sk.level).unwrap_or(0)).min(5) as f64;
+    let scan_ms = (10_000.0 * (1.0 - 0.05 * astro_lvl)).round().max(2_000.0) as i64;
+    let scan_end_ft = max_warp_end_ft + scan_ms * 10_000;
+    if max_warp_end_ft == warp_ft {
+        for p in &active_probes {
+            let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(3)]);
+        }
+    }
+    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStarted", "charid", vec![PyRep::Integer(max_warp_end_ft), PyRep::Integer(scan_ms), PyRep::List(scan_probe_ids.clone())]);
+    let p_ids: Vec<i64> = active_probes.iter().map(|p| p.probe_id).collect();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut pending: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+        pending.push((char_id, p_ids, scan_probe_ids, rows.clone(), idle_probes, scan_end_ft));
+        if let Ok(js) = serde_json::to_string(&pending) { snap.service_state_blobs.insert("pending_probe_scans".into(), js); }
+    });
     Some(Ok(PyRep::List(rows)))
 }
 
@@ -1269,43 +1271,32 @@ async fn handle_recover_probes(
     let count = recovered_probes.len() as i32;
 
     let rec_ids: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
+    for p in &recovered_probes {
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(p.probe_id), PyRep::Integer(4)]);
+    }
     if count > 0 {
         let idle_kvs: Vec<PyRep> = recovered_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_kvs)]);
     }
     Some(Ok(PyRep::keyval([
-        ("recoveredProbeIDs", PyRep::List(rec_ids)),
-        ("recoveredCount", PyRep::Integer(count as i64)),
-        ("returnedToLauncher", PyRep::Integer(to_launcher as i64)),
-        ("returnedToCargo", PyRep::Integer(to_cargo as i64)),
+        ("recoveredProbeIDs", PyRep::List(rec_ids)), ("recoveredCount", PyRep::Integer(count as i64)),
+        ("returnedToLauncher", PyRep::Integer(to_launcher as i64)), ("returnedToCargo", PyRep::Integer(to_cargo as i64)),
         ("expiredReturnedToCargoProbeIDs", PyRep::List(auto_returned.into_iter().map(PyRep::Integer).collect())),
         ("expiredLostProbeIDs", PyRep::List(expired_lost.into_iter().map(PyRep::Integer).collect())),
     ])))
 }
 
-async fn handle_reconnect_probes(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
+async fn handle_reconnect_probes(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
-    let now_unix = ctx.now_unix();
-    let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
+    let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, ctx.now_unix()).await;
     let ship_id = session.ship_id.unwrap_or(0);
-
     let mut reconnected_ids = Vec::new();
     if let Ok(mut map) = ctx.active_scanner_probes.write() {
         for p in map.values_mut() {
-            let is_disconnected = p.state == 0 || (ship_id != 0 && p.ship_id != ship_id && p.state > 0);
-            if p.owner_char_id == char_id && p.solar_system_id == sys_id && is_disconnected {
+            if p.owner_char_id == char_id && p.solar_system_id == sys_id && (p.state == 0 || (ship_id != 0 && p.ship_id != ship_id && p.state > 0)) {
                 p.state = 1;
-                if ship_id != 0 {
-                    p.ship_id = ship_id;
-                }
+                if ship_id != 0 { p.ship_id = ship_id; }
                 reconnected_ids.push(p.probe_id);
             }
         }
@@ -1314,44 +1305,22 @@ async fn handle_reconnect_probes(
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(1)]);
     }
     let count = reconnected_ids.len() as i64;
-    let reconnected: Vec<PyRep> = reconnected_ids.into_iter().map(PyRep::Integer).collect();
     Some(Ok(PyRep::keyval([
-        ("reconnectedProbeIDs", PyRep::List(reconnected)),
+        ("reconnectedProbeIDs", PyRep::List(reconnected_ids.into_iter().map(PyRep::Integer).collect())),
         ("reconnectedCount", PyRep::Integer(count)),
         ("expiredReturnedToCargoProbeIDs", PyRep::List(auto_returned.into_iter().map(PyRep::Integer).collect())),
         ("expiredLostProbeIDs", PyRep::List(expired_lost.into_iter().map(PyRep::Integer).collect())),
     ])))
 }
 
-async fn handle_destroy_probe(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, char_id) = match ServerContext::require_character(session) {
-        Ok(v) => v,
-        Err(e) => return Some(Err(e)),
-    };
+async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, bound_entry: Option<&BoundObjectEntry>, args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
     let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
     let target_pid = args.first().and_then(|a| a.as_i64());
-
-    let destroyed_probes: Vec<crate::router::ActiveScannerProbe> =
-        if let Ok(mut map) = ctx.active_scanner_probes.write() {
-            let ids: Vec<i64> = map
-                .values()
-                .filter(|p| {
-                    p.owner_char_id == char_id
-                        && p.state >= 0
-                        && (target_pid.is_none() || target_pid == Some(p.probe_id))
-                })
-                .map(|p| p.probe_id)
-                .collect();
-            ids.into_iter().filter_map(|id| map.remove(&id)).collect()
-        } else {
-            Vec::new()
-        };
-
+    let destroyed_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        let ids: Vec<i64> = map.values().filter(|p| p.owner_char_id == char_id && p.state >= 0 && (target_pid.is_none() || target_pid == Some(p.probe_id))).map(|p| p.probe_id).collect();
+        ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+    } else { Vec::new() };
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     for p in &destroyed_probes {
         let _ = sys_handle.remove_ball(p.probe_id).await;
@@ -1361,7 +1330,6 @@ async fn handle_destroy_probe(
     if !destroyed_probes.is_empty() && !any_left {
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnScannerInfoRemoved", "charid", vec![]);
     }
-
     Some(Ok(PyRep::keyval([
         ("destroyedProbeID", destroyed_probes.first().map(|p| PyRep::Integer(p.probe_id)).unwrap_or(PyRep::None)),
         ("destroyedCount", PyRep::Integer(destroyed_probes.len() as i64)),
@@ -1369,22 +1337,39 @@ async fn handle_destroy_probe(
     ])))
 }
 
-/// Emits `OnProbeWarpEnd` for any scanner probes whose warp arrival filetime has elapsed.
+/// Emits `OnProbeWarpEnd`, `OnProbeStateChanged`, and `OnSystemScanStopped` as probe timers elapse.
 pub fn tick_probe_warp_end(ctx: &ServerContext) {
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let mut due = Vec::new();
+    let mut due_warps = Vec::new();
     if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
         for p in probe_map.values_mut() {
-            if let Some(end_ft) = p.warp_end_ft {
-                if now_ft >= end_ft {
-                    p.warp_end_ft = None;
-                    due.push((p.owner_char_id, p.probe_id));
-                }
+            if p.warp_end_ft.is_some_and(|end_ft| now_ft >= end_ft) {
+                p.warp_end_ft = None;
+                p.state = 3;
+                due_warps.push((p.owner_char_id, p.probe_id));
             }
         }
     }
-    for (char_id, pid) in due {
+    for (char_id, pid) in due_warps {
         crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, pid);
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(3)]);
+    }
+    let due_scans = ctx.db.with_mut_snapshot(|snap| {
+        let all: Vec<(i64, Vec<i64>, Vec<PyRep>, Vec<PyRep>, Vec<PyRep>, i64)> = snap.service_state_blobs.get("pending_probe_scans").and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+        if all.is_empty() { return Vec::new(); }
+        let (done, rem): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, _, _, _, _, end_ft)| now_ft >= *end_ft);
+        if let Ok(js) = serde_json::to_string(&rem) { snap.service_state_blobs.insert("pending_probe_scans".into(), js); }
+        done
+    });
+    for (char_id, p_ids, scan_probe_ids, rows, idle_probes, _) in due_scans {
+        if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+            for pid in &p_ids { if let Some(p) = probe_map.get_mut(pid) { if p.state == 3 || p.state == 2 { p.state = 1; } } }
+        }
+        for pid in p_ids {
+            let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(1)]);
+        }
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSystemScanStopped", "charid", vec![PyRep::List(scan_probe_ids), PyRep::List(rows), PyRep::List(Vec::new())]);
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
     }
 }
 

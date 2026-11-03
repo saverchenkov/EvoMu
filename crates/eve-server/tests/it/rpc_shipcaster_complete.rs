@@ -121,25 +121,43 @@ async fn seed_and_build_caldari_beacon(
         cid
     });
 
-    let launched = rpc(
+    let dropped = rpc(
         ctx,
         sess,
         "ship",
-        "LaunchForSelf",
+        "Drop",
         &[
             PyRep::List(vec![PyRep::Integer(cid)]),
-            PyRep::Real(pos.x),
-            PyRep::Real(pos.y),
-            PyRep::Real(pos.z),
+            PyRep::Integer(char_id),
+            PyRep::Bool(false),
         ],
     )
     .await
-    .expect("LaunchForSelf beacon constructor");
-    let PyRep::List(launched_list) = launched else {
-        panic!("expected LaunchForSelf list");
+    .expect("Drop beacon constructor");
+    let PyRep::Dict(dropped_map) = dropped else {
+        panic!("expected Drop dict");
     };
-    let deployed = launched_list[0].clone();
-    let pad_id = kv_i64(&deployed, "itemID");
+    let pad_id = match &dropped_map[0] {
+        (PyRep::Integer(k), PyRep::List(ids)) if *k == cid => ids[0].as_i64().expect("pad_id"),
+        other => panic!("unexpected Drop entry: {other:?}"),
+    };
+    let caldari_pads = rpc(
+        ctx,
+        sess,
+        "shipCasterLandingPadMgr",
+        "GetFactionLandingPads",
+        &[PyRep::Integer(500001)],
+    )
+    .await
+    .expect("GetFactionLandingPads");
+    let PyRep::List(caldari_list) = caldari_pads else {
+        panic!("expected landing pads list");
+    };
+    let deployed = caldari_list
+        .iter()
+        .find(|p| kv_i64(p, "itemID") == pad_id)
+        .cloned()
+        .expect("deployed pad in GetFactionLandingPads");
     assert!(!kv_bool(&deployed, "isBuilt") && !kv_bool(&deployed, "isLinked"));
     assert_eq!(kv_i64(&deployed, "linkTimestamp"), 0);
 
@@ -293,26 +311,12 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
         );
         id
     });
-    assert_eq!(
-        rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::Integer(hs_cid), PyRep::Real(f64::NAN), PyRep::Real(0.0), PyRep::Real(0.0)])
-            .await
-            .expect_err("NaN coordinates must fail")
-            .code,
-        "InvalidCoordinates"
-    );
-    assert_eq!(
-        rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::Integer(hs_cid), PyRep::Real(900_000.0), PyRep::Real(0.0), PyRep::Real(0.0)])
-            .await
-            .expect_err("Out-of-range coordinates must fail")
-            .code,
-        "OutOfRange"
-    );
     let hs_err = rpc(
         &ctx,
         &mut sess,
         "ship",
-        "LaunchForSelf",
-        &[PyRep::List(vec![PyRep::Integer(hs_cid)])],
+        "Drop",
+        &[PyRep::List(vec![PyRep::Integer(hs_cid)]), PyRep::Integer(char_id), PyRep::Bool(false)],
     )
     .await
     .expect_err("Highsec beacon deployment must fail");
@@ -428,8 +432,11 @@ async fn test_shipcaster_dynamic_fw_beacon_construction_linking_limit_and_disrup
         }
         (c5, s_a, s_b)
     });
-    let PyRep::List(l5) = rpc(&ctx, &mut sess, "ship", "LaunchForSelf", &[PyRep::Integer(c5)]).await.expect("launch #5") else { panic!() };
-    let pad5_id = kv_i64(&l5[0], "itemID");
+    let PyRep::Dict(d5) = rpc(&ctx, &mut sess, "ship", "Drop", &[PyRep::List(vec![PyRep::Integer(c5)]), PyRep::Integer(char_id), PyRep::Bool(false)]).await.expect("drop #5") else { panic!() };
+    let pad5_id = match &d5[0] {
+        (PyRep::Integer(k), PyRep::List(ids)) if *k == c5 => ids[0].as_i64().expect("pad5_id"),
+        other => panic!("unexpected Drop entry: {other:?}"),
+    };
     let dep = rpc(&ctx, &mut sess, "beyonce", "CallComponentFromClient", &[PyRep::Integer(pad5_id), PyRep::String("underConstruction".into()), PyRep::String("DepositItemsFromShip".into()), PyRep::Dict(vec![(PyRep::Integer(mat_tid as i64), PyRep::Integer(45)), (PyRep::Integer(75924), PyRep::Integer(10))])]).await.expect("DepositItemsFromShip");
     assert_eq!(dep, PyRep::Tuple(vec![PyRep::Bool(true), PyRep::Dict(vec![(PyRep::Integer(75924), PyRep::Integer(10))])]));
     let rem_total: i32 = ctx.db.with_snapshot(|s| [s_a, s_b].iter().filter_map(|id| s.items.get(id)).map(|i| i.quantity).sum());

@@ -207,6 +207,8 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     let v_200_char = 950_203;
     let v_200km = 960_203;
     let mut v_200_sess = seed_pilot(&ctx, v_200_char, v_200km, 23757, NULL_SYS, false); // Archon
+    give_item(&ctx, 970_204, 31796, v_200_char, v_200km, InventoryFlag::MedSlot0, 1);
+    give_item(&ctx, 970_205, 31796, v_200_char, v_200km, InventoryFlag::MedSlot1, 1);
     spawn_ship_in_space(&ctx, v_200_char, v_200km, 23757, NULL_SYS, DVec3::new(200_000.0, 0.0, 0.0)).await;
     give_item(&ctx, 970_203, 16274, v_200_char, v_200km, InventoryFlag::SpecializedFuelBay, 50_000);
     let v_200_beyonce = ctx.bind_object(&mut v_200_sess, "beyonce", NULL_SYS as i64).unwrap();
@@ -303,7 +305,8 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
         .await
         .expect("ActivateSlashModule");
     assert_eq!(lance_res.dict_get("warmupSeconds"), Some(&PyRep::Real(15.0)));
-    assert_eq!(lance_res.dict_get("jumpWarpSuppressionSeconds"), Some(&PyRep::Real(300.0)));
+    assert_eq!(lance_res.dict_get("jumpBlockSeconds"), Some(&PyRep::Real(300.0)));
+    assert_eq!(lance_res.dict_get("tickCount"), Some(&PyRep::Integer(15)));
 
     // At t = 0 (before 15s warmup completes): ZERO OnDamageMessage / OnDamageMessages may be emitted!
     let mut t0_notifs = ctx.drain_notifications_for_char(titan_char);
@@ -332,8 +335,8 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     let cs_200_mid = sys.get_combat_state(v_200km).await.unwrap().unwrap();
     assert_eq!(cs_200_mid.shield_hp, cs_200_init.shield_hp, "Damage must not land before 15s warmup completes");
 
-    // Step remaining ticks to cross t = 15s via live 1 Hz server tick -> beam fires!
-    for _ in 0..4 {
+    // Step remaining ticks to cross t = 15s warmup + beam ticks -> beam fires!
+    for _ in 0..10 {
         let _ = sys.try_step_full_tick(1.0);
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -359,22 +362,15 @@ async fn test_b35_01_lance_doomsday_directional_geometry() {
     let cs_200_after = sys.get_combat_state(v_200km).await.unwrap().unwrap();
     let cs_350_after = sys.get_combat_state(v_350km).await.unwrap().unwrap();
     let cs_off_after = sys.get_combat_state(v_off_axis).await.unwrap().unwrap();
-    assert!(cs_200_after.shield_hp < cs_200_init.shield_hp, "200km ship inside 300km beam cone must take damage at t=15s");
-    assert_eq!(cs_350_after.shield_hp, cs_350_init.shield_hp, "350km ship beyond 300km must not be hit");
-    assert_eq!(cs_off_after.shield_hp, cs_off_init.shield_hp, "Off-axis ship outside cone must not be hit");
+    assert!(cs_200_after.shield_hp < cs_200_init.shield_hp, "200km ship inside 200km Lance cylinder must take damage across 15s beam ticks");
+    assert_eq!(cs_350_after.shield_hp, cs_350_init.shield_hp, "350km ship beyond 200km Lance range must not be hit");
+    assert_eq!(cs_off_after.shield_hp, cs_off_init.shield_hp, "Off-axis ship beyond 2.5km beam radius must not be hit");
 
-    // Step another tick to prove reconcile_tackle_and_bubbles does NOT wipe victim warp_scramble_strength!
+    // Step another tick: Lance Doomsday does NOT warp-scramble victims (only caster is locked for 300s)
     let _ = sys.try_step_full_tick(1.0);
-    assert!(sys.is_ball_scrambled(v_200km).await.unwrap(), "Hit victim must remain warp-scrambled across subsequent ticks");
-    eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, v_200_char, NULL_SYS, v_200km).await;
-    let cs_200_tether = sys.get_combat_state(v_200km).await.unwrap().unwrap();
-    assert!(!cs_200_tether.is_tethered, "Lance disruption must prevent Upwell tethering");
-
-    // Live victim RPCs blocked for 5-minute suppression window: warp, jump drive, stargate jump, and docking
-    assert!(ctx.dispatch_rpc(&mut v_200_sess, "beyonce", Some(v_200_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)], &kw, None).await.is_err());
-    assert!(ctx.dispatch_rpc(&mut v_200_sess, "beyonce", None, "CmdJumpToFleetModuleBeacon", &[PyRep::Integer(cyno_char), PyRep::Integer(DEST_NULL_SYS as i64), PyRep::Integer(beacon_id)], &kw, None).await.is_err());
-    assert!(ctx.dispatch_rpc(&mut v_200_sess, "beyonce", Some(v_200_beyonce), "CmdStargateJump", &[PyRep::Integer(gate_id)], &kw, None).await.is_err());
-    assert!(ctx.dispatch_rpc(&mut v_200_sess, "beyonce", Some(v_200_beyonce), "CmdDock", &[PyRep::Integer(astra_id)], &kw, None).await.is_err());
+    assert!(!sys.is_ball_scrambled(v_200km).await.unwrap(), "Hit victim must NOT be warp-scrambled by standard Lance Doomsday");
+    assert!(ctx.dispatch_rpc(&mut v_200_sess, "beyonce", Some(v_200_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)], &kw, None).await.is_ok(), "Hit victim can warp freely");
+    assert!(ctx.dispatch_rpc(&mut titan_sess, "beyonce", Some(titan_beyonce), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(gate_id), PyRep::Real(0.0)], &kw, None).await.is_err(), "Titan caster cannot warp during 300s lock");
 }
 
 #[tokio::test]
@@ -581,11 +577,11 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
         "Second Mobile Depot within 5km of existing Mobile Depot must be rejected"
     );
 
-    // During 60s anchoring timer: invulnerable (0 damage applied) AND cannot refit before anchoring finishes
+    // During 60s anchoring timer: IS damageable (not invulnerable) AND cannot refit before anchoring finishes
     let (applied_anchor, _) = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
         &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(100.0, 0.0, 0.0, 0.0), 1.0, ctx.now_unix_secs(),
     ).await.ok().flatten().map(|(a, d, _)| (a, d)).unwrap_or((0.0, false));
-    assert_eq!(applied_anchor, 0.0, "Mobile Depot must be invulnerable during its 60s anchoring countdown");
+    assert!(applied_anchor > 0.0, "Mobile Depot must be damageable during its 60s anchoring countdown");
 
     let mod_item = 971_210;
     give_item(&ctx, mod_item, 3041, char_id, ship_id, InventoryFlag::Cargo, 1);
@@ -667,14 +663,15 @@ async fn test_b35_03_mobile_depot_deployment_and_refitting() {
     assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Live module fitting > 2,500m from Mobile Depot must fail");
     assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rig_item_2)], &kw, None).await.unwrap_err().code, "CannotUnfitInSpace", "DestroyFitting > 2,500m from Mobile Depot must fail");
 
-    // Attacking anchored depot to 0% shield triggers 48h (172,800s) reinforced timer AND disables fitting service + DestroyFitting!
+    // Attacking anchored depot to <= 25% shield triggers 48h (172,800s) reinforced timer AND disables fitting service + DestroyFitting!
     let now_u = ctx.now_unix_secs();
+    let max_sh = sys.get_combat_state(depot_item).await.unwrap().unwrap().max_shield_hp;
     let _ = eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
-        &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(10_000.0, 0.0, 0.0, 0.0), 10.0, now_u,
+        &ctx, &sys, NULL_SYS, char_id, depot_item, eve_destiny::DamageVector::new(max_sh * 0.85, 0.0, 0.0, 0.0), 1.0, now_u,
     ).await;
     let st_reinf = ctx.db.with_snapshot(|snap| eve_server::services::mobile_deployables::read_deployable_state_snap(snap).deployables.get(&depot_item).cloned()).unwrap();
-    assert!(st_reinf.reinforced_until_unix.unwrap_or(0) >= now_u + 172_800 - 5, "Depleting Mobile Depot shield to 0% must trigger 48-hour (172,800s) reinforced timer");
-    assert!(sys.get_combat_state(depot_item).await.unwrap().unwrap().shield_hp <= 1e-6, "Reinforcement must trigger at 0% shield");
+    assert!(st_reinf.reinforced_until_unix.unwrap_or(0) >= now_u + 172_800 - 5, "Damaging Mobile Depot shield to <= 25% must trigger 48-hour (172,800s) reinforced timer");
+    assert!(sys.get_combat_state(depot_item).await.unwrap().unwrap().shield_hp <= max_sh * 0.25 + 1.0, "Reinforcement must trigger at <= 25% shield");
     let _ = sys.set_ball_position(ship_id, target_pos + DVec3::new(500.0, 0.0, 0.0)).await;
     assert!(ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(mod_item), PyRep::Integer(ship_id), PyRep::Integer(27)], &kw, None).await.is_err(), "Refitting off a reinforced Mobile Depot must be disabled during 48h reinforcement");
     assert_eq!(ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "DestroyFitting", &[PyRep::Integer(rig_item_2)], &kw, None).await.unwrap_err().code, "CannotUnfitInSpace", "DestroyFitting off a reinforced Mobile Depot must fail");

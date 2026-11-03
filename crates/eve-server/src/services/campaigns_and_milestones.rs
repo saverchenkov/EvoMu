@@ -418,8 +418,13 @@ fn handle_login_campaign_get_state(
 
     ctx.db.with_snapshot(|snap| {
         let ext = load_cosmetics_ui_state(snap);
-        let campaign_id = ext
-            .active_login_campaign_id
+        let per_char_cid = snap
+            .service_state_blobs
+            .get("login_campaign_enrollments")
+            .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
+            .and_then(|m| m.get(&char_id).copied());
+        let campaign_id = per_char_cid
+            .or(ext.active_login_campaign_id)
             .unwrap_or(DEFAULT_LOGIN_CAMPAIGN_ID);
         let campaign = campaigns.get(&campaign_id).ok_or_else(|| {
             err(
@@ -508,8 +513,13 @@ fn handle_login_campaign_claim_reward(
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        let campaign_id = ext
-            .active_login_campaign_id
+        let per_char_cid = snap
+            .service_state_blobs
+            .get("login_campaign_enrollments")
+            .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
+            .and_then(|m| m.get(&char_id).copied());
+        let campaign_id = per_char_cid
+            .or(ext.active_login_campaign_id)
             .unwrap_or(DEFAULT_LOGIN_CAMPAIGN_ID);
         let campaign = campaigns.get(&campaign_id).ok_or_else(|| {
             err(

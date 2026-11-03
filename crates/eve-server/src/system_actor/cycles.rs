@@ -123,8 +123,7 @@ pub(crate) fn step_cycles_and_capacitor(
         dt,
     );
 
-    // Upwell structure tethering gradually repairs fitted module heat damage (including burned-out modules, leaving them offline) (`feat:modules.nanite-repair-paste-in-space`)
-    // DERIVED: 2.0 HP/s gradual tether heat-damage repair rate (Overheating.md:151 'heat damage ... is slowly repaired')
+    // Upwell structure tethering repairs fitted module heat damage (`feat:modules.nanite-repair-paste-in-space`)
     let tethered_ships: Vec<BallId> = ballpark.combat_states.iter().filter_map(|(&bid, cs)| cs.is_tethered.then_some(bid)).collect();
     if !tethered_ships.is_empty() {
         let tether_repair_hp = 2.0 * dt.max(0.0);
@@ -464,10 +463,9 @@ pub(crate) fn step_cycles_and_capacitor(
                     1.0
                 };
 
-                let is_sleeper_target = ballpark
-                    .balls
-                    .get(&target_id)
-                    .is_some_and(|b| matches!(b.type_id, 30185..=30500));
+                let is_sleeper_target = ballpark.balls.get(&target_id)
+                    .and_then(|b| sde_opt.as_ref().and_then(|sde| sde.types.get(&b.type_id)))
+                    .is_some_and(|t| matches!(t.group_id, 959 | 960 | 961 | 982..=987 | 1306 | 1307 | 1529 | 4036));
                 let mut nos_transferred = 0.0;
                 if let Some(cs) = ballpark.combat_states.get_mut(&target_id) {
                     // Nosferatu transfer rule (`feat:combat.nosferatu-drain-cap`, `feat:modules.nosferatu-transfer-rule`, `feat:npc.sleeper-capacitor-immunity-and-leash`):
@@ -758,7 +756,7 @@ pub(crate) fn step_cycles_and_capacitor(
 
             let mut salvage_next_cap_deducted = false;
             let mut salvage_deducted_cap_gj = 0.0;
-            let mut stop_cycle = cycle.repeat == 0 || burned_out || crystal_shattered_empty;
+            let mut stop_cycle = cycle.repeat == 0 || burned_out || crystal_shattered_empty || matches!(cycle.effect_name.as_str(), "superWeaponLanceWarmup" | "superWeaponLanceBeam");
             if stop_cycle {
                 finished_indices.push(idx);
             } else {
@@ -1005,16 +1003,27 @@ pub(crate) fn step_cycles_and_capacitor(
     }
     finished_indices.sort_unstable();
     finished_indices.dedup();
+    let mut lance_requeues = Vec::new();
     for idx in finished_indices.into_iter().rev() {
-        let finished = active_module_cycles.remove(idx);
-        if finished.effect_name == "superWeaponLanceWarmup" && finished.elapsed_s >= finished.duration_s {
+        let mut finished = active_module_cycles.remove(idx);
+        let is_lance = matches!(finished.effect_name.as_str(), "superWeaponLanceWarmup" | "superWeaponLanceBeam");
+        if is_lance && finished.elapsed_s >= finished.duration_s {
             crate::services::tactical_modules::fire_lance_warmup_in_ballpark(
                 ballpark, &finished, sde_opt, db_opt, tactical_state, pending_cycle_actions, &mut destroyed_balls,
             );
+            if finished.repeat > 0 {
+                finished.effect_name = "superWeaponLanceBeam".into();
+                finished.repeat -= 1;
+                finished.elapsed_s = 0.0;
+                finished.duration_s = 1.0;
+                lance_requeues.push(finished);
+                continue;
+            }
         }
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
         emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
     }
+    active_module_cycles.extend(lance_requeues);
     reconcile_tackle_and_bubbles(
         ballpark,
         active_module_cycles,

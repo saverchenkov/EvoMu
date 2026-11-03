@@ -267,6 +267,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     return Err((STATUS_FORBIDDEN, format!("Character is muted until {expiry}: {reason}")));
                 }
             }
+            let now_ft = ((now as i64) + 11_644_473_600) * 10_000_000;
+            if let Some(ban_expiry_ft) = db_bcast.with_snapshot(|snap| {
+                snap.service_state_blobs
+                    .get("gm_chat_bans")
+                    .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
+                    .and_then(|bans| bans.get(&(cid as i64)).copied())
+            }) {
+                if ban_expiry_ft > now_ft {
+                    return Err((STATUS_FORBIDDEN, format!("Character is chat-banned until {ban_expiry_ft}")));
+                }
+            }
 
             let msg_text = match dyn_msg.get(1) {
                 Some(DynamicValue::String(s)) => s.clone(),

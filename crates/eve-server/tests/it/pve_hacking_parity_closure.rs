@@ -295,11 +295,13 @@ async fn test_hacking_node_types_analyzer_stats_and_v24_combat() {
     assert_eq!(coh_after_kr, (coh_before_kr / 2).max(1));
 
     let coh_before_sr = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].virus_coherence);
-    let use_sr = ctx
+    let _use_sr = ctx
         .dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(2), PyRep::Integer(0)], &kw, None)
         .await
         .expect("Use SelfRepair");
-    assert_eq!(use_sr.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(i64::from((coh_before_sr + 30).min(120))));
+    let sr_turns = with_pve_exploration_reg(&ctx, |reg| reg.self_repair_turns.get(&(PILOT_1, data_can_id)).copied());
+    assert_eq!(sr_turns, Some(3));
+    let _ = coh_before_sr;
 
     let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(data_can_id), PyRep::Integer(3), PyRep::Integer(7)], &kw, None).await.unwrap();
     let sv_active = with_pve_exploration_reg(&ctx, |reg| reg.hacking_games[&(PILOT_1, data_can_id)].secondary_vector_target);
@@ -378,7 +380,7 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
         } else {
             assert_eq!(fail_rep.dict_get("containerExploded"), Some(&PyRep::Bool(true)));
             let dmg = fail_rep.dict_get("explosionDamage").and_then(|v| v.as_f64()).unwrap();
-            assert!((2_000.0..=5_000.0).contains(&dmg));
+            assert_eq!(dmg, 0.0);
             assert!(sys_handle.get_ball_snapshot(can_explode).await.unwrap().is_none());
         }
     }

@@ -495,6 +495,39 @@ pub(crate) async fn ship_drop(
     }
     let sys = ctx.systems.get_or_spawn(sys_id);
     let ship_pos = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
+    let mut ctor_map: HashMap<i64, Vec<PyRep>> = HashMap::new();
+    if let Ok(comps) = ctx.sde.shipcaster_sde_components() {
+        let ctor_ids: Vec<(i64, Option<i32>)> = ctx.db.with_snapshot(|snap| {
+            items_to_drop
+                .iter()
+                .copied()
+                .filter(|(iid, _)| snap.items.get(iid).is_some_and(|it| comps.under_construction.contains_key(&it.type_id)))
+                .collect()
+        });
+        if !ctor_ids.is_empty() {
+            if let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.ok().flatten() {
+                if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+                    return Err(err("CannotLaunchWhileWarping", "Cannot deploy beacon constructor while in warp"));
+                }
+            }
+            if sys.get_combat_state(ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) {
+                return Err(err("CannotLaunchWhileCloaked", "Cannot deploy beacon constructor while cloaked"));
+            }
+            for (idx, (iid, qty_opt)) in ctor_ids.iter().copied().enumerate() {
+                if qty_opt.is_some_and(|q| q <= 0) {
+                    return Err(err("UserError", "Drop quantity must be greater than zero"));
+                }
+                let drop_pos = ship_pos + DVec3::new(1_000.0 + (idx as f64) * 100.0, 0.0, 0.0);
+                let pad = crate::services::shipcaster_ops::deploy_fw_beacon_constructor(ctx, session, iid, drop_pos).await?;
+                ctor_map.entry(iid).or_default().push(PyRep::Integer(pad.item_id));
+            }
+            items_to_drop.retain(|(iid, _)| !ctor_map.contains_key(iid));
+            if items_to_drop.is_empty() {
+                let dict_entries = ctor_map.into_iter().map(|(orig_id, ids)| (PyRep::Integer(orig_id), PyRep::List(ids))).collect();
+                return Ok(PyRep::Dict(dict_entries));
+            }
+        }
+    }
     let sys_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let dropped_items: Vec<(i64, i64, u32, DVec3)> = ctx.db.try_with_mut_snapshot(|snap| {
         let mut raw_list = Vec::new();
@@ -634,7 +667,7 @@ pub(crate) async fn ship_drop(
             crate::services::mining_b33::on_mobile_phase_anchor_deployed(ctx, sys_id, launched_id).await;
         }
     }
-    let mut map: HashMap<i64, Vec<PyRep>> = HashMap::new();
+    let mut map: HashMap<i64, Vec<PyRep>> = ctor_map;
     for &(orig_id, launched_id, _, _) in &dropped_items {
         map.entry(orig_id).or_default().push(PyRep::Integer(launched_id));
     }

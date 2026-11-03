@@ -162,6 +162,7 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
         snap.fw_runtime.fw_complexes.retain(|_, (_, _, _, _, completed)| !*completed);
 
         // 2. Spawn missing allowed FW complex tiers (`Novice`, `Small`, `Medium`, `Large`, `Open`).
+        let mut first_complex_pos: Option<[f64; 3]> = None;
         for (idx, &tier) in allowed_tiers.iter().filter(|&&t| t != "Battlefield").enumerate() {
             let cd_key = format!("{sys_id}:{tier}");
             let tier_cd = snap.fw_runtime.complex_tier_cooldowns.get(&cd_key).copied().unwrap_or(0);
@@ -199,7 +200,16 @@ pub async fn ensure_warzone_sites_spawned(ctx: &ServerContext, sys_id: u32) {
                     crate::services::space_destiny::space_docking_cloaking::pick_system_celestial_position(ctx, sys_id, (idx as u32) + 10).0
                 });
             snap.item_positions.insert(gid, pos);
+            if first_complex_pos.is_none() {
+                first_complex_pos = Some(pos);
+            }
             balls_to_spawn.push((gid, TYPE_ACCELERATION_GATE, pos, 250.0));
+        }
+        if let Some(complex_pos) = first_complex_pos {
+            let anchor = ctx.sde.celestials_in_system(sys_id).first().map(|c| c.position.to_array()).unwrap_or(complex_pos);
+            let st = snap.system_states.entry(sys_id).or_default();
+            st.solar_system_id = sys_id;
+            st.fw_complex_position.get_or_insert([anchor[0] + 250_000.0, anchor[1], anchor[2] - 150_000.0]);
         }
 
         // 3. Ensure SupplyCache, SupplyDepot, ListeningPost, and Propaganda tactical objectives exist for Advantage.

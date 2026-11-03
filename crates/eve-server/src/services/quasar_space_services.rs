@@ -1047,7 +1047,7 @@ pub fn register_handlers(
                         ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
                         ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));
                     let url = format!(
-                        "https://binaries.eveonline.com/maptags/v{}.{}.{}/universe.fb",
+                        "http://127.0.0.1:26004/cdn/maptags/v{}.{}.{}/universe.fb",
                         latest.0, latest.1, latest.2
                     );
                     let mut ver_buf = Vec::new();
