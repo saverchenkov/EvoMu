@@ -361,10 +361,10 @@ async fn test_batch2_lookup_warable_and_sov_structures() {
 
 #[tokio::test]
 async fn test_batch2_raffle_character_seeding_and_create() {
-    // parity: rpc:raffleMgr.character_Seeding
+    // parity: rpc:raffleMgr.QA_SeedRaffles
     // parity: rpc:raffleProxy.CreateRaffle
     eve_testkit::attest(&[
-        "rpc:raffleMgr.character_Seeding",
+        "rpc:raffleMgr.QA_SeedRaffles",
         "rpc:raffleProxy.CreateRaffle",
     ]);
 
