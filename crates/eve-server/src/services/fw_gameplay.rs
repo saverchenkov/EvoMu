@@ -1356,3 +1356,21 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
     tick_insurgency_campaigns(ctx, now_unix).await;
     crate::services::insurgency_complex_ops::tick_insurgency_complex_ops(ctx, now_unix).await;
 }
+
+/// Removes a destroyed FW complex guard NPC ball from space and marks the complex guard cleared.
+pub async fn on_fw_complex_guard_destroyed(
+    systems: &crate::system_actor::SystemRegistry,
+    db: &eve_db::WorldRepository,
+    solar_system_id: u32,
+    npc_id: i64,
+) {
+    let Some(gid) = npc_id.checked_sub(500_000_000).filter(|&g| g > 0) else { return; };
+    let is_guard = db.with_mut_snapshot(|snap| {
+        let ok = snap.fw_runtime.fw_complexes.get(&gid).is_some_and(|(sys, ..)| *sys == solar_system_id);
+        if ok { snap.fw_runtime.complex_guards_cleared.insert(gid, true); }
+        ok
+    });
+    if is_guard {
+        let _ = systems.get_or_spawn(solar_system_id).remove_ball(npc_id).await;
+    }
+}

@@ -136,7 +136,6 @@ async fn setup_pilot_in_space(
     sess
 }
 
-/// parity: notify:OnCaptureChanged
 /// parity: notify:OnLocalHackProgressUpdated
 /// parity: notify:OnSecurityModified
 /// parity: notify:OnSystemDynamicBountyStateChanged

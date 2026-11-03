@@ -58,6 +58,9 @@ pub struct ProjectDiscoveryStore {
     /// Persisted MMOS Analysis Kredits reward per accurate classification (`post_classification`).
     #[serde(default)]
     pub classification_ak_reward: i64,
+    /// Whether MMOS grading/reward parameters were explicitly configured.
+    #[serde(default)]
+    pub mmos_configured: bool,
 }
 
 fn char_task_key(char_id: i64, task_idx: i64) -> String {
@@ -163,6 +166,7 @@ pub fn configure_project_discovery_mmos(
     store.classification_xp_accurate = classification_xp_accurate.max(0.0);
     store.classification_xp_inaccurate = classification_xp_inaccurate.max(0.0);
     store.classification_ak_reward = classification_ak_reward.max(0);
+    store.mmos_configured = true;
     save_discovery_store(snap, &store);
 }
 
@@ -174,6 +178,7 @@ pub fn set_project_discovery_task_consensus(
 ) {
     let mut store = load_discovery_store(snap);
     store.task_consensus_by_index.insert(task_index, is_accurate);
+    store.mmos_configured = true;
     save_discovery_store(snap, &store);
 }
 
@@ -668,7 +673,19 @@ pub fn handle_project_discovery(
                 let prev_tasks = st.tasks_submitted;
                 st.last_submitted_task_index = st.current_task_index;
                 st.tasks_submitted += 1;
-                let store = load_discovery_store(snap);
+                let mut store = load_discovery_store(snap);
+                if !store.mmos_configured {
+                    if store.xp_per_rank <= 0.0 {
+                        store.xp_per_rank = 2_000.0;
+                    }
+                    if store.classification_xp_accurate <= 0.0 {
+                        store.classification_xp_accurate = 100.0;
+                    }
+                    if store.classification_ak_reward <= 0 {
+                        store.classification_ak_reward = 10;
+                    }
+                    store.task_consensus_by_index.entry(req_task_index).or_insert(true);
+                }
                 let is_accurate = store
                     .task_consensus_by_index
                     .get(&req_task_index)

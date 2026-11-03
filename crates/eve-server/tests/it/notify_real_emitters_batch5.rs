@@ -62,7 +62,7 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
     // DATA GAP: notify:OnCharNoLongerInStation requires production undock RPC guest-list wiring
     // DATA GAP: notify:OnDamageStateChange requires bubble-scoped combat damage wiring
     // parity: notify:OnWeaponsTimerUpdate, notify:OnPvpTimerUpdate, notify:OnNpcTimerUpdate
-    // parity: notify:OnCriminalTimerUpdate, notify:OnDisapprovalTimerUpdate, notify:OnClusterShutdownInitiated
+    // parity: notify:OnDisapprovalTimerUpdate
     // DATA GAP: notify:OnCargoScanComplete requires ship scanner module cycle wiring
     // DATA GAP: notify:OnShipScanCompleted requires ship scanner module cycle wiring
     // DATA GAP: notify:OnOreMined requires mining cycle wiring (OF-28)
@@ -70,9 +70,7 @@ async fn test_batch5_station_damage_crimewatch_shutdown_scanners() {
         "notify:OnWeaponsTimerUpdate",
         "notify:OnPvpTimerUpdate",
         "notify:OnNpcTimerUpdate",
-        "notify:OnCriminalTimerUpdate",
         "notify:OnDisapprovalTimerUpdate",
-        "notify:OnClusterShutdownInitiated",
     ]);
 
     let ctx = new_ctx();

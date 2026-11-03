@@ -710,6 +710,9 @@ fn take_offer(
                     ],
                 );
             }
+            if total_ak_cost > 0 {
+                crate::services::notify_emitters_batch10::emit_analysis_kredits_change(ctx, char_id);
+            }
             Some(Ok(PyRep::keyval([
                 ("offerID", PyRep::Integer(offer.offer_id)),
                 ("corpID", PyRep::Integer(offer.corp_id)),

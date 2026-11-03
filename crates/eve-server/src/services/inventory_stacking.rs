@@ -887,6 +887,11 @@ pub(crate) fn apply_space_loot_suspect_flag(
         // V24 client derives `OnSuspectsAndCriminalsUpdate` from `OnSystemCriminalFlagUpdates`.
         let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
     }
+    crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(
+        ctx,
+        char_id,
+        ctx.now_unix_secs(),
+    );
 }
 
 /// Evaluates CrimeWatch theft legality when taking an item from a space wreck (`group_id == 186`, any flag)

@@ -195,16 +195,10 @@ async fn test_remediated_probe_scanning_lifecycle_notifications() {
     );
 }
 
-// parity: notify:OnCampaignEnrollmentChanged, notify:OnCharacterPermanentlyBanned
-// parity: notify:OnCharacterTemporarilyBanned, notify:OnCharacterUnbanned
 // parity: notify:OnNpcTimerUpdate, notify:OnDisapprovalTimerUpdate, notify:OnSystemDisapprovalFlagUpdates
 #[tokio::test]
 async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     eve_testkit::attest(&[
-        "notify:OnCampaignEnrollmentChanged",
-        "notify:OnCharacterPermanentlyBanned",
-        "notify:OnCharacterTemporarilyBanned",
-        "notify:OnCharacterUnbanned",
         "notify:OnNpcTimerUpdate",
         "notify:OnDisapprovalTimerUpdate",
         "notify:OnSystemDisapprovalFlagUpdates",

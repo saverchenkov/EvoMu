@@ -149,7 +149,6 @@ async fn setup_pilot_in_space(
 /// parity: notify:OnDestinationChange
 /// parity: notify:OnSystemActivityUpdated
 /// parity: notify:OnCharacterEnergyChanged
-/// parity: notify:OnAnalysisKreditsChange
 #[tokio::test]
 async fn batch10_destiny_clock_esi_map_industry_energy_and_discovery() {
     let ctx = Arc::new(ServerContext::new());

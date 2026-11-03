@@ -53,20 +53,15 @@ fn events(ctx: &ServerContext, char_id: i64, event: &str) -> Vec<Vec<PyRep>> {
 
 #[tokio::test]
 async fn test_batch3_gm_and_admin_rpc_notifications() {
-    // parity: notify:OnAchievementsReset, notify:OnCharacterPermanentlyBanned, notify:OnCharacterTemporarilyBanned
-    // parity: notify:OnCharacterUnbanned, notify:OnCharacterPokedByGM, notify:OnClusterShutdownCancelled
-    // parity: notify:OnGlobalConfigUpdated, notify:OnFastCheckoutEnabledChanged, notify:OnCampaignEnrollmentChanged
+    // parity: notify:OnAchievementsReset, notify:OnCharacterPokedByGM, notify:OnClusterShutdownCancelled
+    // parity: notify:OnGlobalConfigUpdated, notify:OnFastCheckoutEnabledChanged
     // parity: notify:OnModuleAttributeChange, notify:OnLocationAttributeChange
     eve_testkit::attest(&[
         "notify:OnAchievementsReset",
-        "notify:OnCharacterPermanentlyBanned",
-        "notify:OnCharacterTemporarilyBanned",
-        "notify:OnCharacterUnbanned",
         "notify:OnCharacterPokedByGM",
         "notify:OnClusterShutdownCancelled",
         "notify:OnGlobalConfigUpdated",
         "notify:OnFastCheckoutEnabledChanged",
-        "notify:OnCampaignEnrollmentChanged",
         "notify:OnModuleAttributeChange",
         "notify:OnLocationAttributeChange",
     ]);
