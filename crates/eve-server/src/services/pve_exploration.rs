@@ -527,8 +527,8 @@ pub fn notify_pve_destruction_events(
     let now_ft = db.clock().now_blueos_filetime_ticks();
     let mut to_send = Vec::new();
 
-    if let Some(site_id) = cleared_site_id {
-        let cleared_did_opt = db.with_snapshot(|snap| {
+    let cleared_sys_did_opt = cleared_site_id.as_ref().and_then(|site_id| {
+        db.with_snapshot(|snap| {
             snap.owner_notes
                 .get(&PVE_EXPLORATION_NOTE_ID)
                 .and_then(|note| serde_json::from_str::<PveExplorationRegistry>(&note.note).ok())
@@ -536,10 +536,14 @@ pub fn notify_pve_destruction_events(
                     reg.sites_by_system
                         .values()
                         .flatten()
-                        .find(|s| s.site_id == site_id)
-                        .map(|s| s.dungeon_id)
+                        .find(|s| s.site_id == *site_id)
+                        .map(|s| (s.solar_system_id, s.dungeon_id))
                 })
-        });
+        })
+    });
+
+    if let Some(site_id) = cleared_site_id {
+        let cleared_did_opt = cleared_sys_did_opt.map(|(_, d)| d);
         crate::services::fleet_social::fleet_social_scanning::emit_signal_tracker_site_removed_with_db(
             db, pending_notifications, notify_tx, &site_id,
         );
@@ -622,6 +626,15 @@ pub fn notify_pve_destruction_events(
             }
         }
     }
+
+    crate::services::pve_expeditions::emit_expedition_destruction_notifications(
+        db,
+        pending_notifications,
+        notify_tx,
+        cleared_sys_did_opt,
+        new_escalation.as_ref(),
+        advanced_step.as_ref(),
+    );
 
     for esc in [new_escalation, advanced_step].into_iter().flatten() {
         let (chg_pkt, chg_mpkt) = crate::router::ServerContext::build_macho_notification_packet(

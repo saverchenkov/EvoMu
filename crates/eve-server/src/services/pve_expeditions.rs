@@ -476,6 +476,103 @@ pub async fn advance_expedition_step(
     Ok(updated)
 }
 
+pub(crate) fn emit_expedition_destruction_notifications(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &std::sync::RwLock<
+        std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>,
+    >,
+    notify_tx: &tokio::sync::broadcast::Sender<(
+        i64,
+        crate::router::cache_notifications::PendingMachoNotification,
+    )>,
+    cleared_sys_and_did: Option<(SolarSystemId, u32)>,
+    new_escalation: Option<&EscalatingPathEntry>,
+    advanced_step: Option<&EscalatingPathEntry>,
+) {
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let broadcast_sys = |sys_id: SolarSystemId, event: &str, args: Vec<PyRep>| {
+        let recips: Vec<(i64, Option<u64>)> = db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .filter(|c| c.station_id.is_none() && c.structure_id.is_none() && c.solar_system_id == sys_id)
+                .map(|c| (c.character_id, Some(c.user_id)))
+                .collect()
+        });
+        for (cid, uid) in recips {
+            let (packet, marshaled_packet) =
+                ServerContext::build_macho_notification_packet(cid, uid, event, "solarsystemid", args.clone());
+            let notif = crate::router::cache_notifications::PendingMachoNotification {
+                recipient_char_id: cid,
+                event: event.to_string(),
+                id_type: "solarsystemid".to_string(),
+                args: args.clone(),
+                packet,
+                marshaled_packet,
+                created_filetime: now_ft,
+            };
+            {
+                let mut q_guard = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
+                let q = q_guard.entry(cid).or_default();
+                if q.len() >= 512 {
+                    q.remove(0);
+                }
+                q.push(notif.clone());
+            }
+            let _ = notify_tx.send((cid, notif));
+        }
+    };
+
+    if let Some(esc) = new_escalation {
+        let sig_id = expedition_sig_id(esc.instance_id, esc.step_index);
+        let instance = PyRep::keyval([
+            ("instanceID", PyRep::Integer(esc.instance_id)),
+            ("dungeonID", PyRep::Integer(i64::from(esc.expedition_dungeon_id))),
+            ("signatureID", PyRep::String(sig_id)),
+            ("scanStrengthValue", PyRep::Real(0.5)),
+        ]);
+        broadcast_sys(
+            esc.destination_solar_system_id,
+            "OnDungeonInstanceAdded",
+            vec![PyRep::Integer(i64::from(esc.destination_solar_system_id)), instance],
+        );
+    }
+
+    if let Some(esc) = advanced_step {
+        let has_more_steps = esc.dungeons_entered.len() < usize::from(esc.total_steps);
+        let prev_step = if has_more_steps {
+            esc.step_index.saturating_sub(1).max(1)
+        } else {
+            esc.step_index
+        };
+        let old_sig_id = expedition_sig_id(esc.instance_id, prev_step);
+        let (prev_sys, prev_did) = cleared_sys_and_did.unwrap_or((esc.destination_solar_system_id, esc.expedition_dungeon_id));
+        broadcast_sys(
+            prev_sys,
+            "OnDungeonInstanceRemoved",
+            vec![
+                PyRep::Integer(i64::from(prev_sys)),
+                PyRep::Integer(esc.instance_id),
+                PyRep::String(old_sig_id),
+                PyRep::Integer(i64::from(prev_did)),
+            ],
+        );
+        if has_more_steps && esc.step_index > prev_step {
+            let new_sig_id = expedition_sig_id(esc.instance_id, esc.step_index);
+            let instance = PyRep::keyval([
+                ("instanceID", PyRep::Integer(esc.instance_id)),
+                ("dungeonID", PyRep::Integer(i64::from(esc.expedition_dungeon_id))),
+                ("signatureID", PyRep::String(new_sig_id)),
+                ("scanStrengthValue", PyRep::Real(0.5)),
+            ]);
+            broadcast_sys(
+                esc.destination_solar_system_id,
+                "OnDungeonInstanceAdded",
+                vec![PyRep::Integer(i64::from(esc.destination_solar_system_id)), instance],
+            );
+        }
+    }
+}
+
 fn dungeon_kv_for_id(sde: &eve_sde::SdeRegistry, dungeon_id: u32, fallback_name: &str) -> PyRep {
     let (name, faction_id, archetype_id) = sde
         .dungeons

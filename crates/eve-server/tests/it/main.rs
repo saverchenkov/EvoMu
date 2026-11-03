@@ -601,3 +601,6 @@ mod parity_pve_ui_quasar_closure;
 mod parity_quasar_remaining_closure;
 mod parity_quasar_remaining_closure_part2;
 mod parity_notify_missing1_closure;
+mod parity_notify_batch3_closure;
+mod parity_notify_batch3_closure_part2;
+mod parity_notify_batch3_closure_part3;
