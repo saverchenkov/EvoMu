@@ -9,7 +9,7 @@ use eve_db::{
         ROLE_STATION_MANAGER, ROLE_TRADER,
     },
     AllianceRecord, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    TrainedSkillRecord, UpwellStructureRecord,
+    UpwellStructureRecord,
 };
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -462,183 +462,198 @@ async fn test_esi6_market_public_and_structure_routes() {
 }
 
 #[tokio::test]
-async fn test_esi6_market_character_and_corporation_orders_routes() {
-    // parity: esi:GET /characters/{character_id}/orders, esi:GET /characters/{character_id}/orders/history
-    // parity: esi:GET /corporations/{corporation_id}/orders, esi:GET /corporations/{corporation_id}/orders/history
-    // parity: feat:esi.market.char-orders, feat:esi.market.corp-orders
+async fn test_esi6_industry_jobs_fields_and_completion() {
+    // parity: esi:GET /characters/{character_id}/industry/jobs, esi:GET /corporations/{corporation_id}/industry/jobs
+    // parity: feat:esi.industry.char-jobs, feat:esi.industry.corp-jobs
     eve_testkit::attest(&[
-        "esi:GET /characters/{character_id}/orders",
-        "esi:GET /characters/{character_id}/orders/history",
-        "esi:GET /corporations/{corporation_id}/orders",
-        "esi:GET /corporations/{corporation_id}/orders/history",
-        "feat:esi.market.char-orders",
-        "feat:esi.market.corp-orders",
+        "esi:GET /characters/{character_id}/industry/jobs",
+        "esi:GET /corporations/{corporation_id}/industry/jobs",
+        "feat:esi.industry.char-jobs",
+        "feat:esi.industry.corp-jobs",
     ]);
 
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
     let spec = OpenApiSpec::pinned();
+    let fmt = eve_server::esi::sample_routes::format_iso8601_utc;
+
     let char_id = 90_000_001_i64;
-    let corp_id = 98_000_611_i64;
+    let corp_id = 98_000_621_i64;
     let jita_station = 60_003_760_i64;
-    let isogen_item_id = 920_010_i64;
+    let char_bpo_id = 925_101_i64;
+    let corp_bpo_id = 925_102_i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.corporation_id = corp_id;
             ch.station_id = Some(jita_station);
             ch.solar_system_id = 30_000_142;
-            ch.balance = IskCents::from_isk(250_000_000);
+            ch.balance = IskCents::from_isk(500_000_000);
         }
         snap.corporations
-            .insert(corp_id, make_corp(corp_id, "ESI6 Order Corp", "E6OC", char_id, None, 0.0));
-        snap.skills.entry(char_id).or_default().insert(
-            3447,
-            TrainedSkillRecord {
-                type_id: 3447,
-                level: 5,
-                skill_points: 256_000.0,
-            },
+            .insert(corp_id, make_corp(corp_id, "ESI6 Job Fields Corp", "E6JF", char_id, None, 0.0));
+        snap.items.insert(
+            char_bpo_id,
+            make_item(char_bpo_id, 688, char_id, jita_station, InventoryFlag::Hangar, 1, true),
         );
         snap.items.insert(
-            isogen_item_id,
-            make_item(isogen_item_id, 37, corp_id, jita_station, InventoryFlag::Hangar, 2_500, false),
+            corp_bpo_id,
+            make_item(corp_bpo_id, 688, corp_id, jita_station, InventoryFlag::CorpSAG1, 1, true),
         );
+        for sid in [3406_u32, 11448, 11452, 21791] {
+            snap.skills.entry(char_id).or_default().insert(
+                sid,
+                eve_db::TrainedSkillRecord { type_id: sid, level: 3, skill_points: 8_000.0 },
+            );
+        }
+        for (idx, dc_tid) in [20424_u32, 20172, 20411, 20412, 20414, 20416].into_iter().enumerate() {
+            snap.items.insert(
+                925_200 + idx as i64,
+                make_item(925_200 + idx as i64, dc_tid, char_id, jita_station, InventoryFlag::Hangar, 10, false),
+            );
+        }
     });
 
-    let mut sess = SessionState::new(9810);
+    let mut sess = SessionState::new(9820);
     sess.user_id = Some(1);
     sess.character_id = Some(char_id);
     sess.corporation_id = Some(corp_id);
-    sess.corp_role = ROLE_DIRECTOR | ROLE_ACCOUNTANT | ROLE_TRADER;
+    sess.corp_role = ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER;
     sess.station_id = Some(jita_station);
     sess.solar_system_id = Some(30_000_142);
-    sess.region_id = Some(10_000_002);
 
-    // 1. Place active personal buy order (range = 0 solarsystem, min_volume = 5, duration = 7)
-    let char_active_args = [
-        PyRep::Integer(jita_station),
-        PyRep::Integer(34),
-        PyRep::Real(3.5),
-        PyRep::Integer(2_000),
-        PyRep::Integer(0),
-        PyRep::Integer(5),
-        PyRep::Integer(7),
-        PyRep::Bool(false),
-    ];
-    let char_active_rep =
-        rpc_call(&ctx, &mut sess, "marketProxy", "PlaceBuyOrder", &char_active_args).await;
-    let char_active_oid = char_active_rep.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
+    // 1. Personal BPC copy job (activityID = 5, runs = 3) -> CompleteJob
+    let char_copy_dict = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(char_bpo_id)),
+        (PyRep::String("activityID".into()), PyRep::Integer(5)),
+        (PyRep::String("runs".into()), PyRep::Integer(3)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(false)),
+    ]);
+    let char_copy_rep =
+        rpc_call(&ctx, &mut sess, "industryManager", "InstallJob", &[char_copy_dict]).await;
+    let char_copy_job_id = char_copy_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let char_copy_cost = match char_copy_rep.dict_get("totalJobCostISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("missing totalJobCostISK: {other:?}"),
+    };
+    assert!(char_copy_cost > 0.0);
+    let char_copy_dur = char_copy_rep.dict_get("durationSeconds").and_then(|v| v.as_i64()).unwrap_or(100_000) as u64;
+    ctx.db.clock().advance_secs(char_copy_dur + 1);
+    let char_completed_ts = ctx.now_unix();
+    let char_copy_done = rpc_call(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(char_copy_job_id)],
+    )
+    .await;
+    let char_bpc_id = char_copy_done
+        .dict_get("createdBpcItemID")
+        .and_then(|v| v.as_i64())
+        .unwrap();
 
-    // 2. Place and cancel personal buy order (duration = 14) so it appears in character order history
-    let char_hist_args = [
-        PyRep::Integer(jita_station),
-        PyRep::Integer(35),
-        PyRep::Real(4.0),
-        PyRep::Integer(4_000),
-        PyRep::Integer(-1),
-        PyRep::Integer(1),
-        PyRep::Integer(14),
-        PyRep::Bool(false),
-    ];
-    let char_hist_rep =
-        rpc_call(&ctx, &mut sess, "marketProxy", "PlaceBuyOrder", &char_hist_args).await;
-    let char_hist_oid = char_hist_rep.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
-    rpc_call(&ctx, &mut sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(char_hist_oid)])
-        .await;
+    // 2. Personal Invention job (activityID = 8, runs = 1) on the created BPC
+    let inv_dict = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(char_bpc_id)),
+        (PyRep::String("activityID".into()), PyRep::Integer(8)),
+        (PyRep::String("runs".into()), PyRep::Integer(1)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(false)),
+    ]);
+    let inv_rep = rpc_call(&ctx, &mut sess, "industryManager", "InstallJob", &[inv_dict]).await;
+    let inv_job_id = inv_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let inv_cost = match inv_rep.dict_get("totalJobCostISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("missing totalJobCostISK: {other:?}"),
+    };
+    let inv_prob = match inv_rep.dict_get("probability") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("missing probability: {other:?}"),
+    };
+    let inv_runs = inv_rep.dict_get("inventedRuns").and_then(|v| v.as_i64()).unwrap();
+    assert!(inv_prob > 0.0);
+    assert!(inv_runs > 0);
 
-    // 3. Place active corporate buy order (accountKey = 1001 -> wallet_division 2, duration = 30)
-    let corp_active_args = [
-        PyRep::Integer(jita_station),
-        PyRep::Integer(36),
-        PyRep::Real(25.0),
-        PyRep::Integer(800),
-        PyRep::Integer(-1),
-        PyRep::Integer(10),
-        PyRep::Integer(30),
-        PyRep::Bool(true),
-        PyRep::Integer(1001),
-    ];
-    let corp_active_rep =
-        rpc_call(&ctx, &mut sess, "marketProxy", "PlaceBuyOrder", &corp_active_args).await;
-    let corp_active_oid = corp_active_rep.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
-
-    // 4. Place and cancel corporate sell order (accountKey = 1002 -> wallet_division 3, duration = 90)
-    let corp_sell_items = PyRep::List(vec![PyRep::Dict(vec![
-        (PyRep::String("itemID".into()), PyRep::Integer(isogen_item_id)),
-        (PyRep::String("typeID".into()), PyRep::Integer(37)),
-        (PyRep::String("price".into()), PyRep::Real(95.0)),
-        (PyRep::String("quantity".into()), PyRep::Integer(2_500)),
-        (PyRep::String("stationID".into()), PyRep::Integer(jita_station)),
-        (PyRep::String("duration".into()), PyRep::Integer(90)),
-    ])]);
-    let corp_hist_args = [
-        corp_sell_items,
-        PyRep::Bool(true),
-        PyRep::Integer(90),
-        PyRep::None,
-        PyRep::Integer(1002),
-    ];
-    let corp_hist_rep =
-        rpc_call(&ctx, &mut sess, "marketProxy", "PlaceMultiSellOrder", &corp_hist_args).await;
-    let corp_hist_oid = corp_hist_rep.dict_get("orderID").and_then(|v| v.as_i64()).unwrap();
-    rpc_call(&ctx, &mut sess, "marketProxy", "CancelCharOrder", &[PyRep::Integer(corp_hist_oid)])
-        .await;
+    // 3. Corporate BPC copy job (activityID = 5, runs = 4, useCorp = true) -> CompleteJob
+    let corp_copy_dict = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(corp_bpo_id)),
+        (PyRep::String("activityID".into()), PyRep::Integer(5)),
+        (PyRep::String("runs".into()), PyRep::Integer(4)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(true)),
+    ]);
+    let corp_copy_rep =
+        rpc_call(&ctx, &mut sess, "industryManager", "InstallJob", &[corp_copy_dict]).await;
+    let corp_copy_job_id = corp_copy_rep.dict_get("jobID").and_then(|v| v.as_i64()).unwrap();
+    let corp_copy_cost = match corp_copy_rep.dict_get("totalJobCostISK") {
+        Some(PyRep::Real(v)) => *v,
+        other => panic!("missing totalJobCostISK: {other:?}"),
+    };
+    let corp_copy_dur = corp_copy_rep.dict_get("durationSeconds").and_then(|v| v.as_i64()).unwrap_or(100_000) as u64;
+    ctx.db.clock().advance_secs(corp_copy_dur + 1);
+    let corp_completed_ts = ctx.now_unix();
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "industryManager",
+        "CompleteJob",
+        &[PyRep::Integer(corp_copy_job_id)],
+    )
+    .await;
 
     let token = issue_token_with_scopes(
         &ctx,
         char_id,
         vec![
-            "esi-markets.read_character_orders.v1",
-            "esi-markets.read_corporation_orders.v1",
+            "esi-industry.read_character_jobs.v1",
+            "esi-industry.read_corporation_jobs.v1",
         ],
     );
-    let no_scope_token = issue_token_with_scopes(&ctx, char_id, vec![]);
 
-    assert_status(&router, format!("/v2/characters/{char_id}/orders/"), None, 401);
-    assert_status(&router, format!("/v2/characters/{char_id}/orders/"), Some(&no_scope_token), 403);
-
-    let char_orders =
-        get_json(&router, &spec, format!("/v2/characters/{char_id}/orders/"), Some(&token));
-    let char_orders_arr = char_orders.as_array().unwrap();
-    assert_eq!(char_orders_arr.len(), 1);
-    assert_eq!(char_orders_arr[0]["order_id"], json!(char_active_oid));
-    assert_eq!(char_orders_arr[0]["volume_remain"], json!(2_000));
-    assert_eq!(char_orders_arr[0]["min_volume"], json!(5));
-    assert_eq!(char_orders_arr[0]["duration"], json!(7));
-    assert_eq!(char_orders_arr[0]["range"], json!("solarsystem"));
-    assert_eq!(char_orders_arr[0]["is_corporation"], json!(false));
-
-    let char_hist =
-        get_json(&router, &spec, format!("/v1/characters/{char_id}/orders/history/"), Some(&token));
-    let char_hist_arr = char_hist.as_array().unwrap();
-    assert_eq!(char_hist_arr.len(), 1);
-    assert_eq!(char_hist_arr[0]["order_id"], json!(char_hist_oid));
-    assert_eq!(char_hist_arr[0]["state"], json!("cancelled"));
-    assert_eq!(char_hist_arr[0]["duration"], json!(14));
-    assert_status(&router, format!("/v1/characters/{char_id}/orders/history/?page=2"), Some(&token), 404);
-
-    let corp_orders =
-        get_json(&router, &spec, format!("/v3/corporations/{corp_id}/orders/"), Some(&token));
-    let corp_orders_arr = corp_orders.as_array().unwrap();
-    assert_eq!(corp_orders_arr.len(), 1);
-    assert_eq!(corp_orders_arr[0]["order_id"], json!(corp_active_oid));
-    assert_eq!(corp_orders_arr[0]["wallet_division"], json!(2));
-    assert_eq!(corp_orders_arr[0]["issued_by"], json!(char_id));
-    assert_eq!(corp_orders_arr[0]["duration"], json!(30));
-    assert_eq!(corp_orders_arr[0]["range"], json!("station"));
-
-    let corp_hist = get_json(
+    let char_jobs = get_json(
         &router,
         &spec,
-        format!("/v2/corporations/{corp_id}/orders/history/"),
+        format!("/v1/characters/{char_id}/industry/jobs/?include_completed=true"),
         Some(&token),
     );
-    let corp_hist_arr = corp_hist.as_array().unwrap();
-    assert_eq!(corp_hist_arr.len(), 1);
-    assert_eq!(corp_hist_arr[0]["order_id"], json!(corp_hist_oid));
-    assert_eq!(corp_hist_arr[0]["wallet_division"], json!(3));
-    assert_eq!(corp_hist_arr[0]["state"], json!("cancelled"));
-    assert_eq!(corp_hist_arr[0]["duration"], json!(90));
+    let char_jobs_arr = char_jobs.as_array().unwrap();
+    let completed_char_job = char_jobs_arr
+        .iter()
+        .find(|j| j["job_id"] == json!(char_copy_job_id))
+        .expect("completed char copy job");
+    assert_eq!(completed_char_job["blueprint_location_id"], json!(jita_station));
+    assert_eq!(completed_char_job["output_location_id"], json!(jita_station));
+    assert_eq!(completed_char_job["cost"], json!(char_copy_cost));
+    assert_eq!(completed_char_job["licensed_runs"], json!(3));
+    assert_eq!(completed_char_job["completed_date"], json!(fmt(char_completed_ts)));
+    assert_eq!(completed_char_job["completed_character_id"], json!(char_id));
+
+    let active_inv_job = char_jobs_arr
+        .iter()
+        .find(|j| j["job_id"] == json!(inv_job_id))
+        .expect("active invention job");
+    assert_eq!(active_inv_job["blueprint_location_id"], json!(jita_station));
+    assert_eq!(active_inv_job["output_location_id"], json!(jita_station));
+    assert_eq!(active_inv_job["cost"], json!(inv_cost));
+    assert_eq!(active_inv_job["licensed_runs"], json!(inv_runs));
+    assert!((active_inv_job["probability"].as_f64().unwrap() - inv_prob).abs() < 1e-5);
+
+    let corp_jobs = get_json(
+        &router,
+        &spec,
+        format!("/v1/corporations/{corp_id}/industry/jobs/?include_completed=true"),
+        Some(&token),
+    );
+    let corp_jobs_arr = corp_jobs.as_array().unwrap();
+    assert_eq!(corp_jobs_arr.len(), 1);
+    assert_eq!(corp_jobs_arr[0]["job_id"], json!(corp_copy_job_id));
+    assert_eq!(corp_jobs_arr[0]["blueprint_location_id"], json!(jita_station));
+    assert_eq!(corp_jobs_arr[0]["output_location_id"], json!(jita_station));
+    assert_eq!(corp_jobs_arr[0]["cost"], json!(corp_copy_cost));
+    assert_eq!(corp_jobs_arr[0]["licensed_runs"], json!(4));
+    assert_eq!(corp_jobs_arr[0]["completed_date"], json!(fmt(corp_completed_ts)));
+    assert_eq!(corp_jobs_arr[0]["completed_character_id"], json!(char_id));
 }

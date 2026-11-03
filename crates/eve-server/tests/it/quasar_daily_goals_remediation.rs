@@ -262,8 +262,7 @@ async fn test_pve_and_quasar_daily_goals_sde_seeding_and_gameplay_progression() 
                 runs: 1,
                 duration_seconds: 60,
                 start_unix: now.saturating_sub(120),
-                status: "Active".to_string(),
-            },
+                status: "Active".to_string(), ..Default::default() },
         );
     });
     ctx.dispatch_rpc(

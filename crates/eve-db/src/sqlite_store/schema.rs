@@ -152,7 +152,14 @@ CREATE TABLE IF NOT EXISTS industry_jobs (
     product_type_id INTEGER NOT NULL,
     status TEXT NOT NULL,
     duration_seconds INTEGER NOT NULL,
-    start_unix INTEGER NOT NULL
+    start_unix INTEGER NOT NULL,
+    blueprint_location_id INTEGER NOT NULL DEFAULT 0,
+    output_location_id INTEGER NOT NULL DEFAULT 0,
+    cost REAL,
+    licensed_runs INTEGER,
+    probability REAL,
+    completed_unix INTEGER,
+    completed_character_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS planetary_colonies (
@@ -445,6 +452,17 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
         "is_shared INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = conn.execute(&format!("ALTER TABLE bookmarks ADD COLUMN {col}"), []);
+    }
+    for col in [
+        "blueprint_location_id INTEGER NOT NULL DEFAULT 0",
+        "output_location_id INTEGER NOT NULL DEFAULT 0",
+        "cost REAL",
+        "licensed_runs INTEGER",
+        "probability REAL",
+        "completed_unix INTEGER",
+        "completed_character_id INTEGER",
+    ] {
+        let _ = conn.execute(&format!("ALTER TABLE industry_jobs ADD COLUMN {col}"), []);
     }
     super::ledger_store::apply_ledger_migration(conn)?;
     super::d6_store::apply_d6_migration(conn)?;

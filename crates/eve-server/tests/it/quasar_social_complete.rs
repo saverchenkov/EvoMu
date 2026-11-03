@@ -546,13 +546,11 @@ async fn test_quasar_corporation_governance_complete() {
         snap.industry_jobs.insert(880_001, eve_db::IndustryJobRecord {
             job_id: 880_001, installer_id: 90_000_001, facility_id: 60_003_760, blueprint_item_id: 880_002,
             blueprint_type_id: 688, activity_id: 1, runs: 4, product_type_id: 587, status: "Active".into(),
-            duration_seconds: 1800, start_unix: now,
-        });
+            duration_seconds: 1800, start_unix: now, ..Default::default() });
         snap.industry_jobs.insert(880_003, eve_db::IndustryJobRecord {
             job_id: 880_003, installer_id: 90_000_001, facility_id: 60_003_760, blueprint_item_id: 880_002,
             blueprint_type_id: 688, activity_id: 3, runs: 2, product_type_id: 688, status: "Active".into(),
-            duration_seconds: 900, start_unix: now,
-        });
+            duration_seconds: 900, start_unix: now, ..Default::default() });
         snap.items.insert(880_002, eve_db::InventoryItemRecord {
             item_id: 880_002, type_id: 688, owner_id: 98_000_001, location_id: 60_003_760,
             flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1,

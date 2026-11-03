@@ -543,6 +543,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 status: "Active".to_string(),
                 duration_seconds: 3600,
                 start_unix: 1_700_000_000,
+                ..Default::default()
             },
         );
         snap.active_missions.insert(

@@ -498,8 +498,8 @@ pub fn sync_dirty_to_sqlite(
         if fp.industry_jobs.get(&jid) != Some(&h) {
             cold_changed = true;
             tx.execute(
-                "INSERT OR REPLACE INTO industry_jobs (job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT OR REPLACE INTO industry_jobs (job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix, blueprint_location_id, output_location_id, cost, licensed_runs, probability, completed_unix, completed_character_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     j.job_id,
                     j.installer_id,
@@ -512,6 +512,13 @@ pub fn sync_dirty_to_sqlite(
                     j.status,
                     j.duration_seconds as i64,
                     j.start_unix as i64,
+                    j.blueprint_location_id,
+                    j.output_location_id,
+                    j.cost,
+                    j.licensed_runs.map(|v| v as i64),
+                    j.probability.map(|v| v as f64),
+                    j.completed_unix.map(|v| v as i64),
+                    j.completed_character_id,
                 ],
             )
             .map_err(|e| e.to_string())?;

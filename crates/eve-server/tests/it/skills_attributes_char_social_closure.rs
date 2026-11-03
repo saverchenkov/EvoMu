@@ -387,7 +387,7 @@ async fn test_account_character_transfer_csat_surveys_steam_epic_and_twitch_drop
     // Move to NPC corp, but seed an active industry job -> blocked!
     ctx.db.with_mut_snapshot(|snap| {
         snap.characters.get_mut(&char_id).unwrap().corporation_id = 1_000_009; // NPC corp
-        snap.industry_jobs.insert(9001, IndustryJobRecord { job_id: 9001, installer_id: char_id, facility_id: JITA_STN, blueprint_item_id: 1, blueprint_type_id: 687, activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 3600, start_unix: now });
+        snap.industry_jobs.insert(9001, IndustryJobRecord { job_id: 9001, installer_id: char_id, facility_id: JITA_STN, blueprint_item_id: 1, blueprint_type_id: 687, activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 3600, start_unix: now, ..Default::default() });
     });
     let job_err = ctx.quasar_gateway.handle_public_request(&sess, &make_quasar_req(char_id, 1, 0, "eve.user.character.transfer.QueueRequest", xfer_buf.clone(), now), None, false, now);
     assert_ne!(job_err.status_code, STATUS_OK, "Active industry job must block character transfer");

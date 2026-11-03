@@ -83,8 +83,7 @@ async fn test_r4_188_character_transfer_blocks_paused_jobs_corp_orders_and_conse
                 product_type_id: 587,
                 status: "Paused".into(),
                 duration_seconds: 3600,
-                start_unix: now,
-            },
+                start_unix: now, ..Default::default() },
         );
     });
     let mut xfer_buf = Vec::new();
@@ -899,8 +898,7 @@ async fn test_r4_195_paused_industry_job_keeps_blueprint_item_locked() {
                 product_type_id: 587,
                 status: "Paused".into(),
                 duration_seconds: 3600,
-                start_unix: now,
-            },
+                start_unix: now, ..Default::default() },
         );
     });
 

@@ -365,8 +365,7 @@ async fn test_rpc_map_svc_part2_batch() {
                 product_type_id: 587,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: now,
-            },
+                start_unix: now, ..Default::default() },
         );
         snap.industry_jobs.insert(
             77_002,
@@ -381,8 +380,7 @@ async fn test_rpc_map_svc_part2_batch() {
                 product_type_id: 587,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: now.saturating_sub(100_000),
-            },
+                start_unix: now.saturating_sub(100_000), ..Default::default() },
         );
     });
 

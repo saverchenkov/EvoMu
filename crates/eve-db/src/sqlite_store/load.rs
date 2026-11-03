@@ -237,7 +237,7 @@ pub fn load_snapshot_from_sqlite(
 
     {
         let mut stmt = conn
-            .prepare("SELECT job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix FROM industry_jobs")
+            .prepare("SELECT job_id, installer_id, facility_id, blueprint_item_id, blueprint_type_id, activity_id, runs, product_type_id, status, duration_seconds, start_unix, blueprint_location_id, output_location_id, cost, licensed_runs, probability, completed_unix, completed_character_id FROM industry_jobs")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -253,6 +253,13 @@ pub fn load_snapshot_from_sqlite(
                     status: r.get(8)?,
                     duration_seconds: r.get::<_, i64>(9)? as u64,
                     start_unix: r.get::<_, i64>(10)? as u64,
+                    blueprint_location_id: r.get(11)?,
+                    output_location_id: r.get(12)?,
+                    cost: r.get(13)?,
+                    licensed_runs: r.get::<_, Option<i64>>(14)?.map(|v| v as u32),
+                    probability: r.get::<_, Option<f64>>(15)?.map(|v| v as f32),
+                    completed_unix: r.get::<_, Option<i64>>(16)?.map(|v| v as u64),
+                    completed_character_id: r.get(17)?,
                 })
             })
             .map_err(|e| e.to_string())?;

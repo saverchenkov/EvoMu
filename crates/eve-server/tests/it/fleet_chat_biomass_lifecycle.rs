@@ -503,8 +503,7 @@ async fn test_character_biomass_cleanup_and_economy() {
                 product_type_id: 587,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: 1_700_000_000,
-            },
+                start_unix: 1_700_000_000, ..Default::default() },
         );
         snap.planetary_colonies.insert(
             (victim_corp, 40_009_082),

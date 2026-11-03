@@ -523,8 +523,7 @@ async fn test_daily_maintenance_jobs_mutate_belts_ice_market_history_sci_sov_mis
                 runs: 10,
                 status: "Active".into(),
                 start_unix: now - 3_600,
-                duration_seconds: 7_200,
-            },
+                duration_seconds: 7_200, ..Default::default() },
         );
 
         snap.system_states.insert(

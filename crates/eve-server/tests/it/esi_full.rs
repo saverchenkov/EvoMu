@@ -238,8 +238,7 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 product_type_id: 587,
                 status: "Active".to_string(),
                 duration_seconds: 7200,
-                start_unix: now.saturating_sub(1800),
-            },
+                start_unix: now.saturating_sub(1800), ..Default::default() },
         );
 
         // 5. Fleet fixture

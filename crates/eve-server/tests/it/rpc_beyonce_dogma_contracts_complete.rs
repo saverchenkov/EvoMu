@@ -525,8 +525,7 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
     ctx.db.with_mut_snapshot(|s| {
         s.industry_jobs.insert(42, eve_db::IndustryJobRecord {
             job_id: 42, installer_id: C1, facility_id: JITA_44, blueprint_item_id: 885_001, blueprint_type_id: 683,
-            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0,
-        });
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0, ..Default::default() });
     });
     assert_eq!(ctx.dispatch_rpc(&mut s2, "industryMonitor", None, "ConnectJob", &[PyRep::Integer(42)], &HashMap::new(), None).await.unwrap_err().code, "CrpAccessDenied");
     rpc(&ctx, &mut s1, "industryMonitor", "ConnectJob", &[PyRep::Integer(42)]).await;
@@ -554,8 +553,7 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
         eve_server::services::industry_pi::save_orbital_settings(s, 40_009_082, &eve_server::services::industry_pi::OrbitalCustomsSettings { planet_id: 40_009_082, owner_corp_id: cid, ..Default::default() });
         s.industry_jobs.insert(43, eve_db::IndustryJobRecord {
             job_id: 43, installer_id: C1, facility_id: JITA_44, blueprint_item_id: 885_001, blueprint_type_id: 683,
-            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0,
-        });
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0, ..Default::default() });
         eve_server::services::industry_pi::save_job_cost_meta(s, 43, &eve_server::services::industry_pi::IndustryJobCostMeta {
             use_corp: true, owner_id: cid, ..Default::default()
         });

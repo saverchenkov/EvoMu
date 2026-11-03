@@ -222,8 +222,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
                 product_type_id: 688,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: now_unix,
-            },
+                start_unix: now_unix, ..Default::default() },
         );
         snap.items.insert(
             bp_item_id,

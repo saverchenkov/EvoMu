@@ -777,8 +777,7 @@ async fn test_inv2_stack_split_destroy_inventory() {
                 product_type_id: 587,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: 1704067200,
-            },
+                start_unix: 1704067200, ..Default::default() },
         );
     });
     let industry_err = ctx

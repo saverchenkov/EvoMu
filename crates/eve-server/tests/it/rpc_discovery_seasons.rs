@@ -448,8 +448,7 @@ async fn test_season_manager_rpc_suite() {
     ctx.db.with_mut_snapshot(|s| {
         s.industry_jobs.insert(88001, eve_db::IndustryJobRecord {
             job_id: 88001, installer_id: P2, facility_id: 60003760, blueprint_item_id: 7001, blueprint_type_id: 681,
-            activity_id: 1, runs: 1, product_type_id: 587, status: "Delivered".into(), duration_seconds: 3600, start_unix: ctx.now_unix(),
-        });
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Delivered".into(), duration_seconds: 3600, start_unix: ctx.now_unix(), ..Default::default() });
     });
     let mut p2 = select(&ctx, 61_004, "other", "other-secret", P2).await;
     let p2_ch = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(297)]).await.expect("p2 get_challenge");

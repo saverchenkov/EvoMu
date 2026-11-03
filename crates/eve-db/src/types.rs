@@ -751,7 +751,7 @@ impl Default for ContractRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct IndustryJobRecord {
     pub job_id: i64,
     pub installer_id: i64,
@@ -765,6 +765,20 @@ pub struct IndustryJobRecord {
     pub duration_seconds: u64,
     #[serde(default)]
     pub start_unix: u64,
+    #[serde(default)]
+    pub blueprint_location_id: i64,
+    #[serde(default)]
+    pub output_location_id: i64,
+    #[serde(default)]
+    pub cost: Option<f64>,
+    #[serde(default)]
+    pub licensed_runs: Option<u32>,
+    #[serde(default)]
+    pub probability: Option<f32>,
+    #[serde(default)]
+    pub completed_unix: Option<u64>,
+    #[serde(default)]
+    pub completed_character_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

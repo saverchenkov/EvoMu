@@ -964,22 +964,15 @@ pub fn handle_industry_jobs(
                     bp_mut.singleton = true; bp_mut.flag = InventoryFlag::Locked; bp_mut.version += 1;
                 }
 
-                snap.industry_jobs.insert(
-                    jid,
-                    IndustryJobRecord {
-                        job_id: jid,
-                        installer_id: char_id,
-                        facility_id: station_id,
-                        blueprint_item_id: bp_iid,
-                        blueprint_type_id: bp_type_id,
-                        activity_id,
-                        runs,
-                        product_type_id,
-                        status: "Active".into(),
-                        duration_seconds: duration_sec,
-                        start_unix: now_unix,
-                    },
-                );
+                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { Some(cost_meta.invented_runs as u32) } else if activity_id == 5 { Some(runs) } else { None };
+                snap.industry_jobs.insert(jid, IndustryJobRecord {
+                    job_id: jid, installer_id: char_id, facility_id: station_id, blueprint_item_id: bp_iid,
+                    blueprint_type_id: bp_type_id, activity_id, runs, product_type_id, status: "Active".into(),
+                    duration_seconds: duration_sec, start_unix: now_unix,
+                    blueprint_location_id: cost_meta.blueprint_location_id, output_location_id: cost_meta.output_location_id,
+                    cost: (cost_meta.total_cost_isk > 0.0).then_some(cost_meta.total_cost_isk), licensed_runs,
+                    probability: (inv_prob > 0.0).then_some(inv_prob as f32), completed_unix: None, completed_character_id: None,
+                });
                 save_job_cost_meta(snap, jid, &cost_meta);
                 Ok((jid, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_facility_tax_isk, cost_meta, effective_input_flag, input_container_id))
             });
@@ -1228,10 +1221,10 @@ pub fn handle_industry_jobs(
                         };
                         let server_roll = ctx.next_invention_roll(job.job_id as u64, char_id as u64, now_unix);
                         if server_roll >= inv_prob {
-                            if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Failed".into(); }
+                            if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Failed".into(); j_mut.completed_unix = Some(now_unix); j_mut.completed_character_id = Some(char_id); }
                             return Ok(Ok((0, 0, job)));
                         }
-                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); }
+                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); j_mut.completed_unix = Some(now_unix); j_mut.completed_character_id = Some(char_id); }
                         let mut done_meta = meta.clone(); done_meta.completed_unix = Some(now_unix); done_meta.completed_character_id = Some(char_id); save_job_cost_meta(snap, job_id, &done_meta);
                         snap.next_entity_id += 1;
                         let bpc_item_id = snap.next_entity_id;
@@ -1251,7 +1244,7 @@ pub fn handle_industry_jobs(
                         return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
                     }
 
-                    if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); }
+                    if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) { j_mut.status = "Delivered".into(); j_mut.completed_unix = Some(now_unix); j_mut.completed_character_id = Some(char_id); }
                     let mut done_meta = meta.clone(); done_meta.completed_unix = Some(now_unix); done_meta.completed_character_id = Some(char_id); save_job_cost_meta(snap, job_id, &done_meta);
 
                     let mut parent_dyn_attrs = HashMap::new();

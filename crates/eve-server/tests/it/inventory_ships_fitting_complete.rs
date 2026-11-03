@@ -522,8 +522,7 @@ async fn test_repackage_assemble_trash_encoded_crystal_and_item_locking() {
                 product_type_id: 587,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: 1_700_000_000,
-            },
+                start_unix: 1_700_000_000, ..Default::default() },
         );
     });
     sess.corporation_id = Some(corp_id);

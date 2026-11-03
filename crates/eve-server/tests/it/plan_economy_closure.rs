@@ -37,6 +37,7 @@ fn make_job(job_id: i64, facility_id: i64, bp_id: i64, duration_seconds: u64, st
     IndustryJobRecord {
         job_id, installer_id: P1, facility_id, blueprint_item_id: bp_id, blueprint_type_id: 681,
         activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds, start_unix,
+        ..Default::default()
     }
 }
 

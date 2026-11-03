@@ -355,16 +355,14 @@ async fn test_industry_blueprint_data_owner_limits_facilities_taxes_and_sci() {
             eve_db::IndustryJobRecord {
                 job_id: 990_001, installer_id: char_id, facility_id: JITA_STATION_ID,
                 blueprint_item_id: bp_item_id, blueprint_type_id: RIFTER_BP_TYPE_ID, activity_id: 1, runs: 1,
-                product_type_id: 587, status: "Active".into(), duration_seconds: 36_000, start_unix: ctx.now_unix(),
-            },
+                product_type_id: 587, status: "Active".into(), duration_seconds: 36_000, start_unix: ctx.now_unix(), ..Default::default() },
         );
         snap.industry_jobs.insert(
             990_002,
             eve_db::IndustryJobRecord {
                 job_id: 990_002, installer_id: char_id, facility_id: ls_azbel_id,
                 blueprint_item_id: bpc_item_id, blueprint_type_id: RIFTER_BP_TYPE_ID, activity_id: 1, runs: 10,
-                product_type_id: 587, status: "Active".into(), duration_seconds: 36_000, start_unix: ctx.now_unix(),
-            },
+                product_type_id: 587, status: "Active".into(), duration_seconds: 36_000, start_unix: ctx.now_unix(), ..Default::default() },
         );
     });
     let sci_1run = ctx

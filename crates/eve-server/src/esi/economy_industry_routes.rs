@@ -807,17 +807,23 @@ fn format_industry_job_json(
     let start_ts = j.start_unix;
     let end_ts = start_ts + j.duration_seconds;
     let meta = crate::services::industry_pi::load_job_cost_meta(snap, j.job_id);
-    let bp_loc = meta
-        .as_ref()
-        .map(|m| m.blueprint_location_id)
-        .filter(|&id| id > 0)
-        .or_else(|| snap.items.get(&j.blueprint_item_id).map(|it| it.location_id))
-        .unwrap_or(j.facility_id);
-    let out_loc = meta
-        .as_ref()
-        .map(|m| m.output_location_id)
-        .filter(|&id| id > 0)
-        .unwrap_or(j.facility_id);
+    let bp_loc = if j.blueprint_location_id > 0 {
+        j.blueprint_location_id
+    } else {
+        meta.as_ref()
+            .map(|m| m.blueprint_location_id)
+            .filter(|&id| id > 0)
+            .or_else(|| snap.items.get(&j.blueprint_item_id).map(|it| it.location_id))
+            .unwrap_or(j.facility_id)
+    };
+    let out_loc = if j.output_location_id > 0 {
+        j.output_location_id
+    } else {
+        meta.as_ref()
+            .map(|m| m.output_location_id)
+            .filter(|&id| id > 0)
+            .unwrap_or(j.facility_id)
+    };
     let mut obj = json!({
         "job_id": j.job_id,
         "installer_id": j.installer_id,
@@ -844,27 +850,43 @@ fn format_industry_job_json(
     } else {
         obj["station_id"] = json!(j.facility_id);
     }
-    if let Some(ref m) = meta {
-        if m.total_cost_isk > 0.0 {
-            obj["cost"] = json!(m.total_cost_isk);
-        }
-        if m.invented_runs > 0 {
-            obj["licensed_runs"] = json!(m.invented_runs);
+    if let Some(c) = j
+        .cost
+        .or_else(|| meta.as_ref().map(|m| m.total_cost_isk).filter(|&c| c > 0.0))
+    {
+        obj["cost"] = json!(c);
+    }
+    if let Some(lr) = j.licensed_runs.map(|r| r as i64).or_else(|| {
+        if j.activity_id == 8 {
+            meta.as_ref()
+                .map(|m| m.invented_runs as i64)
+                .filter(|&r| r > 0)
         } else if j.activity_id == 5 {
-            obj["licensed_runs"] = json!(j.runs as i64);
+            Some(j.runs as i64)
+        } else {
+            None
         }
-        if m.inv_prob > 0.0 {
-            obj["probability"] = json!(m.inv_prob);
-        }
-        if let Some(p) = m.paused_at_unix {
-            obj["pause_date"] = json!(format_iso8601_utc(p));
-        }
+    }) {
+        obj["licensed_runs"] = json!(lr);
+    }
+    if let Some(prob) = j
+        .probability
+        .map(|p| p as f64)
+        .or_else(|| meta.as_ref().map(|m| m.inv_prob).filter(|&p| p > 0.0))
+    {
+        obj["probability"] = json!(prob);
+    }
+    if let Some(p) = meta.as_ref().and_then(|m| m.paused_at_unix) {
+        obj["pause_date"] = json!(format_iso8601_utc(p));
     }
     if j.status.eq_ignore_ascii_case("delivered") {
-        let comp_ts = meta.as_ref().and_then(|m| m.completed_unix).unwrap_or(end_ts);
-        let comp_char = meta
-            .as_ref()
-            .and_then(|m| m.completed_character_id)
+        let comp_ts = j
+            .completed_unix
+            .or_else(|| meta.as_ref().and_then(|m| m.completed_unix))
+            .unwrap_or(end_ts);
+        let comp_char = j
+            .completed_character_id
+            .or_else(|| meta.as_ref().and_then(|m| m.completed_character_id))
             .unwrap_or(j.installer_id);
         obj["completed_date"] = json!(format_iso8601_utc(comp_ts));
         obj["completed_character_id"] = json!(comp_char);
