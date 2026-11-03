@@ -155,6 +155,7 @@ mod parity_features_world_part4;
 mod parity_fake_remediation_rpc_notify_part1;
 mod parity_notify_batch_closure;
 mod parity_notify_batch_closure_part2;
+mod parity_rpc_batch3_closure;
 mod navigation_pve_closure_part2;
 mod notify_contacts_emission;
 mod notify_corp_emission;

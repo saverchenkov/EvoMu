@@ -124,9 +124,18 @@ pub fn handle_get_homefront_site_instances(
     ServerContext::require_character(session)?;
     crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
 
-    let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId) {
-        Some(s) => s,
-        None => session
+    let sys_id = if let Some(arg0) = args.first().filter(|a| !matches!(a, PyRep::None)) {
+        let raw = arg0.as_i64().ok_or_else(|| BridgeRpcError {
+            code: "UnknownSolarSystem".into(),
+            message: "GetHomefrontSiteInstances requires an integer solarSystemID".into(),
+        })?;
+        let sid = u32::try_from(raw).ok().filter(|id| ctx.sde.solar_systems.contains_key(id)).ok_or_else(|| BridgeRpcError {
+            code: "UnknownSolarSystem".into(),
+            message: format!("Unknown solar system ID {raw}"),
+        })?;
+        sid
+    } else {
+        session
             .solar_system_id
             .or_else(|| {
                 session.character_id.and_then(|cid| {
@@ -137,10 +146,11 @@ pub fn handle_get_homefront_site_instances(
             .ok_or_else(|| BridgeRpcError {
                 code: "NotInSpace".into(),
                 message: "Action requires an active solar system session".into(),
-            })?,
+            })?
     };
 
     let reply = with_pve_special_reg(ctx, |reg| {
+        ensure_homefront_sites_for_system_locked(ctx, reg, sys_id);
         let mut by_dungeon: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         if let Some(list) = reg.homefront_sites.get(&sys_id) {
             for s in list {

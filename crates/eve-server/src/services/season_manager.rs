@@ -688,7 +688,12 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(ch_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ChallengeNotFound".into(),
+                    message: "challenge_is_dormant requires a challenge ID".into(),
+                }));
+            };
             let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id).or_else(|| st.claimed_challenges.get(&ch_id)) {
                     let is_dormant = c.is_dormant || (c.completed && !c.claimed);
@@ -712,7 +717,12 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(ch_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ChallengeNotFound".into(),
+                    message: "get_challenge_expiration_date requires a challenge ID".into(),
+                }));
+            };
             let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id).or_else(|| st.claimed_challenges.get(&ch_id)) {
                     Ok(PyRep::Integer(c.expiration_date))

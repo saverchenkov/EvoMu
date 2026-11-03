@@ -1080,14 +1080,34 @@ pub async fn handle_pve_special_sites(
         // parity: feat:pve.triglavian-sites, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            let sys_id = if let Some(arg0) = args.first().filter(|a| !matches!(a, PyRep::None)) {
+                let Some(raw) = arg0.as_i64() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "UnknownSolarSystem".into(),
+                        message: "GetTriglavianSiteInstances requires an integer solarSystemID".into(),
+                    }));
+                };
+                let Some(sid) = u32::try_from(raw).ok().filter(|id| ctx.sde.solar_systems.contains_key(id)) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "UnknownSolarSystem".into(),
+                        message: format!("Unknown solar system ID {raw}"),
+                    }));
+                };
+                sid
+            } else {
+                match resolve_session_system_id(ctx, session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                }
             };
 
             ensure_special_sites_spawned(ctx).await;
+            let is_pochven = ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070);
 
             let by_dng = with_pve_special_reg(ctx, |reg| {
+                if is_pochven {
+                    ensure_triglavian_sites_for_system(reg, sys_id, 500_026);
+                }
                 let mut map: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
                 if let Some(list) = reg.triglavian_sites.get(&sys_id) {
                     for s in list {
