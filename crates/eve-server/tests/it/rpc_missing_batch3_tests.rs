@@ -20,7 +20,7 @@ async fn test_rpc_missing_batch3_part1() {
     // parity: rpc:localizationServer.UpdateLocalizationQAWrap, rpc:localizationServer.ReloadFSDPickle
     // parity: rpc:clientStatLogger.LogString, rpc:externalQueueMgr.PublishProxyEvent
     // parity: rpc:machoNet.ReloadClientCodeHash, rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
-    // parity: rpc:loadService.StartLoad, rpc:loadService.StopLoad
+    // parity: FLAGGED_FAKE rpc:loadService.StartLoad, rpc:loadService.StopLoad
     eve_testkit::attest(&[
         "rpc:alert.LogModeChanged",
         "rpc:alert.SendProxyStackTraceAlert",
@@ -194,14 +194,11 @@ async fn test_rpc_missing_batch3_part1() {
             &kw,
             None,
         )
-        .await
-        .expect("localizationServer.ReloadFSDPickle");
-    assert_eq!(reload_res, PyRep::Bool(true));
-    let fsd_reload_blob = ctx.db.with_snapshot(|s| {
-        s.service_state_blobs.get("localization:fsd_pickle_reloads").cloned()
-    });
-    assert!(fsd_reload_blob.is_some());
-    assert!(fsd_reload_blob.unwrap().contains("fsd_english.pickle"));
+        .await;
+    assert!(reload_res.is_err(), "ReloadFSDPickle must return an error until implemented");
+    if let Err(e) = reload_res {
+        assert_eq!(e.code, "UnimplementedRPC");
+    }
 
     // 5. rpc:clientStatLogger.LogString
     let log_str_res = ctx
@@ -352,8 +349,10 @@ async fn test_rpc_missing_batch3_part1() {
 
 #[tokio::test]
 async fn test_rpc_missing_batch3_part2() {
-    // parity: rpc:loadService.SetConfig, rpc:cache.Rowset, rpc:cache.Setting
-    // parity: rpc:loadService.GetTotalStats, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
+    // parity: FLAGGED_FAKE rpc:loadService.SetConfig
+    // parity: rpc:cache.Rowset, rpc:cache.Setting
+    // parity: FLAGGED_FAKE rpc:loadService.GetTotalStats
+    // parity: rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer
     // parity: rpc:userSvc.ProcessEVESessionCreated, rpc:raffleMgr.QA_SeedRaffles, rpc:DB2.CallProc
     // DATA GAP: Triaged NA in docs/parity/triage.json (dev/QA/cluster RPCs): rpc:debug.Exec
     eve_testkit::attest(&[
@@ -595,6 +594,26 @@ async fn test_rpc_missing_batch3_part2() {
         .dispatch_rpc(&mut unpriv, "DB2", None, "CallProc", &[PyRep::String("zcluster.Nodes_PolarisID".into())], &kw, None)
         .await;
     assert!(auth_err.is_err(), "Non-admin must be rejected for DB2.CallProc");
+
+    let auth_err_attacks = ctx
+        .dispatch_rpc(
+            &mut unpriv,
+            "DB2",
+            None,
+            "CallProc",
+            &[
+                PyRep::String("zcluster.Attacks_Insert".into()),
+                PyRep::String("attack_data".into()),
+                PyRep::String("test".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        auth_err_attacks.is_err(),
+        "Non-admin must be rejected for DB2.CallProc zcluster.Attacks_Insert"
+    );
 
     let polaris_res = ctx
         .dispatch_rpc(

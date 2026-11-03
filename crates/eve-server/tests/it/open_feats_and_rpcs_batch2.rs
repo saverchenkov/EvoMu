@@ -43,7 +43,8 @@ fn make_player_session(
 
 #[tokio::test]
 async fn test_cluster_session_localization_qa_rpcs_e2e() {
-    // parity: rpc:DB2.CallProc, rpc:loadService.GetTotalStats, rpc:loadService.StartLoad, rpc:loadService.StopLoad, rpc:localizationServer.ReloadFSDPickle, rpc:raffleMgr.QA_SeedRaffles, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated
+    // parity: rpc:DB2.CallProc
+    // parity: FLAGGED_FAKE rpc:loadService.GetTotalStats, rpc:loadService.StartLoad, rpc:loadService.StopLoad, rpc:localizationServer.ReloadFSDPickle, rpc:raffleMgr.QA_SeedRaffles, rpc:sessionMgr.EndAllGameSessions, rpc:sessionMgr.RemoveSessionsFromServer, rpc:userSvc.ProcessEVESessionCreated
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();

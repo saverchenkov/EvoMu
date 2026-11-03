@@ -228,7 +228,7 @@ pub fn handle(
                 }));
             }
             let load_spec = args.first().cloned().unwrap_or(PyRep::None);
-            let mut target_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let mut target_sys = session.solar_system_id;
             let mut ticks: u64 = 5;
             if let Some(n) = load_spec.as_i64() {
                 ticks = (n.max(1) as u64).min(100);
@@ -243,7 +243,7 @@ pub fn handle(
                         Some("solar_system_id") | Some("solarSystemID") => {
                             if let Some(sys) = v.as_i64().and_then(|s| u32::try_from(s).ok()) {
                                 if sys > 0 {
-                                    target_sys = sys;
+                                    target_sys = Some(sys);
                                 }
                             }
                         }
@@ -251,6 +251,24 @@ pub fn handle(
                     }
                 }
             }
+
+            let target_sys = match target_sys {
+                Some(sys) => sys,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "MissingSolarSystemID".into(),
+                    }));
+                }
+            };
+
+            if !ctx.sde.solar_systems.contains_key(&target_sys) {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "InvalidSolarSystemID".into(),
+                }));
+            }
+
             let mut stepped_ticks: u64 = 0;
             if tokio::runtime::Handle::try_current().is_ok() {
                 let sys_handle = ctx.systems.get_or_spawn(target_sys);
@@ -430,8 +448,25 @@ pub fn handle(
                 }
             }
             ctx.db.with_mut_snapshot(|snap| {
-                snap.service_state_blobs.insert("active_sessions".into(), "[]".into());
-                snap.service_state_blobs.insert("session_registry".into(), "{}".into());
+                let mut active: Vec<i64> = snap
+                    .service_state_blobs
+                    .get("active_sessions")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                active.retain(|&s| s == session.session_id as i64);
+                if let Ok(json) = serde_json::to_string(&active) {
+                    snap.service_state_blobs.insert("active_sessions".into(), json);
+                }
+                
+                let mut registry: std::collections::HashMap<String, serde_json::Value> = snap
+                    .service_state_blobs
+                    .get("session_registry")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                registry.retain(|k, _| k == &session.session_id.to_string());
+                if let Ok(json) = serde_json::to_string(&registry) {
+                    snap.service_state_blobs.insert("session_registry".into(), json);
+                }
             });
             Some(Ok(PyRep::None))
         }
@@ -577,7 +612,7 @@ pub fn handle(
             let proc_name = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let is_gm_or_admin =
                 session.has_gm_role() || (session.role & eve_db::service_roles::ROLE_ADMIN) != 0;
-            if proc_name != "zcluster.Attacks_Insert" && !is_gm_or_admin {
+            if !is_gm_or_admin {
                 return Some(Err(BridgeRpcError {
                     code: "UserError".into(),
                     message: "NotAuthorized".into(),

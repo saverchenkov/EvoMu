@@ -1048,38 +1048,10 @@ pub fn handle(
                     message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
                 }));
             }
-            let pickle_name = args.first().and_then(|a| a.as_str()).unwrap_or("all");
-            let fsd_resources = ctx.sde.resources.len();
-            let localized_entries = ctx.sde.types.values().filter(|t| !t.name.is_empty()).count()
-                + ctx.sde.groups.values().filter(|g| !g.name.is_empty()).count()
-                + ctx.sde.categories.values().filter(|c| !c.name.is_empty()).count()
-                + ctx.sde.missions.values().filter(|m| !m.title.is_empty()).count()
-                + ctx.sde.dungeons.values().filter(|d| !d.name.is_empty()).count();
-            let now_unix = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(note) = snap.owner_notes.get_mut(&LOCALIZATION_NOTE_ID) {
-                    if let Ok(mut ov) = serde_json::from_str::<BTreeMap<i64, String>>(&note.note) {
-                        ov.retain(|_, txt| !txt.is_empty());
-                        note.note = serde_json::to_string(&ov).unwrap_or_default();
-                        note.timestamp_unix = now_unix;
-                    }
-                }
-                let mut data: BTreeMap<String, serde_json::Value> = snap
-                    .service_state_blobs
-                    .get("localization:fsd_pickle_reloads")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                let count = data.get("reload_count").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-                data.insert("reload_count".into(), serde_json::json!(count));
-                data.insert("last_pickle".into(), serde_json::json!(pickle_name));
-                data.insert("fsd_resources_count".into(), serde_json::json!(fsd_resources));
-                data.insert("localized_entries_count".into(), serde_json::json!(localized_entries));
-                data.insert("timestamp_unix".into(), serde_json::json!(now_unix));
-                if let Ok(json) = serde_json::to_string(&data) {
-                    snap.service_state_blobs.insert("localization:fsd_pickle_reloads".into(), json);
-                }
-            });
-            Some(Ok(PyRep::Bool(localized_entries > 0)))
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "FSD pickle hot-reloading is not implemented".into(),
+            }))
         }
         ("clientStatLogger", "LogString") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -1236,4 +1208,4 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
 }
 
-const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
+
