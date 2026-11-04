@@ -247,10 +247,21 @@ pub fn handle_pi_orbitals_gm(
                     message: "planetMgr.GMGetLocalDistributionReport requires planetID".into(),
                 }));
             };
+            let Some(sys_id) = ctx
+                .sde
+                .solar_systems
+                .values()
+                .find(|s| s.planet_ids.contains(&planet_id))
+                .map(|s| s.solar_system_id)
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: format!("Planet {planet_id} not found in SDE"),
+                }));
+            };
             let (theta, phi) = parse_theta_phi(theta_rep, phi_rep);
             let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
                 let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.pins_count as i64).unwrap_or(0);
-                let sys_id = ctx.sde.solar_systems.values().find(|s| s.planet_ids.contains(&planet_id)).map(|s| s.solar_system_id).unwrap_or(30000142);
                 let p0_res = crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id);
                 let mut dist: Vec<(PyRep, PyRep)> = p0_res.into_iter().map(|tid| {
                     let richness = compute_planet_resource_density(ctx, snap, planet_id, tid, theta, phi);

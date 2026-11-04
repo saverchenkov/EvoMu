@@ -651,13 +651,20 @@ pub(crate) fn emit_corp_role_session_changed(
     let (uid, ally_id, ship_id, sta_id, st_id, sys_id) = ctx.db.with_snapshot(|s| {
         let ch = s.characters.get(&tid);
         let ally = ch.and_then(|c| c.alliance_id).or_else(|| s.corporations.get(&corp_id).and_then(|c| c.alliance_id));
+        let sys = ch.map(|c| c.solar_system_id).filter(|&s| s > 0).unwrap_or_else(|| {
+            ctx.bound_objects
+                .read()
+                .ok()
+                .and_then(|b| b.values().find(|e| e.character_id == tid && e.service == "beyonce" && e.object_id > 0).map(|e| e.object_id as u32))
+                .unwrap_or(0)
+        });
         (
             ch.map_or(1, |c| c.user_id),
             ally,
             ch.map_or(0, |c| c.active_ship_id),
             ch.and_then(|c| c.station_id),
             ch.and_then(|c| c.structure_id),
-            ch.map_or(30_000_142, |c| c.solar_system_id),
+            sys,
         )
     });
     let (const_id, reg_id) = ctx.sde.solar_systems.get(&sys_id).map_or((20_000_020, 10_000_002), |sys| (sys.constellation_id, sys.region_id));

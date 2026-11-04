@@ -109,7 +109,10 @@ pub async fn handle(
         "TeleportToArena" => {
             let caller_cid = require_cid!(session);
             let target_mid = extract_id(args, 0);
-            let mut arena_sys = session.solar_system_id.unwrap_or(30000142) as i64;
+            let caller_sys = session.solar_system_id.map(|s| s as i64).or_else(|| {
+                ctx.db.with_snapshot(|snap| snap.characters.get(&caller_cid).map(|c| c.solar_system_id as i64))
+            });
+            let mut arena_sys = caller_sys.unwrap_or(0);
 
             let auth_res = ctx.db.with_snapshot(|snap| {
                 let store = load_store(snap);
@@ -131,6 +134,12 @@ pub async fn handle(
             });
             if let Err(e) = auth_res {
                 return Some(Err(e));
+            }
+            if arena_sys <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLocation".into(),
+                    message: "Caller location unknown and no arena match system available".into(),
+                }));
             }
 
             let mut old_sys = 0u32;

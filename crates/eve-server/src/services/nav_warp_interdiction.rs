@@ -859,14 +859,21 @@ pub(crate) async fn handle_set_session_check(
     }
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
-    let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+    let sys_id = session
+        .solar_system_id
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id)))
+        .unwrap_or(0);
     let cur_tick_opt = if let Some(ship_id) = session.ship_id {
-        let h = ctx.systems.get_or_spawn(sys_id);
-        h.get_ball_snapshot(ship_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|(t, _)| (sys_id, t))
+        if sys_id > 0 {
+            let h = ctx.systems.get_or_spawn(sys_id);
+            h.get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(t, _)| (sys_id, t))
+        } else {
+            None
+        }
     } else {
         None
     };
