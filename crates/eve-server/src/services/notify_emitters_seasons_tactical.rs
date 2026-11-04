@@ -1,4 +1,4 @@
-//! `notify_emitters_batch8` — Real Gameplay & Service Notification Emitters (Batch 8: Seasons & Space/Fleet/Combat).
+//! `notify_emitters_seasons_tactical` — Real Gameplay & Service Notification Emitters (Seasons & Space/Fleet/Combat).
 //!
 //! Provides stateful service transition helpers and notification emitters for:
 //! - Group 1: Seasonal lifecycle & challenge expiration (`OnSeasonStarted`, `OnSeasonEnded`,
@@ -483,7 +483,7 @@ pub async fn break_gate_cloak_and_notify(
 ) -> bool {
     let had_gate_cloak = handle.break_gate_cloak(ship_id).await.unwrap_or(false);
     if had_gate_cloak {
-        crate::services::notify_emitters_batch3_space::emit_warp_cloak_or_invuln_cancelled(
+        crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
             ctx, char_id, ship_id, true, false,
         );
     }
@@ -491,7 +491,7 @@ pub async fn break_gate_cloak_and_notify(
         if cs.undock_invulnerable_remaining_ticks > 0 {
             cs.undock_invulnerable_remaining_ticks = 0;
             let _ = handle.set_combat_state(ship_id, cs).await;
-            crate::services::notify_emitters_batch3_space::emit_warp_cloak_or_invuln_cancelled(
+            crate::services::notify_emitters_space_dungeons::emit_warp_cloak_or_invuln_cancelled(
                 ctx, char_id, ship_id, false, true,
             );
         }
@@ -592,7 +592,7 @@ pub fn on_deployable_deactivated(ctx: &ServerContext, session_fleet_id: Option<i
         Some((fleet_id, sys_id, item.owner_id))
     });
     if let Some((fleet_id, sys_id, owner_id)) = info {
-        crate::services::notify_emitters_batch3_space::emit_fleet_jump_beacon_deployable_change(
+        crate::services::notify_emitters_space_dungeons::emit_fleet_jump_beacon_deployable_change(
             ctx,
             Some(fleet_id),
             item_id,

@@ -1,4 +1,4 @@
-//! `notify_emitters_batch10` — Server-side V24 notification emitters for Batch 10
+//! `notify_emitters_tournaments_anomalies` — Server-side V24 notification emitters for Tournaments & Anomalies
 //! (Proving Grounds, Tournaments, Scanning/SignalTracker, Dungeon Instances & Room Triggers,
 //! Progression & Conversations, Tales, System Effects, ESS, Mining, Industry, SimClock,
 //! Abyssal/Zarzakh Deathzone & WhiteOut, and Map Heatmaps).

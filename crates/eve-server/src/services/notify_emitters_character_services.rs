@@ -1,4 +1,4 @@
-//! `notify_emitters_batch3` — Server-side V24 notification emitters for Batch 3
+//! `notify_emitters_character_services` — Server-side V24 notification emitters for Character Services
 //! (Social, GM/Cluster, Agents, Industry, Seasons/Campaigns, Cosmetics/FastCheckout, Skills, ESI).
 
 #![forbid(unsafe_code)]
@@ -990,7 +990,7 @@ pub fn handle_batch3_gm_slash_cmd(
             let sys_id = caller_sys.unwrap_or(30_000_142);
             let dungeon_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10_001);
             let (anom_id, inst_id) =
-                super::notify_emitters_batch3_space::spawn_and_emit_cosmic_anomaly(ctx, sys_id, dungeon_id);
+                super::notify_emitters_space_dungeons::spawn_and_emit_cosmic_anomaly(ctx, sys_id, dungeon_id);
             Some(Ok(PyRep::keyval([
                 ("targetID", PyRep::String(anom_id)),
                 ("instanceID", PyRep::Integer(inst_id)),

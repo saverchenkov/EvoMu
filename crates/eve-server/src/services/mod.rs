@@ -72,16 +72,35 @@ pub mod mining_sites;
 pub mod mobile_deployables;
 pub mod mobile_deployables_ext;
 pub mod nav_warp_interdiction;
-pub mod notify_emitters_batch3;
-pub mod notify_emitters_batch3_space;
-pub mod notify_emitters_batch5;
-pub mod notify_emitters_batch6;
-pub mod notify_emitters_batch8;
-pub mod notify_emitters_batch8_ops;
-pub mod notify_emitters_batch9;
-pub mod notify_emitters_batch9_crates;
-pub mod notify_emitters_batch9_part2;
-pub mod notify_emitters_batch10;
+pub mod notify_emitters_character_services;
+pub mod notify_emitters_space_dungeons;
+pub mod notify_emitters_combat_ess_progression;
+pub mod notify_emitters_seasons_tactical;
+pub mod notify_emitters_operations_nodegraph;
+pub mod notify_emitters_skills_trade_godma;
+pub mod crate_loot_service;
+pub mod notify_emitters_tournaments_anomalies;
+
+#[doc(hidden)]
+pub use notify_emitters_character_services as notify_emitters_batch3;
+#[doc(hidden)]
+pub use notify_emitters_space_dungeons as notify_emitters_batch3_space;
+#[doc(hidden)]
+pub use notify_emitters_combat_ess_progression as notify_emitters_batch5;
+#[doc(hidden)]
+pub use notify_emitters_combat_ess_progression as notify_emitters_batch6;
+#[doc(hidden)]
+pub use notify_emitters_seasons_tactical as notify_emitters_batch8;
+#[doc(hidden)]
+pub use notify_emitters_operations_nodegraph as notify_emitters_batch8_ops;
+#[doc(hidden)]
+pub use notify_emitters_skills_trade_godma as notify_emitters_batch9;
+#[doc(hidden)]
+pub use crate_loot_service as notify_emitters_batch9_crates;
+#[doc(hidden)]
+pub use notify_emitters_skills_trade_godma as notify_emitters_batch9_part2;
+#[doc(hidden)]
+pub use notify_emitters_tournaments_anomalies as notify_emitters_batch10;
 pub mod notify_emitters_b30;
 pub mod notify_emitters_b36;
 pub mod notify_emitters_b23;

@@ -1,4 +1,4 @@
-//! `notify_emitters_batch8_ops` — Real Gameplay & Service Notification Emitters (Batch 8: Operations, AIR NPE & NodeGraph).
+//! `notify_emitters_operations_nodegraph` — Real Gameplay & Service Notification Emitters (Operations, AIR NPE & NodeGraph).
 //!
 //! Provides stateful service transition helpers and notification emitters for Group 3:
 //! `OnOperationDeactivated`, `OnOperationReplayed`, `OnOperationSkipped`,

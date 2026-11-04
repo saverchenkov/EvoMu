@@ -1,4 +1,4 @@
-//! `notify_emitters_batch3_space` — Server-side V24 notification emitters for Batch 3
+//! `notify_emitters_space_dungeons` — Server-side V24 notification emitters for Space & Dungeons
 //! (Space, Destiny, ESS, PvE Dungeons/Escalations, Godma/EWAR, Drones, Crimewatch, Structures, PvP/Tourney).
 
 #![forbid(unsafe_code)]
@@ -1008,7 +1008,7 @@ pub fn emit_pvp_match_found_and_expiry(ctx: &ServerContext, char_id: i64, expire
         "charid",
         vec![],
     );
-    crate::services::notify_emitters_batch10::emit_proving_grounds_match_found(ctx, char_id);
+    crate::services::notify_emitters_tournaments_anomalies::emit_proving_grounds_match_found(ctx, char_id);
     ctx.notify(
         NotificationTarget::Character(char_id),
         "OnAddExpiryDurationForAbyssalPvpContent",

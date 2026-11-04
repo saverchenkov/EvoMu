@@ -3,8 +3,8 @@
 
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::cosmetics_ui_ops::{load_cosmetics_ui_state, save_cosmetics_ui_state};
-use crate::services::notify_emitters_batch3::emit_crate_loot_spawned;
-use crate::services::notify_emitters_batch9::emit_skill_bundle_injected;
+use crate::services::notify_emitters_character_services::emit_crate_loot_spawned;
+use crate::services::notify_emitters_skills_trade_godma::emit_skill_bundle_injected;
 use eve_db::{
     InventoryFlag, InventoryItemRecord, SkillHistoryEntry,
     TrainedSkillRecord, WorldStateSnapshot,
