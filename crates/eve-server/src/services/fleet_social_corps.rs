@@ -691,12 +691,13 @@ pub(super) fn handle_corps(
         }
 
         ("corpmgr", "AuditMember") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let target_id = args.first().and_then(|a| a.as_i64());
+            let (is_ceo, roles) = crate::services::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
+            if !is_ceo && !eve_db::corp_roles::has_role(session.corp_role | roles, eve_db::corp_roles::ROLE_DIRECTOR) {
+                return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only Directors and CEO can audit member roles and permissions".into() }));
+            }
+            let target_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("characterID").and_then(|a| a.as_i64()));
             let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
                 g.get(&corp_id).map(|g| {
                     g.role_audit_log.iter()

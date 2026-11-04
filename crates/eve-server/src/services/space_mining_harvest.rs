@@ -50,7 +50,7 @@ pub fn dispatch_mining_gameplay_events(ctx: &ServerContext, char_id: i64, units:
         crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
             ctx,
             char_id,
-            &["MineMaterials"],
+            &["MineMaterials", "MineOre"],
             units,
             Some(ore_type_id as i64),
         );

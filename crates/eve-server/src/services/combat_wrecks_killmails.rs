@@ -554,6 +554,7 @@ pub fn process_ship_destruction_with_aggression(
     _is_illegal: bool,
 ) -> i64 {
     crate::services::inventory_fitting::fitting_cyno_portal::on_cyno_ship_destroyed(ctx, ship_id);
+    crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, ship_id);
     let hull_val = ctx.sde.types.get(&ship_type_id).map(|t| t.base_price).unwrap_or(250_000.0).max(250_000.0);
     let now_unix = ctx.now_unix();
     let kill_id = ctx.db.with_mut_snapshot(|snap| {

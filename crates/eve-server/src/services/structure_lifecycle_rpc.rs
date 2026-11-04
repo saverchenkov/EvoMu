@@ -240,7 +240,12 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             .get(&corp_id)
             .map(|g| u64::from(g.reinforce_hour))
             .unwrap_or((now / 3_600) % 24);
-        let vuln = reinforce_window.unwrap_or((default_hour, ((now / 86_400) + 4) % 7));
+        let default_day = snap
+            .corp_governance
+            .get(&corp_id)
+            .map(|g| u64::from(g.reinforce_weekday))
+            .unwrap_or(((now / 86_400) + 4) % 7);
+        let vuln = reinforce_window.unwrap_or((default_hour, default_day));
         snap.structure_vulnerability_windows.insert(id, vuln);
         let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
         ext.lifecycle.entry(id).or_default().anchoring_duration_secs = Some(anchoring_duration_secs);

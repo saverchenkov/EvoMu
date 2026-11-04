@@ -230,6 +230,14 @@ pub async fn attempt_salvage_wreck(
         // Remove physical wreck ball from Ballpark
         let _ = sys_handle.remove_ball(wreck_item_id).await;
 
+        crate::services::social_corp_fleet::social_corp_projects::record_server_project_activity(
+            ctx,
+            char_id,
+            &["SalvageWrecks", "SalvageMaterials"],
+            1,
+            Some(sys_id as i64),
+        );
+
         let types = salvage_materials.iter().map(|&(t, _)| t).collect();
         let quantities = salvage_materials.iter().map(|&(_, q)| q).collect();
 

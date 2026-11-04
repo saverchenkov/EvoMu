@@ -210,8 +210,11 @@ pub fn handle_corp_gov_tail(
                 return deny_role("Setting corporation structure reinforcement default requires CEO or Director role");
             }
             let hour = args.first().and_then(|a| a.as_i64()).unwrap_or(18).clamp(0, 23) as u8;
+            let weekday = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(0, 6) as u8;
             with_corp_gov(ctx, |g| {
-                g.entry(corp_id).or_default().reinforce_hour = hour;
+                let gov = g.entry(corp_id).or_default();
+                gov.reinforce_hour = hour;
+                gov.reinforce_weekday = weekday;
             });
             Some(Ok(PyRep::Integer(hour as i64)))
         }
@@ -219,6 +222,11 @@ pub fn handle_corp_gov_tail(
         ("corpRegistry", "GetStructureReinforceDefault") => {
             let hour = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_hour).unwrap_or(18));
             Some(Ok(PyRep::Integer(hour as i64)))
+        }
+
+        ("corpRegistry", "GetStructureReinforceWeekdayDefault") => {
+            let weekday = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.reinforce_weekday).unwrap_or(5));
+            Some(Ok(PyRep::Integer(weekday as i64)))
         }
 
         ("corpRegistry", "GetDivisionNames")

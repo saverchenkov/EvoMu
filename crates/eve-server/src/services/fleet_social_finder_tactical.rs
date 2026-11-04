@@ -1057,6 +1057,9 @@ pub(super) async fn handle_finder_and_tactical(
             };
             let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), char_id, 1.0, 1.0, 1.0);
             ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetStateChange", "fleetid", vec![fleet_state]);
+            if !tag_str.is_empty() {
+                ctx.notify_fleet_broadcast(fleet_id, "Target", char_id, target_id);
+            }
             let tag_rep = if tag_str.is_empty() { PyRep::None } else { PyRep::String(tag_str) };
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fleet_id)),

@@ -15,6 +15,7 @@ pub const SERVER_TRACKED_MATCHERS: &[&str] = &[
     "DestroyNPCShips",
     "DestroyCapsuleerShips",
     "MineMaterials",
+    "MineOre",
     "ManufactureItems",
     "CaptureFWComplexes",
     "DefendFWComplexes",

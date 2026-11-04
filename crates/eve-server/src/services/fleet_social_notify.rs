@@ -401,6 +401,54 @@ pub fn handle_character_disconnect(ctx: &ServerContext, char_id: i64) {
             .unwrap()
             .disconnected_members
             .insert(char_id, ctx.now_unix());
+        reassign_fleet_boss_on_disconnect(ctx, char_id);
+    }
+}
+
+/// Reassigns fleet boss if `char_id` was the boss of a fleet, transferring to the next
+/// highest-ranking connected fleet member per V24 rules (`feat:fleet.boss-handover`).
+pub fn reassign_fleet_boss_on_disconnect(ctx: &ServerContext, char_id: i64) {
+    let handovers: Vec<(i64, i64, FleetMemberRecord, FleetMemberRecord)> = ctx.db.with_mut_snapshot(|snap| {
+        let mut res = Vec::new();
+        for fleet in snap.fleets.values_mut() {
+            if fleet.boss_id == char_id {
+                let next_boss = fleet
+                    .member_details
+                    .values()
+                    .filter(|m| m.character_id != char_id)
+                    .min_by_key(|m| (role_to_i64(m.role), m.join_time_unix, m.character_id))
+                    .map(|m| m.character_id)
+                    .or_else(|| fleet.members.iter().copied().find(|&m| m != char_id));
+                if let Some(nb) = next_boss {
+                    fleet.boss_id = nb;
+                    let mut old_m = fleet.member_details.get(&char_id).cloned();
+                    if let Some(m) = old_m.as_mut() {
+                        m.job &= !FLEET_JOB_CREATOR;
+                        fleet.member_details.insert(char_id, m.clone());
+                    }
+                    if let Some(new_m) = fleet.member_details.get_mut(&nb) {
+                        let old_rec = new_m.clone();
+                        new_m.job |= FLEET_JOB_CREATOR;
+                        res.push((fleet.fleet_id, nb, old_rec, new_m.clone()));
+                    }
+                }
+            }
+        }
+        res
+    });
+    for (fid, new_boss_id, old_rec, new_rec) in handovers {
+        if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fid) {
+            if ad.leader_id == char_id {
+                ad.leader_id = new_boss_id;
+            }
+        }
+        emit_member_changed(ctx, fid, &old_rec, &new_rec, false);
+        ctx.notify(
+            NotificationTarget::Fleet(fid),
+            "OnChangeFleetBoss",
+            "fleetid",
+            vec![PyRep::Integer(char_id), PyRep::Integer(new_boss_id)],
+        );
     }
 }
 

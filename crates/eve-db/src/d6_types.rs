@@ -107,6 +107,8 @@ pub struct CorpGovState {
     #[serde(default)]
     pub reinforce_hour: u8,
     #[serde(default)]
+    pub reinforce_weekday: u8,
+    #[serde(default)]
     pub friendly_fire_legal: bool,
     #[serde(default)]
     pub pending_friendly_fire: Option<(bool, u64)>,
