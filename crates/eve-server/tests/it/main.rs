@@ -646,3 +646,4 @@ mod wallet_hypernet_and_esi_structure_timers;
 mod mining_belts_and_ore_distribution;
 mod drones_fighters_and_abilities;
 mod cosmetics_skinr_studio_and_hub;
+mod pve_agent_missions_lifecycle;

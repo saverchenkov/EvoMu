@@ -1,8 +1,9 @@
 //! `agents_missions` — Domain 9: Agent Dialogue, Missions, 16-Mission Storyline Tally, Epic Arcs, & AIR NPE (`§3.8`).
 
 // parity: plan:E-5
-// parity: feat:pve.mission-accept
+// parity: feat:pve.agent-finder, feat:pve.agent-conversation, feat:pve.mission-accept
 // parity: feat:pve.mission-complete, feat:pve.mission-decline, feat:pve.mission-quit
+// parity: feat:pve.mission-expire, feat:pve.mission-journal, feat:pve.mission-tracker
 // parity: feat:pve.mission-standing-gate, feat:pve.mission-faction-standing-loss
 // parity: feat:pve.mission-lp-isk-reward-formula, feat:pve.mission-bonus-timer
 // parity: feat:pve.mission-offer-expiry-no-penalty, feat:pve.mission-level-clone-and-space-restrictions
@@ -30,7 +31,6 @@ use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
 
-
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -48,38 +48,37 @@ pub async fn handle(
     match (service, method) {
         ("agentMgr", "GetAgents") => {
             let caller_char = session.character_id;
-            let filter_level = args
-                .first().and_then(|a| a.as_i64()).map(|v| v as u8).or_else(|| _kwargs.get("level").and_then(|v| v.as_i64()).map(|v| v as u8));
-            let filter_division = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u32).or_else(|| {
-                    _kwargs.get("divisionID").or_else(|| _kwargs.get("division")).and_then(|v| v.as_i64()).map(|v| v as u32)
-                });
-            let filter_faction = args.get(2).and_then(|a| a.as_i64()).or_else(|| {
-                _kwargs.get("factionID").or_else(|| _kwargs.get("faction")).and_then(|v| v.as_i64())
-            });
-            let filter_corp = args.get(3).and_then(|a| a.as_i64()).or_else(|| {
-                _kwargs.get("corporationID").or_else(|| _kwargs.get("corporation")).and_then(|v| v.as_i64())
-            });
+            let filter_level = args.first().and_then(|a| a.as_i64()).map(|v| v as u8).or_else(|| _kwargs.get("level").and_then(|v| v.as_i64()).map(|v| v as u8));
+            let filter_division = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u32).or_else(|| _kwargs.get("divisionID").or_else(|| _kwargs.get("division")).and_then(|v| v.as_i64()).map(|v| v as u32));
+            let filter_faction = args.get(2).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("factionID").or_else(|| _kwargs.get("faction")).and_then(|v| v.as_i64()));
+            let filter_corp = args.get(3).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("corporationID").or_else(|| _kwargs.get("corporation")).and_then(|v| v.as_i64()));
+            let filter_agent_type = args.get(4).and_then(|a| a.as_i64()).map(|v| v as u32).or_else(|| _kwargs.get("agentTypeID").or_else(|| _kwargs.get("agentType")).and_then(|v| v.as_i64()).map(|v| v as u32));
+            let filter_sec = _kwargs.get("securityStatus").or_else(|| _kwargs.get("security")).or_else(|| args.get(5));
 
-            let mut matching_agents: Vec<&eve_sde::AgentInfo> = ctx.sde.agents
-                .values().filter(|a| {
-                    if filter_level.is_some_and(|lvl| a.level != lvl) {
-                        return false;
-                    }
-                    if filter_division.is_some_and(|div| a.division_id != div) {
-                        return false;
-                    }
-                    if filter_corp.is_some_and(|cid| a.corporation_id != cid) {
-                        return false;
-                    }
-                    if let Some(fid) = filter_faction {
-                        let corp_faction = ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id).map(|f| f as i64);
-                        if corp_faction != Some(fid) {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .collect();
+            let mut matching_agents: Vec<&eve_sde::AgentInfo> = ctx.sde.agents.values().filter(|a| {
+                if filter_level.is_some_and(|lvl| a.level != lvl) || filter_division.is_some_and(|div| a.division_id != div) || filter_corp.is_some_and(|cid| a.corporation_id != cid) || filter_agent_type.is_some_and(|tid| a.agent_type_id != tid) {
+                    return false;
+                }
+                if let Some(fid) = filter_faction {
+                    if ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id).map(|f| f as i64) != Some(fid) { return false; }
+                }
+                if let Some(sec_rep) = filter_sec {
+                    let sys_sec = a.solar_system_id.and_then(|sid| ctx.sde.solar_systems.get(&sid)).map(|s| s.security_status).unwrap_or(1.0);
+                    let matches_sec = match sec_rep {
+                        PyRep::String(s) => match s.to_lowercase().as_str() {
+                            "highsec" | "high" => sys_sec >= 0.45,
+                            "lowsec" | "low" => (0.05..0.45).contains(&sys_sec),
+                            "nullsec" | "null" => sys_sec < 0.05,
+                            _ => s.parse::<f64>().map(|v| sys_sec >= v - 0.05).unwrap_or(true),
+                        },
+                        PyRep::Real(v) => sys_sec >= *v - 0.05,
+                        PyRep::Integer(v) => sys_sec >= (*v as f64) - 0.05,
+                        _ => true,
+                    };
+                    if !matches_sec { return false; }
+                }
+                true
+            }).collect();
             matching_agents.sort_by_key(|a| a.agent_id);
 
             let rows = ctx.db.with_snapshot(|snap| {
