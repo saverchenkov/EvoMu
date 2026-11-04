@@ -17,7 +17,6 @@
 
 #![forbid(unsafe_code)]
 
-use crate::common;
 use crate::notify_econ_char_emission::{call, events_from, seed_item, select, P1, P2, STATION_JITA};
 use eve_db::{InventoryFlag, IskCents};
 use eve_proto::PyRep;
