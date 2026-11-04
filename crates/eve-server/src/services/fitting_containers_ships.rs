@@ -900,6 +900,18 @@ fn handle_alsc_lock_unlock(
     Ok(PyRep::keyval([("containerID", PyRep::Integer(container_id)), ("locked", PyRep::Bool(is_lock)), ("count", PyRep::Integer(item_ids.len() as i64))]))
 }
 
+async fn handle_validate_item_can_be_opened(
+    ctx: &ServerContext, session: &SessionState, bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep], kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let item_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64())).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
+    match validate_single_item_can_be_opened(ctx, char_id, item_id).await {
+        Ok(()) => Some(Ok(PyRep::Bool(true))),
+        Err(e) => Some(Err(e)),
+    }
+}
+
 pub(crate) async fn handle_containers_ships_and_fitting(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -911,12 +923,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("invbroker", "ValidateItemCanBeOpened") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64())).or_else(|| bound_entry.map(|b| b.object_id)).unwrap_or(0);
-            match validate_single_item_can_be_opened(ctx, char_id, item_id).await {
-                Ok(()) => Some(Ok(PyRep::Bool(true))),
-                Err(e) => Some(Err(e)),
-            }
+            handle_validate_item_can_be_opened(ctx, session, bound_entry, args, kwargs).await
         }
 
         ("invbroker", "ValidateItemListCanBeOpened") => {
