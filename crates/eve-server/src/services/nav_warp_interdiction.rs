@@ -11,7 +11,8 @@ use eve_destiny::MovementMode;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Zero Point Envelope landing standoff (`0 m` outside target ball radius, so `<= 2,500 m` warp jitter lands inside the `radius + 2,500 m` docking perimeter).
 pub const STATION_DOCKING_RING_STANDOFF_M: f64 = 0.0;
@@ -138,15 +139,189 @@ pub fn advance_waypoints_on_arrival(ctx: &ServerContext, char_id: i64, arrived_l
 
 /// Returns `true` when `dest_id` refers to a known solar system, NPC station, or Upwell structure.
 pub fn is_valid_waypoint_destination(ctx: &ServerContext, dest_id: i64) -> bool {
+    resolve_waypoint_solar_system(ctx, dest_id).is_some()
+}
+
+/// Resolves a waypoint destination ID (`dest_id`: solar system, NPC station, or Upwell structure)
+/// to its containing solar system ID (`feat:navigation.route-waypoints`).
+pub fn resolve_waypoint_solar_system(ctx: &ServerContext, dest_id: i64) -> Option<u32> {
     if dest_id <= 0 {
-        return false;
+        return None;
     }
-    let sys_hit = u32::try_from(dest_id)
-        .ok()
-        .is_some_and(|sid| ctx.sde.solar_systems.contains_key(&sid));
-    sys_hit
-        || ctx.sde.stations.contains_key(&dest_id)
-        || ctx.db.with_snapshot(|snap| snap.structures.contains_key(&dest_id))
+    if let Ok(sid) = u32::try_from(dest_id) {
+        if ctx.sde.solar_systems.contains_key(&sid) {
+            return Some(sid);
+        }
+    }
+    if let Some(st) = ctx.sde.stations.get(&dest_id) {
+        return Some(st.solar_system_id);
+    }
+    ctx.db.with_snapshot(|snap| {
+        snap.structures
+            .get(&dest_id)
+            .filter(|st| st.state != "Destroyed")
+            .map(|st| st.solar_system_id)
+    })
+}
+
+fn dijkstra_single_leg(
+    ctx: &ServerContext,
+    adj: &HashMap<u32, Vec<u32>>,
+    from_sys: u32,
+    to_sys: u32,
+    avoid_set: &HashSet<u32>,
+    flag: &str,
+) -> Option<Vec<u32>> {
+    if from_sys == to_sys {
+        return Some(vec![from_sys]);
+    }
+    if avoid_set.contains(&from_sys) || avoid_set.contains(&to_sys) {
+        return None;
+    }
+    let mut dist: HashMap<u32, u64> = HashMap::new();
+    let mut parent: HashMap<u32, u32> = HashMap::new();
+    let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
+
+    dist.insert(from_sys, 0);
+    heap.push(Reverse((0, from_sys)));
+
+    let mut found = false;
+    while let Some(Reverse((d, curr))) = heap.pop() {
+        if curr == to_sys {
+            found = true;
+            break;
+        }
+        if d > *dist.get(&curr).unwrap_or(&u64::MAX) {
+            continue;
+        }
+        if let Some(neighbors) = adj.get(&curr) {
+            for &nxt in neighbors {
+                if avoid_set.contains(&nxt) && nxt != to_sys {
+                    continue;
+                }
+                let sec = ctx
+                    .sde
+                    .solar_systems
+                    .get(&nxt)
+                    .map(|s| s.security_status)
+                    .unwrap_or(0.0);
+                let step_cost: u64 = match flag {
+                    "secure" => {
+                        if sec >= 0.45 {
+                            1
+                        } else {
+                            100
+                        }
+                    }
+                    "insecure" => {
+                        if sec < 0.45 {
+                            1
+                        } else {
+                            100
+                        }
+                    }
+                    _ => 1,
+                };
+                let next_d = d.saturating_add(step_cost);
+                if next_d < *dist.get(&nxt).unwrap_or(&u64::MAX) {
+                    dist.insert(nxt, next_d);
+                    parent.insert(nxt, curr);
+                    heap.push(Reverse((next_d, nxt)));
+                }
+            }
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    let mut path = vec![to_sys];
+    let mut cur = to_sys;
+    while let Some(&prev) = parent.get(&cur) {
+        path.push(prev);
+        if prev == from_sys {
+            break;
+        }
+        cur = prev;
+    }
+    path.reverse();
+    Some(path)
+}
+
+/// Calculates a multi-waypoint stargate route respecting avoid lists and explicit waypoints (`feat:navigation.route-waypoints`).
+///
+/// Accepts explicit waypoint destinations (solar systems, NPC stations, or Upwell structures),
+/// resolves their solar systems, and stitches shortest/secure/insecure path legs together without
+/// duplicate junction hops, verifying no avoided solar systems are traversed.
+pub fn calculate_route_with_waypoints(
+    ctx: &ServerContext,
+    origin_sys: u32,
+    waypoints: &[i64],
+    avoid_systems: &[u32],
+    flag: &str,
+) -> Result<Vec<u32>, BridgeRpcError> {
+    if !ctx.sde.solar_systems.contains_key(&origin_sys) {
+        return Err(BridgeRpcError {
+            code: "InvalidOrigin".into(),
+            message: format!("Origin solar system {origin_sys} not found in SDE"),
+        });
+    }
+
+    let mut resolved_targets = Vec::with_capacity(waypoints.len());
+    for &dest_id in waypoints {
+        let sid = resolve_waypoint_solar_system(ctx, dest_id).ok_or_else(|| BridgeRpcError {
+            code: "InvalidWaypoint".into(),
+            message: format!("Destination {dest_id} is not a valid solar system, station, or structure"),
+        })?;
+        resolved_targets.push(sid);
+    }
+
+    let avoid_set: HashSet<u32> = avoid_systems.iter().copied().collect();
+    if avoid_set.contains(&origin_sys) {
+        return Err(BridgeRpcError {
+            code: "OriginSystemInAvoidList".into(),
+            message: format!("Origin system {origin_sys} is in the avoid list"),
+        });
+    }
+
+    if resolved_targets.is_empty() {
+        return Ok(vec![origin_sys]);
+    }
+
+    let base_adj = crate::esi::universe_routes::cached_base_jump_adjacency(ctx);
+    let mut full_route = vec![origin_sys];
+    let mut current_sys = origin_sys;
+
+    for &next_sys in &resolved_targets {
+        if next_sys == current_sys {
+            continue;
+        }
+        if avoid_set.contains(&next_sys) {
+            return Err(BridgeRpcError {
+                code: "WaypointInAvoidList".into(),
+                message: format!("Waypoint solar system {next_sys} is in the avoid list"),
+            });
+        }
+        let leg = dijkstra_single_leg(ctx, &base_adj, current_sys, next_sys, &avoid_set, flag)
+            .ok_or_else(|| {
+                let code = if avoid_set.is_empty() {
+                    "WaypointUnreachable"
+                } else {
+                    "RouteBlockedByAvoidList"
+                };
+                BridgeRpcError {
+                    code: code.into(),
+                    message: format!(
+                        "No stargate route found between {current_sys} and {next_sys} respecting avoid list"
+                    ),
+                }
+            })?;
+        full_route.extend(leg.into_iter().skip(1));
+        current_sys = next_sys;
+    }
+
+    Ok(full_route)
 }
 
 /// Computes the exact warp landing point for `target_id` in `sys_id`:
@@ -598,6 +773,10 @@ pub async fn handle_use_warp_vector(
         ],
     );
 
+    let align_dir = (dest_pos - ship_ball.position).normalize_or_zero();
+    let entry_speed = (ship_ball.max_velocity * 0.75).max(1.0);
+    let align_time_s = ship_ball.align_time_seconds();
+
     Ok(PyRep::keyval([
         ("shipID", PyRep::Integer(ship_id)),
         ("vectorItemID", PyRep::Integer(target_id)),
@@ -606,6 +785,16 @@ pub async fn handle_use_warp_vector(
         ("remainingQuantity", PyRep::Integer(remaining_qty as i64)),
         ("distanceMeters", PyRep::Real(dist_m)),
         ("warpSpeedAuPerSec", PyRep::Real(warp_speed)),
+        ("entrySpeed", PyRep::Real(entry_speed)),
+        ("alignTimeSeconds", PyRep::Real(align_time_s)),
+        (
+            "alignmentVector",
+            PyRep::Tuple(vec![
+                PyRep::Real(align_dir.x),
+                PyRep::Real(align_dir.y),
+                PyRep::Real(align_dir.z),
+            ]),
+        ),
         (
             "destination",
             PyRep::Tuple(vec![

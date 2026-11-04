@@ -21,7 +21,6 @@ use crate::router::{NotificationTarget, ServerContext};
 use crate::services::cluster_macho_misc_services::{
     LandingPadRecord, LauncherRecord, persist_misc_state, with_misc_state,
 };
-use crate::system_actor::SystemHandle;
 use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -632,207 +631,11 @@ pub async fn disrupt_or_destroy_fw_landing_pad(
 #[path = "shipcaster_ops_starter.rs"]
 mod shipcaster_ops_starter;
 pub use shipcaster_ops_starter::{
-    check_starter_shipcaster_eligibility, on_landing_pad_ball_destroyed,
-    on_landing_pad_ball_destroyed_core,
+    apply_shipcaster_arrival_fx, apply_shipcaster_beacon_alignment_and_spool,
+    calculate_shipcaster_arrival_position, calculate_shipcaster_launch_vector,
+    check_proximity, check_starter_shipcaster_eligibility, execute_shipcaster_jump,
+    on_landing_pad_ball_destroyed, on_landing_pad_ball_destroyed_core,
 };
-
-/// Enforces fail-closed operational range and ball presence in the active solar system actor.
-pub(crate) async fn check_proximity(
-    sys: &SystemHandle,
-    ship_id: i64,
-    target_id: i64,
-    max_dist: f64,
-    label: &str,
-) -> Result<(), BridgeRpcError> {
-    if target_id <= 0 {
-        return Err(rpc_err(
-            "TargetNotFound",
-            format!("Invalid target ID {target_id} for {label}"),
-        ));
-    }
-    let ship_ball = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| rpc_err("DestinyQueryFailed", e))?
-        .map(|(_, b)| b)
-        .ok_or_else(|| {
-            rpc_err(
-                "ShipNotInSpace",
-                "Active ship ball is not in space in this solar system",
-            )
-        })?;
-
-    let target_ball = sys
-        .get_ball_snapshot(target_id)
-        .await
-        .map_err(|e| rpc_err("DestinyQueryFailed", e))?
-        .map(|(_, b)| b)
-        .ok_or_else(|| {
-            rpc_err(
-                "TargetNotInSpace",
-                format!("{label} entity {target_id} is not present in space in this solar system"),
-            )
-        })?;
-
-    let dist = ship_ball.position.distance(target_ball.position);
-    if dist > max_dist {
-        return Err(rpc_err(
-            "OutsideOperationalRange",
-            format!("Ship is {dist:.1}m from {label} (must be <= {max_dist:.0}m)"),
-        ));
-    }
-    Ok(())
-}
-
-/// Executes jump handoff across system actors, moving the ball and emitting complete session changes.
-pub(crate) async fn execute_shipcaster_jump(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    char_id: i64,
-    ship_id: i64,
-    origin_sys: u32,
-    dest_sys: u32,
-    arrival_pos: DVec3,
-) -> Result<(), BridgeRpcError> {
-    let now_unix = ctx.now_unix();
-    let old_handle = ctx.systems.get_or_spawn(origin_sys);
-    let Some((cur_tick, ship_ball)) = old_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| rpc_err("DestinyQueryFailed", e))?
-    else {
-        return Err(rpc_err(
-            "ShipNotInSpace",
-            "Active ship ball not in space in origin solar system",
-        ));
-    };
-
-    if matches!(ship_ball.type_id, 670 | 33328) {
-        return Err(rpc_err(
-            "CapsuleCannotJumpShipcaster",
-            "Capsules cannot jump through a shipcaster",
-        ));
-    }
-
-    {
-        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-        if cw.get_or_create(char_id).is_weapon_timer_active(now_unix) {
-            return Err(rpc_err(
-                "WeaponsTimerActive",
-                "Cannot jump through shipcaster while weapons timer is active",
-            ));
-        }
-    }
-
-    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(
-        ctx,
-        char_id,
-        now_unix,
-        Some((origin_sys, cur_tick)),
-    ) {
-        return Err(rpc_err(
-            "SessionChangeInProgress",
-            format!(
-                "Cannot jump shipcaster while 10s session-change timer ({}) is active",
-                active_timer.reason
-            ),
-        ));
-    }
-
-    if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")
-    {
-        return Err(e);
-    }
-
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
-        return Err(rpc_err("ShipInWarp", "Cannot jump shipcaster while ship is mid-warp"));
-    }
-
-    if old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-        return Err(rpc_err(
-            "WarpScrambled",
-            "Cannot jump shipcaster while warp scrambled or disrupted",
-        ));
-    }
-
-    if let Ok(Some(cs)) = old_handle.get_combat_state(ship_id).await {
-        if cs.warp_scramble_strength > 0 {
-            return Err(rpc_err("WarpScrambled", "Cannot jump shipcaster while warp scrambled"));
-        }
-    }
-
-    let updated_ch = ctx
-        .db
-        .set_character_solar_system(char_id, dest_sys, &ctx.sde)
-        .map_err(|e| rpc_err("SystemTransitionFailed", e.to_string()))?;
-
-    let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.location_id = dest_sys as i64;
-        }
-        if origin_sys == 30_100_000 {
-            snap.zarzakh_gate_locks.remove(&char_id).map(|(gid, _)| gid)
-        } else {
-            None
-        }
-    });
-    if let Some(locked_gate_id) = cleared_zarzakh_gate {
-        crate::services::quasar_sov_services::publish_stargate_lock_deactivated_notice(
-            &ctx.quasar_gateway,
-            char_id,
-            30_100_000,
-            locked_gate_id,
-            now_unix,
-        );
-    }
-
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
-    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(
-        ctx, char_id, ship_id,
-    );
-    let existing_ball = old_handle.remove_ball(ship_id).await;
-    ctx.sync_character_local_chat(char_id, Some(origin_sys), dest_sys);
-
-    let new_handle = ctx.systems.get_or_spawn(dest_sys);
-    let mut new_ball = existing_ball.unwrap_or(ship_ball);
-    new_ball.position = arrival_pos;
-    new_ball.velocity = DVec3::ZERO;
-    new_ball.speed_fraction = 0.0;
-    new_ball.mode = MovementMode::Stop;
-
-    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    combat_state.is_cloaked = true;
-    combat_state.gate_cloak_remaining_ticks = 60;
-    combat_state.undock_invulnerable_remaining_ticks = 60;
-    combat_state.sync_invuln_with_undock_timer = true;
-    let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
-    slim_meta.is_cloaked = true;
-
-    let new_tick = new_handle
-        .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
-        .await
-        .unwrap_or(0);
-
-    crate::services::space_destiny::record_session_change_timer(
-        ctx,
-        char_id,
-        now_unix,
-        dest_sys,
-        new_tick,
-        "shipcaster",
-    );
-
-    session.solar_system_id = Some(dest_sys);
-    session.constellation_id = Some(updated_ch.constellation_id);
-    session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
-    crate::services::map_service::record_solar_system_jump(ctx, char_id, dest_sys);
-    let _ = ctx.bind_object(session, "beyonce", dest_sys as i64);
-    let _ = new_handle.push_set_state(ship_id).await;
-
-    Ok(())
-}
 
 /// Dispatches Shipcaster, Landing Pad Construction, and Starter Shipcaster RPC calls.
 pub async fn handle(
@@ -1030,16 +833,41 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let arrival_pos = ctx
+            let starter_station_pos = ctx
                 .sde
                 .stations
                 .get(&starter_launcher.staging_station_id)
-                .map(|st| st.position + DVec3::new(2_500.0, 0.0, 0.0))
-                .unwrap_or_else(|| DVec3::new(2_500.0, 0.0, 0.0));
+                .map(|st| st.position)
+                .unwrap_or_else(|| DVec3::ZERO);
+            let launch_vector = calculate_shipcaster_launch_vector(
+                &ctx.sde,
+                sys_id,
+                starter_launcher.position,
+                dest_sys,
+                starter_station_pos,
+            );
+            let arrival_pos =
+                calculate_shipcaster_arrival_position(starter_station_pos, launch_vector, 2_500.0);
 
-            if let Err(e) =
-                execute_shipcaster_jump(ctx, session, char_id, ship_id, sys_id, dest_sys, arrival_pos)
-                    .await
+            let _ = apply_shipcaster_beacon_alignment_and_spool(
+                &sys,
+                ship_id,
+                starter_launcher.item_id,
+                launch_vector,
+            )
+            .await;
+
+            if let Err(e) = execute_shipcaster_jump(
+                ctx,
+                session,
+                char_id,
+                ship_id,
+                sys_id,
+                dest_sys,
+                arrival_pos,
+                launch_vector,
+            )
+            .await
             {
                 return Some(Err(e));
             }
@@ -1312,10 +1140,35 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let arrival_pos = pad.position + DVec3::new(2_500.0, 0.0, 0.0);
-            if let Err(e) =
-                execute_shipcaster_jump(ctx, session, char_id, ship_id, sys_id, to_system_id, arrival_pos)
-                    .await
+            let launch_vector = calculate_shipcaster_launch_vector(
+                &ctx.sde,
+                sys_id,
+                launcher.position,
+                to_system_id,
+                pad.position,
+            );
+            let arrival_pos =
+                calculate_shipcaster_arrival_position(pad.position, launch_vector, 2_500.0);
+
+            let _ = apply_shipcaster_beacon_alignment_and_spool(
+                &sys,
+                ship_id,
+                launcher.item_id,
+                launch_vector,
+            )
+            .await;
+
+            if let Err(e) = execute_shipcaster_jump(
+                ctx,
+                session,
+                char_id,
+                ship_id,
+                sys_id,
+                to_system_id,
+                arrival_pos,
+                launch_vector,
+            )
+            .await
             {
                 return Some(Err(e));
             }

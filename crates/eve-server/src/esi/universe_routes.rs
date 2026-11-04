@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 type JumpAdjacencyMap = HashMap<u32, Vec<u32>>;
 static JUMP_ADJ_CACHE: OnceLock<Mutex<HashMap<usize, Arc<JumpAdjacencyMap>>>> = OnceLock::new();
 
-fn cached_base_jump_adjacency(ctx: &ServerContext) -> Arc<JumpAdjacencyMap> {
+pub(crate) fn cached_base_jump_adjacency(ctx: &ServerContext) -> Arc<JumpAdjacencyMap> {
     let key = ctx.sde.jumps.len();
     let cache = JUMP_ADJ_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(guard) = cache.lock() {
@@ -139,11 +139,41 @@ pub fn dispatch_universe_and_nav(
                     avoid_set.insert(sys_id);
                 }
             }
-            if orig_u32 == dest_u32 {
+            if orig_u32 == dest_u32 && query_params.get("waypoints").is_none() {
                 if avoid_set.contains(&orig_u32) {
                     return RouteExecutionResult::error(404, "Origin system is in avoid list");
                 }
                 return RouteExecutionResult::ok_json(json!([origin]), 86_400);
+            }
+
+            if let Some(wp_raw) = query_params.get("waypoints") {
+                let mut wp_list = Vec::new();
+                for tok in wp_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let Ok(w_id) = tok.parse::<i64>() else {
+                        return RouteExecutionResult::error(
+                            400,
+                            format!("Invalid waypoint ID '{tok}' in waypoints parameter"),
+                        );
+                    };
+                    wp_list.push(w_id);
+                }
+                wp_list.push(destination);
+                let avoid_vec: Vec<u32> = avoid_set.iter().copied().collect();
+                match crate::services::nav_warp_interdiction::calculate_route_with_waypoints(
+                    ctx,
+                    orig_u32,
+                    &wp_list,
+                    &avoid_vec,
+                    flag,
+                ) {
+                    Ok(path) => {
+                        let path_i64: Vec<i64> = path.into_iter().map(i64::from).collect();
+                        return RouteExecutionResult::ok_json(json!(path_i64), 86_400);
+                    }
+                    Err(e) => {
+                        return RouteExecutionResult::error(404, e.message);
+                    }
+                }
             }
 
             let base_adj = cached_base_jump_adjacency(ctx);

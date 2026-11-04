@@ -621,4 +621,6 @@ mod parity_esi_contacts_remediation;
 mod parity_esi_calendar_remediation;
 mod parity_checkout_discovery_remediation;
 mod parity_notify_flagged_remediation;
+mod navigation_features_remediated_suite;
+mod navigation_features_remediated_part2;
 
