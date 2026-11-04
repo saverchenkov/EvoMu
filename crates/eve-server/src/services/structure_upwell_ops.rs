@@ -197,16 +197,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureAssetSafety", "MoveSafetyWrapToStructure") => Some(handle_move_safety_wrap_to_structure(ctx, session, args)),
         // parity: feat:admin.gm-assetsafety-time
         ("structureAssetSafety", "MoveEjectTimeGM") => {
-            if !session.has_gm_role() { return Some(Err(err("InsufficientRole", "structureAssetSafety.MoveEjectTimeGM requires GM role"))); }
-            let (wrap_id, new_eject_time) = (args.first().and_then(|a| a.as_i64()).unwrap_or(0), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0));
-            if wrap_id > 0 {
-                let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    let mut ext = load_ext_state(snap);
-                    if let Some(wrap) = ext.asset_safety_wraps.get_mut(&wrap_id) { wrap.deliverable_after_unix = new_eject_time.max(0) as u64; save_ext_state(snap, &ext); }
-                    Ok(())
-                });
-            }
-            Some(Ok(PyRep::Bool(true)))
+            Some(handle_move_eject_time_gm(ctx, session, args))
         }
         ("structureControl", "TakeControl") => Some(crate::services::structure_control_ops::handle_take_control(ctx, session, args).await),
         ("structureControl", "ReleaseControl") => Some(crate::services::structure_control_ops::handle_release_control(ctx, session, args)),
@@ -219,8 +210,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureSettings", "CharacterHasSetting") => Some(crate::services::structure_acl_defense_rules::handle_character_has_setting(ctx, session, args)),
         ("structureSettings", "CharacterGetServices") => Some(crate::services::structure_acl_defense_rules::handle_character_get_services(ctx, session, args)),
         ("structureSettings", "clear_memoized") | ("structureDirectory", "clear_memoized") => {
-            // const-ok: client-side memoized cache invalidation notifications return None
-            Some(Ok(PyRep::None))
+            Some(handle_structure_clear_memoized(ctx, session))
         }
         // V24 client structureProfiles RPCs & structureSettings profile aliases
         ("structureProfiles", "GetProfiles") => {
@@ -715,6 +705,39 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         ctx.notify_account_change(char_id, "cash", owner_id, bal_f64);
     }
     Ok(resp)
+}
+
+fn handle_move_eject_time_gm(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    if !session.has_gm_role() {
+        return Err(err("InsufficientRole", "structureAssetSafety.MoveEjectTimeGM requires GM role"));
+    }
+    let (wrap_id, new_eject_time) = (
+        args.first().and_then(|a| a.as_i64()).unwrap_or(0),
+        args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+    );
+    if wrap_id > 0 {
+        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+            let mut ext = load_ext_state(snap);
+            if let Some(wrap) = ext.asset_safety_wraps.get_mut(&wrap_id) {
+                wrap.deliverable_after_unix = new_eject_time.max(0) as u64;
+                save_ext_state(snap, &ext);
+            }
+            Ok(())
+        });
+    }
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_structure_clear_memoized(
+    _ctx: &ServerContext,
+    _session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    // const-ok: client-side memoized cache invalidation notifications return None
+    Ok(PyRep::None)
 }
 
 pub(crate) fn require_structure_control_role(snap: &WorldStateSnapshot, char_id: i64, st: &UpwellStructureRecord) -> Result<(), BridgeRpcError> {

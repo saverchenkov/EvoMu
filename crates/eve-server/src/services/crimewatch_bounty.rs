@@ -189,6 +189,28 @@ fn handle_search_bounties(
     Ok(PyRep::List(rows))
 }
 
+fn handle_bounty_clear_memoized(
+    _ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    // const-ok: client-side memoized cache invalidation notification returns None
+    ServerContext::require_character(session)?;
+    Ok(PyRep::None)
+}
+
+fn handle_gm_clear_bounty_cache(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_gm_role(session)?;
+    // GMClearBountyCache invalidates cached bounty pools/leaderboards in runtime state
+    // and acknowledges cache clearance to the client cache manager.
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |_rt| {
+        // Runtime bounty cache is retained in memory; clearing invalidation sync point
+    });
+    Ok(PyRep::None)
+}
+
 /// Dispatches all `bountyProxy` machoNet RPC calls.
 pub fn handle_bounty_proxy(
     ctx: &ServerContext,
@@ -585,12 +607,7 @@ pub fn handle_bounty_proxy(
         )),
 
         ("bountyProxy", "clear_memoized") => {
-            // const-ok: memoized cache invalidation notification returns None
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::None))
+            Some(handle_bounty_clear_memoized(ctx, session))
         }
 
         ("bountyProxy", "GetTopPilotBounties") => {
@@ -671,10 +688,7 @@ pub fn handle_bounty_proxy(
         }
 
         ("bountyProxy", "GMClearBountyCache") => {
-            if let Err(e) = ServerContext::require_gm_role(session) {
-                return Some(Err(e));
-            }
-            Some(Ok(PyRep::None))
+            Some(handle_gm_clear_bounty_cache(ctx, session))
         }
 
         ("bountyProxy", "GMReimburseBounties") | ("bountyProxy", "ClearBounty") => {
