@@ -237,7 +237,12 @@ class EvoMuBridgeConnection(object):
 
     def close(self):
         self._closed = True
+        self._event_dispatcher = None
         if self.sock is not None:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
             try:
                 self.sock.close()
             except Exception:

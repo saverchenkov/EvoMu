@@ -1009,4 +1009,112 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
         has_goto,
         "CmdGotoDirection must emit GotoDirection in DoDestinyUpdate"
     );
+
+    // 6. Disconnect while in space (triggers emergency warp) and reconnect via a fresh TCP session:
+    //    `SelectCharacterID` + `beyonce.MachoBindObject` (without `UpdateStateRequest`, matching V24.01
+    //    `Michelle.AddBallpark` -> `Park.InitializeRemoteBallpark`) MUST deliver `SetState` via `DoDestinyUpdate`
+    //    so `CharSelectCreateToSpaceTransition` (`GetBallWaitForModel(session.shipid)`) never hangs on black screen.
+    drop(s);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let mut s2 = TcpStream::connect(addr).await.unwrap();
+    let _hello2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+    write_framed_pyrep(&mut s2, &client_ver).await.unwrap();
+    write_framed_pyrep(&mut s2, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let ok_cc2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+    assert_eq!(ok_cc2.as_str(), Some("OK CC"));
+    let challenge2 = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    write_framed_pyrep(&mut s2, &challenge2.to_pyrep())
+        .await
+        .unwrap();
+    let pw_ver_rep2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+    assert_eq!(pw_ver_rep2, PyRep::Integer(2));
+    let srv_hs_rep2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+    let srv_hs2 = CryptoServerHandshake::from_pyrep(&srv_hs_rep2).expect("CryptoServerHandshake");
+    let hs_res2 = CryptoHandshakeResult {
+        challenge_response_hash: placebo_crypto_hash(&srv_hs2.server_challenge),
+        func_output: Vec::new(),
+        func_result: PyRep::Integer(0),
+    };
+    write_framed_pyrep(&mut s2, &hs_res2.to_pyrep()).await.unwrap();
+    let _ack2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+    let _init_pkt2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+    let _sess_chg2 = read_framed_pyrep(&mut s2).await.unwrap().unwrap();
+
+    let sel_pkt2 = send_call(
+        1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(90_000_001)],
+        vec![],
+    );
+    write_framed_pyrep(&mut s2, &sel_pkt2.to_pyrep())
+        .await
+        .unwrap();
+    let sel_rsp2 = loop {
+        let pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s2).await.unwrap().unwrap()).unwrap();
+        if pkt.packet_type == MachoPacketType::CallRsp {
+            break pkt;
+        }
+    };
+    assert_eq!(sel_rsp2.packet_type, MachoPacketType::CallRsp);
+
+    let bind_beyonce_pkt2 = send_call(
+        2,
+        "beyonce",
+        None,
+        "MachoBindObject",
+        vec![PyRep::Integer(30_000_142), PyRep::None],
+        vec![],
+    );
+    write_framed_pyrep(&mut s2, &bind_beyonce_pkt2.to_pyrep())
+        .await
+        .unwrap();
+    let mut bind_rsp2 = None;
+    let mut has_reconnect_set_state = false;
+    for _ in 0..20 {
+        if let Ok(Ok(Some(rep))) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            read_framed_pyrep(&mut s2),
+        )
+        .await
+        {
+            if let Some(pkt) = MachoPacket::from_pyrep(&rep) {
+                if pkt.packet_type == MachoPacketType::CallRsp {
+                    bind_rsp2 = Some(pkt);
+                } else if pkt.packet_type == MachoPacketType::Notification {
+                    if let Some((bcast, args)) = pkt.extract_broadcast_notification() {
+                        if bcast == "DoDestinyUpdate" {
+                            if let Some(PyRep::List(updates)) = args.first() {
+                                if updates.iter().any(|u| {
+                                    matches!(
+                                        u,
+                                        PyRep::Tuple(sc)
+                                            if matches!(&sc[1], PyRep::Tuple(fa) if fa[0].as_str() == Some("SetState"))
+                                    )
+                                }) {
+                                    has_reconnect_set_state = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if bind_rsp2.is_some() && has_reconnect_set_state {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        bind_rsp2.is_some(),
+        "Reconnect beyonce.MachoBindObject must receive CallRsp"
+    );
+    assert!(
+        has_reconnect_set_state,
+        "Reconnect beyonce.MachoBindObject must emit SetState in DoDestinyUpdate even during return-warp"
+    );
 }

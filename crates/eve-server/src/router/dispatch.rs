@@ -564,6 +564,28 @@ impl ServerContext {
                         .await;
                     }
                 }
+                let has_piggybacked_update_state = matches!(
+                    args.get(1),
+                    Some(PyRep::Tuple(call_tuple))
+                        if call_tuple.first().and_then(|m| m.as_str()) == Some("UpdateStateRequest")
+                );
+                if !has_piggybacked_update_state
+                    && session.station_id.is_none()
+                    && session.structure_id.is_none()
+                {
+                    if let Some(ship_id) = session.ship_id {
+                        self.active_warps
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&ship_id);
+                    }
+                    let _ = crate::services::space_destiny::handle_update_state_request(
+                        self,
+                        session,
+                        None,
+                    )
+                    .await;
+                }
             }
 
             let call_result = match args.get(1) {

@@ -96,7 +96,7 @@ pub(crate) fn load_market_order_meta(snap: &eve_db::WorldStateSnapshot, o: &Mark
         };
         return MarketOrderMeta { range, duration: m.duration_days, issue_unix: m.issued_unix, order_state, account_key: m.wallet_division.map(|k| (k as u16) + 999), final_vol_remaining: None, closed_unix: None };
     }
-    MarketOrderMeta { range: if o.is_bid { -1 } else { 32767 }, duration: if o.is_npc { 365 } else { 90 }, issue_unix: default_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None }
+    MarketOrderMeta { range: if o.is_npc || !o.is_bid { 32767 } else { -1 }, duration: if o.is_npc { 365 } else { 90 }, issue_unix: default_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None }
 }
 
 pub(crate) fn unix_to_filetime(unix_secs: u64) -> i64 {
