@@ -152,6 +152,10 @@ pub async fn handle(
                 if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 158 | 164..=172 | 177 | 179..=182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
+                // Fighter Bay (158) only accepts fighters (SDE category 87).
+                if rf == 158 && source_item_opt.as_ref().and_then(|i| ctx.sde.types.get(&i.type_id)).is_some_and(|t| t.category_id != 87) {
+                    return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: "Fighter Bay only accepts fighters".into() }));
+                }
             }
             let flag_u16 = raw_flag_opt.map(|v| v as u16).unwrap_or(InventoryFlag::Cargo as u16);
             let mut flag = match flag_u16 {

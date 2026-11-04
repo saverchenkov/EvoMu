@@ -153,6 +153,10 @@ fn set_hp(ctx: &ServerContext, id: i64, shield: f64, armor: f64, hull: f64) {
 async fn attack(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Result<PyRep, BridgeRpcError> {
     let (sys_id, ship_id) = (sess.solar_system_id.expect("sys"), sess.ship_id.expect("ship"));
     let sys = ctx.systems.get_or_spawn(sys_id);
+    // BF-03: stop the repeating cycle and let it (and the rate-of-fire delay) lapse before the next volley.
+    let _ = rpc(ctx, sess, "dogmaIM", "Deactivate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into())]).await;
+    let _ = sys.step_manual(15.0).await;
+    ctx.advance_secs(15);
     if !sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == id && l.locked) {
         rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(id)]).await?;
         let _ = sys.step_manual(12.0).await;

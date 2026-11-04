@@ -1605,7 +1605,10 @@ pub(crate) mod pi_poco_gantry_deploy_reinforce {
             .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(iris_agent_id)], &kw, None)
             .await
             .expect("Complete Paragon IRIS mission");
-        let mission_em = mission_done.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+        let gross_em = mission_done.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
+        // `lpReward` is the gross offer; NPC-corp members are credited net of the 11% LP tax when ISK >= 100k.
+        let isk_reward = mission_done.dict_get("iskReward").and_then(|v| v.as_i64()).unwrap_or(0);
+        let mission_em = if isk_reward >= 100_000 { gross_em - (gross_em * 11 + 50) / 100 } else { gross_em };
         assert!(mission_em > 0);
 
         ctx.db.with_mut_snapshot(|snap| {

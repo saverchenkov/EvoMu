@@ -365,7 +365,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await.expect("GetCombatAnomalyInstances");
         call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetSignatureInstances", &[]).await.expect("GetSignatureInstances");
         let tracker = call(&ctx, &mut sess_p1, "scanMgr", "SignalTrackerRegister", &[]).await.expect("SignalTrackerRegister");
-        assert_eq!(tracker.dict_get("anomalyCount").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(tracker.dict_get("anomalyCount").and_then(|v| v.as_i64()), Some(3), "2 Guristas combat anomalies + live seasonal event site");
 
         let probes: Vec<PyRep> = (0..8).map(|_| PyRep::List(vec![PyRep::Real(dat_pos[0]), PyRep::Real(dat_pos[1]), PyRep::Real(dat_pos[2])])).collect();
         let scan_rep = call(&ctx, &mut sess_p1, "scanMgr", "RequestScans", &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)]).await.expect("RequestScans");
@@ -450,9 +450,9 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert_eq!([dat_row[5].as_f64().unwrap(), dat_row[6].as_f64().unwrap(), dat_row[7].as_f64().unwrap()], dat_pos);
 
         let tracker_after = call(&ctx, &mut sess_p1, "scanMgr", "SignalTrackerRegister", &[]).await.expect("SignalTrackerRegister after restart");
-        assert_eq!(tracker_after.dict_get("anomalyCount").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(tracker_after.dict_get("anomalyCount").and_then(|v| v.as_i64()), Some(2), "surviving Guristas Watch + seasonal event site");
         let Some(PyRep::Rowset { rows: anom_rows, .. }) = tracker_after.dict_get("anomalies") else { panic!("Expected anomalies rowset") };
-        assert_eq!(anom_rows.len(), 1);
+        assert_eq!(anom_rows.iter().filter(|r| r[1].as_str() == Some("Combat")).count(), 1);
         assert_eq!(anom_rows[0][0].as_str(), Some("PVE-ANOM-30000142-2"));
         assert_eq!([anom_rows[0][4].as_f64().unwrap(), anom_rows[0][5].as_f64().unwrap(), anom_rows[0][6].as_f64().unwrap()], [30_000_000.0, 12_000_000.0, -8_000_000.0]);
         let anoms_cache = call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await.expect("GetCombatAnomalyInstances after restart");
