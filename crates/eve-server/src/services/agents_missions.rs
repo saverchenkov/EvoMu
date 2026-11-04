@@ -121,7 +121,7 @@ pub async fn handle(
             )))
         }
 
-        ("agentMgr", "GetInfoServiceDetails") => {
+        ("agentMgr", "GetInfoServiceDetails") | ("agentMgr", "GetAgentLocationWrap") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
@@ -131,12 +131,12 @@ pub async fn handle(
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };
-            let mut services = vec![PyRep::String("mission".into())];
+            let mut services = vec![PyRep::keyval([("agentServiceType", PyRep::String("mission".into()))])];
             if a.is_locator {
-                services.push(PyRep::String("locator".into()));
+                services.push(PyRep::keyval([("agentServiceType", PyRep::String("locator".into()))]));
             }
             if a.agent_type_id == 4 {
-                services.push(PyRep::String("research".into()));
+                services.push(PyRep::keyval([("agentServiceType", PyRep::String("research".into()))]));
             }
             Some(Ok(PyRep::keyval([
                 ("agentID", PyRep::Integer(a.agent_id)),
@@ -148,8 +148,80 @@ pub async fn handle(
                 ("level", PyRep::Integer(a.level as i64)),
                 ("quality", PyRep::Integer(20)),
                 ("isLocator", PyRep::Bool(a.is_locator)),
+                ("incompatible", PyRep::None),
                 ("services", PyRep::List(services)),
             ])))
+        }
+
+        ("agentMgr", "GetDungeonShipRestrictions") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let restricted = ctx.db.with_snapshot(|snap| {
+                let _ = snap.characters.get(&char_id);
+                Vec::<PyRep>::new()
+            });
+            Some(Ok(PyRep::Dict(vec![(
+                PyRep::String("restrictedShipTypes".into()),
+                PyRep::List(restricted),
+            )])))
+        }
+
+        ("agentMgr", "GetEntryPoint") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let bm = ctx.db.with_snapshot(|snap| {
+                snap.active_missions
+                    .values()
+                    .find(|m| m.character_id == char_id)
+                    .map(|m| {
+                        PyRep::keyval([
+                            ("solarSystemID", PyRep::Integer(m.solar_system_id as i64)),
+                            ("locationID", PyRep::Integer(m.solar_system_id as i64)),
+                            ("bookmarkID", PyRep::Integer(m.bookmark_id.unwrap_or(1))),
+                        ])
+                    })
+                    .unwrap_or_else(|| {
+                        PyRep::keyval([
+                            ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                            ("locationID", PyRep::Integer(sys_id as i64)),
+                            ("bookmarkID", PyRep::Integer(1)),
+                        ])
+                    })
+            });
+            Some(Ok(bm))
+        }
+
+        ("agentMgr", "GetMissionKeywords") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let kw_entries = ctx.db.with_snapshot(|snap| {
+                let _ = snap.characters.get(&char_id);
+                Vec::<(PyRep, PyRep)>::new()
+            });
+            Some(Ok(PyRep::Dict(kw_entries)))
+        }
+
+        ("agentMgr", "GetStandingGainsForMission") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let (agent_id, _) = resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+            let corp_id = ctx.sde.agents.get(&agent_id).map_or(1_000_035, |a| a.corporation_id);
+            Some(Ok(PyRep::Dict(vec![
+                (PyRep::Integer(agent_id), PyRep::Real(0.15)),
+                (PyRep::Integer(corp_id), PyRep::Real(0.05)),
+            ])))
+        }
+
+        ("agentMgr", "IsCheatingWithAgent") | ("agentMgr", "ShouldAlwaysAllowReplay") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let is_gm = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id)) && false;
+            Some(Ok(PyRep::Bool(is_gm)))
+        }
+
+        ("agentMgr", "GotoLocation")
+        | ("agentMgr", "WarpToAgentInSpace")
+        | ("agentMgr", "WarpToLocation") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let ok = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::Bool(ok)))
         }
 
         ("agentMgr", "GetSolarSystemOfAgent") => {

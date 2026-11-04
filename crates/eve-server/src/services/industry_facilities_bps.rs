@@ -1081,6 +1081,7 @@ pub fn handle_industry_facilities_bps(
                 Ok(PyRep::keyval([
                     ("facilityID", PyRep::Integer(facility_id)),
                     ("tax", PyRep::Real(mfg_tax)),
+                    ("taxCorporation", PyRep::Real(mfg_tax)),
                     ("1", PyRep::Real(taxes.get(&1).copied().unwrap_or(mfg_tax))),
                     ("3", PyRep::Real(taxes.get(&3).copied().unwrap_or(mfg_tax))),
                     ("4", PyRep::Real(taxes.get(&4).copied().unwrap_or(mfg_tax))),

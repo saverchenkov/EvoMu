@@ -466,6 +466,15 @@ fn handle_login_campaign_get_state(
         let static_data = PyRep::keyval([
             ("campaign_id", PyRep::Integer(campaign_id)),
             ("titleMessageID", PyRep::Integer(i64::from(campaign.campaign_name_id))),
+            ("subtitleMessageID", PyRep::Integer(i64::from(campaign.campaign_name_id))),
+            (
+                "windowHeaderBackgroundNarrow",
+                PyRep::String("res:/UI/Texture/Classes/LoginCampaign/header_narrow.png".into()),
+            ),
+            (
+                "windowHeaderBackgroundWide",
+                PyRep::String("res:/UI/Texture/Classes/LoginCampaign/header_wide.png".into()),
+            ),
             ("campaign_duration", PyRep::Integer(track_length)),
             ("is_rookie_campaign", PyRep::Bool(false)),
             ("item_rewards_by_day", PyRep::Dict(rewards_by_day)),

@@ -178,9 +178,11 @@ pub async fn handle(
                     .map(|(_, svcs)| svcs.into_iter().map(|s| PyRep::String(s.into())).collect())
                     .unwrap_or_default();
                 let is_war_hq = !hq_services.is_empty();
+                let desc_text = st.name.clone();
                 Some(Ok(PyRep::keyval([
                     ("stationID", PyRep::Integer(st.station_id)),
                     ("stationName", PyRep::String(st.name)),
+                    ("description", PyRep::String(desc_text)),
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
                     ("stationTypeID", PyRep::Integer(i64::from(st.station_type_id))),
                     ("ownerID", PyRep::Integer(st.owner_corporation_id)),

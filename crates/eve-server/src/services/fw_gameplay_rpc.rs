@@ -949,6 +949,236 @@ pub async fn handle(
                 ])
             }))
         }
+        ("facWarMgr", "CheckForRankChange") => {
+            let cid = session.character_id.unwrap_or(0);
+            let rank = ctx.db.with_snapshot(|s| {
+                s.fw_character_stats
+                    .get(&cid)
+                    .map(|r| r.current_rank as i64)
+                    .unwrap_or(1)
+            });
+            Some(Ok(PyRep::Integer(rank)))
+        }
+        ("facWarMgr", "GetAllianceWarFactionID") => {
+            let aid = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.alliance_id)
+                .unwrap_or(0);
+            let fac = ctx.db.with_snapshot(|s| {
+                let exec_corp = s.alliances.get(&aid).map(|a| a.executor_corp_id)?;
+                s.fw_runtime.corp_war_factions.get(&exec_corp).copied()
+            });
+            Some(Ok(fac.or(session.war_faction_id).map(PyRep::Integer).unwrap_or(PyRep::None)))
+        }
+        ("facWarMgr", "GetCharacterRankInfo") | ("facWarMgr", "GetMyCharacterRankInfo") => {
+            let cid = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.character_id)
+                .unwrap_or(0);
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let (fac, cur_rank, high_rank) = ctx.db.with_snapshot(|s| {
+                let st = s.fw_character_stats.get(&cid);
+                let fac = st
+                    .and_then(|r| r.faction_id)
+                    .or_else(|| s.characters.get(&cid).and_then(|c| c.war_faction_id))
+                    .or(session.war_faction_id)
+                    .unwrap_or(500_001);
+                let cur = st.map(|r| r.current_rank as i64).unwrap_or(1);
+                let high = st.map(|r| r.highest_rank as i64).unwrap_or(cur);
+                (fac, cur, high)
+            });
+            Some(Ok(PyRep::keyval([
+                ("characterID", PyRep::Integer(cid)),
+                ("factionID", PyRep::Integer(fac)),
+                ("currentRank", PyRep::Integer(cur_rank)),
+                ("highestRank", PyRep::Integer(high_rank)),
+                ("lastModified", PyRep::Integer(now_ft)),
+            ])))
+        }
+        ("facWarMgr", "GetMyCharacterRankOverview") => {
+            let cid = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.character_id)
+                .unwrap_or(0);
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let (fac, cur_rank, high_rank) = ctx.db.with_snapshot(|s| {
+                let st = s.fw_character_stats.get(&cid);
+                let fac = st
+                    .and_then(|r| r.faction_id)
+                    .or_else(|| s.characters.get(&cid).and_then(|c| c.war_faction_id))
+                    .or(session.war_faction_id)
+                    .unwrap_or(500_001);
+                let cur = st.map(|r| r.current_rank as i64).unwrap_or(1);
+                let high = st.map(|r| r.highest_rank as i64).unwrap_or(cur);
+                (fac, cur, high)
+            });
+            Some(Ok(PyRep::Rowset {
+                columns: vec![
+                    "factionID".into(),
+                    "currentRank".into(),
+                    "highestRank".into(),
+                    "lastModified".into(),
+                ],
+                rows: vec![vec![
+                    PyRep::Integer(fac),
+                    PyRep::Integer(cur_rank),
+                    PyRep::Integer(high_rank),
+                    PyRep::Integer(now_ft),
+                ]],
+            }))
+        }
+        ("facWarMgr", "GetControlBunkerIDInSystem") => {
+            let sys_id = session.solar_system_id.unwrap_or(30000142);
+            let bunker_id = ctx.db.with_snapshot(|s| {
+                s.structures
+                    .values()
+                    .find(|st| st.solar_system_id == sys_id)
+                    .map(|st| st.structure_id)
+                    .unwrap_or(1_000_000_000 + sys_id as i64)
+            });
+            Some(Ok(PyRep::Integer(bunker_id)))
+        }
+        ("facWarMgr", "GetCorpFactionalWarStatus") => {
+            let corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let (fac, start_ft) = ctx.db.with_snapshot(|s| {
+                let fac = s
+                    .fw_runtime
+                    .corp_war_factions
+                    .get(&corp_id)
+                    .copied()
+                    .or(session.war_faction_id)
+                    .unwrap_or(500_001);
+                let enl = s
+                    .fw_corp_enlisted_on
+                    .get(&corp_id)
+                    .copied()
+                    .map(crate::services::fw_enlistment::unix_to_filetime)
+                    .unwrap_or(now_ft);
+                (fac, enl)
+            });
+            Some(Ok(PyRep::keyval([
+                ("factionID", PyRep::Integer(fac)),
+                ("startDate", PyRep::Tuple(vec![PyRep::Integer(start_ft)])),
+                ("status", PyRep::Integer(2)),
+            ])))
+        }
+        ("facWarMgr", "GetFactionCorporations") => {
+            let fac_filter = args.first().and_then(|a| a.as_i64());
+            let dict = ctx.db.with_snapshot(|s| {
+                let mut entries: Vec<(PyRep, PyRep)> = s
+                    .fw_runtime
+                    .corp_war_factions
+                    .iter()
+                    .filter(|(_, &f)| fac_filter.is_none_or(|ff| ff == f))
+                    .map(|(&cid, &f)| (PyRep::Integer(cid), PyRep::Integer(f)))
+                    .collect();
+                if entries.is_empty() {
+                    let cid = session.corporation_id.unwrap_or(1_000_009);
+                    let f = fac_filter.or(session.war_faction_id).unwrap_or(500_001);
+                    entries.push((PyRep::Integer(cid), PyRep::Integer(f)));
+                }
+                PyRep::Dict(entries)
+            });
+            Some(Ok(dict))
+        }
+        ("facWarMgr", "GetSolarSystemLPs") => {
+            let sys_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+                .or(session.solar_system_id)
+                .unwrap_or(30000142);
+            let lp = ctx.db.with_snapshot(|s| {
+                s.fw_runtime.ihub_lp_donations.get(&sys_id).copied().unwrap_or(0)
+            });
+            Some(Ok(PyRep::Integer(lp)))
+        }
+        ("facWarMgr", "GetStats_CorpPilots") => {
+            let corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            let (chars, _, _, _) = compute_fw_leaderboards(ctx);
+            let rows = ctx.db.with_snapshot(|s| {
+                let mut list = Vec::new();
+                for (&cid, st) in &chars {
+                    if s.characters.get(&cid).is_none_or(|c| c.corporation_id == corp_id || corp_id == 0) {
+                        list.push(PyRep::keyval([
+                            ("characterID", PyRep::Integer(cid)),
+                            ("killsY", PyRep::Integer(st.vals[0])),
+                            ("killsW", PyRep::Integer(st.vals[1])),
+                            ("killsTotal", PyRep::Integer(st.vals[2])),
+                            ("vpY", PyRep::Integer(st.vals[3])),
+                            ("vpW", PyRep::Integer(st.vals[4])),
+                            ("vpTotal", PyRep::Integer(st.vals[5])),
+                        ]));
+                    }
+                }
+                list
+            });
+            Some(Ok(PyRep::List(rows)))
+        }
+        ("facWarMgr", "GetStats_FactionInfo") => {
+            let dict = ctx.db.with_snapshot(|s| {
+                let mut out = Vec::new();
+                for fid in [500_001_i64, 500_002, 500_003, 500_004, 500_010, 500_011] {
+                    let members = s
+                        .characters
+                        .values()
+                        .filter(|c| c.war_faction_id == Some(fid))
+                        .count()
+                        .max(1) as i64;
+                    let systems = s
+                        .fw_system_occupations
+                        .values()
+                        .filter(|o| o.occupier_faction_id == fid)
+                        .count() as i64;
+                    out.push((
+                        PyRep::Integer(fid),
+                        PyRep::keyval([
+                            ("factionID", PyRep::Integer(fid)),
+                            ("militiaMembersCount", PyRep::Integer(members)),
+                            ("systemsCount", PyRep::Integer(systems)),
+                            ("warzoneControlled", PyRep::Real(0.5)),
+                        ]),
+                    ));
+                }
+                PyRep::Dict(out)
+            });
+            Some(Ok(dict))
+        }
+        ("facWarMgr", "GetStats_Militia") => {
+            let (_, _, facs, _) = compute_fw_leaderboards(ctx);
+            let mut entries = Vec::new();
+            for fid in [500_001_i64, 500_002, 500_003, 500_004, 500_010, 500_011] {
+                let st = facs.get(&fid).copied().unwrap_or_default();
+                entries.push((PyRep::Integer(fid), st.to_py_dict()));
+            }
+            Some(Ok(PyRep::Dict(entries)))
+        }
+        ("facWarMgr", "RefreshCorps") => {
+            let _ = ctx.db.with_snapshot(|snap| snap.corporations.len());
+            Some(Ok(PyRep::None))
+        }
+        (
+            "facWarMgr",
+            "WithdrawJoinFactionAsAlliance"
+            | "WithdrawJoinFactionAsCorporation"
+            | "WithdrawLeaveFactionAsAlliance"
+            | "WithdrawLeaveFactionAsCorporation",
+        ) => {
+            let _ = ctx.db.with_snapshot(|snap| snap.corporations.len());
+            Some(Ok(PyRep::Bool(true)))
+        }
         _ => None,
     }
 }

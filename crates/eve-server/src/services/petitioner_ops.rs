@@ -591,6 +591,7 @@ fn handle_petitioner(
                     PyRep::keyval([
                         ("categoryID", PyRep::Integer(id)),
                         ("categoryName", PyRep::String(name.into())),
+                        ("displayName", PyRep::String(name.into())),
                     ])
                 })
                 .collect();

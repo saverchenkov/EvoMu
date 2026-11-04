@@ -769,6 +769,7 @@ pub async fn handle(
                 content_pieces.push(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                     ("contentType", PyRep::String("combatAnomaly".into())),
+                    ("content_type", PyRep::Integer(1)),
                     ("dungeonID", PyRep::Integer(i64::from(did))),
                     ("instanceID", PyRep::Integer(iid)),
                     ("security", PyRep::Real(sec)),
@@ -782,6 +783,7 @@ pub async fn handle(
                 content_pieces.push(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                     ("contentType", PyRep::String("signature".into())),
+                    ("content_type", PyRep::Integer(2)),
                     ("dungeonID", PyRep::Integer(i64::from(did))),
                     ("instanceID", PyRep::Integer(iid)),
                     ("security", PyRep::Real(sec)),

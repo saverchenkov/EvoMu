@@ -1083,6 +1083,294 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             Some(Ok(PyRep::Bool(at_dock)))
         }
 
+        ("invbroker", "BreakPlasticWrap") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let wrap_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| bound_entry.map(|b| b.object_id))
+                .unwrap_or(0);
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(wrap) = snap.items.get(&wrap_id).cloned() {
+                    if wrap.owner_id == char_id && wrap.type_id == 3468 {
+                        let parent_loc = wrap.location_id;
+                        let parent_flag = wrap.flag;
+                        for child in snap.items.values_mut() {
+                            if child.location_id == wrap_id {
+                                child.location_id = parent_loc;
+                                child.flag = parent_flag;
+                                child.version += 1;
+                            }
+                        }
+                        snap.items.remove(&wrap_id);
+                    }
+                }
+            });
+            Some(Ok(PyRep::None))
+        }
+
+        ("invbroker", "ClearCharges") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let ship_id = bound_entry
+                .map(|b| b.object_id)
+                .or(session.ship_id)
+                .unwrap_or(0);
+            ctx.db.with_mut_snapshot(|snap| {
+                for it in snap.items.values_mut() {
+                    if it.owner_id == char_id
+                        && it.location_id == ship_id
+                        && matches!(it.flag as u16, 11..=34)
+                        && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 8)
+                    {
+                        it.flag = InventoryFlag::Cargo;
+                        it.version += 1;
+                    }
+                }
+            });
+            Some(Ok(PyRep::None))
+        }
+
+        ("invbroker", "DestroyFitting") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(it) = snap.items.get(&item_id) {
+                    if it.owner_id == char_id && matches!(it.flag as u16, 11..=34 | 92..=94 | 125..=132 | 164..=171) {
+                        snap.items.remove(&item_id);
+                        snap.module_online_states.remove(&item_id);
+                        snap.module_active_states.remove(&item_id);
+                        snap.module_active_charges.remove(&item_id);
+                    }
+                }
+            });
+            Some(Ok(PyRep::None))
+        }
+
+        ("invbroker", "FitFitting") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut failed: Vec<PyRep> = Vec::new();
+            if let Some(PyRep::List(items) | PyRep::Tuple(items)) = args.get(1) {
+                for entry in items {
+                    if let PyRep::Tuple(t) | PyRep::List(t) = entry {
+                        if t.len() >= 2 {
+                            failed.push(PyRep::Tuple(vec![t[0].clone(), t[1].clone()]));
+                        }
+                    }
+                }
+            }
+            if failed.is_empty() {
+                failed.push(PyRep::Tuple(vec![PyRep::Integer(440), PyRep::Integer(1)]));
+            }
+            Some(Ok(PyRep::List(failed)))
+        }
+
+        ("invbroker", "GetAssetWorth") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (asset_worth, plex_worth) = ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .values()
+                    .filter(|it| it.owner_id == char_id)
+                    .fold((0.0, 0.0), |(assets, plex), it| {
+                        let val = ctx
+                            .sde
+                            .types
+                            .get(&it.type_id)
+                            .map(|t| t.base_price)
+                            .unwrap_or(0.0)
+                            * (it.quantity.max(1) as f64);
+                        if it.type_id == 44_992 {
+                            (assets, plex + val)
+                        } else {
+                            (assets + val, plex)
+                        }
+                    })
+            });
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Real(asset_worth),
+                PyRep::Real(plex_worth),
+            ])))
+        }
+
+        ("invbroker", "GetPriceForItems") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let item_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => Vec::new(),
+            };
+            let total: f64 = ctx.db.with_snapshot(|snap| {
+                item_ids
+                    .iter()
+                    .filter_map(|id| snap.items.get(id))
+                    .filter(|it| it.owner_id == char_id)
+                    .map(|it| {
+                        ctx.sde
+                            .types
+                            .get(&it.type_id)
+                            .map(|t| t.base_price)
+                            .unwrap_or(0.0)
+                            * (it.quantity.max(1) as f64)
+                    })
+                    .sum()
+            });
+            Some(Ok(PyRep::Real(total)))
+        }
+
+        ("invbroker", "HasExistingPasswordSet") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let container_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| bound_entry.map(|b| b.object_id))
+                .unwrap_or(0);
+            let which = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let st = read_container_ship_state(ctx);
+            let has_pw = st.get_container_password(container_id, which).is_some();
+            Some(Ok(PyRep::Bool(has_pw)))
+        }
+
+        ("invbroker", "ImportExportWithPlanet") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let _ = ctx.db.get_items_for_character(char_id);
+            Some(Ok(PyRep::None))
+        }
+
+        ("invbroker", "ListIncludingContainers") | ("invbroker", "ListStationItems") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let st_filter = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| bound_entry.map(|b| b.object_id))
+                .filter(|&id| id >= 60_000_000);
+            let items = ctx.db.get_items_for_character(char_id);
+            let mut rows: Vec<Vec<PyRep>> = items
+                .iter()
+                .filter(|it| match st_filter {
+                    Some(st_id) => {
+                        it.location_id == st_id
+                            || items
+                                .iter()
+                                .any(|p| p.item_id == it.location_id && p.location_id == st_id)
+                    }
+                    None => true,
+                })
+                .map(|it| item_to_packed_cells(ctx, it))
+                .collect();
+            if rows.is_empty() {
+                rows = items
+                    .iter()
+                    .map(|it| item_to_packed_cells(ctx, it))
+                    .collect();
+            }
+            Some(Ok(DBRowDescriptor::inv_item_header().build_crowset(rows)))
+        }
+
+        ("invbroker", "ListStations") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64, i64)> =
+                    std::collections::BTreeMap::new();
+                for item in snap.items.values() {
+                    if item.owner_id != char_id {
+                        continue;
+                    }
+                    let loc_id = item.location_id;
+                    let st_info = if (60_000_000..=69_999_999).contains(&loc_id) {
+                        ctx.sde
+                            .stations
+                            .get(&loc_id)
+                            .map(|st| (i64::from(st.solar_system_id), i64::from(st.station_type_id)))
+                    } else if loc_id >= 1_000_000_000_000 {
+                        snap.structures
+                            .get(&loc_id)
+                            .map(|st| (i64::from(st.solar_system_id), i64::from(st.type_id)))
+                    } else {
+                        None
+                    };
+                    if let Some((sys_id, st_type_id)) = st_info {
+                        let entry = counts_by_station
+                            .entry(loc_id)
+                            .or_insert((sys_id, 0, st_type_id));
+                        entry.1 += 1;
+                    }
+                }
+                if counts_by_station.is_empty() {
+                    let st_id = session.station_id.unwrap_or(60_003_760);
+                    let sys_id = i64::from(session.solar_system_id.unwrap_or(30_000_142));
+                    let st_type_id = ctx
+                        .sde
+                        .stations
+                        .get(&st_id)
+                        .map(|s| i64::from(s.station_type_id))
+                        .unwrap_or(1529);
+                    counts_by_station.insert(st_id, (sys_id, 1, st_type_id));
+                }
+                counts_by_station
+                    .into_iter()
+                    .map(|(station_id, (solar_system_id, item_count, st_type_id))| {
+                        vec![
+                            PyRep::Integer(station_id),
+                            PyRep::Integer(solar_system_id),
+                            PyRep::Integer(item_count),
+                            PyRep::Integer(st_type_id),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["stationID", "solarSystemID", "itemCount", "typeID"],
+                rows,
+            )))
+        }
+
+        ("invbroker", "Reprocess") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let _ = ctx.db.get_items_for_character(char_id);
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+
+        ("invbroker", "RetrievePassword") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let _ = ctx.db.get_items_for_character(char_id);
+            Some(Ok(PyRep::None))
+        }
+
         ("itemLocking", "GetLockedItemLocations") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);

@@ -682,10 +682,13 @@ pub(crate) async fn handle_ships_and_services(
                         .and_then(|mid| ctx.sde.dynamic_item_attributes.get(&mid))
                         .and_then(|d| d.applicable_type_ids.first().copied())
                         .unwrap_or(item.type_id);
+                    let mutator_type_id = item.source_mutaplasmid_id.unwrap_or(47740) as i64;
                     Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(item.item_id)),
                         ("typeID", PyRep::Integer(item.type_id as i64)),
                         ("sourceTypeID", PyRep::Integer(source_type_id as i64)),
+                        ("characterID", PyRep::Integer(item.owner_id)),
+                        ("mutatorTypeID", PyRep::Integer(mutator_type_id)),
                         (
                             "mutaplasmidTypeID",
                             item.source_mutaplasmid_id

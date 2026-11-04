@@ -432,6 +432,126 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
         ("scanMgr", "RecoverProbes") => handle_recover_probes(ctx, session, bound_entry, args).await,
         ("scanMgr", "ReconnectToLostProbes") => handle_reconnect_probes(ctx, session, bound_entry).await,
         ("scanMgr", "DestroyProbe") => handle_destroy_probe(ctx, session, bound_entry, args).await,
+        ("scanMgr", "GetFullState") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let sys_id = bound_entry
+                .map(|b| b.object_id as u32)
+                .or(session.solar_system_id)
+                .unwrap_or(30_000_142);
+            let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+            let anom_entries: Vec<(PyRep, PyRep)> = anomalies
+                .into_iter()
+                .enumerate()
+                .map(|(idx, a)| {
+                    let pos = PyRep::Tuple(vec![
+                        PyRep::Real(a.position[0]),
+                        PyRep::Real(a.position[1]),
+                        PyRep::Real(a.position[2]),
+                    ]);
+                    let val = PyRep::Tuple(vec![
+                        PyRep::Integer((idx as i64) + 1),
+                        PyRep::String(a.anomaly_id.clone()),
+                        pos,
+                        PyRep::Integer(1),
+                        PyRep::Integer(1),
+                        PyRep::Integer(885),
+                    ]);
+                    (PyRep::String(a.anomaly_id), val)
+                })
+                .collect();
+            let sig_entries: Vec<(PyRep, PyRep)> = sigs
+                .into_iter()
+                .enumerate()
+                .map(|(idx, s)| {
+                    let pos = PyRep::Tuple(vec![
+                        PyRep::Real(s.position[0]),
+                        PyRep::Real(s.position[1]),
+                        PyRep::Real(s.position[2]),
+                    ]);
+                    let val = PyRep::Tuple(vec![
+                        PyRep::Integer((idx as i64) + 1),
+                        PyRep::String(s.signature_id.clone()),
+                        pos,
+                        PyRep::Integer(1),
+                        PyRep::Integer(502),
+                    ]);
+                    (PyRep::String(s.signature_id), val)
+                })
+                .collect();
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Dict(anom_entries),
+                PyRep::Dict(sig_entries),
+                PyRep::Dict(Vec::new()),
+                PyRep::Dict(Vec::new()),
+            ])))
+        }
+        ("scanMgr", "QAOverrideProbeExpiry") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "GMRoleRequired".into(),
+                    message: "scanMgr.QAOverrideProbeExpiry requires GM/QA role".into(),
+                }));
+            }
+            let secs = args.first().and_then(|a| a.as_f64()).unwrap_or(60.0).max(1.0);
+            if let Ok(mut map) = ctx.active_scanner_probes.write() {
+                for p in map.values_mut() {
+                    if p.owner_char_id == char_id {
+                        p.max_flight_time_s = secs;
+                    }
+                }
+            }
+            Some(Ok(PyRep::None))
+        }
+        ("scanMgr", "QAScanSites") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "GMRoleRequired".into(),
+                    message: "scanMgr.QAScanSites requires GM/QA role".into(),
+                }));
+            }
+            let sys_id = bound_entry
+                .map(|b| b.object_id as u32)
+                .or(session.solar_system_id)
+                .unwrap_or(30_000_142);
+            let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
+            let now_unix = ctx.now_unix();
+            let mut results = format_anomalies(anomalies, now_unix);
+            for s in sigs {
+                results.push(PyRep::keyval([
+                    ("id", PyRep::String(s.signature_id.clone())),
+                    ("signatureID", PyRep::String(s.signature_id)),
+                    ("signalStrength", PyRep::Real(1.0)),
+                    ("resolved", PyRep::Bool(true)),
+                ]));
+            }
+            if results.is_empty() {
+                results.push(PyRep::keyval([
+                    ("id", PyRep::String("ABC-123".into())),
+                    ("signatureID", PyRep::String("ABC-123".into())),
+                    ("signalStrength", PyRep::Real(1.0)),
+                    ("resolved", PyRep::Bool(true)),
+                ]));
+            }
+            Some(Ok(PyRep::List(results)))
+        }
+        ("scanMgr", "SetActivityState") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::None))
+        }
         _ => None,
     }
 }

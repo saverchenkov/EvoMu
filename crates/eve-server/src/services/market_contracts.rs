@@ -1174,8 +1174,29 @@ pub fn handle(
                 (nc, fc)
             });
             Some(Ok(PyRep::keyval([
-                ("numOutstandingContracts", PyRep::Integer(non_corp + for_corp)), ("numOutstandingContractsForCorp", PyRep::Integer(for_corp)),
-                ("numOutstandingContractsNonCorp", PyRep::Integer(non_corp)), ("timeout", PyRep::Integer(ctx.now_blueos_filetime_ticks() + 300 * 10_000_000)),
+                ("numOutstandingContracts", PyRep::Integer(non_corp + for_corp)),
+                ("numOutstandingContractsForCorp", PyRep::Integer(for_corp)),
+                ("numOutstandingContractsNonCorp", PyRep::Integer(non_corp)),
+                ("numBiddingOn", PyRep::Integer(0)),
+                ("numBiddingOnCorp", PyRep::Integer(0)),
+                ("numContractsLeft", PyRep::Integer((21 - non_corp).max(0))),
+                ("numContractsLeftForCorp", PyRep::Integer((21 - for_corp).max(0))),
+                ("numContractsLeftInCorp", PyRep::Integer((500 - for_corp).max(0))),
+                ("numContractsTotal", PyRep::Integer(21)),
+                ("numInProgress", PyRep::Integer(0)),
+                ("numInProgressCorp", PyRep::Integer(0)),
+                ("numRequiresAttention", PyRep::Integer(0)),
+                ("numRequiresAttentionCorp", PyRep::Integer(0)),
+                (
+                    "outstandingContracts",
+                    PyRep::List(vec![PyRep::Tuple(vec![
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(char_id),
+                        PyRep::Integer(60_003_760),
+                        PyRep::Integer(ctx.now_blueos_filetime_ticks() + 86_400 * 10_000_000),
+                    ])]),
+                ),
+                ("timeout", PyRep::Integer(ctx.now_blueos_filetime_ticks() + 300 * 10_000_000)),
             ])))
         }
         ("contractProxy", "NumOutstandingContracts") => {

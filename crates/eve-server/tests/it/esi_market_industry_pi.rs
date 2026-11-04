@@ -4207,6 +4207,8 @@ pub(crate) mod esi_fw_stats_systems_leaderboards {
         );
         let paragon_arr = paragon_offers.as_array().expect("Paragon offers array");
         assert!(!paragon_arr.is_empty(), "Paragon V24 SDE offers must be non-empty");
+        assert!(paragon_arr[0]["offer_id"].as_i64().unwrap_or(0) > 0);
+        assert!(paragon_arr[0]["type_id"].as_i64().unwrap_or(0) > 0);
 
         let (concord_offers, _) = validate_and_json(
             &router,
@@ -4907,6 +4909,8 @@ pub(crate) mod esi_char_public_contracts_live {
         assert_status(&router, format!("/v1/corporations/{corp1}/roles/"), Some(&tok_trader), 403);
         assert_status(&router, format!("/v1/corporations/{corp1}/roles/history/"), Some(&tok_plain), 403);
         assert_status(&router, format!("/v1/corporations/{corp1}/roles/history/"), Some(&tok_pm), 403);
+        assert_ne!(ceo_id, plain_id);
+        assert_ne!(pm_id, grantable_id);
 
         for tok in [&tok_pm, &tok_grantable, &tok_ceo] {
             let arr = get_json(&router, &spec, format!("/v1/corporations/{corp1}/roles/"), Some(tok));

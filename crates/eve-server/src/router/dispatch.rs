@@ -237,6 +237,10 @@ impl ServerContext {
             }
         }
 
+        if caller_trace == Some("machoNet:26000") {
+            res = crate::quasar_grpc::normalize_macho_rpc_reply(service, method, res);
+        }
+
         res
     }
 

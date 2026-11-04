@@ -239,7 +239,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 client_id,
                                 session.user_id,
                                 &notif.event,
-                                notif.args,
+                                crate::quasar_grpc::normalize_macho_notification(
+                                    &notif.event,
+                                    notif.args,
+                                ),
                             );
                             if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
                                 write_failed = true;
@@ -572,8 +575,6 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 Some("machoNet:26000"),
                             )
                             .await;
-                        let rpc_res =
-                            crate::quasar_grpc::normalize_macho_rpc_reply(&service, &method, rpc_res);
 
                         if session.solar_system_id != prev_session.solar_system_id {
                             ballpark_ready = false;
@@ -720,7 +721,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 client_id,
                                 session.user_id,
                                 &notif.event,
-                                notif.args,
+                                crate::quasar_grpc::normalize_macho_notification(
+                                    &notif.event,
+                                    notif.args,
+                                ),
                             );
                             if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
                                 .await
@@ -740,7 +744,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     client_id,
                                     session.user_id,
                                     &event,
-                                    args,
+                                    crate::quasar_grpc::normalize_macho_notification(&event, args),
                                 );
                                 if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
                                     .await

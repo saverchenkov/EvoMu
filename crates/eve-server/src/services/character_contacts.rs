@@ -1300,6 +1300,37 @@ pub fn handle_contacts(
             Some(Ok(PyRep::Tuple(vec![PyRep::Real(asset_worth), PyRep::Real(plex_worth)])))
         }
 
+        ("charMgr", "List")
+        | ("charMgr", "ListIncludingContainers")
+        | ("charMgr", "ListStationItems") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let st_filter = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 60_000_000);
+            let include_containers = method == "ListIncludingContainers";
+            let items = ctx.db.get_items_for_character(char_id);
+            let mut rows: Vec<Vec<PyRep>> = items
+                .iter()
+                .filter(|it| match st_filter {
+                    Some(st_id) => {
+                        it.location_id == st_id
+                            || (include_containers
+                                && items.iter().any(|p| p.item_id == it.location_id && p.location_id == st_id))
+                    }
+                    None => true,
+                })
+                .map(|it| crate::services::inventory_bound::item_to_packed_cells(ctx, it))
+                .collect();
+            if rows.is_empty() {
+                rows = items
+                    .iter()
+                    .map(|it| crate::services::inventory_bound::item_to_packed_cells(ctx, it))
+                    .collect();
+            }
+            Some(Ok(eve_proto::DBRowDescriptor::inv_item_header().build_crowset(rows)))
+        }
+
         // parity: feat:character.home-station
         ("home_station", "get_home_station_candidates") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

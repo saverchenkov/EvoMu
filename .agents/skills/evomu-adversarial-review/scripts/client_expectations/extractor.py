@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""AUDIT E / T-10 prototype: deterministic client-expectation extraction from EVE V24.01 code.ccp.
+"""AUDIT E / T-10: deterministic client-expectation extraction from EVE V24.01 code.ccp.
 
 Read-only on the client archive. Outputs (client-derived; keep OUT of every repo) go next to this script.
 
 Method: abstract interpretation of Python 2.7 bytecode (marshal reader in ccp_reader.py, opcode table in
 dis27.py). Per code object a linear stack simulation with jump-target stack snapshots; locals are
-flow-insensitive (last store in linear order wins). Values are symbolic tuples:
-  ('C', v)            constant                      ('P', 'a.b.c')   dotted global/import path
-  ('SELF',)           first arg named self          ('SA', attr)     unresolved self.attr
-  ('SVC', svc, via)   bound remote service/moniker  ('BM', svc, m, via) attribute of a service
-  ('T', key, path)    tracked value (RPC reply or notify param); key = site id, path = tuple of steps
-  ('ITER', T)         iterator over a tracked value ('TM', key, path, meth) method of tracked value
-  ('CR', name)        result of calling something whose terminal name is `name` (factory resolution)
-  ('A', name)         attribute `name` of an unknown object
-Passes: (1) summaries -> service-factory fixpoint (functions returning Moniker('svc')/RemoteSvc('svc'),
-self.attr bindings); (2) full interpretation -> RPC sites + passthrough wrappers; (3) final interpretation
-with wrappers resolved -> reply shapes, notify params, session keys, constants.
+flow-insensitive (last store in linear order wins, with multi-BM union for branch-assigned callables).
+Values are symbolic tuples:
+  ('C', v)                  constant
+  ('P', 'a.b.c')            dotted global/import path
+  ('SELF',)                 first arg named self (including cellvar/freevar self)
+  ('SA', attr)              unresolved self.attr
+  ('SVC', svc, via)         bound remote service/moniker
+  ('CSVC', name, m, cls)    bound client service (sm.GetService / svc.pyj registry)
+  ('INST', m, cls)          instance of a known client class (m, cls)
+  ('BM', svc, m, via)       bound RPC method of a remote service
+  ('MULTI_BM', [bm...])     branch-merged bound RPC methods
+  ('CM', m, cls, meth, via) bound method of a known client class/service
+  ('T', key, path)          tracked value (RPC reply or notify param); key = site id, path = tuple of steps
+  ('T_MULTI', keys, path)   branch-merged tracked values
+  ('ITER', T)               iterator over a tracked value
+  ('TM', key, path, meth)   method of a tracked value
+  ('CODE', co)              code constant
+  ('FUNC', co)              function/closure/comprehension built from code constant
+  ('PARALLEL_TASK', r)      resolved (callable, args) 2-tuple for uthread.parallel
+  ('SEQ', tuple_of_vals)    tuple/list of symbolic values
+  ('CR', name)              result of calling something whose terminal name is `name` (factory resolution)
+  ('A', name)               attribute `name` of an unknown object
 
 Usage: extractor.py [--ccp PATH] [--out client_expectations.json]
 """
@@ -36,15 +47,27 @@ SVC_BINDERS = {'RemoteSvc', 'ProxySvc', 'ConnectToRemoteService', 'ConnectToAnyS
                'ConnectToSolServerService', 'ConnectToProxyServerService', 'ConnectToAllServices',
                'ConnectToAllProxyServerServices', 'ConnectToAllSolServerServices',
                'ConnectToAllNeighboringServices', 'ConnectToAllSiblingServices', 'Moniker'}
+CLIENT_SVC_BINDERS = {'GetService', 'StartService', 'GetServiceIfRunning', 'GetServiceIfStarted'}
+# Remote RPC methods that return a sub-service / bound handler moniker for the same service.
+SUBSVC_METHODS = {
+    ('skillMgr2', 'GetMySkillHandler'),
+    ('skillMgr2', 'GetSkillHandler'),
+    ('invbroker', 'GetInventoryFromId'),
+    ('invbroker', 'GetInventory'),
+    ('scanMgr', 'GetSystemScanMgr'),
+    ('keeper', 'GetLevelEditor'),
+    ('fleetObjectHandler', 'CreateFleet'),
+}
 # Methods of the moniker/proxy object itself (client-local, never sent as an RPC).
-LOCAL_PROXY_METHODS = {'Bind', 'Unbind', 'SetSessionCheck', 'GetSession', 'GetNodeID', 'ClearCache',
-                       'IsBound', 'GetBoundService', 'SetCallTimeout', 'CallMethod'}
-FACTORY_STOP = {'GetService', 'RemoteSvc', 'ProxySvc', 'Moniker', '__init__', 'Get', '__call__',
+LOCAL_PROXY_METHODS = {'Bind', 'Unbind', 'UnBind', 'SetSessionCheck', 'GetSession', 'GetNodeID', 'ClearCache',
+                       'IsBound', 'GetBoundService', 'SetCallTimeout', 'CallMethod', 'clear_memoized',
+                       'MachoResolve', 'MachoBindObject', 'GetObjectUUID', 'ToString'}
+FACTORY_STOP = {'GetService', 'StartService', 'RemoteSvc', 'ProxySvc', 'Moniker', '__init__', 'Get', '__call__',
                 '__getattr__', 'GetInstance', 'Instance', 'Startup', 'Run'}
 TRACKED_METHODS = {'get', 'has_key', 'keys', 'values', 'items', 'iteritems', 'itervalues', 'iterkeys',
                    'index', 'count', 'copy', 'pop', 'setdefault', 'split', 'startswith', 'lower', 'upper',
-                   'strip', 'format', 'encode', 'decode', 'Get', 'iterkeys', 'difference', 'union',
-                   'intersection', 'issubset'}
+                   'strip', 'format', 'encode', 'decode', 'Get', 'difference', 'union',
+                   'intersection', 'issubset', 'Index', 'Filter', 'Clone'}
 ITER_BUILTINS = {'list', 'tuple', 'sorted', 'set', 'frozenset', 'dict', 'enumerate', 'iter', 'sum', 'min',
                  'max', 'any', 'all', 'zip', 'reversed', 'map', 'filter'}
 SESSION_HANDLERS = {'OnSessionChanged', 'OnSessionMutated', 'DoSessionChanging', 'ProcessSessionChange',
@@ -55,7 +78,7 @@ CONST_WORDS = {'timer', 'timeout', 'cooldown', 'duration', 'delay', 'logoff', 'f
 CMP = ['<', '<=', '==', '!=', '>', '>=', 'in', 'not in', 'is', 'is not', 'exception match', 'BAD']
 BINOPS = {19, 20, 21, 22, 23, 24, 26, 27, 28, 29, 55, 56, 57, 58, 59, 62, 63, 64, 65, 66, 67, 75, 76, 77, 78, 79}
 JREL = {93, 110, 120, 121, 122, 143}
-MAX_PATH = 4
+MAX_PATH = 6
 ID_PREFIXES = {'attribute', 'effect', 'event', 'type', 'group', 'category', 'dgm', 'error', 'message',
                'msg', 'log', 'sound', 'icon', 'graphic', 'flag', 'cmd', 'key'}
 
@@ -63,6 +86,13 @@ ID_PREFIXES = {'attribute', 'effect', 'event', 'type', 'group', 'category', 'dgm
 def is_rpc_method(meth):
     return bool(meth) and not meth.startswith('_') and meth not in LOCAL_PROXY_METHODS and \
         (meth[:1].isupper() or meth[:1].islower())
+
+
+def cls_of(qual):
+    if not qual or qual == '<module>' or '.' not in qual:
+        return None
+    c = qual.split('.', 1)[0]
+    return None if c.startswith('<') else c
 
 
 def words(name):
@@ -133,6 +163,8 @@ def callee_name(v):
         return v[1]
     if t == 'BM':
         return v[2]
+    if t == 'CM':
+        return v[3]
     if t == 'CR':
         return None
     return None
@@ -150,6 +182,8 @@ def callee_label(v):
         return '?.' + v[1]
     if t == 'BM':
         return '%s.%s' % (v[1], v[2])
+    if t == 'CM':
+        return '%s.%s' % (v[2], v[3])
     if t == 'TM':
         return 'reply.' + v[3]
     return '?'
@@ -157,30 +191,52 @@ def callee_label(v):
 
 class World(object):
     def __init__(self):
-        self.factories = {}       # terminal function name -> svc (unique, resolved)
-        self.selfattr = {}        # (module, attr) -> ('SVC', svc, via)
-        self.globals = {}         # (module, name) -> ('SVC', svc, via)
-        self.attrnames = {}       # attribute name -> ('SVC', svc, via) when every store of that attr name is it
-        self.wrappers = {}        # terminal function name -> site key
-        self.wrapper_svc = {}     # terminal function name -> 'svc.Method'
-        self.selfattr_ret = {}    # (module, attr) -> site key (RPC reply stored on self)
-        self.notify_params = {}   # (module, qual) -> param list (seeded in pass 3)
+        self.factories = {}         # terminal function name -> svc (unique, resolved)
+        self.moniker_factories = {} # function name in eveMoniker/moniker -> svc
+        self.cls_factories = {}     # (module, cls, method) -> svc
+        self.selfattr = {}          # (module, attr) -> ('SVC'|'CSVC'|'INST', ...)
+        self.cls_selfattr = {}      # (module, cls, attr) -> ('SVC'|'CSVC'|'INST', ...)
+        self.globals = {}           # (module, name) -> ('SVC'|'CSVC'|'INST', ...)
+        self.attrnames = {}         # attribute name -> ('SVC', svc, via) when every store of that attr name is it
+        self.wrappers = {}          # terminal function name -> (site_key, path)
+        self.cls_wrappers = {}      # (module, cls, method) -> ('T', site_key, path) | ('INST', m, c)
+        self.wrapper_svc = {}       # terminal function name -> 'svc.Method'
+        self.selfattr_ret = {}      # (module, attr) -> (site_key, path)
+        self.cls_selfattr_ret = {}  # (module, cls, attr) -> (site_key, path)
+        self.notify_params = {}     # (module, qual) -> param list (seeded in pass 3)
         self.session_params = {}
+        self.client_services = {}   # svc_name -> (module, cls)
+        self.class_defs = {}        # class_name -> [(module, cls)]
+        self.class_methods = collections.defaultdict(set)  # (module, cls) -> set(method_names)
+        self.proxy_classes = {}     # (module, cls) -> attr_name delegated by __getattr__
+        self.param_seeds = {}       # (module, qual) -> {param_name: symbolic_val}
+        self.t_param_seeds = {}     # (module, qual) -> {param_name: ('T', key, path)}
 
 
 class Interp(object):
     """One run over one code object. mode: 1=summary, 2=sites, 3=final."""
 
-    def __init__(self, world, module, qual, co, mode, seeds=None):
+    def __init__(self, world, module, qual, co, mode, seeds=None, derefs=None):
         self.w, self.m, self.q, self.co, self.mode = world, module, qual, co, mode
+        self.cls = cls_of(qual)
         self.argnames = list(co.varnames[:co.argcount])
         self.is_method = bool(self.argnames) and self.argnames[0] == 'self'
-        self.locals = dict(seeds or {})
-        self.derefs = {}
+        self.locals = {}
+        self.derefs = dict(derefs or {})
+        self.self_locals = {}      # in-method self.<attr> flow
+        if self.is_method or 'self' in (co.cellvars or ()) or 'self' in (co.freevars or ()):
+            self.derefs['self'] = ('SELF',)
+            self.locals['self'] = ('SELF',)
+        for k, v in (seeds or {}).items():
+            self.locals[k] = v
+            self.derefs[k] = v
         self.returns = []          # values returned
+        self.yields = []           # values yielded (e.g. <genexpr>)
+        self.map_vals = []         # values added via MAP_ADD (e.g. <dictcomp>)
         self.selfstores = []       # (attr, value)
         self.attrstores = []       # (attr, value) on any object
         self.globstores = []       # (name, value)
+        self.call_args = []        # (target_mod, target_cls, target_func, arg_idx, value)
         self.sites = []            # dicts
         self.obs = collections.defaultdict(set)   # key -> set((path, use))
         self.consts = []
@@ -188,10 +244,19 @@ class Interp(object):
 
     # ---- observation helpers
     def ob(self, v, use):
-        if v is not None and v[0] == 'T':
+        if v is None:
+            return
+        if v[0] == 'T':
             self.obs[v[1]].add((path_str(v[2]), use))
+        elif v[0] == 'T_MULTI':
+            for k in v[1]:
+                self.obs[k].add((path_str(v[2]), use))
 
     def child(self, v, step):
+        if v[0] == 'T_MULTI':
+            if len(v[2]) >= MAX_PATH:
+                return v
+            return ('T_MULTI', v[1], v[2] + (step,))
         if len(v[2]) >= MAX_PATH:
             return ('T', v[1], v[2])
         return ('T', v[1], v[2] + (step,))
@@ -201,32 +266,156 @@ class Interp(object):
             self.lt = lineno_table(self.co)
         return line_at(self.lt, off)
 
+    def lookup_self_attr(self, nm):
+        if nm in self.self_locals:
+            return self.self_locals[nm]
+        return self.lookup_cls_attr(self.m, self.cls, nm)
+
+    def lookup_cls_attr(self, m, cls, nm):
+        w = self.w
+        if cls:
+            sv = w.cls_selfattr.get((m, cls, nm))
+            if sv is not None:
+                return sv
+        sv = w.selfattr.get((m, nm))
+        if sv is not None:
+            return sv
+        if self.mode >= 2:
+            if cls and (m, cls, nm) in w.cls_selfattr_ret:
+                k, p = w.cls_selfattr_ret[(m, cls, nm)]
+                return ('T', k, p)
+            if (m, nm) in w.selfattr_ret:
+                k, p = w.selfattr_ret[(m, nm)]
+                return ('T', k, p)
+        if cls and (m, cls, nm) in w.cls_factories:
+            return ('SVC', w.cls_factories[(m, cls, nm)], 'factory:%s.%s' % (cls, nm))
+        if cls and self.mode >= 2 and (m, cls, nm) in w.cls_wrappers:
+            return w.cls_wrappers[(m, cls, nm)]
+        if nm in w.attrnames:
+            return w.attrnames[nm]
+        return None
+
+    def record_call_args(self, target_m, target_cls, target_meth, pos, skip_self=True):
+        base = 1 if skip_self else 0
+        for i, a in enumerate(pos):
+            if a is not None and a[0] in ('SVC', 'CSVC', 'INST', 'CR', 'SA', 'T'):
+                self.call_args.append((target_m, target_cls, target_meth, i + base, a))
+
     # ---- service resolution
     def resolve_call(self, fn, pos, kwn, off):
         """Return the value produced by calling fn(pos..., kw...)."""
         w = self.w
         name = callee_name(fn)
+        if fn is not None and fn[0] == 'SVC':
+            return fn
+        if fn is not None and fn[0] == 'T':
+            return fn
+        # Inline comprehension / lambda execution
+        if fn is not None and fn[0] == 'FUNC' and fn[1].name in ('<genexpr>', '<dictcomp>', '<setcomp>', '<lambda>') and fn[1] is not self.co:
+            sub_co = fn[1]
+            sub_seeds = {}
+            for i, a in enumerate(pos):
+                if i < len(sub_co.varnames) and a is not None:
+                    sub_seeds[sub_co.varnames[i]] = a
+            sub_derefs = dict(self.derefs)
+            for k, v in self.locals.items():
+                if v is not None:
+                    sub_derefs[k] = v
+            sub_q = '%s.%s' % (self.q, sub_co.name) if self.q != '<module>' else sub_co.name
+            sub_it = Interp(w, self.m, sub_q, sub_co, self.mode, sub_seeds, sub_derefs).run()
+            self.sites.extend(sub_it.sites)
+            for k, v in sub_it.obs.items():
+                self.obs[k].update(v)
+            self.consts.extend(sub_it.consts)
+            self.selfstores.extend(sub_it.selfstores)
+            self.attrstores.extend(sub_it.attrstores)
+            self.call_args.extend(sub_it.call_args)
+            if sub_co.name == '<genexpr>' and sub_it.yields:
+                yv = sub_it.yields[-1]
+                return ('ITER', yv) if yv is not None and yv[0] in ('T', 'T_MULTI') else None
+            if sub_co.name == '<dictcomp>' and sub_it.map_vals:
+                mv = sub_it.map_vals[-1]
+                if mv is not None and mv[0] in ('T', 'T_MULTI'):
+                    return self.child(mv, '..') if False else mv
+            for rv in sub_it.returns:
+                if rv is not None and not (rv[0] == 'C' and rv[1] is None):
+                    return rv
+            return None
+        # Branch-merged bound RPC methods (e.g. fetcher = SearchCharBounties / SearchCorpBounties)
+        if fn is not None and fn[0] == 'MULTI_BM':
+            keys = []
+            for bm in fn[1]:
+                r = self.resolve_call(bm, pos, kwn, off)
+                if r is not None and r[0] == 'T':
+                    keys.append(r[1])
+            return ('T_MULTI', tuple(keys), ()) if keys else None
         # RPC call on a bound service
         if fn is not None and fn[0] == 'BM':
             svc, meth, via = fn[1], fn[2], fn[3]
             if is_rpc_method(meth):
                 key = '%s|%s|%d' % (self.m, self.q, off)
+                if any(s['key'] == key for s in self.sites if 'key' in s):
+                    key = '%s|%s' % (key, meth)
                 self.sites.append({'kind': 'call', 'svc': svc, 'method': meth, 'module': self.m, 'func': self.q,
                                    'line': self.line(off), 'args': len(pos), 'kwargs': sorted(kwn),
                                    'via': via, 'key': key, 'star': False, 'starstar': False,
                                    'arg_consts': [const_repr(a[1]) if a is not None and a[0] == 'C' else None
                                                   for a in pos]})
+                if (svc, meth) in SUBSVC_METHODS:
+                    return ('SVC', svc, 'subsvc:%s.%s' % (svc, meth))
                 return ('T', key, ())
             return None
+        # Bound method on a known client class / client service
+        if fn is not None and fn[0] == 'CM':
+            _, tm, tcls, tmeth, tvia = fn
+            self.record_call_args(tm, tcls, tmeth, pos, skip_self=True)
+            if (tm, tcls, tmeth) in w.cls_factories:
+                return ('SVC', w.cls_factories[(tm, tcls, tmeth)], 'factory:%s.%s' % (tcls, tmeth))
+            if (tm, tcls) == ('eve/client/script/environment/invCache.pyj', 'invCache') and tmeth in ('GetInventory', 'GetInventoryFromId'):
+                return ('INST', 'eve/client/script/environment/invCache.pyj', 'invCacheContainer')
+            if self.mode >= 2 and (tm, tcls, tmeth) in w.cls_wrappers:
+                wv = w.cls_wrappers[(tm, tcls, tmeth)]
+                if wv[0] == 'T' and self.mode == 3:
+                    self.sites.append({'wrapper_use': wv[1], 'module': self.m, 'func': self.q,
+                                       'line': self.line(off), 'via_wrapper': '%s.%s' % (tcls, tmeth)})
+                return wv
+            # If the class is a __getattr__ proxy around a remote service and does not define tmeth itself
+            if (tm, tcls) in w.proxy_classes and tmeth not in w.class_methods.get((tm, tcls), ()):
+                pattr = w.proxy_classes[(tm, tcls)]
+                psvc = w.cls_selfattr.get((tm, tcls, pattr)) or w.selfattr.get((tm, pattr))
+                if psvc is not None and psvc[0] == 'SVC':
+                    return self.resolve_call(('BM', psvc[1], tmeth, 'proxy:%s.%s' % (tcls, pattr)), pos, kwn, off)
         # explicit binders: sm.RemoteSvc('x'), Moniker('x', ...), session.ConnectToRemoteService('x')
         if name in SVC_BINDERS and pos and pos[0] is not None and pos[0][0] == 'C' and isinstance(pos[0][1], str):
             return ('SVC', pos[0][1], name)
+        # client service binders: sm.GetService('x'), sm.StartService('x')
+        if name in CLIENT_SVC_BINDERS and pos and pos[0] is not None and pos[0][0] == 'C' and isinstance(pos[0][1], str):
+            cs_name = pos[0][1]
+            if cs_name in w.client_services:
+                cm, ccls = w.client_services[cs_name]
+                return ('CSVC', cs_name, cm, ccls)
+        # uthread.parallel([(fn, args), ...])
+        if name == 'parallel' and pos and pos[0] is not None and pos[0][0] == 'SEQ':
+            res = []
+            for item in pos[0][1]:
+                if item is not None and item[0] == 'PARALLEL_TASK':
+                    res.append(item[1])
+                elif item is not None and item[0] == 'SEQ' and len(item[1]) >= 2:
+                    tfn, targs = item[1][0], item[1][1]
+                    tpos = list(targs[1]) if targs is not None and targs[0] == 'SEQ' else []
+                    res.append(self.resolve_call(tfn, tpos, [], off))
+                else:
+                    res.append(None)
+            return ('SEQ', tuple(res))
         if fn is not None and fn[0] == 'TM':
             _, key, path, meth = fn
-            base = ('T', key, path)
-            if meth in ('get', 'Get') and pos and pos[0] is not None and pos[0][0] == 'C':
+            base = ('T_MULTI', key, path) if isinstance(key, tuple) else ('T', key, path)
+            if meth in ('get', 'Get', 'pop', 'setdefault') and pos and pos[0] is not None and pos[0][0] == 'C':
                 self.ob(base, 'get[%s]' % const_repr(pos[0][1]))
                 return self.child(base, '[%s]' % const_repr(pos[0][1]))
+            if meth in ('get', 'Get', 'pop', 'setdefault'):
+                self.ob(base, 'get[*]')
+                return self.child(base, '[*]')
             if meth == 'has_key' and pos and pos[0] is not None and pos[0][0] == 'C':
                 self.ob(base, 'contains[%s]' % const_repr(pos[0][1]))
                 return None
@@ -236,24 +425,36 @@ class Interp(object):
                 return self.child(base, '.values()')
             if meth in ('items', 'iteritems'):
                 return self.child(base, '.items()')
-            if meth == 'copy':
+            if meth in ('copy', 'Clone'):
+                if meth == 'Clone':
+                    self.ob(base, 'rowset_clone')
                 return base
+            if meth == 'Index' and pos and pos[0] is not None and pos[0][0] == 'C' and isinstance(pos[0][1], str):
+                col = pos[0][1]
+                self.ob(base, 'rowset_index[%s]' % const_repr(col))
+                row_t = self.child(base, '[]')
+                self.ob(row_t, 'attr:%s' % col)
+                return ('INDEXED_T', base[1], row_t[2])
+            if meth == 'Filter' and pos and pos[0] is not None and pos[0][0] == 'C' and isinstance(pos[0][1], str):
+                col = pos[0][1]
+                self.ob(base, 'rowset_filter[%s]' % const_repr(col))
+                row_t = self.child(base, '[]')
+                self.ob(row_t, 'attr:%s' % col)
+                return ('FILTERED_T', base[1], base[2])
             return None
         if fn is not None and fn[0] == 'P':
             b = fn[1]
-            tracked = [a for a in pos if a is not None and a[0] == 'T']
+            tracked = [a for a in pos if a is not None and a[0] in ('T', 'T_MULTI')]
             if b == 'len' and tracked:
                 self.ob(tracked[0], 'len')
                 return None
             if b in ITER_BUILTINS and tracked:
                 self.ob(tracked[0], 'iter')
-                if b in ('list', 'tuple', 'sorted', 'reversed', 'iter', 'set', 'frozenset'):
+                if b in ('list', 'tuple', 'sorted', 'reversed', 'iter', 'set', 'frozenset', 'dict'):
                     return tracked[0]
-                if b == 'dict':
-                    return tracked[0]
-                if b == 'enumerate':
-                    return None
                 return None
+            if b in ('list', 'tuple', 'sorted', 'set', 'frozenset') and pos and pos[0] is not None and pos[0][0] == 'ITER':
+                return pos[0][1]
             if b == 'bool' and tracked:
                 self.ob(tracked[0], 'truthy')
                 return None
@@ -268,19 +469,49 @@ class Interp(object):
                 return None
             if b in ('getattr', 'hasattr') and tracked and len(pos) > 1 and pos[1] is not None and pos[1][0] == 'C':
                 self.ob(pos[0], '%s[%s]' % (b, const_repr(pos[1][1])))
-                if b == 'getattr' and pos[0] is not None and pos[0][0] == 'T':
+                if b == 'getattr' and pos[0] is not None and pos[0][0] in ('T', 'T_MULTI'):
                     return self.child(pos[0], '.%s' % pos[1][1])
                 return None
-        # passthrough wrappers (pass 3)
-        if self.mode == 3 and name in w.wrappers and fn is not None and fn[0] in ('A', 'SA', 'P', 'BM'):
-            key = w.wrappers[name]
-            self.sites.append({'wrapper_use': key, 'module': self.m, 'func': self.q, 'line': self.line(off),
-                               'via_wrapper': name})
-            return ('T', key, ())
+            # Direct call to eveMoniker.<fn> or moniker.<fn>
+            if b.startswith(('eveMoniker.', 'moniker.', 'util.Moniker.')) and name in w.moniker_factories:
+                return ('SVC', w.moniker_factories[name], 'moniker:' + name)
+            # Class instantiation ClassName(...)
+            if name in w.class_defs:
+                cdefs = w.class_defs[name]
+                # Prefer class defined in same module, else unique class across codebase
+                same_m = [mc for mc in cdefs if mc[0] == self.m]
+                chosen = same_m[0] if len(same_m) == 1 else (cdefs[0] if len(cdefs) == 1 else None)
+                if chosen is not None:
+                    cm, ccls = chosen
+                    self.record_call_args(cm, ccls, '__init__', pos, skip_self=True)
+                    # Passthrough wrapper classes like PasswordHandlerObjectWrapper(moniker)
+                    if (cm, ccls) in w.proxy_classes and pos and pos[0] is not None and pos[0][0] in ('SVC', 'CR', 'SA'):
+                        return pos[0]
+                    return ('INST', cm, ccls)
+        # Self method call self.foo(...)
+        if fn is not None and fn[0] == 'SA' and self.cls:
+            self.record_call_args(self.m, self.cls, name, pos, skip_self=True)
+            if (self.m, self.cls, name) in w.cls_factories:
+                return ('SVC', w.cls_factories[(self.m, self.cls, name)], 'factory:%s.%s' % (self.cls, name))
+            if self.mode >= 2 and (self.m, self.cls, name) in w.cls_wrappers:
+                wv = w.cls_wrappers[(self.m, self.cls, name)]
+                if wv[0] == 'T' and self.mode == 3:
+                    self.sites.append({'wrapper_use': wv[1], 'module': self.m, 'func': self.q,
+                                       'line': self.line(off), 'via_wrapper': '%s.%s' % (self.cls, name)})
+                return wv
+        # passthrough wrappers (pass 2 round 2 & pass 3)
+        if self.mode >= 2 and name in w.wrappers and fn is not None and fn[0] in ('A', 'SA', 'P', 'BM', 'CM'):
+            key, path = w.wrappers[name]
+            if self.mode == 3:
+                self.sites.append({'wrapper_use': key, 'module': self.m, 'func': self.q, 'line': self.line(off),
+                                   'via_wrapper': name})
+            return ('T', key, path)
         # factory functions returning a service
-        if name in w.factories and fn is not None and fn[0] in ('A', 'SA', 'P'):
+        if name in w.factories and fn is not None and fn[0] in ('A', 'SA', 'P', 'CM'):
             return ('SVC', w.factories[name], 'factory:' + name)
-        if name is not None and fn is not None and fn[0] in ('A', 'SA', 'P'):
+        if name in w.moniker_factories and fn is not None and fn[0] == 'P':
+            return ('SVC', w.moniker_factories[name], 'moniker:' + name)
+        if name is not None and fn is not None and fn[0] in ('A', 'SA', 'P', 'CM'):
             return ('CR', name)
         return None
 
@@ -293,7 +524,6 @@ class Interp(object):
         names, varnames = co.names, co.varnames
         cf = tuple(co.cellvars or ()) + tuple(co.freevars or ())
         consts = co.consts
-        last_store_const = None
 
         def pop():
             return st.pop() if st else None
@@ -335,11 +565,19 @@ class Interp(object):
                 cidx = idx[1] if idx is not None and idx[0] == 'C' and isinstance(idx[1], int) else None
                 if base is not None and base[0] == 'SEQ' and cidx is not None and -len(base[1]) <= cidx < len(base[1]):
                     st.append(base[1][cidx])
+                elif base is not None and base[0] == 'INDEXED_T':
+                    st.append(('T', base[1], base[2]))
+                elif base is not None and base[0] == 'FILTERED_T':
+                    st.append(('T', base[1], base[2]))
                 elif base is not None and base[0] == 'SA' and cidx is not None:
                     sk = '%s[%d]' % (base[1], cidx)
-                    sv = self.w.selfattr.get((self.m, sk))
+                    sv = self.lookup_self_attr(sk)
                     st.append(sv if sv is not None else ('SA', sk))
-                elif base is not None and base[0] == 'T':
+                elif base is not None and base[0] == 'SA':
+                    sk = '%s[*]' % base[1]
+                    sv = self.lookup_self_attr(sk)
+                    st.append(sv if sv is not None else None)
+                elif base is not None and base[0] in ('T', 'T_MULTI'):
                     k = const_repr(idx[1]) if idx is not None and idx[0] == 'C' else '*'
                     self.ob(base, 'subscript[%s]' % k)
                     st.append(self.child(base, '[%s]' % k))
@@ -358,7 +596,7 @@ class Interp(object):
                     pop()
                 v = pop()
                 self.ob(v, 'slice')
-                st.append(v if v is not None and v[0] == 'T' else None)
+                st.append(v if v is not None and v[0] in ('T', 'T_MULTI') else None)
             elif 40 <= op <= 43:
                 for _ in range({40: 2, 41: 3, 42: 3, 43: 4}[op]):
                     pop()
@@ -374,13 +612,23 @@ class Interp(object):
                 obj = pop()
                 v = pop()
                 self.ob(v, 'stored_subscr')
+                if obj is not None and obj[0] == 'SA':
+                    sk = '%s[*]' % obj[1]
+                    if v is not None and v[0] in ('SVC', 'CSVC', 'INST', 'CR', 'SA', 'T'):
+                        self.self_locals[sk] = v
+                        self.selfstores.append((sk, v))
             elif op == 61:
                 pop()
                 pop()
             elif op == 68:   # GET_ITER
                 v = pop()
-                self.ob(v, 'iter')
-                st.append(('ITER', v) if v is not None and v[0] == 'T' else None)
+                if v is not None and v[0] == 'INDEXED_T':
+                    st.append(('ITER', ('T', v[1], v[2])))
+                elif v is not None and v[0] == 'FILTERED_T':
+                    st.append(('ITER', ('T', v[1], v[2])))
+                else:
+                    self.ob(v, 'iter')
+                    st.append(('ITER', v) if v is not None and v[0] in ('T', 'T_MULTI') else None)
             elif op == 93:   # FOR_ITER
                 it = st[-1] if st else None
                 snaps.setdefault(nxt + arg, list(st[:-1]))
@@ -405,6 +653,12 @@ class Interp(object):
                 st.append(None)
             elif op == 83:   # RETURN_VALUE
                 v = pop()
+                if v is not None and v[0] == 'BM' and is_rpc_method(v[2]):
+                    key = '%s|%s|%d|retbm' % (self.m, self.q, off)
+                    self.sites.append({'kind': 'callback:returned_bm', 'svc': v[1], 'method': v[2],
+                                       'module': self.m, 'func': self.q, 'line': self.line(off),
+                                       'args': 1, 'kwargs': [], 'via': v[3], 'key': key,
+                                       'star': False, 'starstar': False, 'arg_consts': [None]})
                 self.ob(v, 'returned')
                 self.returns.append(v)
                 dead = True
@@ -414,9 +668,10 @@ class Interp(object):
                 pop()
                 pop()
                 pop()
-            elif op == 86:
+            elif op == 86:   # YIELD_VALUE
                 v = pop()
                 self.ob(v, 'yielded')
+                self.yields.append(v)
                 st.append(None)
             elif op == 88:   # END_FINALLY
                 pop()
@@ -429,21 +684,25 @@ class Interp(object):
                 v = pop()
                 nm = names[arg]
                 self.ob(v, 'stored_global')
-                if v is not None and v[0] in ('SVC', 'CR'):
+                if v is not None and v[0] in ('SVC', 'CSVC', 'INST', 'CR'):
                     self.globstores.append((nm, v))
                 self.const_store(nm, v, off)
-            elif op in (91, 98, 126, 96 - 1000):
+            elif op in (91, 98, 126):
                 pass
             elif op == 92:   # UNPACK_SEQUENCE
                 v = pop()
-                if v is not None and v[0] == 'T':
+                if v is not None and v[0] in ('T', 'T_MULTI'):
                     self.ob(v, 'unpack:%d' % arg)
                     for i in reversed(range(arg)):
                         st.append(self.child(v, '[%d]' % i))
+                elif v is not None and v[0] == 'SEQ':
+                    for i in reversed(range(arg)):
+                        st.append(v[1][i] if i < len(v[1]) else None)
                 else:
                     st.extend([None] * arg)
-            elif op == 94:
-                self.ob(pop(), 'collected')
+            elif op == 94:   # LIST_APPEND
+                v = pop()
+                self.ob(v, 'collected')
             elif op == 95:   # STORE_ATTR
                 obj = pop()
                 v = pop()
@@ -451,21 +710,24 @@ class Interp(object):
                 if not (v is not None and v[0] == 'C' and v[1] is None):
                     self.attrstores.append((nm, v))
                 if obj is not None and obj[0] == 'SELF':
-                    if v is not None and v[0] in ('SVC', 'CR', 'SA'):
+                    if v is not None and not (v[0] == 'C' and v[1] is None):
+                        self.self_locals[nm] = v
+                    if v is not None and v[0] in ('SVC', 'CSVC', 'INST', 'CR', 'SA'):
                         self.selfstores.append((nm, v))
                     if v is not None and v[0] == 'SEQ':
                         for i, e in enumerate(v[1]):
-                            if e is not None and e[0] in ('SVC', 'CR', 'SA'):
+                            if e is not None and e[0] in ('SVC', 'CSVC', 'INST', 'CR', 'SA', 'T'):
+                                self.self_locals['%s[%d]' % (nm, i)] = e
                                 self.selfstores.append(('%s[%d]' % (nm, i), e))
-                    if v is not None and v[0] == 'T' and not v[2]:
+                    if v is not None and v[0] == 'T':
                         self.selfstores.append((nm, v))
                 self.ob(v, 'stored_attr:%s' % nm)
                 self.const_store(nm, v, off)
             elif op == 96:
                 pop()
-            elif op == 100:
+            elif op == 100:  # LOAD_CONST
                 c = consts[arg]
-                st.append(('C', c) if not isinstance(c, CR.Code) else None)
+                st.append(('CODE', c) if isinstance(c, CR.Code) else ('C', c))
             elif op in (101, 116):   # LOAD_NAME / LOAD_GLOBAL
                 nm = names[arg]
                 g = self.w.globals.get((self.m, nm))
@@ -474,7 +736,19 @@ class Interp(object):
                 el = [pop() for _ in range(arg)][::-1]
                 for v in el:
                     self.ob(v, 'packed')
-                if op != 104 and any(v is not None and v[0] in ('SVC', 'CR', 'SA') for v in el):
+                if op == 102 and arg == 2 and el[0] is not None and el[0][0] == 'BM':
+                    a1 = el[1]
+                    if a1 is None or a1[0] in ('SEQ', 'C'):
+                        if a1 is not None and a1[0] == 'SEQ':
+                            tpos = list(a1[1])
+                        elif a1 is not None and a1[0] == 'C' and isinstance(a1[1], tuple):
+                            tpos = [('C', x) for x in a1[1]]
+                        else:
+                            tpos = []
+                        r = self.resolve_call(el[0], tpos, [], off)
+                        st.append(('PARALLEL_TASK', r))
+                        continue
+                if op != 104 and any(v is not None for v in el):
                     st.append(('SEQ', tuple(el)))
                 else:
                     st.append(None)
@@ -483,42 +757,54 @@ class Interp(object):
             elif op == 106:  # LOAD_ATTR
                 v = pop()
                 nm = names[arg]
-                if v is None or v[0] in ('A', 'CR', 'SA', 'TM', 'ITER', 'SEQ', 'C') and nm in self.w.attrnames:
+                if v is None:
                     st.append(self.w.attrnames[nm] if nm in self.w.attrnames else ('A', nm))
-                elif v[0] == 'P':
-                    st.append(('P', v[1] + '.' + nm))
                 elif v[0] == 'SELF':
-                    sv = self.w.selfattr.get((self.m, nm))
-                    if sv is None and self.mode == 3 and (self.m, nm) in self.w.selfattr_ret:
-                        sv = ('T', self.w.selfattr_ret[(self.m, nm)], ())
-                    if sv is None and nm in self.w.attrnames:
-                        sv = self.w.attrnames[nm]
+                    sv = self.lookup_self_attr(nm)
                     st.append(sv if sv is not None else ('SA', nm))
+                elif v[0] in ('CSVC', 'INST'):
+                    tm, tcls = (v[2], v[3]) if v[0] == 'CSVC' else (v[1], v[2])
+                    sv = self.lookup_cls_attr(tm, tcls, nm)
+                    if sv is not None and sv[0] in ('SVC', 'CSVC', 'INST', 'T'):
+                        st.append(sv)
+                    else:
+                        st.append(('CM', tm, tcls, nm, '%s.%s' % (tcls, nm)))
                 elif v[0] == 'SVC':
                     st.append(('BM', v[1], nm, v[2]))
-                elif v[0] == 'T':
+                elif v[0] in ('INDEXED_T', 'FILTERED_T'):
+                    base_t = ('T', v[1], v[2])
+                    if nm in ('get', 'Get', 'pop', 'values', 'itervalues'):
+                        st.append(('TM', v[1], v[2], 'copy'))
+                    elif nm in TRACKED_METHODS:
+                        st.append(('TM', v[1], v[2], nm))
+                    else:
+                        st.append(('A', nm))
+                elif v[0] in ('T', 'T_MULTI'):
                     if nm in TRACKED_METHODS:
                         self.ob(v, 'method:%s' % nm)
                         st.append(('TM', v[1], v[2], nm))
                     else:
                         self.ob(v, 'attr:%s' % nm)
                         st.append(self.child(v, '.%s' % nm))
+                elif v[0] == 'P':
+                    st.append(('P', v[1] + '.' + nm))
                 elif v[0] == 'CR' and is_rpc_method(nm):
-                    # unresolved factory result: try late resolution
                     s = self.w.factories.get(v[1])
-                    st.append(('BM', s, nm, 'factory:' + v[1]) if s else ('A', nm))
+                    st.append(('BM', s, nm, 'factory:' + v[1]) if s else (self.w.attrnames.get(nm) or ('A', nm)))
+                elif v[0] in ('A', 'CR', 'SA', 'TM', 'ITER', 'SEQ', 'C') and nm in self.w.attrnames:
+                    st.append(self.w.attrnames[nm])
                 else:
                     st.append(('A', nm))
             elif op == 107:  # COMPARE_OP
                 b = pop()
                 a = pop()
                 opn = CMP[arg] if arg < len(CMP) else '?'
-                if opn in ('in', 'not in') and b is not None and b[0] == 'T':
+                if opn in ('in', 'not in') and b is not None and b[0] in ('T', 'T_MULTI'):
                     k = const_repr(a[1]) if a is not None and a[0] == 'C' else '*'
                     self.ob(b, 'contains[%s]' % k)
                 else:
                     for x, y in ((a, b), (b, a)):
-                        if x is not None and x[0] == 'T':
+                        if x is not None and x[0] in ('T', 'T_MULTI'):
                             if y is not None and y[0] == 'C':
                                 self.ob(x, 'compare%s%s' % (opn.replace(' ', '_'), const_repr(y[1])))
                             elif y is not None and y[0] == 'P':
@@ -568,8 +854,18 @@ class Interp(object):
                     st.append(('SELF',))
                 else:
                     st.append(None)
-            elif op == 125:
-                self.locals[varnames[arg]] = pop()
+            elif op == 125:  # STORE_FAST
+                v = pop()
+                nm = varnames[arg]
+                prev = self.locals.get(nm)
+                if prev is not None and v is not None:
+                    if prev[0] == 'BM' and v[0] == 'BM' and prev != v:
+                        v = ('MULTI_BM', [prev, v])
+                    elif prev[0] == 'MULTI_BM' and v[0] == 'BM' and v not in prev[1]:
+                        v = ('MULTI_BM', prev[1] + [v])
+                self.locals[nm] = v
+                if nm in cf:
+                    self.derefs[nm] = v
             elif op == 130:
                 for _ in range(arg):
                     pop()
@@ -591,7 +887,6 @@ class Interp(object):
                 fn = pop()
                 for i, a in enumerate(pos):
                     if a is not None and a[0] == 'BM' and is_rpc_method(a[2]):
-                        # bound RPC method handed to a dispatcher (uthread.new, PerformSelectiveSessionChange,..)
                         self.sites.append({'kind': 'callback:%s' % callee_label(fn), 'svc': a[1], 'method': a[2],
                                            'module': self.m, 'func': self.q, 'line': self.line(off),
                                            'args': len(pos) - i - 1, 'kwargs': sorted(kw), 'via': a[3],
@@ -612,30 +907,34 @@ class Interp(object):
                     for k, a in kw.items():
                         self.ob(a, 'passed_to:%s(%s=)' % (lab, k))
                 st.append(r)
-            elif op in (132, 134):
-                pop()
+            elif op in (132, 134):   # MAKE_FUNCTION / MAKE_CLOSURE
+                code_v = pop()
                 if op == 134:
                     pop()
                 for _ in range(arg):
                     pop()
-                st.append(None)
+                st.append(('FUNC', code_v[1]) if code_v is not None and code_v[0] == 'CODE' else None)
             elif op == 133:
                 for _ in range(arg):
                     pop()
                 st.append(None)
             elif op == 135:
                 st.append(None)
-            elif op == 136:
+            elif op == 136:  # LOAD_DEREF
                 st.append(self.derefs.get(cf[arg]) if arg < len(cf) else None)
-            elif op == 137:
+            elif op == 137:  # STORE_DEREF
                 v = pop()
                 if arg < len(cf):
                     self.derefs[cf[arg]] = v
-            elif op == 146:
+                    self.locals[cf[arg]] = v
+            elif op == 146:  # SET_ADD
                 self.ob(pop(), 'collected')
-            elif op == 147:
-                pop()
-                self.ob(pop(), 'collected')
+            elif op == 147:  # MAP_ADD
+                val = pop()
+                key = pop()
+                self.ob(val, 'collected')
+                self.ob(key, 'collected')
+                self.map_vals.append(val)
             else:
                 raise ValueError('unknown opcode %d at %s:%s+%d' % (op, self.m, self.q, off))
         return self
@@ -671,172 +970,365 @@ def load_all(ccp):
     return mods
 
 
-def iter_code(mods):
+def iter_code(mods, include_comps=False):
     for n, co, err in mods:
         if co is None:
             continue
         for q, c, parent in walk_named(co, '<module>'):
+            if not include_comps and c.name in ('<genexpr>', '<dictcomp>', '<setcomp>'):
+                continue
             yield n, q, c, parent
 
 
-def pass1(world, mods):
-    """Summaries -> factories / self-attr / global service bindings (fixpoint)."""
-    rets = collections.defaultdict(list)     # terminal func name -> [descriptor]
-    selfs = collections.defaultdict(list)    # (module, attr) -> [descriptor]
-    globs = collections.defaultdict(list)
-    anames = collections.defaultdict(list)
+def prepass(world, mods):
+    """Discover classes, methods, __getattr__ proxy classes, moniker factories, and client services (svc.pyj + __guid__)."""
+    mod_dict = {n: co for n, co, _ in mods if co is not None}
+    cdefs = collections.defaultdict(list)
     for n, q, c, parent in iter_code(mods):
-        it = Interp(world, n, q, c, 1).run()
-        if c.name not in ('<module>',) and not c.name.startswith('<'):
-            descs = []
-            for v in it.returns:
+        if parent is not None and parent.name == '<module>' and c.name not in ('<module>',) and not c.name.startswith('<'):
+            # Check if c is a class body (stores __module__ or methods)
+            if '__module__' in c.names or any(isinstance(k, CR.Code) for k in (c.consts or ())):
+                cdefs[c.name].append((n, c.name))
+                for k in c.consts or ():
+                    if isinstance(k, CR.Code) and not k.name.startswith('<'):
+                        world.class_methods[(n, c.name)].add(k.name)
+        if c.name == '__getattr__' and cls_of(q):
+            cls = cls_of(q)
+            for nm in c.names:
+                if nm in ('moniker', '_PasswordHandlerObjectWrapper__object'):
+                    world.proxy_classes[(n, cls)] = nm
+    world.class_defs = dict(cdefs)
+
+    # Client service registry from svc.pyj
+    svc_co = mod_dict.get('svc.pyj')
+    if svc_co is not None:
+        ins = list(instructions(svc_co))
+        for i in range(len(ins) - 4):
+            if ins[i + 2][1] == 108 and ins[i + 3][1] == 109 and ins[i + 4][1] == 90:
+                mod_dot = svc_co.names[ins[i + 2][2]]
+                cls_name = svc_co.names[ins[i + 3][2]]
+                svc_name = svc_co.names[ins[i + 4][2]]
+                mod_path = mod_dot.replace('.', '/') + '.pyj'
+                if mod_path not in mod_dict or (mod_path, cls_name) not in world.class_methods:
+                    # Resolve re-exported class to the module defining it under mod_dot prefix
+                    prefix = mod_dot.replace('.', '/') + '/'
+                    cand = [mc for mc in cdefs.get(cls_name, ()) if mc[0].startswith(prefix)]
+                    if cand:
+                        mod_path = cand[0][0]
+                    elif cdefs.get(cls_name):
+                        mod_path = cdefs[cls_name][0][0]
+                world.client_services[svc_name] = (mod_path, cls_name)
+
+    # Supplement with __guid__ = 'svc.<name>' and __servicename__ = '<name>'
+    for n, q, c, parent in iter_code(mods):
+        if '__guid__' not in c.names and '__servicename__' not in c.names:
+            continue
+        cls = c.name if q == c.name else cls_of(q)
+        if not cls:
+            continue
+        last_str = None
+        for _, op, arg, _ in instructions(c):
+            if op == 100 and isinstance(c.consts[arg], str):
+                last_str = c.consts[arg]
+            elif op in (90, 95, 97) and last_str:
+                nm = c.names[arg]
+                if nm == '__guid__' and last_str.startswith('svc.'):
+                    world.client_services.setdefault(last_str[4:], (n, cls))
+                elif nm == '__servicename__':
+                    world.client_services.setdefault(last_str, (n, cls))
+                last_str = None
+
+    # Seed invCache.__getattr__ dynamic attributes
+    world.cls_selfattr[('eve/client/script/environment/invCache.pyj', 'invCache', 'inventorymgr')] = (
+        'SVC', 'invbroker', 'invCache.inventorymgr')
+    world.cls_selfattr[('eve/client/script/environment/invCache.pyj', 'invCache', 'stationInventoryMgr')] = (
+        'SVC', 'invbroker', 'invCache.stationInventoryMgr')
+    world.cls_selfattr[('eve/client/script/environment/invCache.pyj', 'invCache', '_invCache__invmgr')] = (
+        'SVC', 'invbroker', 'invCache.__invmgr')
+    world.cls_selfattr[('eve/client/script/environment/invCache.pyj', 'invCache', '_invCache__stationinvmgr')] = (
+        'SVC', 'invbroker', 'invCache.__stationinvmgr')
+
+
+def pass1(world, mods):
+    """Summaries -> factories / class factories / self-attr / global / parameter service bindings."""
+    for _pass_round in range(2):
+        rets = collections.defaultdict(list)       # terminal func name -> [descriptor]
+        cls_rets = collections.defaultdict(list)   # (module, cls, meth) -> [descriptor]
+        mon_rets = collections.defaultdict(list)   # func name in eveMoniker/moniker -> [descriptor]
+        selfs = collections.defaultdict(list)      # (module, attr) -> [descriptor]
+        cls_selfs = collections.defaultdict(list)  # (module, cls, attr) -> [descriptor]
+        globs = collections.defaultdict(list)
+        anames = collections.defaultdict(list)
+        call_args = []
+
+        for n, q, c, parent in iter_code(mods):
+            seeds = world.param_seeds.get((n, q), {})
+            it = Interp(world, n, q, c, 1, seeds).run()
+            call_args.extend(it.call_args)
+            cls = cls_of(q)
+            if c.name not in ('<module>',) and not c.name.startswith('<'):
+                descs = []
+                for v in it.returns:
+                    if v is None:
+                        descs.append(None)
+                    elif v[0] == 'C' and v[1] is None:
+                        continue
+                    elif v[0] == 'SVC':
+                        descs.append(('SVC', v[1]))
+                    elif v[0] == 'CR':
+                        descs.append(('CR', v[1]))
+                    elif v[0] == 'SA':
+                        descs.append(('SA', n, cls, v[1]))
+                    elif v[0] == 'A':
+                        descs.append(('AN', v[1]))
+                    else:
+                        descs.append(None)
+                rets[c.name].append(descs)
+                if cls:
+                    cls_rets[(n, cls, c.name)].append(descs)
+                if n in ('eve/common/script/net/eveMoniker.pyj', 'carbon/common/script/net/moniker.pyj'):
+                    mon_rets[c.name].append(descs)
+            for a, v in it.attrstores:
                 if v is None:
-                    descs.append(None)
-                elif v[0] == 'C' and v[1] is None:
-                    continue
+                    anames[a].append(None)
                 elif v[0] == 'SVC':
-                    descs.append(('SVC', v[1]))
+                    anames[a].append(('SVC', v[1]))
                 elif v[0] == 'CR':
-                    descs.append(('CR', v[1]))
+                    anames[a].append(('CR', v[1]))
                 elif v[0] == 'SA':
-                    descs.append(('SA', n, v[1]))
-                elif v[0] == 'A':
-                    descs.append(('AN', v[1]))
+                    anames[a].append(('SA', n, cls, v[1]))
                 else:
-                    descs.append(None)
-            rets[c.name].append(descs)
-        for a, v in it.attrstores:
-            if v is None:
-                anames[a].append(None)
-            elif v[0] == 'SVC':
-                anames[a].append(('SVC', v[1]))
-            elif v[0] == 'CR':
-                anames[a].append(('CR', v[1]))
-            elif v[0] == 'SA':
-                anames[a].append(('SA', n, v[1]))
-            else:
-                anames[a].append(None)
-        for a, v in it.selfstores:
-            if v[0] == 'SVC':
-                selfs[(n, a)].append(('SVC', v[1]))
-            elif v[0] == 'CR':
-                selfs[(n, a)].append(('CR', v[1]))
-            elif v[0] == 'SA':
-                selfs[(n, a)].append(('SA', n, v[1]))
-        for a, v in it.globstores:
-            if v[0] == 'SVC':
-                globs[(n, a)].append(('SVC', v[1]))
-            elif v[0] == 'CR':
-                globs[(n, a)].append(('CR', v[1]))
+                    anames[a].append(None)
+            for a, v in it.selfstores:
+                d = None
+                if v[0] == 'SVC':
+                    d = ('SVC', v[1])
+                elif v[0] in ('CSVC', 'INST'):
+                    d = v
+                elif v[0] == 'CR':
+                    d = ('CR', v[1])
+                elif v[0] == 'SA':
+                    d = ('SA', n, cls, v[1])
+                if d is not None:
+                    selfs[(n, a)].append(d)
+                    if cls:
+                        cls_selfs[(n, cls, a)].append(d)
+            for a, v in it.globstores:
+                if v[0] in ('SVC', 'CSVC', 'INST'):
+                    globs[(n, a)].append(v)
+                elif v[0] == 'CR':
+                    globs[(n, a)].append(('CR', v[1]))
 
-    fac, sa, an = {}, {}, {}
+        fac, cfac, mfac, sa, csa, an = {}, {}, {}, {}, {}, {}
 
-    def res(d):
-        if d is None:
-            return None
-        if d[0] == 'SVC':
-            return d[1]
-        if d[0] == 'CR':
-            return fac.get(d[1])
-        if d[0] == 'SA':
-            return sa.get((d[1], d[2])) or an.get(d[2])
-        if d[0] == 'AN':
-            return an.get(d[1])
-        return None
-
-    def fac_candidate(name, strict):
-        svcs = set()
-        for descs in rets[name]:
-            if not descs:
+        def res(d):
+            if d is None:
                 return None
-            for d in descs:
-                if d is None:
-                    return None
-                if d[0] == 'CR' and d[1] == name:
-                    continue
-                s = res(d)
-                if s is None:
-                    if strict:
-                        return None
-                    continue
-                svcs.add(s)
-        return next(iter(svcs)) if len(svcs) == 1 else None
+            if d[0] == 'SVC':
+                return d[1]
+            if d[0] == 'CR':
+                return fac.get(d[1])
+            if d[0] == 'SA':
+                _, mn, mc, ma = d
+                return (csa.get((mn, mc, ma)) if mc else None) or sa.get((mn, ma)) or an.get(ma)
+            if d[0] == 'AN':
+                return an.get(d[1])
+            return None
 
-    # Optimistic fixpoint (unresolved descriptors ignored, so mutual recursion through self.attr caches
-    # converges), followed by strict verification; names failing verification are blacklisted and the
-    # whole fixpoint is recomputed until stable.
-    black = set()
-    for _round in range(20):
-        fac.clear(); sa.clear(); an.clear()
-        for _ in range(20):
-            changed = False
-            for name in sorted(rets):
-                if name in FACTORY_STOP or name in black:
-                    continue
-                s = fac_candidate(name, False)
-                if s is not None and fac.get(name) != s:
-                    fac[name] = s
-                    changed = True
-            for key in sorted(selfs):
-                svcs = set(res(d) for d in selfs[key])
-                svcs.discard(None)
-                if len(svcs) == 1:
-                    s = next(iter(svcs))
-                    if sa.get(key) != s:
-                        sa[key] = s
+        def candidate(descs_list, strict):
+            svcs = set()
+            for descs in descs_list:
+                if not descs:
+                    return None
+                for d in descs:
+                    if d is None:
+                        return None
+                    s = res(d)
+                    if s is None:
+                        if strict:
+                            return None
+                        continue
+                    svcs.add(s)
+            return next(iter(svcs)) if len(svcs) == 1 else None
+
+        black = set()
+        for _round in range(15):
+            fac.clear(); cfac.clear(); mfac.clear(); sa.clear(); csa.clear(); an.clear()
+            for _ in range(15):
+                changed = False
+                for name, dl in sorted(mon_rets.items()):
+                    s = candidate(dl, False)
+                    if s is not None and mfac.get(name) != s:
+                        mfac[name] = s
                         changed = True
-            for a in sorted(anames):
-                svcs = set(res(d) for d in anames[a])
-                if None in svcs or len(svcs) != 1 or not a:
-                    continue
-                s = next(iter(svcs))
-                if an.get(a) != s:
-                    an[a] = s
-                    changed = True
-            if not changed:
+                for key, dl in sorted(cls_rets.items()):
+                    if key[2] in FACTORY_STOP:
+                        continue
+                    s = candidate(dl, False)
+                    if s is not None and cfac.get(key) != s:
+                        cfac[key] = s
+                        changed = True
+                for name in sorted(rets):
+                    if name in FACTORY_STOP or name in black:
+                        continue
+                    s = candidate(rets[name], False)
+                    if s is not None and fac.get(name) != s:
+                        fac[name] = s
+                        changed = True
+                for key in sorted(cls_selfs):
+                    svcs = set(res(d) for d in cls_selfs[key] if d[0] not in ('CSVC', 'INST'))
+                    svcs.discard(None)
+                    if len(svcs) == 1:
+                        s = next(iter(svcs))
+                        if csa.get(key) != s:
+                            csa[key] = s
+                            changed = True
+                for key in sorted(selfs):
+                    svcs = set(res(d) for d in selfs[key] if d[0] not in ('CSVC', 'INST'))
+                    svcs.discard(None)
+                    if len(svcs) == 1:
+                        s = next(iter(svcs))
+                        if sa.get(key) != s:
+                            sa[key] = s
+                            changed = True
+                for a in sorted(anames):
+                    svcs = set(res(d) for d in anames[a])
+                    if None in svcs or len(svcs) != 1 or not a:
+                        continue
+                    s = next(iter(svcs))
+                    if an.get(a) != s:
+                        an[a] = s
+                        changed = True
+                if not changed:
+                    break
+            bad = sorted(n for n in fac if candidate(rets[n], True) != fac[n])
+            if not bad:
                 break
-        bad = sorted(n for n in fac if fac_candidate(n, True) != fac[n])
-        if not bad:
-            break
-        black.update(bad)
-    world.attrnames = {k: ('SVC', v, 'attr:' + k) for k, v in an.items()}
-    world.factories = fac
-    world.selfattr = {k: ('SVC', v, 'self.' + k[1]) for k, v in sa.items()}
-    gl = {}
-    for key in sorted(globs):
-        svcs = set(res(d) for d in globs[key])
-        svcs.discard(None)
-        if len(svcs) == 1:
-            gl[key] = ('SVC', next(iter(svcs)), 'global:' + key[1])
-    world.globals = gl
+            black.update(bad)
+
+        world.attrnames = {k: ('SVC', v, 'attr:' + k) for k, v in an.items()}
+        world.factories = fac
+        world.moniker_factories = mfac
+        world.cls_factories = cfac
+        for k, v in sa.items():
+            world.selfattr[k] = ('SVC', v, 'self.' + k[1])
+        for k, v in csa.items():
+            world.cls_selfattr[k] = ('SVC', v, 'self.' + k[2])
+        # Also store CSVC / INST self attributes
+        for key, dl in cls_selfs.items():
+            cvals = [d for d in dl if d[0] in ('CSVC', 'INST')]
+            if cvals and len(set(cvals)) == 1 and key not in world.cls_selfattr:
+                world.cls_selfattr[key] = cvals[0]
+        for key, dl in selfs.items():
+            cvals = [d for d in dl if d[0] in ('CSVC', 'INST')]
+            if cvals and len(set(cvals)) == 1 and key not in world.selfattr:
+                world.selfattr[key] = cvals[0]
+
+        gl = {}
+        for key in sorted(globs):
+            svcs = set(res(d) for d in globs[key] if d[0] not in ('CSVC', 'INST'))
+            svcs.discard(None)
+            if len(svcs) == 1:
+                gl[key] = ('SVC', next(iter(svcs)), 'global:' + key[1])
+            else:
+                cvals = [d for d in globs[key] if d[0] in ('CSVC', 'INST')]
+                if cvals and len(set(cvals)) == 1:
+                    gl[key] = cvals[0]
+        world.globals = gl
+
+        # Resolve interprocedural call_args into param_seeds for next round
+        code_argnames = {}
+        for n, q, c, _ in iter_code(mods):
+            code_argnames[(n, q)] = list(c.varnames[:c.argcount])
+        arg_buckets = collections.defaultdict(set)
+        for tm, tcls, tmeth, idx, val in call_args:
+            tq = '%s.%s' % (tcls, tmeth) if tcls else tmeth
+            anms = code_argnames.get((tm, tq))
+            if not anms or idx >= len(anms):
+                continue
+            pnm = anms[idx]
+            if val[0] == 'SVC':
+                arg_buckets[(tm, tq, pnm)].add(('SVC', val[1], 'param:' + pnm))
+            elif val[0] in ('CSVC', 'INST'):
+                arg_buckets[(tm, tq, pnm)].add(val)
+            else:
+                s = res(val if val[0] != 'SA' else ('SA', tm, tcls, val[1]))
+                if s is not None:
+                    arg_buckets[(tm, tq, pnm)].add(('SVC', s, 'param:' + pnm))
+        for (tm, tq, pnm), vals in arg_buckets.items():
+            if len(vals) == 1:
+                world.param_seeds.setdefault((tm, tq), {})[pnm] = next(iter(vals))
 
 
 def pass2(world, mods):
-    """Sites + passthrough wrappers."""
-    wrap = collections.defaultdict(list)
-    defs = collections.Counter()
-    sret = collections.defaultdict(set)
-    for n, q, c, parent in iter_code(mods):
-        it = Interp(world, n, q, c, 2).run()
-        defs[c.name] += 1
-        rs = [v for v in it.returns if not (v is not None and v[0] == 'C' and v[1] is None)]
-        if rs and all(v is not None and v[0] == 'T' and not v[2] for v in rs):
-            keys = set(v[1] for v in rs)
-            wrap[c.name].append(keys)
-        for a, v in it.selfstores:
-            if v[0] == 'T':
-                sret[(n, a)].add(v[1])
-    site_rpc = {}
-    for n, q, c, parent in iter_code(mods):
-        pass
-    world.wrappers = {}
-    for name in sorted(wrap):
-        if name in FACTORY_STOP or name.startswith('<') or len(wrap[name]) != defs[name]:
-            continue
-        allk = set().union(*wrap[name])
-        if len(allk) == 1:
-            world.wrappers[name] = next(iter(allk))
-    world.selfattr_ret = {k: next(iter(v)) for k, v in sret.items() if len(v) == 1}
+    """Sites + passthrough wrappers + self.<attr> RPC reply / instance propagation."""
+    code_argnames = {}
+    for n, q, c, _ in iter_code(mods):
+        code_argnames[(n, q)] = list(c.varnames[:c.argcount])
+
+    for _round in range(2):
+        wrap = collections.defaultdict(list)
+        cwrap = collections.defaultdict(list)
+        defs = collections.Counter()
+        sret = collections.defaultdict(set)
+        csret = collections.defaultdict(set)
+        t_args = collections.defaultdict(set)
+
+        for n, q, c, parent in iter_code(mods):
+            seeds = dict(world.param_seeds.get((n, q), {}))
+            seeds.update(world.t_param_seeds.get((n, q), {}))
+            it = Interp(world, n, q, c, 2, seeds).run()
+            cls = cls_of(q)
+            defs[c.name] += 1
+            rs = [v for v in it.returns if not (v is not None and v[0] == 'C' and v[1] is None)]
+            if rs and all(v is not None and v[0] == 'T' for v in rs):
+                kps = set((v[1], v[2]) for v in rs)
+                wrap[c.name].append(kps)
+                if cls:
+                    cwrap[(n, cls, c.name)].append(('T', kps))
+            elif rs and cls and all(v is not None and v[0] in ('INST', 'CSVC') for v in rs):
+                ivals = set(rs)
+                if len(ivals) == 1:
+                    cwrap[(n, cls, c.name)].append(('INST', ivals))
+            for a, v in it.selfstores:
+                if v[0] == 'T':
+                    sret[(n, a)].add((v[1], v[2]))
+                    if cls:
+                        csret[(n, cls, a)].add((v[1], v[2]))
+                elif v[0] in ('INST', 'CSVC') and cls:
+                    world.cls_selfattr.setdefault((n, cls, a), v)
+            for tm, tcls, tmeth, idx, val in it.call_args:
+                if val[0] == 'T':
+                    tq = '%s.%s' % (tcls, tmeth) if tcls else tmeth
+                    anms = code_argnames.get((tm, tq))
+                    if anms and idx < len(anms):
+                        t_args[(tm, tq, anms[idx])].add((val[1], val[2]))
+
+        world.selfattr_ret = {k: next(iter(v)) for k, v in sret.items() if len(v) == 1}
+        world.cls_selfattr_ret = {k: next(iter(v)) for k, v in csret.items() if len(v) == 1}
+        for (tm, tq, pnm), kps in t_args.items():
+            if len(kps) == 1:
+                k, p = next(iter(kps))
+                world.t_param_seeds.setdefault((tm, tq), {})[pnm] = ('T', k, p)
+
+        world.wrappers = {}
+        for name in sorted(wrap):
+            if name in FACTORY_STOP or name.startswith('<') or len(wrap[name]) != defs[name]:
+                continue
+            allk = set().union(*wrap[name])
+            if len(allk) == 1:
+                world.wrappers[name] = next(iter(allk))
+
+        for key, wlist in sorted(cwrap.items()):
+            if key[2] in FACTORY_STOP or key[2].startswith('<'):
+                continue
+            kinds = set(x[0] for x in wlist)
+            if len(kinds) == 1:
+                kind = next(iter(kinds))
+                allv = set().union(*(x[1] for x in wlist))
+                if len(allv) == 1:
+                    v = next(iter(allv))
+                    world.cls_wrappers[key] = ('T', v[0], v[1]) if kind == 'T' else v
 
 
 def notify_classes(mods):
@@ -869,6 +1361,7 @@ def main():
     a = ap.parse_args()
     mods = load_all(a.ccp)
     world = World()
+    prepass(world, mods)
     pass1(world, mods)
     pass2(world, mods)
 
@@ -889,7 +1382,8 @@ def main():
     sess = collections.defaultdict(set)
     errors = []
     for n, q, c, parent in iter_code(mods):
-        seeds = {}
+        seeds = dict(world.param_seeds.get((n, q), {}))
+        seeds.update(world.t_param_seeds.get((n, q), {}))
         hk = (n, q)
         argn = list(c.varnames[:c.argcount + (1 if c.flags & 4 else 0) + (1 if c.flags & 8 else 0)])
         if hk in handler_codes or c.name in SESSION_HANDLERS:
@@ -934,10 +1428,17 @@ def main():
                                 'via': s['via'], 'arg_consts': s['arg_consts'], 'uses': uses})
         for p, u in obs.get(s['key'], ()):
             e['reply_shape'].setdefault(p, set()).add(u)
-    for wname, key in sorted(world.wrappers.items()):
+    for wname, (key, _path) in sorted(world.wrappers.items()):
         r = key_to_rpc.get(key)
-        if r:
+        if r and wname not in rpc[r]['wrappers']:
             rpc[r]['wrappers'].append(wname)
+    for (_, cls, wname), wv in sorted(world.cls_wrappers.items()):
+        if wv[0] == 'T':
+            r = key_to_rpc.get(wv[1])
+            if r:
+                label = '%s.%s' % (cls, wname)
+                if label not in rpc[r]['wrappers']:
+                    rpc[r]['wrappers'].append(label)
     for e in rpc.values():
         e['reply_shape'] = {p: sorted(v) for p, v in sorted(e['reply_shape'].items())}
         e['summary'] = summarize(e['reply_shape'])
@@ -971,12 +1472,7 @@ def main():
                 pos = idx - (1 if argn and argn[0] == 'self' else 0)
                 idx += 1
                 for path, use in nobs.get('N|%s|%s|%s' % (n, hq, p), ()):
-                    if use.startswith(('passed_to:', 'packed', 'collected', 'stored_')):
-                        kind = 'forwarded'
-                    else:
-                        kind = 'read'
-                    reads.add('arg%d(%s)%s %s%s' % (pos, p, '' if path == '$' else path, use,
-                                                    '' if kind == 'read' else ''))
+                    reads.add('arg%d(%s)%s %s' % (pos, p, '' if path == '$' else path, use))
         # canonical params: most common arity, then lexicographic
         if params_seen:
             cnt = collections.Counter(tuple(p) for p in params_seen)
@@ -994,8 +1490,11 @@ def main():
                  'modules_failed': sorted('%s %s' % (n, e) for n, co, e in mods if co is None),
                  'interp_errors': sorted(errors),
                  'factories': dict(sorted(world.factories.items())),
-                 'wrappers': {k: key_to_rpc.get(v, '?') for k, v in sorted(world.wrappers.items())},
-                 'n_selfattr_bindings': len(world.selfattr), 'n_global_bindings': len(world.globals),
+                 'moniker_factories': dict(sorted(world.moniker_factories.items())),
+                 'wrappers': {k: key_to_rpc.get(v[0], '?') for k, v in sorted(world.wrappers.items())},
+                 'n_selfattr_bindings': len(world.selfattr),
+                 'n_cls_selfattr_bindings': len(world.cls_selfattr),
+                 'n_global_bindings': len(world.globals),
                  'attrname_bindings': {k: v[1] for k, v in sorted(world.attrnames.items())}},
         'rpc': rpc,
         'notify': notify,
@@ -1005,9 +1504,9 @@ def main():
     with open(a.out, 'w', encoding='utf-8') as f:
         json.dump(doc, f, sort_keys=True, indent=1, ensure_ascii=True)
         f.write('\n')
-    print('rpc=%d notify=%d consts=%d session_keys=%d errors=%d factories=%d wrappers=%d' % (
+    print('rpc=%d notify=%d consts=%d session_keys=%d errors=%d factories=%d cls_factories=%d wrappers=%d cls_wrappers=%d' % (
         len(rpc), len(notify), len(consts), len(session_keys), len(errors), len(world.factories),
-        len(world.wrappers)))
+        len(world.cls_factories), len(world.wrappers), len(world.cls_wrappers)))
 
 
 def summarize(shape):
@@ -1031,7 +1530,7 @@ def summarize(shape):
             el['attrs'] = ea
         eu = sorted(set(u.split(':')[1] for u in shape['[]'] if u.startswith('unpack:')))
         if eu:
-            el['tuple_arity'] = [int(x) for x in eu]
+            el['tuple_arity'] = [int(x) for u in shape['[]'] if u.startswith('unpack:') for x in [u.split(':')[1]]]
         s['iterated_elements'] = el
     flags = []
     for u, f in (('iter', 'iterable'), ('len', 'sized'), ('truthy', 'truthiness'), ('discard', 'ignored'),
@@ -1039,6 +1538,8 @@ def summarize(shape):
                  ('stringified', 'string')):
         if u in root and f not in flags:
             flags.append(f)
+    if any(u.startswith('rowset_') for u in root):
+        flags.append('rowset')
     if any(u.startswith('contains[') for u in root):
         flags.append('container')
     if any(u.startswith('compare') for u in root):

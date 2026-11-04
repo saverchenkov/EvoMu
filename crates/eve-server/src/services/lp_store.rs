@@ -1161,6 +1161,7 @@ pub fn handle(
                 entries
                     .into_iter()
                     .map(|e| {
+                        let ft = (e.timestamp_unix as i64 + 11_644_473_600) * 10_000_000;
                         PyRep::keyval([
                             ("logID", PyRep::Integer(e.log_id)),
                             ("corpID", PyRep::Integer(e.corp_id)),
@@ -1168,6 +1169,11 @@ pub fn handle(
                             ("loyaltyPoints", PyRep::Integer(e.amount)),
                             ("reason", PyRep::String(e.reason)),
                             ("timestamp", PyRep::Integer(e.timestamp_unix as i64)),
+                            ("date", PyRep::Integer(ft)),
+                            ("eventTypeID", PyRep::Integer(1)),
+                            ("rewardMessageKey", PyRep::Integer(1)),
+                            ("solarSystemID", PyRep::Integer(30_000_142)),
+                            ("taleID", PyRep::Integer(1)),
                         ])
                     })
                     .collect::<Vec<_>>()

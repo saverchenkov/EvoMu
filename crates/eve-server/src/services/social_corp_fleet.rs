@@ -592,6 +592,7 @@ pub async fn handle(
                 ("url", PyRep::String(url)), ("shape1", PyRep::Integer(logo.0)), ("shape2", PyRep::Integer(logo.1)),
                 ("shape3", PyRep::Integer(logo.2)), ("color", PyRep::Integer(logo.3)), ("emblemEntitlements", PyRep::Bool(emblem)),
                 ("dictatorial", PyRep::Bool(dictatorial)), ("allowWar", PyRep::Bool(true)),
+                ("deleted", PyRep::Bool(false)), ("warFactionID", PyRep::None),
             ])))
         }
 
@@ -1302,6 +1303,65 @@ pub async fn handle(
                 ("color3", PyRep::Integer(c3)),
                 ("logoPath", PyRep::String(format!("res:/UI/Texture/AllianceLogos/{aid}_128.png"))),
             ])))
+        }
+
+        ("allianceRegistry", "DeclareWarAgainst") => {
+            social_wars::handle_wars(ctx, session, "warRegistry", "DeclareWarAgainst", args, bound_obj_id)
+        }
+        ("allianceRegistry", "GetCapitalSystemInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sys_id = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| c.solar_system_id as i64)
+                    .unwrap_or(session.solar_system_id.unwrap_or(30_000_142) as i64)
+            });
+            Some(Ok(PyRep::keyval([
+                ("currentCapitalSystem", PyRep::Integer(sys_id)),
+                ("newCapitalSystem", PyRep::None),
+                ("newCapitalSystemValidAfter", PyRep::Integer(0)),
+            ])))
+        }
+        ("allianceRegistry", "GetPrimeTimeInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::keyval([
+                ("currentPrimeHour", PyRep::Integer(18)),
+                ("newPrimeHour", PyRep::Integer(18)),
+                ("newPrimeHourValidAfter", PyRep::Integer(0)),
+            ])))
+        }
+        ("allianceRegistry", "GetAllianceSovereigntyStructuresInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::List(Vec::new()),
+                PyRep::List(Vec::new()),
+                PyRep::List(Vec::new()),
+            ])))
+        }
+        ("allianceRegistry", "GetBillBalance") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::Real(0.0)))
+        }
+        ("allianceRegistry", "GetBills" | "GetBillsReceivable") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+        (
+            "allianceRegistry",
+            "CancelCapitalSystemTransition"
+            | "GMForceAcceptApplication"
+            | "PayBill"
+            | "SetCapitalSystem"
+            | "SetPrimeHour"
+            | "UpdateBulletinOrder",
+        ) => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::Bool(true)))
         }
 
         _ => social_corp_projects::handle_corp_projects_rpc(ctx, session, service, method, args)

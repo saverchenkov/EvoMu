@@ -178,6 +178,7 @@ mod rpc_campaigns_and_telemetry;
 mod rpc_char_lifecycle;
 mod rpc_char_skills_clones_suite;
 mod rpc_chat_macho_facility;
+mod rpc_client_contracts;
 mod rpc_core_and_utility_services;
 mod rpc_corp_alliance_fw_enlistment;
 mod rpc_corp_alliance_fw_enlistment_alliances;

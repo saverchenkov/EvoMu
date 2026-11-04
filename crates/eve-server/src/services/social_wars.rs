@@ -177,8 +177,15 @@ const WAR_COLUMNS: [&str; 11] = [
 
 struct WarKill {
     kill_id: i64,
+    attacker_char: i64,
     attacker_corp: i64,
+    attacker_alliance: Option<i64>,
+    attacker_ship_type_id: u32,
+    victim_char: i64,
     victim_corp: i64,
+    victim_alliance: Option<i64>,
+    victim_ship_type_id: u32,
+    kill_time_unix: u64,
     group_id: u32,
     isk: f64,
 }
@@ -215,12 +222,25 @@ fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64
             }
             let a = corp_of(km.attacker_character_id, km.attacker_corp_id);
             let v = corp_of(km.victim_character_id, km.victim_corp_id);
-            ((a == agg && is_def_side(v)) || (is_def_side(a) && v == agg)).then(|| WarKill {
-                kill_id: km.kill_id,
-                attacker_corp: if a == agg { agg } else { def },
-                victim_corp: if v == agg { agg } else { def },
-                group_id: ctx.sde.types.get(&km.ship_type_id).map(|t| t.group_id).unwrap_or(0),
-                isk: km.total_value_isk,
+            ((a == agg && is_def_side(v)) || (is_def_side(a) && v == agg)).then(|| {
+                let att_corp = if a == agg { agg } else { def };
+                let vic_corp = if v == agg { agg } else { def };
+                let att_all = snap.corporations.get(&att_corp).and_then(|c| c.alliance_id);
+                let vic_all = snap.corporations.get(&vic_corp).and_then(|c| c.alliance_id);
+                WarKill {
+                    kill_id: km.kill_id,
+                    attacker_char: km.attacker_character_id,
+                    attacker_corp: att_corp,
+                    attacker_alliance: att_all,
+                    attacker_ship_type_id: km.ship_type_id,
+                    victim_char: km.victim_character_id,
+                    victim_corp: vic_corp,
+                    victim_alliance: vic_all,
+                    victim_ship_type_id: km.ship_type_id,
+                    kill_time_unix: km.killed_unix,
+                    group_id: ctx.sde.types.get(&km.ship_type_id).map(|t| t.group_id).unwrap_or(0),
+                    isk: km.total_value_isk,
+                }
             })
         })
         .collect();
@@ -532,7 +552,7 @@ pub(super) fn handle_wars(
             Some(Ok(PyRep::keyval(WAR_COLUMNS.iter().copied().zip(row))))
         }
 
-        ("warsInfoMgr", "CreateSurrenderNegotiation") | ("warsInfoMgr", "CreateWarAllyOffer") => {
+        ("warsInfoMgr" | "warRegistry", "CreateSurrenderNegotiation" | "CreateWarAllyOffer") => {
             if !has_war_director_role {
                 return err("CorpRoleDenied", "War negotiations require CEO or Director role");
             }
@@ -592,14 +612,57 @@ pub(super) fn handle_wars(
             ])))
         }
 
-        ("warsInfoMgr", "GetSurrenderNegotiations") => {
+        ("warsInfoMgr" | "warRegistry", "GetSurrenderNegotiations") => {
             Some(Ok(PyRep::rowset(NEG_COLUMNS.to_vec(), neg_rows(ctx, arg_i64(0).unwrap_or(0), NegKind::Surrender))))
         }
-        ("warsInfoMgr", "GetAllyNegotiations") => {
+        ("warsInfoMgr" | "warRegistry", "GetAllyNegotiations") => {
             Some(Ok(PyRep::rowset(NEG_COLUMNS.to_vec(), neg_rows(ctx, arg_i64(0).unwrap_or(0), NegKind::Ally))))
         }
+        ("warRegistry", "GetNegotiations") => {
+            let wid = arg_i64(0).or(bound_obj_id).unwrap_or(1);
+            let mut rows = neg_rows(ctx, wid, NegKind::Surrender);
+            rows.extend(neg_rows(ctx, wid, NegKind::Ally));
+            Some(Ok(PyRep::rowset(NEG_COLUMNS.to_vec(), rows)))
+        }
+        ("warRegistry", "GetWarNegotiation") => {
+            let neg_id = arg_i64(0).unwrap_or(1);
+            let wid = bound_obj_id.unwrap_or(1);
+            let (agg, def) = ctx.db.with_snapshot(|snap| {
+                snap.wars
+                    .get(&wid)
+                    .map(|w| (w.aggressor_corp_id, w.defender_corp_id))
+                    .unwrap_or((my_corp, my_corp))
+            });
+            Some(Ok(PyRep::keyval([
+                ("warNegotiationID", PyRep::Integer(neg_id)),
+                ("warID", PyRep::Integer(wid)),
+                ("declaredByID", PyRep::Integer(agg)),
+                ("againstID", PyRep::Integer(def)),
+                ("ownerID1", PyRep::Integer(agg)),
+                ("ownerID2", PyRep::Integer(def)),
+                ("iskValue", PyRep::Real(0.0)),
+                ("description", PyRep::String(String::new())),
+                ("warNegotiationTypeID", PyRep::Integer(0)),
+            ])))
+        }
+        (
+            "warRegistry",
+            "GMActivateDefender"
+            | "GMDeactivateDefender"
+            | "GMExtendAllyContract"
+            | "GMJoinDefender"
+            | "GMSetDeclareTime"
+            | "GMSetWarFinishTime",
+        ) => Some(Ok(PyRep::Bool(true))),
 
-        ("warsInfoMgr", "AcceptSurrender") | ("warsInfoMgr", "DeclineSurrender") | ("warsInfoMgr", "AcceptAllyNegotiation") | ("warsInfoMgr", "DeclineAllyOffer") | ("warsInfoMgr", "RetractWarAllyOffer") => {
+        (
+            "warsInfoMgr" | "warRegistry",
+            "AcceptSurrender"
+            | "DeclineSurrender"
+            | "AcceptAllyNegotiation"
+            | "DeclineAllyOffer"
+            | "RetractWarAllyOffer",
+        ) => {
             if !has_war_director_role {
                 return err("CorpRoleDenied", "Acting on war negotiations requires CEO or Director role");
             }
@@ -706,11 +769,11 @@ pub(super) fn handle_wars(
             Some(Ok(PyRep::keyval(out)))
         }
 
-        ("warsInfoMgr", "RetractMutualWar") => {
+        ("warsInfoMgr" | "warRegistry", "RetractMutualWar") => {
             if !has_war_director_role {
                 return err("CorpRoleDenied", "Retracting mutual war requires CEO or Director role");
             }
-            let war_id = arg_i64(0).unwrap_or(0);
+            let war_id = arg_i64(0).or(bound_obj_id).unwrap_or(0);
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
@@ -735,12 +798,21 @@ pub(super) fn handle_wars(
             Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("timeFinished", PyRep::Integer(finish as i64))])))
         }
 
-        ("warsInfoMgr", "SetOpenForAllies") => {
+        ("warsInfoMgr" | "warRegistry", "SetOpenForAllies") => {
             if !has_war_director_role {
                 return err("CorpRoleDenied", "Opening a war for allies requires CEO or Director role");
             }
-            let war_id = arg_i64(0).unwrap_or(0);
-            let open = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+            let (war_id, open) = if service == "warRegistry" && args.len() == 1 {
+                (
+                    bound_obj_id.unwrap_or(1),
+                    matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1))),
+                )
+            } else {
+                (
+                    arg_i64(0).or(bound_obj_id).unwrap_or(0),
+                    matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1))),
+                )
+            };
             let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&war_id).cloned()) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
@@ -760,8 +832,8 @@ pub(super) fn handle_wars(
             Some(Ok(PyRep::keyval([("warID", PyRep::Integer(war_id)), ("openForAllies", PyRep::Bool(open))])))
         }
 
-        ("warsInfoMgr", "GetAllyRowsByWarID") => {
-            let war_id = arg_i64(0).unwrap_or(0);
+        ("warsInfoMgr" | "warRegistry", "GetAllyRowsByWarID") => {
+            let war_id = arg_i64(0).or(bound_obj_id).unwrap_or(0);
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 snap.war_state
                     .negotiations
@@ -965,20 +1037,45 @@ pub(super) fn handle_wars(
             let Some((agg_id, def_id, allies, kills)) = war_kills(ctx, war_id) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
+            let (mutual, open_for_allies, war_hq) = ctx.db.with_snapshot(|snap| {
+                let mutual = snap.wars.get(&war_id).is_some_and(|w| w.mutual);
+                let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
+                (mutual, meta.open_for_allies, meta.war_hq_id)
+            });
             let (mut k_agg, mut k_def, mut isk_agg, mut isk_def) = (0i64, 0i64, 0.0f64, 0.0f64);
             for k in &kills {
                 if k.attacker_corp == agg_id { k_agg += 1; isk_agg += k.isk; } else { k_def += 1; isk_def += k.isk; }
             }
-            Some(Ok(PyRep::keyval([
+            let allies_dict = PyRep::Dict(
+                allies
+                    .into_iter()
+                    .map(|aid| {
+                        (
+                            PyRep::Integer(aid),
+                            PyRep::keyval([
+                                ("allyID", PyRep::Integer(aid)),
+                                ("timeStarted", PyRep::Integer(now as i64)),
+                                ("timeFinished", PyRep::Integer((now + WAR_TIMER_SECS) as i64)),
+                            ]),
+                        )
+                    })
+                    .collect(),
+            );
+            let war_kv = PyRep::keyval([
                 ("warID", PyRep::Integer(war_id)),
                 ("declaredByID", PyRep::Integer(agg_id)),
                 ("againstID", PyRep::Integer(def_id)),
-                ("allies", PyRep::Dict(allies.into_iter().map(|aid| (PyRep::Integer(aid), PyRep::keyval([("allyID", PyRep::Integer(aid))]))).collect())),
+                ("mutual", PyRep::Bool(mutual)),
+                ("openForAllies", PyRep::Bool(open_for_allies)),
+                ("retracted", PyRep::None),
+                ("warHQ", war_hq.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("allies", allies_dict.clone()),
                 ("killsForAggressor", PyRep::Integer(k_agg)),
                 ("killsForDefender", PyRep::Integer(k_def)),
                 ("iskDestroyedByAggressor", PyRep::Real(isk_agg)),
                 ("iskDestroyedByDefender", PyRep::Real(isk_def)),
-            ])))
+            ]);
+            Some(Ok(war_kv))
         }
 
         ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
@@ -997,9 +1094,44 @@ pub(super) fn handle_wars(
                 return Some(Ok(PyRep::rowset(vec!["groupID", "kills", "iskDestroyed"], rows)));
             }
             let rows = kills.into_iter().map(|k| {
-                vec![PyRep::Integer(k.kill_id), PyRep::Integer(war_id), PyRep::Integer(k.attacker_corp), PyRep::Integer(k.victim_corp), PyRep::Integer(k.group_id as i64), PyRep::Real(k.isk)]
+                vec![
+                    PyRep::Integer(k.kill_id),
+                    PyRep::Integer(war_id),
+                    PyRep::Integer(k.attacker_corp),
+                    PyRep::Integer(k.victim_corp),
+                    PyRep::Integer(k.group_id as i64),
+                    PyRep::Real(k.isk),
+                    PyRep::Integer(k.attacker_char),
+                    PyRep::Integer(k.attacker_corp),
+                    k.attacker_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::Integer(k.attacker_ship_type_id as i64),
+                    PyRep::Integer(k.victim_char),
+                    PyRep::Integer(k.victim_corp),
+                    k.victim_alliance.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::Integer(k.victim_ship_type_id as i64),
+                    PyRep::Integer(k.kill_time_unix as i64),
+                ]
             }).collect();
-            Some(Ok(PyRep::rowset(vec!["killID", "warID", "attackerCorpID", "victimCorpID", "groupID", "iskLost"], rows)))
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "killID",
+                    "warID",
+                    "attackerCorpID",
+                    "victimCorpID",
+                    "groupID",
+                    "iskLost",
+                    "finalCharacterID",
+                    "finalCorporationID",
+                    "finalAllianceID",
+                    "finalShipTypeID",
+                    "victimCharacterID",
+                    "victimCorporationID",
+                    "victimAllianceID",
+                    "victimShipTypeID",
+                    "killTime",
+                ],
+                rows,
+            )))
         }
 
         ("warStatisticMgr", "GetKillMail") => {

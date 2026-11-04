@@ -927,6 +927,8 @@ pub async fn handle(
                 ("strategicIndex", PyRep::Integer(strat_idx as i64)),
                 ("prospectingLevel", PyRep::Integer(prosp_lvl as i64)),
                 ("online", PyRep::Bool(online)),
+                ("claimTime", PyRep::Integer(ctx.now_blueos_filetime_ticks())),
+                ("remove_from_cache", PyRep::Bool(false)),
             ])))
         }
 
