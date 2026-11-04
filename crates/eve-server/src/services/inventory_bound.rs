@@ -443,11 +443,16 @@ pub(crate) fn get_effective_corp_roles_at_location(
 ) -> (bool, u64) {
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     ctx.db.with_snapshot(|snap| {
+        let char_home = snap
+            .characters
+            .get(&char_id)
+            .and_then(|ch| ch.station_id.or(ch.structure_id).or(Some(ch.home_station_id)).filter(|&id| id > 0))
+            .unwrap_or(0);
         let (is_ceo, hq_station_id, mut role_mask) = snap
             .corporations
             .get(&corp_id)
-            .map(|c| (c.ceo_id == char_id, c.hq_station_id.unwrap_or(60_003_760), c.member_roles.get(&char_id).copied().unwrap_or(0)))
-            .unwrap_or((false, 60_003_760, 0));
+            .map(|c| (c.ceo_id == char_id, c.hq_station_id.unwrap_or(char_home), c.member_roles.get(&char_id).copied().unwrap_or(0)))
+            .unwrap_or((false, char_home, 0));
         let raw_loc = location_id
             .or_else(|| {
                 snap.characters

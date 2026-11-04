@@ -1070,7 +1070,13 @@ fn handle_buy_offer(
 
         let mut delivered_count = 0_i64;
         let char_id = active_char_id.unwrap_or(user_id as i64);
-        let station_id = active_station_id.unwrap_or(60_003_760);
+        let station_id = active_station_id
+            .or_else(|| {
+                snap.characters
+                    .get(&char_id)
+                    .and_then(|c| c.station_id.or(c.structure_id).or(Some(c.home_station_id)).filter(|&id| id > 0))
+            })
+            .unwrap_or(0);
         for prod in &offer.products {
             if prod.type_id > 0 && prod.quantity > 0 {
                 let total_item_qty = i32::try_from(

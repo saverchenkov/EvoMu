@@ -87,11 +87,18 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "Session change timer is active".into(),
                 }));
             }
-            let dock_opt = session.station_id.or(session.structure_id);
-            let sys_opt = session.solar_system_id;
+            let (char_dock, char_sys, char_home) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|ch| (ch.station_id.or(ch.structure_id), ch.solar_system_id, ch.home_station_id))
+                    .unwrap_or((None, 0, 0))
+            });
+            let dock_opt = session.station_id.or(session.structure_id).or(char_dock);
+            let sys_opt = session.solar_system_id.or(if char_sys > 0 { Some(char_sys) } else { None });
             let loc_id = dock_opt
                 .or_else(|| sys_opt.map(|s| s as i64))
-                .unwrap_or(60_003_760);
+                .or(if char_home > 0 { Some(char_home) } else { None })
+                .unwrap_or(0);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(old_ship) = snap.items.get(&old_ship_id).cloned() else {
