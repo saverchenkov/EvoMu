@@ -272,6 +272,9 @@ async fn test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_s
             pod_cs,
         )
         .await;
+    let _ = dispatch_combat_rpc(&ctx, &mut attacker_sess, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id)], &kw).await;
+    ctx.advance_secs(10);
+    let _ = sys_handle.step_manual(1.0).await;
     let _ = sys_handle
         .add_target_lock(attacker_ship_id, eve_destiny::TargetLock { target_id: pod_ship_id, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None })
         .await;
@@ -465,6 +468,9 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
     with_mut_combat_runtime(&ctx, |rt| {
         rt.limited_engagements.clear();
     });
+    let _ = dispatch_combat_rpc(&ctx, &mut sess_a, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_a)], &HashMap::new()).await;
+    ctx.advance_secs(10);
+    let _ = sys_handle.step_manual(1.0).await;
     let _ = sys_handle
         .add_target_lock(ship_a, eve_destiny::TargetLock { target_id: pod_target_id, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None })
         .await;
