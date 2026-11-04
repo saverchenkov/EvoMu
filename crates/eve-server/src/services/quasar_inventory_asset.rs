@@ -16,9 +16,9 @@
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_NOT_FOUND};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
+    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::{CategoryId, GroupId, SdeRegistry, TypeId};
 use std::sync::Arc;
@@ -27,6 +27,21 @@ fn encode_identifier(field_num: u32, id: u64, out: &mut Vec<u8>) {
     let mut id_buf = Vec::new();
     encode_varint_field(1, id, &mut id_buf);
     encode_bytes_field(field_num, &id_buf, out);
+}
+
+fn caller_location_id(ctx: &AuthoritativeContext, db: &WorldRepository) -> u64 {
+    ctx.effective_character_id()
+        .and_then(|cid| {
+            db.with_snapshot(|s| {
+                s.characters.get(&(cid as i64)).and_then(|c| {
+                    c.station_id
+                        .or(c.structure_id)
+                        .or(Some(c.solar_system_id as i64))
+                        .filter(|&id| id > 0)
+                })
+            })
+        })
+        .unwrap_or(0) as u64
 }
 
 fn encode_currency(field_num: u32, isk_cents: i64, out: &mut Vec<u8>) {
@@ -439,6 +454,7 @@ pub fn register_inventory_asset_handlers(
     );
 
     // 16. eve.inventory.assetholding.operation.api.HoldItemsRequest
+    let db_hold = Arc::clone(&db);
     router.register_handler(
         "eve.inventory.assetholding.operation.api.HoldItemsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -451,11 +467,12 @@ pub fn register_inventory_asset_handlers(
                 ));
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
+            let loc_id = caller_location_id(ctx, &db_hold);
             let mut out = Vec::new();
             encode_identifier(1, 999_001, &mut out); // container id
             encode_identifier(2, op_id.max(1), &mut out); // item id
             let mut loc = Vec::new();
-            encode_identifier(1, 60_003_760, &mut loc); // solar system / station
+            encode_identifier(1, loc_id, &mut loc); // solar system / station
             encode_bytes_field(3, &loc, &mut out);
 
             Ok(GoogleAny {
@@ -468,6 +485,7 @@ pub fn register_inventory_asset_handlers(
     );
 
     // 17. eve.inventory.assetholding.operation.api.HoldItemsOfTypeRequest
+    let db_hold_type = Arc::clone(&db);
     router.register_handler(
         "eve.inventory.assetholding.operation.api.HoldItemsOfTypeRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -480,11 +498,12 @@ pub fn register_inventory_asset_handlers(
                 ));
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
+            let loc_id = caller_location_id(ctx, &db_hold_type);
             let mut out = Vec::new();
             encode_identifier(1, 999_002, &mut out);
             encode_identifier(2, op_id.max(1), &mut out);
             let mut loc = Vec::new();
-            encode_identifier(1, 60_003_760, &mut loc);
+            encode_identifier(1, loc_id, &mut loc);
             encode_bytes_field(3, &loc, &mut out);
 
             Ok(GoogleAny {
@@ -497,6 +516,7 @@ pub fn register_inventory_asset_handlers(
     );
 
     // 18. eve.inventory.assetholding.operation.api.SpawnItemsOfTypeRequest
+    let db_spawn = Arc::clone(&db);
     router.register_handler(
         "eve.inventory.assetholding.operation.api.SpawnItemsOfTypeRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -509,10 +529,11 @@ pub fn register_inventory_asset_handlers(
                 ));
             }
             let op_id = extract_u64_from_field(dyn_msg, 1);
+            let loc_id = caller_location_id(ctx, &db_spawn);
             let mut out = Vec::new();
             encode_identifier(1, op_id.max(1), &mut out);
             let mut loc = Vec::new();
-            encode_identifier(1, 60_003_760, &mut loc);
+            encode_identifier(1, loc_id, &mut loc);
             encode_bytes_field(2, &loc, &mut out);
 
             Ok(GoogleAny {

@@ -914,7 +914,7 @@ fn handle_item_consume(
                     ch.station_id.or(ch.structure_id),
                     (ch.active_ship_id > 0).then_some(ch.active_ship_id),
                 ),
-                None => (Some(60_003_760), None),
+                None => (None, None),
             };
             if !s.is_item_consumable_by(item, cid as i64, current_dock, current_ship) {
                 return Err(eve_proto::BridgeRpcError {

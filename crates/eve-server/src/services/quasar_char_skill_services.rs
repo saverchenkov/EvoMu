@@ -1053,12 +1053,12 @@ pub fn register_handlers(
             let cid = extract_u64_checked(msg, 1)?
                 .map(|v| v as i64)
                 .or_else(|| ctx.effective_character_id().map(|c| c as i64))
-                .unwrap_or(90000001);
+                .unwrap_or(0);
             let (sys_id, station_id) = db_mono_loc.with_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get(&cid) {
-                    (ch.solar_system_id as u64, ch.station_id.map(|s| s as u64).unwrap_or(60003760))
+                    (ch.solar_system_id as u64, ch.station_id.or(ch.structure_id).unwrap_or(0) as u64)
                 } else {
-                    (30000142, 60003760)
+                    (0, 0)
                 }
             });
             let mut out = Vec::new();
