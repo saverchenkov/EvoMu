@@ -748,8 +748,7 @@ pub async fn handle(
                             let pool = enc_opt.as_ref().map(|e| e.npc_type_ids.as_slice()).unwrap_or(&[]);
                             let mut ball_ids = Vec::with_capacity(count);
                             for i in 0..count {
-                                snap.next_entity_id += 1;
-                                let npc_id = 700_000_000_i64.saturating_add(snap.next_entity_id);
+                                let npc_id = snap.alloc_entity_id();
                                 let tid = if !pool.is_empty() { pool[i % pool.len()] } else { resolve_mission_npc_type(ctx) };
                                 ball_ids.push(npc_id);
                                 spawned_npcs.push((npc_id, tid));

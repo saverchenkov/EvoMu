@@ -1229,6 +1229,14 @@ impl WorldStateSnapshot {
         true
     }
 
+    /// Allocates a strictly monotonic dynamic entity/ball ID from `self.next_entity_id`
+    /// persisted in `world_meta` (`feat:invariant.ids-monotonic-across-restart`).
+    pub fn alloc_entity_id(&mut self) -> i64 {
+        let next = self.next_entity_id.max(200_000_000).saturating_add(1);
+        self.next_entity_id = next;
+        next
+    }
+
     /// Allocates a strictly monotonic alliance ID persisted in `self.next_alliance_id` and `world_meta`,
     /// guaranteed strictly greater than any existing alliance in `self.alliances` (`feat:invariant.ids-monotonic-across-restart`).
     pub fn allocate_alliance_id(&mut self) -> i64 {
@@ -1319,6 +1327,7 @@ impl WorldStateSnapshot {
             .chain(self.kill_rights.keys().copied())
             .chain(self.market_transactions.iter().map(|t| t.transaction_id))
             .chain(self.char_lp_logs.values().flatten().map(|l| l.log_id))
+            .chain(self.active_missions.values().flat_map(|m| m.spawned_npc_ball_ids.iter().copied()))
             .filter(|&id| id > 0 && id < 900_000_000)
             .max()
             .unwrap_or(200_000_000);

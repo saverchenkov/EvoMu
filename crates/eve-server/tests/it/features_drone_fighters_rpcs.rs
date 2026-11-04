@@ -1044,7 +1044,7 @@ async fn test_b30_space_jetcan_mwd_module_cycles_and_mission_downtime() {
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(ag_beyonce), "CmdWarpToStuff", &[PyRep::String("mission".into()), PyRep::Integer(i64::from(m_id))], &HashMap::new(), None).await.unwrap();
     let respawned_ids = ctx.db.with_snapshot(|s| s.active_missions[&(P1, m_id)].spawned_npc_ball_ids.clone());
     assert_eq!(respawned_ids.len() as u32, initial_npcs);
-    assert!(respawned_ids.iter().all(|&id| id >= 700_000_000));
+    assert!(respawned_ids.iter().all(|&id| id > 200_000_000 && !initial_npc_ids.contains(&id)));
     let mut respawned_types = Vec::with_capacity(respawned_ids.len());
     for nid in &respawned_ids {
         respawned_types.push(ag_space.get_ball_snapshot(*nid).await.unwrap().unwrap().1.type_id);

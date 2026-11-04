@@ -119,44 +119,49 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
     let mut spawned_npcs: Vec<(u32, i64, u32, DVec3)> = Vec::new();
 
     with_mut_sp6_state(&ctx.db, |st, snap| {
-        for (&(cid, aid), mission) in snap.active_missions.iter_mut() {
-            if cid != char_id
-                || mission.state != "Accepted"
-                || mission.solar_system_id != solar_system_id
-            {
+        let mut keys: Vec<(i64, u32)> = snap.active_missions.keys().copied().collect();
+        keys.sort_unstable();
+        for (cid, aid) in keys {
+            let Some((mission_id, cur_npcs)) =
+                snap.active_missions.get(&(cid, aid)).and_then(|mission| {
+                    let awaiting = st.missions_awaiting_downtime_respawn.contains(&(cid, aid));
+                    let needs_respawn = awaiting
+                        || (mission.spawned_npc_ball_ids.is_empty() && mission.npcs_remaining > 0);
+                    (cid == char_id
+                        && mission.state == "Accepted"
+                        && mission.solar_system_id == solar_system_id
+                        && needs_respawn)
+                        .then_some((mission.mission_id, mission.npcs_remaining))
+                })
+            else {
                 continue;
-            }
-            let awaiting = st.missions_awaiting_downtime_respawn.contains(&(cid, aid));
-            let needs_respawn =
-                awaiting || (mission.spawned_npc_ball_ids.is_empty() && mission.npcs_remaining > 0);
-            if !needs_respawn {
-                continue;
-            }
+            };
             st.missions_awaiting_downtime_respawn
                 .retain(|&k| k != (cid, aid));
-            let mkey = format!("{cid}:{}", mission.mission_id);
+            let mkey = format!("{cid}:{mission_id}");
             let wave_count = st
                 .mission_initial_npc_counts
                 .get(&mkey)
                 .copied()
-                .unwrap_or_else(|| mission.npcs_remaining.max(4));
+                .unwrap_or_else(|| cur_npcs.max(4));
             let wave_types = st.mission_initial_npc_types.get(&mkey).cloned();
-            mission.npcs_remaining = wave_count;
-            mission.current_room_id = 1;
-            mission.spawned_npc_ball_ids.clear();
-            for idx in 0..wave_count {
-                snap.next_entity_id += 1;
-                let npc_bid = 700_000_000_i64.saturating_add(snap.next_entity_id);
-                let npc_tid = wave_types
-                    .as_ref()
-                    .filter(|v| !v.is_empty())
-                    .map(|v| v[(idx as usize) % v.len()])
-                    .unwrap_or(default_npc_tid);
-                mission.spawned_npc_ball_ids.push(npc_bid);
-                let angle = (idx as f64) * std::f64::consts::TAU / (wave_count as f64);
-                let pos =
-                    pocket_origin + DVec3::new(angle.cos() * 4_500.0, 0.0, angle.sin() * 4_500.0);
-                spawned_npcs.push((solar_system_id, npc_bid, npc_tid, pos));
+            let new_bids: Vec<i64> = (0..wave_count).map(|_| snap.alloc_entity_id()).collect();
+            if let Some(mission) = snap.active_missions.get_mut(&(cid, aid)) {
+                mission.npcs_remaining = wave_count;
+                mission.current_room_id = 1;
+                mission.spawned_npc_ball_ids.clear();
+                for (idx, npc_bid) in new_bids.into_iter().enumerate() {
+                    let npc_tid = wave_types
+                        .as_ref()
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v[idx % v.len()])
+                        .unwrap_or(default_npc_tid);
+                    mission.spawned_npc_ball_ids.push(npc_bid);
+                    let angle = (idx as f64) * std::f64::consts::TAU / (wave_count as f64);
+                    let pos = pocket_origin
+                        + DVec3::new(angle.cos() * 4_500.0, 0.0, angle.sin() * 4_500.0);
+                    spawned_npcs.push((solar_system_id, npc_bid, npc_tid, pos));
+                }
             }
         }
     });

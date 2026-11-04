@@ -1214,10 +1214,7 @@ pub async fn handle(
                     DVec3::ZERO
                 };
 
-                let npc_id = ctx.db.with_mut_snapshot(|snap| {
-                    snap.next_entity_id += 1;
-                    700_000_000_i64.saturating_add(snap.next_entity_id)
-                });
+                let npc_id = ctx.db.with_mut_snapshot(|snap| snap.alloc_entity_id());
 
                 let _ = handle
                     .spawn_ball_with_combat(
