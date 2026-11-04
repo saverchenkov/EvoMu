@@ -4930,7 +4930,7 @@ pub(crate) mod tactical_command_bursts {
 
 //  Dedicated integration tests for remediated tactical modules parity rows (Part 2):
 //  - `feat:modules.command-bursts`
-//  - `feat:modules.remote-armor-repairer`
+//  - `feat:modules.armor-repairer`
 
 
 use crate::sovereignty_equinox_gameplay::{
@@ -5127,8 +5127,8 @@ async fn test_command_bursts_parity_remediation() {
 
 #[tokio::test]
 async fn test_remote_armor_repairer_parity_remediation() {
-    // parity: feat:modules.remote-armor-repairer
-    eve_testkit::attest(&["feat:modules.remote-armor-repairer"]);
+    // parity: feat:modules.armor-repairer
+    eve_testkit::attest(&["feat:modules.armor-repairer"]);
 
     let db_path = temp_sqlite_path("parity_rar_remediation");
     let ctx = open_sqlite_ctx(&db_path, true);

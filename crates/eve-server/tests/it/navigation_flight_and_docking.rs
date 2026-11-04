@@ -62,8 +62,8 @@ fn set_corp_only(ctx: &ServerContext, sess: &mut SessionState, struct_id: i64, c
 async fn test_navigation_undock_and_station_docking() {
     // parity: feat:navigation.undock
     // parity: feat:navigation.dock-station
-    // parity: rpc:stationSvc.Undock
-    // parity: rpc:stationSvc.Dock
+    // parity: rpc:structureDocking.Undock
+    // parity: rpc:structureDocking.Dock
     // parity: notify:OnSessionChanged
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -383,7 +383,7 @@ async fn test_navigation_align_to_and_vector_steering() {
     // parity: feat:navigation.align-to
     // parity: feat:navigation.goto-point
     // parity: rpc:beyonce.CmdAlignTo
-    // parity: rpc:beyonce.CmdGotoPoint
+    // parity: feat:navigation.align-server-tick-rounding
     // parity: rpc:beyonce.CmdGotoDirection
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
