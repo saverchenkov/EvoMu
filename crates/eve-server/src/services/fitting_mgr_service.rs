@@ -84,79 +84,14 @@ pub(crate) async fn handle_fitting_mgr(
             handle_save_fitting(ctx, session, service, method, args).await
         }
 
-        ("charFittingMgr", "GetFittings")
-        | ("corpFittingMgr", "GetFittings")
-        | ("allianceFittingMgr", "GetFittings")
-        | ("corpFittingMgr", "GetCommunityFittings") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let is_community_query = method == "GetCommunityFittings";
-            let owner_id = if is_community_query {
-                COMMUNITY_FITTING_CORP_ID
-            } else {
-                let expected_owner = match service {
-                    "corpFittingMgr" => session.corporation_id.unwrap_or(0),
-                    "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
-                    _ => char_id,
-                };
-                let default_owner = if expected_owner > 0 { expected_owner } else { char_id };
-                let owner_id = args
-                    .first()
-                    .and_then(|a| a.as_i64())
-                    .filter(|&oid| oid > 0)
-                    .unwrap_or(default_owner);
-
-                if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
-                    return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
-                }
-                owner_id
-            };
-            let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
-                let mut fittings: Vec<_> = snap
-                    .saved_fittings
-                    .values()
-                    .filter(|f| {
-                        if is_community_query {
-                            is_community_fitting_owner(f.owner_id)
-                        } else {
-                            f.owner_id == owner_id
-                        }
-                    })
-                    .collect();
-                fittings.sort_by_key(|f| f.fitting_id);
-                fittings
-                    .into_iter()
-                    .map(|f| {
-                        let item_tuples: Vec<PyRep> = f
-                            .items
-                            .iter()
-                            .map(|&(tid, flg, qty)| {
-                                PyRep::Tuple(vec![
-                                    PyRep::Integer(tid as i64),
-                                    PyRep::Integer(flg as i64),
-                                    PyRep::Integer(qty as i64),
-                                ])
-                            })
-                            .collect();
-                        (
-                            PyRep::Integer(f.fitting_id),
-                            PyRep::keyval([
-                                ("fittingID", PyRep::Integer(f.fitting_id)),
-                                ("ownerID", PyRep::Integer(f.owner_id)),
-                                ("shipTypeID", PyRep::Integer(f.ship_type_id as i64)),
-                                ("name", PyRep::String(f.name.clone())),
-                                ("description", PyRep::String(f.description.clone())),
-                                ("fitData", PyRep::List(item_tuples.clone())),
-                                ("items", PyRep::List(item_tuples)),
-                            ]),
-                        )
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::Dict(entries)))
-        }
+        // parity: rpc:charFittingMgr.GetFittings
+        ("charFittingMgr", "GetFittings") => handle_get_fittings(ctx, session, service, method, args),
+        // parity: rpc:corpFittingMgr.GetFittings
+        ("corpFittingMgr", "GetFittings") => handle_get_fittings(ctx, session, service, method, args),
+        // parity: rpc:allianceFittingMgr.GetFittings
+        ("allianceFittingMgr", "GetFittings") => handle_get_fittings(ctx, session, service, method, args),
+        // parity: rpc:corpFittingMgr.GetCommunityFittings
+        ("corpFittingMgr", "GetCommunityFittings") => handle_get_fittings(ctx, session, service, method, args),
 
 
         ("charFittingMgr", "UpdateNameAndDescription") | ("charFittingMgr", "UpdateFitting") => {
@@ -181,6 +116,83 @@ pub(crate) async fn handle_fitting_mgr(
 
         _ => None,
     }
+}
+
+fn handle_get_fittings(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let is_community_query = method == "GetCommunityFittings";
+    let owner_id = if is_community_query {
+        COMMUNITY_FITTING_CORP_ID
+    } else {
+        let expected_owner = match service {
+            "corpFittingMgr" => session.corporation_id.unwrap_or(0),
+            "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
+            _ => char_id,
+        };
+        let default_owner = if expected_owner > 0 { expected_owner } else { char_id };
+        let owner_id = args
+            .first()
+            .and_then(|a| a.as_i64())
+            .filter(|&oid| oid > 0)
+            .unwrap_or(default_owner);
+
+        if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
+            return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
+        }
+        owner_id
+    };
+    let entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+        let mut fittings: Vec<_> = snap
+            .saved_fittings
+            .values()
+            .filter(|f| {
+                if is_community_query {
+                    is_community_fitting_owner(f.owner_id)
+                } else {
+                    f.owner_id == owner_id
+                }
+            })
+            .collect();
+        fittings.sort_by_key(|f| f.fitting_id);
+        fittings
+            .into_iter()
+            .map(|f| {
+                let item_tuples: Vec<PyRep> = f
+                    .items
+                    .iter()
+                    .map(|&(tid, flg, qty)| {
+                        PyRep::Tuple(vec![
+                            PyRep::Integer(tid as i64),
+                            PyRep::Integer(flg as i64),
+                            PyRep::Integer(qty as i64),
+                        ])
+                    })
+                    .collect();
+                (
+                    PyRep::Integer(f.fitting_id),
+                    PyRep::keyval([
+                        ("fittingID", PyRep::Integer(f.fitting_id)),
+                        ("ownerID", PyRep::Integer(f.owner_id)),
+                        ("shipTypeID", PyRep::Integer(f.ship_type_id as i64)),
+                        ("name", PyRep::String(f.name.clone())),
+                        ("description", PyRep::String(f.description.clone())),
+                        ("fitData", PyRep::List(item_tuples.clone())),
+                        ("items", PyRep::List(item_tuples)),
+                    ]),
+                )
+            })
+            .collect()
+    });
+    Some(Ok(PyRep::Dict(entries)))
 }
 
 async fn handle_save_fitting(

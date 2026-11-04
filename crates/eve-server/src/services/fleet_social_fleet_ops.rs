@@ -369,314 +369,11 @@ pub(super) async fn handle_fleet_ops(
             ])))
         }
 
-        ("fleetMgr", "FleetWarp")
-        | ("fleetObjectHandler", "FleetWarp")
-        | ("fleetMgr", "WarpFleet")
-        | ("fleetObjectHandler", "WarpFleet") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-
-            let (dest_id, explicit_dest, min_range) = if args.len() >= 3
-                && args.first().and_then(|a| a.as_f64()).is_some()
-                && args.get(1).and_then(|a| a.as_f64()).is_some()
-                && args.get(2).and_then(|a| a.as_f64()).is_some()
-            {
-                let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
-                let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-                let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-                let d = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
-                (0_i64, Some(DVec3::new(x, y, z)), d.clamp(0.0, 100_000.0))
-            } else {
-                let Some(did) = parse_dest_id(args, kwargs) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidArgument".into(),
-                        message: "FleetWarp requires destination entity ID".into(),
-                    }));
-                };
-                let d = args
-                    .get(1)
-                    .and_then(|a| a.as_f64())
-                    .or_else(|| kwargs.get("minRange").and_then(|a| a.as_f64()))
-                    .unwrap_or(0.0)
-                    .clamp(0.0, 100_000.0);
-                (did, None, d)
-            };
-
-            // parity: feat:fleet.takes-fleet-warp-toggle, feat:fleet.stored-formations-and-warp-shapes
-            let (eligible_ship_ids, skipped_opt_out_members) = match ctx.db.with_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
-                };
-                let Some(caller_member) = fleet.member_details.get(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Caller not in fleet".into(),
-                    });
-                };
-                let caller_role = role_to_i64(caller_member.role);
-                if caller_role > 3 && fleet.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet, Wing, or Squad Commanders can initiate Fleet Warp".into(),
-                    });
-                }
-                if let Some(caller_ship_id) = session.ship_id {
-                    crate::services::structure_control_ops::reject_if_controlling_structure(
-                        ctx,
-                        caller_ship_id,
-                        "initiate fleet warp",
-                    )?;
-                }
-                let mut ships = Vec::new();
-                let mut skipped = Vec::new();
-                for m in fleet.member_details.values() {
-                    let in_scope = match caller_member.role {
-                        FleetRole::FleetCommander => true,
-                        FleetRole::WingCommander => m.wing_id == caller_member.wing_id,
-                        FleetRole::SquadCommander => m.squad_id == caller_member.squad_id,
-                        FleetRole::SquadMember => fleet.boss_id == char_id,
-                    };
-                    if !in_scope {
-                        continue;
-                    }
-                    if !m.takes_fleet_warp && m.character_id != char_id {
-                        skipped.push(m.character_id);
-                        continue;
-                    }
-                    if let Some(ch) = snap.characters.get(&m.character_id) {
-                        if ch.solar_system_id == sys_id
-                            && ch.station_id.is_none()
-                            && ch.structure_id.is_none()
-                            && !snap.structures.contains_key(&ch.active_ship_id)
-                        {
-                            ships.push((m.character_id, ch.active_ship_id));
-                        }
-                    }
-                }
-                Ok((ships, skipped))
-            }) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            super::fleet_social_finder_tactical::ensure_fleet_formations_loaded(ctx);
-            let stored_form = ctx
-                .fleet_extras
-                .lock()
-                .unwrap()
-                .stored_formations
-                .get(&char_id)
-                .copied();
-            let (form_idx, spacing_idx) = if explicit_dest.is_some() { (4, 5) } else { (2, 3) };
-            let formation_id = args
-                .get(form_idx)
-                .and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("formationID").and_then(|a| a.as_i64()))
-                .or_else(|| stored_form.map(|(fid, _, _)| fid))
-                .unwrap_or(0);
-            let formation_spacing = args
-                .get(spacing_idx)
-                .and_then(|a| a.as_f64())
-                .or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64()))
-                .or_else(|| stored_form.map(|(_, sp, _)| sp))
-                .unwrap_or(match formation_id {
-                    1 | 3 | 4 => 5_000.0,
-                    2 => 10_000.0,
-                    _ => 0.0,
-                })
-                .clamp(0.0, 100_000.0);
-
-            if (32_000_000..=32_999_999).contains(&sys_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotWarpInAbyssalSpace".into(),
-                    message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
-                }));
-            }
-            let sys = ctx.systems.get_or_spawn(sys_id);
-            let caller_ship_id = session.ship_id.unwrap_or(0);
-            let caller_pos = sys
-                .get_ball_snapshot(caller_ship_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position);
-            let now_unix = ctx.now_unix();
-            let dest_pos = if let Some(pos) = explicit_dest {
-                pos
-            } else if let Ok(Some((_, b))) = sys.get_ball_snapshot(dest_id).await {
-                b.position
-            } else if let Some(bm_res) = ctx.db.with_snapshot(|snap| {
-                let bm = snap.bookmarks.get(&dest_id)?;
-                if sys_id == 30_100_000 || bm.solar_system_id == 30_100_000 {
-                    return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
-                }
-                if super::is_bookmark_expired_in_snap(snap, dest_id, now_unix)
-                    || bm.solar_system_id != sys_id
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "BookmarkNotFound".into(),
-                        message: format!("Bookmark {dest_id} not found or inaccessible"),
-                    }));
-                }
-                let can_use = bm.owner_id == char_id
-                    || bm.folder_id.is_some_and(|fid| {
-                        snap.bookmark_folders.get(&fid).is_some_and(|f| {
-                            crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
-                                snap, session, char_id, f,
-                            ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
-                        })
-                    });
-                if !can_use {
-                    return Some(Err(BridgeRpcError {
-                        code: "BookmarkNotFound".into(),
-                        message: format!("Bookmark {dest_id} not found or inaccessible"),
-                    }));
-                }
-                Some(Ok(DVec3::new(bm.x, bm.y, bm.z)))
-            }) {
-                match bm_res {
-                    Ok(p) => p,
-                    Err(e) => return Some(Err(e)),
-                }
-            } else if let Some(st) = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .and_then(|s| s.stations.iter().find(|st| st.station_id == dest_id))
-            {
-                DVec3::new(st.position.x, st.position.y, st.position.z)
-            } else {
-                DVec3::new(150_000_000.0, 0.0, 0.0)
-            };
-
-            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
-                ctx, sys_id, dest_pos, dest_pos,
-            )
-            .await
-            {
-                return Some(Err(e));
-            }
-
-            let mut warped_members = Vec::new();
-            let mut landing_positions = Vec::new();
-            let mut ess_bubble_blocked = false;
-            for (idx, (member_char_id, ship_id)) in eligible_ship_ids.into_iter().enumerate() {
-                if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
-                    if ball.max_velocity <= 0.0 {
-                        continue;
-                    }
-                    if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp").is_err()
-                        || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp").is_err()
-                    {
-                        continue;
-                    }
-                    if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {
-                        continue;
-                    }
-                    if crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
-                        ctx, sys_id, ship_id, "warp",
-                    )
-                    .await
-                    .is_err()
-                    {
-                        ess_bubble_blocked = true;
-                        continue;
-                    }
-                    if let Some(c_pos) = caller_pos {
-                        if member_char_id != char_id && ball.position.distance(c_pos) > 8_000_000.0
-                        {
-                            continue;
-                        }
-                    }
-                    let dist = ball.position.distance(dest_pos);
-                    if dist >= WARP_MIN_DISTANCE_M {
-                        let dir = (dest_pos - ball.position).normalize_or_zero();
-                        let i = idx as f64;
-                        let offset = match formation_id {
-                            1 => DVec3::new((idx % 5) as f64 * formation_spacing, 0.0, (idx / 5) as f64 * formation_spacing),
-                            2 => DVec3::new(i.cos() * formation_spacing, (i * 0.7).sin() * formation_spacing, i.sin() * formation_spacing),
-                            3 => DVec3::new(((idx + 1) / 2) as f64 * if idx % 2 == 0 { 1.0 } else { -1.0 } * formation_spacing, 0.0, -(((idx + 1) / 2) as f64) * formation_spacing),
-                            4 => DVec3::new((idx % 5) as f64 * formation_spacing, ((idx / 5) as f64) * formation_spacing, 0.0),
-                            5 => caller_pos.map(|cp| (ball.position - cp).clamp_length_max(100_000.0)).unwrap_or(DVec3::ZERO),
-                            _ => DVec3::ZERO,
-                        };
-                        let landing = dest_pos - dir * min_range + offset;
-                        if crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
-                            ctx, sys_id, dest_pos, landing,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            ess_bubble_blocked = true;
-                            continue;
-                        }
-                        let warp_mode = MovementMode::new_warp(ball.position, landing, 3.0);
-                        if sys.set_movement_mode(ship_id, warp_mode).await.is_ok() {
-                            warped_members.push(PyRep::Integer(member_char_id));
-                            landing_positions.push(PyRep::Tuple(vec![
-                                PyRep::Integer(member_char_id),
-                                PyRep::Real(landing.x),
-                                PyRep::Real(landing.y),
-                                PyRep::Real(landing.z),
-                            ]));
-                        }
-                    }
-                }
-            }
-            if warped_members.is_empty() && ess_bubble_blocked {
-                return Some(Err(BridgeRpcError {
-                    code: "EssIntrusionBubbleWarpBlocked".into(),
-                    message: "Cannot fleet warp out from inside the 75 km ESS warp disruption bubble".into(),
-                }));
-            }
-
-            for &opt_out_cid in &skipped_opt_out_members {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnFleetMoveFailed",
-                    "charid",
-                    vec![PyRep::Integer(opt_out_cid)],
-                );
-            }
-
-            Some(Ok(PyRep::keyval([
-                ("status", PyRep::String("FleetWarpInitiated".into())),
-                ("fleetID", PyRep::Integer(fleet_id)),
-                ("destinationID", PyRep::Integer(dest_id)),
-                ("formationID", PyRep::Integer(formation_id)),
-                ("formationSpacing", PyRep::Real(formation_spacing)),
-                ("warpCount", PyRep::Integer(warped_members.len() as i64)),
-                ("warpedMembers", PyRep::Integer(warped_members.len() as i64)),
-                ("warpedMemberIDs", PyRep::List(warped_members)),
-                (
-                    "skippedOptOutMemberIDs",
-                    PyRep::List(skipped_opt_out_members.into_iter().map(PyRep::Integer).collect()),
-                ),
-                ("landingPositions", PyRep::List(landing_positions)),
-                ("destinationX", PyRep::Real(dest_pos.x)),
-                ("destinationY", PyRep::Real(dest_pos.y)),
-                ("destinationZ", PyRep::Real(dest_pos.z)),
-            ])))
+        ("fleetMgr", "FleetWarp") | ("fleetObjectHandler", "FleetWarp") => {
+            handle_fleet_warp(ctx, session, args, kwargs).await
+        }
+        ("fleetMgr", "WarpFleet") | ("fleetObjectHandler", "WarpFleet") => {
+            handle_fleet_warp(ctx, session, args, kwargs).await
         }
 
         ("fleetMgr", "SetMotd")
@@ -1234,4 +931,316 @@ fn handle_fleet_member_preference(
         }
         Err(e) => Some(Err(e)),
     }
+}
+
+async fn handle_fleet_warp(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let fleet_id = match session.fleet_id {
+        Some(fid) => fid,
+        None => {
+            return Some(Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Character is not in a fleet".into(),
+            }))
+        }
+    };
+    let Some(sys_id) = session.solar_system_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        }));
+    };
+
+    let (dest_id, explicit_dest, min_range) = if args.len() >= 3
+        && args.first().and_then(|a| a.as_f64()).is_some()
+        && args.get(1).and_then(|a| a.as_f64()).is_some()
+        && args.get(2).and_then(|a| a.as_f64()).is_some()
+    {
+        let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
+        let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
+        let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+        let d = args.get(3).and_then(|a| a.as_f64()).unwrap_or(0.0);
+        (0_i64, Some(DVec3::new(x, y, z)), d.clamp(0.0, 100_000.0))
+    } else {
+        let Some(did) = parse_dest_id(args, kwargs) else {
+            return Some(Err(BridgeRpcError {
+                code: "InvalidArgument".into(),
+                message: "FleetWarp requires destination entity ID".into(),
+            }));
+        };
+        let d = args
+            .get(1)
+            .and_then(|a| a.as_f64())
+            .or_else(|| kwargs.get("minRange").and_then(|a| a.as_f64()))
+            .unwrap_or(0.0)
+            .clamp(0.0, 100_000.0);
+        (did, None, d)
+    };
+
+    // parity: feat:fleet.takes-fleet-warp-toggle, feat:fleet.stored-formations-and-warp-shapes
+    let (eligible_ship_ids, skipped_opt_out_members) = match ctx.db.with_snapshot(|snap| {
+        let Some(fleet) = snap.fleets.get(&fleet_id) else {
+            return Err(BridgeRpcError {
+                code: "FleetNotFound".into(),
+                message: format!("Fleet {fleet_id} not found"),
+            });
+        };
+        let Some(caller_member) = fleet.member_details.get(&char_id) else {
+            return Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Caller not in fleet".into(),
+            });
+        };
+        let caller_role = role_to_i64(caller_member.role);
+        if caller_role > 3 && fleet.boss_id != char_id {
+            return Err(BridgeRpcError {
+                code: "FleetPermissionDenied".into(),
+                message: "Only Fleet, Wing, or Squad Commanders can initiate Fleet Warp".into(),
+            });
+        }
+        if let Some(caller_ship_id) = session.ship_id {
+            crate::services::structure_control_ops::reject_if_controlling_structure(
+                ctx,
+                caller_ship_id,
+                "initiate fleet warp",
+            )?;
+        }
+        let mut ships = Vec::new();
+        let mut skipped = Vec::new();
+        for m in fleet.member_details.values() {
+            let in_scope = match caller_member.role {
+                FleetRole::FleetCommander => true,
+                FleetRole::WingCommander => m.wing_id == caller_member.wing_id,
+                FleetRole::SquadCommander => m.squad_id == caller_member.squad_id,
+                FleetRole::SquadMember => fleet.boss_id == char_id,
+            };
+            if !in_scope {
+                continue;
+            }
+            if !m.takes_fleet_warp && m.character_id != char_id {
+                skipped.push(m.character_id);
+                continue;
+            }
+            if let Some(ch) = snap.characters.get(&m.character_id) {
+                if ch.solar_system_id == sys_id
+                    && ch.station_id.is_none()
+                    && ch.structure_id.is_none()
+                    && !snap.structures.contains_key(&ch.active_ship_id)
+                {
+                    ships.push((m.character_id, ch.active_ship_id));
+                }
+            }
+        }
+        Ok((ships, skipped))
+    }) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+
+    super::fleet_social_finder_tactical::ensure_fleet_formations_loaded(ctx);
+    let stored_form = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .stored_formations
+        .get(&char_id)
+        .copied();
+    let (form_idx, spacing_idx) = if explicit_dest.is_some() { (4, 5) } else { (2, 3) };
+    let formation_id = args
+        .get(form_idx)
+        .and_then(|a| a.as_i64())
+        .or_else(|| kwargs.get("formationID").and_then(|a| a.as_i64()))
+        .or_else(|| stored_form.map(|(fid, _, _)| fid))
+        .unwrap_or(0);
+    let formation_spacing = args
+        .get(spacing_idx)
+        .and_then(|a| a.as_f64())
+        .or_else(|| kwargs.get("formationSpacing").and_then(|a| a.as_f64()))
+        .or_else(|| stored_form.map(|(_, sp, _)| sp))
+        .unwrap_or(match formation_id {
+            1 | 3 | 4 => 5_000.0,
+            2 => 10_000.0,
+            _ => 0.0,
+        })
+        .clamp(0.0, 100_000.0);
+
+    if (32_000_000..=32_999_999).contains(&sys_id) {
+        return Some(Err(BridgeRpcError {
+            code: "CannotWarpInAbyssalSpace".into(),
+            message: "Bookmarks and warp navigation are disabled inside Abyssal Deadspace".into(),
+        }));
+    }
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let caller_ship_id = session.ship_id.unwrap_or(0);
+    let caller_pos = sys
+        .get_ball_snapshot(caller_ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position);
+    let now_unix = ctx.now_unix();
+    let dest_pos = if let Some(pos) = explicit_dest {
+        pos
+    } else if let Ok(Some((_, b))) = sys.get_ball_snapshot(dest_id).await {
+        b.position
+    } else if let Some(bm_res) = ctx.db.with_snapshot(|snap| {
+        let bm = snap.bookmarks.get(&dest_id)?;
+        if sys_id == 30_100_000 || bm.solar_system_id == 30_100_000 {
+            return Some(Err(BridgeRpcError::user_error("DunBlacklistCannotWarp")));
+        }
+        if super::is_bookmark_expired_in_snap(snap, dest_id, now_unix)
+            || bm.solar_system_id != sys_id
+        {
+            return Some(Err(BridgeRpcError {
+                code: "BookmarkNotFound".into(),
+                message: format!("Bookmark {dest_id} not found or inaccessible"),
+            }));
+        }
+        let can_use = bm.owner_id == char_id
+            || bm.folder_id.is_some_and(|fid| {
+                snap.bookmark_folders.get(&fid).is_some_and(|f| {
+                    crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                        snap, session, char_id, f,
+                    ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                })
+            });
+        if !can_use {
+            return Some(Err(BridgeRpcError {
+                code: "BookmarkNotFound".into(),
+                message: format!("Bookmark {dest_id} not found or inaccessible"),
+            }));
+        }
+        Some(Ok(DVec3::new(bm.x, bm.y, bm.z)))
+    }) {
+        match bm_res {
+            Ok(p) => p,
+            Err(e) => return Some(Err(e)),
+        }
+    } else if let Some(st) = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .and_then(|s| s.stations.iter().find(|st| st.station_id == dest_id))
+    {
+        DVec3::new(st.position.x, st.position.y, st.position.z)
+    } else {
+        DVec3::new(150_000_000.0, 0.0, 0.0)
+    };
+
+    if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+        ctx, sys_id, dest_pos, dest_pos,
+    )
+    .await
+    {
+        return Some(Err(e));
+    }
+
+    let mut warped_members = Vec::new();
+    let mut landing_positions = Vec::new();
+    let mut ess_bubble_blocked = false;
+    for (idx, (member_char_id, ship_id)) in eligible_ship_ids.into_iter().enumerate() {
+        if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
+            if ball.max_velocity <= 0.0 {
+                continue;
+            }
+            if crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp").is_err()
+                || crate::services::space_navigation_advanced::check_immobilizing_module_active(ctx, ship_id, "warp").is_err()
+            {
+                continue;
+            }
+            if sys.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                continue;
+            }
+            if crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+                ctx, sys_id, ship_id, "warp",
+            )
+            .await
+            .is_err()
+            {
+                ess_bubble_blocked = true;
+                continue;
+            }
+            if let Some(c_pos) = caller_pos {
+                if member_char_id != char_id && ball.position.distance(c_pos) > 8_000_000.0
+                {
+                    continue;
+                }
+            }
+            let dist = ball.position.distance(dest_pos);
+            if dist >= WARP_MIN_DISTANCE_M {
+                let dir = (dest_pos - ball.position).normalize_or_zero();
+                let i = idx as f64;
+                let offset = match formation_id {
+                    1 => DVec3::new((idx % 5) as f64 * formation_spacing, 0.0, (idx / 5) as f64 * formation_spacing),
+                    2 => DVec3::new(i.cos() * formation_spacing, (i * 0.7).sin() * formation_spacing, i.sin() * formation_spacing),
+                    3 => DVec3::new(((idx + 1) / 2) as f64 * if idx % 2 == 0 { 1.0 } else { -1.0 } * formation_spacing, 0.0, -(((idx + 1) / 2) as f64) * formation_spacing),
+                    4 => DVec3::new((idx % 5) as f64 * formation_spacing, ((idx / 5) as f64) * formation_spacing, 0.0),
+                    5 => caller_pos.map(|cp| (ball.position - cp).clamp_length_max(100_000.0)).unwrap_or(DVec3::ZERO),
+                    _ => DVec3::ZERO,
+                };
+                let landing = dest_pos - dir * min_range + offset;
+                if crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+                    ctx, sys_id, dest_pos, landing,
+                )
+                .await
+                .is_err()
+                {
+                    ess_bubble_blocked = true;
+                    continue;
+                }
+                let warp_mode = MovementMode::new_warp(ball.position, landing, 3.0);
+                if sys.set_movement_mode(ship_id, warp_mode).await.is_ok() {
+                    warped_members.push(PyRep::Integer(member_char_id));
+                    landing_positions.push(PyRep::Tuple(vec![
+                        PyRep::Integer(member_char_id),
+                        PyRep::Real(landing.x),
+                        PyRep::Real(landing.y),
+                        PyRep::Real(landing.z),
+                    ]));
+                }
+            }
+        }
+    }
+    if warped_members.is_empty() && ess_bubble_blocked {
+        return Some(Err(BridgeRpcError {
+            code: "EssIntrusionBubbleWarpBlocked".into(),
+            message: "Cannot fleet warp out from inside the 75 km ESS warp disruption bubble".into(),
+        }));
+    }
+
+    for &opt_out_cid in &skipped_opt_out_members {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnFleetMoveFailed",
+            "charid",
+            vec![PyRep::Integer(opt_out_cid)],
+        );
+    }
+
+    Some(Ok(PyRep::keyval([
+        ("status", PyRep::String("FleetWarpInitiated".into())),
+        ("fleetID", PyRep::Integer(fleet_id)),
+        ("destinationID", PyRep::Integer(dest_id)),
+        ("formationID", PyRep::Integer(formation_id)),
+        ("formationSpacing", PyRep::Real(formation_spacing)),
+        ("warpCount", PyRep::Integer(warped_members.len() as i64)),
+        ("warpedMembers", PyRep::Integer(warped_members.len() as i64)),
+        ("warpedMemberIDs", PyRep::List(warped_members)),
+        (
+            "skippedOptOutMemberIDs",
+            PyRep::List(skipped_opt_out_members.into_iter().map(PyRep::Integer).collect()),
+        ),
+        ("landingPositions", PyRep::List(landing_positions)),
+        ("destinationX", PyRep::Real(dest_pos.x)),
+        ("destinationY", PyRep::Real(dest_pos.y)),
+        ("destinationZ", PyRep::Real(dest_pos.z)),
+    ])))
 }

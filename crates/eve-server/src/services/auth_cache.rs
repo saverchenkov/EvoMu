@@ -94,10 +94,7 @@ pub async fn handle(
             Some(Ok(PyRep::Integer(ticks)))
         }
 
-        ("machoNet", "NoBlock") => {
-            // const-ok: machoNet.NoBlock is a keepalive ping returning true
-            Some(Ok(PyRep::Bool(true)))
-        }
+        ("machoNet", "NoBlock") => handle_machonet_noblock(ctx, session),
 
         ("machoNet", "GetCachedObject") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -1370,4 +1367,16 @@ pub async fn handle(
 
         _ => super::config_service::handle(ctx, session, service, method, args, kwargs),
     }
+}
+
+/// Handles `machoNet.NoBlock` client keepalive ping semantics.
+///
+/// The client periodically issues non-blocking pings (`machoNet.NoBlock`) to confirm transport
+/// liveness and refresh proxy/gateway session activity without mutating game state.
+#[inline]
+fn handle_machonet_noblock(
+    _ctx: &ServerContext,
+    _session: &mut SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    Some(Ok(PyRep::Bool(true)))
 }
