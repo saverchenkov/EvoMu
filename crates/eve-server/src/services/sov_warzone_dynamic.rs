@@ -79,6 +79,14 @@ fn dynamic_resource_settings() -> PyRep {
     ])
 }
 
+fn handle_sov_mgr_remove_from_cache(
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    // const-ok: client-side memoized cache invalidation notification returns None
+    ServerContext::require_character(session)?;
+    Ok(PyRep::None)
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -314,13 +322,7 @@ pub async fn handle(
         }
 
         ("sovMgr", "remove_from_cache") => {
-            // const-ok: cache invalidation notification returns None
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            // const-ok: client-side memoized cache invalidation notification returns None
-            Some(Ok(PyRep::None))
+            Some(handle_sov_mgr_remove_from_cache(session))
         }
 
         ("fwWarzoneSolarsystem", "iteritems") => {

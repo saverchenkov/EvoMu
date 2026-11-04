@@ -1058,6 +1058,15 @@ pub fn inject_skillpoints(
     Ok(PyRep::Real(yielded))
 }
 
+fn handle_check_and_send_skill_notifications(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    crate::services::character_skills::catch_up_skill_queue(ctx, char_id);
+    Ok(PyRep::None)
+}
+
 /// Station-entry skill notification check (`skillMgr2.CheckAndSendNotifications`,
 /// `notifications/client/development/skillHistoryProvider.pyj:22`) and non-diminishing
 /// skill injection lookup (`nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections`,
@@ -1071,12 +1080,7 @@ pub fn handle_skill_notifications_and_injections(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("skillMgr2", "CheckAndSendNotifications") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            crate::services::character_skills::catch_up_skill_queue(ctx, char_id);
-            Some(Ok(PyRep::None))
+            Some(handle_check_and_send_skill_notifications(ctx, session))
         }
         // parity: feat:skills.nondiminishing-injector, rpc:nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections
         ("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections") => {

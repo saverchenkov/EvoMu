@@ -74,6 +74,22 @@ fn parse_extractor_heads_rep(rep: Option<&PyRep>) -> Option<Vec<(i64, f64, f64)>
     }
 }
 
+fn handle_planet_mgr_append(
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    // const-ok: client-side list-like proxy method on bound planetMgr object
+    ServerContext::require_character(session)?;
+    Ok(PyRep::None)
+}
+
+fn handle_planet_mgr_remote_handler(
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    // const-ok: bound moniker remoteHandler property accessor
+    ServerContext::require_character(session)?;
+    Ok(PyRep::None)
+}
+
 pub fn handle_pi_orbitals(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1244,8 +1260,7 @@ pub fn handle_pi_orbitals(
         }
 
         ("planetMgr", "append") => {
-            // const-ok: client-side list-like proxy method on bound planetMgr object
-            Some(Ok(PyRep::None))
+            Some(handle_planet_mgr_append(session))
         }
 
         ("planetMgr", "celestialIndex") => {
@@ -1306,8 +1321,7 @@ pub fn handle_pi_orbitals(
         }
 
         ("planetMgr", "remoteHandler") => {
-            // const-ok: bound moniker remoteHandler property accessor
-            Some(Ok(PyRep::None))
+            Some(handle_planet_mgr_remote_handler(session))
         }
 
         _ => None,

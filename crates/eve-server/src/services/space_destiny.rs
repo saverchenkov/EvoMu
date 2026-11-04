@@ -338,6 +338,14 @@ pub fn compute_pilot_warp_speed_au_s(
 
 pub(crate) use space_nav_travel::sync_ship_cloak_and_mjfg_from_fitting;
 
+fn handle_ess_mgr_clear_cache(
+    session: &SessionState,
+) -> Result<PyRep, BridgeRpcError> {
+    // const-ok: client-side memoized cache invalidation notification returns None
+    ServerContext::require_character(session)?;
+    Ok(PyRep::None)
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -717,13 +725,7 @@ pub async fn handle(
         }
 
         ("essMgr", "clear_cache") => {
-            // const-ok: cache invalidation notification returns None
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            // const-ok: client-side memoized cache invalidation notification returns None
-            Some(Ok(PyRep::None))
+            Some(handle_ess_mgr_clear_cache(session))
         }
 
         // parity: rpc:essMgr.prime_cache_result
