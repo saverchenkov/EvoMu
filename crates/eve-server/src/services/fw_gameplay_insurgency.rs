@@ -465,6 +465,11 @@ pub fn evaluate_and_resolve_insurgency_campaign(
 
     let mut updated_balances: Vec<(i64, f64)> = Vec::new();
     ctx.db.with_mut_snapshot(|snap| {
+        if outcome == "PirateWin" {
+            if let Some(occ) = snap.fw_system_occupations.get_mut(&fob_sys) {
+                occ.occupier_faction_id = pirate_fac;
+            }
+        }
         for &(cid, fid, lp_award) in &payouts {
             if lp_award > 0 {
                 let lp_corp = militia_lp_corp_id(&ctx.sde, fid);
