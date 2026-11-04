@@ -235,14 +235,14 @@ pub fn resolve_facility_modifiers_and_system(
                     .or_else(|| snap.characters.get(&it.owner_id).map(|c| c.solar_system_id))
                     .or_else(|| snap.characters.values().find(|c| c.corporation_id == it.owner_id).map(|c| c.solar_system_id))
                     .or_else(|| snap.characters.values().next().map(|c| c.solar_system_id))
-                    .unwrap_or(30_000_142)
+                    .unwrap_or(0)
             };
             let region_id = ctx
                 .sde
                 .solar_systems
                 .get(&sys_id)
                 .map(|sys| sys.region_id)
-                .unwrap_or(10000002);
+                .unwrap_or(0);
             let (base_mat_mod, base_time_mod, cost_mod) =
                 structure_sde_industry_bonuses(ctx, it.type_id);
             let (_, rig_time, rig_cost, _) =

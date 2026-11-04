@@ -902,7 +902,7 @@ pub fn save_orbital_settings(snap: &mut eve_db::WorldStateSnapshot, planet_or_or
             snap.characters.values().find(|c| c.corporation_id == settings.owner_corp_id).map(|c| c.solar_system_id)
         })
         .or_else(|| snap.characters.values().next().map(|c| c.solar_system_id))
-        .unwrap_or(30_000_142);
+        .unwrap_or(0);
     let office_id = orbital_id_opt.unwrap_or(planet_id);
     let standing_lvl = if settings.minimum_standing > 5.0 { Some("excellent".to_string()) }
         else if settings.minimum_standing > 0.0 { Some("good".to_string()) }

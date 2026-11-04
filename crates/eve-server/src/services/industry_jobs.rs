@@ -153,7 +153,9 @@ pub fn handle_industry_jobs(
                     let current_sys = session
                         .solar_system_id
                         .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-                        .unwrap_or(30_000_142);
+                        .or_else(|| session.station_id.and_then(|sid| ctx.sde.location_solar_system(sid)))
+                        .or_else(|| session.structure_id.and_then(|sid| snap.structures.get(&sid).map(|s| s.solar_system_id)))
+                        .unwrap_or(0);
                     let Some((_, _, f_sys, _, _, _, _)) =
                         resolve_facility_modifiers_and_system(ctx, snap, station_id)
                     else {

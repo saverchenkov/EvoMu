@@ -942,6 +942,42 @@ impl LivingWorldDirector {
         crate::living_world_haulers::step_hauler_convoy_internal(self, convoy_id, systems, db, sde).await
     }
 
+    fn resolve_npc_station_for_system(
+        sde: &eve_sde::SdeRegistry,
+        solar_system_id: SolarSystemId,
+    ) -> i64 {
+        let Some(cur) = sde.solar_systems.get(&solar_system_id) else {
+            return 0;
+        };
+        cur.stations
+            .iter()
+            .min_by_key(|st| st.station_id)
+            .map(|st| st.station_id)
+            .or_else(|| {
+                sde.stations
+                    .values()
+                    .filter(|st| {
+                        sde.solar_systems
+                            .get(&st.solar_system_id)
+                            .is_some_and(|s| s.constellation_id == cur.constellation_id)
+                    })
+                    .min_by_key(|st| st.station_id)
+                    .map(|st| st.station_id)
+            })
+            .or_else(|| {
+                sde.stations
+                    .values()
+                    .filter(|st| {
+                        sde.solar_systems
+                            .get(&st.solar_system_id)
+                            .is_some_and(|s| s.region_id == cur.region_id)
+                    })
+                    .min_by_key(|st| st.station_id)
+                    .map(|st| st.station_id)
+            })
+            .unwrap_or(0)
+    }
+
     /// Ensures at least one `MiningOp` exists in `solar_system_id` (`feat:npc.mining-op-npc`).
     pub fn ensure_system_mining_op(
         &self,
@@ -958,11 +994,7 @@ impl LivingWorldDirector {
                 return existing.convoy_id;
             }
         }
-        let dest_station_id = sde
-            .solar_systems
-            .get(&solar_system_id)
-            .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
-            .unwrap_or(60_003_760);
+        let dest_station_id = Self::resolve_npc_station_for_system(sde, solar_system_id);
         let miner_type_id = sde
             .types
             .values()
@@ -1021,11 +1053,7 @@ impl LivingWorldDirector {
         }
         let route = crate::living_world_haulers::compute_trade_route(sde, solar_system_id);
         let dest_sys = *route.last().unwrap_or(&solar_system_id);
-        let dest_station_id = sde
-            .solar_systems
-            .get(&dest_sys)
-            .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
-            .unwrap_or(60_003_760);
+        let dest_station_id = Self::resolve_npc_station_for_system(sde, dest_sys);
         let hauler_tid = hauler_type_for_system(sde, solar_system_id);
         // DERIVED: Primary regional mineral cargo (Tritanium type_id 34, SDE volume 0.01 m3) scaled to hauler cargo hold
         let cargo_type_id = sde

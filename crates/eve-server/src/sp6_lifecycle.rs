@@ -580,12 +580,25 @@ pub async fn handle_safe_logoff(
             .unwrap_or(0)
     });
     let sys_id = session.solar_system_id.unwrap_or_else(|| {
-        ctx.db
-            .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
-            .unwrap_or(30_000_142)
+        ctx.db.with_snapshot(|s| {
+            s.characters
+                .get(&char_id)
+                .map(|c| c.solar_system_id)
+                .filter(|&id| id > 0)
+                .or_else(|| {
+                    (ship_id > 0).then(|| s.items.get(&ship_id)).flatten().and_then(|it| {
+                        if (30_000_000..40_000_000).contains(&it.location_id) {
+                            Some(it.location_id as u32)
+                        } else {
+                            ctx.sde.location_solar_system(it.location_id)
+                        }
+                    })
+                })
+                .unwrap_or(0)
+        })
     });
 
-    if ship_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
+    if ship_id > 0 && sys_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         if sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
             failed_conditions.push(PyRep::String("SAFE_LOGOFF_WARP_SCRAMBLED".into()));
@@ -637,7 +650,7 @@ pub async fn handle_safe_logoff(
     }
 
     let complete_at_unix = now_unix.saturating_add(SAFE_LOGOFF_COUNTDOWN_SECS);
-    if ship_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
+    if ship_id > 0 && sys_id > 0 && session.station_id.is_none() && session.structure_id.is_none() {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         let _ = sys_handle.set_movement_mode(ship_id, MovementMode::Stop).await;
         let _ = sys_handle.set_speed_fraction(ship_id, 0.0).await;

@@ -4,6 +4,7 @@
 // parity: feat:industry.blueprint-data, feat:industry.blueprint-limits, feat:industry.facilities
 // parity: feat:industry.facility-tax, feat:industry.job-cost, feat:industry.cost-index
 // parity: feat:industry.structure-rigs, feat:structures.service-industry, feat:structures.service-reactions
+// parity: rpc:blueprintManager.GetBlueprintDataByOwner
 
 #![forbid(unsafe_code)]
 
@@ -197,7 +198,7 @@ pub fn facility_tax_note_id(facility_id: i64) -> i64 {
     -(1_000_000_000_000_i64.saturating_add(facility_id.abs()))
 }
 
-/// Resolves a requested facility ID or falls back to caller's active station/structure from session/DB before Jita fallback.
+/// Resolves a requested facility ID or falls back to caller's active/home station or structure from session/DB.
 pub(crate) fn resolve_caller_facility_id(
     ctx: &ServerContext,
     session: &SessionState,
@@ -207,14 +208,30 @@ pub(crate) fn resolve_caller_facility_id(
     requested
         .or(session.station_id)
         .or(session.structure_id)
-        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id)))
-        .unwrap_or(60_003_760)
+        .or_else(|| {
+            ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&char_id).and_then(|c| {
+                    c.station_id
+                        .or(c.structure_id)
+                        .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
+                })
+            })
+        })
+        .unwrap_or(0)
 }
 
 /// DERIVED: Default NPC station industry facility tax rate (0.25%), shared with ESI `/industry/facilities` and `InstallJob`.
 pub(crate) const NPC_STATION_INDUSTRY_TAX_RATE: f64 = 0.0025;
 
 pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) -> HashMap<u8, f64> {
+    load_facility_taxes_with_sde(None, snap, facility_id)
+}
+
+pub fn load_facility_taxes_with_sde(
+    sde: Option<&eve_sde::SdeRegistry>,
+    snap: &eve_db::WorldStateSnapshot,
+    facility_id: i64,
+) -> HashMap<u8, f64> {
     let nid = facility_tax_note_id(facility_id);
     if let Some(note) = snap.owner_notes.get(&nid) {
         if let Ok(map) = serde_json::from_str::<HashMap<u8, f64>>(&note.note) {
@@ -225,20 +242,18 @@ pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) 
         || snap
             .items
             .get(&facility_id)
-            .map(|it| matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836))
-            .unwrap_or(false);
+            .is_some_and(|it| matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836));
     let default_rate = if is_upwell {
         0.05
-    } else if facility_id == 60_003_760 {
+    } else if sde.is_some_and(|s| s.stations.contains_key(&facility_id)) {
         NPC_STATION_INDUSTRY_TAX_RATE
     } else {
         0.10
     };
-    let mut map = HashMap::new();
-    for act in [1_u8, 3, 4, 5, 8, 9] {
-        map.insert(act, default_rate);
-    }
-    map
+    [1_u8, 3, 4, 5, 8, 9]
+        .into_iter()
+        .map(|act| (act, default_rate))
+        .collect()
 }
 
 pub fn has_custom_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) -> bool {
@@ -430,9 +445,10 @@ pub fn compute_industry_job_costs_for_char(
     let fallback_sys = char_id
         .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
         .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
+    let fallback_reg = ctx.sde.solar_systems.get(&fallback_sys).map(|s| s.region_id).unwrap_or(0);
     let (_, _, sys_id, _, _, _, structure_cost_modifier) =
         resolve_facility_modifiers_and_system(ctx, snap, facility_id).unwrap_or((
-            1529, 1000035, fallback_sys, 10000002, 1.0, 1.0, 1.0,
+            1529, 0, fallback_sys, fallback_reg, 1.0, 1.0, 1.0,
         ));
     let system_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, activity_id);
     let base_job_cost_isk =
@@ -452,7 +468,7 @@ pub fn compute_industry_job_costs_for_char(
     } else {
         None
     };
-    let taxes = load_facility_taxes(snap, facility_id);
+    let taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);
     let facility_tax_rate = acl_tax_override.unwrap_or_else(|| {
         taxes
             .get(&activity_id)
@@ -516,7 +532,7 @@ pub fn build_facility_pyrep(
         resolve_facility_modifiers_and_system(ctx, snap, facility_id)?;
     let (rig_mat, rig_time, rig_cost, rig_sec_mult) =
         resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
-    let taxes = load_facility_taxes(snap, facility_id);
+    let taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);
     let mfg_tax = taxes.get(&1).copied().unwrap_or(0.0025);
     let sys_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, 1);
     let tax_kv = PyRep::keyval([
@@ -570,6 +586,53 @@ pub fn build_facility_pyrep(
     ]))
 }
 
+fn resolve_bp_facility_loc(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    loc_id: i64,
+) -> (Option<i64>, i64, Option<i64>) {
+    let loc_type_id = ctx
+        .sde
+        .stations
+        .get(&loc_id)
+        .map(|s| s.station_type_id as i64)
+        .or_else(|| snap.structures.get(&loc_id).map(|s| s.type_id as i64))
+        .or_else(|| snap.items.get(&loc_id).map(|p| p.type_id as i64))
+        .or_else(|| u32::try_from(loc_id).ok().filter(|s| ctx.sde.solar_systems.contains_key(s)).map(|_| 5))
+        .unwrap_or(0);
+    let mut cur = loc_id;
+    for _ in 0..4 {
+        if let Some(st) = ctx.sde.stations.get(&cur) {
+            return (Some(cur), loc_type_id, Some(st.solar_system_id as i64));
+        }
+        if let Some(st) = snap.structures.get(&cur) {
+            return (Some(cur), loc_type_id, Some(st.solar_system_id as i64));
+        }
+        if let Some(sys) = u32::try_from(cur).ok().filter(|s| ctx.sde.solar_systems.contains_key(s)) {
+            return (None, loc_type_id, Some(sys as i64));
+        }
+        if let Some(p) = snap.items.get(&cur) {
+            let cat = ctx.sde.types.get(&p.type_id).map(|t| t.category_id).unwrap_or(0);
+            let sys_opt = ctx.sde.stations.get(&p.location_id).map(|s| s.solar_system_id as i64)
+                .or_else(|| snap.structures.get(&p.location_id).map(|s| s.solar_system_id as i64))
+                .or_else(|| ctx.sde.location_solar_system(p.location_id).map(|s| s as i64));
+            if cat == 65 || matches!(p.type_id, 35825..=35836) {
+                return (Some(cur), loc_type_id, sys_opt);
+            }
+            if cat == 6 || p.location_id == cur || p.location_id <= 0 {
+                return (None, loc_type_id, sys_opt);
+            }
+            cur = p.location_id;
+            continue;
+        }
+        if (60_000_000..64_000_000).contains(&cur) {
+            return (Some(cur), loc_type_id, ctx.sde.location_solar_system(cur).map(|s| s as i64));
+        }
+        break;
+    }
+    (None, loc_type_id, None)
+}
+
 pub fn handle_industry_facilities_bps(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -586,108 +649,100 @@ pub fn handle_industry_facilities_bps(
                 Err(e) => return Some(Err(e)),
             };
             if method == "GetBlueprintDataByOwner" {
-                let owner_id = args
-                    .first()
-                    .and_then(|a| a.as_i64())
-                    .or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64()))
-                    .unwrap_or(char_id);
-                let caller_corp_id = session.corporation_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id))).unwrap_or(0);
-                if owner_id != char_id && owner_id != caller_corp_id && !session.has_gm_role() {
-                    return Some(Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") }));
-                }
+                let owner_id = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("ownerID").and_then(|v| v.as_i64())).unwrap_or(char_id);
                 let facility_filter = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("facilityID").and_then(|v| v.as_i64())).filter(|&id| id > 0);
-                let bps = ctx.db.with_snapshot(|snap| {
-                    snap.items.values().filter(|it| it.owner_id == owner_id && facility_filter.map(|fid| it.location_id == fid).unwrap_or(true) && ctx.sde.blueprints.contains_key(&it.type_id))
-                        .filter_map(|it| {
-                            let bp = ctx.sde.blueprints.get(&it.type_id)?;
-                            let me = it
-                                .dynamic_attributes
-                                .get(&ATTR_BLUEPRINT_ME)
-                                .copied()
-                                .unwrap_or(0.0) as i64;
-                            let te = it
-                                .dynamic_attributes
-                                .get(&ATTR_BLUEPRINT_TE)
-                                .copied()
-                                .unwrap_or(0.0) as i64;
-                            let is_reaction = bp.activities.contains_key("reaction")
-                                && !bp.activities.contains_key("manufacturing");
-                            let act_id = if is_reaction { 9 } else { 1 };
-                            let cost_meta = compute_industry_job_costs(
-                                ctx,
-                                snap,
-                                it.type_id,
-                                act_id,
-                                1,
-                                it.location_id,
-                            )
-                            .unwrap_or_default();
-                            let mats_list: Vec<PyRep> = if is_reaction {
-                                bp.activities
-                                    .get("reaction")
-                                    .map(|a| {
-                                        a.materials
-                                            .iter()
-                                            .map(|m| {
-                                                PyRep::keyval([
-                                                    ("typeID", PyRep::Integer(m.type_id as i64)),
-                                                    ("quantity", PyRep::Integer(m.quantity as i64)),
-                                                ])
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default()
-                            } else {
-                                bp.materials
-                                    .iter()
-                                    .map(|m| {
-                                        PyRep::keyval([
-                                            ("typeID", PyRep::Integer(m.type_id as i64)),
-                                            ("quantity", PyRep::Integer(m.quantity as i64)),
-                                        ])
-                                    })
-                                    .collect()
-                            };
-                            let skills_list: Vec<PyRep> = bp
-                                .activities
-                                .get(if is_reaction { "reaction" } else { "manufacturing" })
-                                .or_else(|| bp.activities.get("1"))
-                                .map(|act| {
-                                    act.skills
-                                        .iter()
-                                        .map(|sk| {
-                                            PyRep::keyval([
-                                                ("typeID", PyRep::Integer(sk.type_id as i64)),
-                                                ("level", PyRep::Integer(sk.level as i64)),
-                                            ])
-                                        })
-                                        .collect::<Vec<_>>()
-                                })
-                                .filter(|v| !v.is_empty())
-                                .unwrap_or_else(|| {
-                                    vec![PyRep::keyval([
-                                        ("typeID", PyRep::Integer(3380)),
-                                        ("level", PyRep::Integer(1)),
-                                    ])]
-                                });
-                            Some(PyRep::keyval([
-                                ("itemID", PyRep::Integer(it.item_id)),
-                                ("blueprintID", PyRep::Integer(it.item_id)),
-                                ("ownerID", PyRep::Integer(it.owner_id)),
-                                ("blueprintTypeID", PyRep::Integer(bp.blueprint_type_id as i64)),
-                                ("productTypeID", PyRep::Integer(bp.product_type_id as i64)),
-                                ("facilityID", PyRep::Integer(it.location_id)), ("locationID", PyRep::Integer(it.location_id)),
-                                ("materialEfficiency", PyRep::Integer(me)), ("timeEfficiency", PyRep::Integer(te)),
-                                ("original", PyRep::Bool(!it.is_blueprint_copy)),
-                                ("runsRemaining", PyRep::Integer(it.blueprint_runs_remaining.unwrap_or(-1) as i64)),
-                                ("materials", PyRep::List(mats_list)),
-                                ("skills", PyRep::List(skills_list)),
-                                ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
-                            ]))
-                        })
-                        .collect::<Vec<_>>()
+                let v24_tuple_sig = args.len() >= 2 || kwargs.contains_key("facilityID");
+                let res = ctx.db.with_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                    if owner_id != char_id && !session.has_gm_role() {
+                        const CORP_BP_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR
+                            | eve_db::corp_roles::ROLE_FACTORY_MANAGER
+                            | eve_db::corp_roles::ROLE_RENT_FACTORY_FACILITY
+                            | eve_db::corp_roles::ROLE_RENT_RESEARCH_FACILITY;
+                        let caller_corp_id = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+                        let has_corp_access = owner_id == caller_corp_id
+                            && !(1_000_000..2_000_000).contains(&owner_id)
+                            && ((session.corp_role & CORP_BP_ROLES) != 0
+                                || snap.corporations.get(&owner_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & CORP_BP_ROLES) != 0))
+                                || snap.corp_role_assignments.get(&(owner_id, char_id)).is_some_and(|a| (a.roles & CORP_BP_ROLES) != 0));
+                        if !has_corp_access {
+                            return Err(BridgeRpcError { code: "OwnerAccessDenied".into(), message: format!("Character {char_id} is not authorized to query blueprints for owner {owner_id}") });
+                        }
+                    }
+                    let mut active_jobs: HashMap<i64, i64> = HashMap::new();
+                    for j in snap.industry_jobs.values() {
+                        if !matches!(j.status.as_str(), "Delivered" | "Completed" | "Cancelled" | "Reverted" | "Failed") {
+                            active_jobs.entry(j.blueprint_item_id).or_insert(j.job_id);
+                        }
+                    }
+                    let mut owned: Vec<&eve_db::InventoryItemRecord> = snap.items.values()
+                        .filter(|it| it.owner_id == owner_id && ctx.sde.blueprints.contains_key(&it.type_id))
+                        .collect();
+                    owned.sort_by_key(|it| it.item_id);
+                    let mut counts: std::collections::BTreeMap<Option<i64>, i64> = std::collections::BTreeMap::new();
+                    let mut bps = Vec::new();
+                    for it in owned {
+                        let Some(bp) = ctx.sde.blueprints.get(&it.type_id) else { continue };
+                        let (fac_opt, loc_type_id, sys_opt) = resolve_bp_facility_loc(ctx, snap, it.location_id);
+                        *counts.entry(fac_opt).or_insert(0) += 1;
+                        if facility_filter.is_some_and(|fid| fac_opt != Some(fid)) || bps.len() >= 25_000 {
+                            continue;
+                        }
+                        let me = it.dynamic_attributes.get(&ATTR_BLUEPRINT_ME).copied().unwrap_or(0.0) as i64;
+                        let te = it.dynamic_attributes.get(&ATTR_BLUEPRINT_TE).copied().unwrap_or(0.0) as i64;
+                        let is_reaction = bp.activities.contains_key("reaction") && !bp.activities.contains_key("manufacturing");
+                        let act_id = if is_reaction { 9 } else { 1 };
+                        let cost_meta = compute_industry_job_costs(ctx, snap, it.type_id, act_id, 1, fac_opt.unwrap_or(it.location_id)).unwrap_or_default();
+                        let mats_list: Vec<PyRep> = if is_reaction {
+                            bp.activities.get("reaction").map(|a| a.materials.iter().map(|m| PyRep::keyval([("typeID", PyRep::Integer(m.type_id as i64)), ("quantity", PyRep::Integer(m.quantity as i64))])).collect()).unwrap_or_default()
+                        } else {
+                            bp.materials.iter().map(|m| PyRep::keyval([("typeID", PyRep::Integer(m.type_id as i64)), ("quantity", PyRep::Integer(m.quantity as i64))])).collect()
+                        };
+                        let skills_list: Vec<PyRep> = bp.activities.get(if is_reaction { "reaction" } else { "manufacturing" }).or_else(|| bp.activities.get("1"))
+                            .map(|act| act.skills.iter().map(|sk| PyRep::keyval([("typeID", PyRep::Integer(sk.type_id as i64)), ("level", PyRep::Integer(sk.level as i64))])).collect::<Vec<_>>())
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| vec![PyRep::keyval([("typeID", PyRep::Integer(3380)), ("level", PyRep::Integer(1))])]);
+                        let prod_type_id = if is_reaction {
+                            bp.activities.get("reaction").and_then(|a| a.products.first()).map(|p| p.type_id).unwrap_or(bp.product_type_id)
+                        } else {
+                            bp.product_type_id
+                        };
+                        let runs = if it.is_blueprint_copy { i64::from(it.blueprint_runs_remaining.unwrap_or(1)) } else { -1 };
+                        let qty_code = if it.is_blueprint_copy { -2 } else if it.singleton { -1 } else { i64::from(it.quantity.max(1)) };
+                        let flag_i64 = it.flag as u16 as i64;
+                        bps.push(PyRep::keyval([
+                            ("typeID", PyRep::Integer(bp.blueprint_type_id as i64)),
+                            ("blueprintTypeID", PyRep::Integer(bp.blueprint_type_id as i64)),
+                            ("itemID", PyRep::Integer(it.item_id)),
+                            ("blueprintID", PyRep::Integer(it.item_id)),
+                            ("ownerID", PyRep::Integer(it.owner_id)),
+                            ("productTypeID", PyRep::Integer(prod_type_id as i64)),
+                            ("facilityID", fac_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("locationID", PyRep::Integer(it.location_id)),
+                            ("locationTypeID", PyRep::Integer(loc_type_id)),
+                            ("locationFlagID", PyRep::Integer(flag_i64)),
+                            ("flagID", PyRep::Integer(flag_i64)),
+                            ("solarSystemID", sys_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("materialEfficiency", PyRep::Integer(me)),
+                            ("timeEfficiency", PyRep::Integer(te)),
+                            ("original", PyRep::Bool(!it.is_blueprint_copy)),
+                            ("runs", PyRep::Integer(runs)),
+                            ("runsRemaining", PyRep::Integer(runs)),
+                            ("quantity", PyRep::Integer(qty_code)),
+                            ("jobID", active_jobs.get(&it.item_id).copied().map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ("isImpounded", PyRep::Bool(it.flag == eve_db::InventoryFlag::Impounded)),
+                            ("materials", PyRep::List(mats_list)),
+                            ("skills", PyRep::List(skills_list)),
+                            ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
+                        ]));
+                    }
+                    if v24_tuple_sig {
+                        let bp_counts = PyRep::Dict(counts.into_iter().map(|(f, c)| (f.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::Integer(c))).collect());
+                        Ok(PyRep::Tuple(vec![PyRep::List(bps), bp_counts]))
+                    } else {
+                        Ok(PyRep::List(bps))
+                    }
                 });
-                return Some(Ok(PyRep::List(bps)));
+                return Some(res);
             }
             let Some(raw_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -870,6 +925,7 @@ pub fn handle_industry_facilities_bps(
                 let sci_range = (skill_lvl(24270) as i64) * 5;
                 let react_range = (skill_lvl(45750) as i64) * 5;
                 PyRep::keyval([
+                    ("maxBlueprintResults", PyRep::Integer(25_000)),
                     ("maxManufacturingJobs", PyRep::Integer(mfg_max)),
                     ("maxResearchJobs", PyRep::Integer(sci_max)),
                     ("maxReactionsJobs", PyRep::Integer(react_max)),
@@ -897,7 +953,7 @@ pub fn handle_industry_facilities_bps(
                 let current_sys = session
                     .solar_system_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-                    .unwrap_or(30_000_142);
+                    .unwrap_or(0);
                 let mut list = Vec::new();
                 if !explicit_ids.is_empty() {
                     for fid in explicit_ids {
@@ -937,10 +993,18 @@ pub fn handle_industry_facilities_bps(
                     let fallback_id = session
                         .station_id
                         .or(session.structure_id)
-                        .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id))
-                        .unwrap_or(60_003_760);
-                    if let Some(f_rep) = build_facility_pyrep(ctx, snap, fallback_id) {
-                        list.push(f_rep);
+                        .or_else(|| {
+                            snap.characters.get(&char_id).and_then(|c| {
+                                c.station_id
+                                    .or(c.structure_id)
+                                    .or_else(|| (c.home_station_id > 0).then_some(c.home_station_id))
+                            })
+                        })
+                        .unwrap_or(0);
+                    if fallback_id > 0 {
+                        if let Some(f_rep) = build_facility_pyrep(ctx, snap, fallback_id) {
+                            list.push(f_rep);
+                        }
                     }
                 }
                 list
@@ -969,7 +1033,7 @@ pub fn handle_industry_facilities_bps(
                     .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.solar_system_id as u32))
                     .or(session.solar_system_id)
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id))
-                    .unwrap_or(30_000_142);
+                    .unwrap_or(0);
                 let reg = ctx.sde.solar_systems.get(&sys_id).map(|sys| sys.region_id as i64).unwrap_or(0);
                 let mut out = Vec::new();
                 if owner_filter.is_none() || owner_filter == Some(char_id) {
@@ -1014,7 +1078,7 @@ pub fn handle_industry_facilities_bps(
                 if resolve_facility_modifiers_and_system(ctx, snap, facility_id).is_none() {
                     return Err(BridgeRpcError { code: "FacilityNotFound".into(), message: format!("Industry facility {facility_id} not found") });
                 }
-                let mut taxes = load_facility_taxes(snap, facility_id);
+                let mut taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);
                 if snap.structures.contains_key(&facility_id) {
                     for act in [1_u8, 3, 4, 5, 8, 9] {
                         if let Ok(Some(r)) = crate::services::structure_profile_services::check_industry_activity_acl_and_tax(snap, facility_id, char_id, act, now) {
@@ -1219,7 +1283,7 @@ pub fn handle_industry_facilities_bps(
                         }
                     }
                 }
-                let mut taxes = load_facility_taxes(snap, facility_id);
+                let mut taxes = load_facility_taxes_with_sde(Some(&ctx.sde), snap, facility_id);
                 for (act, rate) in updates {
                     taxes.insert(act, rate);
                 }
@@ -1271,7 +1335,7 @@ pub fn handle_industry_facilities_bps(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let req_sys = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id);
             let res = ctx.db.with_snapshot(|snap| {
-                let sys_id = req_sys.or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id)).unwrap_or(30_000_142);
+                let sys_id = req_sys.or_else(|| snap.characters.get(&char_id).map(|c| c.solar_system_id)).unwrap_or(0);
                 let sci = |act| compute_canonical_system_cost_index(ctx, snap, sys_id, act);
                 PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(sys_id as i64)),
