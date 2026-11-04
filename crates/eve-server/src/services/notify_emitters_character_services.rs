@@ -987,7 +987,9 @@ pub fn handle_batch3_gm_slash_cmd(
             Some(Ok(PyRep::Bool(enabled)))
         }
         "/spawnanomaly" => {
-            let sys_id = caller_sys.unwrap_or(30_000_142);
+            let sys_id = caller_sys
+                .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&caller_cid).map(|c| c.solar_system_id)))
+                .unwrap_or(0);
             let dungeon_id = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(10_001);
             let (anom_id, inst_id) =
                 super::notify_emitters_space_dungeons::spawn_and_emit_cosmic_anomaly(ctx, sys_id, dungeon_id);

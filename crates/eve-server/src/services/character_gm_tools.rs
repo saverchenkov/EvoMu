@@ -449,11 +449,10 @@ pub async fn handle_gm_slash_ext(
             .and_then(|s| s.parse::<i64>().ok());
 
         let (target_char_id, sys_id, target_ship_id) = ctx.db.with_snapshot(|snap| {
-            let caller_sys = snap
-                .characters
-                .get(&cid)
-                .map(|c| c.solar_system_id)
-                .unwrap_or(30_000_142);
+            let caller_sys = session
+                .solar_system_id
+                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
+                .unwrap_or(0);
             let caller_ship = snap
                 .characters
                 .get(&cid)
@@ -549,7 +548,8 @@ pub async fn handle_gm_slash_ext(
                     .get(&cid)
                     .map(|c| (c.solar_system_id, c.active_ship_id))
             })
-            .unwrap_or((30_000_142, 0));
+            .or_else(|| session.solar_system_id.map(|s| (s, 0)))
+            .unwrap_or((0, 0));
 
         let handle = ctx.systems.get_or_spawn(sys_id);
         let origin = if ship_id > 0 {
@@ -632,11 +632,10 @@ pub async fn handle_gm_slash_ext(
             }));
         };
         let (sys_id, removed_db) = ctx.db.with_mut_snapshot(|snap| {
-            let caller_sys = snap
-                .characters
-                .get(&cid)
-                .map(|c| c.solar_system_id)
-                .unwrap_or(30_000_142);
+            let caller_sys = session
+                .solar_system_id
+                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
+                .unwrap_or(0);
             let removed = snap.items.remove(&target_id).is_some();
             let children: Vec<i64> = snap.items.values().filter(|i| i.location_id == target_id).map(|i| i.item_id).collect();
             for child_id in children { snap.items.remove(&child_id); }
@@ -1001,11 +1000,10 @@ pub async fn handle_gm_slash_ext(
             }));
         };
         let lookup = ctx.db.with_snapshot(|snap| {
-            let caller_sys = snap
-                .characters
-                .get(&cid)
-                .map(|c| c.solar_system_id)
-                .unwrap_or(30_000_142);
+            let caller_sys = session
+                .solar_system_id
+                .or_else(|| snap.characters.get(&cid).map(|c| c.solar_system_id))
+                .unwrap_or(0);
             if let Some(ch) = snap.characters.get(&target_id) {
                 Some((ch.character_id, ch.active_ship_id, ch.solar_system_id, true))
             } else if let Some(item) = snap.items.get(&target_id) {
@@ -1019,8 +1017,9 @@ pub async fn handle_gm_slash_ext(
                 Some((cid, target_id, caller_sys, false))
             }
         });
+        let default_sys = session.solar_system_id.unwrap_or(0);
         let (victim_char_id, victim_ship_id, sys_id, in_db_items) =
-            lookup.unwrap_or((cid, target_id, 30_000_142, false));
+            lookup.unwrap_or((cid, target_id, default_sys, false));
         let handle = ctx.systems.get_or_spawn(sys_id);
         let ball_opt = handle
             .get_ball_snapshot(victim_ship_id)
