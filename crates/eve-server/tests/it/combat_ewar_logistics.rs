@@ -350,6 +350,8 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     let dmg_painted = m_rep_painted.dict_get("appliedDamage").and_then(|v| v.as_f64()).unwrap();
     assert!(dmg_painted > dmg_unpainted && dmg_painted > 0.0, "Target Painter bloom must apply to incoming weapon damage: got painted={dmg_painted}, unpainted={dmg_unpainted}");
 
+    ctx.advance_secs(10);
+    let _ = sys.step_manual(1.0).await;
     let turret_rep_painted = fire_weapon(&ctx, &mut sess, turret_id, victim_id).await.expect("Fire turret painted");
     let p_hit_painted = turret_rep_painted.dict_get("hitChance").and_then(|v| v.as_f64()).unwrap();
     assert!(p_hit_painted > p_hit_unpainted, "Target Painter bloom must increase turret hit chance (painted={p_hit_painted} > unpainted={p_hit_unpainted})");
@@ -483,6 +485,9 @@ async fn test_combat_ewar_and_capacitor_warfare_closure() {
     let p_hit_base = turret_rep_base.dict_get("hitChance").and_then(|v| v.as_f64()).unwrap();
 
     sys.set_capacitor(victim_id, 500.0).await.unwrap();
+
+    ctx.advance_secs(10);
+    let _ = sys.step_manual(1.0).await;
 
     // 1) Unscripted TD from victim on ship_id
     ctx.dispatch_rpc(&mut victim_sess, "dogmaIM", None, "Activate", &[PyRep::Integer(v_td_id), PyRep::String("shipModuleTrackingDisruptor".into()), PyRep::Integer(ship_id), PyRep::Integer(1)], &kw, None).await.expect("Activate unscripted TD on ship_id");
