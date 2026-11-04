@@ -221,6 +221,7 @@ mod sovereignty_equinox_gameplay_closure_part4;
 mod sovereignty_mercden_parity_closure;
 mod sovereignty_mercden_parity_closure_part2;
 mod sovereignty_mercden_parity_closure_part3;
+mod sovereignty_mercenary_dens;
 mod fw_warzone_insurgency;
 mod sovereignty_equinox_gameplay;
 mod regressions_b01_b15;
@@ -246,30 +247,13 @@ mod space;
 mod space_filaments_jumps_complete;
 mod parity_quasar_batch_closure;
 mod space_mining;
-mod space_mining_part2;
 mod space_navigation_cyno;
 mod space_propulsion_interdiction;
-mod space_propulsion_interdiction_part2;
-mod space_propulsion_interdiction_part3;
 mod space_warp_jump_docking;
-mod space_warp_jump_docking_part2;
-mod space_warp_jump_docking_part3;
 mod station_entry_inventory;
 mod structures;
-mod structures_closure_remediated;
-mod structures_closure_remediated_part2;
-mod structures_closure_remediated_part3;
-mod structures_closure_remediated_part4;
-mod structures_closure_remediated_part5;
-mod structures_closure_remediated_part6;
-mod structures_closure_remediated_part7;
 mod structures_lifecycle_complete;
 mod structures_upwell_complete;
-mod mobile_structures_closure;
-mod mobile_structures_closure_part2;
-mod mobile_structures_closure_part3;
-mod mobile_structures_closure_part4;
-mod mobile_structures_closure_part5;
 mod system;
 mod time_control;
 mod wallet_ledger_complete;
@@ -416,7 +400,6 @@ mod crimewatch_hostility;
 mod combat_r4_regressions;
 mod combat_r5_regressions;
 mod structures_mining_r4_regressions;
-mod structures_mining_r4_regressions_part2;
 mod crimewatch_drones_closure;
 mod crimewatch_drones_closure_part2;
 mod ships_modules_closure;
@@ -653,6 +636,7 @@ mod quasar_vendors_war_and_serverops;
 mod quasar_debug_race_and_ships;
 
 // Backward-compatibility aliases for test suites renamed to semantic domain names in 61d4cc02b
+
 #[allow(unused_imports)]
 pub(crate) use abyssal_deadspace as abyssal_deadspace_closure;
 #[allow(unused_imports)]
@@ -667,3 +651,22 @@ pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
 pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
 #[allow(unused_imports)]
 pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
+pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
+#[allow(unused_imports)]
+pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
+#[allow(unused_imports)]
+pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
+#[allow(unused_imports)]
+pub(crate) use crimewatch_hostility as plan_c7_crimewatch_closure;
+#[allow(unused_imports)]
+pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
+#[allow(unused_imports)]
+pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
+#[allow(unused_imports)]
+pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
