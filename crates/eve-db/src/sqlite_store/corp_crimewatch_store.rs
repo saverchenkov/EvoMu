@@ -7,7 +7,7 @@
 //! denials), and warfare/FW/sovereignty/insurgency runtime state in `d6_corp_crimewatch_kv`
 //! (schema migration `0003_d6_corp_crimewatch_warfare`).
 
-use crate::d6_types::tuple_map_serde;
+use crate::durable_domain_types::tuple_map_serde;
 use crate::sqlite_store::fingerprints::{FnvHasher, TableFingerprints};
 use crate::types::*;
 use eve_sde::SolarSystemId;

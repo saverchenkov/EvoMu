@@ -1172,7 +1172,7 @@ pub fn sync_dirty_to_sqlite(
         }
     }
 
-    // 32. char_mining_ledger (synced via d6_batch4_store::sync_d6_batch4)
+    // 32. char_mining_ledger (synced via industry_market_pve_store::sync_d6_batch4)
 
     // 33. asteroids
     let rem_asteroids: Vec<i64> = fp
@@ -1213,10 +1213,10 @@ pub fn sync_dirty_to_sqlite(
 
     cold_changed |= super::sync_ext::sync_extension_tables(tx, snap, fp)?;
     cold_changed |= super::ledger_store::sync_ledger(tx, snap, fp)?;
-    cold_changed |= super::d6_store::sync_d6(tx, snap, fp)?;
-    cold_changed |= super::d6_social_store::sync_d6_social(tx, snap, fp)?;
-    cold_changed |= super::d6_corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
-    cold_changed |= super::d6_batch4_store::sync_d6_batch4(tx, snap, fp)?;
+    cold_changed |= super::notes_lp_sequence_store::sync_d6(tx, snap, fp)?;
+    cold_changed |= super::social_store::sync_d6_social(tx, snap, fp)?;
+    cold_changed |= super::corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
+    cold_changed |= super::industry_market_pve_store::sync_d6_batch4(tx, snap, fp)?;
 
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(snap.clone());

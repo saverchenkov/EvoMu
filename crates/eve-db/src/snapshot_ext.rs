@@ -1,6 +1,6 @@
 //! `WorldStateSnapshot` container and dynamic world/ESI event and campaign records (`ESI-3`).
 
-pub use crate::d6_types::*;
+pub use crate::durable_domain_types::*;
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
