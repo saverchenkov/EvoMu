@@ -22,6 +22,7 @@ use crate::services::industry_pi::{
     load_job_cost_meta, resolve_decryptor_modifiers, resolve_facility_modifiers_and_system,
     resolve_structure_rig_bonus, restore_blueprint_flag, save_job_cost_meta,
     solar_system_jump_distance, sync_industry_job_pause_states,
+    validate_capital_construction_restrictions,
 };
 use eve_db::{IndustryJobRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
@@ -327,92 +328,15 @@ pub fn handle_industry_jobs(
                 let eff_mat_bonus_pct = (1.0 - eff_mat_mod).max(0.0) * 100.0;
                 let eff_time_bonus_pct = (1.0 - eff_time_mod).max(0.0) * 100.0;
 
-                if activity_id == 1 {
-                    let prod_grp = ctx
-                        .sde
-                        .types
-                        .get(&bp.product_type_id)
-                        .map(|t| t.group_id)
-                        .unwrap_or(0);
-                    let fac_sec = ctx
-                        .sde
-                        .solar_systems
-                        .get(&fac_sys_id)
-                        .map(|s| s.security_status)
-                        .unwrap_or(1.0);
-                    if matches!(prod_grp, 659 | 30) {
-                        if fac_sec > 0.0 || fac_sys_id >= 31_000_000 {
-                            return Err(BridgeRpcError {
-                                code: "SupercapitalRequiresSovereignNullSec".into(),
-                                message: format!(
-                                    "Supercapitals require sovereign Null-Sec (system {fac_sys_id} sec {fac_sec:.2})"
-                                ),
-                            });
-                        }
-                        let has_sov = snap
-                            .system_states
-                            .get(&fac_sys_id)
-                            .and_then(|s| s.sov_alliance_id)
-                            .is_some();
-                        let has_supercap_upgrade = snap.items.values().any(|i| {
-                            i.location_id == fac_sys_id as i64
-                                && matches!(i.type_id, 81623 | 2009)
-                                && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
-                        });
-                        if !has_sov || !has_supercap_upgrade {
-                            return Err(BridgeRpcError {
-                                code: "SupercapitalRequiresSovereignNullSec".into(),
-                                message: format!(
-                                    "System {fac_sys_id} requires active sovereignty and an online Supercapital Construction Facilities upgrade"
-                                ),
-                            });
-                        }
-                        let has_supercap_shipyard = fac_type_id == 35827
-                            && snap.items.values().any(|i| {
-                                i.location_id == station_id
-                                    && (164..=171).contains(&(i.flag as u16))
-                                    && i.type_id == 35877
-                                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
-                            });
-                        if !has_supercap_shipyard {
-                            return Err(BridgeRpcError {
-                                code: "SupercapitalRequiresSotiyoSupercapitalShipyard".into(),
-                                message: format!(
-                                    "Supercapitals require a Sotiyo (35827) with an online Standup Supercapital Shipyard I (35877) at {station_id}"
-                                ),
-                            });
-                        }
-                    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883)
-                        && bp.product_type_id != 28606
-                    {
-                        if ctx.sde.solar_systems.get(&fac_sys_id).map(|s| s.region_id) == Some(10_000_070) {
-                            return Err(BridgeRpcError::user_error("CapitalConstructionForbiddenInPochven"));
-                        }
-                        if fac_sec >= 0.45 && fac_sys_id < 31_000_000 {
-                            return Err(BridgeRpcError {
-                                code: "CapitalConstructionForbiddenInHighSec".into(),
-                                message: format!(
-                                    "Capital ship construction is forbidden in High-Sec (system {fac_sys_id} sec {fac_sec:.2})"
-                                ),
-                            });
-                        }
-                        let has_cap_shipyard = matches!(fac_type_id, 35826 | 35827 | 35833 | 35834)
-                            && snap.items.values().any(|i| {
-                                i.location_id == station_id
-                                    && (164..=171).contains(&(i.flag as u16))
-                                    && matches!(i.type_id, 35881 | 35877)
-                                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
-                            });
-                        if !has_cap_shipyard {
-                            return Err(BridgeRpcError {
-                                code: "FacilityNotCapitalCapable".into(),
-                                message: format!(
-                                    "Facility {station_id} (type {fac_type_id}) requires an online Standup Capital Shipyard I (35881)"
-                                ),
-                            });
-                        }
-                    }
-                }
+                validate_capital_construction_restrictions(
+                    ctx,
+                    snap,
+                    bp,
+                    activity_id,
+                    fac_sys_id,
+                    fac_type_id,
+                    station_id,
+                )?;
 
                 let char_skills = snap.skills.get(&char_id);
                 let skill_lvl = |sid: TypeId| -> u8 {
@@ -885,11 +809,30 @@ pub fn handle_industry_jobs(
                 let jid = snap.next_entity_id;
 
                 if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                    let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
+                    let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
+                    let scc_cents = IskCents::from_f64_isk(cost_meta.scc_surcharge_isk);
                     let corp_bal = snap
                         .corporations
-                        .get(&job_owner_id)
-                        .map(|c| c.division_balance(1))
+                        .get_mut(&job_owner_id)
+                        .map(|c| {
+                            c.ensure_wallet_divisions();
+                            c.wallet_divisions[0].balance = c
+                                .wallet_divisions[0]
+                                .balance
+                                .checked_sub(total_debit_cents)
+                                .unwrap_or(IskCents(0));
+                            c.master_wallet = c.wallet_divisions[0].balance;
+                            c.master_wallet
+                        })
                         .unwrap_or(IskCents(0));
+                    snap.append_journal(job_owner_id, "IndustryJobInstallationFee", base_cents, corp_bal, format!("Base job cost for industry job {jid}"));
+                    if tax_cents.0 > 0 {
+                        snap.append_journal(job_owner_id, "IndustryFacilityTax", tax_cents, corp_bal, format!("Facility tax for industry job {jid}"));
+                    }
+                    if scc_cents.0 > 0 {
+                        snap.append_journal(job_owner_id, "IndustrySccSurcharge", scc_cents, corp_bal, format!("SCC surcharge for industry job {jid}"));
+                    }
                     snap.append_journal_entry(eve_db::JournalEntryInput {
                         owner_id: job_owner_id,
                         entry_type: "IndustryJobInstallationFee",
@@ -936,24 +879,38 @@ pub fn handle_industry_jobs(
 
                 let fac_tax_cents = IskCents::from_f64_isk(charged_facility_tax_isk);
                 if fac_tax_cents.0 > 0 {
-                    if let Some(struct_owner_corp) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
-                        if !use_corp || struct_owner_corp != job_owner_id {
-                            if let Some(scorp) = snap.corporations.get_mut(&struct_owner_corp) {
-                                scorp.ensure_wallet_divisions();
-                                scorp.master_wallet = scorp
-                                    .master_wallet
-                                    .checked_add(fac_tax_cents)
-                                    .unwrap_or(scorp.master_wallet);
-                                scorp.wallet_divisions[0].balance = scorp.master_wallet;
-                                let sbal = scorp.master_wallet;
-                                snap.append_journal(
-                                    struct_owner_corp,
-                                    "IndustryFacilityTax",
-                                    fac_tax_cents,
-                                    sbal,
-                                    format!("Structure industry facility tax for job {jid}"),
-                                );
-                            }
+                    let fac_owner_corp = snap
+                        .structures
+                        .get(&station_id)
+                        .map(|s| s.owner_corp_id)
+                        .or_else(|| resolve_facility_modifiers_and_system(ctx, snap, station_id).map(|m| m.1));
+                    if let Some(fac_corp) = fac_owner_corp {
+                        if !use_corp || fac_corp != job_owner_id {
+                            let scorp = snap.corporations.entry(fac_corp).or_insert_with(|| eve_db::CorporationRecord {
+                                corporation_id: fac_corp,
+                                name: ctx
+                                    .sde
+                                    .npc_corporations
+                                    .get(&fac_corp)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_else(|| format!("Corporation {fac_corp}")),
+                                ticker: "NPC".into(),
+                                ..Default::default()
+                            });
+                            scorp.ensure_wallet_divisions();
+                            scorp.master_wallet = scorp
+                                .master_wallet
+                                .checked_add(fac_tax_cents)
+                                .unwrap_or(scorp.master_wallet);
+                            scorp.wallet_divisions[0].balance = scorp.master_wallet;
+                            let sbal = scorp.master_wallet;
+                            snap.append_journal(
+                                fac_corp,
+                                "IndustryFacilityTax",
+                                fac_tax_cents,
+                                sbal,
+                                format!("Facility tax for industry job {jid}"),
+                            );
                         }
                     }
                 }

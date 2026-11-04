@@ -1078,6 +1078,7 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
             }
         }
         save_ext_state(snap, &ext);
+        crate::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states(snap, now);
         (gone, released)
     });
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);

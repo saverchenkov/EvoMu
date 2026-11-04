@@ -4,6 +4,7 @@
 
 use crate::router::ServerContext;
 use eve_db::InventoryFlag;
+use eve_proto::BridgeRpcError;
 
 /// Computes Standup Structure Rig bonuses (`feat:industry.structure-rigs`, `feat:industry.structure-standup-rig-security-multipliers`):
 /// - Manufacturing/Research/Invention rigs: High-Sec (`1.0x`), Low-Sec (`1.9x`), Null-Sec/WH (`2.1x`).
@@ -175,6 +176,98 @@ pub fn resolve_structure_rig_bonus(
     (mat, time, sec_mult)
 }
 
+pub fn structure_sde_industry_bonuses(ctx: &ServerContext, type_id: eve_sde::TypeId) -> (f64, f64, f64) {
+    let Some(t) = ctx.sde.types.get(&type_id) else {
+        return (1.0, 1.0, 1.0);
+    };
+    let mat_mod = t.default_attributes.get(&2600).copied().unwrap_or(1.0);
+    let time_mod = t
+        .default_attributes
+        .get(&2602)
+        .copied()
+        .or_else(|| t.default_attributes.get(&2721).copied())
+        .unwrap_or(1.0);
+    let cost_mod = t.default_attributes.get(&2601).copied().unwrap_or(1.0);
+    (mat_mod, time_mod, cost_mod)
+}
+
+pub fn resolve_facility_modifiers_and_system(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    facility_id: i64,
+) -> Option<(eve_sde::TypeId, i64, u32, u32, f64, f64, f64)> {
+    if let Some(st) = snap.structures.get(&facility_id) {
+        if st.state == "Destroyed" {
+            return None;
+        }
+        let region_id = ctx
+            .sde
+            .solar_systems
+            .get(&st.solar_system_id)
+            .map(|sys| sys.region_id)
+            .unwrap_or(10000002);
+        let (base_mat_mod, base_time_mod, cost_mod) =
+            structure_sde_industry_bonuses(ctx, st.type_id);
+        let (_, rig_time, rig_cost, _) =
+            resolve_structure_rig_bonuses_full(ctx, snap, facility_id, st.solar_system_id);
+        let eff_time_mod = base_time_mod * (1.0 - rig_time);
+        let eff_cost_mod = cost_mod * (1.0 - rig_cost);
+        return Some((
+            st.type_id,
+            st.owner_corp_id,
+            st.solar_system_id,
+            region_id,
+            base_mat_mod,
+            eff_time_mod,
+            eff_cost_mod,
+        ));
+    }
+    if let Some(it) = snap.items.get(&facility_id) {
+        if matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836) {
+            let sys_id = if (30_000_000..40_000_000).contains(&it.location_id) {
+                it.location_id as u32
+            } else {
+                30_000_142
+            };
+            let region_id = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|sys| sys.region_id)
+                .unwrap_or(10000002);
+            let (base_mat_mod, base_time_mod, cost_mod) =
+                structure_sde_industry_bonuses(ctx, it.type_id);
+            let (_, rig_time, rig_cost, _) =
+                resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
+            let eff_time_mod = base_time_mod * (1.0 - rig_time);
+            let eff_cost_mod = cost_mod * (1.0 - rig_cost);
+            return Some((
+                it.type_id,
+                it.owner_id,
+                sys_id,
+                region_id,
+                base_mat_mod,
+                eff_time_mod,
+                eff_cost_mod,
+            ));
+        }
+    }
+    for sys in ctx.sde.solar_systems.values() {
+        if let Some(station) = sys.stations.iter().find(|s| s.station_id == facility_id) {
+            return Some((
+                station.station_type_id,
+                station.owner_corporation_id,
+                sys.solar_system_id,
+                sys.region_id,
+                1.0,
+                1.0,
+                1.0,
+            ));
+        }
+    }
+    None
+}
+
 /// Resolves a material's adjusted price for EIV calculation (`feat:industry.eiv-adjusted-prices`):
 /// 1. 28-day clamped EMA over `snap.market_history` for `type_id` (matching `/markets/prices/`).
 /// 2. SDE `base_price` fallback (or `10.0` if unset).
@@ -210,5 +303,105 @@ pub fn resolve_material_adjusted_price(
         .get(&type_id)
         .map(|t| if t.base_price > 0.0 { t.base_price } else { 10.0 })
         .unwrap_or(10.0)
+}
+
+/// Validates capital and supercapital construction restrictions (`feat:industry.capital-construction-restrictions`).
+pub fn validate_capital_construction_restrictions(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    bp: &eve_sde::BlueprintInfo,
+    activity_id: u8,
+    fac_sys_id: u32,
+    fac_type_id: eve_sde::TypeId,
+    station_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if activity_id != 1 {
+        return Ok(());
+    }
+    let prod_grp = ctx
+        .sde
+        .types
+        .get(&bp.product_type_id)
+        .map(|t| t.group_id)
+        .unwrap_or(0);
+    let fac_sec = ctx
+        .sde
+        .solar_systems
+        .get(&fac_sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+    if matches!(prod_grp, 659 | 30) {
+        if fac_sec > 0.0 || fac_sys_id >= 31_000_000 {
+            return Err(BridgeRpcError {
+                code: "SupercapitalRequiresSovereignNullSec".into(),
+                message: format!(
+                    "Supercapitals require sovereign Null-Sec (system {fac_sys_id} sec {fac_sec:.2})"
+                ),
+            });
+        }
+        let has_sov = snap
+            .system_states
+            .get(&fac_sys_id)
+            .and_then(|s| s.sov_alliance_id)
+            .is_some();
+        let has_supercap_upgrade = snap.items.values().any(|i| {
+            i.location_id == fac_sys_id as i64
+                && matches!(i.type_id, 81623 | 2009)
+                && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+        });
+        if !has_sov || !has_supercap_upgrade {
+            return Err(BridgeRpcError {
+                code: "SupercapitalRequiresSovereignNullSec".into(),
+                message: format!(
+                    "System {fac_sys_id} requires active sovereignty and an online Supercapital Construction Facilities upgrade"
+                ),
+            });
+        }
+        let has_supercap_shipyard = fac_type_id == 35827
+            && snap.items.values().any(|i| {
+                i.location_id == station_id
+                    && (164..=171).contains(&(i.flag as u16))
+                    && i.type_id == 35877
+                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+            });
+        if !has_supercap_shipyard {
+            return Err(BridgeRpcError {
+                code: "SupercapitalRequiresSotiyoSupercapitalShipyard".into(),
+                message: format!(
+                    "Supercapitals require a Sotiyo (35827) with an online Standup Supercapital Shipyard I (35877) at {station_id}"
+                ),
+            });
+        }
+    } else if matches!(prod_grp, 485 | 4594 | 547 | 5120 | 1538 | 883)
+        && bp.product_type_id != 28606
+    {
+        if ctx.sde.solar_systems.get(&fac_sys_id).map(|s| s.region_id) == Some(10_000_070) {
+            return Err(BridgeRpcError::user_error("CapitalConstructionForbiddenInPochven"));
+        }
+        if fac_sec >= 0.45 && fac_sys_id < 31_000_000 {
+            return Err(BridgeRpcError {
+                code: "CapitalConstructionForbiddenInHighSec".into(),
+                message: format!(
+                    "Capital ship construction is forbidden in High-Sec (system {fac_sys_id} sec {fac_sec:.2})"
+                ),
+            });
+        }
+        let has_cap_shipyard = matches!(fac_type_id, 35826 | 35827 | 35833 | 35834)
+            && snap.items.values().any(|i| {
+                i.location_id == station_id
+                    && (164..=171).contains(&(i.flag as u16))
+                    && matches!(i.type_id, 35881 | 35877)
+                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+            });
+        if !has_cap_shipyard {
+            return Err(BridgeRpcError {
+                code: "FacilityNotCapitalCapable".into(),
+                message: format!(
+                    "Facility {station_id} (type {fac_type_id}) requires an online Standup Capital Shipyard I (35881)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 

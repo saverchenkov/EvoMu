@@ -289,99 +289,7 @@ pub fn load_job_cost_meta(
 
 pub use crate::services::industry_pi::industry_rigs::*;
 
-pub fn structure_sde_industry_bonuses(ctx: &ServerContext, type_id: TypeId) -> (f64, f64, f64) {
-    let Some(t) = ctx.sde.types.get(&type_id) else {
-        return (1.0, 1.0, 1.0);
-    };
-    let mat_mod = t.default_attributes.get(&2600).copied().unwrap_or(1.0);
-    let time_mod = t
-        .default_attributes
-        .get(&2602)
-        .copied()
-        .or_else(|| t.default_attributes.get(&2721).copied())
-        .unwrap_or(1.0);
-    let cost_mod = t.default_attributes.get(&2601).copied().unwrap_or(1.0);
-    (mat_mod, time_mod, cost_mod)
-}
-
-pub fn resolve_facility_modifiers_and_system(
-    ctx: &ServerContext,
-    snap: &eve_db::WorldStateSnapshot,
-    facility_id: i64,
-) -> Option<(TypeId, i64, u32, u32, f64, f64, f64)> {
-    if let Some(st) = snap.structures.get(&facility_id) {
-        if st.state == "Destroyed" {
-            return None;
-        }
-        let region_id = ctx
-            .sde
-            .solar_systems
-            .get(&st.solar_system_id)
-            .map(|sys| sys.region_id)
-            .unwrap_or(10000002);
-        let (base_mat_mod, base_time_mod, cost_mod) =
-            structure_sde_industry_bonuses(ctx, st.type_id);
-        let (_, rig_time, rig_cost, _) =
-            resolve_structure_rig_bonuses_full(ctx, snap, facility_id, st.solar_system_id);
-        let eff_time_mod = base_time_mod * (1.0 - rig_time);
-        let eff_cost_mod = cost_mod * (1.0 - rig_cost);
-        return Some((
-            st.type_id,
-            st.owner_corp_id,
-            st.solar_system_id,
-            region_id,
-            base_mat_mod,
-            eff_time_mod,
-            eff_cost_mod,
-        ));
-    }
-    if let Some(it) = snap.items.get(&facility_id) {
-        if matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836) {
-            let sys_id = if (30_000_000..40_000_000).contains(&it.location_id) {
-                it.location_id as u32
-            } else {
-                30_000_142
-            };
-            let region_id = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|sys| sys.region_id)
-                .unwrap_or(10000002);
-            let (base_mat_mod, base_time_mod, cost_mod) =
-                structure_sde_industry_bonuses(ctx, it.type_id);
-            let (_, rig_time, rig_cost, _) =
-                resolve_structure_rig_bonuses_full(ctx, snap, facility_id, sys_id);
-            let eff_time_mod = base_time_mod * (1.0 - rig_time);
-            let eff_cost_mod = cost_mod * (1.0 - rig_cost);
-            return Some((
-                it.type_id,
-                it.owner_id,
-                sys_id,
-                region_id,
-                base_mat_mod,
-                eff_time_mod,
-                eff_cost_mod,
-            ));
-        }
-    }
-    for sys in ctx.sde.solar_systems.values() {
-        if let Some(station) = sys.stations.iter().find(|s| s.station_id == facility_id) {
-            return Some((
-                station.station_type_id,
-                station.owner_corporation_id,
-                sys.solar_system_id,
-                sys.region_id,
-                1.0,
-                1.0,
-                1.0,
-            ));
-        }
-    }
-    None
-}
-
-/// Computes blueprint Estimated Item Value (EIV) per run from SDE manufacturing or reaction BOM.
+/// Computes blueprint Estimated Item Value (EIV) per run from SDE manufacturing or reaction BOM (`feat:industry.eiv-adjusted-prices`).
 pub fn compute_blueprint_eiv_per_run(ctx: &ServerContext, bp: &eve_sde::BlueprintInfo, activity_id: u8) -> f64 {
     compute_blueprint_eiv_per_run_with_snap(ctx, None, bp, activity_id)
 }
@@ -407,13 +315,17 @@ pub fn compute_blueprint_eiv_per_run_with_snap(
             .map(|a| a.materials.iter().map(|m| (m.type_id, m.quantity)).collect())
             .unwrap_or_default()
     };
-    mats.into_iter()
+    let sum = mats.into_iter()
         .map(|(tid, qty)| {
             let unit_price = crate::services::industry_pi::industry_rigs::resolve_material_adjusted_price(ctx, snap, tid);
             (qty as f64) * unit_price
         })
-        .sum::<f64>()
-        .max(10_000.0)
+        .sum::<f64>();
+    if sum > 0.0 {
+        sum
+    } else {
+        10_000.0
+    }
 }
 
 pub fn compute_industry_job_costs(
