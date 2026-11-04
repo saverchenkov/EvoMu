@@ -91,6 +91,8 @@ mod journeys_mining_combat_and_missions;
 mod journeys_clones_industry_and_corp;
 mod journeys_core_part5;
 mod journeys_core_part6;
+mod journeys_fleet_and_structures;
+mod journeys_store_and_operations;
 mod contracts_blueprints_and_plastic_wrap;
 mod economy_contracts;
 mod economy_contracts_market_closure;

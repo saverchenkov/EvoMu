@@ -1,11 +1,11 @@
-//! End-to-End Integration Journeys Part 5 (`journey:fleet` .. `journey:cosmetics_store`).
+//! End-to-End Integration Journeys: Fleet, Structures, Sovereignty/FW, and Daily Goals (Journeys 21..=24).
 #![forbid(unsafe_code)]
 
 use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest,
-    EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, WireField, WireMessage,
+    encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse,
+    GoogleAny, GoogleTimestamp, QuasarMessage, WireField, WireMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
@@ -50,13 +50,13 @@ async fn quasar_rpc(
             seconds: ctx.now_unix() as i64,
             nanos: 0,
         }),
-        correlation_uuid: format!("jrn-p5-{n:06}").into_bytes(),
+        correlation_uuid: format!("jrn-fs-{n:06}").into_bytes(),
         payload: Some(GoogleAny {
             type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
             value,
         }),
         external_origin: "eve-client".into(),
-        application_instance_uuid: b"jrn-p5-app-01".to_vec(),
+        application_instance_uuid: b"jrn-fs-app-01".to_vec(),
         authoritative_context: None,
         trace_context: None,
     };
@@ -75,8 +75,10 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
+// parity: journey:fleet
 #[tokio::test]
 async fn test_journey_fleet() {
+    eve_testkit::attest(&["journey:fleet"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -140,8 +142,10 @@ async fn test_journey_fleet() {
     assert!(saw_bcast, "SendBroadcast must emit OnFleetBroadcast with AlignSun");
 }
 
+// parity: journey:structures
 #[tokio::test]
 async fn test_journey_structures() {
+    eve_testkit::attest(&["journey:structures"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -253,8 +257,10 @@ async fn test_journey_structures() {
     assert!(saw_unanchoring, "Unanchor must emit OnStructureStateChanged(Unanchoring)");
 }
 
+// parity: journey:sovereignty_fw
 #[tokio::test]
 async fn test_journey_sovereignty_fw() {
+    eve_testkit::attest(&["journey:sovereignty_fw"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -363,8 +369,10 @@ async fn test_journey_sovereignty_fw() {
     assert!(sov_wm.fields.iter().any(|f| f.field_number == 1), "GetResourcesResponse must include power field");
 }
 
+// parity: journey:daily_goals_events
 #[tokio::test]
 async fn test_journey_daily_goals_events() {
+    eve_testkit::attest(&["journey:daily_goals_events"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -401,54 +409,4 @@ async fn test_journey_daily_goals_events() {
         }
     }
     assert!(saw_progressed, "ScanSignature must emit ProgressedNotice");
-}
-
-#[tokio::test]
-async fn test_journey_cosmetics_store() {
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    ctx.seed_demo_world_fixtures();
-    crate::common::seed_test_nes_store_catalog(&ctx);
-
-    let mut sess = SessionState::new(506);
-    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    call_rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
-        .await
-        .expect("SelectCharacterID");
-
-    // 1. PLEX Vault balance & NES store purchase via Quasar publicGatewaySvc.Subscribe + SendRequest
-    call_rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[])
-        .await
-        .expect("publicGatewaySvc.Subscribe");
-    let init_plex = ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001));
-    assert_eq!(init_plex, 500);
-
-    let bal_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.BalanceRequest", Vec::new()).await;
-    assert_eq!(bal_rsp.status_code, STATUS_OK);
-
-    // Purchase offer 2001 (450 PLEX) from NES store
-    let (mut b, mut purch_payload) = (Vec::new(), Vec::new());
-    encode_string_field(1, "2001", &mut b);
-    encode_bytes_field(1, &b, &mut purch_payload);
-    let purch_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", purch_payload).await;
-    assert_eq!(purch_rsp.status_code, STATUS_OK);
-    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 50);
-
-    // 2. Apply ship SKIN via shipCosmeticsMgr
-    let ship_id = sess.ship_id.expect("ship_id");
-    let ship_type_id = ctx.db.with_snapshot(|s| s.items[&ship_id].type_id);
-    let skin_id = ctx
-        .sde
-        .skins
-        .iter()
-        .find(|(_, sk)| sk.types.contains(&ship_type_id))
-        .map(|(id, _)| *id as i64)
-        .unwrap_or(1);
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.licensed_skins.entry(90_000_001).or_default().push(skin_id as u32);
-    });
-    let skin_res = call_rpc(&ctx, &mut sess, "shipCosmeticsMgr", "ApplySkinToShip", &[PyRep::Integer(ship_id), PyRep::Integer(skin_id)])
-        .await
-        .expect("ApplySkinToShip");
-    assert_eq!(skin_res.dict_get("shipID").and_then(|v| v.as_i64()), Some(ship_id));
 }

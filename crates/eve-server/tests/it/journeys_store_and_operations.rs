@@ -1,10 +1,15 @@
-//! End-to-End Integration Journeys Part 6 (`journey:mail_notifications` .. `journey:gm_tools`).
+//! End-to-End Integration Journeys: Cosmetics/Store, Mail/Notifs, ESI, Downtime, and GM Tools (Journeys 25..=29).
 #![forbid(unsafe_code)]
 
 use eve_db::{service_roles, InventoryFlag, VirtualServerClock, WorldRepository};
 use eve_machonet::SessionState;
+use eve_proto::quasar::{
+    encode_bytes_field, encode_string_field, EvePublicRequest, EvePublicResponse,
+    GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+};
 use eve_proto::PyRep;
 use eve_server::esi::{send_raw_esi_request, EsiHttpRequest, EsiServer};
+use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,8 +25,113 @@ async fn call_rpc(
         .await
 }
 
+fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
+    if let PyRep::KeyVal(entries) = rep {
+        for (k, v) in entries {
+            if k == "response_proto" {
+                if let PyRep::Bytes(b) = v {
+                    return EvePublicResponse::decode_proto(b).expect("decode EvePublicResponse");
+                }
+            }
+        }
+    }
+    panic!("Expected KeyVal with response_proto, got {rep:?}");
+}
+
+async fn quasar_rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    type_name: &str,
+    value: Vec<u8>,
+) -> EvePublicResponse {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let req = EvePublicRequest {
+        issued: Some(GoogleTimestamp {
+            seconds: ctx.now_unix() as i64,
+            nanos: 0,
+        }),
+        correlation_uuid: format!("jrn-so-{n:06}").into_bytes(),
+        payload: Some(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{type_name}"),
+            value,
+        }),
+        external_origin: "eve-client".into(),
+        application_instance_uuid: b"jrn-so-app-01".to_vec(),
+        authoritative_context: None,
+        trace_context: None,
+    };
+    let rep = ctx
+        .dispatch_rpc(
+            sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req.encode_proto())],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("SendRequest");
+    extract_response_proto(&rep)
+}
+
+// parity: journey:cosmetics_store
+#[tokio::test]
+async fn test_journey_cosmetics_store() {
+    eve_testkit::attest(&["journey:cosmetics_store"]);
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ctx.seed_demo_world_fixtures();
+    crate::common::seed_test_nes_store_catalog(&ctx);
+
+    let mut sess = SessionState::new(506);
+    crate::common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    call_rpc(&ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(90_000_001)])
+        .await
+        .expect("SelectCharacterID");
+
+    // 1. PLEX Vault balance & NES store purchase via Quasar publicGatewaySvc.Subscribe + SendRequest
+    call_rpc(&ctx, &mut sess, "publicGatewaySvc", "Subscribe", &[])
+        .await
+        .expect("publicGatewaySvc.Subscribe");
+    let init_plex = ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001));
+    assert_eq!(init_plex, 500);
+
+    let bal_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.BalanceRequest", Vec::new()).await;
+    assert_eq!(bal_rsp.status_code, STATUS_OK);
+
+    // Purchase offer 2001 (450 PLEX) from NES store
+    let (mut b, mut purch_payload) = (Vec::new(), Vec::new());
+    encode_string_field(1, "2001", &mut b);
+    encode_bytes_field(1, &b, &mut purch_payload);
+    let purch_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.plex.vault.api.PurchaseRequest", purch_payload).await;
+    assert_eq!(purch_rsp.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|s| s.plex_vault_balance(90_000_001)), 50);
+
+    // 2. Apply ship SKIN via shipCosmeticsMgr
+    let ship_id = sess.ship_id.expect("ship_id");
+    let ship_type_id = ctx.db.with_snapshot(|s| s.items[&ship_id].type_id);
+    let skin_id = ctx
+        .sde
+        .skins
+        .iter()
+        .find(|(_, sk)| sk.types.contains(&ship_type_id))
+        .map(|(id, _)| *id as i64)
+        .unwrap_or(1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.licensed_skins.entry(90_000_001).or_default().push(skin_id as u32);
+    });
+    let skin_res = call_rpc(&ctx, &mut sess, "shipCosmeticsMgr", "ApplySkinToShip", &[PyRep::Integer(ship_id), PyRep::Integer(skin_id)])
+        .await
+        .expect("ApplySkinToShip");
+    assert_eq!(skin_res.dict_get("shipID").and_then(|v| v.as_i64()), Some(ship_id));
+}
+
+// parity: journey:mail_notifications
 #[tokio::test]
 async fn test_journey_mail_notifications() {
+    eve_testkit::attest(&["journey:mail_notifications"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -93,8 +203,10 @@ async fn test_journey_mail_notifications() {
     assert!(ev.dict_get("eventID").and_then(|v| v.as_i64()).or_else(|| ev.as_i64()).unwrap_or(0) > 0);
 }
 
+// parity: journey:esi_external
 #[tokio::test]
 async fn test_journey_esi_external() {
+    eve_testkit::attest(&["journey:esi_external"]);
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -162,8 +274,10 @@ async fn test_journey_esi_external() {
     assert_eq!(forbidden_resp.status_code, 403);
 }
 
+// parity: journey:downtime_persistence
 #[tokio::test]
 async fn test_journey_downtime_persistence() {
+    eve_testkit::attest(&["journey:downtime_persistence"]);
     let tmp_dir = std::env::temp_dir();
     let db_path = tmp_dir.join(format!("evomu_journey_dt_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db_path);
@@ -216,8 +330,10 @@ async fn test_journey_downtime_persistence() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+// parity: journey:gm_tools
 #[tokio::test]
 async fn test_journey_gm_tools() {
+    eve_testkit::attest(&["journey:gm_tools"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
