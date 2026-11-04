@@ -396,7 +396,7 @@ async fn test_hacking_failure_outcomes_and_core_kill_loot_spew() {
         } else {
             assert_eq!(fail_rep.dict_get("containerExploded"), Some(&PyRep::Bool(true)));
             let dmg = fail_rep.dict_get("explosionDamage").and_then(|v| v.as_f64()).unwrap();
-            assert_eq!(dmg, 0.0);
+            assert!((2_000.0..=5_000.0).contains(&dmg));
             assert!(sys_handle.get_ball_snapshot(can_explode).await.unwrap().is_none());
         }
     }

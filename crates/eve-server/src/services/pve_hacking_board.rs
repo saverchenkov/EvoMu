@@ -562,8 +562,8 @@ pub fn resolve_hacking_turn_combat(
 }
 
 /// Self-destructs a standard relic/data container after failing a hack attempt twice (`failure_counts >= 2`).
-/// Destroys the container ball and all contained loot items harmlessly without dealing ship explosion damage
-/// (only Ghost Site covert cans detonate for AoE ship damage via [`detonate_ghost_site_with_can`]).
+/// In null-sec, low-sec, or wormhole space, triggers container self-destruction; all contained loot items are
+/// destroyed, and an explosive blast inflicts 2,000-5,000 HP area-of-effect damage to any ship within 5,000 meters.
 // parity: feat:pve.hacking-failure-outcome, feat:exploration.hack-failure-container-explosion
 pub async fn handle_second_hack_failure_explosion(
     ctx: &ServerContext,
@@ -581,7 +581,35 @@ pub async fn handle_second_hack_failure_explosion(
             .retain(|_, c| c.parent_container_id != container_id);
     });
 
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .map(|s| s.security_status)
+        .unwrap_or(0.0);
+    let is_wh = (31_000_000..32_000_000).contains(&solar_system_id)
+        || crate::services::quasar_social_chat::is_wormhole_system(solar_system_id);
+
+    let explosive_damage = if is_wh {
+        4_500.0
+    } else if sys_sec <= 0.0 {
+        3_500.0
+    } else if sys_sec < 0.45 {
+        2_500.0
+    } else {
+        0.0
+    };
+
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let mut blast_center = glam::DVec3::ZERO;
+    if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
+        blast_center = cb.position;
+    } else if let Some(pos) = ctx
+        .db
+        .with_snapshot(|snap| snap.item_positions.get(&container_id).copied())
+    {
+        blast_center = glam::DVec3::from_array(pos);
+    }
     let _ = sys_handle.remove_ball(container_id).await;
 
     let _ = is_relic;
@@ -593,7 +621,33 @@ pub async fn handle_second_hack_failure_explosion(
         before.saturating_sub(snap.items.len())
     });
 
-    (true, 0.0, Vec::new(), destroyed_loot_count)
+    let mut damaged_ships = Vec::new();
+    if explosive_damage > 0.0 {
+        let dmg_vec = eve_destiny::DamageVector {
+            explosive: explosive_damage,
+            ..Default::default()
+        };
+        if let Ok(balls) = sys_handle.list_balls().await {
+            for b in balls {
+                let is_ship = ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .get(&b.id)
+                        .and_then(|i| ctx.sde.types.get(&i.type_id))
+                        .is_some_and(|t| t.category_id == 6)
+                }) || ctx
+                    .sde
+                    .types
+                    .get(&b.type_id)
+                    .is_some_and(|t| t.category_id == 6);
+                if is_ship && b.position.distance(blast_center) <= 5_000.0 {
+                    let _ = sys_handle.apply_damage(b.id, dmg_vec).await;
+                    damaged_ships.push(b.id);
+                }
+            }
+        }
+    }
+
+    (true, explosive_damage, damaged_ships, destroyed_loot_count)
 }
 
 /// Triggers Ghost Site container detonation on hack failure (`failed_container_id = Some(cid)`)

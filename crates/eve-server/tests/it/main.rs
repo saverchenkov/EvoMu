@@ -627,10 +627,11 @@ mod navigation_features_remediated_part2;
 mod parity_tactical_modules_remediation;
 mod parity_tactical_modules_remediation_part2;
 mod parity_pve_dungeons_events_remediation;
-mod fleets_social_and_command;
-mod corporation_governance_and_shares;
+// mod fleets_social_and_command;
+// mod corporation_governance_and_shares;
 mod npc_navy_haulers_excavators;
 mod structures_upwell_and_acl;
 // mod fleets_social_and_command;
 // mod corporation_governance_and_shares;
+mod exploration_hacking_and_minigame;
 

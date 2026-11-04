@@ -477,12 +477,12 @@ async fn test_exploration_hacking_grid_coherence_strength_and_second_fail_explos
     assert_eq!(fail2_ev.dict_get("containerExploded"), Some(&PyRep::Bool(true)));
     assert_eq!(fail2_ev.dict_get("containerDestroyed"), Some(&PyRep::Bool(true)));
     assert_eq!(fail2_ev.dict_get("destroyedLootCount").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(fail2_ev.dict_get("explosionDamage").and_then(|v| v.as_f64()), Some(0.0));
+    assert!((2_000.0..=5_000.0).contains(&fail2_ev.dict_get("explosionDamage").and_then(|v| v.as_f64()).unwrap()));
 
     assert!(sys_handle.get_ball_snapshot(can_2).await.unwrap().is_none());
     assert!(ctx.db.with_snapshot(|s| !s.items.contains_key(&can_2) && !s.items.contains_key(&loot_in_can_2)));
-    assert_eq!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp, 10_000.0);
-    assert_eq!(sys_handle.get_combat_state(bystander_near).await.unwrap().unwrap().shield_hp, 10_000.0);
+    assert!(sys_handle.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp < 10_000.0);
+    assert!(sys_handle.get_combat_state(bystander_near).await.unwrap().unwrap().shield_hp < 10_000.0);
     assert_eq!(sys_handle.get_combat_state(bystander_far).await.unwrap().unwrap().shield_hp, 10_000.0);
 }
 
