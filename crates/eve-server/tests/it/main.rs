@@ -358,7 +358,6 @@ mod notifies_progression_and_services;
 mod parity_notify_market_item_received;
 mod quasar_achievement_career_and_cosmetics;
 mod crimewatch_timers_and_drones;
-mod parity_fighters_lifecycle_closure;
 mod quasar_achievements_progress;
 // mod fleets_social_and_command;
 // mod corporation_governance_and_shares;
@@ -436,6 +435,11 @@ pub(crate) use {
     wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure,
     zarzakh_gate_lock as zarzakh_gate_lock_closure,
     features_industry_exploration as open_feats_batch6,
+    combat_pve as parity_corp_combat_batch_closure,
+    combat_pve as parity_corp_combat_batch_closure_part2,
+    combat_weapons_wrecks as parity_features_combat_part1,
+    combat_fighters_insurance_bounties as parity_features_combat_part2,
+    combat_fighters_insurance_bounties as parity_fighters_lifecycle_closure,
 };
 pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
 #[allow(unused_imports)]
