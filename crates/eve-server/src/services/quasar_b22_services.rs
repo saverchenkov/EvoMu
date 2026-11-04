@@ -15,8 +15,8 @@ use crate::quasar_gateway::{
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -61,17 +61,17 @@ fn encode_transaction_attributes(tx: &CosmeticTransactionRecord) -> Vec<u8> {
     attrs
 }
 
-fn extract_uint32_field(_dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8], field_num: u32) -> Option<u32> {
+fn extract_uint64_field(raw_bytes: &[u8], field_num: u32) -> Option<u64> {
     if let Ok(wm) = WireMessage::decode(raw_bytes) {
         if let Some(f) = wm.fields.iter().find(|f| f.field_number == field_num) {
             if let Some(v) = f.value.as_varint() {
-                return u32::try_from(v).ok();
+                return Some(v);
             }
             if let Some(b) = f.value.as_bytes() {
                 if let Ok(sub) = WireMessage::decode(b) {
                     if let Some(sf) = sub.fields.iter().find(|f| f.field_number == 1) {
                         if let Some(v) = sf.value.as_varint() {
-                            return u32::try_from(v).ok();
+                            return Some(v);
                         }
                     }
                 }
@@ -79,6 +79,10 @@ fn extract_uint32_field(_dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8], field
         }
     }
     None
+}
+
+fn extract_uint32_field(_dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8], field_num: u32) -> Option<u32> {
+    extract_uint64_field(raw_bytes, field_num).and_then(|v| u32::try_from(v).ok())
 }
 
 fn extract_uuid_field(dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8], field_num: u32) -> Option<Vec<u8>> {
@@ -240,6 +244,154 @@ pub fn register_handlers(
                     "eve_public.cosmetic.market.transaction.api.GetAllResponse",
                     out,
                 ))
+            }),
+        );
+    }
+
+    // 4. eve.cdn.api.GetActiveURLSigningKeyRequest & SignURLRequest (feat:quasar.cdn)
+    {
+        router.register_handler(
+            "eve.cdn.api.GetActiveURLSigningKeyRequest",
+            Arc::new(move |_ctx, _any, _dyn_msg| {
+                let mut out = Vec::new();
+                encode_string_field(1, "evomu-cdn-v24", &mut out);
+                Ok(any("eve.cdn.api.GetActiveURLSigningKeyResponse", out))
+            }),
+        );
+        router.register_handler(
+            "eve.cdn.api.SignURLRequest",
+            Arc::new(move |_ctx, req_any, dyn_msg| {
+                let url = match dyn_msg.get(1) {
+                    Some(DynamicValue::String(s)) => s.clone(),
+                    _ => {
+                        WireMessage::decode(&req_any.value)
+                            .ok()
+                            .and_then(|wm| {
+                                wm.fields
+                                    .iter()
+                                    .find(|f| f.field_number == 1)
+                                    .and_then(|f| f.value.as_str().ok().flatten().map(|s| s.to_string()))
+                            })
+                            .unwrap_or_else(|| "https://cdn.evomu.org/res/asset.fb".to_string())
+                    }
+                };
+                let signed = if url.contains('?') {
+                    format!("{url}&sig=evomu_v24_signed")
+                } else {
+                    format!("{url}?sig=evomu_v24_signed")
+                };
+                let mut out = Vec::new();
+                encode_string_field(1, &signed, &mut out);
+                let mut ts = Vec::new();
+                encode_varint_field(1, 1_800_000_000, &mut ts);
+                encode_bytes_field(2, &ts, &mut out);
+                encode_string_field(3, "evomu-cdn-v24", &mut out);
+                Ok(any("eve.cdn.api.SignURLResponse", out))
+            }),
+        );
+    }
+
+    // 5. eve.client.host.GetRequest & DisconnectRequest (feat:quasar.client)
+    {
+        router.register_handler(
+            "eve.client.host.GetRequest",
+            Arc::new(move |_ctx, _req_any, _dyn_msg| {
+                let mut host_attr = Vec::new();
+                encode_varint_field(1, 12345678, &mut host_attr);
+                encode_string_field(2, "en_US", &mut host_attr);
+                encode_varint_field(4, 16384, &mut host_attr);
+                encode_string_field(10, "24.01.2024", &mut host_attr);
+                let mut out = Vec::new();
+                encode_bytes_field(1, &host_attr, &mut out);
+                Ok(any("eve.client.host.GetResponse", out))
+            }),
+        );
+        router.register_handler(
+            "DisconnectRequest",
+            Arc::new(move |_ctx, _any, _dyn| {
+                Ok(any("google.protobuf.Empty", Vec::new()))
+            }),
+        );
+    }
+
+    // 6. eve.contacts.GetAllForCharacterRequest & label.GetForAllianceRequest (feat:quasar.contact)
+    {
+        let db_contacts = Arc::clone(&db);
+        router.register_handler(
+            "eve.contacts.GetAllForCharacterRequest",
+            Arc::new(move |ctx, _req_any, _dyn_msg| {
+                let char_id = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                let mut out = Vec::new();
+                db_contacts.with_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get(&char_id) {
+                        for (&contact_id, &standing) in &ch.standings {
+                            let mut personal = Vec::new();
+                            let mut char_id_msg = Vec::new();
+                            encode_varint_field(1, contact_id as u64, &mut char_id_msg);
+                            let mut ind_msg = Vec::new();
+                            encode_bytes_field(1, &char_id_msg, &mut ind_msg);
+                            encode_bytes_field(1, &ind_msg, &mut personal);
+                            let rel_val = (standing + 10.0).round() as u64;
+                            encode_varint_field(4, rel_val, &mut personal);
+                            encode_bytes_field(1, &personal, &mut out);
+                        }
+                    }
+                });
+                Ok(any("eve.contacts.GetAllForCharacterResponse", out))
+            }),
+        );
+        router.register_handler(
+            "eve.contact.label.GetForAllianceRequest",
+            Arc::new(move |_ctx, _req_any, _dyn_msg| {
+                let mut out = Vec::new();
+                let mut inst = Vec::new();
+                let mut id_msg = Vec::new();
+                encode_varint_field(1, 1, &mut id_msg);
+                encode_bytes_field(1, &id_msg, &mut inst);
+                let mut attr = Vec::new();
+                encode_string_field(1, "Alliance Contacts", &mut attr);
+                encode_bytes_field(2, &attr, &mut inst);
+                encode_bytes_field(1, &inst, &mut out);
+                Ok(any("eve.contact.label.GetForAllianceResponse", out))
+            }),
+        );
+    }
+
+    // 7. eve.content.GetAllRequest & GetRequest (feat:quasar.content)
+    {
+        router.register_handler(
+            "eve.content.GetAllRequest",
+            Arc::new(move |_ctx, _req_any, _dyn_msg| {
+                let mut out = Vec::new();
+                for id in 1..=3u64 {
+                    let mut id_msg = Vec::new();
+                    encode_varint_field(1, id, &mut id_msg);
+                    encode_bytes_field(1, &id_msg, &mut out);
+                }
+                Ok(any("eve.content.GetAllResponse", out))
+            }),
+        );
+        router.register_handler(
+            "eve.content.GetRequest",
+            Arc::new(move |_ctx, req_any, _dyn_msg| {
+                let cid = extract_uint64_field(&req_any.value, 1).unwrap_or(1);
+                let mut attrs = Vec::new();
+                let mut details = Vec::new();
+                let mut op_id = Vec::new();
+                encode_varint_field(1, 100, &mut op_id);
+                encode_bytes_field(1, &op_id, &mut details);
+                encode_bytes_field(1, &details, &mut attrs);
+                let mut tags = Vec::new();
+                encode_string_field(1, "news", &mut tags);
+                encode_string_field(2, "community", &mut tags);
+                encode_bytes_field(2, &tags, &mut attrs);
+                encode_varint_field(3, 1, &mut attrs);
+                encode_string_field(4, &format!("Article #{cid}: News from New Eden"), &mut attrs);
+
+                let mut out = Vec::new();
+                encode_bytes_field(1, &attrs, &mut out);
+                encode_string_field(2, "ccp-content", &mut out);
+                Ok(any("eve.content.GetResponse", out))
             }),
         );
     }

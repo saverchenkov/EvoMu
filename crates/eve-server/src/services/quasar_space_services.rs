@@ -251,6 +251,15 @@ pub fn get_identifier_or_int(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> 
 pub fn get_string_field(msg: &DynamicQuasarMessage, field_num: u32) -> Option<String> {
     match msg.get(field_num) {
         Some(DynamicValue::String(s)) => Some(s.clone()),
+        Some(DynamicValue::Message(sub)) => get_string_field(sub, 1),
+        Some(DynamicValue::Repeated(items)) => {
+            for item in items {
+                if let DynamicValue::String(s) = item {
+                    return Some(s.clone());
+                }
+            }
+            None
+        }
         _ => None,
     }
 }

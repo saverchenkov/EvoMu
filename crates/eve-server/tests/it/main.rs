@@ -658,3 +658,4 @@ mod corporation_membership_and_titles;
 mod structures_defenses_weapons_and_safety;
 mod quasar_npc_through_pvp;
 mod quasar_dogma_through_fulfillment;
+mod quasar_cdn_through_deadspace;

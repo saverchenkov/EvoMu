@@ -527,6 +527,12 @@ impl PublicGatewayRouter {
             "eve.device",
             "eve_public.cdn",
             "eve.cdn",
+            "eve_public.client",
+            "eve.client",
+            "eve_public.content",
+            "eve.content",
+            "eve_public.deadspace",
+            "eve.deadspace",
             "eve_public.localization",
             "eve.localization",
         ];
