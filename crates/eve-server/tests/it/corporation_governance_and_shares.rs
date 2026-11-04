@@ -56,31 +56,32 @@ async fn rpc(
         .await
 }
 
-fn field(rep: &PyRep, key: &str) -> PyRep {
-    match rep {
-        PyRep::KeyVal(map) => map.get(key).cloned().unwrap_or(PyRep::None),
-        _ => PyRep::None,
-    }
-}
-
 #[tokio::test]
 async fn test_corporation_member_roles_and_audit_log_tracking() {
     // parity: feat:corporation.member-audit
     eve_testkit::attest(&["feat:corporation.member-audit"]);
 
-    let ctx = common::test_context().await;
-    let mut sess1 = select_pilot(&ctx, 60_031, "testpilot1", "testpass1", CEO_PILOT).await;
-    let mut sess2 = select_pilot(&ctx, 60_032, "testpilot2", "testpass2", MEMBER_PILOT).await;
+    let ctx = ServerContext::new();
+    let mut sess1 = select_pilot(&ctx, 60_031, "demo", "demo-secret", CEO_PILOT).await;
+    let mut sess2 = select_pilot(&ctx, 60_032, "other", "other-secret", MEMBER_PILOT).await;
 
     // Ensure member is in corporation
     ctx.db.with_mut_snapshot(|s| {
         if let Some(corp) = s.corporations.get_mut(&CORP_ID) {
+            corp.members.insert(CEO_PILOT);
             corp.members.insert(MEMBER_PILOT);
+            corp.ceo_id = CEO_PILOT;
+        }
+        if let Some(ch) = s.characters.get_mut(&CEO_PILOT) {
+            ch.corporation_id = CORP_ID;
+            
         }
         if let Some(ch) = s.characters.get_mut(&MEMBER_PILOT) {
             ch.corporation_id = CORP_ID;
         }
     });
+    sess1.corporation_id = Some(CORP_ID);
+    sess2.corporation_id = Some(CORP_ID);
 
     // 1. Non-director / regular member calling corpmgr.AuditMember is denied with CorpRoleDenied
     let audit_err = rpc(&ctx, &mut sess2, "corpmgr", "AuditMember", &[PyRep::Integer(CEO_PILOT)])
@@ -96,17 +97,7 @@ async fn test_corporation_member_roles_and_audit_log_tracking() {
         "UpdateMember",
         &[
             PyRep::Integer(MEMBER_PILOT),
-            PyRep::String("Accountant".into()),
             PyRep::Integer(eve_db::corp_roles::ROLE_ACCOUNTANT as i64),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
         ],
     )
     .await
@@ -121,17 +112,7 @@ async fn test_corporation_member_roles_and_audit_log_tracking() {
         "UpdateMember",
         &[
             PyRep::Integer(MEMBER_PILOT),
-            PyRep::String("Security Officer".into()),
             PyRep::Integer((eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_SECURITY_OFFICER) as i64),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
         ],
     )
     .await
@@ -169,19 +150,26 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
     // parity: feat:corporation.corp-project-contribution-methods
     eve_testkit::attest(&["feat:corporation.corp-project-contribution-methods"]);
 
-    let ctx = common::test_context().await;
-    let _sess1 = select_pilot(&ctx, 60_041, "testpilot1", "testpass1", CEO_PILOT).await;
-    let mut sess2 = select_pilot(&ctx, 60_042, "testpilot2", "testpass2", MEMBER_PILOT).await;
+    let ctx = ServerContext::new();
+    let _sess1 = select_pilot(&ctx, 60_041, "demo", "demo-secret", CEO_PILOT).await;
+    let mut sess2 = select_pilot(&ctx, 60_042, "other", "other-secret", MEMBER_PILOT).await;
 
     ctx.db.with_mut_snapshot(|s| {
         if let Some(corp) = s.corporations.get_mut(&CORP_ID) {
+            corp.members.insert(CEO_PILOT);
             corp.members.insert(MEMBER_PILOT);
+            corp.ceo_id = CEO_PILOT;
+        }
+        if let Some(ch) = s.characters.get_mut(&CEO_PILOT) {
+            ch.corporation_id = CORP_ID;
+            
         }
         if let Some(ch) = s.characters.get_mut(&MEMBER_PILOT) {
             ch.corporation_id = CORP_ID;
             ch.balance = IskCents(100_000_00); // 100,000 ISK
         }
     });
+    sess2.corporation_id = Some(CORP_ID);
 
     let now = ctx.now_unix();
 
@@ -192,14 +180,10 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
             project_id: p_mining_id,
             corporation_id: CORP_ID,
             name: "Mining Project".into(),
-            description: "Mine ore".into(),
             target_quantity: 50,
             current_quantity: 0,
             isk_per_unit: IskCents(100_00),
             escrow_remaining: IskCents(50_000_00),
-            created_at_unix: now,
-            expires_at_unix: now + 86400 * 7,
-            career: "industry".into(),
         });
         s.alliance_war_state.project_meta.insert(p_mining_id, ("MineMaterials".into(), false, false));
         let det = s.alliance_war_state.project_details.entry(p_mining_id).or_default();
@@ -213,14 +197,10 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
             project_id: p_dmg_id,
             corporation_id: CORP_ID,
             name: "Fleet Combat Damage".into(),
-            description: "Damage hostile ships".into(),
             target_quantity: 500,
             current_quantity: 0,
             isk_per_unit: IskCents(10_00),
             escrow_remaining: IskCents(50_000_00),
-            created_at_unix: now,
-            expires_at_unix: now + 86400 * 7,
-            career: "soldier".into(),
         });
         s.alliance_war_state.project_meta.insert(p_dmg_id, ("DamageShips".into(), false, false));
         let det = s.alliance_war_state.project_details.entry(p_dmg_id).or_default();
@@ -234,14 +214,10 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
             project_id: p_salvage_id,
             corporation_id: CORP_ID,
             name: "Salvage Operation".into(),
-            description: "Salvage battlefield wrecks".into(),
             target_quantity: 1,
             current_quantity: 0,
             isk_per_unit: IskCents(5_000_00),
             escrow_remaining: IskCents(10_000_00),
-            created_at_unix: now,
-            expires_at_unix: now + 86400 * 7,
-            career: "explorer".into(),
         });
         s.alliance_war_state.project_meta.insert(p_salvage_id, ("SalvageWrecks".into(), false, false));
         let det = s.alliance_war_state.project_details.entry(p_salvage_id).or_default();
@@ -265,15 +241,30 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
             singleton: true,
             version: 1,
             dynamic_attributes: HashMap::new(),
+            ..Default::default()
         });
     });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    sys_handle.spawn_ball(Ball {
+        id: ship_id,
+        type_id: 606,
+        position: DVec3::ZERO,
+        velocity: DVec3::ZERO,
+        max_velocity: 1000.0,
+        inertia: 1.0,
+        mass: 100_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await.unwrap();
 
     eve_server::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(
         &ctx,
         MEMBER_PILOT,
         ship_id,
         sys_id,
-        eve_db::InventoryFlag::CargoHold,
+        eve_db::InventoryFlag::Cargo,
         1230, // Veldspar
         50,
     );
@@ -297,6 +288,7 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
             singleton: true,
             version: 1,
             dynamic_attributes: HashMap::new(),
+            ..Default::default()
         });
     });
 
@@ -320,7 +312,7 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
         kinetic: 0.0,
         explosive: 0.0,
     };
-    eve_server::services::structure_lifecycle_rpc::apply_damage_structure_or_ball(
+    eve_server::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(
         &ctx,
         &sys_handle,
         sys_id,
@@ -352,6 +344,7 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
             singleton: true,
             version: 1,
             dynamic_attributes: HashMap::new(),
+            ..Default::default()
         });
     });
 
@@ -370,11 +363,12 @@ async fn test_corporation_project_contribution_methods_and_milestones() {
 
     let salvage_res = eve_server::combat::drones_salvage_tractor::attempt_salvage_wreck(
         &ctx,
+        sys_id,
         MEMBER_PILOT,
         ship_id,
-        sys_id,
         wreck_id,
-        1.0, // 100% bonus guarantee success
+        1.0,
+        0.0,
     )
     .await
     .expect("attempt_salvage_wreck");
@@ -396,18 +390,26 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
     // parity: feat:corporation.structure-reinforce-default
     eve_testkit::attest(&["feat:corporation.structure-reinforce-default"]);
 
-    let ctx = common::test_context().await;
-    let mut sess1 = select_pilot(&ctx, 60_051, "testpilot1", "testpass1", CEO_PILOT).await;
-    let mut sess2 = select_pilot(&ctx, 60_052, "testpilot2", "testpass2", MEMBER_PILOT).await;
+    let ctx = ServerContext::new();
+    let mut sess1 = select_pilot(&ctx, 60_051, "demo", "demo-secret", CEO_PILOT).await;
+    let mut sess2 = select_pilot(&ctx, 60_052, "other", "other-secret", MEMBER_PILOT).await;
 
     ctx.db.with_mut_snapshot(|s| {
         if let Some(corp) = s.corporations.get_mut(&CORP_ID) {
+            corp.members.insert(CEO_PILOT);
             corp.members.insert(MEMBER_PILOT);
+            corp.ceo_id = CEO_PILOT;
+        }
+        if let Some(ch) = s.characters.get_mut(&CEO_PILOT) {
+            ch.corporation_id = CORP_ID;
+            
         }
         if let Some(ch) = s.characters.get_mut(&MEMBER_PILOT) {
             ch.corporation_id = CORP_ID;
         }
     });
+    sess1.corporation_id = Some(CORP_ID);
+    sess2.corporation_id = Some(CORP_ID);
 
     // 1. Non-director / regular member calling SetStructureReinforceDefault is denied
     let non_dir_err = rpc(
@@ -456,15 +458,23 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
     assert_eq!(get_rf_day, PyRep::Integer(4));
 
     // 3. Anchor a new Upwell structure for the corporation
-    let sys_id = 30_000_142;
+    let sys_id = 30_000_144;
     let ship_id = 99_004_001;
     let struct_item_id = 99_004_002;
     let astrahus_type_id = 35832;
 
+    sess1.station_id = None;
+    sess1.structure_id = None;
     sess1.solar_system_id = Some(sys_id);
     sess1.ship_id = Some(ship_id);
 
     ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&CEO_PILOT) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+        }
         s.items.insert(ship_id, eve_db::InventoryItemRecord {
             item_id: ship_id,
             type_id: 606,
@@ -475,17 +485,19 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
             singleton: true,
             version: 1,
             dynamic_attributes: HashMap::new(),
+            ..Default::default()
         });
         s.items.insert(struct_item_id, eve_db::InventoryItemRecord {
             item_id: struct_item_id,
             type_id: astrahus_type_id,
             owner_id: CEO_PILOT,
             location_id: ship_id,
-            flag: eve_db::InventoryFlag::CargoHold,
+            flag: eve_db::InventoryFlag::Cargo,
             quantity: 1,
             singleton: true,
             version: 1,
             dynamic_attributes: HashMap::new(),
+            ..Default::default()
         });
     });
 
@@ -493,7 +505,7 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
     sys_handle.spawn_ball(Ball {
         id: ship_id,
         type_id: 606,
-        position: DVec3::new(100_000.0, 0.0, 0.0),
+        position: DVec3::new(0.0, 5.0e9, 0.0),
         velocity: DVec3::ZERO,
         max_velocity: 500.0,
         inertia: 1.0,
@@ -503,6 +515,8 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
         mode: MovementMode::Stop,
     }).await.unwrap();
 
+    sess1.station_id = None;
+    sess1.structure_id = None;
     let anchor_res = rpc(
         &ctx,
         &mut sess1,
@@ -513,13 +527,14 @@ async fn test_corporation_structure_default_reinforcement_and_anchoring_inherita
     .await
     .expect("structureDeployment.Anchor");
 
-    let new_structure_id = match anchor_res {
-        PyRep::Integer(id) => id,
-        other => match field(&other, "structureID") {
-            PyRep::Integer(id) => id,
-            _ => panic!("Expected structureID from Anchor, got {other:?}"),
-        },
-    };
+    let new_structure_id = anchor_res
+        .dict_get("structureID")
+        .and_then(|v| v.as_i64())
+        .or_else(|| match anchor_res {
+            PyRep::Integer(id) => Some(id),
+            _ => None,
+        })
+        .expect("Expected structureID from Anchor");
 
     // 4. Verify the newly anchored structure inherited the corp default reinforce hour 19 and weekday 4
     let vuln = ctx.db.with_snapshot(|s| s.structure_vulnerability_windows.get(&new_structure_id).copied()).unwrap();
@@ -1617,6 +1632,9 @@ async fn test_corp_governance_divisions_ceo_placement_tax() {
 
 #[tokio::test]
 async fn test_corp_authorization_negative_checks_r_nav_01() {
+    // parity: rpc:corpRegistry.MoveCompanyShares
+    eve_testkit::attest(&["rpc:corpRegistry.MoveCompanyShares"]);
+
     let ctx = ServerContext::new();
     let corp_id = 2_000_100;
     let member_no_roles = PILOT_2;
