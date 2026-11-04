@@ -858,19 +858,10 @@ pub async fn handle_extended(
             Some(Ok(PyRep::List(ids)))
         }
 
-        ("agentMgr", "GetDisabledMissions") => {
-            // const-ok: no mission IDs are disabled in EvoMu's SDE mission pool
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            Some(Ok(PyRep::List(vec![])))
-        }
+        // parity: rpc:agentMgr.GetDisabledMissions
+        ("agentMgr", "GetDisabledMissions") => handle_get_disabled_missions(session),
 
-        ("agentMgr", "GetReplayTimestamp") => {
-            // `eve/client/script/ui/station/agents/agents.pyj:485-491` (`GetAgentTimers`):
-            // calls `self.GetAgentMoniker(agentID).GetReplayTimestamp(session.charid)` and stores
-            // the returned timestamp (or `None` when the career agent is not on a replay timer).
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            Some(Ok(PyRep::None))
-        }
+        ("agentMgr", "GetReplayTimestamp") => handle_get_replay_timestamp(session, args),
 
         ("agentMgr", "GetPlausibleMissionIDs") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -1296,4 +1287,18 @@ fn handle_agent_mgr_attr(
         _ => PyRep::None,
     };
     Some(Ok(val))
+}
+
+fn handle_get_disabled_missions(session: &SessionState) -> Option<Result<PyRep, BridgeRpcError>> {
+    // const-ok: no mission IDs are disabled in EvoMu's SDE mission pool
+    let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    Some(Ok(PyRep::List(vec![])))
+}
+
+fn handle_get_replay_timestamp(session: &SessionState, _args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
+    // `eve/client/script/ui/station/agents/agents.pyj:485-491` (`GetAgentTimers`):
+    // calls `self.GetAgentMoniker(agentID).GetReplayTimestamp(session.charid)` and stores
+    // the returned timestamp (or `None` when the career agent is not on a replay timer).
+    let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    Some(Ok(PyRep::None))
 }

@@ -182,10 +182,8 @@ pub fn handle(
                 PyRep::Integer(30002510),
             ])))
         }
-        ("charUnboundMgr", "ToggleValidation") => {
-            // const-ok: toggle validation confirmation for character creation pipeline
-            Some(Ok(PyRep::Bool(true)))
-        }
+        // parity: rpc:charUnboundMgr.ToggleValidation
+        ("charUnboundMgr", "ToggleValidation") => handle_toggle_validation(session, args),
         ("charUnboundMgr", "UpdateCharacterBloodline") => {
             let char_id = match owned_char_arg(ctx, user_id, args, "UpdateCharacterBloodline") {
                 Ok(id) => id,
@@ -238,6 +236,11 @@ pub fn handle(
         }
         _ => None,
     }
+}
+
+fn handle_toggle_validation(_session: &SessionState, _args: &[PyRep]) -> Option<Result<PyRep, BridgeRpcError>> {
+    // const-ok: toggle validation confirmation for character creation pipeline
+    Some(Ok(PyRep::Bool(true)))
 }
 
 fn prepare(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {

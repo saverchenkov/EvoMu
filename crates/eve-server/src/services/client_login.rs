@@ -477,12 +477,7 @@ pub async fn handle(
             ]);
             Some(Ok(desc.build_crowset(Vec::new())))
         }
-        ("config", "GetOldStationData") => {
-            // const-ok: `eveCfg._LoadOldStationsInfo` only builds `cfg.oldStations` when the
-            // result is truthy. EvoMu's universe has no retired stations (all stations come from
-            // the current SDE), so there is no old-station recordset to send.
-            Some(Ok(PyRep::None))
-        }
+        ("config", "GetOldStationData") => handle_get_old_station_data(ctx, session, args),
         ("populationCap", "GetCharacterLoadSlot") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,
@@ -838,6 +833,17 @@ pub async fn handle(
         }
         _ => None,
     }
+}
+
+fn handle_get_old_station_data(
+    _ctx: &ServerContext,
+    _session: &SessionState,
+    _args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // const-ok: `eveCfg._LoadOldStationsInfo` only builds `cfg.oldStations` when the
+    // result is truthy. EvoMu's universe has no retired stations (all stations come from
+    // the current SDE), so there is no old-station recordset to send.
+    Some(Ok(PyRep::None))
 }
 
 /// `(stack-trace registry size, bean-count registry size)` on `ctx`; both are bounded by `ALERT_REGISTRY_CAP`.
