@@ -635,14 +635,12 @@ mod parity_pve_dungeons_events_remediation;
 // mod corporation_governance_and_shares;
 mod npc_navy_haulers_excavators;
 mod structures_upwell_and_acl;
-// mod fleets_social_and_command;
-// mod corporation_governance_and_shares;
 mod exploration_hacking_and_minigame;
 mod wormhole_phenomena_and_lifecycle;
 mod dogma_heat_ewar_and_phenomena;
 mod inventory_containers_and_anchoring;
-
 mod sovereignty_skyhooks_and_mercenary_dens;
 mod scanning_probes_and_signatures;
 mod fw_insurgencies_and_fob;
 mod wallet_hypernet_and_esi_structure_timers;
+mod mining_belts_and_ore_distribution;
