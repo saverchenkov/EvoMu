@@ -652,3 +652,4 @@ mod quasar_belts_battlepass_and_campaigns;
 mod quasar_academy_accounting_and_assets;
 mod structures_quantum_core_and_services;
 mod pve_agent_specializations_and_arcs;
+mod planetary_industry_colonies_and_production;
