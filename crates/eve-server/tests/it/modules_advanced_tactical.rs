@@ -3254,23 +3254,36 @@ async fn test_nosferatu_relative_cap_grappler_mutadaptive_rar_and_blockade_runne
     assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 150.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
-    // 1b. Higher % (80% > 50%) but lower absolute GJ (Source 120 / 150 GJ < Target 2000 / 4000 GJ): drains!
+    // 1b. Relative cap comparison:
+    // When Source % >= Target % (80% > 50%), standard hull does not drain even if absolute GJ is lower (120 < 2000)
     let mut s_cs2 = sys.get_combat_state(ship_src).await.unwrap().unwrap();
     s_cs2.capacitor_recharge_time_ms = 0.0;
     s_cs2.max_capacitor = 150.0;
     s_cs2.capacitor = 120.0;
-    sys.set_combat_state(ship_src, s_cs2).await.unwrap();
+    sys.set_combat_state(ship_src, s_cs2.clone()).await.unwrap();
     let mut t_cs2 = sys.get_combat_state(ship_tgt).await.unwrap().unwrap();
     t_cs2.capacitor_recharge_time_ms = 0.0;
     t_cs2.max_capacitor = 4_000.0;
     t_cs2.capacitor = 2_000.0;
+    sys.set_combat_state(ship_tgt, t_cs2.clone()).await.unwrap();
+    rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
+        PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
+    ]).await.unwrap();
+    for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
+    assert_eq!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor, 2_000.0);
+    assert_eq!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor, 120.0);
+    rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
+
+    // When Source % < Target % (26.7% < 50%) and absolute GJ is lower (40 < 2000), drain occurs
+    s_cs2.capacitor = 40.0;
+    sys.set_combat_state(ship_src, s_cs2).await.unwrap();
     sys.set_combat_state(ship_tgt, t_cs2).await.unwrap();
     rpc(&ctx, &mut sess_src, "dogmaIM", "Activate", vec![
         PyRep::Integer(nos_id), PyRep::String("energyNosferatuFalloff".into()), PyRep::Integer(ship_tgt), PyRep::Integer(0),
     ]).await.unwrap();
     for _ in 0..3 { sys.step_manual(1.0).await.unwrap(); }
     assert!(sys.get_combat_state(ship_tgt).await.unwrap().unwrap().capacitor < 2_000.0);
-    assert!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor > 120.0);
+    assert!(sys.get_combat_state(ship_src).await.unwrap().unwrap().capacitor > 40.0);
     rpc(&ctx, &mut sess_src, "dogmaIM", "Deactivate", vec![PyRep::Integer(nos_id)]).await.unwrap();
 
     // 1c. Blood Raider Bhaalgorn (17920) overrides absolute GJ limit (drains Target 150 GJ even with Source 1500 GJ)
