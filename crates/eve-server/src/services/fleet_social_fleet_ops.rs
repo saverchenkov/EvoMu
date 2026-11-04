@@ -14,6 +14,205 @@ use super::parse_dest_id;
 
 const WARP_MIN_DISTANCE_M: f64 = 150_000.0;
 
+async fn handle_send_broadcast(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let fleet_id = match session.fleet_id {
+        Some(fid) => fid,
+        None => {
+            return Some(Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Character is not in a fleet".into(),
+            }))
+        }
+    };
+    // Client (FleetSvc.SendGlobal/System/BubbleBroadcast): `(name, broadcastScope, itemID, typeID)`;
+    // the RPC method picks the location scope, `broadcastScope` the command-chain group.
+    let broadcast_name = args.first().and_then(|a| a.as_str()).unwrap_or("Target");
+    let scope = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+    let location = match method {
+        "BroadcastToBubble" => 2,
+        "BroadcastToSystem" => 1,
+        _ => 0,
+    };
+    let item_id = args.get(2).and_then(|a| a.as_i64());
+    let type_id = args.get(3).and_then(|a| a.as_i64());
+
+    // OnFleetBroadcast carries the sender's solarSystemID: no session system, no broadcast.
+    // parity: feat:fleet.broadcast-scope-and-filter
+    let Some(sender_sys) = session.solar_system_id else {
+        return Some(Err(BridgeRpcError {
+            code: "NotInSolarSystem".into(),
+            message: "Fleet broadcasts require a session solar system".into(),
+        }));
+    };
+    let (sender_record, members_raw) = match ctx.db.with_snapshot(|snap| {
+        let fleet = snap.fleets.get(&fleet_id).ok_or_else(|| BridgeRpcError {
+            code: "FleetNotFound".into(),
+            message: format!("Fleet {fleet_id} not found"),
+        })?;
+        let sender = fleet.member_details.get(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "NotInFleet".into(),
+            message: "Caller is not in fleet".into(),
+        })?;
+
+        let is_authorized = fleet.boss_id == char_id
+            || (sender.job & notify::FLEET_JOB_CREATOR) != 0
+            || matches!(
+                sender.role,
+                FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander
+            );
+        let is_unrestricted = matches!(
+            broadcast_name,
+            "NeedArmor"
+                | "NeedShield"
+                | "NeedCapacitor"
+                | "NeedBackup"
+                | "InPosition"
+                | "HoldPosition"
+                | "NeedRepairs"
+                | "Location"
+                | "Travel"
+        );
+        if !is_authorized && !is_unrestricted {
+            return Err(BridgeRpcError {
+                code: "CannotBroadcastInFleet".into(),
+                message: "Only fleet commanders and authorized pilots can broadcast in fleet".into(),
+            });
+        }
+
+        let members: Vec<(FleetMemberRecord, u32, i64)> = fleet
+            .member_details
+            .values()
+            .filter_map(|m| {
+                let ch = snap.characters.get(&m.character_id)?;
+                Some((m.clone(), ch.solar_system_id, ch.active_ship_id))
+            })
+            .collect();
+        Ok((sender.clone(), members))
+    }) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+
+    let now_unix = ctx.now_unix();
+    let muted_set = {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        if let Some((last_ts, last_name, last_scope, last_loc, last_item)) =
+            ex.last_broadcast.get(&char_id)
+        {
+            if now_unix > 0
+                && now_unix < last_ts.saturating_add(2)
+                && last_name == broadcast_name
+                && *last_scope == scope
+                && *last_loc == location
+                && *last_item == item_id
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "BroadcastSpamCooldown".into(),
+                    message: "Broadcast spam cooldown is active (2s)".into(),
+                }));
+            }
+        }
+        ex.last_broadcast.insert(
+            char_id,
+            (now_unix, broadcast_name.to_string(), scope, location, item_id),
+        );
+        ex.broadcast_history.entry(fleet_id).or_default().push((
+            now_unix,
+            char_id,
+            broadcast_name.to_string(),
+            scope,
+            item_id,
+            type_id,
+        ));
+        ex.broadcast_filters.clone()
+    };
+
+    let members_info: Vec<(i64, u32, i64)> = members_raw
+        .into_iter()
+        .filter(|(m, _, _)| notify::broadcast_group_allows(scope, &sender_record, m))
+        .filter(|(m, _, _)| {
+            !muted_set
+                .get(&m.character_id)
+                .is_some_and(|s| s.contains(broadcast_name))
+        })
+        .map(|(m, sys, ship)| (m.character_id, sys, ship))
+        .collect();
+    // FleetSvc.OnFleetBroadcast(name, scope, charID, solarSystemID, itemID, typeID)
+    let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
+    let payload = vec![
+        PyRep::String(broadcast_name.to_string()),
+        PyRep::Integer(scope),
+        PyRep::Integer(char_id),
+        PyRep::Integer(sender_sys as i64),
+        opt(item_id),
+        opt(type_id),
+    ];
+    let mut recipient_ids = Vec::new();
+    if location == 0 {
+        for (m_id, _, _) in &members_info {
+            recipient_ids.push(*m_id);
+            ctx.notify(NotificationTarget::Character(*m_id), "OnFleetBroadcast", "charid", payload.clone());
+        }
+    } else {
+        let sys = ctx.systems.get_or_spawn(sender_sys);
+        let sender_ship = session.ship_id.unwrap_or(0);
+        let sender_pos = sys
+            .get_ball_snapshot(sender_ship)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, b)| b.position);
+        for (m_id, m_sys, m_ship) in members_info {
+            if m_sys != sender_sys {
+                continue;
+            }
+            if location == 2 && m_id != char_id {
+                // Without a sender ball there is no bubble to share: only the sender sees it.
+                let Some(s_pos) = sender_pos else { continue };
+                let in_bubble = sys
+                    .get_ball_snapshot(m_ship)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, b)| b.position.distance(s_pos) <= 250_000.0);
+                if !in_bubble {
+                    continue;
+                }
+            }
+            recipient_ids.push(m_id);
+            ctx.notify(
+                NotificationTarget::Character(m_id),
+                "OnFleetBroadcast",
+                "charid",
+                payload.clone(),
+            );
+        }
+    }
+
+    Some(Ok(PyRep::keyval([
+        ("fleetID", PyRep::Integer(fleet_id)),
+        ("broadcast", PyRep::String(broadcast_name.to_string())),
+        ("broadcastType", PyRep::String(broadcast_name.to_string())),
+        ("senderID", PyRep::Integer(char_id)),
+        ("targetID", opt(item_id)),
+        ("scope", PyRep::Integer(scope)),
+        ("itemID", opt(item_id)),
+        (
+            "recipientIDs",
+            PyRep::List(recipient_ids.into_iter().map(PyRep::Integer).collect()),
+        ),
+    ])))
+}
+
 pub(super) async fn handle_fleet_ops(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -23,203 +222,23 @@ pub(super) async fn handle_fleet_ops(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("fleetObjectHandler", "SendBroadcast")
-        | ("fleetMgr", "SendBroadcast")
-        | ("fleetMgr", "BroadcastToBubble")
-        | ("fleetObjectHandler", "BroadcastToBubble")
-        | ("fleetMgr", "BroadcastToSystem")
-        | ("fleetObjectHandler", "BroadcastToSystem") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
-            };
-            // Client (FleetSvc.SendGlobal/System/BubbleBroadcast): `(name, broadcastScope, itemID, typeID)`;
-            // the RPC method picks the location scope, `broadcastScope` the command-chain group.
-            let broadcast_name = args.first().and_then(|a| a.as_str()).unwrap_or("Target");
-            let scope = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let location = match method {
-                "BroadcastToBubble" => 2,
-                "BroadcastToSystem" => 1,
-                _ => 0,
-            };
-            let item_id = args.get(2).and_then(|a| a.as_i64());
-            let type_id = args.get(3).and_then(|a| a.as_i64());
-
-            // OnFleetBroadcast carries the sender's solarSystemID: no session system, no broadcast.
-            // parity: feat:fleet.broadcast-scope-and-filter
-            let Some(sender_sys) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotInSolarSystem".into(),
-                    message: "Fleet broadcasts require a session solar system".into(),
-                }));
-            };
-            let (sender_record, members_raw) = match ctx.db.with_snapshot(|snap| {
-                let fleet = snap.fleets.get(&fleet_id).ok_or_else(|| BridgeRpcError {
-                    code: "FleetNotFound".into(),
-                    message: format!("Fleet {fleet_id} not found"),
-                })?;
-                let sender = fleet.member_details.get(&char_id).ok_or_else(|| BridgeRpcError {
-                    code: "NotInFleet".into(),
-                    message: "Caller is not in fleet".into(),
-                })?;
-
-                let is_authorized = fleet.boss_id == char_id
-                    || (sender.job & notify::FLEET_JOB_CREATOR) != 0
-                    || matches!(
-                        sender.role,
-                        FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander
-                    );
-                let is_unrestricted = matches!(
-                    broadcast_name,
-                    "NeedArmor"
-                        | "NeedShield"
-                        | "NeedCapacitor"
-                        | "NeedBackup"
-                        | "InPosition"
-                        | "HoldPosition"
-                        | "NeedRepairs"
-                        | "Location"
-                        | "Travel"
-                );
-                if !is_authorized && !is_unrestricted {
-                    return Err(BridgeRpcError {
-                        code: "CannotBroadcastInFleet".into(),
-                        message: "Only fleet commanders and authorized pilots can broadcast in fleet".into(),
-                    });
-                }
-
-                let members: Vec<(FleetMemberRecord, u32, i64)> = fleet
-                    .member_details
-                    .values()
-                    .filter_map(|m| {
-                        let ch = snap.characters.get(&m.character_id)?;
-                        Some((m.clone(), ch.solar_system_id, ch.active_ship_id))
-                    })
-                    .collect();
-                Ok((sender.clone(), members))
-            }) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let now_unix = ctx.now_unix();
-            let muted_set = {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
-                if let Some((last_ts, last_name, last_scope, last_loc, last_item)) =
-                    ex.last_broadcast.get(&char_id)
-                {
-                    if now_unix > 0
-                        && now_unix < last_ts.saturating_add(2)
-                        && last_name == broadcast_name
-                        && *last_scope == scope
-                        && *last_loc == location
-                        && *last_item == item_id
-                    {
-                        return Some(Err(BridgeRpcError {
-                            code: "BroadcastSpamCooldown".into(),
-                            message: "Broadcast spam cooldown is active (2s)".into(),
-                        }));
-                    }
-                }
-                ex.last_broadcast.insert(
-                    char_id,
-                    (now_unix, broadcast_name.to_string(), scope, location, item_id),
-                );
-                ex.broadcast_history.entry(fleet_id).or_default().push((
-                    now_unix,
-                    char_id,
-                    broadcast_name.to_string(),
-                    scope,
-                    item_id,
-                    type_id,
-                ));
-                ex.broadcast_filters.clone()
-            };
-
-            let members_info: Vec<(i64, u32, i64)> = members_raw
-                .into_iter()
-                .filter(|(m, _, _)| notify::broadcast_group_allows(scope, &sender_record, m))
-                .filter(|(m, _, _)| {
-                    !muted_set
-                        .get(&m.character_id)
-                        .is_some_and(|s| s.contains(broadcast_name))
-                })
-                .map(|(m, sys, ship)| (m.character_id, sys, ship))
-                .collect();
-            // FleetSvc.OnFleetBroadcast(name, scope, charID, solarSystemID, itemID, typeID)
-            let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
-            let payload = vec![
-                PyRep::String(broadcast_name.to_string()),
-                PyRep::Integer(scope),
-                PyRep::Integer(char_id),
-                PyRep::Integer(sender_sys as i64),
-                opt(item_id),
-                opt(type_id),
-            ];
-            let mut recipient_ids = Vec::new();
-            if location == 0 {
-                for (m_id, _, _) in &members_info {
-                    recipient_ids.push(*m_id);
-                    ctx.notify(NotificationTarget::Character(*m_id), "OnFleetBroadcast", "charid", payload.clone());
-                }
-            } else {
-                let sys = ctx.systems.get_or_spawn(sender_sys);
-                let sender_ship = session.ship_id.unwrap_or(0);
-                let sender_pos = sys
-                    .get_ball_snapshot(sender_ship)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|(_, b)| b.position);
-                for (m_id, m_sys, m_ship) in members_info {
-                    if m_sys != sender_sys {
-                        continue;
-                    }
-                    if location == 2 && m_id != char_id {
-                        // Without a sender ball there is no bubble to share: only the sender sees it.
-                        let Some(s_pos) = sender_pos else { continue };
-                        let in_bubble = sys
-                            .get_ball_snapshot(m_ship)
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_some_and(|(_, b)| b.position.distance(s_pos) <= 250_000.0);
-                        if !in_bubble {
-                            continue;
-                        }
-                    }
-                    recipient_ids.push(m_id);
-                    ctx.notify(
-                        NotificationTarget::Character(m_id),
-                        "OnFleetBroadcast",
-                        "charid",
-                        payload.clone(),
-                    );
-                }
-            }
-
-            Some(Ok(PyRep::keyval([
-                ("fleetID", PyRep::Integer(fleet_id)),
-                ("broadcast", PyRep::String(broadcast_name.to_string())),
-                ("broadcastType", PyRep::String(broadcast_name.to_string())),
-                ("senderID", PyRep::Integer(char_id)),
-                ("targetID", opt(item_id)),
-                ("scope", PyRep::Integer(scope)),
-                ("itemID", opt(item_id)),
-                (
-                    "recipientIDs",
-                    PyRep::List(recipient_ids.into_iter().map(PyRep::Integer).collect()),
-                ),
-            ])))
+        ("fleetObjectHandler", "SendBroadcast") => {
+            handle_send_broadcast(ctx, session, "SendBroadcast", args).await
+        }
+        ("fleetObjectHandler", "BroadcastToBubble") => {
+            handle_send_broadcast(ctx, session, "BroadcastToBubble", args).await
+        }
+        ("fleetObjectHandler", "BroadcastToSystem") => {
+            handle_send_broadcast(ctx, session, "BroadcastToSystem", args).await
+        }
+        ("fleetMgr", "SendBroadcast") => {
+            handle_send_broadcast(ctx, session, "SendBroadcast", args).await
+        }
+        ("fleetMgr", "BroadcastToBubble") => {
+            handle_send_broadcast(ctx, session, "BroadcastToBubble", args).await
+        }
+        ("fleetMgr", "BroadcastToSystem") => {
+            handle_send_broadcast(ctx, session, "BroadcastToSystem", args).await
         }
 
         ("fleetMgr", "WarpToMember") | ("fleetObjectHandler", "WarpToMember") => {
@@ -1008,13 +1027,23 @@ pub(super) async fn handle_fleet_ops(
             super::handle_get_init_state(ctx, session)
         }
 
-        ("fleetMgr", "AddToWatchlist")
-        | ("fleetMgr", "RemoveFromWatchlist")
-        | ("fleetMgr", "RegisterForDamageUpdates")
-        | ("fleetObjectHandler", "AddToWatchlist")
-        | ("fleetObjectHandler", "RemoveFromWatchlist")
-        | ("fleetObjectHandler", "RegisterForDamageUpdates") => {
-            super::handle_fleet_watchlist_ops(ctx, session, method, args).await
+        ("fleetMgr", "AddToWatchlist") => {
+            super::handle_fleet_watchlist_ops(ctx, session, "AddToWatchlist", args).await
+        }
+        ("fleetMgr", "RemoveFromWatchlist") => {
+            super::handle_fleet_watchlist_ops(ctx, session, "RemoveFromWatchlist", args).await
+        }
+        ("fleetMgr", "RegisterForDamageUpdates") => {
+            super::handle_fleet_watchlist_ops(ctx, session, "RegisterForDamageUpdates", args).await
+        }
+        ("fleetObjectHandler", "AddToWatchlist") => {
+            super::handle_fleet_watchlist_ops(ctx, session, "AddToWatchlist", args).await
+        }
+        ("fleetObjectHandler", "RemoveFromWatchlist") => {
+            super::handle_fleet_watchlist_ops(ctx, session, "RemoveFromWatchlist", args).await
+        }
+        ("fleetObjectHandler", "RegisterForDamageUpdates") => {
+            super::handle_fleet_watchlist_ops(ctx, session, "RegisterForDamageUpdates", args).await
         }
 
         // rpc-lint: allow auditor acceptance text feat:fleet.broadcast-scope-and-filter
