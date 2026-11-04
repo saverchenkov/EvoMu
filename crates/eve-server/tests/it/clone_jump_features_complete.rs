@@ -167,9 +167,25 @@ async fn test_clone_jump_preconditions_fees_and_same_location_swap() {
     sess.station_id = Some(remote_st_id);
     assert_eq!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8102)]).await.unwrap_err().code, "CloneJumpCooldownActive");
 
-    // 8. NPC same-station clone swap is blocked while cooldown is active; Upwell same-structure swap is allowed with 0 cooldown
+    // 8. NPC same-station clone swap is allowed while cooldown is active with 0 cooldown (feat:clones.same-location-clone-swap)
     ctx.db.with_mut_snapshot(|snap| seed_clone(snap, pilot_id, 8103, remote_st_id, vec![]));
-    assert_eq!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8103)]).await.unwrap_err().code, "CloneJumpCooldownActive");
+    let bal_pre_swap = ctx.db.with_snapshot(|snap| snap.characters.get(&pilot_id).unwrap().balance.0);
+    let npc_swap_rep = rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8103)])
+        .await
+        .expect("NPC same-station clone swap during cooldown");
+    let PyRep::KeyVal(npc_swap_kv) = npc_swap_rep else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(npc_swap_kv.get("cooldownSeconds").and_then(|v| v.as_i64()), Some(0));
+    let bal_post_swap = ctx.db.with_snapshot(|snap| snap.characters.get(&pilot_id).unwrap().balance.0);
+    assert_eq!(bal_pre_swap - bal_post_swap, 90_000_000, "NPC swap debits 900k fee");
+
+    // Remote jump is still blocked by the previously running cooldown
+    ctx.advance_secs(12);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8102)]).await.unwrap_err().code,
+        "CloneJumpCooldownActive"
+    );
 
     // 9. Upwell structure owner-set fee per standing (min 1 ISK) & same-structure 0-cooldown swap
     let (struct_id, owner_corp) = (1_000_000_000_801_i64, 98_000_001_i64);
@@ -231,6 +247,7 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
     let pilot_id = 90_000_202_i64;
     let (jita_st_id, cap_id) = (60_003_760_i64, 92_000_001_i64);
     let poch_station_id = 60002002_i64; // In Pochven (region 10000070)
+    let poch_struct_id = 1_000_000_000_804_i64;
     let (wh_sys_id, wh_struct_id) = (31_000_007_u32, 1_000_000_000_802_i64);
     let thera_struct_id = 1_000_000_000_803_i64;
 
@@ -239,8 +256,10 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
         seed_skill(snap, pilot_id, 24242, 3);
         seed_skill(snap, pilot_id, 33399, 3);
         seed_item(snap, cap_id, 670, pilot_id, jita_st_id, InventoryFlag::Hangar);
+        setup_structure(snap, poch_struct_id, 30002079, 1001, 92_000_012);
         setup_structure(snap, wh_struct_id, wh_sys_id, 1001, 92_000_010);
         setup_structure(snap, thera_struct_id, 31_000_005, 1001, 92_000_011);
+        seed_clone(snap, pilot_id, 8200, jita_st_id, vec![]);
         seed_clone(snap, pilot_id, 8201, poch_station_id, vec![]);
         seed_clone(snap, pilot_id, 8202, wh_struct_id, vec![]);
         seed_clone(snap, pilot_id, 8203, thera_struct_id, vec![]);
@@ -248,19 +267,21 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
 
     let mut sess = make_session(pilot_id, Some(jita_st_id), None, Some(cap_id));
 
-    // 1. Pochven medical clone restriction (via charMgr and home_station)
+    // 1. Pochven medical clone restriction (via charMgr and home_station on station & structure)
     let err_med_mgr = rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", vec![PyRep::Integer(poch_station_id)]).await.unwrap_err();
     // rpc-lint: allow error code check
     assert_eq!(err_med_mgr.code, "CannotSetMedicalCloneInPochven");
     let err_med = rpc(&ctx, &mut sess, "home_station", "set_home_station", vec![PyRep::Integer(poch_station_id)]).await.unwrap_err();
     // rpc-lint: allow error code check
     assert_eq!(err_med.code, "CannotSetMedicalCloneInPochven");
+    let err_med_struct = rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", vec![PyRep::Integer(poch_struct_id)]).await.unwrap_err();
+    assert_eq!(err_med_struct.code, "CannotSetMedicalCloneInPochven");
 
     // 2. Pochven jump clone ban: remote jump into Pochven refused
     let err_poch_jump = rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8201)]).await.unwrap_err();
     assert_eq!(err_poch_jump.code, "CannotCloneJumpToPochven");
 
-    // 3. Local clone swap in Pochven is allowed
+    // 3. Local clone swap in Pochven is allowed, but remote jump out of Pochven is refused
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&pilot_id).unwrap();
         ch.station_id = Some(poch_station_id);
@@ -269,6 +290,9 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
     });
     sess.station_id = Some(poch_station_id);
     assert!(matches!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8204)]).await.expect("Pochven local swap"), PyRep::KeyVal(_)));
+    ctx.advance_secs(12);
+    let err_poch_out = rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8200)]).await.unwrap_err();
+    assert_eq!(err_poch_out.code, "CannotCloneJumpFromPochven");
 
     // 4. Wormhole clone jump ban: remote jump into W-space refused
     ctx.advance_secs(24 * 3600 + 10);
@@ -281,7 +305,7 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
     let err_wh = rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8202)]).await.unwrap_err();
     assert_eq!(err_wh.code, "CannotCloneJumpInWormholeSpace");
 
-    // 5. In-structure clone swap in W-space structure allowed
+    // 5. In-structure clone swap in W-space structure allowed, but remote jump out of W-space refused
     ctx.db.with_mut_snapshot(|snap| {
         let ch = snap.characters.get_mut(&pilot_id).unwrap();
         ch.station_id = None;
@@ -292,6 +316,9 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
     sess.station_id = None;
     sess.structure_id = Some(wh_struct_id);
     assert!(matches!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8205)]).await.expect("WH local swap"), PyRep::KeyVal(_)));
+    ctx.advance_secs(12);
+    let err_wh_out = rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8200)]).await.unwrap_err();
+    assert_eq!(err_wh_out.code, "CannotCloneJumpInWormholeSpace");
 
     // 6. Thera exception: behaves as k-space, remote jump allowed
     ctx.advance_secs(24 * 3600 + 10);
@@ -351,6 +378,7 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
         seed_pilot(snap, pilot1, 1_000_001, Some(jita_st_id), cap_id);
         seed_skill(snap, pilot1, 24242, 3);
         seed_skill(snap, pilot1, 33399, 3);
+        snap.characters.get_mut(&pilot1).unwrap().standings.insert(1_000_001, 7.5);
         snap.active_implants.insert(pilot1, vec![9899]);
 
         seed_item(snap, cap_id, 670, pilot1, jita_st_id, InventoryFlag::Hangar);
@@ -361,7 +389,7 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
 
     let mut sess1 = make_session(pilot1, Some(jita_st_id), None, Some(cap_id));
 
-    // 1. Clone jump: combat booster removed, accelerator preserved, implants swapped
+    // 1. Clone jump: combat booster removed, accelerator preserved, implants swapped, skills/standings/corp transfer
     assert!(matches!(rpc(&ctx, &mut sess1, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(target_jc_id)]).await.expect("Clone jump"), PyRep::KeyVal(_)));
 
     ctx.db.with_snapshot(|snap| {
@@ -370,7 +398,9 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
         assert_eq!(snap.active_implants.get(&pilot1).cloned().unwrap(), vec![10216]);
         let jc = snap.jump_clones.get(&pilot1).unwrap().iter().find(|c| c.jump_clone_id == target_jc_id).unwrap();
         assert_eq!(jc.implants, vec![9899]);
-        assert_eq!(snap.characters.get(&pilot1).unwrap().corporation_id, 1_000_001);
+        assert_eq!(snap.characters.get(&pilot1).unwrap().corporation_id, 1_000_001, "Corp membership transfers");
+        assert_eq!(snap.characters.get(&pilot1).unwrap().standings.get(&1_000_001), Some(&7.5), "Standings transfer");
+        assert_eq!(snap.skills.get(&pilot1).unwrap().get(&24242).map(|s| s.level), Some(3), "Skills transfer");
     });
 
     // 2. Upwell structure clone bay service and ACL gating

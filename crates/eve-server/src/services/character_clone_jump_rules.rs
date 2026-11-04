@@ -257,6 +257,7 @@ pub fn handle_clone_jump(
             c.location_id
         };
         let same_station = dest_loc_id == departure_loc_id;
+        let same_location_swap = same_station && departure_has_clone_bay;
         let same_structure_swap =
             same_station && dest_loc_id >= 1_000_000_000_000 && departure_has_clone_bay;
         if !departure_has_clone_bay {
@@ -267,7 +268,7 @@ pub fn handle_clone_jump(
                 ),
             });
         }
-        let effective_cooldown = if same_structure_swap { 0 } else { full_cooldown_sec };
+        let effective_cooldown = if same_location_swap { 0 } else { full_cooldown_sec };
 
         // feat:clones.clone-jump-preconditions-and-fees: no session-change timer running
         if crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None).is_some() {
@@ -277,9 +278,9 @@ pub fn handle_clone_jump(
             });
         }
 
-        // feat:clones.same-location-clone-swap: jumping to clone stored in the same Upwell structure
-        // with an online Standup Cloning Center I incurs no cooldown and is allowed while cooldown is active.
-        if !same_structure_swap
+        // feat:clones.same-location-clone-swap: jumping to clone stored in the same NPC station or Upwell structure
+        // incurs no cooldown and is allowed while cooldown is active.
+        if !same_location_swap
             && ch_check.last_clone_jump_unix > 0
             && now_unix < ch_check.last_clone_jump_unix.saturating_add(full_cooldown_sec)
         {
@@ -452,7 +453,7 @@ pub fn handle_clone_jump(
             });
         }
 
-        if !same_structure_swap
+        if !same_location_swap
             && ch_check.last_clone_jump_unix > 0
             && now_unix < ch_check.last_clone_jump_unix.saturating_add(full_cooldown_sec)
         {
@@ -665,7 +666,7 @@ pub fn handle_clone_jump(
             ch.constellation_id = dest_const_id;
             ch.region_id = dest_reg_id;
             ch.active_ship_id = capsule_id;
-            if !same_structure_swap {
+            if !same_location_swap {
                 ch.last_clone_jump_unix = now_unix;
             }
             ch.version += 1;
