@@ -361,9 +361,7 @@ async fn apply_standup_hit(
             )
             .await
             .ok()??;
-        if was_fighter {
-            crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, ball.id, dmg).await;
-        }
+        let _ = was_fighter;
         crate::services::combat_crimewatch::record_killmail_assist_action(
             ctx, ball.id, gunner_char_id, st_type_id, weapon_type_id, app, false, now_unix,
         );

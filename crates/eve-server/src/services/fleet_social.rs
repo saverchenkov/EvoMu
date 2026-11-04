@@ -31,7 +31,7 @@ pub mod fleet_social_corps;
 #[path = "fleet_social_finder_tactical.rs"]
 pub mod fleet_social_finder_tactical;
 #[path = "fleet_social_fleet_ops.rs"]
-mod fleet_social_fleet_ops;
+pub(crate) mod fleet_social_fleet_ops;
 #[path = "fleet_social_fleets.rs"]
 pub(crate) mod fleet_social_fleets;
 #[path = "fleet_social_mail.rs"]
@@ -667,6 +667,12 @@ pub async fn handle(
                 message: "MakeLeader requires target characterID".into(),
             }));
         };
+        if ctx.fleet_extras.lock().unwrap().disconnected_members.contains_key(&new_boss_id) {
+            return Some(Err(BridgeRpcError {
+                code: "TargetMemberOffline".into(),
+                message: format!("Cannot transfer fleet boss to disconnected member {new_boss_id}"),
+            }));
+        }
         let res = ctx.db.try_with_mut_snapshot(|snap| {
             let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
                 return Err(BridgeRpcError {

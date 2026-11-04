@@ -165,19 +165,17 @@ async fn test_fleet_movement_optins_formations_and_setups() {
         &ctx,
         &mut sess1,
         "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        "SetFleetFormation",
+        "SetFleetFormationSettings",
         &[PyRep::Integer(3), PyRep::Real(5_000.0), PyRep::Real(10_000.0)],
     )
     .await
-    .expect("SetFleetFormation");
+    .expect("SetFleetFormationSettings");
     assert_eq!(field(&form_rep, "formationID"), PyRep::Integer(3));
     assert_eq!(field(&form_rep, "formationName"), PyRep::String("Arrow".into()));
 
-    // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-    let get_form = rpc(&ctx, &mut sess1, "fleetObjectHandler", "GetFleetFormation", &[])
+    let get_form = rpc(&ctx, &mut sess1, "fleetObjectHandler", "GetFormationSettings", &[])
         .await
-        .expect("GetFleetFormation");
+        .expect("GetFormationSettings");
     assert_eq!(field(&get_form, "formationID"), PyRep::Integer(3));
     assert_eq!(field(&get_form, "formationName"), PyRep::String("Arrow".into()));
 
@@ -467,11 +465,19 @@ async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
     let sys_id = sess1.solar_system_id.unwrap_or(30_000_142);
     let ship1 = sess1.ship_id.unwrap_or(1);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let caller_pos = sys_handle.get_ball_position_sync(ship1).unwrap_or(glam::DVec3::ZERO);
+    if sys_handle.get_ball_position_sync(ship1).is_none() {
+        let _ = sys_handle.spawn_ball(eve_destiny::Ball {
+            id: ship1, type_id: 626, position: caller_pos, velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0, inertia: 1.0, mass: 10_000_000.0, radius: 100.0,
+            speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+        }).await;
+    }
     let _ = sys_handle
         .spawn_ball(eve_destiny::Ball {
             id: 999001,
             type_id: 587,
-            position: glam::DVec3::new(10_000.0, 0.0, 0.0),
+            position: caller_pos + glam::DVec3::new(10_000.0, 0.0, 0.0),
             velocity: glam::DVec3::ZERO,
             max_velocity: 300.0,
             inertia: 1.0,
@@ -493,31 +499,22 @@ async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
             },
         )
         .await;
-    let tag_rep = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        "SetTargetTag",
-        &[PyRep::Integer(999001), PyRep::String("A".into())],
-    )
-    .await
-    .expect("SetTargetTag");
-    assert_eq!(field(&tag_rep, "targetID"), PyRep::Integer(999001));
-    assert_eq!(field(&tag_rep, "tag"), PyRep::String("A".into()));
+    let tag_rep = rpc(&ctx, &mut sess1, "beyonce", "CmdFleetTagTarget", &[PyRep::Integer(999001), PyRep::String("A".into())])
+        .await
+        .expect("CmdFleetTagTarget A");
+    assert_eq!(tag_rep, PyRep::None);
+    let fs_after_tag = rpc(&ctx, &mut sess1, "beyonce", "GetFleetState", &[]).await.expect("GetFleetState");
+    assert_eq!(
+        field(&fs_after_tag, "targetTags"),
+        PyRep::Dict(vec![(PyRep::Integer(999001), PyRep::String("A".into()))])
+    );
 
-    // Clear target tags
-    let clear_tags = rpc(
-        &ctx,
-        &mut sess1,
-        "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        "ClearTargetTags",
-        &[],
-    )
-    .await
-    .expect("ClearTargetTags");
-    assert_eq!(field(&clear_tags, "fleetID"), PyRep::Integer(fid));
+    // Clear target tag via empty string on CmdFleetTagTarget
+    rpc(&ctx, &mut sess1, "beyonce", "CmdFleetTagTarget", &[PyRep::Integer(999001), PyRep::String("".into())])
+        .await
+        .expect("CmdFleetTagTarget untag");
+    let fs_cleared = rpc(&ctx, &mut sess1, "beyonce", "GetFleetState", &[]).await.expect("GetFleetState cleared");
+    assert_eq!(field(&fs_cleared, "targetTags"), PyRep::Dict(Vec::new()));
 }
 
 #[tokio::test]

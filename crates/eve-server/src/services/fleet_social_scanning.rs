@@ -257,17 +257,18 @@ pub(super) async fn handle_scanning_and_wormholes(
                 + (astrometrics_lvl as f64 * 0.05)
                 + (rangefinding_lvl as f64 * 0.05)
                 + (pinpointing_lvl as f64 * 0.02);
-            let _scan_time_ms = (4000.0
+            let scan_time_ms = (10_000.0
                 * (1.0 - 0.05 * astrometrics_lvl as f64).max(0.5)
-                * (1.0 - 0.05 * acquisition_lvl as f64).max(0.5))
+                * (1.0 - 0.10 * acquisition_lvl as f64).max(0.5))
             .round() as i64;
             let radius_au = scan_radius_meters / AU_IN_METERS;
-
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let probe_ids_rep: Vec<PyRep> = (0..probes.len()).map(|i| PyRep::Integer(900_000 + i as i64)).collect();
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnSystemScanStarted",
                 "charid",
-                vec![PyRep::Integer(char_id), PyRep::Integer(probes.len() as i64)],
+                vec![PyRep::Integer(now_ft), PyRep::Integer(scan_time_ms), PyRep::List(probe_ids_rep)],
             );
 
             let updated_results = ctx.db.try_with_mut_snapshot(|snap| {
@@ -558,12 +559,23 @@ pub(super) async fn handle_scanning_and_wormholes(
                     ]));
                 }
             }
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnNewProbe",
-                "charid",
-                vec![PyRep::Integer(probe_count)],
-            );
+            let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add(3_600 * 10_000_000);
+            for (idx, pr) in pos_reps.iter().enumerate() {
+                let pt = match pr {
+                    PyRep::List(c) if c.len() >= 3 => PyRep::Tuple(vec![c[0].clone(), c[1].clone(), c[2].clone()]),
+                    other => other.clone(),
+                };
+                let probe_kv = PyRep::keyval([
+                    ("probeID", PyRep::Integer(900_000 + idx as i64)),
+                    ("typeID", PyRep::Integer(30_013)),
+                    ("scanRange", PyRep::Real(scan_radius_m)),
+                    ("expiry", PyRep::Integer(expiry_ft)),
+                    ("pos", pt.clone()),
+                    ("destination", pt),
+                    ("state", PyRep::Integer(1)),
+                ]);
+                ctx.notify(NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
+            }
             Some(Ok(PyRep::keyval([
                 ("success", PyRep::Bool(true)),
                 ("probeCount", PyRep::Integer(probe_count)),

@@ -411,3 +411,96 @@ pub fn seed_fast_checkout_plex_offer(ctx: &ServerContext, user_id: u64, offer_id
         },
     );
 }
+
+/// GM pilot flown into space purely through client RPCs and GM slash commands.
+#[allow(dead_code)]
+pub struct LivePilot {
+    pub sess: SessionState,
+    pub char_id: i64,
+    pub ship_id: i64,
+    /// `beyonce` bound object for the current solar system (`beyonce.MachoBindObject`).
+    pub beyonce: u64,
+}
+
+/// Dispatches a GM `slash.SlashCmd` and panics with the command text on failure.
+#[allow(dead_code)]
+pub async fn slash_cmd(ctx: &ServerContext, sess: &mut SessionState, cmd: &str) -> PyRep {
+    ctx.dispatch_rpc(sess, "slash", None, "SlashCmd", &[PyRep::String(cmd.into())], &HashMap::new(), None)
+        .await
+        .unwrap_or_else(|e| panic!("{cmd} failed: {e:?}"))
+}
+
+/// Provisions a GM account docked in Jita 4-4, creates `ship_type_id` with `/createitem`, boards it
+/// (`ship.Board`), undocks (`stationSvc.Undock`) and teleports to `sys_id` with `/tr` (lands at 10 km on X).
+#[allow(dead_code)]
+pub async fn gm_pilot_in_space(ctx: &ServerContext, sess_id: u64, char_id: i64, ship_type_id: u32, sys_id: u32) -> LivePilot {
+    let kw = HashMap::new();
+    let user = format!("live{char_id}");
+    let pass = format!("{user}-secret");
+    ctx.db.provision_gm_account(&user, &pass, char_id, &format!("Live Pilot {char_id}"));
+    let mut sess = SessionState::new(sess_id);
+    login_pilot(ctx, &mut sess, &user, &pass).await;
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None)
+        .await
+        .expect("SelectCharacterID");
+    let created = slash_cmd(ctx, &mut sess, &format!("/createitem {ship_type_id} 1")).await;
+    let ship_id = created.dict_get("itemID").and_then(|v| v.as_i64()).expect("/createitem itemID");
+    let required: Vec<u32> = ctx.sde.types.get(&ship_type_id).map(|t| {
+        [182_u16, 183, 184, 1285, 1289, 1290].iter().filter_map(|a| t.default_attributes.get(a)).map(|v| v.round() as u32).filter(|&s| s > 0).collect()
+    }).unwrap_or_default();
+    for skill_id in required {
+        slash_cmd(ctx, &mut sess, &format!("/giveskill {skill_id} 5")).await;
+    }
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.expect("ship.Board");
+    ctx.advance_secs(31);
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("stationSvc.Undock");
+    slash_cmd(ctx, &mut sess, &format!("/tr {sys_id}")).await;
+    sess.ship_id = Some(ship_id);
+    let bind = ctx.dispatch_rpc(&mut sess, "beyonce", None, "MachoBindObject", &[PyRep::Integer(i64::from(sys_id)), PyRep::None], &kw, None)
+        .await
+        .expect("beyonce.MachoBindObject");
+    let PyRep::Tuple(bound) = bind else { panic!("bind tuple") };
+    let beyonce = bound[0].as_i64().expect("beyonce bound id") as u64;
+    ctx.advance_secs(31);
+    let _ = sess.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    LivePilot { sess, char_id, ship_id, beyonce }
+}
+
+/// Creates `qty` x `type_id` in the pilot's cargo (`/createitem`) and moves the stack into `flag` of the
+/// active ship through `invbroker.Add`; returns the moved item id.
+#[allow(dead_code)]
+pub async fn stock_ship_bay(ctx: &ServerContext, p: &mut LivePilot, type_id: u32, qty: i32, flag: i64) -> i64 {
+    let created = slash_cmd(ctx, &mut p.sess, &format!("/createitem {type_id} {qty}")).await;
+    let item_id = created.dict_get("itemID").and_then(|v| v.as_i64()).expect("/createitem itemID");
+    ctx.dispatch_rpc(&mut p.sess, "invbroker", None, "Add", &[PyRep::Integer(item_id), PyRep::Integer(p.ship_id), PyRep::Integer(flag)], &HashMap::new(), None)
+        .await
+        .unwrap_or_else(|e| panic!("invbroker.Add {type_id} -> flag {flag} failed: {e:?}"));
+    item_id
+}
+
+/// Flies the pilot's ship to `dest` with `beyonce.CmdGotoPoint`, stepping the system actor until within
+/// 500 m (or past closest approach), then `beyonce.CmdStop`; returns the final ball position.
+#[allow(dead_code)]
+pub async fn fly_to(ctx: &ServerContext, p: &mut LivePilot, dest: glam::DVec3) -> glam::DVec3 {
+    let kw = HashMap::new();
+    let sys = ctx.systems.get_or_spawn(p.sess.solar_system_id.expect("in space"));
+    ctx.dispatch_rpc(&mut p.sess, "beyonce", Some(p.beyonce), "CmdGotoPoint", &[PyRep::Real(dest.x), PyRep::Real(dest.y), PyRep::Real(dest.z)], &kw, None)
+        .await
+        .expect("CmdGotoPoint");
+    let mut best = f64::MAX;
+    for _ in 0..600 {
+        sys.step_manual(1.0).await.unwrap();
+        let d = sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball").1.position.distance(dest);
+        if d < 500.0 || d > best {
+            break;
+        }
+        best = d;
+    }
+    ctx.dispatch_rpc(&mut p.sess, "beyonce", Some(p.beyonce), "CmdStop", &[], &kw, None).await.expect("CmdStop");
+    for _ in 0..10 {
+        sys.step_manual(1.0).await.unwrap();
+    }
+    sys.get_ball_snapshot(p.ship_id).await.unwrap().expect("ship ball").1.position
+}

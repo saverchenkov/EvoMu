@@ -209,8 +209,10 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     assert!(info_items.iter().any(|(k, _)| k == &PyRep::Integer(C1)));
     assert!(info_items.iter().any(|(k, _)| k == &PyRep::Integer(C2)));
 
-    // 5. CmdFleetTagTarget (BF-03): non-leader rejection & leader tagging
-    let tag_target_id = 99_000_123;
+    // 5. CmdFleetTagTarget (BF-03): non-leader rejection & leader tagging on locked on-grid target
+    let tag_target_id = ship2;
+    ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "AddTarget", &[PyRep::Integer(tag_target_id)], &HashMap::new(), None).await.expect("AddTarget");
+    for _ in 0..25 { let _ = ctx.systems.get_or_spawn(SYS_ORIGIN).step_manual(1.0).await; }
     let tag_err = ctx
         .dispatch_rpc(&mut sess2, "beyonce", None, "CmdFleetTagTarget", &[PyRep::Integer(tag_target_id), PyRep::String("1".into())], &HashMap::new(), None)
         .await;

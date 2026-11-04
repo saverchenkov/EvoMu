@@ -239,35 +239,39 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
         ("beyonce", "CmdFleetTagTarget") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            // parity: feat:fleet.target-tagging
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(target_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "CmdFleetTagTarget requires a positive target itemID".into() }));
             };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let tag_str = args.get(1).and_then(|a| match a {
-                PyRep::String(s) => Some(s.clone()),
-                PyRep::Integer(i) => Some(i.to_string()),
-                _ => None,
-            }).unwrap_or_default();
-            let fleet_id = session.fleet_id.or_else(|| ctx.db.with_snapshot(|s| fleet_of(s, char_id)));
-            let Some(fid) = fleet_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotInFleet".into(),
-                    message: "Character is not in a fleet".into(),
-                }));
+            let raw_tag = args.get(1).and_then(|a| match a { PyRep::String(s) => Some(s.trim().to_string()), PyRep::Integer(i) => Some(i.to_string()), _ => None }).unwrap_or_default();
+            let tag_str = raw_tag.to_ascii_uppercase();
+            let Some(fid) = session.fleet_id.or_else(|| ctx.db.with_snapshot(|s| fleet_of(s, char_id))) else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let is_lead = ctx.db.with_snapshot(|snap| {
                 let fleet = snap.fleets.get(&fid)?;
-                let is_boss = fleet.boss_id == char_id;
                 let mem = fleet.member_details.get(&char_id)?;
-                let role_ok = matches!(mem.role, FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander);
-                Some(is_boss || role_ok)
+                Some(fleet.boss_id == char_id || matches!(mem.role, FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander))
             }).unwrap_or(false);
             if !is_lead {
-                return Some(Err(BridgeRpcError {
-                    code: "FleetAccessDenied".into(),
-                    message: "Only fleet commanders can tag targets".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "FleetAccessDenied".into(), message: "Only fleet commanders can tag targets".into() }));
+            }
+            if !tag_str.is_empty() {
+                if tag_str.len() != 1 || !tag_str.chars().all(|c| c.is_ascii_uppercase() || ('1'..='9').contains(&c)) {
+                    return Some(Err(BridgeRpcError { code: "InvalidTargetTag".into(), message: format!("Target tag '{raw_tag}' must be A-Z or 1-9") }));
+                }
+                let Some(sys_id) = session.solar_system_id else { return Some(Err(BridgeRpcError::user_error("NotInSpace"))) };
+                let Some(ship_id) = session.ship_id else { return Some(Err(BridgeRpcError::user_error("NoActiveShip"))) };
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                let on_grid = matches!((sys_handle.get_ball_position_sync(ship_id), sys_handle.get_ball_position_sync(target_id)), (Some(sp), Some(tp)) if sp.distance(tp) <= 8_000_000.0);
+                if !on_grid {
+                    return Some(Err(BridgeRpcError { code: "TargetNotOnGrid".into(), message: format!("Target {target_id} is not on grid with caller") }));
+                }
+                let is_locked = sys_handle.get_target_locks(ship_id).await.map(|locks| locks.iter().any(|l| l.target_id == target_id && l.locked)).unwrap_or(false);
+                if !is_locked {
+                    return Some(Err(BridgeRpcError { code: "TargetNotLocked".into(), message: format!("Target {target_id} must be locked before tagging") }));
+                }
             }
             {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
@@ -275,7 +279,7 @@ pub async fn handle(
                 if tag_str.is_empty() {
                     tags.remove(&target_id);
                 } else {
-                    tags.retain(|&tid, existing| tid == target_id || existing != &tag_str);
+                    tags.retain(|&tid, existing| tid != target_id && existing != &tag_str);
                     tags.insert(target_id, tag_str);
                 }
             }
@@ -776,6 +780,14 @@ pub async fn handle(
             let Some((fid, is_leader, leader_id, wing_id, squad_id, role)) = fleet_state else {
                 return Some(Ok(PyRep::None));
             };
+            let tags_dict = ctx
+                .fleet_extras
+                .lock()
+                .unwrap()
+                .target_tags
+                .get(&fid)
+                .map(|m| m.iter().map(|(&tid, t)| (PyRep::Integer(tid), PyRep::String(t.clone()))).collect::<Vec<_>>())
+                .unwrap_or_default();
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fid)),
                 ("isLeader", PyRep::Bool(is_leader)),
@@ -784,6 +796,7 @@ pub async fn handle(
                 ("squadID", PyRep::Integer(squad_id)),
                 ("role", PyRep::Integer(role as i64)),
                 ("booster", PyRep::Integer(0)),
+                ("targetTags", PyRep::Dict(tags_dict)),
             ])))
         }
         ("beyonce", "GetOperationSpawnpointPosition") => {

@@ -1001,113 +1001,8 @@ pub(super) async fn handle_finder_and_tactical(
             Some(Ok(PyRep::keyval([("characterID", PyRep::Integer(applicant_id)), ("rejected", PyRep::Bool(true))])))
         }
 
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        ("fleetProxy", "SetTargetTag")
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        | ("fleetObjectHandler", "SetTargetTag")
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        | ("fleetMgr", "SetTargetTag")
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        | ("fleetObjectHandler", "TagTarget")
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        | ("fleetMgr", "TagTarget")
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        | ("fleetObjectHandler", "ClearTargetTags") => {
-            // parity: feat:fleet.target-tagging
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
-            };
-            let is_lead = ctx.db.with_snapshot(|snap| {
-                snap.fleets.get(&fleet_id).is_some_and(|f| {
-                    f.boss_id == char_id || f.member_details.get(&char_id).is_some_and(|m| role_to_i64(m.role) <= 3)
-                })
-            });
-            if !is_lead {
-                return Some(Err(BridgeRpcError { code: "FleetRoleDenied".into(), message: "Only fleet commanders can tag targets".into() }));
-            }
-            if method == "ClearTargetTags" {
-                ctx.fleet_extras.lock().unwrap().target_tags.remove(&fleet_id);
-                let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), char_id, 1.0, 1.0, 1.0);
-                ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetStateChange", "fleetid", vec![fleet_state]);
-                return Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("targetTags", PyRep::Dict(Vec::new()))])));
-            }
-            let Some(target_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "SetTargetTag requires targetID".into() }));
-            };
-            let tag_str = args.get(1).and_then(|a| match a { PyRep::String(s) => Some(s.trim().to_string()), PyRep::Integer(i) => Some(i.to_string()), _ => None }).unwrap_or_default();
-            if !tag_str.is_empty() {
-                let valid = tag_str.len() == 1
-                    && tag_str.chars().all(|c| c.is_ascii_uppercase() || ('1'..='9').contains(&c));
-                if !valid {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidTargetTag".into(),
-                        message: format!("Target tag '{tag_str}' must be a single letter A-Z or digit 1-9"),
-                    }));
-                }
-                let Some(sys_id) = session.solar_system_id else {
-                    return Some(Err(BridgeRpcError::user_error("NotInSpace")));
-                };
-                let Some(ship_id) = session.ship_id else {
-                    return Some(Err(BridgeRpcError::user_error("NoActiveShip")));
-                };
-                let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                let on_grid = sys_handle.get_ball_snapshot(target_id).await.ok().flatten().is_some();
-                let is_locked = sys_handle
-                    .get_target_locks(ship_id)
-                    .await
-                    .map(|locks| locks.iter().any(|l| l.target_id == target_id))
-                    .unwrap_or(false);
-                if !on_grid || !is_locked {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetNotLocked".into(),
-                        message: format!("Target {target_id} must be on grid and locked before tagging"),
-                    }));
-                }
-            }
-            let tags_dict = {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
-                let tags = ex.target_tags.entry(fleet_id).or_default();
-                if tag_str.is_empty() {
-                    tags.remove(&target_id);
-                } else {
-                    tags.retain(|&tid, existing| tid == target_id || existing != &tag_str);
-                    tags.insert(target_id, tag_str.clone());
-                }
-                tags.iter().map(|(&tid, t)| (PyRep::Integer(tid), PyRep::String(t.clone()))).collect::<Vec<_>>()
-            };
-            let fleet_state = notify::build_fleet_state_keyval(ctx, Some(fleet_id), char_id, 1.0, 1.0, 1.0);
-            ctx.notify(NotificationTarget::Fleet(fleet_id), "OnFleetStateChange", "fleetid", vec![fleet_state]);
-            if !tag_str.is_empty() {
-                ctx.notify_fleet_broadcast(fleet_id, "Target", char_id, target_id);
-            }
-            let tag_rep = if tag_str.is_empty() { PyRep::None } else { PyRep::String(tag_str) };
-            Some(Ok(PyRep::keyval([
-                ("fleetID", PyRep::Integer(fleet_id)),
-                ("targetID", PyRep::Integer(target_id)),
-                ("tag", tag_rep),
-                ("targetTags", PyRep::Dict(tags_dict)),
-            ])))
-        }
-
-        // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-        ("fleetObjectHandler", "GetTargetTags") | ("fleetMgr", "GetTargetTags") => {
-            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
-            };
-            let tags_dict = ctx.fleet_extras.lock().unwrap().target_tags.get(&fleet_id)
-                .map(|m| m.iter().map(|(&tid, t)| (PyRep::Integer(tid), PyRep::String(t.clone()))).collect::<Vec<_>>())
-                .unwrap_or_default();
-            Some(Ok(PyRep::Dict(tags_dict)))
-        }
-
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        ("fleetObjectHandler", "SetFleetFormation")
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        | ("fleetMgr", "SetFleetFormation")
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        | ("fleetObjectHandler", "SaveFleetFormation") => {
+        ("fleetObjectHandler", "SetFleetFormationSettings")
+        | ("fleetMgr", "SetFleetFormationSettings") => {
             // parity: feat:fleet.stored-formations-and-warp-shapes
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             ensure_fleet_formations_loaded(ctx);
@@ -1126,8 +1021,8 @@ pub(super) async fn handle_finder_and_tactical(
             ])))
         }
 
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        ("fleetObjectHandler", "GetFleetFormation") | ("fleetMgr", "GetFleetFormation") => {
+        ("fleetObjectHandler", "GetFormationSettings")
+        | ("fleetMgr", "GetFormationSettings") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             ensure_fleet_formations_loaded(ctx);
             let (fid, spacing, size) = ctx.fleet_extras.lock().unwrap().stored_formations.get(&char_id).copied().unwrap_or((0, 0.0, 10_000.0));

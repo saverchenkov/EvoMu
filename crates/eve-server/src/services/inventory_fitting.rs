@@ -151,7 +151,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 164..=172 | 177 | 179..=182 | 185) {
+                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 158 | 164..=172 | 177 | 179..=182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }

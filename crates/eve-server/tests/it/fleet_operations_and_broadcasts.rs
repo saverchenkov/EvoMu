@@ -238,15 +238,13 @@ async fn test_fleet_stored_formations_and_warp_shapes() {
         &ctx,
         &mut s1,
         "fleetObjectHandler",
-        // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-        "SetFleetFormation",
+        "SetFleetFormationSettings",
         &[PyRep::Integer(3), PyRep::Real(5_000.0), PyRep::Real(10_000.0)],
     )
     .await
-    .expect("SetFleetFormation");
+    .expect("SetFleetFormationSettings");
     assert_eq!(set_res.dict_get("formationName"), Some(&PyRep::String("Arrow".into())));
-    // rpc-lint: allow auditor acceptance text feat:fleet.stored-formations-and-warp-shapes
-    let get_res = rpc(&ctx, &mut s1, "fleetObjectHandler", "GetFleetFormation", &[]).await.expect("GetFleetFormation");
+    let get_res = rpc(&ctx, &mut s1, "fleetObjectHandler", "GetFormationSettings", &[]).await.expect("GetFormationSettings");
     assert_eq!(get_res.dict_get("formationID"), Some(&PyRep::Integer(3)));
 
     let dest = DVec3::new(1_000_000_000.0, 0.0, 0.0);
@@ -286,14 +284,12 @@ async fn test_fleet_target_tagging_validation_lock_and_destruction() {
 
     form_fleet_with_two(&ctx, &mut s1, &mut s2, PILOT_2).await;
 
-    // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-    let err_unlocked = rpc(&ctx, &mut s1, "fleetObjectHandler", "SetTargetTag", &[PyRep::Integer(ship2), PyRep::String("A".into())])
+    let err_unlocked = rpc(&ctx, &mut s1, "beyonce", "CmdFleetTagTarget", &[PyRep::Integer(ship2), PyRep::String("A".into())])
         .await
         .expect_err("Unlocked target must fail");
     assert_eq!(err_unlocked.code, "TargetNotLocked");
 
-    // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-    let err_invalid = rpc(&ctx, &mut s1, "fleetObjectHandler", "SetTargetTag", &[PyRep::Integer(ship2), PyRep::String("AA".into())])
+    let err_invalid = rpc(&ctx, &mut s1, "beyonce", "CmdFleetTagTarget", &[PyRep::Integer(ship2), PyRep::String("AA".into())])
         .await
         .expect_err("Invalid tag must fail");
     assert_eq!(err_invalid.code, "InvalidTargetTag");
@@ -307,17 +303,15 @@ async fn test_fleet_target_tagging_validation_lock_and_destruction() {
     .unwrap();
     ctx.drain_notifications_for_char(PILOT_2);
 
-    // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-    let tag_res = rpc(&ctx, &mut s1, "fleetObjectHandler", "SetTargetTag", &[PyRep::Integer(ship2), PyRep::String("A".into())])
+    let tag_res = rpc(&ctx, &mut s1, "beyonce", "CmdFleetTagTarget", &[PyRep::Integer(ship2), PyRep::String("A".into())])
         .await
-        .expect("SetTargetTag A");
-    assert_eq!(tag_res.dict_get("tag"), Some(&PyRep::String("A".into())));
+        .expect("CmdFleetTagTarget A");
+    assert_eq!(tag_res, PyRep::None);
     assert!(ctx.drain_notifications_for_char(PILOT_2).iter().any(|n| n.event == "OnFleetStateChange"));
 
     eve_server::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(&ctx, ship2);
-    // rpc-lint: allow auditor acceptance text feat:fleet.target-tagging
-    let tags_after = rpc(&ctx, &mut s1, "fleetObjectHandler", "GetTargetTags", &[]).await.expect("GetTargetTags");
-    assert_eq!(tags_after, PyRep::Dict(Vec::new()));
+    let fs_after = rpc(&ctx, &mut s1, "beyonce", "GetFleetState", &[]).await.expect("GetFleetState");
+    assert_eq!(fs_after.dict_get("targetTags"), Some(&PyRep::Dict(Vec::new())));
 }
 
 #[tokio::test]

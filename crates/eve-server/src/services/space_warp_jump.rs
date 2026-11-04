@@ -117,6 +117,28 @@ async fn handle_cmd_warp_to_stuff(
             message: "Session has no active ship".into(),
         });
     };
+    let is_fleet_warp_kw = kwargs
+        .get("fleet")
+        .is_some_and(|v| matches!(v, PyRep::Bool(true)) || v.as_i64().is_some_and(|i| i != 0) || v.as_str().is_some())
+        || kwargs.contains_key("formationID");
+    if is_fleet_warp_kw && !is_autopilot && session.fleet_id.is_some() {
+        let mut wf_args = Vec::new();
+        if args.first().and_then(|a| a.as_str()).is_some() {
+            if let Some(tid) = args.get(1) {
+                wf_args.push(tid.clone());
+            }
+            if let Some(mr) = args.get(2) {
+                wf_args.push(mr.clone());
+            }
+        } else {
+            wf_args.extend_from_slice(args);
+        }
+        if let Some(res) =
+            crate::services::fleet_social::fleet_social_fleet_ops::handle_fleet_warp(ctx, session, &wf_args, kwargs).await
+        {
+            return res;
+        }
+    }
     let mjd_handle = ctx.systems.get_or_spawn(sys_id);
     crate::services::nav_warp_interdiction::validate_pre_warp_common(
         ctx,

@@ -206,11 +206,29 @@ pub fn remove_character_from_fleet(
                 should_disband = true;
             } else if fleet.boss_id == char_id {
                 // parity: feat:fleet.boss-handover
+                let disconnected: std::collections::HashSet<i64> = ctx
+                    .fleet_extras
+                    .lock()
+                    .unwrap()
+                    .disconnected_members
+                    .keys()
+                    .copied()
+                    .collect();
                 let next_boss = fleet
                     .member_details
                     .values()
-                    .min_by_key(|m| (role_to_i64(m.role), m.join_time_unix, m.character_id))
+                    .min_by_key(|m| {
+                        (
+                            disconnected.contains(&m.character_id),
+                            role_to_i64(m.role),
+                            m.wing_id.unwrap_or(i64::MAX),
+                            m.squad_id.unwrap_or(i64::MAX),
+                            m.join_time_unix,
+                            m.character_id,
+                        )
+                    })
                     .map(|m| m.character_id)
+                    .or_else(|| fleet.members.iter().copied().find(|cid| !disconnected.contains(cid)))
                     .or_else(|| fleet.members.first().copied())
                     .unwrap_or(0);
                 if next_boss != 0 {
@@ -420,6 +438,14 @@ pub fn handle_character_disconnect(ctx: &ServerContext, char_id: i64) {
 /// Reassigns fleet boss if `char_id` was the boss of a fleet, transferring to the next
 /// highest-ranking connected fleet member per V24 rules (`feat:fleet.boss-handover`).
 pub fn reassign_fleet_boss_on_disconnect(ctx: &ServerContext, char_id: i64) {
+    let disconnected: std::collections::HashSet<i64> = ctx
+        .fleet_extras
+        .lock()
+        .unwrap()
+        .disconnected_members
+        .keys()
+        .copied()
+        .collect();
     let handovers: Vec<(i64, i64, FleetMemberRecord, FleetMemberRecord)> = ctx.db.with_mut_snapshot(|snap| {
         let mut res = Vec::new();
         for fleet in snap.fleets.values_mut() {
@@ -427,10 +453,24 @@ pub fn reassign_fleet_boss_on_disconnect(ctx: &ServerContext, char_id: i64) {
                 let next_boss = fleet
                     .member_details
                     .values()
-                    .filter(|m| m.character_id != char_id)
-                    .min_by_key(|m| (role_to_i64(m.role), m.join_time_unix, m.character_id))
+                    .filter(|m| m.character_id != char_id && !disconnected.contains(&m.character_id))
+                    .min_by_key(|m| {
+                        (
+                            role_to_i64(m.role),
+                            m.wing_id.unwrap_or(i64::MAX),
+                            m.squad_id.unwrap_or(i64::MAX),
+                            m.join_time_unix,
+                            m.character_id,
+                        )
+                    })
                     .map(|m| m.character_id)
-                    .or_else(|| fleet.members.iter().copied().find(|&m| m != char_id));
+                    .or_else(|| {
+                        fleet
+                            .members
+                            .iter()
+                            .copied()
+                            .find(|&m| m != char_id && !disconnected.contains(&m))
+                    });
                 if let Some(nb) = next_boss {
                     fleet.boss_id = nb;
                     let mut old_m = fleet.member_details.get(&char_id).cloned();

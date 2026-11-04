@@ -337,9 +337,11 @@ pub async fn activate_scan_probe_launcher(
         [-707.0, -707.0, 0.0],
     ];
 
+    let mut spawned_probe_positions: Vec<(i64, DVec3)> = Vec::with_capacity(allocated_probe_ids.len());
     for (idx, &probe_id) in allocated_probe_ids.iter().enumerate() {
         let off = formation_offsets[idx % formation_offsets.len()];
         let pos = DVec3::new(ship_pos.x + off[0], ship_pos.y + off[1], ship_pos.z + off[2]);
+        spawned_probe_positions.push((probe_id, pos));
         let ball = Ball {
             id: probe_id,
             type_id: probe_type_id,
@@ -387,7 +389,7 @@ pub async fn activate_scan_probe_launcher(
                     base_sensor_strength,
                     max_flight_time_s,
                     launched_at_unix: now_unix,
-                    state: 1,
+                    state: PROBE_STATE_IDLE,
                     warp_end_ft: None,
                 },
             );
@@ -395,14 +397,15 @@ pub async fn activate_scan_probe_launcher(
 
     let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, module_type_id, Some(effect_name), target_id_opt);
     let expiry_ft = ctx.now_blueos_filetime_ticks().saturating_add((max_flight_time_s.round() as i64).saturating_mul(10_000_000));
-    let pos_tuple = PyRep::Tuple(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)]);
-    for &pid in &allocated_probe_ids {
+    for &(pid, ppos) in &spawned_probe_positions {
+        let pt = PyRep::Tuple(vec![PyRep::Real(ppos.x), PyRep::Real(ppos.y), PyRep::Real(ppos.z)]);
         let probe_kv = PyRep::keyval([
             ("probeID", PyRep::Integer(pid)), ("typeID", PyRep::Integer(probe_type_id as i64)),
             ("scanRange", PyRep::Real(scan_range_m)), ("expiry", PyRep::Integer(expiry_ft)),
-            ("pos", pos_tuple.clone()), ("destination", pos_tuple.clone()), ("state", PyRep::Integer(1)),
+            ("pos", pt.clone()), ("destination", pt), ("state", PyRep::Integer(PROBE_STATE_IDLE as i64)),
         ]);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);
     }
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)),
@@ -660,9 +663,8 @@ async fn handle_request_scans(
                             invalid_coords = true;
                             break;
                         }
-                        probe.position = [x, y, z];
-                        probe.destination = probe.position;
-                        moved_balls.push((pid, DVec3::from_array(probe.position)));
+                        probe.destination = [x, y, z];
+                        moved_balls.push((pid, DVec3::from_array(probe.destination)));
                     }
                 } else if let (Some(x), Some(y), Some(z)) = (
                     find_in_v("x").and_then(|a| a.as_f64()),
@@ -673,9 +675,8 @@ async fn handle_request_scans(
                         invalid_coords = true;
                         break;
                     }
-                    probe.position = [x, y, z];
-                    probe.destination = probe.position;
-                    moved_balls.push((pid, DVec3::from_array(probe.position)));
+                    probe.destination = [x, y, z];
+                    moved_balls.push((pid, DVec3::from_array(probe.destination)));
                 }
                 if let Some(step) = find_in_v("rangeStep").and_then(|a| a.as_i64()) {
                     probe.range_step = (step as i32).clamp(1, 8);
@@ -720,9 +721,8 @@ async fn handle_request_scans(
                             invalid_coords = true;
                             break;
                         }
-                        probe.position = [x, y, z];
-                        probe.destination = probe.position;
-                        moved_balls.push((pid, DVec3::from_array(probe.position)));
+                        probe.destination = [x, y, z];
+                        moved_balls.push((pid, DVec3::from_array(probe.destination)));
                     }
                     if let Some(step) = coords.get(3).and_then(|a| a.as_i64()).map(|s| (s as i32).clamp(1, 8)).or(override_range_step) {
                         probe.range_step = step;
@@ -747,23 +747,41 @@ async fn handle_request_scans(
     let warp_ft = ctx.now_blueos_filetime_ticks();
     let mut max_warp_end_ft = warp_ft;
     for (pid, new_pos) in moved_balls {
-        if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(pid).await {
+        if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(pid).await {
             let old_pos = b.position;
             let dist = (old_pos - new_pos).length();
-            b.position = new_pos;
-            let _ = sys_handle.spawn_ball(b).await;
             if dist > 1.0 {
                 let p_tid = ctx.active_scanner_probes.read().ok().and_then(|m| m.get(&pid).map(|p| p.probe_type_id)).unwrap_or(30_013);
-                let warp_au: f64 = ctx.sde.types.get(&p_tid).and_then(|t| t.default_attributes.get(&600).copied()).unwrap_or(20.0).max(1.0);
-                let warp_ms = if dist > 250_000.0 { ((dist / (warp_au * AU_IN_METERS)) * 1000.0).round().clamp(500.0, 60_000.0) as i64 } else { ((dist / 1_000.0) * 1000.0).round().clamp(200.0, 5_000.0) as i64 };
-                let p_end_ft = warp_ft + warp_ms * 10_000;
-                max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
-                let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
-                let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
-                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_WARPING as i64)]);
-                let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(warp_ms)]);
-                if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-                    if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = PROBE_STATE_WARPING; }
+                let p_sde = ctx.sde.types.get(&p_tid);
+                let warp_au: f64 = p_sde
+                    .map(|t| t.default_attributes.get(&600).copied().unwrap_or(15.0) * t.default_attributes.get(&1281).copied().unwrap_or(1.0))
+                    .unwrap_or(15.0)
+                    .max(1.0);
+                let max_vel = p_sde.and_then(|t| t.default_attributes.get(&37).copied()).unwrap_or(3_000.0).max(500.0);
+                if dist <= 150_000.0 {
+                    let move_ms = ((dist / max_vel) * 1000.0).round().clamp(200.0, 5_000.0) as i64;
+                    let p_end_ft = warp_ft + move_ms * 10_000;
+                    max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
+                    let _ = sys_handle.set_movement_mode(pid, eve_destiny::MovementMode::GotoDirection { direction: (new_pos - old_pos).normalize_or_zero() }).await;
+                    let _ = sys_handle.set_speed_fraction(pid, 1.0).await;
+                    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_MOVING as i64)]);
+                    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+                        if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = PROBE_STATE_MOVING; }
+                    }
+                } else {
+                    let accel_ms = 50.0 * (dist / 1_000.0).max(1.0).ln();
+                    let cruise_ms = (dist / (warp_au * AU_IN_METERS)) * 1000.0;
+                    let warp_ms = (accel_ms + cruise_ms).round().clamp(500.0, 30_000.0) as i64;
+                    let p_end_ft = warp_ft + warp_ms * 10_000;
+                    max_warp_end_ft = max_warp_end_ft.max(p_end_ft);
+                    let _ = sys_handle.set_movement_mode(pid, eve_destiny::MovementMode::new_warp(old_pos, new_pos, warp_au)).await;
+                    let from_t = PyRep::Tuple(vec![PyRep::Real(old_pos.x), PyRep::Real(old_pos.y), PyRep::Real(old_pos.z)]);
+                    let to_t = PyRep::Tuple(vec![PyRep::Real(new_pos.x), PyRep::Real(new_pos.y), PyRep::Real(new_pos.z)]);
+                    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_WARPING as i64)]);
+                    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeWarpStart", "charid", vec![PyRep::Integer(pid), from_t, to_t, PyRep::Integer(warp_ft), PyRep::Integer(warp_ms)]);
+                    if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
+                        if let Some(p) = probe_map.get_mut(&pid) { p.warp_end_ft = Some(p_end_ft); p.state = PROBE_STATE_WARPING; }
+                    }
                 }
             }
         }
@@ -829,7 +847,7 @@ async fn handle_request_scans(
                 let mut sum_covering_range_au = 0.0;
 
                 for probe in &active_probes {
-                    let p_pos = DVec3::from_array(probe.position);
+                    let p_pos = DVec3::from_array(probe.destination);
                     let dist = p_pos.distance(sig_pos);
                     let base_au = probe_base_scan_range_au(&ctx.sde, probe.probe_type_id);
                     let radius = probe.scan_range_m.max(base_au * AU_IN_METERS);
@@ -1079,8 +1097,17 @@ async fn handle_request_scans(
 
     let scan_probe_ids: Vec<PyRep> = active_probes.iter().map(|p| PyRep::Integer(p.probe_id)).collect();
     let idle_probes: Vec<PyRep> = active_probes.iter().map(|p| PyRep::keyval([("probeID", PyRep::Integer(p.probe_id)), ("destination", PyRep::Tuple(vec![PyRep::Real(p.destination[0]), PyRep::Real(p.destination[1]), PyRep::Real(p.destination[2])]))])).collect();
-    let astro_lvl: f64 = ctx.db.with_snapshot(|s| s.skills.get(&char_id).and_then(|m| m.get(&3412)).map(|sk| sk.level).unwrap_or(0)).min(5) as f64;
-    let scan_ms = (10_000.0 * (1.0 - 0.05 * astro_lvl)).round().max(2_000.0) as i64;
+    let scan_ms = ctx.db.with_snapshot(|s| {
+        let sk = s.skills.get(&char_id);
+        let a_lvl = sk.and_then(|m| m.get(&3412)).map(|x| x.level.min(5)).unwrap_or(0) as f64;
+        let acq_lvl = sk.and_then(|m| m.get(&25811)).map(|x| x.level.min(5)).unwrap_or(0) as f64;
+        let base_ms = 10_000.0_f64;
+        let ship_id = caller_ship_id.unwrap_or(0);
+        let mod_mult: f64 = s.items.values().filter(|i| {
+            i.location_id == ship_id && matches!(i.flag as u16, 11..=34 | 92..=94 | 125..=132) && s.module_online_states.get(&i.item_id).copied().unwrap_or(true)
+        }).filter_map(|i| ctx.sde.types.get(&i.type_id)?.default_attributes.get(&1906).copied()).fold(1.0, |acc, pct| acc * (1.0 + pct / 100.0).clamp(0.5, 1.5));
+        (base_ms * (1.0 - 0.05 * a_lvl) * (1.0 - 0.10 * acq_lvl) * mod_mult).round().clamp(1_500.0, 20_000.0) as i64
+    });
     let scan_end_ft = max_warp_end_ft + scan_ms * 10_000;
     if max_warp_end_ft == warp_ft {
         if let Ok(mut pm) = ctx.active_scanner_probes.write() {
@@ -1124,22 +1151,15 @@ async fn handle_recover_probes(
     let now_unix = ctx.now_unix();
     let (auto_returned, expired_lost) = expire_overdue_probes_for_char(ctx, char_id, now_unix).await;
 
-    let candidate_probes: Vec<crate::router::ActiveScannerProbe> =
-        if let Ok(mut map) = ctx.active_scanner_probes.write() {
-            let ids: Vec<i64> = map
-                .values()
-                .filter(|p| {
-                    p.owner_char_id == char_id
-                        && p.solar_system_id == sys_id
-                        && p.state > 0
-                        && (target_probe_ids.is_empty() || target_probe_ids.contains(&p.probe_id))
-                })
-                .map(|p| p.probe_id)
-                .collect();
-            ids.into_iter().filter_map(|id| map.remove(&id)).collect()
-        } else {
-            Vec::new()
-        };
+    let candidate_probes: Vec<crate::router::ActiveScannerProbe> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
+        let ids: Vec<i64> = map.values()
+            .filter(|p| p.owner_char_id == char_id && p.solar_system_id == sys_id && p.state > 0 && (target_probe_ids.is_empty() || target_probe_ids.contains(&p.probe_id)))
+            .map(|p| p.probe_id)
+            .collect();
+        ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+    } else {
+        Vec::new()
+    };
 
     let ship_id_opt = session.ship_id.or_else(|| candidate_probes.first().map(|p| p.ship_id));
     let ship_cargo_cap = ship_id_opt
@@ -1148,91 +1168,43 @@ async fn handle_recover_probes(
                 .ok()
                 .map(|fs| fs.ship.get_attribute(eve_sde::attr_ids::CAPACITY, &ctx.sde))
                 .filter(|&c| c > 0.0)
-                .or_else(|| {
-                    ctx.db.with_snapshot(|s| {
-                        s.items.get(&sid).and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))
-                    })
-                })
+                .or_else(|| ctx.db.with_snapshot(|s| s.items.get(&sid).and_then(|it| ctx.sde.types.get(&it.type_id).map(|t| t.capacity))))
         })
         .unwrap_or(400.0);
 
     let (recovered_probes, unrecovered_probes, to_launcher, to_cargo) = if !candidate_probes.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
-            let mut in_launcher = 0i32;
-            let mut in_cargo = 0i32;
-            let mut rec = Vec::new();
-            let mut unrec = Vec::new();
-            let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>,
-                             next_id: &mut i64,
-                             ship_id: i64,
-                             flag: InventoryFlag,
-                             p_type_id: u32,
-                             qty: i32,
-                             exclude_id: i64| {
-                if let Some(st) = items.values_mut().find(|i| {
-                    i.owner_id == char_id
-                        && i.location_id == ship_id
-                        && i.flag == flag
-                        && i.item_id != exclude_id
-                        && i.type_id == p_type_id
-                }) {
+            let (mut in_launcher, mut in_cargo) = (0i32, 0i32);
+            let (mut rec, mut unrec) = (Vec::new(), Vec::new());
+            let add_stack = |items: &mut HashMap<i64, eve_db::InventoryItemRecord>, next_id: &mut i64, ship_id: i64, flag: InventoryFlag, p_type_id: u32, qty: i32, exclude_id: i64| {
+                if let Some(st) = items.values_mut().find(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == flag && i.item_id != exclude_id && i.type_id == p_type_id) {
                     st.quantity += qty;
                     st.version += 1;
                 } else {
                     *next_id += 1;
                     let new_id = *next_id;
-                    items.insert(
-                        new_id,
-                        eve_db::InventoryItemRecord {
-                            item_id: new_id,
-                            type_id: p_type_id,
-                            owner_id: char_id,
-                            location_id: ship_id,
-                            flag,
-                            quantity: qty,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
+                    items.insert(new_id, eve_db::InventoryItemRecord {
+                        item_id: new_id, type_id: p_type_id, owner_id: char_id, location_id: ship_id,
+                        flag, quantity: qty, singleton: false, version: 1, ..Default::default()
+                    });
                 }
             };
-            let mut used_cargo_vol: f64 = if let Some(ship_id) = ship_id_opt {
-                snap.items
-                    .values()
+            let mut used_cargo_vol: f64 = ship_id_opt.map(|ship_id| {
+                snap.items.values()
                     .filter(|i| i.location_id == ship_id && i.flag == InventoryFlag::Cargo)
-                    .map(|i| {
-                        let uv = ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1);
-                        uv * (i.quantity.max(1) as f64)
-                    })
+                    .map(|i| ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1) * (i.quantity.max(1) as f64))
                     .sum()
-            } else {
-                0.0
-            };
+            }).unwrap_or(0.0);
             for p in candidate_probes {
-                let p_type_id = p.probe_type_id;
-                let ship_id = ship_id_opt.unwrap_or(p.ship_id);
-                let launcher_id = p.launcher_module_id;
+                let (p_type_id, ship_id, launcher_id) = (p.probe_type_id, ship_id_opt.unwrap_or(p.ship_id), p.launcher_module_id);
                 let mut placed_in_launcher = false;
                 if let Some(li) = snap.items.get(&launcher_id).cloned().filter(|i| i.location_id == ship_id) {
-                    let cur_clip: i32 = snap
-                        .items
-                        .values()
-                        .filter(|i| {
-                            i.owner_id == char_id
-                                && i.location_id == ship_id
-                                && i.flag == li.flag
-                                && i.item_id != launcher_id
-                        })
+                    let cur_clip: i32 = snap.items.values()
+                        .filter(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == li.flag && i.item_id != launcher_id)
                         .map(|i| i.quantity)
                         .sum();
-                    let matching_clip = snap.items.values().any(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == li.flag
-                            && i.item_id != launcher_id
-                            && i.type_id == p_type_id
-                    });
+                    let matching_clip = snap.items.values()
+                        .any(|i| i.owner_id == char_id && i.location_id == ship_id && i.flag == li.flag && i.item_id != launcher_id && i.type_id == p_type_id);
                     if cur_clip == 0 || (cur_clip < 8 && matching_clip) {
                         add_stack(&mut snap.items, &mut snap.next_entity_id, ship_id, li.flag, p_type_id, 1, launcher_id);
                         in_launcher += 1;
@@ -1342,18 +1314,25 @@ async fn handle_destroy_probe(ctx: &ServerContext, session: &mut SessionState, b
 /// Emits `OnProbeWarpEnd`, `OnProbeStateChanged`, and `OnSystemScanStopped` as probe timers elapse.
 pub fn tick_probe_warp_end(ctx: &ServerContext) {
     let now_ft = ctx.now_blueos_filetime_ticks();
-    let mut due_warps = Vec::new();
+    let mut due_arrivals = Vec::new();
     if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
         for p in probe_map.values_mut() {
             if p.warp_end_ft.is_some_and(|end_ft| now_ft >= end_ft) {
+                let was_warping = p.state == PROBE_STATE_WARPING;
                 p.warp_end_ft = None;
+                p.position = p.destination;
                 p.state = PROBE_STATE_SCANNING;
-                due_warps.push((p.owner_char_id, p.probe_id));
+                due_arrivals.push((p.owner_char_id, p.solar_system_id, p.probe_id, p.destination, was_warping));
             }
         }
     }
-    for (char_id, pid) in due_warps {
-        crate::services::notify_emitters_tournaments_anomalies::emit_probe_warp_end(ctx, char_id, pid);
+    for (char_id, sys_id, pid, dest, was_warping) in due_arrivals {
+        let sys_h = ctx.systems.get_or_spawn(sys_id);
+        sys_h.try_set_ball_position(pid, DVec3::from_array(dest));
+        sys_h.try_stop_ball(pid);
+        if was_warping {
+            crate::services::notify_emitters_tournaments_anomalies::emit_probe_warp_end(ctx, char_id, pid);
+        }
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_SCANNING as i64)]);
     }
     let due_scans = ctx.db.with_mut_snapshot(|snap| {
@@ -1365,7 +1344,13 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
     });
     for (char_id, p_ids, scan_probe_ids, rows, idle_probes, _) in due_scans {
         if let Ok(mut probe_map) = ctx.active_scanner_probes.write() {
-            for pid in &p_ids { if let Some(p) = probe_map.get_mut(pid) { if p.state == PROBE_STATE_SCANNING || p.state == PROBE_STATE_WARPING { p.state = PROBE_STATE_IDLE; } } }
+            for pid in &p_ids {
+                if let Some(p) = probe_map.get_mut(pid) {
+                    if matches!(p.state, PROBE_STATE_SCANNING | PROBE_STATE_WARPING | PROBE_STATE_MOVING) {
+                        p.state = PROBE_STATE_IDLE;
+                    }
+                }
+            }
         }
         for pid in p_ids {
             let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_IDLE as i64)]);

@@ -231,6 +231,7 @@ async fn activate_single_fighter_ability(
 
     let squad_mult = fighter.squadron_size.max(1) as f64;
 
+    let mut ewar_strength_applied = 0.0f64;
     if target_mode == "itemTargeted" {
         let Some(tid) = target_id else {
             return Some(Err(BridgeRpcError {
@@ -310,6 +311,7 @@ async fn activate_single_fighter_ability(
                 let fall = attr(2222).unwrap_or(0.0);
                 opt + 2.0 * fall
             }
+            14 | 17 => attr(76).unwrap_or(45_000.0),
             16 => attr(2239).unwrap_or(10_000.0),
             _ => {
                 if let Some(opt) = attr(2175).or_else(|| attr(2236)) {
@@ -485,9 +487,26 @@ async fn activate_single_fighter_ability(
             }
             // Support fighter EWAR abilities:
             2 | 18 => {
-                // Dromi I: Stasis webification (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
+                // Dromi I/II: Stasis webification (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
                 let base_web = attr(2184).map(|v| v.abs() / 100.0).unwrap_or(0.15);
                 let web_factor = (base_web * squad_mult).clamp(0.05, 0.90);
+                ewar_strength_applied = web_factor;
+                let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
+                let mut synth = eve_dogma::DogmaItemState::from_sde(synth_id, 526, &ctx.sde);
+                synth.base_attributes.insert(20, -(web_factor * 100.0));
+                synth.base_attributes.insert(54, 1_000_000_000.0);
+                ctx.upsert_projected_ewar_on_ship(
+                    fighter.parent_ship_id,
+                    tid,
+                    eve_dogma::ProjectedEwarEffect {
+                        source_module_id: synth_id,
+                        source_module_type_id: 526,
+                        charge_type_id: None,
+                        distance: 0.0,
+                        overloaded: false,
+                        effective_module: synth,
+                    },
+                );
                 let _ = sys_handle.set_speed_fraction(tid, (1.0 - web_factor).max(0.05)).await;
                 DamageVector::default()
             }
@@ -495,12 +514,14 @@ async fn activate_single_fighter_ability(
                 // Siren I: Warp disruption (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
                 let base_scram = attr(2205).or_else(|| attr(105)).unwrap_or(1.0) as i32;
                 let scram_pts = (base_scram * (fighter.squadron_size as i32)).max(1);
+                ewar_strength_applied = scram_pts as f64;
                 let _ = sys_handle.set_warp_scramble_strength(tid, scram_pts).await;
                 DamageVector::default()
             }
             11 => {
                 // Cenobite I: Energy neutralization (`feat:drones.support-fighter-abilities`)
-                let neut_gj = attr(2209).unwrap_or(200.0) * squad_mult;
+                let neut_gj = attr(2211).or_else(|| attr(2209)).unwrap_or(70.0) * squad_mult;
+                ewar_strength_applied = neut_gj;
                 if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
                     cs.capacitor = (cs.capacitor - neut_gj).max(0.0);
                     let _ = sys_handle.set_combat_state(tid, cs).await;
@@ -510,15 +531,106 @@ async fn activate_single_fighter_ability(
             }
             12 => {
                 // Scarab I: ECM jamming (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
-                let jam_strength = attr(2221).unwrap_or(5.0) * squad_mult;
-                if jam_strength > 5.0 {
+                let per_unit_jam = attr(2246)
+                    .or_else(|| attr(2247))
+                    .or_else(|| attr(2248))
+                    .or_else(|| attr(2249))
+                    .unwrap_or(2.4);
+                let jam_strength = per_unit_jam * squad_mult;
+                ewar_strength_applied = jam_strength;
+                let target_sensor = ctx
+                    .sde
+                    .types
+                    .get(&target_ball.type_id)
+                    .map(|t| {
+                        [208u16, 209, 210, 211]
+                            .into_iter()
+                            .filter_map(|aid| t.default_attributes.get(&aid).copied())
+                            .fold(0.0_f64, f64::max)
+                    })
+                    .unwrap_or(0.0);
+                let jam_threshold = if target_sensor > 0.0 {
+                    (target_sensor * 0.40).max(3.5)
+                } else {
+                    5.0
+                };
+                if jam_strength >= jam_threshold {
+                    let dur_s = (attr(2220).unwrap_or(10_000.0) / 1_000.0).max(5.0);
+                    let _ = sys_handle.apply_ecm_jam(tid, dur_s).await;
                     let _ = sys_handle.clear_target_locks(tid).await;
                 }
                 DamageVector::default()
             }
-            14 | 17 => {
-                // Cenotaph I: Target painting / sensor dampening (`feat:drones.fighter-support-cenotaph-scarab`)
-                let _ = sys_handle.set_speed_fraction(tid, 0.85).await;
+            14 => {
+                // SDE fighter ability 14: target painting projected onto the target ship
+                let paint_mult = 1.0 + 0.15 * squad_mult;
+                ewar_strength_applied = paint_mult;
+                let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
+                let mut synth = eve_dogma::DogmaItemState::from_sde(synth_id, 12709, &ctx.sde);
+                synth.base_attributes.insert(54, 1_000_000_000.0);
+                synth.base_attributes.insert(554, 15.0 * squad_mult);
+                ctx.upsert_projected_ewar_on_ship(
+                    fighter.parent_ship_id,
+                    tid,
+                    eve_dogma::ProjectedEwarEffect {
+                        source_module_id: synth_id,
+                        source_module_type_id: 12709,
+                        charge_type_id: None,
+                        distance: 0.0,
+                        overloaded: false,
+                        effective_module: synth,
+                    },
+                );
+                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
+                    let base_sig = cs.base_signature_radius.unwrap_or_else(|| cs.signature_radius.max(35.0));
+                    cs.base_signature_radius = Some(base_sig);
+                    cs.signature_radius = base_sig * paint_mult;
+                    let _ = sys_handle.set_combat_state(tid, cs).await;
+                }
+                DamageVector::default()
+            }
+            17 => {
+                // SDE fighter ability 17: sensor dampening projected onto the target ship
+                let damp_reduction = (0.15 * squad_mult).clamp(0.10, 0.65);
+                ewar_strength_applied = damp_reduction;
+                let synth_id = -(fighter_ball_id * 10 + slot_id as i64);
+                let mut synth = eve_dogma::DogmaItemState::from_sde(synth_id, 1968, &ctx.sde);
+                synth.base_attributes.insert(54, 1_000_000_000.0);
+                synth.base_attributes.insert(309, -(damp_reduction * 100.0));
+                synth.base_attributes.insert(566, -(damp_reduction * 100.0));
+                ctx.upsert_projected_ewar_on_ship(
+                    fighter.parent_ship_id,
+                    tid,
+                    eve_dogma::ProjectedEwarEffect {
+                        source_module_id: synth_id,
+                        source_module_type_id: 1968,
+                        charge_type_id: None,
+                        distance: 0.0,
+                        overloaded: false,
+                        effective_module: synth,
+                    },
+                );
+                let base_range = ctx
+                    .sde
+                    .types
+                    .get(&target_ball.type_id)
+                    .and_then(|t| t.default_attributes.get(&76).copied())
+                    .unwrap_or(50_000.0);
+                let damped_range = (base_range * (1.0 - damp_reduction)).max(2_500.0);
+                if let Ok(locks) = sys_handle.get_target_locks(tid).await {
+                    for mut lk in locks {
+                        lk.max_range_m = Some(damped_range);
+                        lk.lock_time_ms *= 1.0 + damp_reduction;
+                        let _ = sys_handle.remove_target_lock(tid, lk.target_id).await;
+                        if target_ball
+                            .position
+                            .distance(sys_handle.get_ball_position_sync(lk.target_id).unwrap_or(target_ball.position))
+                            <= damped_range
+                        {
+                            let _ = sys_handle.add_target_lock(tid, lk).await;
+                        }
+                    }
+                }
                 DamageVector::default()
             }
             _ => DamageVector::default(),
@@ -655,7 +767,11 @@ async fn activate_single_fighter_ability(
                     })
                     .unwrap_or(false);
                 if !was_mwd {
-                    let speed_bonus_pct = attr(2151).or_else(|| attr(2124)).unwrap_or(400.0);
+                    let speed_bonus_pct = if ability_id == 13 {
+                        attr(2224).unwrap_or(200.0)
+                    } else {
+                        attr(2151).or_else(|| attr(2124)).unwrap_or(400.0)
+                    };
                     let mut b = fighter_ball.clone();
                     b.max_velocity *= 1.0 + speed_bonus_pct / 100.0;
                     b.speed_fraction = 1.0;
@@ -664,7 +780,8 @@ async fn activate_single_fighter_ability(
                             if cs.base_signature_radius.is_none() {
                                 cs.base_signature_radius = Some(cs.signature_radius);
                             }
-                            cs.signature_radius *= 0.50;
+                            let sig_mult = (1.0 + attr(2225).unwrap_or(-80.0) / 100.0).clamp(0.10, 0.90);
+                            cs.signature_radius *= sig_mult;
                         }
                         let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
                     } else {
@@ -743,6 +860,8 @@ async fn activate_single_fighter_ability(
         ("abilityNameID", ability_name_id),
         ("tooltipTextID", tooltip_text_id),
         ("turretGraphicID", turret_graphic_id),
+        ("squadronSize", PyRep::Integer(fighter.squadron_size as i64)),
+        ("ewarStrength", PyRep::Real(ewar_strength_applied)),
         ("success", PyRep::Bool(true)),
     ])))
 }
@@ -857,7 +976,12 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
     }
 
     let now_unix = ctx.now_unix();
-    let cd_secs = slot_def.cooldown_seconds.unwrap_or(60.0).max(1.0) as u64;
+    let f_attrs = ctx.sde.types.get(&fighter.type_id).map(|t| &t.default_attributes);
+    let cd_secs = slot_def
+        .cooldown_seconds
+        .or_else(|| f_attrs.and_then(|m| m.get(&2349).copied()).map(|ms| ms / 1_000.0))
+        .unwrap_or(60.0)
+        .max(1.0) as u64;
     {
         let cds = ctx.fighter_cooldown_state.read().unwrap();
         if let Some(&ready_at) = cds.get(&(fighter_ball_id, slot_id)) {
@@ -907,8 +1031,32 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
         .unwrap()
         .insert((fighter_ball_id, slot_id), now_unix + cd_secs);
 
-    let bomb_dmg = DamageVector::new(1000.0, 1000.0, 1000.0, 1000.0);
-    let aoe_radius = 15_000.0f64;
+    let squad_scale = fighter.squadron_size.max(1) as f64;
+    let bomb_type_id = f_attrs
+        .and_then(|m| m.get(&2324).copied())
+        .map(|v| v as u32)
+        .unwrap_or(41_549);
+    let bomb_attrs = ctx.sde.types.get(&bomb_type_id).map(|t| &t.default_attributes);
+    let (b_em, b_th, b_ki, b_ex) = (
+        bomb_attrs.and_then(|m| m.get(&114).copied()).unwrap_or(0.0),
+        bomb_attrs.and_then(|m| m.get(&118).copied()).unwrap_or(0.0),
+        bomb_attrs.and_then(|m| m.get(&117).copied()).unwrap_or(0.0),
+        bomb_attrs.and_then(|m| m.get(&116).copied()).unwrap_or(0.0),
+    );
+    let bomb_dmg = if b_em + b_th + b_ki + b_ex > 0.0 {
+        DamageVector::new(
+            b_em * squad_scale,
+            b_th * squad_scale,
+            b_ki * squad_scale,
+            b_ex * squad_scale,
+        )
+    } else {
+        DamageVector::new(200.0 * squad_scale, 200.0 * squad_scale, 200.0 * squad_scale, 200.0 * squad_scale)
+    };
+    let aoe_radius = bomb_attrs
+        .and_then(|m| m.get(&107).copied().or_else(|| m.get(&99).copied()))
+        .filter(|&r| r > 0.0)
+        .unwrap_or(15_000.0);
 
     // Apply AoE damage to entities near target_point
     if let Ok(balls) = sys_handle.list_balls().await {
@@ -1151,12 +1299,13 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                 .types
                 .get(&fighter.type_id)
                 .and_then(|t| {
-                    t.default_attributes
-                        .get(&2151)
-                        .or_else(|| t.default_attributes.get(&2124))
-                        .copied()
+                    if ability_id == 13 {
+                        t.default_attributes.get(&2224).copied()
+                    } else {
+                        t.default_attributes.get(&2151).or_else(|| t.default_attributes.get(&2124)).copied()
+                    }
                 })
-                .unwrap_or(400.0);
+                .unwrap_or(if ability_id == 13 { 200.0 } else { 400.0 });
             if let Ok(Some((_, mut b))) = sys_handle.get_ball_snapshot(fighter_ball_id).await {
                 b.max_velocity /= 1.0 + speed_bonus_pct / 100.0;
                 if let Ok(Some(mut cs)) = sys_handle.get_combat_state(fighter_ball_id).await {
@@ -1171,9 +1320,12 @@ pub(crate) async fn handle_deactivate_fighter_ability_slots(
                 }
             }
         }
-    } else if slot_id == 0 {
-        if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
-            f.target_id = None;
+    } else {
+        ctx.remove_projected_ewar_by_module(fighter.parent_ship_id, -(fighter_ball_id * 10 + slot_id as i64));
+        if slot_id == 0 {
+            if let Some(f) = ctx.active_fighters.write().unwrap().get_mut(&fighter_ball_id) {
+                f.target_id = None;
+            }
         }
     }
 

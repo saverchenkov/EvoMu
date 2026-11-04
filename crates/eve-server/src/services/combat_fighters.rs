@@ -5,13 +5,22 @@
 use super::*;
 
 fn fighter_class_and_slot_attr(sde: &eve_sde::SdeRegistry, fighter_type_id: u32) -> Option<(u16, u16)> {
-    let attrs = &sde.types.get(&fighter_type_id)?.default_attributes;
+    let ty = sde.types.get(&fighter_type_id)?;
+    let attrs = &ty.default_attributes;
     for (f_attr, s_attr) in [(2212u16, 2217u16), (2213, 2218), (2214, 2219), (2740, 2737), (2741, 2738), (2742, 2739)] {
         if attrs.get(&f_attr).copied().unwrap_or(0.0) > 0.0 {
             return Some((f_attr, s_attr));
         }
     }
-    None
+    match ty.group_id {
+        1652 => Some((2212, 2217)),
+        1537 => Some((2213, 2218)),
+        1653 => Some((2214, 2219)),
+        4777 => Some((2740, 2737)),
+        4778 => Some((2741, 2738)),
+        4779 => Some((2742, 2739)),
+        _ => None,
+    }
 }
 
 fn check_fighter_class_slot_limit(
@@ -27,7 +36,7 @@ fn check_fighter_class_slot_limit(
         let code = if count_loaded_tubes { "CannotLoadFighterTubeNoTubesExistForClass" } else { "CannotLaunchFighterNotEnoughTubesAvailableForClass" };
         return Err(BridgeRpcError { code: code.into(), message: "UserError: No fighter launch tubes exist on this hull for that fighter class".into() });
     }
-    let is_same_class = |tid: u32| ctx.sde.types.get(&tid).and_then(|t| t.default_attributes.get(&f_attr).copied()).unwrap_or(0.0) > 0.0;
+    let is_same_class = |tid: u32| fighter_class_and_slot_attr(&ctx.sde, tid).is_some_and(|(fa, _)| fa == f_attr);
     let active_in_class = ctx.active_fighters.read().unwrap().values().filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned && is_same_class(f.type_id)).count();
     let loaded_in_class = if count_loaded_tubes {
         let loads: Vec<i64> = ctx.fighter_tube_loads.read().unwrap().iter().filter(|&(&(sid, tidx), _)| sid == ship_id && Some(tidx) != replace_tube_idx).map(|(_, &fid)| fid).collect();
@@ -69,9 +78,8 @@ pub async fn apply_damage_to_fighter_squadron(
         .get(&squad.type_id)
         .and_then(|t| {
             t.default_attributes
-                .get(&2214)
+                .get(&263)
                 .copied()
-                .or_else(|| t.default_attributes.get(&263).copied())
                 .or_else(|| t.default_attributes.get(&9).copied())
         })
         .unwrap_or(1_000.0)
@@ -113,6 +121,7 @@ pub async fn apply_damage_to_fighter_squadron(
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&squad.item_id);
         });
+        crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, fighter_ball_id);
         ctx.notify(crate::router::NotificationTarget::Character(owner_char_id), "OnFighterRemovedFromController", "charid", vec![PyRep::Integer(fighter_ball_id), PyRep::Integer(tube_flag)]);
     } else if lost > 0 {
         ctx.active_fighters.write().unwrap().insert(fighter_ball_id, squad.clone());
@@ -371,8 +380,17 @@ pub async fn handle_fighters(
                 .sde
                 .types
                 .get(&item.type_id)
-                .and_then(|t| t.default_attributes.get(&2215).copied())
-                .map(|v| v as u32)
+                .map(|t| {
+                    t.default_attributes
+                        .get(&2215)
+                        .copied()
+                        .map(|v| v as u32)
+                        .unwrap_or(match t.group_id {
+                            1537 | 4778 => 3,
+                            1653 | 4779 => 6,
+                            _ => 9,
+                        })
+                })
                 .unwrap_or(9);
 
             let loaded_fighter_id = if item.quantity > max_squadron_size as i32 {
@@ -843,30 +861,62 @@ pub async fn handle_fighters(
                 if sys_handle.get_ball_snapshot(f.ball_id).await.ok().flatten().is_none() {
                     continue;
                 }
-                ctx.active_fighters.write().unwrap().remove(&f.ball_id);
-                ctx.fighter_charge_state
-                    .write()
-                    .unwrap()
-                    .retain(|&(bid, _), _| bid != f.ball_id);
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.fighter_unit_damage_accum.remove(&f.ball_id);
-                });
+                let f_sde = ctx.sde.types.get(&f.type_id);
+                let base_refuel_s = f_sde
+                    .and_then(|t| t.default_attributes.get(&2426).copied())
+                    .map(|ms| (ms / 1_000.0).clamp(2.0, 10.0))
+                    .unwrap_or(3.0);
+                let charge_reload_s: f64 = {
+                    let used_map = ctx.fighter_charge_state.read().unwrap();
+                    ctx.sde
+                        .fighter_abilities_by_type
+                        .get(&f.type_id)
+                        .map(|slots| {
+                            slots
+                                .iter()
+                                .filter_map(|s| {
+                                    let ch = s.charges.as_ref()?;
+                                    let used = used_map.get(&(f.ball_id, s.slot_index as u32)).copied().unwrap_or(0);
+                                    let max_c = ch.charge_count.max(1) as f64;
+                                    (used > 0).then_some(((used as f64) / max_c) * (ch.rearm_time_seconds.max(1.0) * 0.45))
+                                })
+                                .sum()
+                        })
+                        .unwrap_or(0.0)
+                };
+                let accum_dmg = with_combat_runtime(ctx, |rt| rt.fighter_unit_damage_accum.get(&f.ball_id).copied().unwrap_or(0.0));
+                let missing_cs_hp = sys_handle
+                    .get_combat_state(f.ball_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|cs| {
+                        (cs.max_shield_hp - cs.shield_hp).max(0.0)
+                            + (cs.max_armor_hp - cs.armor_hp).max(0.0)
+                            + (cs.max_structure_hp - cs.structure_hp).max(0.0)
+                    })
+                    .unwrap_or(0.0);
+                let unit_hp = f_sde
+                    .and_then(|t| t.default_attributes.get(&263).copied().or_else(|| t.default_attributes.get(&9).copied()))
+                    .unwrap_or(1_000.0)
+                    .max(250.0);
+                let repair_s = (((accum_dmg + missing_cs_hp) / unit_hp).clamp(0.0, 4.0)) * 1.5;
 
-                // Refill missing fighters in the squadron from any reserve stack of the same `type_id` in the parent ship's FighterBay (`feat:drones.fighter-squadron-losses`)
-                let max_squadron_size = ctx
-                    .sde
-                    .types
-                    .get(&f.type_id)
-                    .and_then(|t| t.default_attributes.get(&2215).copied())
-                    .map(|v| v as i32)
+                ctx.active_fighters.write().unwrap().remove(&f.ball_id);
+                ctx.fighter_charge_state.write().unwrap().retain(|&(bid, _), _| bid != f.ball_id);
+                with_mut_combat_runtime(ctx, |rt| { rt.fighter_unit_damage_accum.remove(&f.ball_id); });
+
+                let max_squadron_size = f_sde
+                    .map(|t| {
+                        t.default_attributes.get(&2215).copied().map(|v| v as i32).unwrap_or(match t.group_id {
+                            1537 | 4778 => 3,
+                            1653 | 4779 => 6,
+                            _ => 9,
+                        })
+                    })
                     .unwrap_or(9);
-                let loaded_tube_ids: std::collections::HashSet<i64> = ctx
-                    .fighter_tube_loads
-                    .read()
-                    .unwrap()
-                    .values()
-                    .copied()
-                    .collect();
+                let loaded_tube_ids: std::collections::HashSet<i64> = ctx.fighter_tube_loads.read().unwrap().values().copied().collect();
+                let mut refilled_units = 0i32;
                 ctx.db.with_mut_snapshot(|snap| {
                     if let Some(main_it) = snap.items.get_mut(&f.item_id) {
                         main_it.location_id = ship_id;
@@ -875,58 +925,51 @@ pub async fn handle_fighters(
                         main_it.version += 1;
                     }
                     snap.item_positions.remove(&f.item_id);
-                    let cur_qty = f.squadron_size as i32;
-                    let mut needed = (max_squadron_size - cur_qty).max(0);
+                    let mut needed = (max_squadron_size - f.squadron_size as i32).max(0);
                     if needed > 0 {
                         let reserve_ids: Vec<i64> = snap
                             .items
                             .values()
                             .filter(|i| {
-                                i.location_id == ship_id
-                                    && i.flag == InventoryFlag::FighterBay
-                                    && i.owner_id == char_id
-                                    && i.type_id == f.type_id
-                                    && i.item_id != f.item_id
-                                    && !loaded_tube_ids.contains(&i.item_id)
-                                    && !snap.is_item_locked_in_contract_or_job(i.item_id)
-                                    && i.quantity > 0
+                                i.location_id == ship_id && i.flag == InventoryFlag::FighterBay && i.owner_id == char_id
+                                    && i.type_id == f.type_id && i.item_id != f.item_id && !loaded_tube_ids.contains(&i.item_id)
+                                    && !snap.is_item_locked_in_contract_or_job(i.item_id) && i.quantity > 0
                             })
                             .map(|i| i.item_id)
                             .collect();
-                        let mut refilled = 0;
                         for rid in reserve_ids {
-                            if needed <= 0 {
-                                break;
-                            }
+                            if needed <= 0 { break; }
                             if let Some(res_it) = snap.items.get_mut(&rid) {
                                 let take = res_it.quantity.min(needed);
                                 res_it.quantity -= take;
                                 needed -= take;
-                                refilled += take;
-                                if res_it.quantity <= 0 {
-                                    snap.items.remove(&rid);
-                                }
+                                refilled_units += take;
+                                if res_it.quantity <= 0 { snap.items.remove(&rid); }
                             }
                         }
-                        if refilled > 0 {
+                        if refilled_units > 0 {
                             if let Some(main_it) = snap.items.get_mut(&f.item_id) {
-                                main_it.quantity += refilled;
+                                main_it.quantity += refilled_units;
                                 main_it.version += 1;
                             }
                         }
                     }
                 });
 
+                let total_rearm_secs = (base_refuel_s + charge_reload_s + repair_s + (refilled_units as f64) * 2.5)
+                    .ceil()
+                    .clamp(3.0, 20.0) as u64;
                 ctx.fighter_tube_loads.write().unwrap().entry((ship_id, f.tube_index)).or_insert(f.item_id);
                 with_mut_combat_runtime(ctx, |rt| {
-                    rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), ctx.now_unix() + 15);
+                    rt.fighter_tube_rearm_until.insert((ship_id, f.tube_index), ctx.now_unix() + total_rearm_secs);
                 });
                 let tube_flag = (159 + f.tube_index) as i64;
                 let recalled_qty = ctx.db.with_snapshot(|s| s.items.get(&f.item_id).map(|i| i.quantity).unwrap_or(f.squadron_size as i32)) as i64;
                 let now_ft = ctx.now_blueos_filetime_ticks();
+                let end_ft = now_ft + (total_rearm_secs as i64) * 10_000_000;
                 session.push_notification("OnFighterRemovedFromController", vec![PyRep::Integer(f.ball_id), PyRep::Integer(tube_flag)]);
                 session.push_notification("OnFighterTubeContentUpdate", vec![PyRep::Integer(tube_flag), PyRep::Integer(f.item_id), PyRep::Integer(f.type_id as i64), PyRep::Integer(recalled_qty)]);
-                session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("REFUELING".into()), PyRep::Integer(now_ft), PyRep::Integer(now_ft + 150_000_000), PyRep::None]);
+                session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("REFUELING".into()), PyRep::Integer(now_ft), PyRep::Integer(end_ft), PyRep::None]);
                 let _ = sys_handle.remove_ball(f.ball_id).await;
                 recalled.push(PyRep::Integer(f.ball_id));
             }
@@ -1110,9 +1153,7 @@ pub async fn handle_fighters(
             handle_activate_fighter_ability_slots(ctx, session, args).await
         }
 
-        // rpc-lint: allow required by parity row feat:drones.fighter-heavy-long-range-bomb
-        ("fighterMgr", "ExecuteActivateAbilitySlotsOnPoint")
-        | ("fighterMgr", "ActivateAbilitySlotsAtPoint") => {
+        ("fighterMgr", "ActivateAbilitySlotsAtPoint") => {
             handle_activate_fighter_ability_slots_on_point(ctx, session, args).await
         }
 

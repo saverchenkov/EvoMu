@@ -176,8 +176,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut highsec_sess,
             "fighterMgr",
             None,
-            // rpc-lint: allow canonical fighter ability invocation
-            "ExecuteActivateAbilitySlotsOnPoint",
+            "ActivateAbilitySlotsAtPoint",
             &[
                 PyRep::Integer(hs_squad_ball_id),
                 PyRep::Integer(2),
@@ -228,8 +227,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
-            // rpc-lint: allow canonical fighter ability invocation
-            "ExecuteActivateAbilitySlotsOnPoint",
+            "CmdActivateAbilitySlots",
             &[
                 PyRep::Integer(squad_ball_id),
                 PyRep::Integer(2),
@@ -242,14 +240,13 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
         .expect_err("Target point > 100km must fail TargetOutOfRange");
     assert_eq!(range_err.code, "TargetOutOfRange");
 
-    // Fire point-targeted AoE bomb ability via ExecuteActivateAbilitySlotsOnPoint
+    // Fire point-targeted AoE bomb ability via ActivateAbilitySlotsAtPoint
     let bomb_res = ctx
         .dispatch_rpc(
             &mut nullsec_sess,
             "fighterMgr",
             None,
-            // rpc-lint: allow canonical fighter ability invocation
-            "ExecuteActivateAbilitySlotsOnPoint",
+            "ActivateAbilitySlotsAtPoint",
             &[
                 PyRep::Integer(squad_ball_id),
                 PyRep::Integer(2), // slot 2: Long-range heavy bomb
@@ -259,7 +256,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             None,
         )
         .await
-        .expect("ExecuteActivateAbilitySlotsOnPoint in nullsec");
+        .expect("ActivateAbilitySlotsAtPoint in nullsec");
     let PyRep::KeyVal(bomb_dict) = bomb_res else { panic!("expected KeyVal") };
     assert_eq!(bomb_dict.get("success"), Some(&PyRep::Bool(true)));
     assert_eq!(bomb_dict.get("remainingCharges").and_then(|v| v.as_i64()), Some(2)); // Started at 3, consumed 1
@@ -275,8 +272,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
-            // rpc-lint: allow canonical fighter ability invocation
-            "ExecuteActivateAbilitySlotsOnPoint",
+            "ActivateAbilitySlotsAtPoint",
             &[
                 PyRep::Integer(squad_ball_id),
                 PyRep::Integer(2),
@@ -323,7 +319,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
         &ctx,
         nullsec_sys,
         squad_ball_id,
-        DamageVector::new(250.0, 0.0, 0.0, 0.0),
+        DamageVector::new(4_000.0, 0.0, 0.0, 0.0),
     )
     .await;
     assert_eq!(lost, 1, "Expected 1 fighter unit destroyed");
@@ -367,8 +363,8 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
         .expect_err("Launch while rearming must fail");
     assert_eq!(relaunch_err.code, "TubeRearming");
 
-    // Advance clock by 15s: tube completes refueling, rearming, and repair
-    ctx.advance_secs(15);
+    // Advance clock past SDE per-charge bomb rearm + replacement + refuel timer
+    ctx.advance_secs(50);
 
     // Relaunch succeeds
     let relaunch_ok = ctx
@@ -389,8 +385,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
-            // rpc-lint: allow canonical fighter ability invocation
-            "ExecuteActivateAbilitySlotsOnPoint",
+            "ActivateAbilitySlotsAtPoint",
             &[
                 PyRep::Integer(new_squad_ball_id),
                 PyRep::Integer(2),
@@ -606,11 +601,11 @@ async fn test_support_fighter_abilities_and_space_superiority() {
     assert_eq!(evasive_dict.get("success"), Some(&PyRep::Bool(true)));
     assert_eq!(evasive_dict.get("cooldownSeconds").and_then(|v| v.as_f64()), Some(60.0));
 
-    // Verify velocity increased and signature radius reduced by 50%
+    // Verify velocity increased (+200% SDE attr 2224) and signature radius reduced by 80% (SDE attr 2225 = -80%)
     let boosted_b = sys_handle.get_ball_snapshot(equite_ball).await.unwrap().unwrap().1;
     let boosted_cs = sys_handle.get_combat_state(equite_ball).await.unwrap().unwrap();
-    assert!(boosted_b.max_velocity > initial_b.max_velocity, "Evasive Maneuvers must increase fighter velocity");
-    assert!((boosted_cs.signature_radius - initial_cs.signature_radius * 0.50).abs() < 1e-3, "Evasive Maneuvers must cut signature radius by 50%");
+    assert!(boosted_b.max_velocity > initial_b.max_velocity * 2.5, "Evasive Maneuvers must increase fighter velocity (+200% SDE)");
+    assert!((boosted_cs.signature_radius - initial_cs.signature_radius * 0.20).abs() < 1e-3, "Evasive Maneuvers must cut signature radius by 80% (SDE attr 2225)");
 
     // Verify cooldown prevents immediate re-activation
     let eq_cd_err = ctx.dispatch_rpc(&mut pilot_sess, "fighterMgr", None, "CmdActivateAbilitySlots", &[PyRep::Integer(equite_ball), PyRep::Integer(1), PyRep::None], &kw, None).await.unwrap_err();

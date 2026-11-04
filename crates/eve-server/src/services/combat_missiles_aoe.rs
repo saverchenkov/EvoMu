@@ -45,6 +45,7 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
 ) {
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let _ = sys_handle.remove_ball(ball_id).await;
+    crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, ball_id);
     with_mut_combat_runtime(ctx, |rt| {
         rt.active_drones_in_space.remove(&ball_id);
         rt.active_drone_miners.remove(&ball_id);
@@ -672,9 +673,6 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         }
                         if let Ok(Some((applied, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, sb_dmg, 5.0, now_unix).await {
                             hit_ball_ids.push(b.id);
-                            if ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&b.id)) {
-                                crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, b.id, sb_dmg).await;
-                            }
                             record_killmail_assist_action(ctx, b.id, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
                             if destroyed {
                                 if is_probe_b && !destroyed_probe_ids.contains(&b.id) {
@@ -910,9 +908,6 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                         let scaled_dmg = bomb_dmg.scaled(sig_factor);
                         if scaled_dmg.total() > 0.0 {
                             if let Ok(Some((app, destroyed, _))) = crate::services::station_structure::structure_lifecycle_rpc::apply_damage_structure_or_ball(ctx, &sys_handle, sys_id, char_id, b.id, scaled_dmg, 12.0, now_unix).await {
-                                if ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&b.id)) {
-                                    crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, b.id, scaled_dmg).await;
-                                }
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
                                 record_killmail_assist_action(

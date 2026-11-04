@@ -661,12 +661,24 @@ pub async fn apply_damage_structure_or_ball(
         return Ok(Some((0.0, false, false)));
     }
     let att_opt = (attacker_char_id > 0).then_some(attacker_char_id);
-    let hit = sys_handle
+    let was_fighter = ctx.active_fighters.read().is_ok_and(|af| af.contains_key(&target_ball_id));
+    let mut hit = sys_handle
         .apply_damage_with_attacker(target_ball_id, dmg, att_opt)
         .await
         .ok()
         .flatten()
         .map(|(a, d, _)| (a, d, d));
+    if was_fighter && dmg.total() > 0.0 {
+        let (_, _, wiped) =
+            crate::services::combat_crimewatch::apply_damage_to_fighter_squadron(ctx, sys_id, target_ball_id, dmg).await;
+        if let Some((a, d, d2)) = hit.as_mut() {
+            *d = *d || wiped;
+            *d2 = *d2 || wiped;
+            let _ = a;
+        } else if wiped {
+            hit = Some((dmg.total(), true, true));
+        }
+    }
     if let Some((applied, _, _)) = hit {
         if applied >= 1.0 && attacker_char_id > 0 {
             let is_ship = ctx.db.with_snapshot(|s| {

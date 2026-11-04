@@ -951,6 +951,7 @@ pub async fn destroy_specialized_npc_with_hint(
         .or_else(|| hint.map(|(_, p)| p))
         .unwrap_or(DVec3::ZERO);
     let _ = sys_handle.remove_ball(npc_ball_id).await;
+    crate::services::fleet_social::fleet_social_finder_tactical::clear_destroyed_target_tag(ctx, npc_ball_id);
 
     let npc_opt = with_mut_combat_ephemeral(ctx, |rt| {
         rt.npc_entities

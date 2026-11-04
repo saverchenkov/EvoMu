@@ -945,7 +945,80 @@ fn handle_fleet_member_preference(
     }
 }
 
-async fn handle_fleet_warp(
+pub(crate) fn compute_oriented_formation_offset(
+    formation_id: i64,
+    slot_idx: usize,
+    spacing: f64,
+    size: f64,
+    warp_dir: DVec3,
+    relative_delta: DVec3,
+) -> DVec3 {
+    if formation_id == 5 {
+        return relative_delta.clamp_length_max(24_000.0);
+    }
+    if slot_idx == 0 || formation_id == 0 {
+        return DVec3::ZERO;
+    }
+    let forward = if warp_dir.length_squared() > 1e-6 {
+        warp_dir.normalize()
+    } else {
+        DVec3::X
+    };
+    let ref_up = if forward.y.abs() < 0.99 { DVec3::Y } else { DVec3::Z };
+    let right = forward.cross(ref_up).normalize_or_zero();
+    let up = right.cross(forward).normalize_or_zero();
+    let sp = spacing.clamp(2_500.0, 20_000.0);
+    match formation_id {
+        1 => {
+            // Wall: 2D centered lattice in the (right, up) plane perpendicular to warp direction
+            const WALL_SLOTS: [(i32, i32); 12] = [
+                (1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (-1, 1), (1, -1), (-1, -1),
+                (2, 0), (-2, 0), (0, 2), (0, -2),
+            ];
+            let (c, r) = if slot_idx <= WALL_SLOTS.len() {
+                WALL_SLOTS[slot_idx - 1]
+            } else {
+                let k = (slot_idx - 1) as i32;
+                ((k % 5) - 2, (k / 5) - 1)
+            };
+            (right * (c as f64 * sp) + up * (r as f64 * sp)).clamp_length_max(24_000.0)
+        }
+        2 => {
+            // Sphere: 3D golden-angle Fibonacci shell around FC within command burst radius
+            let radius = size.max(sp).clamp(3_000.0, 22_000.0);
+            let k = slot_idx as f64;
+            let golden = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+            let y = 1.0 - ((2.0 * (k - 0.5)) / 12.0).clamp(0.1, 1.9);
+            let r_xz = (1.0 - y * y).max(0.0).sqrt();
+            let theta = golden * k;
+            let (ux, uy, uz) = (r_xz * theta.cos(), y, r_xz * theta.sin());
+            right * (ux * radius) + up * (uy * radius) + forward * (uz * radius)
+        }
+        3 => {
+            // Arrow: V-wedge trailing behind FC along -forward (`idx=1` -> `sp * sqrt(2)`)
+            let rank = slot_idx.div_ceil(2) as f64;
+            let side = if slot_idx % 2 == 1 { 1.0 } else { -1.0 };
+            (right * (side * rank * sp) - forward * (rank * sp)).clamp_length_max(24_000.0)
+        }
+        4 => {
+            // Diamond: 3D octahedron vertices around FC
+            let ring = ((slot_idx - 1) / 6 + 1) as f64;
+            let axis = match (slot_idx - 1) % 6 {
+                0 => right,
+                1 => -right,
+                2 => up,
+                3 => -up,
+                4 => forward,
+                _ => -forward,
+            };
+            (axis * (sp * ring)).clamp_length_max(24_000.0)
+        }
+        _ => DVec3::ZERO,
+    }
+}
+
+pub(crate) async fn handle_fleet_warp(
     ctx: &ServerContext,
     session: &SessionState,
     args: &[PyRep],
@@ -1025,9 +1098,19 @@ async fn handle_fleet_warp(
                 "initiate fleet warp",
             )?;
         }
+        let mut ordered_members: Vec<&FleetMemberRecord> = fleet.member_details.values().collect();
+        ordered_members.sort_by_key(|m| {
+            (
+                m.character_id != char_id,
+                role_to_i64(m.role),
+                m.wing_id.unwrap_or(0),
+                m.squad_id.unwrap_or(0),
+                m.character_id,
+            )
+        });
         let mut ships = Vec::new();
         let mut skipped = Vec::new();
-        for m in fleet.member_details.values() {
+        for m in ordered_members {
             let in_scope = match caller_member.role {
                 FleetRole::FleetCommander => true,
                 FleetRole::WingCommander => m.wing_id == caller_member.wing_id,
@@ -1082,6 +1165,13 @@ async fn handle_fleet_warp(
             2 => 10_000.0,
             _ => 0.0,
         })
+        .clamp(0.0, 100_000.0);
+
+    let formation_size = kwargs
+        .get("formationSize")
+        .and_then(|a| a.as_f64())
+        .or_else(|| stored_form.map(|(_, _, sz)| sz))
+        .unwrap_or(formation_spacing.max(10_000.0))
         .clamp(0.0, 100_000.0);
 
     if (32_000_000..=32_999_999).contains(&sys_id) {
@@ -1155,10 +1245,15 @@ async fn handle_fleet_warp(
         return Some(Err(e));
     }
 
+    let fleet_warp_dir = caller_pos
+        .map(|cp| (dest_pos - cp).normalize_or_zero())
+        .filter(|d| d.length_squared() > 1e-6)
+        .unwrap_or(DVec3::X);
+    let anchor_pos = dest_pos - fleet_warp_dir * min_range;
     let mut warped_members = Vec::new();
     let mut landing_positions = Vec::new();
     let mut ess_bubble_blocked = false;
-    for (idx, (member_char_id, ship_id)) in eligible_ship_ids.into_iter().enumerate() {
+    for (member_char_id, ship_id) in eligible_ship_ids {
         if let Ok(Some((_, ball))) = sys.get_ball_snapshot(ship_id).await {
             if ball.max_velocity <= 0.0 {
                 continue;
@@ -1188,17 +1283,17 @@ async fn handle_fleet_warp(
             }
             let dist = ball.position.distance(dest_pos);
             if dist >= WARP_MIN_DISTANCE_M {
-                let dir = (dest_pos - ball.position).normalize_or_zero();
-                let i = idx as f64;
-                let offset = match formation_id {
-                    1 => DVec3::new((idx % 5) as f64 * formation_spacing, 0.0, (idx / 5) as f64 * formation_spacing),
-                    2 => DVec3::new(i.cos() * formation_spacing, (i * 0.7).sin() * formation_spacing, i.sin() * formation_spacing),
-                    3 => DVec3::new(((idx + 1) / 2) as f64 * if idx % 2 == 0 { 1.0 } else { -1.0 } * formation_spacing, 0.0, -(((idx + 1) / 2) as f64) * formation_spacing),
-                    4 => DVec3::new((idx % 5) as f64 * formation_spacing, ((idx / 5) as f64) * formation_spacing, 0.0),
-                    5 => caller_pos.map(|cp| (ball.position - cp).clamp_length_max(100_000.0)).unwrap_or(DVec3::ZERO),
-                    _ => DVec3::ZERO,
-                };
-                let landing = dest_pos - dir * min_range + offset;
+                let slot_idx = warped_members.len();
+                let rel_delta = caller_pos.map(|cp| ball.position - cp).unwrap_or(DVec3::ZERO);
+                let offset = compute_oriented_formation_offset(
+                    formation_id,
+                    slot_idx,
+                    formation_spacing,
+                    formation_size,
+                    fleet_warp_dir,
+                    rel_delta,
+                );
+                let landing = anchor_pos + offset;
                 if crate::services::pve_ess_reserve_banks::check_ess_warp_destination_allowed(
                     ctx, sys_id, dest_pos, landing,
                 )
