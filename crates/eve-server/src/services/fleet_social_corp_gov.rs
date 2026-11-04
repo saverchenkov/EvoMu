@@ -61,6 +61,58 @@ fn save_corp_rec_ads(ctx: &ServerContext, ads: &[CorpRecruitmentAd]) {
     }
 }
 
+fn handle_corp_rec_queries(
+    ctx: &ServerContext,
+    corp_id: i64,
+    now_unix: u64,
+    method: &str,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let filter_corp = match method {
+        "GetRecruitmentAdsByCorpID" => args.first().and_then(|a| a.as_i64()).or(Some(corp_id)),
+        "GetRecruitmentAdsForCorporation" => Some(corp_id),
+        _ => None,
+    };
+    let filter_ad = if method == "GetRecruitmentAd" { args.first().and_then(|a| a.as_i64()) } else { None };
+    let (filter_mask, filter_lang, min_members, max_members) = if method == "SearchCorpAds" {
+        let mask = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("typeMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
+        let lang = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").or_else(|| kwargs.get("languageMask")).and_then(|a| a.as_i64())).unwrap_or(0) as u64;
+        let min_m = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("minMembers").and_then(|a| a.as_i64()));
+        let max_m = args.get(3).and_then(|a| a.as_i64()).or_else(|| kwargs.get("maxMembers").and_then(|a| a.as_i64()));
+        (mask, lang, min_m, max_m)
+    } else { (0, 0, None, None) };
+    let ads = load_corp_rec_ads(ctx);
+    let mut rows = Vec::new();
+    for ad in &ads {
+        if method == "SearchCorpAds" {
+            if now_unix >= ad.expiry_unix || (filter_mask != 0 && (ad.type_mask & filter_mask) == 0) || (filter_lang != 0 && (ad.lang_mask & filter_lang) == 0) {
+                continue;
+            }
+            let member_count = ctx.db.with_snapshot(|s| s.corporations.get(&ad.corp_id).map(|c| c.members.len()).unwrap_or(1) as i64);
+            if min_members.is_some_and(|min_m| member_count < min_m) || max_members.is_some_and(|max_m| max_m > 0 && member_count > max_m) {
+                continue;
+            }
+        } else {
+            if filter_corp.is_some_and(|fc| fc != ad.corp_id) || filter_ad.is_some_and(|fa| fa != ad.ad_id) {
+                continue;
+            }
+        }
+        rows.push(vec![
+            PyRep::Integer(ad.ad_id),
+            PyRep::Integer(ad.corp_id),
+            PyRep::String(ad.title.clone()),
+            PyRep::String(ad.description.clone()),
+            PyRep::Integer(ad.type_mask as i64),
+            PyRep::Integer(ad.recruiter_id),
+        ]);
+    }
+    Some(Ok(PyRep::rowset(
+        vec!["adID", "corporationID", "title", "description", "typeMask", "recruiterID"],
+        rows,
+    )))
+}
+
 pub(super) fn handle_add_corporation(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1051,12 +1103,14 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::rowset(vec!["corporationID", "startDate", "endDate"], rows)))
         }
 
-        ("corpRegistry", "AddBulletin")
-        | ("corpRegistry", "UpdateBulletinOrder")
-        | ("corpRegistry", "GetBulletins")
-        | ("corpRegistry", "DeleteBulletin") => {
-            handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args)
-        }
+        // parity: rpc:corpRegistry.AddBulletin
+        ("corpRegistry", "AddBulletin") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corpRegistry.UpdateBulletinOrder
+        ("corpRegistry", "UpdateBulletinOrder") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corpRegistry.GetBulletins
+        ("corpRegistry", "GetBulletins") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
+        // parity: rpc:corpRegistry.DeleteBulletin
+        ("corpRegistry", "DeleteBulletin") => handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args),
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {
@@ -1167,67 +1221,14 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::List(recruiters)))
         }
 
-        ("corpRecProxy", "GetRecruitmentAdsForCorporation")
-        | ("corpRecProxy", "GetRecruitmentAdsByCorpID")
-        | ("corpRecProxy", "GetRecruitmentAd")
-        | ("corpRecProxy", "SearchCorpAds") => {
-            let filter_corp = match method {
-                "GetRecruitmentAdsByCorpID" => args.first().and_then(|a| a.as_i64()).or(Some(corp_id)),
-                "GetRecruitmentAdsForCorporation" => Some(corp_id),
-                _ => None,
-            };
-            let filter_ad = if method == "GetRecruitmentAd" { args.first().and_then(|a| a.as_i64()) } else { None };
-            let (filter_mask, filter_lang, min_members, max_members) = if method == "SearchCorpAds" {
-                let mask = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("typeMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
-                let lang = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").and_then(|a| a.as_i64())).or_else(|| kwargs.get("languageMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
-                let min_m = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("minMembers").and_then(|a| a.as_i64()));
-                let max_m = args.get(3).and_then(|a| a.as_i64()).or_else(|| kwargs.get("maxMembers").and_then(|a| a.as_i64()));
-                (mask, lang, min_m, max_m)
-            } else { (0, 0, None, None) };
-            let ads = load_corp_rec_ads(ctx);
-            let mut rows = Vec::new();
-            for ad in &ads {
-                if method == "SearchCorpAds" {
-                    if now_unix >= ad.expiry_unix {
-                        continue;
-                    }
-                    if filter_mask != 0 && (ad.type_mask & filter_mask) == 0 {
-                        continue;
-                    }
-                    if filter_lang != 0 && (ad.lang_mask & filter_lang) == 0 {
-                        continue;
-                    }
-                    let member_count = ctx.db.with_snapshot(|s| {
-                        s.corporations.get(&ad.corp_id).map(|c| c.members.len()).unwrap_or(1) as i64
-                    });
-                    if let Some(min_m) = min_members {
-                        if member_count < min_m { continue; }
-                    }
-                    if let Some(max_m) = max_members {
-                        if max_m > 0 && member_count > max_m { continue; }
-                    }
-                } else {
-                    if filter_corp.is_some_and(|fc| fc != ad.corp_id) {
-                        continue;
-                    }
-                    if filter_ad.is_some_and(|fa| fa != ad.ad_id) {
-                        continue;
-                    }
-                }
-                rows.push(vec![
-                    PyRep::Integer(ad.ad_id),
-                    PyRep::Integer(ad.corp_id),
-                    PyRep::String(ad.title.clone()),
-                    PyRep::String(ad.description.clone()),
-                    PyRep::Integer(ad.type_mask as i64),
-                    PyRep::Integer(ad.recruiter_id),
-                ]);
-            }
-            Some(Ok(PyRep::rowset(
-                vec!["adID", "corporationID", "title", "description", "typeMask", "recruiterID"],
-                rows,
-            )))
-        }
+        // parity: rpc:corpRecProxy.GetRecruitmentAdsForCorporation
+        ("corpRecProxy", "GetRecruitmentAdsForCorporation") => handle_corp_rec_queries(ctx, corp_id, now_unix, method, args, kwargs),
+        // parity: rpc:corpRecProxy.GetRecruitmentAdsByCorpID
+        ("corpRecProxy", "GetRecruitmentAdsByCorpID") => handle_corp_rec_queries(ctx, corp_id, now_unix, method, args, kwargs),
+        // parity: rpc:corpRecProxy.GetRecruitmentAd
+        ("corpRecProxy", "GetRecruitmentAd") => handle_corp_rec_queries(ctx, corp_id, now_unix, method, args, kwargs),
+        // parity: rpc:corpRecProxy.SearchCorpAds
+        ("corpRecProxy", "SearchCorpAds") => handle_corp_rec_queries(ctx, corp_id, now_unix, method, args, kwargs),
 
         ("corpRecProxy", "DeleteRecruitmentAd") => {
             let has_role = ctx.db.with_snapshot(|snap| {

@@ -500,22 +500,54 @@ pub async fn handle(
             }
             res
         }
-        ("tourneyMgr", "OverrideDroneRestrict")
-        | ("tourneyMgr", "OverrideLockRestrict")
-        | ("tourneyMgr", "OverrideMoveRestrict")
-        | ("tourneyMgr", "OverrideWarpRestrict") => {
+        // parity: rpc:tourneyMgr.OverrideDroneRestrict
+        ("tourneyMgr", "OverrideDroneRestrict") => {
             let caller_cid = require_cid!(session);
             let (target_mid, restricted) = if args.len() >= 2 { (extract_id(args, 0), extract_bool(args, 1)) } else { (None, extract_bool(args, 0)) };
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
-                match method {
-                    "OverrideDroneRestrict" => m.drone_restrict = restricted,
-                    "OverrideLockRestrict" => m.lock_restrict = restricted,
-                    "OverrideMoveRestrict" => m.move_restrict = restricted,
-                    _ => m.warp_restrict = restricted,
-                }
+                m.drone_restrict = restricted;
+                save_store(snap, &store, now_unix);
+                Ok(PyRep::Bool(true))
+            })
+        }
+        // parity: rpc:tourneyMgr.OverrideLockRestrict
+        ("tourneyMgr", "OverrideLockRestrict") => {
+            let caller_cid = require_cid!(session);
+            let (target_mid, restricted) = if args.len() >= 2 { (extract_id(args, 0), extract_bool(args, 1)) } else { (None, extract_bool(args, 0)) };
+            ctx.db.try_with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let m = store.resolve_match_mut(target_mid)?;
+                check_referee_auth(session, caller_cid, m)?;
+                m.lock_restrict = restricted;
+                save_store(snap, &store, now_unix);
+                Ok(PyRep::Bool(true))
+            })
+        }
+        // parity: rpc:tourneyMgr.OverrideMoveRestrict
+        ("tourneyMgr", "OverrideMoveRestrict") => {
+            let caller_cid = require_cid!(session);
+            let (target_mid, restricted) = if args.len() >= 2 { (extract_id(args, 0), extract_bool(args, 1)) } else { (None, extract_bool(args, 0)) };
+            ctx.db.try_with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let m = store.resolve_match_mut(target_mid)?;
+                check_referee_auth(session, caller_cid, m)?;
+                m.move_restrict = restricted;
+                save_store(snap, &store, now_unix);
+                Ok(PyRep::Bool(true))
+            })
+        }
+        // parity: rpc:tourneyMgr.OverrideWarpRestrict
+        ("tourneyMgr", "OverrideWarpRestrict") => {
+            let caller_cid = require_cid!(session);
+            let (target_mid, restricted) = if args.len() >= 2 { (extract_id(args, 0), extract_bool(args, 1)) } else { (None, extract_bool(args, 0)) };
+            ctx.db.try_with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let m = store.resolve_match_mut(target_mid)?;
+                check_referee_auth(session, caller_cid, m)?;
+                m.warp_restrict = restricted;
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             })

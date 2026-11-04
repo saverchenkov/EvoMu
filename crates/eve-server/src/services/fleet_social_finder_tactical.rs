@@ -302,6 +302,25 @@ pub async fn handle_fleet_watchlist_ops(
     ])))
 }
 
+fn require_fleet_advert_auth(ctx: &ServerContext, session: &SessionState) -> Result<(i64, i64), BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let fleet_id = session.fleet_id.ok_or_else(|| BridgeRpcError {
+        code: "NotInFleet".into(),
+        message: "Character is not in a fleet".into(),
+    })?;
+    let is_auth = ctx.db.with_snapshot(|snap| {
+        snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
+            || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
+    });
+    if !is_auth {
+        return Err(BridgeRpcError {
+            code: "FleetRoleDenied".into(),
+            message: "Only fleet boss or advert leader can modify advert".into(),
+        });
+    }
+    Ok((char_id, fleet_id))
+}
+
 pub(super) async fn handle_finder_and_tactical(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -512,59 +531,9 @@ pub(super) async fn handle_finder_and_tactical(
             }
         }
 
-        ("fleetProxy", "AddFleetFinderAdvert")
-        | ("fleetProxy", "UpdateAdvertInfo")
-        | ("fleetProxy", "UpdateAdvertAllowedEntities")
-        | ("fleetProxy", "UpdateFleetAdvertWithNewLeader") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(fleet_id) = session.fleet_id else {
-                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
-            };
-            let is_auth = ctx.db.with_snapshot(|snap| {
-                snap.fleets.get(&fleet_id).is_some_and(|fl| fl.boss_id == char_id)
-                    || ctx.fleet_extras.lock().unwrap().adverts.get(&fleet_id).is_some_and(|ad| ad.leader_id == char_id)
-            });
-            if !is_auth {
-                return Some(Err(BridgeRpcError { code: "FleetRoleDenied".into(), message: "Only fleet boss or advert leader can modify advert".into() }));
-            }
-            if method == "UpdateAdvertAllowedEntities" {
-                let mut entities = HashSet::new();
-                if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
-                    for v in list {
-                        if let Some(id) = v.as_i64() { entities.insert(id); }
-                    }
-                }
-                if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
-                    ad.allowed_entities = entities.clone();
-                }
-                return Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("allowedCount", PyRep::Integer(entities.len() as i64))])));
-            }
-            if method == "UpdateFleetAdvertWithNewLeader" {
-                let new_leader = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-                let is_member = ctx.db.with_snapshot(|snap| {
-                    snap.fleets.get(&fleet_id).is_some_and(|fl| fl.members.contains(&new_leader) || fl.member_details.contains_key(&new_leader))
-                });
-                if !is_member {
-                    return Some(Err(BridgeRpcError { code: "CustomError".into(), message: "New advert leader must be an active member of the fleet".into() }));
-                }
-                if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
-                    ad.leader_id = new_leader;
-                }
-                return Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("leaderID", PyRep::Integer(new_leader))])));
-            }
-            if method == "UpdateAdvertInfo" {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
-                if let Some(ad) = ex.adverts.get_mut(&fleet_id) {
-                    if let Some(s) = args.first().and_then(|a| a.as_str()) { ad.fleet_name = s.to_string(); }
-                    if let Some(s) = args.get(1).and_then(|a| a.as_str()) { ad.description = s.to_string(); }
-                    if let Some(s) = args.get(2).and_then(|a| a.as_i64()) { ad.invite_scope = s as u8; }
-                    return Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("fleetName", PyRep::String(ad.fleet_name.clone())),
-                        ("description", PyRep::String(ad.description.clone())),
-                    ])));
-                }
-            }
+        // parity: rpc:fleetProxy.AddFleetFinderAdvert
+        ("fleetProxy", "AddFleetFinderAdvert") => {
+            let (char_id, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let (fleet_name, description, invite_scope, auto_join, min_standing, min_security) =
                 if let Some(advert_obj) = args.first().filter(|a| a.dict_get("fleetName").is_some() || a.dict_get("inviteScope").is_some() || a.dict_get("joinNeedsApproval").is_some()).or_else(|| kwargs.get("advertKeyVal").or_else(|| kwargs.get("advert"))) {
                     let fn_name = advert_obj.dict_get("fleetName").and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
@@ -607,6 +576,55 @@ pub(super) async fn handle_finder_and_tactical(
                 ("minStanding", PyRep::Real(min_standing)),
                 ("minSecurity", PyRep::Real(min_security)),
             ])))
+        }
+
+        // parity: rpc:fleetProxy.UpdateAdvertInfo
+        ("fleetProxy", "UpdateAdvertInfo") => {
+            let (_, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let mut ex = ctx.fleet_extras.lock().unwrap();
+            if let Some(ad) = ex.adverts.get_mut(&fleet_id) {
+                if let Some(s) = args.first().and_then(|a| a.as_str()) { ad.fleet_name = s.to_string(); }
+                if let Some(s) = args.get(1).and_then(|a| a.as_str()) { ad.description = s.to_string(); }
+                if let Some(s) = args.get(2).and_then(|a| a.as_i64()) { ad.invite_scope = s as u8; }
+                Some(Ok(PyRep::keyval([
+                    ("fleetID", PyRep::Integer(fleet_id)),
+                    ("fleetName", PyRep::String(ad.fleet_name.clone())),
+                    ("description", PyRep::String(ad.description.clone())),
+                ])))
+            } else {
+                Some(Err(BridgeRpcError { code: "AdvertNotFound".into(), message: "Fleet advert not found".into() }))
+            }
+        }
+
+        // parity: rpc:fleetProxy.UpdateAdvertAllowedEntities
+        ("fleetProxy", "UpdateAdvertAllowedEntities") => {
+            let (_, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let mut entities = HashSet::new();
+            if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
+                for v in list {
+                    if let Some(id) = v.as_i64() { entities.insert(id); }
+                }
+            }
+            if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
+                ad.allowed_entities = entities.clone();
+            }
+            Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("allowedCount", PyRep::Integer(entities.len() as i64))])))
+        }
+
+        // parity: rpc:fleetProxy.UpdateFleetAdvertWithNewLeader
+        ("fleetProxy", "UpdateFleetAdvertWithNewLeader") => {
+            let (char_id, fleet_id) = match require_fleet_advert_auth(ctx, session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let new_leader = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let is_member = ctx.db.with_snapshot(|snap| {
+                snap.fleets.get(&fleet_id).is_some_and(|fl| fl.members.contains(&new_leader) || fl.member_details.contains_key(&new_leader))
+            });
+            if !is_member {
+                return Some(Err(BridgeRpcError { code: "CustomError".into(), message: "New advert leader must be an active member of the fleet".into() }));
+            }
+            if let Some(ad) = ctx.fleet_extras.lock().unwrap().adverts.get_mut(&fleet_id) {
+                ad.leader_id = new_leader;
+            }
+            Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("leaderID", PyRep::Integer(new_leader))])))
         }
 
         ("fleetProxy", "GetAvailableFleetAds") | ("fleetProxy", "GetMyFleetFinderAdvert") => {
