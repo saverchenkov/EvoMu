@@ -1338,6 +1338,8 @@ async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     let dummy_t = 740_300_099_i64;
     let _ = tama_h.spawn_ball_with_combat(Ball { id: dummy_t, type_id: 48_090, position: DVec3::new(30_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_type_combat_state(48_090)).await;
     let _ = tama_h.add_target_lock(c_ship, eve_destiny::TargetLock { target_id: dummy_t, lock_time_ms: 0.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await;
+    let _ = ctx.dispatch_rpc(&mut sess1, "dogmaIM", None, "Deactivate", &[PyRep::Integer(turret_id), PyRep::String("projectileFired".into())], &kw, None).await;
+    ctx.advance_secs(10);
     eve_server::services::combat_crimewatch::dispatch_combat_rpc(&ctx, &mut sess1, "dogmaIM", "Activate", &[PyRep::Integer(turret_id), PyRep::String("projectileFired".into()), PyRep::Integer(dummy_t)], &kw).await.expect("Restored turret hits 30km outside Dark weather");
 }
 }
