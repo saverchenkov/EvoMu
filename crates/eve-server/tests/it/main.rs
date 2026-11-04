@@ -91,10 +91,10 @@ mod esi_universe_sov_complete;
 mod features_parity_complete_part1;
 mod features_parity_complete_part2;
 mod features_parity_complete_part3;
+mod esi_universe_sov_complete_part2;
+mod features_parity_complete;
 mod industry;
 mod industry_pi_complete;
-mod industry_pi_complete_part2;
-mod industry_pi_complete_part3;
 mod inventory_ships_fitting_complete;
 mod inventory_ships_ledger_rows;
 mod live_playtest_fixes;
@@ -161,6 +161,7 @@ mod quasar_cosmetics_skinr_state;
 mod quasar_fw_occupancy;
 mod quasar_sov_equinox_hub;
 mod quasar_sov_pirate_insurgency;
+mod quasar_sov_pirate_remediation;
 mod sovereignty_mercenary_dens;
 mod fw_warzone_insurgency;
 mod sovereignty_equinox_gameplay;
@@ -248,8 +249,7 @@ mod rpc_fw_insurgency_crimewatch;
 mod rpc_milestones_telemetry_load;
 mod d6_persistence_owner_notes_lp_ids;
 mod d6_persistence_social_notifications;
-mod d6_persistence_corp_crimewatch_warfare;
-mod d6_persistence_corp_crimewatch_warfare_part2;
+mod persistence_corp_crimewatch_warfare;
 mod d6_persistence_industry_market_pve_ship;
 mod fleet_chat_biomass_lifecycle;
 mod sp6_logoff_and_server_tick;
@@ -317,11 +317,12 @@ pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_clos
 mod plan_c3_c4_combat_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
-mod fleet_tactical_movement_closure;
+mod fleet_and_wings_management;
 mod crimewatch_hostility;
 mod combat_r4_regressions;
 mod combat_r5_regressions;
 mod structures_mining_r4_regressions;
+mod ships_modules_closure;
 mod ess_reserve_main_concurrency;
 mod mining_structures_sov_r5_regressions;
 mod skills_fitting_corp_r5_regressions;
@@ -363,6 +364,16 @@ mod quasar_corporation_goals_and_freelance;
 mod quasar_daily_goals_and_ess_bounties;
 mod journey_t6_part1;
 mod journey_t6_part2;
+mod esi_market_industry_pi_part2;
+mod esi_market_industry_pi_part3;
+mod esi_market_industry_pi_part4;
+mod esi_p6_closure;
+mod esi_p6_closure_part2;
+mod quasar_daily_goals_remediation;
+mod quasar_q3_q9_closure;
+mod quasar_q5_q6_closure;
+mod quasar_b34_closure;
+mod journey_t6;
 mod wormhole_statics_lifecycle;
 mod wormhole_special_systems;
 mod pochven_wormholes_travel;
@@ -537,6 +548,15 @@ pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
 pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
 #[allow(unused_imports)]
 pub(crate) use crimewatch_hostility as crimewatch_closure;
+pub(crate) use combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2;
+#[allow(unused_imports)]
+pub(crate) use crimewatch_hostility as plan_c7_crimewatch_closure;
+#[allow(unused_imports)]
+pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
+#[allow(unused_imports)]
+pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
+#[allow(unused_imports)]
+pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
 #[allow(unused_imports)]
 pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
 #[allow(unused_imports)]

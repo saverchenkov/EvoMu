@@ -1,14 +1,16 @@
-//! Integration tests for fleet movement opt-ins, formations, setups, boss handover, join requests, watchlist, broadcasts, and target tagging.
-//!
-//! Parity rows:
-//! - `feat:fleet.member-movement-optins`
-//! - `feat:fleet.fleet-setups`
-//! - `feat:fleet.join-requests`
-//! - `feat:fleet.watchlist-broadcast-tracking`
-//! - `feat:fleet.broadcast-scope-and-filter`
-//! - `feat:fleet.takes-fleet-warp-toggle`
+//! Integration tests for fleet and wings management, formations, broadcasts, watchlist, and tagging.
 
-#![forbid(unsafe_code)]
+pub(crate) mod fleet_tactical_movement {
+// Integration tests for fleet movement opt-ins, formations, setups, boss handover, join requests, watchlist, broadcasts, and target tagging.
+// 
+// Parity rows:
+// - `feat:fleet.member-movement-optins`
+// - `feat:fleet.fleet-setups`
+// - `feat:fleet.join-requests`
+// - `feat:fleet.watchlist-broadcast-tracking`
+// - `feat:fleet.broadcast-scope-and-filter`
+// - `feat:fleet.takes-fleet-warp-toggle`
+
 
 use std::collections::HashMap;
 
@@ -600,4 +602,6 @@ async fn test_fleet_boss_handover_closure() {
     let _ = eve_server::services::fleet_social::fleet_social_notify::remove_character_from_all_fleets(&ctx, boss_id);
     assert_eq!(ctx.db.with_snapshot(|s| s.fleets.get(&fid).unwrap().boss_id), fc_id);
     assert!(ctx.drain_notifications_for_char(fc_id).iter().any(|n| n.event == "OnFleetMemberChanged"));
+}
+
 }
