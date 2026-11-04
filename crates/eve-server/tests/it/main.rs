@@ -614,3 +614,4 @@ mod parity_esi_calendar_closure;
 mod parity_plan_remaining_closure;
 mod parity_quasar_three_closure;
 mod parity_crimewatch_closure;
+mod parity_discovery_planet_closure;
