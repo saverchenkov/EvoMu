@@ -167,3 +167,54 @@ pub(crate) fn handle_apply_ecm_burst(
     }
     jammed
 }
+
+impl super::SystemHandle {
+    pub fn try_remove_module_cycle(&self, ship_id: BallId, module_id: i64) {
+        let (removed, db_opt) = {
+            let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let deact_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let super::SystemActorState {
+                active_module_cycles,
+                base_scramble_strengths,
+                base_core_strengths,
+                db_opt,
+                ..
+            } = &mut *st;
+            let mut removed_cycle = None;
+            if let Some(pos) = active_module_cycles.iter().position(|c| c.ship_id == ship_id && c.module_id == module_id) {
+                let rem = active_module_cycles.remove(pos);
+                super::cycles::cleanup_removed_module_cycle(&mut bp, &rem, db_opt);
+                super::cycles_tackle::reconcile_tackle_and_bubbles(
+                    &mut bp,
+                    active_module_cycles,
+                    base_scramble_strengths,
+                    base_core_strengths,
+                    db_opt,
+                    deact_guard.as_ref(),
+                );
+                removed_cycle = Some(rem);
+            }
+            super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+            {
+                let mut mod_guard = self.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
+                mod_guard.clear();
+                for c in active_module_cycles.iter() {
+                    mod_guard.insert(c.ship_id);
+                }
+            }
+            (removed_cycle, db_opt.clone())
+        };
+        if let Some(removed) = removed {
+            if let Some(db_ref) = db_opt {
+                if !db_ref.is_write_locked_by_current_thread() {
+                    db_ref.with_mut_snapshot(|snap| {
+                        snap.module_active_states.remove(&removed.module_id);
+                        snap.module_active_charges.remove(&removed.module_id);
+                    });
+                }
+            }
+        }
+    }
+}
+

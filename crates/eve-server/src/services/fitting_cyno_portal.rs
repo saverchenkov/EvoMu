@@ -121,7 +121,7 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
     let mut removed_bridges = Vec::new();
     st.bridges.retain(|&(k, _), br| {
         if k == key && br.bridger_ship_id == ship_id {
-            removed_bridges.push((br.origin_system_id, br.portal_ball_id));
+            removed_bridges.push((br.origin_system_id, br.bridger_ship_id, br.portal_module_id, br.portal_ball_id));
             false
         } else {
             true
@@ -140,9 +140,13 @@ pub fn on_cyno_ship_destroyed(ctx: &ServerContext, ship_id: i64) {
         }
     }
     drop(st);
-    for (sys_id, ball_id) in removed_bridges {
+    for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in removed_bridges {
+        let sys = ctx.systems.get_or_spawn(sys_id);
         if ball_id != 0 {
-            ctx.systems.get_or_spawn(sys_id).try_remove_ball(ball_id);
+            sys.try_remove_ball(ball_id);
+        }
+        if portal_mod_id != 0 {
+            sys.try_remove_module_cycle(bridger_ship_id, portal_mod_id);
         }
     }
 }
@@ -897,6 +901,7 @@ pub(super) async fn caller_in_space(
     session: &SessionState,
     allow_bubbled: bool,
 ) -> Result<(i64, i64, u32, Ball), BridgeRpcError> {
+    sweep_expired_cyno_beacons(ctx);
     let (_, char_id) = ServerContext::require_character(session)?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;

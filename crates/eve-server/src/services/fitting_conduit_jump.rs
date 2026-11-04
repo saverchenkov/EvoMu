@@ -103,7 +103,7 @@ pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
     let mut expired_bridges = Vec::new();
     st.bridges.retain(|&(k, _), br| {
         if k == ctx_k && br.expires_at_unix <= now {
-            expired_bridges.push((br.origin_system_id, br.portal_ball_id));
+            expired_bridges.push((br.origin_system_id, br.bridger_ship_id, br.portal_module_id, br.portal_ball_id));
             false
         } else {
             true
@@ -111,9 +111,13 @@ pub fn sweep_expired_cyno_beacons(ctx: &ServerContext) {
     });
     drop(st);
     cleanup_expired_beacons(ctx, expired_beacons);
-    for (sys_id, ball_id) in expired_bridges {
+    for (sys_id, bridger_ship_id, portal_mod_id, ball_id) in expired_bridges {
+        let sys = ctx.systems.get_or_spawn(sys_id);
         if ball_id != 0 {
-            ctx.systems.get_or_spawn(sys_id).try_remove_ball(ball_id);
+            sys.try_remove_ball(ball_id);
+        }
+        if portal_mod_id != 0 {
+            sys.try_remove_module_cycle(bridger_ship_id, portal_mod_id);
         }
     }
 }
