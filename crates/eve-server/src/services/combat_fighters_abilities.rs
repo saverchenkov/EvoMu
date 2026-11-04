@@ -486,8 +486,8 @@ async fn activate_single_fighter_ability(
             // Support fighter EWAR abilities:
             2 | 18 => {
                 // Dromi I: Stasis webification (`feat:drones.fighter-support-cenotaph-scarab`, `feat:drones.support-fighter-abilities`)
-                let base_web = attr(2186).unwrap_or(0.40);
-                let web_factor = (base_web * (squad_mult / 3.0)).clamp(0.10, 0.90);
+                let base_web = attr(2184).map(|v| v.abs() / 100.0).unwrap_or(0.15);
+                let web_factor = (base_web * squad_mult).clamp(0.05, 0.90);
                 let _ = sys_handle.set_speed_fraction(tid, (1.0 - web_factor).max(0.05)).await;
                 DamageVector::default()
             }
@@ -500,10 +500,11 @@ async fn activate_single_fighter_ability(
             }
             11 => {
                 // Cenobite I: Energy neutralization (`feat:drones.support-fighter-abilities`)
-                let _neut_gj = attr(2209).unwrap_or(200.0) * squad_mult;
-                with_mut_combat_runtime(ctx, |_rt| {
-                    // Drain capacitor
-                });
+                let neut_gj = attr(2209).unwrap_or(200.0) * squad_mult;
+                if let Ok(Some(mut cs)) = sys_handle.get_combat_state(tid).await {
+                    cs.capacitor = (cs.capacitor - neut_gj).max(0.0);
+                    let _ = sys_handle.set_combat_state(tid, cs).await;
+                }
                 let _ = sys_handle.apply_damage_with_attacker(tid, DamageVector::default(), Some(char_id)).await;
                 DamageVector::default()
             }
