@@ -202,3 +202,4 @@ pub mod wallet_services_ext;
 pub mod wormhole_lifecycle_ops;
 pub mod wormhole_pve_escalations;
 pub mod wormhole_pve_seeding;
+pub mod quasar_vendors_and_war_services;
