@@ -277,6 +277,62 @@ fn neg_rows(ctx: &ServerContext, war_id: i64, kind: NegKind) -> Vec<Vec<PyRep>> 
 
 const NEG_COLUMNS: [&str; 7] = ["negotiationID", "warID", "ownerID", "iskValue", "message", "status", "timeEffective"];
 
+fn handle_war_registry_unbind(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_id_opt: Option<i64>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let bound_id = bound_id_opt.unwrap_or(0) as u64;
+    if bound_id > 0 {
+        if let Err(e) = ctx.release_bound_object(session, bound_id) {
+            return Some(Err(e));
+        }
+    }
+    Some(Ok(PyRep::None))
+}
+
+fn handle_set_mutual_war_invites_blocked(
+    ctx: &ServerContext,
+    _session: &SessionState,
+    has_war_director_role: bool,
+    my_corp: i64,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if !has_war_director_role {
+        return err("CorpRoleDenied", "Changing mutual war invite settings requires CEO or Director role");
+    }
+    let blocked = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.war_state
+            .blocked_mutual_invites
+            .insert(my_corp, blocked);
+    });
+    Some(Ok(PyRep::Bool(true)))
+}
+
+fn handle_war_stat_unbind(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_id_opt: Option<i64>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let bound_id = bound_id_opt.unwrap_or(0) as u64;
+    if bound_id > 0 {
+        if let Err(e) = ctx.release_bound_object(session, bound_id) {
+            return Some(Err(e));
+        }
+    }
+    Some(Ok(PyRep::None))
+}
+
+fn handle_war_stat_set_session_check(
+    _ctx: &ServerContext,
+    _session: &SessionState,
+    _args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    // Session check registration for war statistic monitoring; returns None
+    Some(Ok(PyRep::None))
+}
+
 pub(super) fn handle_wars(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -512,15 +568,8 @@ pub(super) fn handle_wars(
             }
         }
 
-        ("warRegistry", "UnBind") | ("warRegistry", "Unbind") => {
-            let bound_id = arg_i64(0).unwrap_or(0) as u64;
-            if bound_id > 0 {
-                if let Err(e) = ctx.release_bound_object(session, bound_id) {
-                    return Some(Err(e));
-                }
-            }
-            Some(Ok(PyRep::None))
-        }
+        ("warRegistry", "UnBind") => handle_war_registry_unbind(ctx, session, arg_i64(0)),
+        ("warRegistry", "Unbind") => handle_war_registry_unbind(ctx, session, arg_i64(0)),
 
         ("warRegistry", "timeDeclared") => {
             let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
@@ -913,16 +962,7 @@ pub(super) fn handle_wars(
         }
 
         ("mutualWarInviteMgr", "SetInvitesBlockedByPlayer") => {
-            if !has_war_director_role {
-                return err("CorpRoleDenied", "Changing mutual war invite settings requires CEO or Director role");
-            }
-            let blocked = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.war_state
-                    .blocked_mutual_invites
-                    .insert(my_corp, blocked);
-            });
-            Some(Ok(PyRep::Bool(true)))
+            handle_set_mutual_war_invites_blocked(ctx, session, has_war_director_role, my_corp, args)
         }
 
         ("mutualWarInviteMgr", "SendInviteByPlayer") => {
@@ -1045,19 +1085,11 @@ pub(super) fn handle_wars(
             }
         }
 
-        ("warStatisticMgr", "UnBind") | ("warStatisticMgr", "Unbind") => {
-            let bound_id = arg_i64(0).unwrap_or(0) as u64;
-            if bound_id > 0 {
-                if let Err(e) = ctx.release_bound_object(session, bound_id) {
-                    return Some(Err(e));
-                }
-            }
-            Some(Ok(PyRep::None))
-        }
+        ("warStatisticMgr", "UnBind") => handle_war_stat_unbind(ctx, session, arg_i64(0)),
+        ("warStatisticMgr", "Unbind") => handle_war_stat_unbind(ctx, session, arg_i64(0)),
 
         ("warStatisticMgr", "SetSessionCheck") => {
-            // const-ok: session check registration returns None
-            Some(Ok(PyRep::None))
+            handle_war_stat_set_session_check(ctx, session, args)
         }
 
         ("warStatisticMgr", "GetBaseInfo") => {
