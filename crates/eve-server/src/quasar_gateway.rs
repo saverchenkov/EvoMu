@@ -888,50 +888,27 @@ impl PublicGatewayRouter {
 
         // 4. Validate payload presence and lookup schema in 1,455-file QuasarDescriptorRegistry
         let Some(payload_any) = &request.payload else {
-            return build_response(
-                STATUS_BAD_REQUEST,
-                "Missing google.protobuf.Any payload in eve_public.Request".to_string(),
-                None,
-            );
+            return build_response(STATUS_BAD_REQUEST, "Missing google.protobuf.Any payload in eve_public.Request".to_string(), None);
         };
         let norm_type = payload_any.normalized_type_name().to_string();
-        let has_route = self.handlers.read().unwrap().contains_key(&norm_type);
-        if self.descriptors.get_message(&norm_type).is_none() && !has_route {
-            return build_response(
-                STATUS_NOT_FOUND,
-                format!("Unknown Quasar protobuf message type '{norm_type}'"),
-                None,
-            );
+        let has_descriptor = self.descriptors.get_message(&norm_type).is_some();
+        let has_handler = self.handlers.read().unwrap_or_else(|e| e.into_inner()).contains_key(&norm_type);
+        if !has_descriptor && !has_handler {
+            return build_response(STATUS_NOT_FOUND, format!("Unknown Quasar protobuf message type '{norm_type}'"), None);
         }
 
         // Enforce server-side active-character and admin/GM role policies
         if Self::requires_active_character(&norm_type) && session_cid.is_none() {
-            return build_response(
-                STATUS_FORBIDDEN,
-                format!("Active character selection required for character-scoped request '{norm_type}'"),
-                None,
-            );
+            return build_response(STATUS_FORBIDDEN, format!("Active character selection required for character-scoped request '{norm_type}'"), None);
         }
         if Self::requires_admin_role(&norm_type) && !session.has_gm_role() {
-            return build_response(
-                STATUS_FORBIDDEN,
-                format!("Admin/GM role required for administrative gateway request '{norm_type}'"),
-                None,
-            );
+            return build_response(STATUS_FORBIDDEN, format!("Admin/GM role required for administrative gateway request '{norm_type}'"), None);
         }
 
-        let dyn_msg = match self.descriptors.decode_dynamic(&norm_type, &payload_any.value) {
+        let dyn_msg = match self.descriptors.decode_dynamic_or_wire(&norm_type, &payload_any.value) {
             Ok(m) => m,
-            Err(_) if has_route => {
-                crate::services::quasar_b2_services::decode_wire_dynamic(&norm_type, &payload_any.value)
-            }
-            Err(e) => {
-                return build_response(
-                    STATUS_BAD_REQUEST,
-                    format!("Invalid protobuf wire payload for '{norm_type}': {e}"),
-                    None,
-                );
-            }
+            Err(_) if has_handler => crate::services::quasar_b2_services::decode_wire_dynamic(&norm_type, &payload_any.value),
+            Err(e) => return build_response(STATUS_BAD_REQUEST, format!("Invalid protobuf wire payload for '{norm_type}': {e}"), None),
         };
 
         // 5. Bounded idempotency key deduplication (with TTL + max-entry eviction)
@@ -972,6 +949,9 @@ impl PublicGatewayRouter {
         let pre_notice_len = self.pending_notices.read().unwrap_or_else(|e| e.into_inner()).len();
         let (status_code, status_message, rsp_payload) = match handler_opt {
             Some(handler) => match handler(&auth_ctx, payload_any, &dyn_msg) {
+                Ok(any_out) if any_out.type_url.is_empty() && any_out.value.is_empty() => {
+                    (STATUS_OK, "OK".to_string(), None)
+                }
                 Ok(any_out) => (STATUS_OK, "OK".to_string(), Some(any_out)),
                 Err((code, msg)) => (code, msg, None),
             },

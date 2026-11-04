@@ -166,6 +166,21 @@ async fn test_quasar_cdn_client_and_constellation() {
     let dyn_cp = reg.decode_dynamic("eve.cdn.Checkpoint", &cp_buf).expect("decode eve.cdn.Checkpoint");
     assert_eq!(get_str(&dyn_cp, 1), Some("https://cdn.evomu.org/checkpoints/v1/meta.bin"));
 
+    // GlobalConfig ejabberd_client_address and desktop flatbuffer CDN fallback without HTTPS errors (#288, #298, #304)
+    let gcfg = eve_server::bug_reporting::build_client_global_config(&ctx, Some("127.0.0.1"));
+    assert!(gcfg.contains_key("ejabberd_client_address"));
+    let evetech_ach_req = EvePublicRequest {
+        correlation_uuid: vec![1, 2, 3, 4],
+        payload: Some(GoogleAny {
+            type_url: "type.evetech.net/eve_public.achievement.definition.api.cdn.GetLatestRequest".to_string(),
+            value: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let evetech_ach_rsp = ctx.quasar_gateway.handle_public_request(&sess, &evetech_ach_req, None, false, 1_700_000_000);
+    assert_eq!(evetech_ach_rsp.status_code, STATUS_OK);
+    assert!(evetech_ach_rsp.payload.is_none());
+
     // 2. Quasar Client (feat:quasar.client)
     // Descriptor registry verification for client domain (4 proto files)
     let client_files = [

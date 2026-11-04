@@ -507,7 +507,20 @@ pub fn register_achievement_handlers(
     let mgr_cdn = Arc::clone(&manager);
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |_ctx, any, dyn_msg| {
+            if dyn_msg.get(1).is_none()
+                && any.type_url.starts_with("type.evetech.net/")
+                && std::env::var("EVOMU_CDN_BASE_URL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .is_none()
+            {
+                return Ok(GoogleAny {
+                    type_url: String::new(),
+                    value: Vec::new(),
+                });
+            }
+
             let no_local = dyn_msg.get(2).and_then(|v| match v {
                 DynamicValue::Bool(b) => Some(*b),
                 DynamicValue::Uint64(u) => Some(*u != 0),

@@ -1043,24 +1043,18 @@ fn compute_title_def_crc(defs: &[TitleDefinitionRecord], ver: [u32; 3], lang: &s
 fn handle_title_def_get_latest(
     state: &SkinrCosmeticsState,
     req_type: &str,
+    any_type_url: &str,
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
-    let lang = sub(dyn_msg, 3)
-        .and_then(|l| str_of(l, 1))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "en-us".to_string());
+    if dyn_msg.get(1).is_none() && any_type_url.starts_with("type.evetech.net/") && std::env::var("EVOMU_CDN_BASE_URL").ok().filter(|s| !s.trim().is_empty()).is_none() {
+        return Ok(GoogleAny { type_url: String::new(), value: Vec::new() });
+    }
+    let lang = sub(dyn_msg, 3).and_then(|l| str_of(l, 1)).filter(|s| !s.is_empty()).unwrap_or_else(|| "en-us".to_string());
     let data = state.data.read().unwrap_or_else(|e| e.into_inner());
     let ver = data.title_def_version;
     let crc = compute_title_def_crc(&data.title_definitions, ver, &lang);
-    let cdn_base = std::env::var("EVOMU_CDN_BASE_URL")
-        .ok()
-        .map(|s| s.trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
-    let url = format!(
-        "{cdn_base}/cosmetics/character/title/definitions/v{}.{}.{}/{}.json",
-        ver[0], ver[1], ver[2], lang
-    );
+    let cdn_base = std::env::var("EVOMU_CDN_BASE_URL").ok().map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "http://127.0.0.1:26004/cdn".to_string());
+    let url = format!("{cdn_base}/cosmetics/character/title/definitions/v{}.{}.{}/{}.json", ver[0], ver[1], ver[2], lang);
 
     let mut crc_msg = Vec::new();
     encode_varint_field(1, crc as u64, &mut crc_msg);
@@ -1248,8 +1242,8 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<SkinrCosmeticsState>) {
         "eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
         "eve.cosmetic.character.title.definition.api.GetLatestRequest",
     ] {
-        reg!(req_name, move |s: &Arc<SkinrCosmeticsState>, _ctx, _any: &GoogleAny, d| {
-            handle_title_def_get_latest(s, req_name, d)
+        reg!(req_name, move |s: &Arc<SkinrCosmeticsState>, _ctx, any: &GoogleAny, d| {
+            handle_title_def_get_latest(s, req_name, &any.type_url, d)
         });
     }
     for req_name in [
