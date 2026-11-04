@@ -666,7 +666,9 @@ pub(crate) fn resolve_upwell_dock_target(
             format!("Character {char_id} is denied docking access by structure {dock_id} ACL"),
         ));
     }
-    let is_capital_ship = matches!(ship_group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
+    // Freighters (513) and Jump Freighters (902) dock at every Upwell hull (SDE Raitaru/Astrahus text:
+    // "docking capabilities for subcapital ships and freighters"), so they are not capital-sized here.
+    let is_capital_ship = matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594);
     let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
     let is_rorqual = ship_type_id == 28_352 || ship_group_id == 883;
     let hull_allowed = match st.type_id {

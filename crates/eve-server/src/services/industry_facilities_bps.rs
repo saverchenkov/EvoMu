@@ -57,6 +57,8 @@ pub struct IndustryJobCostMeta {
     pub output_location_id: i64,
     #[serde(default)]
     pub location_id: i64,
+    #[serde(default)] pub output_flag: Option<eve_db::InventoryFlag>,
+    #[serde(default)] pub ready_before_offline: bool,
     #[serde(default)]
     pub completed_unix: Option<u64>,
     #[serde(default)]
@@ -106,6 +108,15 @@ pub fn is_structure_industry_service_online_for_bp(
 
 /// Synchronizes active/paused industry jobs when a host structure loses or regains fuel/service (`feat:industry.job-pause-on-service-offline`, `feat:lifecycle.industry-pause-and-many`).
 pub fn sync_industry_job_pause_states(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64) {
+    sync_industry_job_pause_states_at(snap, now_unix, false);
+}
+
+/// Runs the sync at the exact moment a service module is offlined/onlined: jobs finished by then stay deliverable.
+pub fn sync_industry_job_pause_states_on_service_change(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64) {
+    sync_industry_job_pause_states_at(snap, now_unix, true);
+}
+
+fn sync_industry_job_pause_states_at(snap: &mut eve_db::WorldStateSnapshot, now_unix: u64, offline_is_now: bool) {
     let job_ids: Vec<i64> = snap.industry_jobs.keys().copied().collect();
     for jid in job_ids {
         let Some((facility_id, activity_id, status, start_unix, duration_seconds)) = snap
@@ -121,17 +132,20 @@ pub fn sync_industry_job_pause_states(snap: &mut eve_db::WorldStateSnapshot, now
         let online = is_structure_industry_service_online(snap, facility_id, activity_id);
         if !online && status == "Active" {
             let ready_at = start_unix.saturating_add(duration_seconds);
-            let offline_opt = resolve_facility_offline_moment_opt(snap, facility_id);
-            if let Some(offline_moment) = offline_opt {
-                if ready_at <= offline_moment {
-                    continue;
+            let offline_opt = resolve_facility_offline_moment_opt(snap, facility_id).or(offline_is_now.then_some(now_unix));
+            let mut meta = load_job_cost_meta(snap, jid).unwrap_or_default();
+            if meta.ready_before_offline { continue; }
+            if offline_opt.is_some_and(|m| ready_at <= m) {
+                if offline_is_now {
+                    meta.ready_before_offline = true;
+                    save_job_cost_meta(snap, jid, &meta);
                 }
+                continue;
             }
             let pause_ts = offline_opt.unwrap_or(now_unix).max(start_unix);
             if let Some(j_mut) = snap.industry_jobs.get_mut(&jid) {
                 j_mut.status = "Paused".into();
             }
-            let mut meta = load_job_cost_meta(snap, jid).unwrap_or_default();
             if meta.paused_at_unix.is_none() {
                 meta.paused_at_unix = Some(pause_ts);
                 save_job_cost_meta(snap, jid, &meta);
@@ -220,7 +234,7 @@ pub(crate) fn resolve_caller_facility_id(
         .unwrap_or(0)
 }
 
-/// DERIVED: Default NPC station industry facility tax rate (0.25%), shared with ESI `/industry/facilities` and `InstallJob`.
+/// Fixed NPC station industry facility tax rate (0.25% per `wiki:Manufacturing`), shared with ESI `/industry/facilities` and `InstallJob`.
 pub(crate) const NPC_STATION_INDUSTRY_TAX_RATE: f64 = 0.0025;
 
 pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) -> HashMap<u8, f64> {
@@ -228,7 +242,7 @@ pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) 
 }
 
 pub fn load_facility_taxes_with_sde(
-    sde: Option<&eve_sde::SdeRegistry>,
+    _sde: Option<&eve_sde::SdeRegistry>,
     snap: &eve_db::WorldStateSnapshot,
     facility_id: i64,
 ) -> HashMap<u8, f64> {
@@ -245,10 +259,8 @@ pub fn load_facility_taxes_with_sde(
             .is_some_and(|it| matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836));
     let default_rate = if is_upwell {
         0.05
-    } else if sde.is_some_and(|s| s.stations.contains_key(&facility_id)) {
-        NPC_STATION_INDUSTRY_TAX_RATE
     } else {
-        0.10
+        NPC_STATION_INDUSTRY_TAX_RATE
     };
     [1_u8, 3, 4, 5, 8, 9]
         .into_iter()
@@ -359,30 +371,15 @@ pub fn compute_blueprint_eiv_per_run_with_snap(
     if sum > 0.0 {
         sum
     } else {
-        10_000.0
+        ctx.sde.types.get(&bp.product_type_id).map(|t| t.base_price.max(0.0)).unwrap_or(0.0)
     }
 }
 
-pub fn compute_industry_job_costs(
-    ctx: &ServerContext,
-    snap: &eve_db::WorldStateSnapshot,
-    bp_type_id: TypeId,
-    activity_id: u8,
-    runs: u32,
-    facility_id: i64,
-) -> Result<IndustryJobCostMeta, BridgeRpcError> {
+pub fn compute_industry_job_costs(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, bp_type_id: TypeId, activity_id: u8, runs: u32, facility_id: i64) -> Result<IndustryJobCostMeta, BridgeRpcError> {
     compute_industry_job_costs_for_char(ctx, snap, None, bp_type_id, activity_id, runs, facility_id, false)
 }
 
-pub fn compute_industry_job_costs_ext(
-    ctx: &ServerContext,
-    snap: &eve_db::WorldStateSnapshot,
-    bp_type_id: TypeId,
-    activity_id: u8,
-    runs: u32,
-    facility_id: i64,
-    is_alpha_clone: bool,
-) -> Result<IndustryJobCostMeta, BridgeRpcError> {
+pub fn compute_industry_job_costs_ext(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, bp_type_id: TypeId, activity_id: u8, runs: u32, facility_id: i64, is_alpha_clone: bool) -> Result<IndustryJobCostMeta, BridgeRpcError> {
     compute_industry_job_costs_for_char(ctx, snap, None, bp_type_id, activity_id, runs, facility_id, is_alpha_clone)
 }
 
@@ -433,6 +430,21 @@ pub fn compute_industry_job_costs_for_char(
     facility_id: i64,
     is_alpha_clone: bool,
 ) -> Result<IndustryJobCostMeta, BridgeRpcError> {
+    compute_industry_job_costs_with_step(ctx, snap, char_id, bp_type_id, activity_id, 0, runs, facility_id, is_alpha_clone)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_industry_job_costs_with_step(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: Option<i64>,
+    bp_type_id: TypeId,
+    activity_id: u8,
+    start_step: usize,
+    runs: u32,
+    facility_id: i64,
+    is_alpha_clone: bool,
+) -> Result<IndustryJobCostMeta, BridgeRpcError> {
     let Some(bp) = ctx.sde.blueprints.get(&bp_type_id) else {
         return Err(BridgeRpcError {
             code: "UnknownBlueprint".into(),
@@ -440,8 +452,7 @@ pub fn compute_industry_job_costs_for_char(
         });
     };
     let eiv_per_run = compute_blueprint_eiv_per_run_with_snap(ctx, Some(snap), bp, activity_id);
-    let activity_eiv_factor = if matches!(activity_id, 3 | 4 | 5 | 8) { 0.02 } else { 1.0 };
-    let total_eiv = eiv_per_run * (runs as f64) * activity_eiv_factor;
+    let total_eiv = eiv_per_run * crate::services::industry_pi::compute_activity_ptv_multiplier(activity_id, start_step, runs);
     let fallback_sys = char_id
         .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
         .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
@@ -1306,7 +1317,7 @@ pub fn handle_industry_facilities_bps(
             });
             match res {
                 Ok((sys_id, kv)) => {
-                    crate::services::notify_emitters_batch3::emit_facilities_updated(
+                    crate::services::notify_emitters_character_services::emit_facilities_updated(
                         ctx,
                         Some(sys_id),
                         char_id,

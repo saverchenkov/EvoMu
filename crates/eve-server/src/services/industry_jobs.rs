@@ -15,7 +15,7 @@ use crate::formulas::{
 };
 use crate::router::ServerContext;
 use crate::services::industry_pi::{
-    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, compute_industry_job_costs_for_char,
+    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE,
     emit_industry_job, finalize_completed_industry_job_response, handle_industry_job_queries,
     is_fulcrum_pirate_ship_bonus_applicable,
     is_structure_industry_service_online_for_bp,
@@ -79,6 +79,9 @@ pub fn handle_industry_jobs(
             let explicit_owner_id = lookup_first("ownerID").or_else(|| lookup_first("corporationID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
             let explicit_input_flag = lookup_first("inputFlag").or_else(|| lookup_first("flagID")).and_then(|v| v.as_i64()).and_then(|f| u16::try_from(f).ok()).map(InventoryFlag::from_u16);
             let raw_input_container = lookup_first("inputLocationID").or_else(|| lookup_first("inputContainerID")).or_else(|| lookup_first("containerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
+            let raw_output_location = lookup_first("outputLocationID").or_else(|| lookup_first("outputContainerID")).and_then(|v| v.as_i64()).filter(|&id| id > 0);
+            let explicit_output_flag = lookup_first("outputFlag").and_then(|v| v.as_i64()).and_then(|f| u16::try_from(f).ok()).map(InventoryFlag::from_u16);
+            let explicit_licensed_runs = lookup_first("licensedRuns").or_else(|| lookup_first("licensed_runs")).and_then(|v| v.as_i64()).filter(|&n| n > 0).map(|n| n as u32);
 
             let (raw_bp_type_id, raw_activity_id, runs_raw) = match args.first() {
                 Some(PyRep::KeyVal(_) | PyRep::Dict(_)) => {
@@ -196,6 +199,8 @@ pub fn handle_industry_jobs(
             }
 
             let now_unix = ctx.now_unix();
+            // Matured 24h hangar-division role grants take effect before corp hangar Take checks.
+            crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, session.corporation_id.unwrap_or(0));
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 sync_industry_job_pause_states(snap, now_unix);
@@ -400,12 +405,12 @@ pub fn handle_industry_jobs(
                         )
                 };
 
-                let matching_bps: Vec<InventoryItemRecord> = snap
+                let mut matching_bps: Vec<InventoryItemRecord> = snap
                     .items
                     .values()
                     .filter(|i| {
                         (i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id))
-                            && (i.location_id == station_id || i.location_id == docked_id)
+                            && crate::services::industry_pi::is_industry_loc_at_facility(snap, i.location_id, station_id, docked_id, char_id, use_corp, job_owner_id)
                             && i.type_id == bp_type_id
                             && explicit_bp_item_id.map(|eid| i.item_id == eid).unwrap_or(true)
                             && i.quantity >= 1
@@ -414,6 +419,7 @@ pub fn handle_industry_jobs(
                     })
                     .cloned()
                     .collect();
+                matching_bps.sort_by_key(|i| (raw_input_container.is_some_and(|cid| i.location_id != cid), i.item_id));
                 if matching_bps.is_empty() {
                     return Err(BridgeRpcError {
                         code: "BlueprintNotAvailable".into(),
@@ -568,12 +574,20 @@ pub fn handle_industry_jobs(
                     dec_prob_mult,
                 );
 
-                let mut cost_meta = compute_industry_job_costs_for_char(
+                let research_step = if activity_id == 4 {
+                    me_level as usize
+                } else if activity_id == 3 {
+                    (te_level / 2) as usize
+                } else {
+                    0
+                };
+                let mut cost_meta = super::industry_facilities_bps::compute_industry_job_costs_with_step(
                     ctx,
                     snap,
                     Some(char_id),
                     bp_type_id,
                     activity_id,
+                    research_step,
                     runs,
                     station_id,
                     is_alpha_clone,
@@ -615,19 +629,20 @@ pub fn handle_industry_jobs(
                 let input_container_id = raw_input_container.filter(|&id| id != station_id && id != docked_id);
                 if let Some(cid) = input_container_id {
                     let Some(cont) = snap.items.get(&cid) else {
-                        return Err(BridgeRpcError {
-                            code: "InvalidInputContainer".into(),
-                            message: format!("Input container {cid} does not exist"),
-                        });
+                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} does not exist") });
                     };
-                    if cont.location_id != station_id && cont.location_id != docked_id {
-                        return Err(BridgeRpcError {
-                            code: "InvalidInputContainer".into(),
-                            message: format!(
-                                "Input container {cid} is at location {}, not facility {station_id}",
-                                cont.location_id
-                            ),
-                        });
+                    if !crate::services::industry_pi::is_industry_loc_at_facility(snap, cont.location_id, station_id, docked_id, char_id, use_corp, job_owner_id) {
+                        return Err(BridgeRpcError { code: "InvalidInputContainer".into(), message: format!("Input container {cid} is at location {}, not facility {station_id}", cont.location_id) });
+                    }
+                }
+                if let Some(oid) = raw_output_location.filter(|&id| id != station_id && id != docked_id) {
+                    let Some(out_cont) = snap.items.get(&oid) else {
+                        return Err(BridgeRpcError { code: "InvalidOutputLocation".into(), message: format!("Output location {oid} does not exist") });
+                    };
+                    if (out_cont.owner_id != char_id && !(use_corp && out_cont.owner_id == job_owner_id))
+                        || !crate::services::industry_pi::is_industry_loc_at_facility(snap, out_cont.location_id, station_id, docked_id, char_id, use_corp, job_owner_id)
+                    {
+                        return Err(BridgeRpcError { code: "InvalidOutputLocation".into(), message: format!("Output location {oid} is not accessible at facility {station_id}") });
                     }
                 }
                 let effective_input_flag = explicit_input_flag.unwrap_or_else(|| {
@@ -677,7 +692,7 @@ pub fn handle_industry_jobs(
                 let mut consume_material = |snap: &mut eve_db::WorldStateSnapshot, mat_tid: TypeId, req_qty: i32, err_code: &str| -> Result<(), BridgeRpcError> {
                     if req_qty <= 0 { return Ok(()); }
                     let mut matching_stacks: Vec<(bool, i64, i32)> = snap.items.values().filter(|i| {
-                        let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == docked_id, |cid| i.location_id == cid);
+                        let loc_ok = input_container_id.map_or(i.location_id == station_id || i.location_id == docked_id || i.location_id == bp_rec.location_id, |cid| i.location_id == cid);
                         let flag_ok = explicit_input_flag.map_or((i.owner_id == char_id || (use_corp && i.owner_id == job_owner_id)) && is_usable_industry_flag(i.flag) && has_corp_div_take(snap, i.flag), |ef| i.owner_id == job_owner_id && i.flag == ef);
                         flag_ok && loc_ok && i.type_id == mat_tid && i.quantity > 0 && !i.singleton && !snap.is_item_locked_in_contract_or_job(i.item_id)
                     }).map(|i| (i.owner_id != job_owner_id || i.flag != effective_input_flag, i.item_id, i.quantity)).collect();
@@ -863,26 +878,34 @@ pub fn handle_industry_jobs(
                     let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
                     let scc_cents = IskCents::from_f64_isk(cost_meta.scc_surcharge_isk);
                     let alpha_cents = IskCents::from_f64_isk(cost_meta.alpha_clone_tax_isk);
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.balance = ch.balance.checked_sub(base_cents).unwrap_or(IskCents(0));
-                        let b1 = ch.balance;
-                        snap.append_journal(char_id, "IndustryJobInstallationFee", base_cents, b1, format!("Base job cost for industry job {jid}"));
-                    }
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
-                        let b2 = ch.balance;
-                        snap.append_journal(char_id, "IndustryFacilityTax", tax_cents, b2, format!("Facility tax for industry job {jid}"));
-                    }
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.balance = ch.balance.checked_sub(scc_cents).unwrap_or(IskCents(0));
-                        let b3 = ch.balance;
-                        snap.append_journal(char_id, "IndustrySccSurcharge", scc_cents, b3, format!("SCC surcharge for industry job {jid}"));
-                    }
-                    if alpha_cents.0 > 0 {
+                    let now_ts = ctx.now_unix();
+                    for (etype, fee, desc) in [
+                        ("IndustryJobInstallationFee", base_cents, format!("Base job cost for industry job {jid}")),
+                        ("IndustryFacilityTax", tax_cents, format!("Facility tax for industry job {jid}")),
+                        ("IndustrySccSurcharge", scc_cents, format!("SCC surcharge for industry job {jid}")),
+                        ("IndustryAlphaCloneTax", alpha_cents, format!("Alpha clone tax for industry job {jid}")),
+                    ] {
+                        if etype == "IndustryAlphaCloneTax" && fee.0 <= 0 {
+                            continue;
+                        }
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(alpha_cents).unwrap_or(IskCents(0));
-                            let b4 = ch.balance;
-                            snap.append_journal(char_id, "IndustryAlphaCloneTax", alpha_cents, b4, format!("Alpha clone tax for industry job {jid}"));
+                            ch.balance = ch.balance.checked_sub(fee).unwrap_or(IskCents(0));
+                            let bal_after = ch.balance;
+                            snap.append_journal_entry(eve_db::JournalEntryInput {
+                                owner_id: char_id,
+                                entry_type: etype,
+                                amount: fee,
+                                balance_after: bal_after,
+                                reason: desc,
+                                meta: eve_db::JournalMeta {
+                                    ref_type_id: 56,
+                                    first_party_id: char_id,
+                                    second_party_id: station_id,
+                                    account_key: 1000,
+                                    date_unix: now_ts,
+                                    ..Default::default()
+                                },
+                            });
                         }
                     }
                 }
@@ -925,13 +948,18 @@ pub fn handle_industry_jobs(
                     }
                 }
 
+                let corp_office_id = crate::services::industry_pi::resolve_corp_office_at_facility(snap, use_corp, job_owner_id, station_id);
                 if let Some(bp_mut) = snap.items.get_mut(&bp_iid) {
                     cost_meta.blueprint_original_flag = Some(bp_mut.flag).filter(|f| *f != InventoryFlag::Locked);
-                    cost_meta.blueprint_location_id = bp_mut.location_id; cost_meta.output_location_id = bp_mut.location_id; cost_meta.location_id = bp_mut.location_id;
+                    let bp_loc = if bp_mut.location_id != station_id { bp_mut.location_id } else { corp_office_id.unwrap_or(bp_mut.location_id) };
+                    cost_meta.blueprint_location_id = bp_loc;
+                    cost_meta.output_location_id = raw_output_location.unwrap_or(bp_loc);
+                    cost_meta.output_flag = explicit_output_flag;
+                    cost_meta.location_id = corp_office_id.unwrap_or(bp_loc);
                     bp_mut.singleton = true; bp_mut.flag = InventoryFlag::Locked; bp_mut.version += 1;
                 }
 
-                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { Some(cost_meta.invented_runs as u32) } else if activity_id == 5 { Some(runs) } else { None };
+                let licensed_runs = if activity_id == 8 && cost_meta.invented_runs > 0 { Some(cost_meta.invented_runs as u32) } else if activity_id == 5 { Some(explicit_licensed_runs.unwrap_or(runs)) } else { None };
                 snap.industry_jobs.insert(jid, IndustryJobRecord {
                     job_id: jid, installer_id: char_id, facility_id: station_id, blueprint_item_id: bp_iid,
                     blueprint_type_id: bp_type_id, activity_id, runs, product_type_id, status: "Active".into(),
@@ -947,7 +975,7 @@ pub fn handle_industry_jobs(
             match res {
                 Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta, eff_in_flag, in_cid)) => {
                     emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
-                    crate::services::notify_emitters_batch3::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
+                    crate::services::notify_emitters_character_services::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)), ("ownerID", PyRep::Integer(cost_meta.owner_id)),
                         ("blueprintID", PyRep::Integer(bp_iid)), ("blueprintItemID", PyRep::Integer(bp_iid)),
@@ -1144,8 +1172,13 @@ pub fn handle_industry_jobs(
                     let out_owner_id = if meta.use_corp && meta.owner_id > 0 { meta.owner_id } else { char_id };
                     let is_ancient_relic = ctx.sde.types.get(&job.blueprint_type_id).map(|t| t.group_id == 971).unwrap_or(false);
                     let bp_valid = snap.items.get(&job.blueprint_item_id).map(|bp| {
+                        let bp_at_fac = bp.location_id == job.facility_id
+                            || Some(bp.location_id) == docked_loc
+                            || bp.location_id == job.blueprint_location_id
+                            || bp.location_id == meta.blueprint_location_id
+                            || snap.items.get(&bp.location_id).is_some_and(|p| p.location_id == job.facility_id || Some(p.location_id) == docked_loc);
                         (bp.owner_id == char_id || bp.owner_id == out_owner_id)
-                            && (bp.location_id == job.facility_id || Some(bp.location_id) == docked_loc)
+                            && bp_at_fac
                             && bp.flag == InventoryFlag::Locked
                             && (is_ancient_relic || !bp.is_blueprint_copy || !matches!(job.activity_id, 1 | 8) || bp.blueprint_runs_remaining.unwrap_or(0) >= job.runs as i32)
                     }).unwrap_or(false);
@@ -1202,9 +1235,9 @@ pub fn handle_industry_jobs(
                         dyn_attrs.insert(ATTR_BLUEPRINT_ME, out_me);
                         dyn_attrs.insert(ATTR_BLUEPRINT_TE, out_te);
                         let t2_bpc_type_id: TypeId = if job.product_type_id > 0 { job.product_type_id } else { 11372 };
-                        let out_flag = if meta.use_corp && out_owner_id != char_id { restore_blueprint_flag(out_owner_id, &meta) } else { InventoryFlag::Hangar };
+                        let (out_loc_id, out_flag) = crate::services::industry_pi::resolve_industry_delivery_target(snap, &job, &meta, char_id, out_owner_id, job.facility_id);
                         snap.items.insert(bpc_item_id, InventoryItemRecord {
-                            item_id: bpc_item_id, type_id: t2_bpc_type_id, owner_id: out_owner_id, location_id: job.facility_id,
+                            item_id: bpc_item_id, type_id: t2_bpc_type_id, owner_id: out_owner_id, location_id: out_loc_id,
                             flag: out_flag, quantity: 1, singleton: true, version: 1, dynamic_attributes: dyn_attrs,
                             source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: true, blueprint_runs_remaining: Some(out_runs),
                         });
@@ -1240,11 +1273,7 @@ pub fn handle_industry_jobs(
                     if remove_consumed_bpc {
                         snap.items.remove(&job.blueprint_item_id);
                     }
-                    let out_flag = if meta.use_corp && out_owner_id != char_id {
-                        restore_blueprint_flag(out_owner_id, &meta)
-                    } else {
-                        InventoryFlag::Hangar
-                    };
+                    let (out_loc_id, out_flag) = crate::services::industry_pi::resolve_industry_delivery_target(snap, &job, &meta, char_id, out_owner_id, bp_location_id);
 
                     if matches!(job.activity_id, 1 | 9) {
                         let prod_qty_per_run = ctx.sde.blueprints.get(&job.blueprint_type_id).and_then(|bp| {
@@ -1260,7 +1289,7 @@ pub fn handle_industry_jobs(
                                 item_id: prod_item_id,
                                 type_id: job.product_type_id,
                                 owner_id: out_owner_id,
-                                location_id: bp_location_id,
+                                location_id: out_loc_id,
                                 flag: out_flag,
                                 quantity: total_out_qty,
                                 singleton: total_out_qty == 1,
@@ -1282,7 +1311,7 @@ pub fn handle_industry_jobs(
                                 item_id: copy_item_id,
                                 type_id: job.blueprint_type_id,
                                 owner_id: out_owner_id,
-                                location_id: bp_location_id,
+                                location_id: out_loc_id,
                                 flag: out_flag,
                                 quantity: 1,
                                 singleton: true,
@@ -1291,7 +1320,7 @@ pub fn handle_industry_jobs(
                                 source_mutaplasmid_id: None,
                                 insured_payout_isk: 0.0,
                                 is_blueprint_copy: true,
-                                blueprint_runs_remaining: Some(job.runs as i32),
+                                blueprint_runs_remaining: Some(job.licensed_runs.unwrap_or(job.runs) as i32),
                             },
                         );
                         Ok(Ok((copy_item_id, job.blueprint_type_id, job)))

@@ -36,6 +36,12 @@ fn map_blueprint_flag(flag: InventoryFlag) -> &'static str {
         InventoryFlag::Cargo => "Cargo",
         InventoryFlag::CorpDeliveries | InventoryFlag::Deliveries => "CorpDeliveries",
         InventoryFlag::Locked => "Locked",
+        InventoryFlag::CorpSAG2 => "CorpSAG2",
+        InventoryFlag::CorpSAG3 => "CorpSAG3",
+        InventoryFlag::CorpSAG4 => "CorpSAG4",
+        InventoryFlag::CorpSAG5 => "CorpSAG5",
+        InventoryFlag::CorpSAG6 => "CorpSAG6",
+        InventoryFlag::CorpSAG7 => "CorpSAG7",
         _ => "CorpSAG1",
     }
 }
@@ -232,10 +238,21 @@ pub fn dispatch_corp_alliance_route(
                             .unwrap_or(0.0)
                             .round()
                             .clamp(0.0, 20.0) as i64;
+                        let eff_loc_id = if matches!(item.flag as u16, 116..=122) {
+                            crate::services::industry_pi::industry_rigs::resolve_corp_office_at_facility(
+                                snap,
+                                true,
+                                corp_id,
+                                item.location_id,
+                            )
+                            .unwrap_or(item.location_id)
+                        } else {
+                            item.location_id
+                        };
                         json!({
                             "item_id": item.item_id,
                             "type_id": item.type_id as i64,
-                            "location_id": item.location_id,
+                            "location_id": eff_loc_id,
                             "location_flag": map_blueprint_flag(item.flag),
                             "quantity": qty,
                             "time_efficiency": te,

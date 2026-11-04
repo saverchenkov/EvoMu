@@ -120,6 +120,8 @@ pub fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMe
         ("status", PyRep::String(j.status.clone())),
         ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
         ("startUnix", PyRep::Integer(j.start_unix as i64)),
+        ("endUnix", PyRep::Integer(j.start_unix.saturating_add(j.duration_seconds) as i64)),
+        ("pauseUnix", meta.paused_at_unix.map(|p| PyRep::Integer(p as i64)).unwrap_or(PyRep::None)),
         ("estimatedItemValueISK", PyRep::Real(meta.eiv_isk)),
         ("baseJobCost", PyRep::Real(meta.base_job_cost_isk)),
         ("facilityTaxISK", PyRep::Real(meta.facility_tax_isk)),

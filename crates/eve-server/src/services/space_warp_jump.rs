@@ -1186,7 +1186,7 @@ async fn handle_dock(
         let is_medium_structure = matches!(st.type_id, 35832 | 35825 | 35835);
         let is_large_structure = matches!(st.type_id, 35833 | 35826 | 35836);
         let is_capital_ship =
-            matches!(ship_group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
+            matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594); // freighters dock at all Upwell hulls
         let is_supercapital_ship = matches!(ship_group_id, 30 | 659);
         if (is_medium_structure && is_capital_ship)
             || (is_large_structure && is_supercapital_ship)

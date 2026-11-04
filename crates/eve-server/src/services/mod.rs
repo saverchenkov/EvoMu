@@ -80,8 +80,6 @@ pub mod notify_emitters_operations_nodegraph;
 pub mod notify_emitters_skills_trade_godma;
 pub mod crate_loot_service;
 pub mod notify_emitters_tournaments_anomalies;
-// Retained crate-private solely for merge-protected peer files (`agents_missions.rs`, `auth_cache.rs`, `industry_facilities_bps.rs`, `industry_jobs.rs`).
-pub(crate) use notify_emitters_character_services as notify_emitters_batch3;
 pub mod notify_emitters_channel_events;
 pub mod notify_emitters_fleet_combat;
 pub mod notify_emitters_ess_bounties;

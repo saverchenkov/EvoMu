@@ -867,6 +867,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                     }
                 }
                 save_ext_state(snap, &ext);
+                crate::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states_on_service_change(snap, now);
             }
             return Ok((structure_id, item_id, src.type_id, src.flag as i64, false, false, was_service, released));
         }
@@ -973,6 +974,7 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
                 }
             }
             save_ext_state(snap, &ext);
+            crate::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states_on_service_change(snap, now);
         }
         Ok((structure_id, fitted_id, src.type_id, src.flag as i64, false, will_online, is_service, released))
     })?;
@@ -1068,6 +1070,9 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
             }
         }
         save_ext_state(snap, &ext);
+        if is_service {
+            crate::services::industry_pi::industry_facilities_bps::sync_industry_job_pause_states_on_service_change(snap, now);
+        }
         Ok((item.type_id, is_service, released))
     })?;
     crate::services::structure_control_ops::notify_released_structure_controllers(ctx, &released);

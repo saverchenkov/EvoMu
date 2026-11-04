@@ -296,62 +296,254 @@ pub fn clear_sde_adjusted_prices() {
     *SDE_ADJUSTED_PRICES.write().unwrap() = None;
 }
 
+/// Computes all active rolling market adjusted prices (`feat:industry.eiv-adjusted-prices`, `feat:esi.market.prices`)
+/// from the explicit adjusted-price cache and 28-day clamped rolling EMA over executed `snap.market_history`.
+pub fn collect_live_market_adjusted_prices(
+    snap: &eve_db::WorldStateSnapshot,
+) -> std::collections::HashMap<eve_sde::TypeId, f64> {
+    let mut hist_by_type: std::collections::HashMap<
+        eve_sde::TypeId,
+        Vec<&eve_db::MarketHistoryDayRecord>,
+    > = std::collections::HashMap::new();
+    for ((_reg_id, tid), days) in &snap.market_history {
+        hist_by_type
+            .entry(*tid)
+            .or_default()
+            .extend(days.iter().filter(|h| h.average > 0.0));
+    }
+    let mut out = std::collections::HashMap::with_capacity(hist_by_type.len());
+    for (tid, mut days) in hist_by_type {
+        if days.is_empty() {
+            continue;
+        }
+        days.sort_by(|a, b| a.date.cmp(&b.date));
+        let recent_28 = &days[days.len().saturating_sub(28)..];
+        let mut rolling_adj = recent_28[0].average;
+        for d in &recent_28[1..] {
+            let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
+            rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
+        }
+        if rolling_adj > 0.0 {
+            out.insert(tid, rolling_adj);
+        }
+    }
+    if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
+        if let Some(map) = guard.as_ref() {
+            for (&tid, &price) in map {
+                if price > 0.0 {
+                    out.insert(tid, price);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolves a type's live rolling market adjusted price if trade history or cache exists (`None` if untraded).
+pub fn compute_market_adjusted_price_from_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    type_id: eve_sde::TypeId,
+) -> Option<f64> {
+    if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
+        if let Some(map) = guard.as_ref() {
+            if let Some(&price) = map.get(&type_id) {
+                if price > 0.0 {
+                    return Some(price);
+                }
+            }
+        }
+    }
+    let mut days: Vec<&eve_db::MarketHistoryDayRecord> = snap
+        .market_history
+        .iter()
+        .filter(|((_, tid), _)| *tid == type_id)
+        .flat_map(|(_, v)| v.iter())
+        .filter(|h| h.average > 0.0)
+        .collect();
+    if days.is_empty() {
+        return None;
+    }
+    days.sort_by(|a, b| a.date.cmp(&b.date));
+    let recent_28 = &days[days.len().saturating_sub(28)..];
+    let mut rolling_adj = recent_28[0].average;
+    for d in &recent_28[1..] {
+        let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
+        rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
+    }
+    (rolling_adj > 0.0).then_some(rolling_adj)
+}
+
 /// Resolves a material's adjusted price for EIV calculation (`feat:industry.eiv-adjusted-prices`):
 /// 1. Cached adjusted prices from `sde_adjusted_prices` / market price cache.
-/// 2. 28-day clamped EMA over `snap.market_history` for `type_id` (matching `/markets/prices/`).
-/// 3. SDE `base_price` fallback (or `10.0` if unset).
+/// 2. 28-day clamped EMA over `snap.market_history` for `type_id` (shared with `/markets/prices/` and insurance).
+/// 3. SDE `base_price` baseline when no live trades have executed yet.
 pub fn resolve_material_adjusted_price(
     ctx: &ServerContext,
     snap: Option<&eve_db::WorldStateSnapshot>,
     type_id: eve_sde::TypeId,
 ) -> f64 {
-    if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
-        if let Some(map) = guard.as_ref() {
-            if let Some(&price) = map.get(&type_id) {
-                if price > 0.0 {
-                    return price;
-                }
-            }
-        }
-    }
-
-    let calc_rolling = |s: &eve_db::WorldStateSnapshot| -> Option<f64> {
-        let mut days: Vec<&eve_db::MarketHistoryDayRecord> = s
-            .market_history
-            .iter()
-            .filter(|((_, tid), _)| *tid == type_id)
-            .flat_map(|(_, v)| v.iter())
-            .filter(|h| h.average > 0.0)
-            .collect();
-        if !days.is_empty() {
-            days.sort_by(|a, b| a.date.cmp(&b.date));
-            let recent_28 = &days[days.len().saturating_sub(28)..];
-            let mut rolling_adj = recent_28[0].average;
-            for d in &recent_28[1..] {
-                let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
-                rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
-            }
-            if rolling_adj > 0.0 {
-                return Some(rolling_adj);
-            }
-        }
-        None
-    };
-
     let maybe_price = match snap {
-        Some(s) => calc_rolling(s),
-        None => ctx.db.with_snapshot(calc_rolling),
+        Some(s) => compute_market_adjusted_price_from_snap(s, type_id),
+        None => ctx
+            .db
+            .with_snapshot(|s| compute_market_adjusted_price_from_snap(s, type_id)),
     };
-
     if let Some(price) = maybe_price {
         return price;
     }
-
     ctx.sde
         .types
         .get(&type_id)
         .map(|t| if t.base_price > 0.0 { t.base_price } else { 10.0 })
         .unwrap_or(10.0)
+}
+
+/// Computes ship insurance reference value incorporating live rolling market adjusted prices
+/// of the ship's ME-0 manufacturing material basket (shared with `/markets/prices` and blueprint EIV).
+pub fn compute_ship_insurance_reference_value_with_prices(
+    sde: &eve_sde::SdeRegistry,
+    live_prices: &std::collections::HashMap<eve_sde::TypeId, f64>,
+    ship_type_id: eve_sde::TypeId,
+) -> f64 {
+    let base_hull_price = crate::formulas::compute_ship_insurance_reference_value(sde, ship_type_id);
+    if live_prices.is_empty() {
+        return base_hull_price;
+    }
+    if let Some(bp) = sde
+        .blueprints
+        .values()
+        .find(|b| b.product_type_id == ship_type_id)
+    {
+        let mats: Vec<(eve_sde::TypeId, u64)> = if !bp.materials.is_empty() {
+            bp.materials.iter().map(|m| (m.type_id, m.quantity)).collect()
+        } else {
+            bp.activities
+                .get("manufacturing")
+                .or_else(|| bp.activities.get("1"))
+                .map(|a| a.materials.iter().map(|m| (m.type_id, m.quantity)).collect())
+                .unwrap_or_default()
+        };
+        if !mats.is_empty() && mats.iter().any(|(tid, _)| live_prices.contains_key(tid)) {
+            let mut base_sum = 0.0_f64;
+            let mut live_sum = 0.0_f64;
+            for (tid, qty) in mats {
+                let b_px = sde
+                    .types
+                    .get(&tid)
+                    .map(|t| if t.base_price > 0.0 { t.base_price } else { 10.0 })
+                    .unwrap_or(10.0);
+                let l_px = live_prices.get(&tid).copied().unwrap_or(b_px);
+                base_sum += (qty as f64) * b_px;
+                live_sum += (qty as f64) * l_px;
+            }
+            if base_sum > 0.0 && live_sum > 0.0 {
+                return if base_hull_price > 0.0 {
+                    base_hull_price * (live_sum / base_sum)
+                } else {
+                    live_sum
+                };
+            }
+        }
+    }
+    if let Some(&hull_adj) = live_prices.get(&ship_type_id) {
+        if hull_adj > 0.0 {
+            return hull_adj;
+        }
+    }
+    base_hull_price
+}
+
+pub fn compute_ship_insurance_reference_value_for_ctx(
+    ctx: &ServerContext,
+    ship_type_id: eve_sde::TypeId,
+) -> f64 {
+    ctx.db.with_snapshot(|snap| {
+        let live_prices = collect_live_market_adjusted_prices(snap);
+        compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_prices, ship_type_id)
+    })
+}
+
+pub fn is_industry_loc_at_facility(
+    snap: &eve_db::WorldStateSnapshot,
+    loc_id: i64,
+    station_id: i64,
+    docked_id: i64,
+    char_id: i64,
+    use_corp: bool,
+    job_owner_id: i64,
+) -> bool {
+    if loc_id == station_id || loc_id == docked_id {
+        return true;
+    }
+    let Some(parent) = snap.items.get(&loc_id) else {
+        return false;
+    };
+    if parent.owner_id != char_id && !(use_corp && parent.owner_id == job_owner_id) {
+        return false;
+    }
+    if parent.location_id == station_id || parent.location_id == docked_id {
+        return true;
+    }
+    snap.items.get(&parent.location_id).is_some_and(|gp| {
+        (gp.owner_id == char_id || (use_corp && gp.owner_id == job_owner_id))
+            && (gp.location_id == station_id || gp.location_id == docked_id)
+    })
+}
+
+pub fn resolve_corp_office_at_facility(
+    snap: &eve_db::WorldStateSnapshot,
+    use_corp: bool,
+    job_owner_id: i64,
+    station_id: i64,
+) -> Option<i64> {
+    if !use_corp {
+        return None;
+    }
+    snap.corp_governance
+        .get(&job_owner_id)
+        .and_then(|g| g.offices.get(&station_id).copied())
+        .filter(|id| snap.items.contains_key(id))
+        .or_else(|| {
+            snap.items
+                .values()
+                .find(|i| {
+                    i.owner_id == job_owner_id && i.location_id == station_id && i.type_id == 27
+                })
+                .map(|i| i.item_id)
+        })
+}
+
+pub fn resolve_industry_delivery_target(
+    snap: &eve_db::WorldStateSnapshot,
+    job: &eve_db::IndustryJobRecord,
+    meta: &crate::services::industry_pi::IndustryJobCostMeta,
+    char_id: i64,
+    out_owner_id: i64,
+    fallback_loc: i64,
+) -> (i64, eve_db::InventoryFlag) {
+    let raw_target = if job.output_location_id > 0 {
+        job.output_location_id
+    } else if meta.output_location_id > 0 {
+        meta.output_location_id
+    } else {
+        fallback_loc
+    };
+    let target_loc = match snap.items.get(&raw_target) {
+        Some(it) if it.type_id == 27 => it.location_id,
+        Some(_) => raw_target,
+        None => fallback_loc,
+    };
+    let is_item_container = snap.items.get(&target_loc).is_some_and(|it| it.type_id != 27);
+    let target_flag = meta.output_flag.unwrap_or_else(|| {
+        if is_item_container {
+            eve_db::InventoryFlag::Unlocked
+        } else if meta.use_corp && out_owner_id != char_id {
+            crate::services::industry_pi::restore_blueprint_flag(out_owner_id, meta)
+        } else {
+            eve_db::InventoryFlag::Hangar
+        }
+    });
+    (target_loc, target_flag)
 }
 
 /// Validates capital and supercapital construction restrictions (`feat:industry.capital-construction-restrictions`).
@@ -393,10 +585,17 @@ pub fn validate_capital_construction_restrictions(
             .get(&fac_sys_id)
             .and_then(|s| s.sov_alliance_id)
             .is_some();
-        let has_supercap_upgrade = snap.items.values().any(|i| {
-            i.location_id == fac_sys_id as i64
-                && matches!(i.type_id, 81623 | 2009)
+        let is_mod_online = |i: &eve_db::InventoryItemRecord| -> bool {
+            snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
                 && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+        };
+        let has_supercap_upgrade = snap.items.values().any(|i| {
+            matches!(i.type_id, 81623 | 2009)
+                && is_mod_online(i)
+                && (i.location_id == fac_sys_id as i64
+                    || snap.structures.get(&i.location_id).is_some_and(|st| {
+                        st.solar_system_id == fac_sys_id && st.state != "Destroyed"
+                    }))
         });
         if !has_sov || !has_supercap_upgrade {
             return Err(BridgeRpcError {
@@ -411,7 +610,7 @@ pub fn validate_capital_construction_restrictions(
                 i.location_id == station_id
                     && (164..=171).contains(&(i.flag as u16))
                     && i.type_id == 35877
-                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                    && is_mod_online(i)
             });
         if !has_supercap_shipyard {
             return Err(BridgeRpcError {
@@ -440,6 +639,7 @@ pub fn validate_capital_construction_restrictions(
                 i.location_id == station_id
                     && (164..=171).contains(&(i.flag as u16))
                     && matches!(i.type_id, 35881 | 35877)
+                    && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
                     && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
             });
         if !has_cap_shipyard {
@@ -452,5 +652,24 @@ pub fn validate_capital_construction_restrictions(
         }
     }
     Ok(())
+}
+
+/// Computes the Process Time Value (PTV) EIV multiplier across `runs` starting from `start_step`
+/// (`me_level` for ME research, `te_level / 2` for TE research):
+/// - Manufacturing / Reactions (`1 | 9`): `runs`
+/// - Copying / Invention (`5 | 8`): `0.02 * runs`
+/// - ME / TE Research (`3 | 4`): `0.02 * sum(LVL_SECS[start_step..start_step + runs] / 105.0)`
+pub fn compute_activity_ptv_multiplier(activity_id: u8, start_step: usize, runs: u32) -> f64 {
+    const LVL_SECS: [u64; 10] = [105, 250, 595, 1_414, 3_360, 8_000, 19_000, 45_255, 107_700, 256_000];
+    match activity_id {
+        3 | 4 => {
+            let s = start_step.min(10);
+            let e = (s + runs as usize).min(10);
+            let sum_secs: u64 = LVL_SECS[s..e].iter().sum();
+            0.02 * (sum_secs as f64) / 105.0
+        }
+        5 | 8 => 0.02 * (runs as f64),
+        _ => runs as f64,
+    }
 }
 

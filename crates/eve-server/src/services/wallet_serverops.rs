@@ -1062,7 +1062,9 @@ fn give_cash(
             rec.balance
         } else {
             let corp = snap.corporations.get_mut(&to_id).expect("checked above");
-            corp.master_wallet = corp.master_wallet.checked_add(amount).unwrap_or(corp.master_wallet);
+            let cur = corp.division_balance(1).max(corp.master_wallet);
+            let next_bal = cur.checked_add(amount).unwrap_or(cur);
+            corp.set_division_balance(1, next_bal);
             corp.master_wallet
         };
         let rec_reason = if reason.is_empty() { format!("Player donation from {char_id}") } else { format!("Player donation from {char_id}: {reason}") };

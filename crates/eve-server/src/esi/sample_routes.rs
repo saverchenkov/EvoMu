@@ -926,11 +926,15 @@ pub fn dispatch_operation(
                 .filter(|t| t.category_id == 6 && t.published && t.base_price > 0.0)
                 .collect();
             ship_types.sort_by_key(|t| t.type_id);
+            let live_prices = ctx.db.with_snapshot(|snap| {
+                crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(
+                    snap,
+                )
+            });
             let out: Vec<Value> = ship_types
                 .into_iter()
                 .map(|t| {
-                    let ref_val =
-                        crate::formulas::compute_ship_insurance_reference_value(&ctx.sde, t.type_id);
+                    let ref_val = crate::services::industry_pi::industry_rigs::compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_prices, t.type_id);
                     let levels: Vec<Value> = crate::formulas::compute_insurance_levels(ref_val)
                         .into_iter()
                         .map(|(name, cost, payout)| {

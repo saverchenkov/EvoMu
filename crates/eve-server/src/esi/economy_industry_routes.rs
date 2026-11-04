@@ -250,7 +250,7 @@ pub fn dispatch_economy_industry_route(
                         "region_id": st.region_id as i64,
                         "solar_system_id": st.solar_system_id as i64,
                         "type_id": st.station_type_id as i64,
-                        // DERIVED: NPC station industry facility tax rate shared with InstallJob cost calculation
+                        // Fixed 0.25% NPC station industry facility tax rate (`wiki:Manufacturing:93`)
                         "tax": crate::services::industry_pi::industry_facilities_bps::NPC_STATION_INDUSTRY_TAX_RATE,
                     }),
                 );

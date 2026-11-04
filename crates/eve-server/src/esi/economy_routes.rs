@@ -298,6 +298,10 @@ pub fn dispatch_economy_route(
         }
 
         ("GET", "/markets/prices") => Some(ctx.db.with_snapshot(|snap| {
+            let live_adjusted =
+                crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(
+                    snap,
+                );
             let mut hist_by_type: HashMap<u32, Vec<&eve_db::snapshot_ext::MarketHistoryDayRecord>> =
                 HashMap::new();
             for ((_reg_id, tid), days) in &snap.market_history {
@@ -319,6 +323,7 @@ pub fn dispatch_economy_route(
             }
             let mut all_tids: std::collections::BTreeSet<u32> =
                 hist_by_type.keys().copied().collect();
+            all_tids.extend(live_adjusted.keys().copied());
             all_tids.extend(sell_sum_vol_by_type.keys().copied());
             all_tids.extend(buy_sum_vol_by_type.keys().copied());
             let out: Vec<Value> = all_tids
@@ -338,21 +343,30 @@ pub fn dispatch_economy_route(
                                 recent_30.iter().map(|d| d.average).sum::<f64>()
                                     / (recent_30.len() as f64)
                             };
-                            // DERIVED: adjusted_price is approximated via a 28-day clamped EMA over daily market history
-                            // (falling back to SDE base_price / active-order volume-weighted average when history is absent)
-                            // rather than CCP's internal 28-day adjusted price formula.
-                            let recent_28 = &days[days.len().saturating_sub(28)..];
-                            let mut rolling_adj = recent_28[0].average;
-                            for d in &recent_28[1..] {
-                                let clamped = d.average.clamp(rolling_adj * 0.5, rolling_adj * 2.0);
-                                rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
-                            }
+                            let rolling_adj = live_adjusted.get(&tid).copied().unwrap_or(avg);
                             return Some(json!({
                                 "type_id": tid as i64,
                                 "average_price": avg,
                                 "adjusted_price": rolling_adj,
                             }));
                         }
+                    }
+                    if let Some(&adj_only) = live_adjusted.get(&tid) {
+                        let avg_opt = sell_sum_vol_by_type
+                            .get(&tid)
+                            .or_else(|| buy_sum_vol_by_type.get(&tid))
+                            .and_then(|&(sw, sv)| (sv > 0).then_some(sw / (sv as f64)));
+                        return Some(match avg_opt {
+                            Some(avg) => json!({
+                                "type_id": tid as i64,
+                                "average_price": avg,
+                                "adjusted_price": adj_only,
+                            }),
+                            None => json!({
+                                "type_id": tid as i64,
+                                "adjusted_price": adj_only,
+                            }),
+                        });
                     }
                     let (sum_wv, sum_v) = sell_sum_vol_by_type
                         .get(&tid)
@@ -362,11 +376,17 @@ pub fn dispatch_economy_route(
                         return None;
                     }
                     let avg = sum_wv / (sum_v as f64);
-                    // DERIVED: adjusted_price falls back to active-order volume-weighted average when daily history is absent
+                    let adj = ctx
+                        .sde
+                        .types
+                        .get(&tid)
+                        .map(|t| t.base_price)
+                        .filter(|&b| b > 0.0)
+                        .unwrap_or(avg);
                     Some(json!({
                         "type_id": tid as i64,
                         "average_price": avg,
-                        "adjusted_price": avg,
+                        "adjusted_price": adj,
                     }))
                 })
                 .collect();

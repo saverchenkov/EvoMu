@@ -93,7 +93,8 @@ pub(crate) async fn handle_ships_and_services(
                 if existing.is_some() && !void_old {
                     return Err(BridgeRpcError::user_error("InsureShipFailedSingleContract"));
                 }
-                let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship.type_id);
+                let live_prices = crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(snap);
+                let ref_val = crate::services::industry_pi::industry_rigs::compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_prices, ship.type_id);
                 let levels = crate::formulas::compute_insurance_levels(ref_val);
                 let standard_fractions = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 
@@ -223,7 +224,7 @@ pub(crate) async fn handle_ships_and_services(
                     }
                 }
             };
-            let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
+            let ref_val = crate::services::industry_pi::industry_rigs::compute_ship_insurance_reference_value_for_ctx(ctx, type_id);
             Some(Ok(PyRep::Real(ref_val)))
         }
 
@@ -403,10 +404,11 @@ pub(crate) async fn handle_ships_and_services(
                 ship_type_ids = types.into_iter().take(50).collect();
             }
 
+            let live_prices = ctx.db.with_snapshot(|snap| crate::services::industry_pi::industry_rigs::collect_live_market_adjusted_prices(snap));
             let entries: Vec<PyRep> = ship_type_ids
                 .into_iter()
                 .filter_map(|type_id| {
-                    let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
+                    let ref_val = crate::services::industry_pi::industry_rigs::compute_ship_insurance_reference_value_with_prices(&ctx.sde, &live_prices, type_id);
                     if ref_val <= 0.0 {
                         return None;
                     }

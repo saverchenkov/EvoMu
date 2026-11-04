@@ -2,9 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::{
-    abyssal_attribute_roll, compute_insurance_quote, compute_ship_insurance_reference_value,
-};
+use crate::formulas::{abyssal_attribute_roll, compute_insurance_quote};
 use crate::router::{BoundObjectEntry, ServerContext};
 use eve_db::{InventoryFlag, IskCents, SavedFittingRecord};
 use eve_machonet::SessionState;

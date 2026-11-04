@@ -261,8 +261,14 @@ async fn test_industry_job_cost_formula_and_surcharges() {
 async fn test_industry_facility_tax_npc_and_upwell_profiles() {
     // parity: feat:industry.facility-tax
     let ctx = ServerContext::new();
-    let npc_station: i64 = 60_000_001; // Non-Jita SDE NPC Station
-    let mut sess = setup_pilot(&ctx, 802, PILOT, npc_station, 30_000_001).await;
+    let (&npc_station, npc_st_info) = ctx
+        .sde
+        .stations
+        .iter()
+        .find(|(&sid, _)| sid != JITA_STATION)
+        .expect("non-Jita SDE NPC station");
+    let npc_sys = npc_st_info.solar_system_id;
+    let mut sess = setup_pilot(&ctx, 802, PILOT, npc_station, npc_sys).await;
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(PILOT).or_default().insert(
             3387,
@@ -271,14 +277,14 @@ async fn test_industry_facility_tax_npc_and_upwell_profiles() {
         if let Some(ch) = snap.characters.get_mut(&PILOT) {
             ch.balance = IskCents::from_isk(1_000_000_000);
             ch.station_id = Some(npc_station);
-            ch.solar_system_id = 30_000_001;
+            ch.solar_system_id = npc_sys;
         }
     });
 
-    // 1. Standard NPC station default facility tax rate is 10%
+    // 1. Standard NPC station default facility tax rate is fixed at 0.25% (0.0025)
     let npc_taxes = ctx.db.with_snapshot(|snap| load_facility_taxes(snap, npc_station));
     let npc_rate = npc_taxes.get(&1).copied().unwrap_or(0.0);
-    assert!((npc_rate - 0.10).abs() < 1e-6, "Default NPC station industry tax must be 10%, got {npc_rate}");
+    assert!((npc_rate - 0.0025).abs() < 1e-6, "Default NPC station industry tax must be 0.25%, got {npc_rate}");
 
     let bpo_npc = 886_000_001;
     add_item(&ctx, bpo_npc, RIFTER_BP, PILOT, npc_station, InventoryFlag::Hangar, 1, true);
@@ -288,8 +294,8 @@ async fn test_industry_facility_tax_npc_and_upwell_profiles() {
         compute_industry_job_costs(&ctx, snap, RIFTER_BP, 1, 1, npc_station)
     })
     .expect("compute NPC job costs");
-    assert!((cost_meta.facility_tax_rate - 0.10).abs() < 1e-6);
-    let exp_tax_isk = (cost_meta.eiv_isk * 0.10 * 100.0).round() / 100.0;
+    assert!((cost_meta.facility_tax_rate - 0.0025).abs() < 1e-6);
+    let exp_tax_isk = (cost_meta.eiv_isk * 0.0025 * 100.0).round() / 100.0;
     assert!((cost_meta.facility_tax_isk - exp_tax_isk).abs() < 0.02);
 
     // 2. Upwell structure owner-configured profile tax
