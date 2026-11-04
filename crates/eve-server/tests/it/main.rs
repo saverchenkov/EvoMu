@@ -654,3 +654,4 @@ mod structures_quantum_core_and_services;
 mod pve_agent_specializations_and_arcs;
 mod planetary_industry_colonies_and_production;
 mod navigation_flight_and_docking;
+mod corporation_membership_and_titles;
