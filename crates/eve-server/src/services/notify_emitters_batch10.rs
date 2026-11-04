@@ -787,7 +787,7 @@ pub fn emit_sim_clock_rebase_if_advanced(ctx: &ServerContext, prev_unix: u64, se
     if new_ft <= old_ft {
         return;
     }
-    let in_space_chars: Vec<i64> = ctx.db.with_snapshot(|snap| {
+    let systems: HashSet<u32> = ctx.db.with_snapshot(|snap| {
         snap.characters
             .values()
             .filter(|c| {
@@ -795,15 +795,15 @@ pub fn emit_sim_clock_rebase_if_advanced(ctx: &ServerContext, prev_unix: u64, se
                     && c.structure_id.is_none()
                     && ctx.is_character_online(c.character_id, c.user_id)
             })
-            .map(|c| c.character_id)
+            .map(|c| c.solar_system_id)
             .collect()
     });
     let times = PyRep::Tuple(vec![PyRep::Integer(old_ft), PyRep::Integer(new_ft)]);
-    for cid in in_space_chars {
+    for sys_id in systems {
         ctx.notify(
-            NotificationTarget::Character(cid),
+            NotificationTarget::SolarSystem(sys_id),
             "DoSimClockRebase",
-            "charid",
+            "solarsystemid2",
             vec![times.clone()],
         );
     }

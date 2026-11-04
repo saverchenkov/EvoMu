@@ -201,10 +201,10 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     let mut dis_transition: Option<(Vec<i64>, Vec<i64>)> = None;
     with_mut_combat_runtime(ctx, |rt| {
         if prev_opt.is_none() && is_all_idle { return; }
-        if prev.0 != weap_sig { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
-        if prev.1 != pvp_sig { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
-        if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
-        if prev.3 != crim_sig {
+        if prev.0 != weap_sig && !(prev.0 == 0 && weap_code == 100) { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
+        if prev.1 != pvp_sig && !(prev.1 == 0 && pvp_code == 200) { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
+        if prev.2 != npc_sig && !(prev.2 == 0 && npc_code == 400) { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
+        if prev.3 != crim_sig && !(prev.3 == 0 && crim_code == 300) {
             updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val]));
             let prev_c = prev.3 >> 40;
             if matches!(crim_code, 301 | 303) && !matches!(prev_c, 301 | 303) {
@@ -215,7 +215,7 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
                 crim_transition = Some((vec![char_id], vec![], vec![]));
             }
         }
-        if prev.4 != dis_sig {
+        if prev.4 != dis_sig && !(prev.4 == 0 && dis_code == 500) {
             updates.push(("OnDisapprovalTimerUpdate", vec![PyRep::Integer(dis_code), dis_val]));
             let prev_d = prev.4 >> 40;
             if matches!(dis_code, 501 | 502) && !matches!(prev_d, 501 | 502) {

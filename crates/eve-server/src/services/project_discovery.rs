@@ -140,8 +140,13 @@ pub fn spend_analysis_kredits(
     char_id: i64,
     amount: i64,
 ) -> Result<i64, BridgeRpcError> {
-    ctx.db
-        .try_with_mut_snapshot(|snap| spend_analysis_kredits_in_snap(snap, char_id, amount))
+    let rem = ctx
+        .db
+        .try_with_mut_snapshot(|snap| spend_analysis_kredits_in_snap(snap, char_id, amount))?;
+    if amount > 0 {
+        crate::services::notify_emitters_batch10::emit_analysis_kredits_change(ctx, char_id);
+    }
+    Ok(rem)
 }
 
 fn load_discovery_store(snap: &eve_db::WorldStateSnapshot) -> ProjectDiscoveryStore {
@@ -925,6 +930,7 @@ pub fn handle_project_discovery(
                         player_state_rep,
                     );
                     if ak_gain > 0 {
+                        session.push_notification("OnAnalysisKreditsChange", vec![]);
                         crate::services::notify_emitters_batch10::emit_analysis_kredits_change(ctx, char_id);
                     }
                     let xp_args = vec![PyRep::Real(total_xp)];

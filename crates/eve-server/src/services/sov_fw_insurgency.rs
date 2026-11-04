@@ -601,6 +601,7 @@ pub async fn handle(
                 session.corporation_id = Some(new_cid);
             }
             session.war_faction_id = Some(faction_id);
+            crate::services::notify_emitters_batch3::emit_campaign_enrollment_changed(ctx, char_id);
             Some(Ok(PyRep::keyval([
                 ("factionID", PyRep::Integer(faction_id)),
                 ("enlisted", PyRep::Bool(true)),

@@ -67,10 +67,14 @@ async fn test_market_buy_fulfillment_emits_on_market_item_received_and_never_cli
         "marketProxy",
         "PlaceMultiSellOrder",
         &[
-            PyRep::Integer(STATION_JITA),
-            PyRep::Integer(tritanium_type_id as i64),
-            PyRep::Real(15.0),
-            PyRep::Integer(100),
+            PyRep::List(vec![PyRep::keyval([
+                ("stationID", PyRep::Integer(STATION_JITA)),
+                ("typeID", PyRep::Integer(tritanium_type_id as i64)),
+                ("itemID", PyRep::Integer(sell_item_id)),
+                ("price", PyRep::Real(15.0)),
+                ("quantity", PyRep::Integer(100)),
+            ])]),
+            PyRep::Bool(false),
             PyRep::Integer(90),
             PyRep::Real(0.0),
         ],
