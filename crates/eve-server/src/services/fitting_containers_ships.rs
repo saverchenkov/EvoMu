@@ -1049,7 +1049,10 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             let auth_ok = ctx.db.with_snapshot(|snap| {
                 if let Some(cont) = snap.items.get(&container_id) {
                     let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    cont.owner_id == char_id || (corp_id > 0 && cont.owner_id == corp_id)
+                    // Owner, corp-owned container member, or a corp-mate of the owning pilot (who
+                    // must still pass the ALSC password check below); outsiders are denied outright.
+                    let owner_corp = snap.characters.get(&cont.owner_id).map(|c| c.corporation_id).unwrap_or(0);
+                    cont.owner_id == char_id || (corp_id > 0 && (cont.owner_id == corp_id || owner_corp == corp_id))
                 } else {
                     true
                 }

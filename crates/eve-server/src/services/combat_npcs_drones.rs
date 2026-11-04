@@ -540,12 +540,20 @@ pub async fn handle_npcs_drones(
                     if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
                         return Err(BridgeRpcError { code: "NotADrone".into(), message: format!("Item {did} (type {}) is not a drone", it.type_id) });
                     }
-                    if matches!(it.type_id, 41030 | 43681 | 41031 | 43682 | 90621 | 90622) {
+                    let is_excavator = ctx
+                        .sde
+                        .types
+                        .get(&it.type_id)
+                        .is_some_and(|t| t.group_id == 101 && t.default_attributes.get(&1272).copied() == Some(25.0));
+                    if is_excavator {
                         let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
-                        if ship_type != 28352 {
+                        let can_operate_excavator = ctx.sde.types.get(&ship_type).is_some_and(|t| {
+                            t.default_attributes.contains_key(&3223) || t.default_attributes.contains_key(&3224)
+                        });
+                        if !can_operate_excavator {
                             return Err(BridgeRpcError {
                                 code: "InvalidShipForExcavator".into(),
-                                message: "Excavator mining drones can only be operated by a Rorqual (28352)".into(),
+                                message: "Excavator mining drones can only be operated by a Capital Industrial Ship".into(),
                             });
                         }
                     }

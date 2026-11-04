@@ -59,6 +59,34 @@ pub fn save_mutes_to_db(db: &WorldRepository, mutes: &HashMap<u32, (u64, String)
     }
 }
 
+pub fn check_active_chat_mute(
+    moderation: &ChatModerationState,
+    db: &WorldRepository,
+    cid: u32,
+    now_unix: u64,
+) -> Option<(u64, String)> {
+    let mem_entry = moderation
+        .mutes
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&cid)
+        .cloned();
+    let entry = mem_entry.or_else(|| load_mutes_from_db(db).remove(&cid));
+    match entry {
+        Some((expiry, reason)) if expiry > now_unix => Some((expiry, reason)),
+        Some(_) => {
+            let snapshot = {
+                let mut mutes = moderation.mutes.write().unwrap_or_else(|e| e.into_inner());
+                mutes.retain(|_, (exp, _)| *exp > now_unix);
+                mutes.clone()
+            };
+            save_mutes_to_db(db, &snapshot);
+            None
+        }
+        None => None,
+    }
+}
+
 pub fn encode_chat_member(
     cid: u32,
     corpid: u32,
@@ -254,29 +282,13 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     "Active character required to broadcast message".into(),
                 ));
             };
-            let now = ctx_now_unix(ctx);
+            let now = {
+                let n = ctx_now_unix(ctx);
+                if n > 0 { n } else { db_bcast.clock().now_unix_secs() }
+            };
 
-            if let Some((expiry, reason)) = state_bcast
-                .mutes
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&cid)
-                .cloned()
-            {
-                if expiry > now {
-                    return Err((STATUS_FORBIDDEN, format!("Character is muted until {expiry}: {reason}")));
-                }
-            }
-            let now_ft = ((now as i64) + 11_644_473_600) * 10_000_000;
-            if let Some(ban_expiry_ft) = db_bcast.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("gm_chat_bans")
-                    .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
-                    .and_then(|bans| bans.get(&(cid as i64)).copied())
-            }) {
-                if ban_expiry_ft > now_ft {
-                    return Err((STATUS_FORBIDDEN, format!("Character is chat-banned until {ban_expiry_ft}")));
-                }
+            if let Some((expiry, reason)) = check_active_chat_mute(&state_bcast, &db_bcast, cid, now) {
+                return Err((STATUS_FORBIDDEN, format!("Character is muted until {expiry}: {reason}")));
             }
 
             let msg_text = match dyn_msg.get(1) {

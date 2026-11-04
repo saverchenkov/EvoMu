@@ -230,26 +230,6 @@ pub fn emit_pod_or_corvette_assembly(
     );
 }
 
-/// Emits `OnPasswordChanged(which, containerItem)` (`2` args, `id_type = "charid"`).
-// parity: notify:OnPasswordChanged
-pub fn emit_password_changed(
-    ctx: &ServerContext,
-    char_id: i64,
-    container_id: i64,
-    type_id: TypeId,
-) {
-    let container_item = PyRep::keyval([
-        ("itemID", PyRep::Integer(container_id)),
-        ("typeID", PyRep::Integer(i64::from(type_id))),
-    ]);
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnPasswordChanged",
-        "charid",
-        vec![PyRep::Integer(1), container_item],
-    );
-}
-
 /// Emits `OnPlayerStateUpdated(playerState)` (`1` arg, `id_type = "charid"`).
 // parity: notify:OnPlayerStateUpdated
 pub fn emit_player_state_updated(ctx: &ServerContext, char_id: i64, player_state_rep: PyRep) {

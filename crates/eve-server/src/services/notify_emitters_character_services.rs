@@ -748,29 +748,38 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/chatban" => {
-            let Some(target_cid) = parts.get(1).and_then(|s| s.parse::<i64>().ok()) else {
+            let Some(target_cid) = parts.get(1).and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError::user_error("InvalidSlashArguments")));
+            };
+            let Ok(cid_u32) = u32::try_from(target_cid) else {
                 return Some(Err(BridgeRpcError::user_error("InvalidSlashArguments")));
             };
             let mode = parts.get(2).copied().unwrap_or("3600");
             let is_perm = mode.eq_ignore_ascii_case("perm") || mode.eq_ignore_ascii_case("permanent");
+            let now_unix = ctx.now_unix();
             let now_ft = ctx.now_blueos_filetime_ticks();
-            let expiry_ft = if is_perm {
-                i64::MAX
+            let (expiry_unix, expiry_ft, reason) = if is_perm {
+                (u64::MAX, i64::MAX, "Permanent GM chat ban".to_string())
             } else {
                 let secs = mode.parse::<i64>().unwrap_or(3600).max(1);
-                now_ft.saturating_add(secs.saturating_mul(10_000_000))
+                (
+                    now_unix.saturating_add(secs as u64),
+                    now_ft.saturating_add(secs.saturating_mul(10_000_000)),
+                    "Temporary GM chat ban".to_string(),
+                )
             };
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut bans: HashMap<i64, i64> = snap
-                    .service_state_blobs
-                    .get("gm_chat_bans")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                bans.insert(target_cid, expiry_ft);
-                if let Ok(json) = serde_json::to_string(&bans) {
-                    snap.service_state_blobs.insert("gm_chat_bans".into(), json);
-                }
-            });
+            let mutes_snapshot = {
+                let mut mutes = ctx
+                    .quasar_gateway
+                    .chat_moderation
+                    .mutes
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                mutes.retain(|_, (exp, _)| *exp > now_unix);
+                mutes.insert(cid_u32, (expiry_unix, reason));
+                mutes.clone()
+            };
+            crate::services::quasar_social_chat::save_mutes_to_db(&ctx.db, &mutes_snapshot);
             if is_perm {
                 ctx.notify(
                     NotificationTarget::Character(target_cid),
@@ -793,20 +802,22 @@ pub fn handle_batch3_gm_slash_cmd(
             ])))
         }
         "/chatunban" => {
-            let Some(target_cid) = parts.get(1).and_then(|s| s.parse::<i64>().ok()) else {
+            let Some(target_cid) = parts.get(1).and_then(|s| s.parse::<i64>().ok()).filter(|&id| id > 0) else {
                 return Some(Err(BridgeRpcError::user_error("InvalidSlashArguments")));
             };
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut bans: HashMap<i64, i64> = snap
-                    .service_state_blobs
-                    .get("gm_chat_bans")
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-                bans.remove(&target_cid);
-                if let Ok(json) = serde_json::to_string(&bans) {
-                    snap.service_state_blobs.insert("gm_chat_bans".into(), json);
-                }
-            });
+            if let Ok(cid_u32) = u32::try_from(target_cid) {
+                let mutes_snapshot = {
+                    let mut mutes = ctx
+                        .quasar_gateway
+                        .chat_moderation
+                        .mutes
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    mutes.remove(&cid_u32);
+                    mutes.clone()
+                };
+                crate::services::quasar_social_chat::save_mutes_to_db(&ctx.db, &mutes_snapshot);
+            }
             ctx.notify(
                 NotificationTarget::Character(target_cid),
                 "OnCharacterUnbanned",

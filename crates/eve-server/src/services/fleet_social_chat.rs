@@ -657,15 +657,14 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError { code: "UserError".into(), message: "ChatContentInvalidBannedWords".into() }));
             }
             let now_unix = ctx.now_unix();
-            let now_ft_check = ctx.now_blueos_filetime_ticks();
-            if let Some(ban_expiry_ft) = ctx.db.with_snapshot(|snap| {
-                snap.service_state_blobs
-                    .get("gm_chat_bans")
-                    .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
-                    .and_then(|bans| bans.get(&char_id).copied())
-            }) {
-                if ban_expiry_ft > now_ft_check {
-                    return Some(Err(BridgeRpcError { code: "CharacterChatBanned".into(), message: "Character is banned from chat".into() }));
+            if let Ok(cid_u32) = u32::try_from(char_id) {
+                if let Some((_, reason)) = crate::services::quasar_social_chat::check_active_chat_mute(
+                    &ctx.quasar_gateway.chat_moderation,
+                    &ctx.db,
+                    cid_u32,
+                    now_unix,
+                ) {
+                    return Some(Err(BridgeRpcError { code: "CharacterChatBanned".into(), message: format!("Character is banned from chat: {reason}") }));
                 }
             }
             let db_mute = ctx.db.with_snapshot(|snap| snap.chat_channel_acl.get(chan_id).and_then(|a| a.muted_until.get(&char_id).cloned()));

@@ -356,12 +356,20 @@ pub(crate) async fn handle_mine(
                     message: "Ore mining drones cannot harvest Ice asteroids (group 465)".into(),
                 });
             }
-            // 'Excavator' Mining Drone (41030) / 'Excavator' Ice Harvesting Drone (43681) requires Rorqual (28352) + active Industrial Core (group 515)
-            if matches!(d_item.type_id, 41030 | 43681 | 41031 | 90621 | 90622) {
-                if ship_type_id != 28352 {
+            // Excavator mining/ice drones (SDE group 101, 25 Mbit bandwidth attr 1272) require Capital Industrial Ship (attrs 3223/3224) + active Industrial Core (group 515)
+            let is_excavator = ctx
+                .sde
+                .types
+                .get(&d_item.type_id)
+                .is_some_and(|t| t.group_id == 101 && t.default_attributes.get(&1272).copied() == Some(25.0));
+            if is_excavator {
+                let can_operate_excavator = ctx.sde.types.get(&ship_type_id).is_some_and(|t| {
+                    t.default_attributes.contains_key(&3223) || t.default_attributes.contains_key(&3224)
+                });
+                if !can_operate_excavator {
                     return Err(BridgeRpcError {
                         code: "InvalidShipForExcavator".into(),
-                        message: "Excavator mining drones can only be operated by a Rorqual (28352)".into(),
+                        message: "Excavator mining drones can only be operated by a Capital Industrial Ship".into(),
                     });
                 }
                 if active_ind_core_type.is_none() {
@@ -380,7 +388,9 @@ pub(crate) async fn handle_mine(
                 let op3439 = sk.and_then(|m| m.get(&3439)).map(|s| s.level).unwrap_or(0);
                 let op = op3438.max(op3439);
                 let ice_op = sk.and_then(|m| m.get(&43702)).map(|s| s.level).unwrap_or(0);
-                let int = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
+                let int3442 = sk.and_then(|m| m.get(&3442)).map(|s| s.level).unwrap_or(0);
+                let int3436 = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
+                let int = int3442.max(int3436);
                 let spec = sk.and_then(|m| m.get(&22541)).map(|s| s.level).unwrap_or(0);
                 let ice_spec = sk.and_then(|m| m.get(&43703)).map(|s| s.level).unwrap_or(0);
                 let cap_ind = sk.and_then(|m| m.get(&28374)).map(|s| s.level).unwrap_or(0);
@@ -403,17 +413,31 @@ pub(crate) async fn handle_mine(
                 (op, ice_op, int, spec, ice_spec, cap_ind, r_mult)
             });
 
-        let rorq_ore_bonus_mult = if ship_type_id == 28352 && cap_ind_lvl > 0 {
-            let per_lvl = ctx
-                .sde
+        let sde_skill_pct = |skill_id: u32, attr_id: u16| -> f64 {
+            ctx.sde
                 .types
-                .get(&28352)
-                .and_then(|t| t.default_attributes.get(&3223).copied())
-                .unwrap_or(10.0);
-            1.0 + (per_lvl / 100.0) * (cap_ind_lvl.min(5) as f64)
-        } else {
-            1.0
+                .get(&skill_id)
+                .and_then(|t| t.default_attributes.get(&attr_id).copied())
+                .unwrap_or(0.0)
+                / 100.0
         };
+        let drone_requires_skill = |drone_tid: u32, req_skill_id: u32| -> bool {
+            let target = f64::from(req_skill_id);
+            ctx.sde.types.get(&drone_tid).is_some_and(|t| {
+                [182_u16, 183, 184, 1285, 1289, 1290]
+                    .into_iter()
+                    .any(|attr| t.default_attributes.get(&attr).copied() == Some(target))
+            })
+        };
+        let ship_t = ctx.sde.types.get(&ship_type_id);
+        let rorq_ore_bonus_mult = ship_t
+            .and_then(|t| t.default_attributes.get(&3223).copied())
+            .map(|per_lvl| 1.0 + (per_lvl / 100.0) * (cap_ind_lvl.min(5) as f64))
+            .unwrap_or(1.0);
+        let rorq_ice_dur_factor = ship_t
+            .and_then(|t| t.default_attributes.get(&3224).copied())
+            .map(|per_lvl| 1.0 + (per_lvl / 100.0) * (cap_ind_lvl.min(5) as f64))
+            .unwrap_or(1.0);
         let ind_core_ore_mult = active_ind_core_type
             .and_then(|cid| ctx.sde.types.get(&cid)?.default_attributes.get(&2585).copied())
             .map(|pct| 1.0 + pct / 100.0)
@@ -436,40 +460,33 @@ pub(crate) async fn handle_mine(
             let d_waste = if raw_waste > 1.0 { raw_waste / 100.0 } else { raw_waste };
             per_drone_waste_prob.insert(d_item.item_id, d_waste);
             max_waste_prob = max_waste_prob.max(d_waste);
-            let is_ice_drone = drone_t
-                .and_then(|t| t.default_attributes.get(&182).copied())
-                == Some(43702.0);
+            let is_ice_drone = drone_requires_skill(d_item.type_id, 43702);
             let base_dur_s = drone_t
                 .and_then(|t| t.default_attributes.get(&73).copied())
                 .map(|dur_ms| if dur_ms >= 1000.0 { dur_ms / 1000.0 } else { dur_ms })
                 .unwrap_or(60.0)
                 .max(1.0);
             let (drone_mult, mine_dur_s) = if is_ice_drone {
-                let ice_spec_factor = if matches!(d_item.type_id, 43681 | 43682) {
-                    1.0 - 0.02 * (ice_spec_lvl.min(5) as f64)
-                } else {
-                    1.0
-                };
-                let rorq_ice_dur_factor = if ship_type_id == 28352 {
-                    1.0 - 0.05 * (cap_ind_lvl.min(5) as f64)
+                let ice_spec_factor = if drone_requires_skill(d_item.type_id, 43703) {
+                    1.0 + sde_skill_pct(43703, 293) * (ice_spec_lvl.min(5) as f64)
                 } else {
                     1.0
                 };
                 let core_ice_dur_factor = (1.0 / ind_core_ice_rate_mult).clamp(0.1, 1.0);
                 let dur_s = base_dur_s
-                    * (1.0 - 0.05 * (ice_op_lvl.min(5) as f64))
+                    * (1.0 + sde_skill_pct(43702, 293) * (ice_op_lvl.min(5) as f64))
                     * ice_spec_factor
                     * rorq_ice_dur_factor
                     * core_ice_dur_factor;
                 (1.0, dur_s.max(1.0))
             } else {
-                let spec_factor = if matches!(d_item.type_id, 10250 | 41030 | 90621) {
-                    1.0 + 0.02 * (drone_spec_lvl as f64)
+                let spec_factor = if drone_requires_skill(d_item.type_id, 22541) {
+                    1.0 + sde_skill_pct(22541, 434) * (drone_spec_lvl.min(5) as f64)
                 } else {
                     1.0
                 };
-                let mult = (1.0 + 0.05 * (drone_op_lvl as f64))
-                    * (1.0 + 0.10 * (drone_int_lvl as f64))
+                let mult = (1.0 + sde_skill_pct(3438, 434) * (drone_op_lvl.min(5) as f64))
+                    * (1.0 + sde_skill_pct(3442, 434) * (drone_int_lvl.min(5) as f64))
                     * spec_factor
                     * rig_mult
                     * rorq_ore_bonus_mult

@@ -230,7 +230,11 @@ pub(crate) async fn handle_set_password(
     kwargs: &std::collections::HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (container_id, which, pw_arg, old_arg) = if let Some(b) = bound_entry {
+    let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
+    let item_bound = bound_entry.filter(|b| {
+        !(Some(b.object_id) == caller_loc && args.first().and_then(|a| a.as_i64()).is_some_and(|v| v > 2))
+    });
+    let (container_id, which, pw_arg, old_arg) = if let Some(b) = item_bound {
         if args.first().and_then(|a| a.as_i64()).is_some() || kwargs.contains_key("which") {
             let w = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("which").and_then(|v| v.as_i64())).unwrap_or(0);
             (b.object_id, w, args.get(1).or_else(|| kwargs.get("password")).or_else(|| kwargs.get("newPassword")), args.get(2).or_else(|| kwargs.get("oldPassword")))
@@ -284,7 +288,6 @@ pub(crate) async fn handle_set_password(
     };
 
     let corp_id = session.corporation_id.unwrap_or(0);
-    let caller_loc = session.station_id.or(session.structure_id).or_else(|| session.solar_system_id.map(i64::from));
     let now_unix = ctx.now_unix_secs();
     let pw_type_str = if which == 2 { "config" } else { "general" };
 
@@ -311,12 +314,8 @@ pub(crate) async fn handle_set_password(
         }
         let item_tid = item.type_id;
         let grp_id = ctx.sde.types.get(&item_tid).map(|t| t.group_id).unwrap_or(0);
-        if grp_id == 649 {
-            return Err(BridgeRpcError {
-                code: "CannotPasswordProtectFreightContainer".into(),
-                message: format!("Freight container {container_id} cannot be password protected"),
-            });
-        }
+        // Only Secure Cargo Containers (340) and Audit Log Secure Containers (448) take passwords;
+        // freight (649) and plain cargo/station containers share the same rejection.
         if !matches!(grp_id, 340 | 448) {
             return Err(BridgeRpcError {
                 code: "ContainerDoesNotSupportPassword".into(),
@@ -352,7 +351,10 @@ pub(crate) async fn handle_set_password(
                     message: "Character must be colocated with container to configure password".into(),
                 });
             }
-        } else if Some(item.location_id) != caller_loc && session.ship_id != Some(item.location_id) {
+        } else if Some(item.location_id) != caller_loc
+            && session.ship_id != Some(item.location_id)
+            && !snap.items.get(&item.location_id).is_some_and(|p| Some(p.location_id) == caller_loc)
+        {
             return Err(BridgeRpcError {
                 code: "ColocationRequired".into(),
                 message: "Character must be colocated with container to configure password".into(),

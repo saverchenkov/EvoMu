@@ -172,9 +172,18 @@ pub fn handle(
                         if !has_inventory {
                             return false;
                         }
-                        if it.owner_id == char_id || session.has_gm_role() {
+                        let is_corp_owned = session
+                            .corporation_id
+                            .is_some_and(|cid| cid > 0 && it.owner_id == cid);
+                        if it.owner_id == char_id || is_corp_owned || session.has_gm_role() {
+                            let in_corp_office_here = at_location
+                                && snap
+                                    .items
+                                    .get(&it.location_id)
+                                    .is_some_and(|p| p.location_id == location_id);
                             let in_reach = it.item_id == session.ship_id.unwrap_or(0)
                                 || (it.location_id == location_id && at_location)
+                                || in_corp_office_here
                                 || Some(it.location_id) == session.ship_id;
                             in_reach
                         } else {
@@ -219,7 +228,12 @@ fn self_inv_item(
     object_id: i64,
 ) -> Result<PyRep, BridgeRpcError> {
     let header = DBRowDescriptor::inv_item_header();
-    if let Some(item) = ctx.db.get_item(object_id).filter(|i| i.owner_id == char_id) {
+    if let Some(item) = ctx.db.get_item(object_id).filter(|i| {
+        i.owner_id == char_id
+            || session
+                .corporation_id
+                .is_some_and(|cid| cid > 0 && i.owner_id == cid)
+    }) {
         return Ok(header.build_dbrow(item_to_packed_cells(ctx, &item)));
     }
     if session.station_id == Some(object_id) {

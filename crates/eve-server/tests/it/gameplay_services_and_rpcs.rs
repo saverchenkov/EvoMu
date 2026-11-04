@@ -5178,6 +5178,9 @@ async fn test_remediated_campaign_enrollment_chat_bans_and_crimewatch_timers() {
     }).await.unwrap();
     sys_h.add_target_lock(ship_a, TargetLock { target_id: npc_id, lock_time_ms: 100.0, remaining_lock_ms: 0.0, locked: true, max_range_m: None }).await.unwrap();
     drain_all(&ctx, &mut s_a, PILOT_A);
+    rpc(&ctx, &mut s_a, "dogmaIM", "Deactivate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into())]).await.unwrap();
+    ctx.advance_secs(10);
+    sys_h.step_manual(10.0).await.unwrap();
     rpc(&ctx, &mut s_a, "dogmaIM", "Activate", &[PyRep::Integer(gun_id), PyRep::String("projectileFired".into()), PyRep::Integer(npc_id)]).await.unwrap();
     let npc_notifs = drain_all(&ctx, &mut s_a, PILOT_A);
     assert!(npc_notifs.iter().any(|(e, _)| e == "OnNpcTimerUpdate"));

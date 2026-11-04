@@ -126,6 +126,9 @@ pub fn ice_belt_dungeon_for_system(ctx: &ServerContext, sys_id: SolarSystemId) -
 /// `DNG-<dungeonID>-<instanceID>` like the ore anomalies, and `ore_types` lists the belt's ice types
 /// from the SDE dungeon layout. Ice asteroid balls are not materialised here.
 pub fn seed_system_ice_belt_from_sde(ctx: &ServerContext, sys_id: SolarSystemId) {
+    // Designated ice systems get the asteroid-backed regional belt first, so the anomaly
+    // listed to the client is minable (no asteroid-less placeholder shadowing it).
+    crate::services::space_mining_harvest::tick_ice_belt_respawn_sync(ctx, sys_id);
     let Some(dungeon_id) = ice_belt_dungeon_for_system(ctx, sys_id) else {
         return;
     };

@@ -236,7 +236,7 @@ async fn test_freight_container_space_rules_and_holds() {
 
     // 3. Freight container cannot be password protected
     let pw_err = rpc(&ctx, &mut sess, "invbroker", "SetPassword", &[PyRep::Integer(freight_can_id), PyRep::Integer(1), PyRep::String("pw".into()), PyRep::String("".into())]).await.expect_err("Password on freight container");
-    assert_eq!(pw_err.code, "CannotPasswordProtectFreightContainer");
+    assert_eq!(pw_err.code, "ContainerDoesNotSupportPassword");
 
     // 4. Scooping into small ship hold with insufficient cargo fails with CapacityExceeded
     let small_ship_id = 822_005i64;
