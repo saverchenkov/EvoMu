@@ -2049,3 +2049,1114 @@ async fn test_sov_dev_indices_adm_vulnerability_live_entosis_and_command_nodes()
 }
 
 }
+
+#[allow(dead_code, unused_imports)]
+pub(crate) mod sov_upgrades_and_reagents {
+    use super::*;
+
+//  End-to-end parity closure tests (Part 1) for Equinox Sovereignty Hub
+//  anchoring, fuel, upgrades, power, workforce, reagents, and Mercenary Dens.
+
+
+use crate::quasar_sov_equinox_hub::{field, id_req, idm, rpc, structure, subscribe, varint};
+use crate::sovereignty_equinox_gameplay::{
+    drain_quasar, find_nullsec_planets, fit_subcap_blasters, lock_target_via_rpc, make_ball,
+    open_sqlite_ctx, place_ship_ball, register_online_pilot, rpc_call, set_pilot_location,
+    step_weapon_ticks, temp_sqlite_path, ALLIANCE, CORP, PILOT, PILOT_SHIP,
+};
+
+fn err_code<T: std::fmt::Debug>(res: Result<T, eve_proto::BridgeRpcError>) -> String {
+    res.unwrap_err().code
+}
+use eve_db::{corp_roles, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_proto::quasar::{encode_bytes_field, encode_varint_field};
+use eve_proto::PyRep;
+use eve_server::quasar_gateway::STATUS_OK;
+use eve_server::services::quasar_sov_hub::{compute_hub_resources, simulate_fuel, star_power};
+use eve_server::services::quasar_sov_mercden::TYPE_MERCENARY_DEN_MANAGEMENT;
+use eve_server::services::sov_gameplay::{
+    TYPE_MERCENARY_DEN, UPGRADE_MAJOR_THREAT_DETECTION, UPGRADE_PROSPECTING_ARRAY,
+};
+use eve_server::services::sov_services::{
+    claim_system_sovereignty, TYPE_ORBITAL_SKYHOOK, TYPE_SOVEREIGNTY_HUB, TYPE_SUPERIONIC_ICE,
+};
+use eve_server::services::station_structure::structure_lifecycle as life;
+use glam::DVec3;
+
+#[tokio::test]
+async fn test_sov_hub_anchor_upgrades_power_and_fuel_closure() {
+    // parity: feat:sovereignty.sov-hub-anchor
+    // parity: feat:sovereignty.sov-hub-fuel
+    // parity: feat:sovereignty.sov-hub-upgrades
+    // parity: feat:sovereignty.sov-power
+    eve_testkit::attest(&[
+        "feat:sovereignty.sov-hub-anchor",
+        "feat:sovereignty.sov-hub-fuel",
+        "feat:sovereignty.sov-hub-upgrades",
+        "feat:sovereignty.sov-power",
+    ]);
+
+    let db_path = temp_sqlite_path("parity_sov_hub_core");
+    let ctx = open_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
+    let null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| {
+            s.security_status <= 0.0
+                && s.region_id < 11_000_000
+                && ctx.sde.regions.get(&s.region_id).is_none_or(|r| r.faction_id.is_none())
+        })
+        .find(|s| eve_server::services::quasar_sov_hub::system_yield(&ctx.sde, s.solar_system_id).planet_workforce >= 2_500)
+        .map(|s| s.solar_system_id)
+        .unwrap_or_else(|| find_nullsec_planets(&ctx).0);
+    let hub_pos = DVec3::new(150_000.0, 0.0, 0.0);
+
+    let mut s_dir = register_online_pilot(
+        &ctx,
+        88_001,
+        "demo",
+        "demo-secret",
+        PILOT,
+        CORP,
+        Some(ALLIANCE),
+        30_000_142,
+        PILOT_SHIP,
+        639,
+        hub_pos,
+        corp_roles::ROLE_DIRECTOR,
+    )
+    .await;
+
+    // Negative: high-sec anchoring fails closed.
+    assert_eq!(
+        err_code(
+            rpc_call(
+                &ctx,
+                &mut s_dir,
+                "structureDeployment",
+                "Anchor",
+                &[PyRep::Integer(TYPE_SOVEREIGNTY_HUB as i64)],
+            )
+            .await
+        ),
+        "CannotAnchorSovHubOutsideNullSec"
+    );
+
+    // Move to unclaimed null-sec, anchor Sovereignty Hub from cargo, and complete onlining.
+    let _ = ctx.systems.get_or_spawn(30_000_142).remove_ball(PILOT_SHIP).await;
+    set_pilot_location(&ctx, &mut s_dir, null_sys, None);
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 639, hub_pos).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            988_001,
+            InventoryItemRecord {
+                item_id: 988_001,
+                type_id: TYPE_SOVEREIGNTY_HUB,
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let anchor_rep = rpc_call(
+        &ctx,
+        &mut s_dir,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(988_001), PyRep::String("Equinox Hub".into())],
+    )
+    .await
+    .expect("anchor Sovereignty Hub");
+    let hub_id = anchor_rep.dict_get("structureID").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states.get(&null_sys).and_then(|st| st.sov_alliance_id)),
+        None
+    );
+
+    let anchor_end = ctx.db.with_snapshot(|s| s.structures.get(&hub_id).unwrap().reinforced_until_unix);
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(anchor_end + 1)));
+    life::sync_all_structures(&ctx);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.system_states.get(&null_sys).and_then(|st| st.sov_alliance_id)),
+        Some(ALLIANCE)
+    );
+
+    // Fuel Access Group via SetSovHubFuelAccessGroup.
+    assert_eq!(
+        rpc_call(&ctx, &mut s_dir, "sovMgr", "SetSovHubFuelAccessGroup", &[PyRep::Integer(hub_id), PyRep::Integer(55_001)])
+            .await
+            .expect("SetSovHubFuelAccessGroup"),
+        PyRep::Integer(55_001)
+    );
+    assert_eq!(
+        rpc_call(&ctx, &mut s_dir, "sovMgr", "IsOnLocalSovHubFuelAccessGroup", &[PyRep::Integer(hub_id)])
+            .await
+            .unwrap(),
+        PyRep::Bool(true)
+    );
+
+    // Anchor Skyhooks on all planets so system power/workforce are harvested, and verify star power.
+    let expected_star_power: u64 = ctx
+        .sde
+        .celestials_in_system(null_sys)
+        .into_iter()
+        .filter(|c| c.group_id == 6)
+        .map(|c| star_power(&ctx.sde, c.type_id))
+        .sum();
+    ctx.db.with_mut_snapshot(|snap| {
+        for (idx, cel) in ctx.sde.celestials_in_system(null_sys).into_iter().filter(|c| c.group_id == 7).enumerate() {
+            let sh_id = 1_098_000_100 + idx as i64;
+            snap.structures.insert(sh_id, structure(sh_id, CORP, null_sys, TYPE_ORBITAL_SKYHOOK));
+            snap.sov_runtime.skyhook_planets.insert(sh_id, cel.celestial_id);
+        }
+        for (iid, tid, qty) in [
+            (988_010, TYPE_SUPERIONIC_ICE, 100),
+            (988_011, 87_703, 1), // Power Monitoring Division 1 (+200 power, 2,500 wf, 8 Ice/hr)
+            (988_012, UPGRADE_MAJOR_THREAT_DETECTION, 1), // 400 power, 2,700 wf
+            (988_013, UPGRADE_PROSPECTING_ARRAY, 1),      // 450 power, 6,400 wf
+            (988_014, 87_948, 1),                         // Minor Threat Detection: 400 power, 4,000 wf (overloads power)
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: PILOT,
+                    location_id: hub_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: qty,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    let mut rx = subscribe(&ctx, &mut s_dir).await;
+    let base_power = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap().power_available);
+    assert!(base_power >= expected_star_power);
+
+    // Add 16 Superionic Ice (enough for 2 hours of Power Monitoring Division 1 at 8 Ice/hr).
+    let mut add_fuel = id_req(1, 988_010);
+    encode_varint_field(2, 16, &mut add_fuel);
+    encode_bytes_field(3, &idm(hub_id as u64), &mut add_fuel);
+    assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.fuel.api.AddRequest", add_fuel).await.status_code, STATUS_OK);
+
+    // Configure Power Monitoring Division 1 + Major Threat Detection + 2x Prospecting Array (overloads power).
+    let mut proc_cfg = Vec::new();
+    for iid in [988_011u64, 988_012, 988_013, 988_014] {
+        encode_bytes_field(1, &idm(iid), &mut proc_cfg);
+    }
+    for tid in [87_703u64, UPGRADE_MAJOR_THREAT_DETECTION as u64, UPGRADE_PROSPECTING_ARRAY as u64, 87_948u64] {
+        let mut cfg = Vec::new();
+        encode_bytes_field(1, &idm(tid), &mut cfg);
+        encode_varint_field(2, 1, &mut cfg);
+        encode_bytes_field(2, &cfg, &mut proc_cfg);
+    }
+    encode_bytes_field(3, &idm(hub_id as u64), &mut proc_cfg);
+    assert_eq!(
+        rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.upgrade.api.ProcessConfigurationRequest", proc_cfg)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    let _ = drain_quasar(&mut rx);
+
+    let res_after = ctx.db.with_snapshot(|s| compute_hub_resources(s, &ctx.sde, hub_id).unwrap());
+    assert_eq!(res_after.power_available, base_power + 200);
+    assert!(res_after.power_allocated <= res_after.power_available, "power overload must take excess upgrades offline");
+
+    // Hourly fuel burn: 2 hours burns 16 Ice, 3rd hour empties bay and offlines fuel-burning upgrade.
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let hub = snap.sov_runtime.sov_hubs.get_mut(&hub_id).unwrap();
+        hub.last_updated_unix = now;
+        let _ = simulate_fuel(&ctx.sde, hub, now + 7_200);
+        assert_eq!(hub.fuel.get(&TYPE_SUPERIONIC_ICE).copied().unwrap_or(0), 0);
+        assert!(simulate_fuel(&ctx.sde, hub, now + 10_800));
+        let pwr_mon = hub.upgrades.iter().find(|u| u.type_id == 87_703).unwrap();
+        assert!(!pwr_mon.online || pwr_mon.low_power, "empty fuel bay must offline fuel-consuming upgrade");
+    });
+
+    drop(ctx);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_sov_workforce_reagents_and_mercenary_den_closure() {
+    // parity: feat:sovereignty.sov-workforce
+    // parity: feat:sovereignty.sov-reagents
+    // parity: feat:sovereignty.mercenary-den
+    eve_testkit::attest(&[
+        "feat:sovereignty.sov-workforce",
+        "feat:sovereignty.sov-reagents",
+        "feat:sovereignty.mercenary-den",
+    ]);
+
+    let db_path = temp_sqlite_path("parity_sov_wf_reagents_den");
+    let ctx = open_sqlite_ctx(&db_path, true);
+    crate::common::pin_clock(&ctx);
+    let (null_sys, temp_planet, lava_planet, ice_planet, _) = find_nullsec_planets(&ctx);
+    let mut adj_null: Vec<u32> = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| {
+            j.from_solar_system_id == null_sys
+                && ctx.sde.solar_systems.get(&j.to_solar_system_id).is_some_and(|s| {
+                    s.security_status <= 0.0
+                        && ctx.sde.constellations.get(&s.constellation_id).and_then(|c| c.faction_id).is_none()
+                        && ctx.sde.regions.get(&s.region_id).and_then(|r| r.faction_id).is_none()
+                })
+        })
+        .map(|j| j.to_solar_system_id)
+        .filter(|&sys| {
+            ctx.sde
+                .celestials_in_system(sys)
+                .into_iter()
+                .filter(|c| c.group_id == 7)
+                .map(|c| eve_server::services::quasar_sov_hub::planet_yield(c.type_id).1)
+                .sum::<u64>()
+                >= 2_000
+        })
+        .collect();
+    adj_null.sort_unstable();
+    let neighbor_sys = adj_null.into_iter().next().expect("adjacent null-sec system with >= 2000 workforce");
+
+    let cels = ctx.sde.celestials_in_system(null_sys);
+    let lava_pos = cels.iter().find(|c| c.celestial_id == lava_planet).unwrap().position;
+    let ice_pos = cels.iter().find(|c| c.celestial_id == ice_planet).unwrap().position;
+    let temp_pos = cels.iter().find(|c| c.celestial_id == temp_planet).unwrap().position;
+    let (hub_a, hub_b, sh_temp) = (1_099_000_001i64, 1_099_000_002i64, 1_099_000_003i64);
+
+    let mut s_dir = register_online_pilot(
+        &ctx,
+        88_002,
+        "demo",
+        "demo-secret",
+        PILOT,
+        CORP,
+        Some(ALLIANCE),
+        null_sys,
+        PILOT_SHIP,
+        19_722,
+        lava_pos,
+        corp_roles::ROLE_DIRECTOR,
+    )
+    .await;
+    let mut rx = subscribe(&ctx, &mut s_dir).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(null_sys).or_default().solar_system_id = null_sys;
+        snap.system_states.entry(neighbor_sys).or_default().solar_system_id = neighbor_sys;
+        snap.structures.insert(hub_a, structure(hub_a, CORP, null_sys, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(hub_b, structure(hub_b, CORP, neighbor_sys, TYPE_SOVEREIGNTY_HUB));
+        snap.structures.insert(sh_temp, structure(sh_temp, CORP, null_sys, TYPE_ORBITAL_SKYHOOK));
+        snap.sov_runtime.skyhook_planets.insert(sh_temp, temp_planet);
+        for (idx, cel) in ctx.sde.celestials_in_system(neighbor_sys).into_iter().filter(|c| c.group_id == 7).enumerate() {
+            let sh_id = 1_099_000_200 + idx as i64;
+            snap.structures.insert(sh_id, structure(sh_id, CORP, neighbor_sys, TYPE_ORBITAL_SKYHOOK));
+            snap.sov_runtime.skyhook_planets.insert(sh_id, cel.celestial_id);
+        }
+        snap.skills.entry(PILOT).or_default().insert(
+            TYPE_MERCENARY_DEN_MANAGEMENT,
+            TrainedSkillRecord { type_id: TYPE_MERCENARY_DEN_MANAGEMENT, level: 2, skill_points: 50_000.0 },
+        );
+        for (iid, tid, qty) in [
+            (988_101, TYPE_ORBITAL_SKYHOOK, 2),
+            (988_102, TYPE_MERCENARY_DEN, 1),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid,
+                    type_id: tid,
+                    owner_id: PILOT,
+                    location_id: PILOT_SHIP,
+                    flag: InventoryFlag::Cargo,
+                    quantity: qty,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    claim_system_sovereignty(&ctx, null_sys, ALLIANCE, CORP, hub_a).expect("claim null_sys");
+    claim_system_sovereignty(&ctx, neighbor_sys, ALLIANCE, CORP, hub_b).expect("claim neighbor_sys");
+    let _ = ctx.systems.get_or_spawn(null_sys).spawn_ball(make_ball(sh_temp, TYPE_ORBITAL_SKYHOOK, temp_pos)).await;
+
+    // 1. Anchor Skyhooks on Lava & Ice planets and verify Magmatic Gas / Superionic Ice accumulation.
+    let sh_lava = rpc_call(
+        &ctx,
+        &mut s_dir,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(TYPE_ORBITAL_SKYHOOK as i64), PyRep::Integer(lava_planet)],
+    )
+    .await
+    .expect("anchor Lava Skyhook")
+    .dict_get("structureID")
+    .and_then(|v| v.as_i64())
+    .unwrap();
+
+    let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(PILOT_SHIP).await;
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 19_722, ice_pos).await;
+    let sh_ice = rpc_call(
+        &ctx,
+        &mut s_dir,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(TYPE_ORBITAL_SKYHOOK as i64), PyRep::Integer(ice_planet)],
+    )
+    .await
+    .expect("anchor Ice Skyhook")
+    .dict_get("structureID")
+    .and_then(|v| v.as_i64())
+    .unwrap();
+
+    let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(PILOT_SHIP).await;
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 19_722, DVec3::new(200_000.0, 0.0, 0.0)).await;
+    let _ = rpc_call(&ctx, &mut s_dir, "sovMgr", "AcquireSkyhooks", &[PyRep::Integer(null_sys as i64)])
+        .await
+        .expect("AcquireSkyhooks");
+
+    let ready_unix = ctx.db.with_snapshot(|s| s.structures.get(&sh_ice).unwrap().reinforced_until_unix);
+    let now_unix = ctx.now_unix();
+    if ready_unix + 7_200 > now_unix {
+        ctx.advance_secs(ready_unix + 7_200 - now_unix);
+    } else {
+        ctx.advance_secs(7_200);
+    }
+    life::sync_all_structures(&ctx);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    let (gas_qty, ice_qty) = ctx.db.with_snapshot(|s| {
+        let g = s.sov_runtime.skyhook_reagent_bays.get(&sh_lava).map(|b| b.1 + b.2).unwrap_or(0);
+        let i = s.sov_runtime.skyhook_reagent_bays.get(&sh_ice).map(|b| b.1 + b.2).unwrap_or(0);
+        (g, i)
+    });
+    assert!(gas_qty > 0 && ice_qty > 0, "Lava ({gas_qty}) and Ice ({ice_qty}) Skyhooks must accumulate reagents");
+
+    // 2. Cross-system Workforce export/import via hub.workforce.api.ConfigureRequest.
+    let wf_before = varint(
+        &field(
+            &rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64))
+                .await
+                .payload
+                .unwrap()
+                .value,
+            2,
+        )
+        .unwrap(),
+        1,
+    )
+    .unwrap_or(0);
+
+    let (mut exp, mut exp_cfg, mut cfg_b) = (Vec::new(), Vec::new(), id_req(1, hub_b as u64));
+    encode_bytes_field(3, &idm(null_sys as u64), &mut exp);
+    encode_varint_field(2, 1_500, &mut exp);
+    encode_bytes_field(3, &exp, &mut exp_cfg);
+    encode_bytes_field(2, &exp_cfg, &mut cfg_b);
+    assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_b).await.status_code, STATUS_OK);
+
+    let (mut src, mut imp, mut imp_cfg, mut cfg_a) = (Vec::new(), Vec::new(), Vec::new(), id_req(1, hub_a as u64));
+    encode_bytes_field(1, &idm(neighbor_sys as u64), &mut src);
+    encode_bytes_field(1, &src, &mut imp);
+    encode_bytes_field(2, &imp, &mut imp_cfg);
+    encode_bytes_field(2, &imp_cfg, &mut cfg_a);
+    assert_eq!(rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.workforce.api.ConfigureRequest", cfg_a).await.status_code, STATUS_OK);
+
+    let wf_after = varint(
+        &field(
+            &rpc(&ctx, &mut s_dir, "eve_public.sovereignty.hub.api.GetResourcesRequest", id_req(1, hub_a as u64))
+                .await
+                .payload
+                .unwrap()
+                .value,
+            2,
+        )
+        .unwrap(),
+        1,
+    )
+    .unwrap_or(0);
+    assert_eq!(wf_after, wf_before + 1_500);
+
+    // 3. Anchor Mercenary Den on Temperate Skyhook, generate Infomorphs, and attack it.
+    let _ = ctx.systems.get_or_spawn(null_sys).remove_ball(PILOT_SHIP).await;
+    place_ship_ball(&ctx, null_sys, PILOT, PILOT_SHIP, 19_722, temp_pos + DVec3::new(3_000.0, 0.0, 0.0)).await;
+    let den_id = rpc_call(
+        &ctx,
+        &mut s_dir,
+        "structureDeployment",
+        "Anchor",
+        &[PyRep::Integer(TYPE_MERCENARY_DEN as i64), PyRep::Integer(sh_temp), PyRep::Integer(temp_planet)],
+    )
+    .await
+    .expect("anchor Mercenary Den")
+    .dict_get("structureID")
+    .and_then(|v| v.as_i64())
+    .unwrap();
+
+    let den_ready = ctx.db.with_snapshot(|s| s.structures.get(&den_id).unwrap().reinforced_until_unix);
+    let now_u = ctx.now_unix();
+    if den_ready + 3_600 > now_u {
+        ctx.advance_secs(den_ready + 3_600 - now_u);
+    } else {
+        ctx.advance_secs(3_600);
+    }
+    life::sync_all_structures(&ctx);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    let idks = ctx.db.with_snapshot(|s| {
+        s.sov_runtime
+            .mercenary_dens
+            .get(&den_id)
+            .map(|d| d.infomorphs)
+            .unwrap_or(0)
+    });
+    assert!(idks > 0, "Mercenary Den must generate Infomorph Decryption Keys over time");
+
+    // Attack Mercenary Den with blasters and verify shield HP drops.
+    let blaster_base = 988_900i64;
+    fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, blaster_base);
+    lock_target_via_rpc(&ctx, &mut s_dir, null_sys, PILOT_SHIP, den_id).await;
+    let shield_before = ctx.db.with_snapshot(|s| s.structures.get(&den_id).unwrap().shield_hp);
+    let _ = rpc_call(
+        &ctx,
+        &mut s_dir,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(blaster_base), PyRep::String("effects.ProjectileFired".into()), PyRep::Integer(den_id)],
+    )
+    .await;
+    step_weapon_ticks(&ctx, null_sys).await;
+    let shield_after = ctx.db.with_snapshot(|s| s.structures.get(&den_id).unwrap().shield_hp);
+    assert!(shield_after < shield_before, "attacking Mercenary Den must reduce its shield HP");
+    let _ = drain_quasar(&mut rx);
+
+    drop(ctx);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+}
+
+#[allow(dead_code, unused_imports)]
+pub(crate) mod pve_boosters_and_blockade_runners {
+    use super::*;
+
+//  End-to-end parity closure tests (Part 2) for FW Boosters, Abyssal Bioadaptive
+//  Cache rewards, Cynosural Field lighting rules, and Blockade Runner cargo-scan immunity.
+
+
+use crate::sovereignty_equinox_gameplay::{
+    fit_subcap_blasters, lock_target_via_rpc, open_sqlite_ctx, place_ship_ball,
+    register_online_pilot, rpc_call, set_pilot_location, step_weapon_ticks, temp_sqlite_path,
+    ALLIANCE, CORP, PILOT, PILOT_SHIP,
+};
+
+fn err_code<T: std::fmt::Debug>(res: Result<T, eve_proto::BridgeRpcError>) -> String {
+    res.unwrap_err().code
+}
+use eve_db::{
+    FleetRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord,
+};
+use eve_proto::PyRep;
+use eve_server::services::lp_store_catalog::{register_lp_store_offer, LPOffer};
+use eve_server::services::pve_special_sites_abyssal::{
+    abyssal_mutaplasmid_for_tier, BIOADAPTIVE_CACHE_TYPE_ID, EXTRACTION_SUBNODE_TYPE_ID,
+    TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, ZERO_POINT_CONDENSATE_TYPE_ID,
+};
+use eve_server::services::structure_acl_defense_rules::TYPE_MOBILE_CYNO_INHIBITOR;
+use glam::DVec3;
+
+#[tokio::test]
+async fn test_fw_boosters_lp_store_and_consumption_closure() {
+    // parity: feat:fw.fw-boosters
+    eve_testkit::attest(&["feat:fw.fw-boosters"]);
+
+    let db_path = temp_sqlite_path("parity_fw_boosters");
+    let ctx = open_sqlite_ctx(&db_path, true);
+    let militia_corp = 1_000_179i64; // 24th Imperial Crusade
+    let booster_tid = 91_916u32;   // Imperial Electronics Booster I
+
+    let station_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|st| st.owner_corporation_id == militia_corp)
+        .map(|st| st.station_id)
+        .expect("24th Imperial Crusade station in SDE");
+    let sys_id = ctx.sde.stations.get(&station_id).unwrap().solar_system_id;
+
+    let mut sess = register_online_pilot(
+        &ctx,
+        88_003,
+        "demo",
+        "demo-secret",
+        PILOT,
+        CORP,
+        None,
+        sys_id,
+        PILOT_SHIP,
+        639,
+        DVec3::ZERO,
+        0,
+    )
+    .await;
+    sess.station_id = Some(station_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        register_lp_store_offer(
+            snap,
+            LPOffer {
+                offer_id: 990_179,
+                corp_id: militia_corp,
+                type_id: booster_tid,
+                quantity: 1,
+                lp_cost: 2_500,
+                isk_cost: IskCents::from_isk(1_000_000),
+                req_items: Vec::new(),
+                ak_cost: 0,
+                min_standing: None,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.station_id = Some(station_id);
+            ch.balance = IskCents::from_isk(5_000_000);
+        }
+        snap.skills.entry(PILOT).or_default().insert(
+            3405, // Biology
+            TrainedSkillRecord { type_id: 3405, level: 2, skill_points: 10_000.0 },
+        );
+    });
+
+    // 1. GetAvailableOffersFromCorp lists the FW booster offer.
+    let offers = rpc_call(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(militia_corp)])
+        .await
+        .expect("GetAvailableOffersFromCorp");
+    let PyRep::List(offer_list) = offers else { panic!("expected offer list"); };
+    assert!(offer_list.iter().any(|o| o.dict_get("typeID").and_then(|v| v.as_i64()) == Some(i64::from(booster_tid))));
+
+    // 2. Negative: insufficient LP fails closed.
+    assert!(
+        rpc_call(
+            &ctx,
+            &mut sess,
+            "LPStoreMgr",
+            "TakeOfferForCharacter",
+            &[PyRep::Integer(militia_corp), PyRep::Integer(990_179), PyRep::Integer(1)],
+        )
+        .await
+        .is_err()
+    );
+
+    // 3. Grant LP, purchase FW booster, and consume via dogmaIM.UseBooster.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.loyalty_points.insert(militia_corp, 5_000);
+        }
+    });
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCharacter",
+        &[PyRep::Integer(militia_corp), PyRep::Integer(990_179), PyRep::Integer(1)],
+    )
+    .await
+    .expect("TakeOfferForCharacter");
+
+    let booster_item_id = ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .find(|i| i.owner_id == PILOT && i.location_id == station_id && i.type_id == booster_tid)
+            .map(|i| i.item_id)
+            .expect("purchased FW booster in station hangar")
+    });
+
+    rpc_call(&ctx, &mut sess, "dogmaIM", "UseBooster", &[PyRep::Integer(booster_item_id)])
+        .await
+        .expect("UseBooster");
+    let active = rpc_call(&ctx, &mut sess, "skillMgr2", "GetBoosters", &[])
+        .await
+        .expect("GetBoosters");
+    let PyRep::Dict(active_dict) = active else { panic!("expected active boosters dict"); };
+    assert!(active_dict.iter().any(|(k, _)| k.as_i64() == Some(i64::from(booster_tid))));
+
+    drop(ctx);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_abyssal_bioadaptive_cache_rewards_closure() {
+    // parity: feat:abyssal.bioadaptive-cache-rewards
+    eve_testkit::attest(&["feat:abyssal.bioadaptive-cache-rewards"]);
+
+    let db_path = temp_sqlite_path("parity_abyssal_cache");
+    let ctx = open_sqlite_ctx(&db_path, true);
+    let origin_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| (0.45..0.85).contains(&s.security_status) && s.region_id < 11_000_000)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(30_002_659);
+
+    let mut sess = register_online_pilot(
+        &ctx,
+        88_004,
+        "demo",
+        "demo-secret",
+        PILOT,
+        CORP,
+        None,
+        origin_sys,
+        PILOT_SHIP,
+        621, // Caracal (Cruiser)
+        DVec3::new(10_000.0, 0.0, 0.0),
+        0,
+    )
+    .await;
+
+    // Enter T1 Exotic pocket (47761) via abyssalMgr RPCs and verify Bioadaptive Cache + Extraction Sub-node + T1 HP.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            988_401,
+            InventoryItemRecord {
+                item_id: 988_401,
+                type_id: 47_761,
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let dep1 = rpc_call(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(988_401)])
+        .await
+        .expect("AbyssalEntranceDeployment T1");
+    let tr1 = dep1.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    let ent1 = rpc_call(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(tr1)])
+        .await
+        .expect("AbyssalEntranceGateActivation T1");
+    let abyss_sys_t1 = ent1.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let t1_balls = ctx.systems.get_or_spawn(abyss_sys_t1).list_balls().await.unwrap();
+    let r1_cache_t1 = t1_balls
+        .iter()
+        .find(|b| b.type_id == BIOADAPTIVE_CACHE_TYPE_ID)
+        .map(|b| b.id)
+        .expect("Bioadaptive Cache ball in T1 Abyssal room");
+    assert!(t1_balls.iter().any(|b| b.type_id == EXTRACTION_SUBNODE_TYPE_ID));
+    let t1_hp = ctx
+        .systems
+        .get_or_spawn(abyss_sys_t1)
+        .get_combat_state(r1_cache_t1)
+        .await
+        .unwrap()
+        .unwrap()
+        .max_structure_hp;
+
+    // Enter T5 Exotic pocket (47891) for a second pilot and verify 25x higher hull HP.
+    let pilot2 = 90_000_202i64;
+    let ship2 = 100_000_202i64;
+    let mut s2 = register_online_pilot(
+        &ctx,
+        88_005,
+        "demo2",
+        "demo2-secret",
+        pilot2,
+        CORP,
+        None,
+        origin_sys,
+        ship2,
+        621,
+        DVec3::new(2_000_000.0, 0.0, 0.0),
+        0,
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            988_402,
+            InventoryItemRecord {
+                item_id: 988_402,
+                type_id: 47_891,
+                owner_id: pilot2,
+                location_id: ship2,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let dep5 = rpc_call(&ctx, &mut s2, "abyssalMgr", "AbyssalEntranceDeployment", &[PyRep::Integer(988_402)])
+        .await
+        .expect("AbyssalEntranceDeployment T5");
+    let tr5 = dep5.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    let ent5 = rpc_call(&ctx, &mut s2, "abyssalMgr", "AbyssalEntranceGateActivation", &[PyRep::Integer(tr5)])
+        .await
+        .expect("AbyssalEntranceGateActivation T5");
+    let abyss_sys_t5 = ent5.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let t5_balls = ctx.systems.get_or_spawn(abyss_sys_t5).list_balls().await.unwrap();
+    let r1_cache_t5 = t5_balls
+        .iter()
+        .find(|b| b.type_id == BIOADAPTIVE_CACHE_TYPE_ID && b.id != r1_cache_t1)
+        .map(|b| b.id)
+        .expect("Bioadaptive Cache ball in T5 Abyssal room");
+    let t5_hp = ctx
+        .systems
+        .get_or_spawn(abyss_sys_t5)
+        .get_combat_state(r1_cache_t5)
+        .await
+        .unwrap()
+        .unwrap()
+        .max_structure_hp;
+    assert!(t5_hp >= t1_hp * 20.0, "T5 cache hull HP ({t5_hp}) must be much higher than T1 ({t1_hp})");
+
+    // Destroy T1 Bioadaptive Cache with blasters and verify wreck container drops tier rewards.
+    set_pilot_location(&ctx, &mut sess, abyss_sys_t1, None);
+    place_ship_ball(&ctx, abyss_sys_t1, PILOT, PILOT_SHIP, 621, DVec3::new(0.0, 0.0, 1_000.0)).await;
+    let blaster_base = 988_910i64;
+    fit_subcap_blasters(&ctx, PILOT, PILOT_SHIP, blaster_base);
+    lock_target_via_rpc(&ctx, &mut sess, abyss_sys_t1, PILOT_SHIP, r1_cache_t1).await;
+    let _ = rpc_call(
+        &ctx,
+        &mut sess,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(blaster_base), PyRep::String("effects.ProjectileFired".into()), PyRep::Integer(r1_cache_t1)],
+    )
+    .await;
+    step_weapon_ticks(&ctx, abyss_sys_t1).await;
+
+    let expected_muta = abyssal_mutaplasmid_for_tier(1);
+    let dropped_types: Vec<u32> = ctx.db.with_snapshot(|snap| {
+        let wreck_id = snap
+            .items
+            .values()
+            .find(|i| i.location_id == abyss_sys_t1 as i64 && i.item_id != r1_cache_t1 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 186))
+            .map(|i| i.item_id)
+            .expect("wreck container produced on Bioadaptive Cache destruction");
+        snap.items.values().filter(|i| i.location_id == wreck_id).map(|i| i.type_id).collect()
+    });
+    assert!(dropped_types.contains(&expected_muta), "cache drop must include tier mutaplasmid");
+    assert!(dropped_types.contains(&TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID), "cache drop must include Triglavian survey database");
+    assert!(dropped_types.contains(&47_761), "cache drop must include filament");
+    assert!(dropped_types.contains(&ZERO_POINT_CONDENSATE_TYPE_ID), "cache drop must include zero-point condensate");
+
+    drop(ctx);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_cyno_lighting_rules_and_blockade_runner_scan_immunity_closure() {
+    // parity: feat:modules.cyno-lighting-rules
+    // parity: feat:ships.blockade-runner-cargo-scan-immunity
+    eve_testkit::attest(&[
+        "feat:modules.cyno-lighting-rules",
+        "feat:ships.blockade-runner-cargo-scan-immunity",
+    ]);
+
+    let db_path = temp_sqlite_path("parity_cyno_and_br");
+    let ctx = open_sqlite_ctx(&db_path, true);
+    let high_sys = 30_000_142u32; // Jita (0.95)
+    let low_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status > 0.0 && s.security_status < 0.44 && s.region_id != 10_000_070)
+        .map(|s| s.solar_system_id)
+        .expect("low-sec system in SDE");
+    let wh_sys = 31_000_001u32;   // Wormhole
+
+    let mut s_recon = register_online_pilot(
+        &ctx,
+        88_006,
+        "demo",
+        "demo-secret",
+        PILOT,
+        CORP,
+        Some(ALLIANCE),
+        high_sys,
+        PILOT_SHIP,
+        11_957, // Falcon (Force Recon)
+        DVec3::new(10_000.0, 0.0, 0.0),
+        0,
+    )
+    .await;
+
+    // 1. Hull restriction: Rifter (587) cannot fit Cynosural Field Generator I (21096).
+    let rifter_id = 100_000_801i64;
+    let cyno_mod_id = 988_201i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            rifter_id,
+            InventoryItemRecord {
+                item_id: rifter_id,
+                type_id: 587,
+                owner_id: PILOT,
+                location_id: high_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cyno_mod_id,
+            InventoryItemRecord {
+                item_id: cyno_mod_id,
+                type_id: 21_096,
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            988_202,
+            InventoryItemRecord {
+                item_id: 988_202,
+                type_id: 16_273, // Liquid Ozone
+                owner_id: PILOT,
+                location_id: PILOT_SHIP,
+                flag: InventoryFlag::Cargo,
+                quantity: 500,
+                ..Default::default()
+            },
+        );
+        snap.skills.entry(PILOT).or_default().insert(
+            21_603, // Cynosural Field Theory V
+            TrainedSkillRecord { type_id: 21_603, level: 5, skill_points: 256_000.0 },
+        );
+    });
+    assert!(
+        eve_dogma::ShipFittingEngine::from_sde(1, 587, &ctx.sde)
+            .fit_module(2, 21_096, InventoryFlag::HiSlot0 as u16, &ctx.sde)
+            .is_err(),
+        "normal cyno must not fit on non-Recon/non-BlackOps hull"
+    );
+
+    // 2. High-sec, non-fleet, and Mobile Cyno Inhibitor checks.
+    assert_eq!(
+        err_code(
+            rpc_call(
+                &ctx,
+                &mut s_recon,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralGeneration".into())],
+            )
+            .await
+        ),
+        "CannotLightCynoInSystem"
+    );
+
+    let _ = ctx.systems.get_or_spawn(high_sys).remove_ball(PILOT_SHIP).await;
+    set_pilot_location(&ctx, &mut s_recon, low_sys, None);
+    place_ship_ball(&ctx, low_sys, PILOT, PILOT_SHIP, 11_957, DVec3::ZERO).await;
+    assert_eq!(
+        err_code(
+            rpc_call(
+                &ctx,
+                &mut s_recon,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralGeneration".into())],
+            )
+            .await
+        ),
+        "MustBeInFleet"
+    );
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(
+            77_001,
+            FleetRecord {
+                fleet_id: 77_001,
+                boss_id: PILOT,
+                members: vec![PILOT],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            988_205,
+            InventoryItemRecord {
+                item_id: 988_205,
+                type_id: TYPE_MOBILE_CYNO_INHIBITOR,
+                owner_id: PILOT,
+                location_id: low_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(988_205, [10_000.0, 0.0, 0.0]);
+    });
+    assert_eq!(
+        err_code(
+            rpc_call(
+                &ctx,
+                &mut s_recon,
+                "dogmaIM",
+                "Activate",
+                &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralGeneration".into())],
+            )
+            .await
+        ),
+        "CynoInhibited"
+    );
+
+    // Move outside inhibitor range, light cyno: consumes 50 Liquid Ozone on Force Recon, immobilizes, blocks eject.
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&988_205); });
+    rpc_call(
+        &ctx,
+        &mut s_recon,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralGeneration".into())],
+    )
+    .await
+    .expect("light normal cyno on Force Recon");
+    let ozone_left = ctx.db.with_snapshot(|s| s.items.get(&988_202).unwrap().quantity);
+    assert_eq!(ozone_left, 450, "Force Recon with CFT V must consume 50 Liquid Ozone");
+    assert_eq!(
+        err_code(rpc_call(&ctx, &mut s_recon, "ship", "Eject", &[]).await),
+        "CynosuralFieldActive"
+    );
+
+    // 3. Wormhole space: cyno can be lit, but jump drive cannot lock/jump to it.
+    let _ = ctx.systems.get_or_spawn(low_sys).remove_ball(PILOT_SHIP).await;
+    eve_server::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(&ctx, PILOT, PILOT_SHIP);
+    ctx.advance_secs(601);
+    set_pilot_location(&ctx, &mut s_recon, wh_sys, None);
+    place_ship_ball(&ctx, wh_sys, PILOT, PILOT_SHIP, 11_957, DVec3::ZERO).await;
+    rpc_call(
+        &ctx,
+        &mut s_recon,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(cyno_mod_id), PyRep::String("effects.CynosuralGeneration".into())],
+    )
+    .await
+    .expect("light cyno in wormhole space");
+
+    let jumper_cid = 90_000_301i64;
+    let jumper_ship = 100_000_301i64;
+    let mut s_jumper = register_online_pilot(
+        &ctx,
+        88_007,
+        "jumper",
+        "sec",
+        jumper_cid,
+        CORP,
+        Some(ALLIANCE),
+        low_sys,
+        jumper_ship,
+        22_428, // Redeemer
+        DVec3::ZERO,
+        0,
+    )
+    .await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.get_mut(&77_001).unwrap().members.push(jumper_cid);
+    });
+    assert_eq!(
+        err_code(
+            rpc_call(
+                &ctx,
+                &mut s_jumper,
+                "beyonce",
+                "CmdJumpToFleetModuleBeacon",
+                &[PyRep::Integer(PILOT), PyRep::Integer(wh_sys as i64), PyRep::Integer(0)],
+            )
+            .await
+        ),
+        "JumpDriveForbiddenInWormholeSpace"
+    );
+
+    // 4. Blockade Runner (Prorator 12733, group 1202) cargo scan immunity vs high-sec NPC customs scan.
+    let br_ship = 100_000_401i64;
+    let scanner_mod = 988_301i64;
+    let contraband_item = 988_302i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            br_ship,
+            InventoryItemRecord {
+                item_id: br_ship,
+                type_id: 12_733, // Prorator (Blockade Runner)
+                owner_id: PILOT,
+                location_id: high_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            contraband_item,
+            InventoryItemRecord {
+                item_id: contraband_item,
+                type_id: 3_721, // Slaves (contraband in high-sec)
+                owner_id: PILOT,
+                location_id: br_ship,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            scanner_mod,
+            InventoryItemRecord {
+                item_id: scanner_mod,
+                type_id: 442, // Cargo Scanner I
+                owner_id: jumper_cid,
+                location_id: jumper_ship,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let _ = ctx.systems.get_or_spawn(low_sys).remove_ball(jumper_ship).await;
+    set_pilot_location(&ctx, &mut s_jumper, high_sys, None);
+    place_ship_ball(&ctx, high_sys, jumper_cid, jumper_ship, 22_428, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    place_ship_ball(&ctx, high_sys, PILOT, br_ship, 12_733, DVec3::new(5_000.0, 0.0, 0.0)).await;
+    lock_target_via_rpc(&ctx, &mut s_jumper, high_sys, jumper_ship, br_ship).await;
+
+    let scan_res = rpc_call(
+        &ctx,
+        &mut s_jumper,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(scanner_mod), PyRep::String("effects.CargoScan".into()), PyRep::Integer(br_ship)],
+    )
+    .await
+    .expect("cargo scan Blockade Runner");
+    assert_eq!(scan_res.dict_get("cargoScanImmune").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(scan_res.dict_get("totalScannedQuantity").and_then(|v| v.as_i64()), Some(0));
+
+    // High-sec NPC customs contraband scan still detects & confiscates contraband on Blockade Runner.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT) {
+            ch.solar_system_id = high_sys;
+            ch.active_ship_id = br_ship;
+            ch.station_id = None;
+        }
+    });
+    let confiscated = eve_server::services::combat_npc_police::scan_and_enforce_highsec_contraband(&ctx, high_sys, br_ship);
+    assert!(!confiscated.is_empty(), "high-sec NPC customs must still confiscate contraband from Blockade Runner");
+    assert!(!ctx.db.with_snapshot(|s| s.items.contains_key(&contraband_item)));
+
+    drop(ctx);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+}
