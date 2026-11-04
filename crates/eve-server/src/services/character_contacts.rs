@@ -94,7 +94,7 @@ pub fn handle_contacts(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("charMgr", "GetPublicInfo3") => {
@@ -416,26 +416,11 @@ pub fn handle_contacts(
                     kv.get("willpower").and_then(|v| v.as_i64()).map(|v| v as u8),
                 ),
                 _ => (
-                    args.first()
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as u8)
-                        .or_else(|| _kwargs.get("charisma").and_then(|v| v.as_i64()).map(|v| v as u8)),
-                    args.get(1)
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as u8)
-                        .or_else(|| _kwargs.get("intelligence").and_then(|v| v.as_i64()).map(|v| v as u8)),
-                    args.get(2)
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as u8)
-                        .or_else(|| _kwargs.get("memory").and_then(|v| v.as_i64()).map(|v| v as u8)),
-                    args.get(3)
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as u8)
-                        .or_else(|| _kwargs.get("perception").and_then(|v| v.as_i64()).map(|v| v as u8)),
-                    args.get(4)
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as u8)
-                        .or_else(|| _kwargs.get("willpower").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.first().and_then(|v| v.as_i64()).map(|v| v as u8).or_else(|| kwargs.get("charisma").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(1).and_then(|v| v.as_i64()).map(|v| v as u8).or_else(|| kwargs.get("intelligence").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(2).and_then(|v| v.as_i64()).map(|v| v as u8).or_else(|| kwargs.get("memory").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(3).and_then(|v| v.as_i64()).map(|v| v as u8).or_else(|| kwargs.get("perception").and_then(|v| v.as_i64()).map(|v| v as u8)),
+                    args.get(4).and_then(|v| v.as_i64()).map(|v| v as u8).or_else(|| kwargs.get("willpower").and_then(|v| v.as_i64()).map(|v| v as u8)),
                 ),
             };
             let (Some(cha), Some(int), Some(mem), Some(per), Some(wil)) =
@@ -577,21 +562,16 @@ pub fn handle_contacts(
                     message: format!("Contact entity {contact_id} not found"),
                 }));
             }
-            let standing = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .unwrap_or(0.0)
-                .clamp(-10.0, 10.0);
-            let in_watchlist = args
-                .get(2)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            let req_label_mask = args
-                .get(3)
+            let standing = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0).clamp(-10.0, 10.0);
+            let in_watchlist = args.get(2).and_then(|a| match a {
+                PyRep::Bool(b) => Some(*b),
+                PyRep::Integer(i) => Some(*i != 0),
+                _ => None,
+            }).unwrap_or(false);
+            // V24 positional layout is `(contactID, standing, inWatchlist, notify, note)` — `args[3]` is `notify`.
+            let req_label_mask = kwargs
+                .get("labelMask")
+                .or_else(|| kwargs.get("label_mask"))
                 .and_then(|a| a.as_i64())
                 .map(|m| m.max(0) as u64);
             let contact_type = if (99_000_000..100_000_000).contains(&contact_id) {
@@ -625,6 +605,11 @@ pub fn handle_contacts(
             };
             drop(guard);
             if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                return Some(Err(e));
+            }
+            if let Err(e) = crate::services::fleet_social::fleet_social_persistence::record_contact_notification_if_requested(
+                ctx, char_id, contact_id, standing, false, args, kwargs,
+            ) {
                 return Some(Err(e));
             }
             if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
@@ -673,11 +658,7 @@ pub fn handle_contacts(
                     message: format!("{method} requires at least one contactID"),
                 }));
             }
-            let standing = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .unwrap_or(0.0)
-                .clamp(-10.0, 10.0);
+            let standing = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0).clamp(-10.0, 10.0);
             let watchlist_opt = if method == "EditContact" {
                 args.get(2).and_then(|a| match a {
                     PyRep::Bool(b) => Some(*b),
@@ -687,9 +668,8 @@ pub fn handle_contacts(
             } else {
                 None
             };
-
             let label_mask_opt = if method == "EditContact" {
-                args.get(3).and_then(|a| a.as_i64()).map(|m| m.max(0) as u64)
+                kwargs.get("labelMask").or_else(|| kwargs.get("label_mask")).and_then(|a| a.as_i64()).map(|m| m.max(0) as u64)
             } else {
                 None
             };
@@ -721,6 +701,18 @@ pub fn handle_contacts(
             }
             if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
                 return Some(Err(e));
+            }
+            if method == "EditContact" {
+                for &cid in &contact_ids {
+                    if let Err(e) = crate::services::fleet_social::fleet_social_persistence::record_contact_notification_if_requested(
+                        ctx, char_id, cid, standing, true, args, kwargs,
+                    ) {
+                        return Some(Err(e));
+                    }
+                }
+            }
+            if let Some(err_msg) = crate::router::dispatch::take_dispatch_wal_error() {
+                return Some(Err(BridgeRpcError { code: "DatabasePersistenceError".into(), message: err_msg }));
             }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsUpdated(contactIDs, standing, inWatchlist): `None` keeps
@@ -1382,7 +1374,7 @@ pub fn handle_contacts(
                     }
                 }
             }
-            super::character_gm_tools::handle_char_unbound(ctx, session, service, method, args, _kwargs)
+            super::character_gm_tools::handle_char_unbound(ctx, session, service, method, args, kwargs)
         }
     }
 }

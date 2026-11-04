@@ -1293,6 +1293,7 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM access_groups;
          DELETE FROM chat_channels;
          DELETE FROM char_contacts;
+         DELETE FROM char_contact_notifications;
          DELETE FROM char_contact_labels;
          DELETE FROM corp_contacts;
          DELETE FROM corp_contact_labels;

@@ -144,6 +144,161 @@ pub fn sync_char_contacts_to_db(
     Ok(())
 }
 
+pub const MAX_CONTACT_NOTIFICATIONS_PER_CHAR: usize = 50;
+
+pub fn sync_contact_notifications_to_db(
+    ctx: &ServerContext,
+    target_char_id: i64,
+) -> Result<(), eve_proto::BridgeRpcError> {
+    let mut records: Vec<eve_db::SocialContactNotificationRecord> = ctx
+        .esi_state
+        .contact_notifications
+        .read()
+        .ok()
+        .and_then(|m| m.get(&target_char_id).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| eve_db::SocialContactNotificationRecord {
+            notification_id: n.notification_id,
+            sender_character_id: n.sender_character_id,
+            send_date_unix: n.send_date_unix,
+            standing_level: n.standing_level,
+            message: n.message,
+        })
+        .collect();
+    if records.len() > MAX_CONTACT_NOTIFICATIONS_PER_CHAR {
+        let excess = records.len() - MAX_CONTACT_NOTIFICATIONS_PER_CHAR;
+        records.drain(..excess);
+    }
+    if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+        snap.char_contact_notifications.insert(target_char_id, records);
+        Ok::<_, eve_proto::BridgeRpcError>(())
+    }) {
+        eve_db::record_last_wal_error(&e.message);
+        hydrate_social_state_from_db(ctx);
+        return Err(e);
+    }
+    Ok(())
+}
+
+pub fn record_contact_notification_entry(
+    ctx: &ServerContext,
+    sender_char_id: i64,
+    target_contact_id: i64,
+    standing: f64,
+    message: String,
+) -> Result<bool, eve_proto::BridgeRpcError> {
+    if target_contact_id <= 0
+        || target_contact_id == sender_char_id
+        || (500_000..2_000_000).contains(&target_contact_id)
+        || (98_000_000..100_000_000).contains(&target_contact_id)
+        || ctx.sde.agents.contains_key(&target_contact_id)
+        || is_blocked_by(ctx, target_contact_id, sender_char_id)
+    {
+        return Ok(false);
+    }
+    let nid = ctx.esi_state.alloc_id();
+    let send_date_unix = ctx.now_unix();
+    if let Ok(mut notif_map) = ctx.esi_state.contact_notifications.write() {
+        let list = notif_map.entry(target_contact_id).or_default();
+        list.push(crate::esi::runtime_state::EsiContactNotification {
+            notification_id: nid,
+            sender_character_id: sender_char_id,
+            send_date_unix,
+            standing_level: standing,
+            message,
+        });
+        if list.len() > MAX_CONTACT_NOTIFICATIONS_PER_CHAR {
+            let excess = list.len() - MAX_CONTACT_NOTIFICATIONS_PER_CHAR;
+            list.drain(..excess);
+        }
+    }
+    sync_contact_notifications_to_db(ctx, target_contact_id)?;
+    Ok(true)
+}
+
+pub fn record_contact_notification_if_requested(
+    ctx: &ServerContext,
+    sender_char_id: i64,
+    target_contact_id: i64,
+    standing: f64,
+    is_edit: bool,
+    args: &[eve_proto::PyRep],
+    kwargs: &HashMap<String, eve_proto::PyRep>,
+) -> Result<(), eve_proto::BridgeRpcError> {
+    let parse_bool_or_int = |a: &eve_proto::PyRep| match a {
+        eve_proto::PyRep::Bool(b) => Some(*b),
+        eve_proto::PyRep::Integer(i) => Some(*i != 0),
+        _ => None,
+    };
+    let notify_opt = kwargs
+        .get("notify")
+        .or_else(|| kwargs.get("sendNotification"))
+        .and_then(parse_bool_or_int)
+        .or_else(|| args.get(3).and_then(parse_bool_or_int));
+    if notify_opt != Some(true) {
+        return Ok(());
+    }
+    let msg = args
+        .get(4)
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            kwargs
+                .get("note")
+                .or_else(|| kwargs.get("message"))
+                .and_then(|a| a.as_str())
+                .filter(|s| !s.is_empty())
+        })
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if is_edit {
+                format!("Character {sender_char_id} updated your contact standing")
+            } else {
+                format!("Character {sender_char_id} added you to contacts")
+            }
+        });
+    let _ = record_contact_notification_entry(ctx, sender_char_id, target_contact_id, standing, msg)?;
+    Ok(())
+}
+
+pub fn load_contact_notifications_for_char(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> Vec<crate::esi::runtime_state::EsiContactNotification> {
+    let mut by_id: HashMap<i64, crate::esi::runtime_state::EsiContactNotification> = HashMap::new();
+    if let Some(persisted) = snap.char_contact_notifications.get(&char_id) {
+        for n in persisted {
+            by_id.insert(
+                n.notification_id,
+                crate::esi::runtime_state::EsiContactNotification {
+                    notification_id: n.notification_id,
+                    sender_character_id: n.sender_character_id,
+                    send_date_unix: n.send_date_unix,
+                    standing_level: n.standing_level,
+                    message: n.message.clone(),
+                },
+            );
+        }
+    }
+    if let Some(runtime_list) = ctx
+        .esi_state
+        .contact_notifications
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&char_id)
+    {
+        for n in runtime_list {
+            by_id.insert(n.notification_id, n.clone());
+        }
+    }
+    let mut notifs: Vec<_> = by_id.into_values().collect();
+    notifs.sort_by(|a, b| b.notification_id.cmp(&a.notification_id));
+    notifs.truncate(MAX_CONTACT_NOTIFICATIONS_PER_CHAR);
+    notifs
+}
+
 pub fn is_blocked_by(ctx: &ServerContext, target_char_id: i64, sender_char_id: i64) -> bool {
     let esi_blocked = ctx
         .esi_state
@@ -154,6 +309,15 @@ pub fn is_blocked_by(ctx: &ServerContext, target_char_id: i64, sender_char_id: i
         .and_then(|list| list.into_iter().find(|c| c.contact_id == sender_char_id))
         .is_some_and(|c| c.is_blocked);
     if esi_blocked {
+        return true;
+    }
+    let social_blocked = ctx
+        .social_extras
+        .lock()
+        .ok()
+        .and_then(|s| s.blocked.get(&target_char_id).map(|b| b.contains(&sender_char_id)))
+        .unwrap_or(false);
+    if social_blocked {
         return true;
     }
     ctx.db.with_snapshot(|snap| {
@@ -525,6 +689,25 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
             esi_cl.clear();
             for (&id, labels) in &snap.char_contact_labels {
                 esi_cl.insert(id, labels.clone());
+            }
+        }
+        if let Ok(mut notif_map) = ctx.esi_state.contact_notifications.write() {
+            notif_map.clear();
+            for (&cid, list) in &snap.char_contact_notifications {
+                let mut converted = Vec::with_capacity(list.len());
+                for n in list {
+                    ctx.esi_state
+                        .next_custom_id
+                        .fetch_max(n.notification_id + 1, std::sync::atomic::Ordering::Relaxed);
+                    converted.push(crate::esi::runtime_state::EsiContactNotification {
+                        notification_id: n.notification_id,
+                        sender_character_id: n.sender_character_id,
+                        send_date_unix: n.send_date_unix,
+                        standing_level: n.standing_level,
+                        message: n.message.clone(),
+                    });
+                }
+                notif_map.insert(cid, converted);
             }
         }
         if let Ok(mut esi_corpc) = ctx.esi_state.corp_contacts.write() {

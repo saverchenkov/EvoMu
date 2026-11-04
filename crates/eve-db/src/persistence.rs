@@ -107,6 +107,7 @@ impl WorldStateWalDelta {
             && old.chat_channels == new.chat_channels
             && old.chat_channel_acl == new.chat_channel_acl
             && old.char_contacts == new.char_contacts
+            && old.char_contact_notifications == new.char_contact_notifications
             && old.char_contact_labels == new.char_contact_labels
             && old.corp_contacts == new.corp_contacts
             && old.corp_contact_labels == new.corp_contact_labels

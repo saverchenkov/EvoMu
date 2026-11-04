@@ -784,6 +784,8 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub char_contacts: HashMap<i64, Vec<SocialContactRecord>>,
     #[serde(default)]
+    pub char_contact_notifications: HashMap<i64, Vec<crate::durable_domain_types::SocialContactNotificationRecord>>,
+    #[serde(default)]
     pub char_contact_labels: HashMap<i64, Vec<(i64, String)>>,
     #[serde(default)]
     pub corp_contacts: HashMap<i64, Vec<SocialContactRecord>>,

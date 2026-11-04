@@ -38,7 +38,10 @@ pub use snapshot_ext::{
     LpRewardLogEntry, MailingListRecord, MarketDailySummary, MarketHistoryDayRecord,
     SocialContactRecord, StarbaseDetailSettings,
 };
-pub use durable_domain_types::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent};
+pub use durable_domain_types::{
+    DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent,
+    SocialContactNotificationRecord,
+};
 pub use types::*;
 
 use serde::{Deserialize, Serialize};

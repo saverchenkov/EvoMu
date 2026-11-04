@@ -536,4 +536,147 @@ async fn test_parity_remediation_alliance_contacts_and_labels() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+#[tokio::test]
+async fn test_contact_notifications_block_suppression_and_50_cap() {
+    // parity: esi:GET /characters/{character_id}/notifications/contacts, feat:esi.character.contact-notifications
+    eve_testkit::attest(&[
+        "esi:GET /characters/{character_id}/notifications/contacts",
+        "feat:esi.character.contact-notifications",
+    ]);
+
+    let db_path = temp_db_path("contact_notifs_bf02");
+    let sender_id = 90_000_001;
+    let target_id = 90_000_002;
+    let kw = HashMap::new();
+
+    {
+        let repo = Arc::new(WorldRepository::open_sqlite(&db_path).expect("open sqlite"));
+        let seed_snap = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+        repo.with_mut_snapshot(|snap| *snap = seed_snap);
+        let ctx = Arc::new(ServerContext::with_repository(repo));
+        common::pin_clock(&ctx);
+        let router = EsiRouter::new(Arc::clone(&ctx));
+        let spec = OpenApiSpec::pinned();
+
+        let mut s_sender = make_session(77_101, 1, sender_id, 1_000_009, None);
+        let mut s_target = make_session(77_102, 2, target_id, 1_000_009, None);
+
+        let sender_tok = issue_token(
+            &ctx,
+            sender_id,
+            vec!["esi-characters.read_contacts.v1", "esi-characters.write_contacts.v1"],
+        );
+        let target_tok = issue_token(&ctx, target_id, vec!["esi-characters.read_notifications.v1"]);
+
+        // 1. Negative standing (-10.0) via ESI POST /contacts must NOT set is_blocked = true
+        let post_neg = EsiHttpRequest::new(
+            "POST",
+            format!("/v2/characters/{sender_id}/contacts/?standing=-10.0&watched=false"),
+        )
+        .with_bearer_token(&sender_tok)
+        .with_body(serde_json::to_vec(&json!([target_id])).unwrap());
+        assert_eq!(esi_call(&router, &spec, &post_neg, 201), json!([target_id]));
+
+        let sender_contacts = get_json(
+            &router,
+            &spec,
+            &format!("/v2/characters/{sender_id}/contacts/"),
+            Some(&sender_tok),
+            200,
+        );
+        assert_eq!(sender_contacts[0]["contact_id"], json!(target_id));
+        assert_eq!(sender_contacts[0]["standing"], json!(-10.0));
+        assert_eq!(sender_contacts[0]["is_blocked"], json!(false));
+
+        let init_notifs = get_json(
+            &router,
+            &spec,
+            &format!("/v1/characters/{target_id}/notifications/contacts/"),
+            Some(&target_tok),
+            200,
+        );
+        assert_eq!(init_notifs.as_array().unwrap().len(), 1);
+        assert_eq!(init_notifs[0]["standing_level"], json!(-10.0));
+
+        // Explicit BlockOwners sets is_blocked = true, and ESI PUT preserves existing is_blocked = true
+        rpc(&ctx, &mut s_sender, "charMgr", "BlockOwners", &[PyRep::List(vec![PyRep::Integer(target_id)])]).await;
+        let put_blocked = EsiHttpRequest::new(
+            "PUT",
+            format!("/v2/characters/{sender_id}/contacts/?standing=-8.0&watched=false"),
+        )
+        .with_bearer_token(&sender_tok)
+        .with_body(serde_json::to_vec(&json!([target_id])).unwrap());
+        esi_call(&router, &spec, &put_blocked, 204);
+        let after_put = get_json(&router, &spec, &format!("/v2/characters/{sender_id}/contacts/"), Some(&sender_tok), 200);
+        assert_eq!(after_put[0]["is_blocked"], json!(true));
+        rpc(&ctx, &mut s_sender, "charMgr", "UnblockOwners", &[PyRep::List(vec![PyRep::Integer(target_id)])]).await;
+
+        // 2. Block suppression on BOTH charMgr.AddContact/EditContact AND ESI POST /contacts
+        rpc(&ctx, &mut s_target, "charMgr", "BlockOwners", &[PyRep::List(vec![PyRep::Integer(sender_id)])]).await;
+        rpc(
+            &ctx, &mut s_sender, "charMgr", "AddContact",
+            &[PyRep::Integer(target_id), PyRep::Real(5.0), PyRep::Bool(false), PyRep::Bool(true), PyRep::String("Blocked add".into())],
+        ).await;
+        rpc(
+            &ctx, &mut s_sender, "charMgr", "EditContact",
+            &[PyRep::Integer(target_id), PyRep::Real(6.0), PyRep::Bool(false), PyRep::Integer(1), PyRep::String("Blocked edit".into())],
+        ).await;
+        let post_blocked = EsiHttpRequest::new(
+            "POST",
+            format!("/v2/characters/{sender_id}/contacts/?standing=7.0&watched=false"),
+        )
+        .with_bearer_token(&sender_tok)
+        .with_body(serde_json::to_vec(&json!([target_id])).unwrap());
+        assert_eq!(esi_call(&router, &spec, &post_blocked, 201), json!([target_id]));
+
+        let still_one = get_json(&router, &spec, &format!("/v1/characters/{target_id}/notifications/contacts/"), Some(&target_tok), 200);
+        assert_eq!(still_one.as_array().unwrap().len(), 1, "blocked sender must not add notifications via charMgr or ESI POST");
+
+        // 3. Unblock, verify notify=0/false suppression, integer notify=1 & positional note without corrupting labelMask, and 50-cap
+        rpc(&ctx, &mut s_target, "charMgr", "UnblockOwners", &[PyRep::List(vec![PyRep::Integer(sender_id)])]).await;
+        rpc(
+            &ctx, &mut s_sender, "charMgr", "EditContact",
+            &[PyRep::Integer(target_id), PyRep::Real(4.0), PyRep::Bool(true), PyRep::Integer(0), PyRep::String("No notify".into())],
+        ).await;
+        assert_eq!(get_json(&router, &spec, &format!("/v1/characters/{target_id}/notifications/contacts/"), Some(&target_tok), 200).as_array().unwrap().len(), 1);
+
+        let add_res = ctx.dispatch_rpc(
+            &mut s_sender, "charMgr", None, "AddContact",
+            &[PyRep::Integer(target_id), PyRep::Real(9.0), PyRep::Bool(true), PyRep::Integer(1), PyRep::String("Msg 1".into())],
+            &kw, None,
+        ).await.expect("AddContact int notify");
+        assert_eq!(add_res.dict_get("labelMask"), Some(&PyRep::Integer(0)), "args[3]=1 is notify, not labelMask");
+
+        for idx in 2..=54 {
+            rpc(
+                &ctx, &mut s_sender, "charMgr", "EditContact",
+                &[PyRep::Integer(target_id), PyRep::Real(10.0), PyRep::Bool(true), PyRep::Bool(true), PyRep::String(format!("Msg {idx}"))],
+            ).await;
+        }
+        assert_eq!(esi_call(&router, &spec, &post_blocked, 201), json!([target_id])); // 55th post-unblock notification via ESI POST
+
+        let cnotifs = get_json(&router, &spec, &format!("/v1/characters/{target_id}/notifications/contacts/"), Some(&target_tok), 200);
+        let arr = cnotifs.as_array().unwrap();
+        assert_eq!(arr.len(), 50);
+        assert_eq!(arr[0]["message"], json!(format!("Character {sender_id} added you to contacts")));
+        assert_eq!(arr[1]["message"], json!("Msg 54"));
+        assert_eq!(arr[49]["message"], json!("Msg 6"));
+    }
+
+    // 4. Verify SQLite restart durability of the capped 50 notifications
+    let repo2 = Arc::new(WorldRepository::open_sqlite(&db_path).expect("reopen sqlite"));
+    let ctx2 = Arc::new(ServerContext::with_repository(repo2));
+    common::pin_clock(&ctx2);
+    let router2 = EsiRouter::new(Arc::clone(&ctx2));
+    let spec2 = OpenApiSpec::pinned();
+    let target_tok2 = issue_token(&ctx2, target_id, vec!["esi-characters.read_notifications.v1"]);
+    let persisted = get_json(&router2, &spec2, &format!("/v1/characters/{target_id}/notifications/contacts/"), Some(&target_tok2), 200);
+    let parr = persisted.as_array().unwrap();
+    assert_eq!(parr.len(), 50);
+    assert_eq!(parr[1]["message"], json!("Msg 54"));
+    assert_eq!(parr[49]["message"], json!("Msg 6"));
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
 }

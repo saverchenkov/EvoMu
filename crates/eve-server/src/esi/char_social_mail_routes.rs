@@ -6,9 +6,7 @@
 #![forbid(unsafe_code)]
 
 use crate::esi::char_social_routes::infer_contact_type;
-use crate::esi::runtime_state::{
-    EsiContactEntry, EsiContactNotification, EsiMailLabel, EsiMailMeta,
-};
+use crate::esi::runtime_state::{EsiContactEntry, EsiMailLabel, EsiMailMeta};
 use crate::esi::sample_routes::RouteExecutionResult;
 use crate::router::ServerContext;
 use serde_json::{json, Value};
@@ -167,60 +165,44 @@ pub fn dispatch_char_social_mail_route(
                     "Contact IDs array must contain 1..=100 positive integers",
                 ));
             }
-            let res = ctx.db.with_snapshot(|snap| {
+            let typed_contacts = match ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
                     return Err(RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
                     ));
                 }
+                Ok(contact_ids
+                    .iter()
+                    .map(|&cid| (cid, infer_contact_type(ctx, snap, cid).to_string()))
+                    .collect::<Vec<_>>())
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(e),
+            };
+            {
                 let mut map = ctx
                     .esi_state
                     .char_contacts
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
                 let list = map.entry(char_id).or_default();
-                let mut notif_map = ctx
-                    .esi_state
-                    .contact_notifications
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                for &cid in &contact_ids {
-                    let ctype = infer_contact_type(ctx, snap, cid).to_string();
-                    if let Some(existing) = list.iter_mut().find(|e| e.contact_id == cid) {
+                for (cid, ctype) in &typed_contacts {
+                    if let Some(existing) = list.iter_mut().find(|e| e.contact_id == *cid) {
                         existing.standing = standing;
                         existing.is_watched = watched;
-                        existing.is_blocked = standing < -5.0;
                         existing.label_ids = label_ids.clone();
                     } else {
                         list.push(EsiContactEntry {
-                            contact_id: cid,
+                            contact_id: *cid,
                             contact_type: ctype.clone(),
                             standing,
                             is_watched: watched,
-                            is_blocked: standing < -5.0,
+                            is_blocked: false,
                             label_ids: label_ids.clone(),
                         });
                     }
-                    if method == "POST" && ctype == "character" && cid != char_id {
-                        let nid = ctx.esi_state.alloc_id();
-                        let send_date_unix = ctx.now_unix();
-                        notif_map
-                            .entry(cid)
-                            .or_default()
-                            .push(EsiContactNotification {
-                                notification_id: nid,
-                                sender_character_id: char_id,
-                                send_date_unix,
-                                standing_level: standing,
-                                message: format!("Character {char_id} added you to contacts"),
-                            });
-                    }
                 }
-                Ok(())
-            });
-            if let Err(e) = res {
-                return Some(e);
             }
             if let Err(e) =
                 crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id)
@@ -229,6 +211,24 @@ pub fn dispatch_char_social_mail_route(
                     500,
                     format!("Persistence error: {}", e.message),
                 ));
+            }
+            if method == "POST" {
+                for (cid, ctype) in &typed_contacts {
+                    if ctype == "character" && *cid != char_id {
+                        if let Err(e) = crate::services::fleet_social::fleet_social_persistence::record_contact_notification_entry(
+                            ctx,
+                            char_id,
+                            *cid,
+                            standing,
+                            format!("Character {char_id} added you to contacts"),
+                        ) {
+                            return Some(RouteExecutionResult::error(
+                                500,
+                                format!("Persistence error: {}", e.message),
+                            ));
+                        }
+                    }
+                }
             }
             Some(if method == "POST" {
                 RouteExecutionResult::created_json(json!(contact_ids))

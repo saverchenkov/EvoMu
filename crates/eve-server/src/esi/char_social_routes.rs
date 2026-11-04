@@ -523,15 +523,9 @@ pub fn dispatch_char_social_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                let mut notifs = ctx
-                    .esi_state
-                    .contact_notifications
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&char_id)
-                    .cloned()
-                    .unwrap_or_default();
-                notifs.sort_by(|a, b| b.notification_id.cmp(&a.notification_id));
+                let notifs = crate::services::fleet_social::fleet_social_persistence::load_contact_notifications_for_char(
+                    ctx, snap, char_id,
+                );
                 let out: Vec<Value> = notifs
                     .into_iter()
                     .map(|n| {

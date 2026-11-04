@@ -702,3 +702,12 @@ pub struct PersistedCombatCrimewatchState {
     #[serde(default)]
     pub detailed_killmails: HashMap<i64, DetailedKillmail>,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SocialContactNotificationRecord {
+    pub notification_id: i64,
+    pub sender_character_id: i64,
+    pub send_date_unix: u64,
+    pub standing_level: f64,
+    pub message: String,
+}

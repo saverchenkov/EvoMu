@@ -21,7 +21,11 @@ use std::sync::Arc;
 const JITA_STATION_ID: i64 = 60_003_760;
 
 fn temp_sqlite_path(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("evomu_{tag}_{}.sqlite", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let p = std::env::temp_dir().join(format!("evomu_{tag}_{}_{nanos}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&p);
     let _ = std::fs::remove_file(p.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(p.with_extension("sqlite-shm"));
@@ -162,7 +166,8 @@ async fn test_d6_single_source_of_truth_client_esi_quasar_and_restart() {
         // 1. Contacts & CSPA
         let lbl = rpc(&ctx, &mut sess, "charMgr", "CreateLabel", &[PyRep::String("SSOT Contacts".into()), PyRep::Integer(0x00FF00)]).await.expect("CreateLabel");
         let label_id = lbl.dict_get("labelID").and_then(|v| v.as_i64()).unwrap_or(1);
-        rpc(&ctx, &mut sess, "charMgr", "AddContact", &[PyRep::Integer(target_char_id), PyRep::Real(9.5), PyRep::Bool(true), PyRep::Integer(label_id)]).await.expect("AddContact");
+        rpc(&ctx, &mut sess, "charMgr", "AddContact", &[PyRep::Integer(target_char_id), PyRep::Real(9.5), PyRep::Bool(true), PyRep::Bool(false), PyRep::String(String::new())]).await.expect("AddContact");
+        rpc(&ctx, &mut sess, "charMgr", "AssignLabels", &[PyRep::List(vec![PyRep::Integer(target_char_id)]), PyRep::Integer(label_id)]).await.expect("AssignLabels");
         rpc(&ctx, &mut sess, "charMgr", "LogSettings", &[PyRep::Real(7_500.0)]).await.expect("LogSettings");
 
         // 2. Mail labels & deleted mail

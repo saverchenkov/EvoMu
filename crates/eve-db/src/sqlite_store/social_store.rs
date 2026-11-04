@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 
 use super::fingerprints::{fnv1a_hasher, fp_json, TableFingerprints};
+use crate::durable_domain_types::SocialContactNotificationRecord;
 use crate::snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, MailingListRecord, SocialContactRecord,
     WorldStateSnapshot,
@@ -79,6 +80,11 @@ CREATE TABLE IF NOT EXISTS chat_channels (
 CREATE TABLE IF NOT EXISTS char_contacts (
     character_id INTEGER PRIMARY KEY,
     contacts_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS char_contact_notifications (
+    character_id INTEGER PRIMARY KEY,
+    notifications_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS char_contact_labels (
@@ -264,6 +270,13 @@ pub(super) fn compute_d6_social_fp(snap: &WorldStateSnapshot) -> D6SocialFingerp
     for k in chc_keys {
         k.hash(&mut h);
         fp_json(&snap.char_contacts[&k]).hash(&mut h);
+    }
+
+    let mut chcn_keys: Vec<i64> = snap.char_contact_notifications.keys().copied().collect();
+    chcn_keys.sort_unstable();
+    for k in chcn_keys {
+        k.hash(&mut h);
+        fp_json(&snap.char_contact_notifications[&k]).hash(&mut h);
     }
 
     let mut chcl_keys: Vec<i64> = snap.char_contact_labels.keys().copied().collect();
@@ -530,6 +543,21 @@ pub(super) fn load_d6_social_into_snapshot(
             snap.char_contacts.insert(cid, list);
         }
     }
+    snap.char_contact_notifications.clear();
+    {
+        let mut stmt = conn
+            .prepare("SELECT character_id, notifications_json FROM char_contact_notifications")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (cid, js) = row.map_err(|e| e.to_string())?;
+            let list: Vec<SocialContactNotificationRecord> =
+                serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            snap.char_contact_notifications.insert(cid, list);
+        }
+    }
     snap.char_contact_labels.clear();
     {
         let mut stmt = conn
@@ -651,6 +679,7 @@ pub(super) fn sync_d6_social(
         DELETE FROM bookmark_folders;
         DELETE FROM chat_channels;
         DELETE FROM char_contacts;
+        DELETE FROM char_contact_notifications;
         DELETE FROM char_contact_labels;
         DELETE FROM corp_contacts;
         DELETE FROM corp_contact_labels;
@@ -788,6 +817,14 @@ pub(super) fn sync_d6_social(
         let js = serde_json::to_string(contacts).map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO char_contacts (character_id, contacts_json) VALUES (?1, ?2)",
+            params![cid, js],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for (cid, notifs) in &snap.char_contact_notifications {
+        let js = serde_json::to_string(notifs).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO char_contact_notifications (character_id, notifications_json) VALUES (?1, ?2)",
             params![cid, js],
         )
         .map_err(|e| e.to_string())?;

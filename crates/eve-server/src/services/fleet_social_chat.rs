@@ -48,7 +48,7 @@ pub(super) fn handle_chat_and_social(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let is_chat_service = matches!(
         service,
@@ -63,7 +63,7 @@ pub(super) fn handle_chat_and_social(
     }
 
     if service == "charMgr" {
-        return handle_contacts_notifications_calendar(ctx, session, service, method, args);
+        return handle_contacts_notifications_calendar(ctx, session, service, method, args, kwargs);
     }
 
     None
@@ -1172,10 +1172,10 @@ fn dispatch_char_contacts(
     session: &mut SessionState,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let empty_kw = HashMap::new();
     crate::services::character_skills::character_contacts::handle_contacts(
-        ctx, session, "charMgr", method, args, &empty_kw,
+        ctx, session, "charMgr", method, args, kwargs,
     )
 }
 
@@ -1185,21 +1185,22 @@ fn handle_contacts_notifications_calendar(
     service: &str,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // parity: rpc:charMgr.GetContactList
-        ("charMgr", "GetContactList") => dispatch_char_contacts(ctx, session, method, args),
+        ("charMgr", "GetContactList") => dispatch_char_contacts(ctx, session, method, args, kwargs),
         // parity: rpc:charMgr.AddContact
-        ("charMgr", "AddContact") => dispatch_char_contacts(ctx, session, method, args),
+        ("charMgr", "AddContact") => dispatch_char_contacts(ctx, session, method, args, kwargs),
         // parity: rpc:charMgr.EditContact, rpc:charMgr.EditContactsRelationshipID
         ("charMgr", "EditContact") | ("charMgr", "EditContactsRelationshipID") => {
-            dispatch_char_contacts(ctx, session, method, args)
+            dispatch_char_contacts(ctx, session, method, args, kwargs)
         }
         // parity: rpc:charMgr.DeleteContacts
-        ("charMgr", "DeleteContacts") => dispatch_char_contacts(ctx, session, method, args),
+        ("charMgr", "DeleteContacts") => dispatch_char_contacts(ctx, session, method, args, kwargs),
         // parity: rpc:charMgr.BlockOwners, rpc:charMgr.UnblockOwners
         ("charMgr", "BlockOwners") | ("charMgr", "UnblockOwners") => {
-            dispatch_char_contacts(ctx, session, method, args)
+            dispatch_char_contacts(ctx, session, method, args, kwargs)
         }
 
         ("charMgr", "GetSettingsInfo") => Some(

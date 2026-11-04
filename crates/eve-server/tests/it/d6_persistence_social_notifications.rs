@@ -81,7 +81,8 @@ async fn test_d6_contacts_labels_blocklist_cspa_persist_across_sqlite_restart() 
         let lbl_rep = call(&ctx1, &mut sess1, "charMgr", "CreateLabel", &[PyRep::String("Trusted Friends".into()), PyRep::Integer(0x00FF00)]).await;
         let char_label_id = lbl_rep.dict_get("labelID").and_then(|v| v.as_i64()).unwrap_or(1);
 
-        call(&ctx1, &mut sess1, "charMgr", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true), PyRep::Integer(char_label_id)]).await;
+        call(&ctx1, &mut sess1, "charMgr", "AddContact", &[PyRep::Integer(90_000_002), PyRep::Real(10.0), PyRep::Bool(true), PyRep::Bool(true), PyRep::String("Trusted fleet ally".into())]).await;
+        call(&ctx1, &mut sess1, "charMgr", "AssignLabels", &[PyRep::List(vec![PyRep::Integer(90_000_002)]), PyRep::Integer(char_label_id)]).await;
         call(&ctx1, &mut sess1, "charMgr", "BlockOwners", &[PyRep::List(vec![PyRep::Integer(90_000_003)])]).await;
         call(&ctx1, &mut sess1, "charMgr", "LogSettings", &[PyRep::Real(5_000.0)]).await;
         call(&ctx1, &mut sess1, "charMgr", "SetNote", &[PyRep::Integer(90_000_002), PyRep::String("Reliable fleet scout".into())]).await;
