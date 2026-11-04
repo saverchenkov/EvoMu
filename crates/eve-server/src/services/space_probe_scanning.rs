@@ -1376,4 +1376,3 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbesIdle", "charid", vec![PyRep::List(idle_probes)]);
     }
 }
-
