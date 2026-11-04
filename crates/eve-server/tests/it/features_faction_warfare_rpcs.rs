@@ -109,7 +109,7 @@ async fn kill_target_live(
         ctx, sess, sys_id, ship_id, target_id,
     )
     .await;
-    for round in 0..24 {
+    for _ in 0..40 {
         if ctx
             .systems
             .get_or_spawn(sys_id)
@@ -121,25 +121,22 @@ async fn kill_target_live(
         {
             return;
         }
-        if round == 0 || target_id < 500_000_000 {
-            for i in 0..3 {
-                let _ = rpc(
-                    ctx,
-                    sess,
-                    "dogmaIM",
-                    "Activate",
-                    &[
-                        PyRep::Integer(gun_base_id + i * 2),
-                        PyRep::String("targetAttack".into()),
-                        PyRep::Integer(target_id),
-                    ],
-                )
-                .await;
-            }
+        for i in 0..3 {
+            let _ = rpc(
+                ctx,
+                sess,
+                "dogmaIM",
+                "Activate",
+                &[
+                    PyRep::Integer(gun_base_id + i * 2),
+                    PyRep::String("targetAttack".into()),
+                    PyRep::Integer(target_id),
+                ],
+            )
+            .await;
         }
-        if target_id >= 500_000_000 {
-            crate::sovereignty_equinox_gameplay::step_weapon_ticks(ctx, sys_id).await;
-        }
+        crate::sovereignty_equinox_gameplay::step_weapon_ticks(ctx, sys_id).await;
+        ctx.advance_secs(5);
     }
     assert!(
         ctx.systems
