@@ -92,24 +92,19 @@ mod economy_market_industry_part2;
 mod economy_quasar_esi_r4_regressions;
 mod economy_quasar_r5_regressions;
 mod esi;
-mod esi_b2_closure;
 mod esi_corp_alliance;
-mod esi_corp_alliance_part2;
 mod esi_corp_market_industry_closure;
 mod esi_fittings_war_killmails;
 mod esi_corp_governance;
 mod esi_fleets;
 mod esi_full;
 mod esi_market_industry_pi;
-mod esi_market_industry_pi_part5;
 mod esi_routes;
 mod esi_routes_character;
 mod esi_ui_and_features;
 mod esi_universe_character;
 mod esi_universe_fw_complete;
-mod esi_universe_fw_complete_part2;
 mod esi_universe_sov_complete;
-mod esi_universe_sov_complete_part2;
 mod features_parity_complete_part1;
 mod features_parity_complete_part2;
 mod features_parity_complete_part3;
@@ -221,7 +216,6 @@ mod regressions_r8;
 mod regressions_r8_part2;
 mod regressions_r8_part3;
 mod rpc_char_lifecycle;
-mod rpc_notification_closure;
 mod sde_localization_resources;
 mod security_auditor_flags;
 mod seeded_rng;
@@ -253,20 +247,13 @@ mod serverops_cluster_complete;
 mod mining_cycle_engine;
 mod mining_bonuses_bursts;
 mod rpc_market_contracts_bounty;
-mod rpc_market_contracts_bounty_part2;
-mod rpc_core_services_batch;
-mod rpc_core_services_batch_part2;
-mod rpc_core_services_batch_part3;
 mod rpc_station_clones_facwar;
-mod rpc_station_clones_facwar_part2;
 mod rpc_structures_pos_dogma;
-mod rpc_structures_pos_dogma_part2;
 mod rpc_corp_alliance_fw_enlistment;
 mod rpc_corp_alliance_fw_enlistment_alliances;
 mod rpc_user_mail_trade;
 mod rpc_petitioner_raffle;
 mod rpc_petitioner_service;
-mod rpc_petitioner_service_part2;
 mod rpc_operations_dungeons;
 mod rpc_operations_manager_air;
 mod rpc_discovery_seasons;
@@ -274,7 +261,6 @@ mod rpc_space_inventory_entity;
 mod rpc_planet_mgr_colonies;
 mod rpc_planet_mgr_orbitals;
 mod rpc_tourney_mgr;
-mod rpc_tourney_mgr_part2;
 mod rpc_fleet_object_hierarchy;
 mod rpc_fleet_object_ops;
 mod rpc_bounty_crimewatch;
@@ -325,8 +311,6 @@ mod parity_skinr_den_invariants;
 mod plan_unblock_invariants_and_lifecycle;
 mod wormhole_restrictions_and_buckets;
 mod notifications_server_push_sweep;
-mod rpc_services_remaining_part1;
-mod rpc_services_remaining_part2;
 mod space_navigation_ops;
 mod rpc_char_skills_clones_suite;
 mod access_group_bookmarks_suite;
@@ -334,8 +318,7 @@ mod mail_and_mailing_lists_suite;
 mod space_travel_shipcaster_suite;
 mod ship_operations_and_insurance_contracts;
 mod ship_operations_and_insurance_contracts_part2;
-mod rpc_calendar_remediation;
-mod rpc_fleet_remediation;
+mod rpc_calendar_ops;
 mod quasar_store_vault_suite;
 mod quasar_t1_t3_t5_closure;
 mod remediated_fake_done_tests;
@@ -355,7 +338,6 @@ mod pi_planet_mgr_rpc_part3;
 mod rpc_shipcaster_complete;
 mod rpc_lp_store_mgr_complete;
 mod lp_store_closure;
-mod rpc_utility_services_batch;
 mod rpc_mail_mgr_complete;
 mod rpc_mailing_lists_complete;
 mod remediated_storms_and_homefront;
@@ -365,9 +347,7 @@ mod quasar_goal_tale_notices;
 mod quasar_cosmetics_live_state;
 mod quasar_cosmetics_market_state;
 mod quasar_cosmetics_seasons_closure_part1;
-mod rpc_missing_batch1;
 mod character_skill_features_t12;
-mod rpc_missing_batch3_tests;
 mod structure_acl_and_features_complete;
 mod structure_acl_and_features_complete_part2;
 mod structure_profiles_directory_defense;
@@ -440,14 +420,8 @@ mod notify_real_emitters_batch10_part3;
 mod notify_real_emitters_batch10_part4;
 mod notify_real_emitters_batch10_part5;
 mod notify_b23_closure;
-mod rpc_lp_store_and_travel_closure;
 mod client_bug_reporting_suite;
 mod pi_and_evermarks_remediation;
-mod esi_market_industry_pi_part2;
-mod esi_market_industry_pi_part3;
-mod esi_market_industry_pi_part4;
-mod esi_p6_closure;
-mod esi_p6_closure_part2;
 mod quasar_daily_goals_remediation;
 mod quasar_q3_q9_closure;
 mod quasar_q5_q6_closure;
@@ -504,7 +478,6 @@ mod open_feats_and_rpcs_b11_part2;
 mod open_feats_and_rpcs_b11_part3;
 mod open_feats_batch6_closure;
 mod open_feats_batch6_part2_closure;
-mod esi_b6_closure;
 mod open_feats_b42;
 mod open_feats_and_rpcs_b9;
 mod open_feats_and_rpcs_b34;
@@ -626,13 +599,19 @@ mod quasar_vendors_war_and_serverops;
 mod quasar_debug_race_and_ships;
 
 // Backward-compatibility aliases for test suites renamed to semantic domain names in 61d4cc02b
+mod gameplay_services_and_rpcs;
+mod rpc_services_remaining;
 
 #[allow(unused_imports)]
 pub(crate) use abyssal_deadspace as abyssal_deadspace_closure;
 #[allow(unused_imports)]
+pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
+#[allow(unused_imports)]
 pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
 #[allow(unused_imports)]
 pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
+#[allow(unused_imports)]
+pub(crate) use crimewatch_hostility as crimewatch_closure;
 #[allow(unused_imports)]
 pub(crate) use crimewatch_hostility as plan_c7_crimewatch_closure;
 #[allow(unused_imports)]
@@ -675,3 +654,14 @@ pub(crate) use self::fw_warzone_insurgency as fw_warzone_insurgency_closure;
 pub(crate) use self::sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
 #[allow(unused_imports)]
 pub(crate) use self::crimewatch_hostility as plan_c7_crimewatch_closure;
+pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
+#[allow(unused_imports)]
+pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
+#[allow(unused_imports)]
+pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
