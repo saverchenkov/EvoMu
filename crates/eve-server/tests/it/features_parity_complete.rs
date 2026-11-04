@@ -2054,3 +2054,1819 @@ async fn test_attributes_remaps_implants_boosters() {
 }
 
 }
+
+// Folded submodule: parity_fake_remediation_feat_part1
+#[allow(unused_imports, dead_code)]
+pub(crate) mod features_parity_part4 {
+    use super::*;
+
+// Integration tests remediating `FLAGGED_FAKE` `feat:*` parity rows.
+//
+// Covers:
+// - `feat:wormholes.lifetime-decay-stages`
+// - `feat:navigation.wormhole-info-buckets`
+// - `feat:pve.hacking-node-types`
+// - `feat:pve.hacking-failure-outcome`
+// - `feat:sovereignty.skyhook-reagent-maturity`
+
+use eve_db::{CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::pve_exploration::{
+    ensure_system_pve_sites_seeded, with_pve_exploration_reg, HackingNodeKind, HackingUtilityKind,
+};
+use eve_server::services::pve_hacking_board::{
+    build_hacking_grid_procedural, build_hacking_grid_procedural_with_sde,
+    resolve_hacking_node_stats,
+};
+use eve_server::services::sov_gameplay::sov_gameplay_skyhook::advance_skyhook_reagents_in_snap;
+use eve_server::services::space_destiny::{
+    derive_wormhole_buckets, derive_wormhole_buckets_raw, wormhole_item_id_for_signature,
+};
+use std::collections::HashMap;
+
+fn make_context() -> ServerContext {
+    ServerContext::new()
+}
+
+fn make_session(char_id: i64, sys_id: u32, ship_id: i64) -> SessionState {
+    let mut sess = SessionState::new(990_001);
+    sess.user_id = Some(99_001);
+    sess.character_id = Some(char_id);
+    sess.corporation_id = Some(1_000_009);
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess
+}
+
+#[tokio::test]
+async fn test_wormhole_lifetime_decay_stages_and_info_buckets() {
+    // parity: feat:wormholes.lifetime-decay-stages, feat:navigation.wormhole-info-buckets
+    eve_testkit::attest(&[
+        "feat:wormholes.lifetime-decay-stages",
+        "feat:navigation.wormhole-info-buckets",
+    ]);
+
+    let ctx = make_context();
+    crate::common::pin_clock(&ctx);
+    let now = ctx.now_unix();
+    let b041 = ctx.sde.wormhole_types.get(&30_645).expect("Wormhole B041 in SDE");
+    let lifetime = (b041.max_stable_time_min * 60.0) as u64; // 2880 min = 48h
+
+    // > 24h remaining (36h left): >1 day bucket, not yet begun to decay
+    let fresh = derive_wormhole_buckets_raw(
+        30_000_142,
+        b041.max_jump_mass,
+        b041.max_stable_mass,
+        b041.max_stable_mass,
+        now,
+        lifetime,
+        false,
+        now + 12 * 3_600,
+        &ctx.sde,
+    );
+    assert_eq!(fresh.lifetime_bucket, ">1 day");
+    assert_eq!(fresh.max_ship_size, "Extra Large");
+    assert_eq!(
+        fresh.lifetime_description,
+        "This wormhole has not yet begun to decay"
+    );
+
+    // 4h..=24h remaining (12h left): <1 day bucket, beginning to decay
+    let decaying = derive_wormhole_buckets_raw(
+        30_000_142,
+        b041.max_jump_mass,
+        b041.max_stable_mass,
+        b041.max_stable_mass,
+        now,
+        lifetime,
+        false,
+        now + 36 * 3_600,
+        &ctx.sde,
+    );
+    assert_eq!(decaying.lifetime_bucket, "<1 day");
+    assert_eq!(
+        decaying.lifetime_description,
+        "This wormhole is beginning to decay, and probably won't last another day"
+    );
+
+    // < 4h remaining (2h left): <4h bucket, reaching end of natural lifetime
+    let eol = derive_wormhole_buckets_raw(
+        30_000_142,
+        b041.max_jump_mass,
+        b041.max_stable_mass,
+        b041.max_stable_mass,
+        now,
+        lifetime,
+        false,
+        now + 46 * 3_600,
+        &ctx.sde,
+    );
+    assert_eq!(eol.lifetime_bucket, "<4h");
+    assert_eq!(
+        eol.lifetime_description,
+        "This wormhole is reaching the end of its natural lifetime"
+    );
+
+    // Verify SDE wormhole type attributes drive ship size & destination class buckets
+    for (wtid, expected_size, expected_dest) in [
+        (34_134_u32, "Small", "C1-3"),       // Wormhole E004 (5M kg -> C1)
+        (30_579_u32, "Medium", "C1-3"),      // Wormhole Z971 (62M kg -> C1)
+        (30_677_u32, "Large", "High-Sec"),   // Wormhole B274 (375M kg -> High-Sec)
+        (56_026_u32, "Large", "Null-Sec"),   // Wormhole C729 (410M kg)
+        (30_645_u32, "Extra Large", "C6"),   // Wormhole B041 (1B kg -> C6)
+    ] {
+        let sig = CosmicSignatureRecord {
+            signature_id: format!("SDE-{wtid}"),
+            solar_system_id: 30_000_142,
+            sig_group: "Wormhole".into(),
+            type_name: ctx.sde.wormhole_types[&wtid].name.clone(),
+            position: [1_000.0, 0.0, 0.0],
+            signal_strength: 1.0,
+            wormhole_type_id: Some(wtid),
+            destination_system_id: None,
+            created_unix: now,
+            lifetime_seconds: 0,
+            max_mass_kg: 0.0,
+            remaining_mass_kg: 500_000_000.0,
+            max_jump_mass_kg: 0.0,
+            collapsed: false,
+        };
+        let b = derive_wormhole_buckets(&sig, now + 60, &ctx.sde);
+        assert_eq!(b.max_ship_size, expected_size, "wtid {wtid}");
+        assert_eq!(b.destination_class, expected_dest, "wtid {wtid}");
+    }
+
+    // Verify live MachoNet scanMgr.GetSystemScanMgr & wormholeMgr.WormholeJump RPCs
+    let sys_id = 30_000_142_u32;
+    let char_id = 90_000_001_i64;
+    let ship_id = 100_000_099_i64;
+    let mut sess = make_session(char_id, sys_id, ship_id);
+    let kw: HashMap<String, PyRep> = HashMap::new();
+    let b274 = &ctx.sde.wormhole_types[&30_677];
+    let wh_sig_id = "WH-SDE-LIVE".to_string();
+    let wh_item_id = wormhole_item_id_for_signature(sys_id, &wh_sig_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 605, // Heron
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.cosmic_signatures.insert(
+            sys_id,
+            vec![CosmicSignatureRecord {
+                signature_id: wh_sig_id.clone(),
+                solar_system_id: sys_id,
+                sig_group: "Wormhole".into(),
+                type_name: b274.name.clone(),
+                position: [500.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                wormhole_type_id: Some(30_677),
+                destination_system_id: Some(30_002_187),
+                created_unix: now.saturating_sub(22 * 3_600), // 2h left of 24h -> <4h
+                lifetime_seconds: (b274.max_stable_time_min * 60.0) as u64,
+                max_mass_kg: b274.max_stable_mass,
+                remaining_mass_kg: b274.max_stable_mass * 0.25, // <50%
+                max_jump_mass_kg: b274.max_jump_mass,
+                collapsed: false,
+            }],
+        );
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 605,
+            position: glam::DVec3::new(500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: wh_item_id,
+            type_id: 26_272,
+            position: glam::DVec3::new(500.0, 0.0, 0.0),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: b274.max_stable_mass,
+            radius: 1_500.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Rigid,
+        })
+        .await;
+
+    let scan_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "scanMgr",
+            None,
+            "GetSystemScanMgr",
+            &[PyRep::Integer(i64::from(sys_id))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("scanMgr.GetSystemScanMgr");
+    let sig_kv = scan_rep
+        .dict_get("signatures")
+        .and_then(|s| match s {
+            PyRep::List(l) => l
+                .iter()
+                .find(|item| item.dict_get("signatureID") == Some(&PyRep::String(wh_sig_id.clone()))),
+            _ => None,
+        })
+        .expect("WH-SDE-LIVE in GetSystemScanMgr");
+    assert_eq!(
+        sig_kv.dict_get("maxShipSize"),
+        Some(&PyRep::String("Large".into()))
+    );
+    assert_eq!(
+        sig_kv.dict_get("lifetimeBucket"),
+        Some(&PyRep::String("<4h".into()))
+    );
+    assert_eq!(
+        sig_kv.dict_get("massStabilityBucket"),
+        Some(&PyRep::String("<50%".into()))
+    );
+
+    let jump_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "wormholeMgr",
+            None,
+            "WormholeJump",
+            &[PyRep::Integer(wh_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("wormholeMgr.WormholeJump");
+    assert_eq!(
+        jump_rep.dict_get("lifetimeBucket"),
+        Some(&PyRep::String("<4h".into()))
+    );
+    assert_eq!(
+        jump_rep.dict_get("lifetimeDescription"),
+        Some(&PyRep::String(
+            "This wormhole is reaching the end of its natural lifetime".into()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn test_hacking_node_types_and_failure_outcome() {
+    // parity: feat:pve.hacking-node-types, feat:pve.hacking-failure-outcome
+    eve_testkit::attest(&[
+        "feat:pve.hacking-node-types",
+        "feat:pve.hacking-failure-outcome",
+    ]);
+
+    // 1. Difficulty 1 (Very Easy) and Difficulty 2 (Easy) must not spawn RestorationNode or VirusSuppressor
+    for diff in [1_u8, 2_u8] {
+        let tiles = build_hacking_grid_procedural(77_001, false, diff, 1_750_000_000);
+        assert!(
+            !tiles.iter().any(|t| matches!(
+                t.kind,
+                HackingNodeKind::RestorationNode | HackingNodeKind::VirusSuppressor
+            )),
+            "Difficulty {diff} board must not spawn RestorationNode or VirusSuppressor"
+        );
+    }
+    let diff3_tiles = build_hacking_grid_procedural(77_003, false, 3, 1_750_000_000);
+    assert!(
+        diff3_tiles
+            .iter()
+            .any(|t| t.kind == HackingNodeKind::RestorationNode),
+        "Difficulty 3 board must include RestorationNode"
+    );
+
+    // 2. SelfRepair heals 5..=10 coherence per turn for 3 turns without a max_virus_coherence cap,
+    //    and 2nd hack failure on a standard Data/Relic container self-destructs with 0.0 ship damage.
+    let ctx = make_context();
+    let (tier1, stats1) = resolve_hacking_node_stats(Some(&ctx.sde), Some(21_683), false, 0);
+    let (tier3, stats3) = resolve_hacking_node_stats(Some(&ctx.sde), Some(21_685), false, 0);
+    assert_eq!(tier1, 1);
+    assert_eq!(tier3, 3);
+    assert!(stats3.core_coh > stats1.core_coh && stats3.fw_coh > stats1.fw_coh);
+    let sde_tiles =
+        build_hacking_grid_procedural_with_sde(Some(&ctx.sde), 77_004, Some(21_685), false, 0, 1_750_000_000);
+    assert!(sde_tiles
+        .iter()
+        .any(|t| t.kind == HackingNodeKind::RestorationNode));
+    let kw: HashMap<String, PyRep> = HashMap::new();
+    let char_id = 90_000_001_i64;
+    let sys_id = 30_002_813_u32; // Low-sec
+    let ship_id = 100_000_001_i64;
+    let analyzer_id = 100_000_002_i64;
+    let mut sess = make_session(char_id, sys_id, ship_id);
+
+    ensure_system_pve_sites_seeded(&ctx, sys_id).await;
+    let (can_id, can_fail, site_pos) = with_pve_exploration_reg(&ctx, |reg| {
+        let relic = reg
+            .sites_by_system
+            .get(&sys_id)
+            .and_then(|list| {
+                list.iter().find(|s| {
+                    s.site_category.eq_ignore_ascii_case("Relic") && s.hackable_can_ids.len() >= 2
+                })
+            })
+            .expect("Seeded standard Relic site with >= 2 cans");
+        (relic.hackable_can_ids[0], relic.hackable_can_ids[1], relic.position)
+    });
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.active_ship_id = ship_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 605, // Heron
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            analyzer_id,
+            InventoryItemRecord {
+                item_id: analyzer_id,
+                type_id: 22_177, // Relic Analyzer I
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(analyzer_id, true);
+    });
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: ship_id,
+            type_id: 605,
+            position: glam::DVec3::from_array(site_pos),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "hackingMgr",
+            None,
+            "StartNewGameInstance",
+            &[PyRep::Integer(can_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("StartNewGameInstance");
+
+    with_pve_exploration_reg(&ctx, |reg| {
+        let g = reg.hacking_games.get_mut(&(char_id, can_id)).unwrap();
+        g.virus_coherence = (g.max_virus_coherence - 5).max(1);
+        g.utilities[0] = Some(HackingUtilityKind::SelfRepair);
+        for t in g.tiles.iter_mut().take(4) {
+            t.kind = HackingNodeKind::Empty;
+            t.coherence = 0;
+            t.strength = 0;
+        }
+    });
+
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "hackingMgr",
+            None,
+            "UsedUtilityElement",
+            &[PyRep::Integer(can_id), PyRep::Integer(0), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate SelfRepair");
+
+    let (base_coh, max_coh) = with_pve_exploration_reg(&ctx, |reg| {
+        let g = &reg.hacking_games[&(char_id, can_id)];
+        (g.virus_coherence, g.max_virus_coherence)
+    });
+    let mut prev_coh = base_coh;
+    for turn in 1..=3_u32 {
+        let _ = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "hackingMgr",
+                None,
+                "ClickedOnTile",
+                &[PyRep::Integer(can_id), PyRep::Integer(i64::from(turn))],
+                &kw,
+                None,
+            )
+            .await
+            .expect("Click tile");
+        let cur_coh = with_pve_exploration_reg(&ctx, |reg| {
+            reg.hacking_games[&(char_id, can_id)].virus_coherence
+        });
+        let delta = cur_coh - prev_coh;
+        assert!(
+            (5..=10).contains(&delta),
+            "SelfRepair turn {turn} must heal 5..=10 coherence, got {delta}"
+        );
+        prev_coh = cur_coh;
+    }
+    let (after_coh, rem_sr) = with_pve_exploration_reg(&ctx, |reg| {
+        (
+            reg.hacking_games[&(char_id, can_id)].virus_coherence,
+            reg.self_repair_turns.get(&(char_id, can_id)).copied(),
+        )
+    });
+    assert!(after_coh > base_coh, "SelfRepair must heal virus coherence");
+    assert!(
+        after_coh > max_coh,
+        "SelfRepair must allow virus coherence to exceed max_virus_coherence (got {base_coh} -> {after_coh}, max {max_coh})"
+    );
+    assert_eq!(rem_sr, None, "self_repair_turns must be cleaned up after 3 turns");
+
+    // Trigger 2nd failure on a standard container in low-sec -> self-destructs with 0.0 explosionDamage
+    for attempt in 1..=2 {
+        let _ = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "hackingMgr",
+                None,
+                "StartNewGameInstance",
+                &[PyRep::Integer(can_fail)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("StartNewGameInstance");
+        with_pve_exploration_reg(&ctx, |reg| {
+            let g = reg.hacking_games.get_mut(&(char_id, can_fail)).unwrap();
+            g.virus_coherence = 5;
+            g.tiles[1].kind = HackingNodeKind::Antivirus;
+            g.tiles[1].coherence = 500;
+            g.tiles[1].strength = 50;
+        });
+        let rep = ctx
+            .dispatch_rpc(
+                &mut sess,
+                "hackingMgr",
+                None,
+                "ClickedOnTile",
+                &[PyRep::Integer(can_fail), PyRep::Integer(1)],
+                &kw,
+                None,
+            )
+            .await
+            .expect("ClickedOnTile fail");
+        if attempt == 2 {
+            assert_eq!(rep.dict_get("containerExploded"), Some(&PyRep::Bool(true)));
+            assert_eq!(rep.dict_get("explosionDamage"), Some(&PyRep::Real(0.0)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_skyhook_reagent_harvest_secure_surplus_split() {
+    // parity: feat:sovereignty.skyhook-reagent-maturity
+    eve_testkit::attest(&["feat:sovereignty.skyhook-reagent-maturity"]);
+
+    let ctx = make_context();
+    let skyhook_id = 1_040_000_001_i64;
+    let t0 = 1_750_000_000_u64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime
+            .skyhook_reagent_bays
+            .insert(skyhook_id, (81_143, 0, 0, t0));
+        snap.sov_runtime
+            .skyhook_last_harvest_unix
+            .insert(skyhook_id, t0);
+        let (_, sec_1h, sur_1h) = advance_skyhook_reagents_in_snap(snap, skyhook_id, t0 + 3_600)
+            .expect("1h skyhook harvest");
+        assert!(sec_1h > 0, "Newly harvested reagents must split into Secure bay");
+        assert!(sur_1h > 0, "Newly harvested reagents must split into Surplus bay");
+        assert_eq!(sec_1h, sur_1h, "Harvested reagents split 50/50 between Secure and Surplus");
+    });
+}
+}
+
+// Folded submodule: parity_fake_remediation_part1
+#[allow(unused_imports, dead_code)]
+pub(crate) mod features_parity_part5 {
+    use super::*;
+
+// End-to-end remediation integration tests for ESI social, calendar, contacts,
+// mailing lists, corporation governance, and sovereignty map (`esi:*` fake_done closure).
+
+
+use crate::esi_market_industry_pi::{issue_token_with_scopes, rpc_call};
+use eve_db::corp_roles::{
+    ROLE_CONTRACT_MANAGER, ROLE_DIRECTOR, ROLE_PROJECT_MANAGER, ROLE_TRADER,
+};
+use eve_db::{AllianceRecord, CorporationRecord, IskCents, TrainedSkillRecord};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::esi::router::EsiRouter;
+use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
+use eve_server::router::ServerContext;
+use eve_server::services::sov_services::claim_system_sovereignty;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+fn esi_get_validated(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: Option<&str>) -> Value {
+    let mut req = EsiHttpRequest::new("GET", path);
+    if let Some(t) = token {
+        req = req.with_bearer_token(t);
+    }
+    let resp = router.handle_request(&req);
+    assert_eq!(resp.status_code, 200, "GET {path} -> {}: {}", resp.status_code, String::from_utf8_lossy(&resp.body));
+    let raw_path = path.split('?').next().unwrap_or(path);
+    spec.validate_response("GET", raw_path, resp.status_code, &resp.headers, &resp.body)
+        .unwrap_or_else(|e| panic!("OpenAPI validation failed for GET {path}: {e}"));
+    serde_json::from_slice(&resp.body).unwrap_or(Value::Null)
+}
+
+fn esi_put_validated(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: &str, body: &Value) {
+    let req = EsiHttpRequest::new("PUT", path)
+        .with_bearer_token(token)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_vec(body).unwrap());
+    let resp = router.handle_request(&req);
+    assert_eq!(resp.status_code, 204, "PUT {path} -> {}: {}", resp.status_code, String::from_utf8_lossy(&resp.body));
+    spec.validate_response("PUT", path, resp.status_code, &resp.headers, &resp.body)
+        .unwrap_or_else(|e| panic!("OpenAPI validation failed for PUT {path}: {e}"));
+}
+
+#[tokio::test]
+async fn test_parity_remediation_esi_calendar_rpc_and_http_persistence() {
+    // parity: esi:GET /characters/{character_id}/calendar, esi:GET /characters/{character_id}/calendar/{event_id}, esi:PUT /characters/{character_id}/calendar/{event_id}, esi:GET /characters/{character_id}/calendar/{event_id}/attendees
+    eve_testkit::attest(&[
+        "esi:GET /characters/{character_id}/calendar",
+        "esi:GET /characters/{character_id}/calendar/{event_id}",
+        "esi:PUT /characters/{character_id}/calendar/{event_id}",
+        "esi:GET /characters/{character_id}/calendar/{event_id}/attendees",
+    ]);
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let spec = OpenApiSpec::pinned();
+
+    let ceo_id = 90_000_001_i64;
+    let wingman_id = 90_000_002_i64;
+    let corp_id = 98_600_001_i64;
+    let jita_station = 60_003_760_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.characters[&ceo_id].clone();
+        for (cid, name) in [(ceo_id, "Calendar CEO"), (wingman_id, "Calendar Wingman")] {
+            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.corporation_id = corp_id;
+            ch.station_id = Some(jita_station);
+            ch.solar_system_id = 30_000_142;
+            snap.characters.insert(cid, ch);
+        }
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Calendar Corp".into(),
+                ticker: "CALC".into(),
+                ceo_id,
+                tax_rate: 0.05,
+                members: HashSet::from([ceo_id, wingman_id]),
+                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (wingman_id, 0)]),
+                ..CorporationRecord::default()
+            },
+        );
+    });
+
+    let mut ceo_sess = SessionState::new(70_101);
+    ceo_sess.user_id = Some(1);
+    ceo_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    ceo_sess.character_id = Some(ceo_id);
+    ceo_sess.corporation_id = Some(corp_id);
+    ceo_sess.station_id = Some(jita_station);
+    ceo_sess.solar_system_id = Some(30_000_142);
+
+    let mut wing_sess = SessionState::new(70_102);
+    wing_sess.user_id = Some(1);
+    wing_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    wing_sess.character_id = Some(wingman_id);
+    wing_sess.corporation_id = Some(corp_id);
+    wing_sess.station_id = Some(jita_station);
+    wing_sess.solar_system_id = Some(30_000_142);
+
+    let event_ft = ((ctx.now_unix() as i64 + 7_200) + 11_644_473_600) * 10_000_000;
+    let create_rep = rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "calendarMgr",
+        "CreateCorporationEvent",
+        &[
+            PyRep::Integer(event_ft),
+            PyRep::Integer(90),
+            PyRep::String("Fleet Stratop".into()),
+            PyRep::String("Form up in Jita 4-4".into()),
+            PyRep::Integer(1),
+        ],
+    )
+    .await;
+    let event_id = create_rep
+        .as_i64()
+        .or_else(|| create_rep.dict_get("eventID").and_then(|v| v.as_i64()))
+        .expect("created corporation event_id");
+    assert!(event_id > 0);
+
+    // Respond via MachoNet RPC as wingman (5 = tentative)
+    rpc_call(
+        &ctx,
+        &mut wing_sess,
+        "calendarMgr",
+        "SendEventResponse",
+        &[
+            PyRep::Integer(event_id),
+            PyRep::Integer(corp_id),
+            PyRep::Integer(5),
+        ],
+    )
+    .await;
+
+    // Respond via ESI HTTP PUT as CEO ("accepted")
+    let cal_tok = issue_token_with_scopes(
+        &ctx,
+        ceo_id,
+        vec![
+            "esi-calendar.read_calendar_events.v1",
+            "esi-calendar.respond_calendar_events.v1",
+        ],
+    );
+    esi_put_validated(
+        &router,
+        &spec,
+        &format!("/v1/characters/{ceo_id}/calendar/{event_id}/"),
+        &cal_tok,
+        &json!({ "response": "accepted" }),
+    );
+
+    // Clear ephemeral esi_state to prove ESI reads directly from WorldStateSnapshot
+    ctx.esi_state.calendar_events.write().unwrap().clear();
+    ctx.esi_state.calendar_responses.write().unwrap().clear();
+
+    let list = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/characters/{ceo_id}/calendar/"),
+        Some(&cal_tok),
+    );
+    let arr = list.as_array().expect("calendar list array");
+    let item = arr.iter().find(|e| e["event_id"] == json!(event_id)).expect("event in calendar list");
+    assert_eq!(item["title"], json!("Fleet Stratop"));
+    assert_eq!(item["importance"], json!(1));
+    assert_eq!(item["event_response"], json!("accepted"));
+
+    let detail = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/characters/{ceo_id}/calendar/{event_id}/"),
+        Some(&cal_tok),
+    );
+    assert_eq!(detail["event_id"], json!(event_id));
+    assert_eq!(detail["owner_id"], json!(corp_id));
+    assert_eq!(detail["owner_type"], json!("corporation"));
+    assert_eq!(detail["duration"], json!(90));
+    assert_eq!(detail["text"], json!("Form up in Jita 4-4"));
+    assert_eq!(detail["response"], json!("accepted"));
+
+    let attendees = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/characters/{ceo_id}/calendar/{event_id}/attendees/"),
+        Some(&cal_tok),
+    );
+    let att_arr = attendees.as_array().expect("attendees array");
+    assert!(att_arr.iter().any(|a| a["character_id"] == json!(ceo_id) && a["event_response"] == json!("accepted")));
+    assert!(att_arr.iter().any(|a| a["character_id"] == json!(wingman_id) && a["event_response"] == json!("tentative")));
+}
+
+#[tokio::test]
+async fn test_parity_remediation_esi_contacts_labels_and_mail_lists() {
+    // parity: esi:GET /characters/{character_id}/contacts/labels, esi:GET /corporations/{corporation_id}/contacts, esi:GET /corporations/{corporation_id}/contacts/labels, esi:GET /alliances/{alliance_id}/contacts, esi:GET /alliances/{alliance_id}/contacts/labels, esi:GET /characters/{character_id}/mail/lists
+    eve_testkit::attest(&[
+        "esi:GET /characters/{character_id}/contacts/labels",
+        "esi:GET /corporations/{corporation_id}/contacts",
+        "esi:GET /corporations/{corporation_id}/contacts/labels",
+        "esi:GET /alliances/{alliance_id}/contacts",
+        "esi:GET /alliances/{alliance_id}/contacts/labels",
+        "esi:GET /characters/{character_id}/mail/lists",
+    ]);
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let spec = OpenApiSpec::pinned();
+
+    let ceo_id = 90_000_001_i64;
+    let target_char_id = 90_000_002_i64;
+    let corp_id = 98_600_002_i64;
+    let alliance_id = 99_600_002_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.characters[&ceo_id].clone();
+        for (cid, name) in [(ceo_id, "Diplo CEO"), (target_char_id, "Neutral Contact")] {
+            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.corporation_id = if cid == ceo_id { corp_id } else { 1_000_009 };
+            ch.alliance_id = if cid == ceo_id { Some(alliance_id) } else { None };
+            ch.balance = IskCents::from_isk(50_000_000);
+            snap.characters.insert(cid, ch);
+        }
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Diplo Corp".into(),
+                ticker: "DPLC".into(),
+                ceo_id,
+                alliance_id: Some(alliance_id),
+                tax_rate: 0.05,
+                members: HashSet::from([ceo_id]),
+                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR)]),
+                ..CorporationRecord::default()
+            },
+        );
+        snap.alliances.insert(
+            alliance_id,
+            AllianceRecord {
+                alliance_id,
+                name: "Diplo Alliance".into(),
+                short_name: "DPLA".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: HashSet::from([corp_id]),
+            },
+        );
+    });
+
+    let mut sess = SessionState::new(70_103);
+    sess.user_id = Some(1);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    sess.character_id = Some(ceo_id);
+    sess.corporation_id = Some(corp_id);
+    sess.alliance_id = Some(alliance_id);
+    sess.corp_role = ROLE_DIRECTOR;
+
+    // 1. Character contact label via charMgr.CreateLabel
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "CreateLabel",
+        &[PyRep::String("Logi Anchors".into()), PyRep::Integer(1)],
+    )
+    .await;
+
+    // 2. Corporation contact & label via corpRegistry
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "CreateLabel",
+        &[PyRep::String("Blues".into()), PyRep::Integer(2)],
+    )
+    .await;
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "AddCorporateContact",
+        &[PyRep::Integer(target_char_id), PyRep::Real(5.0), PyRep::Integer(1)],
+    )
+    .await;
+
+    // 3. Alliance contact & label via allianceRegistry
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "allianceRegistry",
+        "CreateLabel",
+        &[PyRep::String("Coalition".into()), PyRep::Integer(3)],
+    )
+    .await;
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "allianceRegistry",
+        "AddAllianceContact",
+        &[PyRep::Integer(target_char_id), PyRep::Real(10.0), PyRep::Integer(1)],
+    )
+    .await;
+
+    // 4. Mailing list via mailingListsMgr.Create
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "mailingListsMgr",
+        "Create",
+        &[
+            PyRep::String("FC Announcements".into()),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+            PyRep::Integer(0),
+        ],
+    )
+    .await;
+
+    // Clear ephemeral esi_state maps to prove SQLite/WorldStateSnapshot backing
+    ctx.esi_state.char_contact_labels.write().unwrap().clear();
+    ctx.esi_state.corp_contacts.write().unwrap().clear();
+    ctx.esi_state.corp_contact_labels.write().unwrap().clear();
+    ctx.esi_state.alliance_contacts.write().unwrap().clear();
+    ctx.esi_state.alliance_contact_labels.write().unwrap().clear();
+    ctx.esi_state.mail_lists.write().unwrap().clear();
+
+    let tok = issue_token_with_scopes(
+        &ctx,
+        ceo_id,
+        vec![
+            "esi-characters.read_contacts.v1",
+            "esi-corporations.read_contacts.v1",
+            "esi-alliances.read_contacts.v1",
+            "esi-mail.read_mail.v1",
+        ],
+    );
+
+    let char_labels = esi_get_validated(&router, &spec, &format!("/v1/characters/{ceo_id}/contacts/labels/"), Some(&tok));
+    assert!(char_labels.as_array().unwrap().iter().any(|l| l["label_name"] == json!("Logi Anchors")));
+
+    let corp_contacts = esi_get_validated(&router, &spec, &format!("/v1/corporations/{corp_id}/contacts/"), Some(&tok));
+    assert!(corp_contacts.as_array().unwrap().iter().any(|c| c["contact_id"] == json!(target_char_id) && c["standing"] == json!(5.0)));
+
+    let corp_labels = esi_get_validated(&router, &spec, &format!("/v1/corporations/{corp_id}/contacts/labels/"), Some(&tok));
+    assert!(corp_labels.as_array().unwrap().iter().any(|l| l["label_name"] == json!("Blues")));
+
+    let ally_contacts = esi_get_validated(&router, &spec, &format!("/v1/alliances/{alliance_id}/contacts/"), Some(&tok));
+    assert!(ally_contacts.as_array().unwrap().iter().any(|c| c["contact_id"] == json!(target_char_id) && c["standing"] == json!(10.0)));
+
+    let ally_labels = esi_get_validated(&router, &spec, &format!("/v1/alliances/{alliance_id}/contacts/labels/"), Some(&tok));
+    assert!(ally_labels.as_array().unwrap().iter().any(|l| l["label_name"] == json!("Coalition")));
+
+    let mail_lists = esi_get_validated(&router, &spec, &format!("/v1/characters/{ceo_id}/mail/lists/"), Some(&tok));
+    assert!(mail_lists.as_array().unwrap().iter().any(|m| m["name"] == json!("FC Announcements")));
+}
+
+#[tokio::test]
+async fn test_parity_remediation_esi_corp_governance_roles_limit_and_sov_map() {
+    // parity: esi:GET /corporations/{corporation_id}/members/limit, esi:GET /corporations/{corporation_id}/roles, esi:GET /corporations/{corporation_id}/roles/history, esi:GET /sovereignty/map
+    eve_testkit::attest(&[
+        "esi:GET /corporations/{corporation_id}/members/limit",
+        "esi:GET /corporations/{corporation_id}/roles",
+        "esi:GET /corporations/{corporation_id}/roles/history",
+        "esi:GET /sovereignty/map",
+    ]);
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let spec = OpenApiSpec::pinned();
+
+    let ceo_id = 90_000_001_i64;
+    let member_id = 90_000_002_i64;
+    let corp_id = 98_600_003_i64;
+    let alliance_id = 99_600_003_i64;
+    let null_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .find(|s| s.security_status <= 0.0)
+        .map(|s| s.solar_system_id)
+        .expect("SDE nullsec solar system");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.characters[&ceo_id].clone();
+        for (cid, name) in [(ceo_id, "Gov CEO"), (member_id, "Gov Member")] {
+            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.corporation_id = corp_id;
+            ch.alliance_id = Some(alliance_id);
+            snap.characters.insert(cid, ch);
+        }
+        snap.skills.entry(ceo_id).or_default().clear();
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Governance Corp".into(),
+                ticker: "GOVC".into(),
+                ceo_id,
+                alliance_id: Some(alliance_id),
+                tax_rate: 0.05,
+                members: HashSet::from([ceo_id, member_id]),
+                member_roles: HashMap::from([(ceo_id, ROLE_DIRECTOR), (member_id, 0)]),
+                ..CorporationRecord::default()
+            },
+        );
+        snap.alliances.insert(
+            alliance_id,
+            AllianceRecord {
+                alliance_id,
+                name: "Governance Alliance".into(),
+                short_name: "GOVA".into(),
+                executor_corp_id: corp_id,
+                member_corp_ids: HashSet::from([corp_id]),
+            },
+        );
+    });
+
+    let tok = issue_token_with_scopes(
+        &ctx,
+        ceo_id,
+        vec![
+            "esi-corporations.read_corporation_membership.v1",
+            "esi-corporations.read_titles.v1",
+            "esi-corporations.track_members.v1",
+        ],
+    );
+
+    // 1. Untrained CEO defaults to base 10 member limit; training Corporation Management + UpdateCorporationAbilities updates it
+    let base_limit = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/members/limit/"),
+        Some(&tok),
+    );
+    assert_eq!(base_limit, json!(10));
+
+    let mut ceo_sess = SessionState::new(70_104);
+    ceo_sess.user_id = Some(1);
+    ceo_sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    ceo_sess.character_id = Some(ceo_id);
+    ceo_sess.corporation_id = Some(corp_id);
+    ceo_sess.alliance_id = Some(alliance_id);
+    ceo_sess.corp_role = ROLE_DIRECTOR;
+
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "UpdateCorporationAbilities",
+        &[],
+    )
+    .await;
+    let untrained_rpc_limit = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/members/limit/"),
+        Some(&tok),
+    );
+    assert_eq!(untrained_rpc_limit, json!(10));
+
+    let sde_bonus = ctx
+        .sde
+        .types
+        .get(&3363)
+        .and_then(|t| t.default_attributes.get(&191))
+        .copied()
+        .expect("SDE attribute 191 on Corporation Management (3363)")
+        .round() as i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(ceo_id).or_default().insert(
+            3363,
+            TrainedSkillRecord {
+                type_id: 3363,
+                level: 3,
+                skill_points: 16_000.0,
+            },
+        );
+    });
+
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "UpdateCorporationAbilities",
+        &[],
+    )
+    .await;
+
+    let updated_limit = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/members/limit/"),
+        Some(&tok),
+    );
+    assert_eq!(updated_limit, json!(sde_bonus * 3));
+
+    // 2. Live corpRegistry.UpdateMember grants Trader, Contract_Manager, Project_Manager -> reflected in /roles and /roles/history
+    let granted_mask = (ROLE_TRADER | ROLE_CONTRACT_MANAGER | ROLE_PROJECT_MANAGER) as i64;
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "UpdateMember",
+        &[
+            PyRep::Integer(member_id),
+            PyRep::String(String::new()),
+            PyRep::Integer(granted_mask),
+            PyRep::Integer(0),
+        ],
+    )
+    .await;
+    ctx.advance_secs(86_405);
+    rpc_call(
+        &ctx,
+        &mut ceo_sess,
+        "corpRegistry",
+        "UpdateMember",
+        &[
+            PyRep::Integer(member_id),
+            PyRep::String(String::new()),
+            PyRep::Integer(granted_mask),
+            PyRep::Integer(0),
+        ],
+    )
+    .await;
+    let tok = issue_token_with_scopes(
+        &ctx,
+        ceo_id,
+        vec![
+            "esi-corporations.read_corporation_membership.v1",
+            "esi-corporations.read_titles.v1",
+            "esi-corporations.track_members.v1",
+        ],
+    );
+
+    let roles_json = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/roles/"),
+        Some(&tok),
+    );
+    let member_entry = roles_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["character_id"] == json!(member_id))
+        .expect("member in /roles");
+    let role_names: Vec<&str> = member_entry["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(role_names.contains(&"Trader"));
+    assert!(role_names.contains(&"Contract_Manager"));
+    assert!(role_names.contains(&"Project_Manager"));
+
+    let history_json = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/roles/history/"),
+        Some(&tok),
+    );
+    let hist_entry = history_json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["character_id"] == json!(member_id) && h["issuer_id"] == json!(ceo_id))
+        .expect("role history entry");
+    let new_roles: Vec<&str> = hist_entry["new_roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(new_roles.contains(&"Trader"));
+    assert!(new_roles.contains(&"Contract_Manager"));
+
+    // 3. Live sovereignty claim -> reflected in GET /sovereignty/map
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.system_states.entry(null_sys).or_default();
+    });
+    claim_system_sovereignty(&ctx, null_sys, alliance_id, corp_id, 0)
+        .expect("claim_system_sovereignty");
+    let sov_map = esi_get_validated(&router, &spec, "/v1/sovereignty/map/", None);
+    let sys_entry = sov_map
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["system_id"] == json!(null_sys as i64))
+        .expect("claimed system in /sovereignty/map");
+    assert_eq!(sys_entry["alliance_id"], json!(alliance_id));
+    assert_eq!(sys_entry["corporation_id"], json!(corp_id));
+}
+}
+
+// Folded submodule: parity_fake_remediation_part2
+#[allow(unused_imports, dead_code)]
+pub(crate) mod features_parity_part6 {
+    use super::*;
+
+// End-to-end remediation integration tests for ESI corp blueprints/structures
+// and Quasar title definitions, space CDN, freelance projects/item delivery,
+// and payment schedules/tokens/store (`esi:*` & `quasar:*` fake_done closure).
+
+
+use crate::esi_market_industry_pi::{issue_token_with_scopes, make_item, rpc_call};
+use crate::quasar_sov_equinox_hub::{drain, field, fields, id_req, idm, rpc, sess, subscribe};
+use eve_db::corp_roles::{ROLE_DIRECTOR, ROLE_FACTORY_MANAGER, ROLE_STATION_MANAGER};
+use eve_db::{CorporationRecord, InventoryFlag, IskCents};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::quasar::{encode_bytes_field, encode_string_field, encode_varint_field};
+use eve_proto::PyRep;
+use eve_server::esi::router::EsiRouter;
+use eve_server::esi::{EsiHttpRequest, OpenApiSpec};
+use eve_server::quasar_gateway::{STATUS_OK, STATUS_UNAUTHORIZED};
+use eve_server::router::ServerContext;
+use eve_server::services::quasar_payment_store_types::{
+    save_store_catalog, PaymentScheduleRecord, PaymentTokenRecord, StoreCatalog, StoreCategory,
+    StoreOffer, StoreProduct,
+};
+use glam::DVec3;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+fn esi_get_validated(router: &EsiRouter, spec: &OpenApiSpec, path: &str, token: Option<&str>) -> Value {
+    let mut req = EsiHttpRequest::new("GET", path);
+    if let Some(t) = token {
+        req = req.with_bearer_token(t);
+    }
+    let resp = router.handle_request(&req);
+    assert_eq!(resp.status_code, 200, "GET {path} -> {}: {}", resp.status_code, String::from_utf8_lossy(&resp.body));
+    let raw_path = path.split('?').next().unwrap_or(path);
+    spec.validate_response("GET", raw_path, resp.status_code, &resp.headers, &resp.body)
+        .unwrap_or_else(|e| panic!("OpenAPI validation failed for GET {path}: {e}"));
+    serde_json::from_slice(&resp.body).unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn test_parity_remediation_esi_corp_blueprints_and_structures_live_rpcs() {
+    // parity: esi:GET /corporations/{corporation_id}/blueprints, esi:GET /corporations/{corporation_id}/structures
+    eve_testkit::attest(&[
+        "esi:GET /corporations/{corporation_id}/blueprints",
+        "esi:GET /corporations/{corporation_id}/structures",
+    ]);
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let spec = OpenApiSpec::pinned();
+
+    let ceo_id = 90_000_001_i64;
+    let corp_id = 98_600_010_i64;
+    let jita_station = 60_003_760_i64;
+    let perim_sys = 30_000_144_u32;
+    let ship_id = 80_600_001_i64;
+    let bpo_id = 99_600_101_i64;
+    let astrahus_item_id = 99_600_102_i64;
+    let market_svc_id = 99_600_103_i64;
+
+    let anchor_pos = ctx
+        .sde
+        .celestials_in_system(perim_sys)
+        .into_iter()
+        .find(|c| c.group_id == 7)
+        .map(|p| [p.position.x + 25_000_000.0, p.position.y, p.position.z])
+        .unwrap_or([100_000_000.0, 0.0, 0.0]);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&ceo_id].clone();
+        ch.corporation_id = corp_id;
+        ch.station_id = Some(jita_station);
+        ch.solar_system_id = 30_000_142;
+        ch.active_ship_id = ship_id;
+        ch.balance = IskCents::from_isk(500_000_000);
+        snap.characters.insert(ceo_id, ch);
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Industrial Structure Corp".into(),
+                ticker: "INDS".into(),
+                ceo_id,
+                master_wallet: IskCents::from_isk(100_000_000),
+                tax_rate: 0.05,
+                members: HashSet::from([ceo_id]),
+                member_roles: HashMap::from([(
+                    ceo_id,
+                    ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER,
+                )]),
+                ..CorporationRecord::default()
+            },
+        );
+        // Seed corp BPO (Rifter Blueprint = 684) and Astrahus item (35832) + Standup Market Hub I (35892)
+        snap.items.insert(
+            bpo_id,
+            make_item(bpo_id, 684, corp_id, jita_station, InventoryFlag::CorpSAG1, 1, true),
+        );
+        snap.items.insert(
+            astrahus_item_id,
+            make_item(astrahus_item_id, 35832, ceo_id, ship_id, InventoryFlag::Cargo, 1, false),
+        );
+        snap.items.insert(
+            market_svc_id,
+            make_item(market_svc_id, 35892, corp_id, jita_station, InventoryFlag::CorpSAG1, 1, false),
+        );
+    });
+
+    let mut sess = SessionState::new(70_201);
+    sess.user_id = Some(1);
+    sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    sess.character_id = Some(ceo_id);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(jita_station);
+    sess.solar_system_id = Some(30_000_142);
+    sess.corp_role = ROLE_DIRECTOR | ROLE_FACTORY_MANAGER | ROLE_STATION_MANAGER;
+
+    // 1. Live industryManager.InstallJob (ME Research = activityID 4) + CompleteJob on corp BPO
+    let me_dict = PyRep::Dict(vec![
+        (PyRep::String("blueprintID".into()), PyRep::Integer(bpo_id)),
+        (PyRep::String("activityID".into()), PyRep::Integer(4)),
+        (PyRep::String("runs".into()), PyRep::Integer(2)),
+        (PyRep::String("facilityID".into()), PyRep::Integer(jita_station)),
+        (PyRep::String("useCorp".into()), PyRep::Bool(true)),
+    ]);
+    let job_rep = rpc_call(&ctx, &mut sess, "industryManager", "InstallJob", &[me_dict]).await;
+    let job_id = job_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("ME jobID");
+    ctx.db.clock().advance_secs(50_000);
+    rpc_call(&ctx, &mut sess, "industryManager", "CompleteJob", &[PyRep::Integer(job_id)]).await;
+
+    let tok = issue_token_with_scopes(
+        &ctx,
+        ceo_id,
+        vec![
+            "esi-corporations.read_blueprints.v1",
+            "esi-corporations.read_structures.v1",
+        ],
+    );
+    let bps = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/blueprints/"),
+        Some(&tok),
+    );
+    let bp_entry = bps
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["item_id"] == json!(bpo_id))
+        .expect("researched corp BPO in /corporations/{id}/blueprints");
+    assert_eq!(bp_entry["material_efficiency"], json!(2));
+    assert_eq!(bp_entry["runs"], json!(-1));
+
+    // 2. Live structureDeployment.AnchorStructure + structureServices.SetServiceOnlineState
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&ceo_id) {
+            ch.station_id = None;
+            ch.solar_system_id = perim_sys;
+        }
+    });
+    sess.station_id = None;
+    sess.solar_system_id = Some(perim_sys);
+    sess.ship_id = Some(ship_id);
+    ctx.systems
+        .get_or_spawn(perim_sys)
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: DVec3::from_array(anchor_pos),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 3.0,
+            mass: 1_000_000.0,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+
+    let anchor_rep = rpc_call(
+        &ctx,
+        &mut sess,
+        "structureDeployment",
+        "Anchor",
+        &[
+            PyRep::Integer(astrahus_item_id),
+            PyRep::Tuple(vec![
+                PyRep::Real(anchor_pos[0] + 60_000.0),
+                PyRep::Real(anchor_pos[1]),
+                PyRep::Real(anchor_pos[2]),
+            ]),
+            PyRep::String("Perimeter Trade Citadel".into()),
+            PyRep::Integer(1),
+            PyRep::Integer(18),
+        ],
+    )
+    .await;
+    let structure_id = anchor_rep
+        .as_i64()
+        .or_else(|| anchor_rep.dict_get("structureID").and_then(|v| v.as_i64()))
+        .expect("anchored structure_id");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.state = "ShieldVulnerable".into();
+        }
+        if let Some(svc) = snap.items.get_mut(&market_svc_id) {
+            svc.location_id = structure_id;
+            svc.flag = InventoryFlag::ServiceSlot0;
+        }
+    });
+    rpc_call(
+        &ctx,
+        &mut sess,
+        "structureDeployment",
+        "RenameStructure",
+        &[PyRep::Integer(structure_id), PyRep::String("Perimeter Trade Citadel".into())],
+    )
+    .await;
+
+    let structs = esi_get_validated(
+        &router,
+        &spec,
+        &format!("/v1/corporations/{corp_id}/structures/"),
+        Some(&tok),
+    );
+    let st_entry = structs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["structure_id"] == json!(structure_id))
+        .expect("anchored structure in /corporations/{id}/structures");
+    assert_eq!(st_entry["name"], json!("Perimeter Trade Citadel"));
+    assert_eq!(st_entry["reinforce_hour"], json!(21));
+    assert_eq!(
+        st_entry["services"],
+        json!([{ "name": "Standup Market Hub I", "state": "offline" }])
+    );
+}
+
+#[tokio::test]
+async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/space/api/cdn/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj",
+    ]);
+
+    let ctx = Arc::new(ServerContext::new());
+    crate::common::pin_clock(&ctx);
+    let router = EsiRouter::new(Arc::clone(&ctx));
+    let mut s = sess(70_202, 90_000_001, 98_000_001, 30_000_142, 0);
+
+    // 1. Character title definitions GetLatestRequest returns CDN URL; no school-synthesized titles
+    let latest_rsp = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(latest_rsp.status_code, STATUS_OK);
+    let latest_val = latest_rsp.payload.expect("GetLatestResponse").value;
+    let cp = field(&latest_val, 1).expect("checkpoint");
+    let url_bytes = field(&cp, 1).expect("url");
+    let url = String::from_utf8(url_bytes).expect("utf8 url");
+    let path = url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP CDN URL");
+    assert_eq!(path, "/cdn/cosmetics/character/title/definitions/v24.1.0/en-us.json");
+    let cdn_http = router.handle_request(&EsiHttpRequest::new("GET", path));
+    assert_eq!(cdn_http.status_code, 200);
+    let parsed_defs: Value = serde_json::from_slice(&cdn_http.body).expect("title defs JSON");
+    assert_eq!(parsed_defs, json!([]));
+
+    // 3. Space CDN GetUpdateRequest returns configurable CDN URL; EsiRouter does not serve invented MAPT binary
+    let mut no_local = Vec::new();
+    encode_varint_field(2, 1, &mut no_local);
+    let space_rsp = rpc(&ctx, &mut s, "eve_public.space.api.cdn.GetUpdateRequest", no_local).await;
+    assert_eq!(space_rsp.status_code, STATUS_OK);
+    let space_cp = field(&space_rsp.payload.unwrap().value, 1).expect("space checkpoint");
+    let space_url = String::from_utf8(field(&space_cp, 1).unwrap()).unwrap();
+    let space_path = space_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
+    assert_eq!(space_path, format!("/cdn/maptags/v24.1.{}/universe.fb", ctx.sde.solar_systems.len()));
+    let map_http = router.handle_request(&EsiHttpRequest::new("GET", space_path));
+    assert_eq!(map_http.status_code, 404);
+
+    // 4. Achievement definition CDN GetLatestRequest returns local EsiRouter JSON bundle
+    let ach_rsp = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.achievement.definition.api.cdn.GetLatestRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(ach_rsp.status_code, STATUS_OK);
+    let ach_cp = field(&ach_rsp.payload.unwrap().value, 1).expect("ach checkpoint");
+    let ach_url = String::from_utf8(field(&ach_cp, 1).unwrap()).unwrap();
+    let ach_path = ach_url.strip_prefix("http://127.0.0.1:26004").expect("local ESI HTTP URL");
+    let ach_mgr = &ctx.quasar_gateway.progression.achievements;
+    assert_eq!(ach_path, format!("/cdn/achievements/v24.1.{}/{}.json", ach_mgr.sde_achievement_count, ach_mgr.sde_achievement_hash));
+    let ach_http = router.handle_request(&EsiHttpRequest::new("GET", ach_path));
+    assert_eq!(ach_http.status_code, 200);
+    let ach_defs: Value = serde_json::from_slice(&ach_http.body).expect("ach defs JSON");
+    assert_eq!(ach_defs.as_array().unwrap().len(), ach_mgr.sde_achievement_count);
+}
+
+#[tokio::test]
+async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
+    // parity: quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    let manager_id = 90_000_001_i64;
+    let pilot_id = 90_000_002_i64;
+    let corp_id = 98_600_020_i64;
+    let jita_station = 60_003_760_i64;
+    let ore_item_id = 99_600_201_i64;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let tpl = snap.characters[&manager_id].clone();
+        for (cid, name, c_id) in [
+            (manager_id, "Project Manager", corp_id),
+            (pilot_id, "Contractor Pilot", 1_000_009),
+        ] {
+            let mut ch = snap.characters.get(&cid).cloned().unwrap_or_else(|| tpl.clone());
+            ch.character_id = cid;
+            ch.name = name.into();
+            ch.corporation_id = c_id;
+            ch.station_id = Some(jita_station);
+            ch.solar_system_id = 30_000_142;
+            ch.balance = IskCents::from_isk(10_000_000);
+            snap.characters.insert(cid, ch);
+        }
+        snap.corporations.insert(
+            corp_id,
+            CorporationRecord {
+                corporation_id: corp_id,
+                name: "Freelance Sponsor Corp".into(),
+                ticker: "FRSC".into(),
+                ceo_id: manager_id,
+                master_wallet: IskCents::from_isk(100_000_000),
+                tax_rate: 0.05,
+                members: HashSet::from([manager_id]),
+                member_roles: HashMap::from([(manager_id, ROLE_DIRECTOR)]),
+                ..CorporationRecord::default()
+            },
+        );
+        // Seed 500 Tritanium (type_id 34) in contractor's Jita hangar
+        snap.items.insert(
+            ore_item_id,
+            make_item(ore_item_id, 34, pilot_id, jita_station, InventoryFlag::Hangar, 500, false),
+        );
+    });
+
+    let mut mgr_sess = sess(70_203, manager_id, corp_id, 30_000_142, ROLE_DIRECTOR);
+    let mut pilot_sess = sess(70_204, pilot_id, 1_000_009, 30_000_142, 0);
+    let mut pilot_rx = subscribe(&ctx, &mut pilot_sess).await;
+
+    // 1. CreateRequest with explicit 2,000,000 ISK budget (10,000 ISK/unit * 200), batch=100, type_id=34
+    let (mut cfg_b, mut param_b, mut opts_b, mut mod_b, mut rew_b, mut isk_b) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    encode_string_field(1, "34", &mut opts_b);
+    encode_bytes_field(3, &opts_b, &mut param_b);
+    encode_bytes_field(3, &param_b, &mut cfg_b);
+    encode_varint_field(4, 100, &mut mod_b);
+    encode_varint_field(1, 10_000, &mut isk_b);
+    encode_bytes_field(1, &isk_b, &mut rew_b);
+
+    let mut create_req = Vec::new();
+    encode_string_field(1, "Supply Jita Tritanium", &mut create_req);
+    encode_string_field(2, "Deliver 200 Tritanium to Jita 4-4", &mut create_req);
+    encode_varint_field(3, 200, &mut create_req);
+    encode_bytes_field(6, &cfg_b, &mut create_req);
+    encode_bytes_field(7, &mod_b, &mut create_req);
+    encode_bytes_field(10, &rew_b, &mut create_req);
+    let create_rsp = rpc(
+        &ctx,
+        &mut mgr_sess,
+        "eve_public.freelance.project.api.CreateRequest",
+        create_req.clone(),
+    )
+    .await;
+    assert_eq!(create_rsp.status_code, STATUS_OK);
+    let id_msg = field(&create_rsp.payload.unwrap().value, 1).expect("project Identifier");
+    assert!(id_msg.len() >= 16);
+
+    // 2. CommitRequest as contractor
+    assert_eq!(
+        rpc(&ctx, &mut pilot_sess, "eve_public.freelance.project.api.CommitRequest", id_msg.clone())
+            .await
+            .status_code,
+        STATUS_OK
+    );
+
+    // 3. DeliverRequest for 200 units -> moves items to CorpDeliveries & emits ContributionSucceededNotice
+    let mut deliver_req = id_msg.clone();
+    encode_varint_field(4, 200, &mut deliver_req);
+    let deliv_rsp = rpc(
+        &ctx,
+        &mut pilot_sess,
+        "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
+        deliver_req,
+    )
+    .await;
+    assert_eq!(deliv_rsp.status_code, STATUS_OK);
+
+    let notices = drain(&mut pilot_rx);
+    assert!(
+        notices.iter().any(|(t, _)| t.ends_with("ContributionSucceededNotice")),
+        "DeliverRequest must emit ContributionSucceededNotice"
+    );
+
+    // Verify items moved from pilot Hangar (500 -> 300) into CorpDeliveries (200)
+    ctx.db.with_snapshot(|snap| {
+        let pilot_qty: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == pilot_id && i.type_id == 34 && i.flag == InventoryFlag::Hangar)
+            .map(|i| i.quantity)
+            .sum();
+        let corp_deliv_qty: i32 = snap
+            .items
+            .values()
+            .filter(|i| i.owner_id == corp_id && i.type_id == 34 && i.flag == InventoryFlag::CorpDeliveries)
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(pilot_qty, 300);
+        assert_eq!(corp_deliv_qty, 200);
+    });
+
+    // 4. RedeemRewardRequest credits contractor & emits ParticipantRewardRedeemedNotice
+    let redeem_rsp = rpc(
+        &ctx,
+        &mut pilot_sess,
+        "eve_public.freelance.project.api.RedeemRewardRequest",
+        id_msg.clone(),
+    )
+    .await;
+    assert_eq!(redeem_rsp.status_code, STATUS_OK);
+    let redeem_notices = drain(&mut pilot_rx);
+    assert!(
+        redeem_notices.iter().any(|(t, _)| t.ends_with("ParticipantRewardRedeemedNotice")),
+        "RedeemRewardRequest must emit ParticipantRewardRedeemedNotice"
+    );
+
+    // 5. Cancelled project DeliverRequest must fail without duplicating items into CorpDeliveries
+    let create_rsp2 = rpc(&ctx, &mut mgr_sess, "eve_public.freelance.project.api.CreateRequest", create_req).await;
+    assert_eq!(create_rsp2.status_code, STATUS_OK);
+    let id_msg2 = field(&create_rsp2.payload.unwrap().value, 1).expect("project2 Identifier");
+    assert_eq!(rpc(&ctx, &mut pilot_sess, "eve_public.freelance.project.api.CommitRequest", id_msg2.clone()).await.status_code, STATUS_OK);
+    assert_eq!(rpc(&ctx, &mut mgr_sess, "eve_public.freelance.project.api.CloseRequest", id_msg2.clone()).await.status_code, STATUS_OK);
+    let mut deliver_req2 = id_msg2;
+    encode_varint_field(4, 100, &mut deliver_req2);
+    assert_ne!(
+        rpc(&ctx, &mut pilot_sess, "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", deliver_req2)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    ctx.db.with_snapshot(|snap| {
+        let pilot_qty: i32 = snap.items.values().filter(|i| i.owner_id == pilot_id && i.type_id == 34 && i.flag == InventoryFlag::Hangar).map(|i| i.quantity).sum();
+        let corp_deliv_qty: i32 = snap.items.values().filter(|i| i.owner_id == corp_id && i.type_id == 34 && i.flag == InventoryFlag::CorpDeliveries).map(|i| i.quantity).sum();
+        assert_eq!(pilot_qty, 300);
+        assert_eq!(corp_deliv_qty, 200);
+    });
+}
+
+#[tokio::test]
+async fn test_parity_remediation_quasar_payment_schedules_tokens_and_store() {
+    // parity: quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj, quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj, quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/payment/schedule/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/payment/token/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/payment/token/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/store/category/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        save_store_catalog(
+            snap,
+            &StoreCatalog {
+                categories: vec![StoreCategory {
+                    id: 1,
+                    name: "Omega".into(),
+                    description: "Omega Clone State".into(),
+                }],
+                products: vec![StoreProduct {
+                    id: 101,
+                    name: "30 Days Omega".into(),
+                    description: "Omega time".into(),
+                    type_id: 3966,
+                    quantity: 1,
+                }],
+                offers: vec![StoreOffer {
+                    id: 1001,
+                    name: "30 Days Omega".into(),
+                    description: "Monthly Omega".into(),
+                    category_id: 1,
+                    price_plex: 500,
+                    product_ids: vec![101],
+                    targeted: true,
+                    price_cents: Some(1_999),
+                    currency: Some("USD".into()),
+                }],
+            },
+        );
+        let tokens = vec![
+            PaymentTokenRecord {
+                id: 88,
+                user_id: 1,
+                token_str: "tok_live_88".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+            PaymentTokenRecord {
+                id: 89,
+                user_id: 1,
+                token_str: "tok_live_89".into(),
+                is_quick_pay: true,
+                consumed: false,
+            },
+        ];
+        snap.service_state_blobs
+            .insert("payment_tokens".into(), serde_json::to_string(&tokens).unwrap());
+    });
+
+    let mut s = sess(70_205, 90_000_001, 98_000_001, 30_000_142, 0);
+    let mut rx = subscribe(&ctx, &mut s).await;
+
+    // 1. Store category, product, offer, and targetaudience endpoints
+    assert_eq!(rpc(&ctx, &mut s, "eve_public.store.category.api.GetAllRequest", Vec::new()).await.status_code, STATUS_OK);
+    assert_eq!(rpc(&ctx, &mut s, "eve_public.store.product.api.GetRequest", id_req(1, 101)).await.status_code, STATUS_OK);
+    assert_eq!(rpc(&ctx, &mut s, "eve_public.store.offer.api.GetAllRequest", Vec::new()).await.status_code, STATUS_OK);
+    let ta_rsp = rpc(
+        &ctx,
+        &mut s,
+        "eve_public.store.targetaudience.offer.api.ListRequest",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(ta_rsp.status_code, STATUS_OK);
+    assert!(!fields(&ta_rsp.payload.unwrap().value, 1).is_empty());
+
+    // 2. Payment token GetQuickPayRequest + DisableAllRequest emits QuickPayRemovedNotice (and unauth -> 401)
+    let mut unauth = SessionState::new(70_206);
+    assert_eq!(
+        rpc(&ctx, &mut unauth, "eve_public.payment.token.api.GetQuickPayRequest", Vec::new())
+            .await
+            .status_code,
+        STATUS_UNAUTHORIZED
+    );
+    let qp_rsp = rpc(&ctx, &mut s, "eve_public.payment.token.api.GetQuickPayRequest", Vec::new()).await;
+    assert_eq!(qp_rsp.status_code, STATUS_OK);
+    assert!(!fields(&qp_rsp.payload.unwrap().value, 1).is_empty());
+
+    // 3. Purchase Omega via TokenRequest -> creates PaymentScheduleRecord
+    let mut purchase_req = Vec::new();
+    let mut order = Vec::new();
+    let mut off_ident = Vec::new();
+    encode_string_field(1, "VEVC-1001", &mut off_ident);
+    encode_bytes_field(1, &off_ident, &mut order);
+    encode_varint_field(2, 1, &mut order);
+    encode_bytes_field(1, &order, &mut purchase_req);
+    encode_bytes_field(2, &idm(88), &mut purchase_req);
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.payment.purchase.api.TokenRequest", purchase_req)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+
+    // 4. Advance clock past 30-day billing cycle with quick-pay token -> GetActiveByType is pure read, tick renews & records receipt
+    let sched_due: u64 = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("payment_schedules")
+            .and_then(|j| serde_json::from_str::<Vec<PaymentScheduleRecord>>(j).ok())
+            .and_then(|v| v.first().map(|s| s.next_payment_unix))
+            .unwrap()
+    });
+    let advance = sched_due.saturating_add(60).saturating_sub(ctx.now_unix() as u64);
+    ctx.advance_secs(advance);
+    let mut by_type = Vec::new();
+    encode_varint_field(1, 1, &mut by_type);
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.payment.schedule.api.GetActiveByTypeRequest", by_type.clone())
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    let receipts_before_tick: usize = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("payment_receipts")
+            .and_then(|j| serde_json::from_str::<Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord>>(j).ok())
+            .map(|v| v.len())
+            .unwrap_or(0)
+    });
+    assert_eq!(receipts_before_tick, 1);
+
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let (renewed_due, receipts_after_tick) = ctx.db.with_snapshot(|snap| {
+        let due = snap
+            .service_state_blobs
+            .get("payment_schedules")
+            .and_then(|j| serde_json::from_str::<Vec<PaymentScheduleRecord>>(j).ok())
+            .and_then(|v| v.first().map(|s| s.next_payment_unix))
+            .unwrap();
+        let rcpts = snap
+            .service_state_blobs
+            .get("payment_receipts")
+            .and_then(|j| serde_json::from_str::<Vec<eve_server::services::quasar_payment_store_types::PaymentReceiptRecord>>(j).ok())
+            .unwrap_or_default();
+        (due, rcpts)
+    });
+    assert!(renewed_due > sched_due);
+    assert_eq!(receipts_after_tick.len(), 2);
+    assert_eq!(receipts_after_tick[1].amount_in_cents, 1_999);
+
+    // 5. Disable quick-pay tokens, advance past renewed due date, and tick -> PaymentFailedNotice & CancelledNotice
+    assert_eq!(
+        rpc(&ctx, &mut s, "eve_public.payment.token.api.DisableAllRequest", Vec::new())
+            .await
+            .status_code,
+        STATUS_OK
+    );
+    let tok_notices = drain(&mut rx);
+    assert!(tok_notices.iter().any(|(t, _)| t.ends_with("QuickPayRemovedNotice")));
+
+    let advance2 = renewed_due.saturating_add(60).saturating_sub(ctx.now_unix() as u64);
+    ctx.advance_secs(advance2);
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+    let sched_notices = drain(&mut rx);
+    assert!(sched_notices.iter().any(|(t, _)| t.ends_with("PaymentFailedNotice")));
+    assert!(sched_notices.iter().any(|(t, _)| t.ends_with("CancelledNotice")));
+    assert_ne!(
+        rpc(&ctx, &mut s, "eve_public.payment.schedule.api.GetActiveByTypeRequest", by_type)
+            .await
+            .status_code,
+        STATUS_OK
+    );
+}
+}
