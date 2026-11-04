@@ -5,7 +5,6 @@
 #![forbid(unsafe_code)]
 
 use eve_db::{CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents};
-use eve_server::esi::runtime_state::EsiCalendarEvent;
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
 use serde_json::{json, Value};
@@ -410,42 +409,64 @@ async fn test_esi4_calendar_list_event_respond_and_attendees() {
     );
     assert_eq!(empty_cal, json!([]));
 
-    // 2. Seed two calendar events in EsiRuntimeState
+    // 2. Seed two calendar events into WorldStateSnapshot / Social state
     {
-        let mut cal = ctx.esi_state.calendar_events.write().unwrap();
-        cal.insert(
-            5001,
-            EsiCalendarEvent {
-                event_id: 5001,
-                event_date_unix: 1_704_067_200, // 2024-01-01T00:00:00Z
-                title: "Alliance Structure Timer".to_string(),
-                text: "Formup with logistics wing".to_string(),
-                duration_minutes: 120,
-                importance: 1,
-                owner_id: 98_000_001,
-                owner_name: "Star Fleet Corp".to_string(),
-                owner_type: "corporation".to_string(),
-                attendees: vec![char_id, other_char_id],
-            },
-        );
-        cal.insert(
-            5002,
-            EsiCalendarEvent {
-                event_id: 5002,
-                event_date_unix: 1_704_153_600, // 2024-01-02T00:00:00Z
-                title: "Mining Op".to_string(),
-                text: "Moon extraction belt".to_string(),
-                duration_minutes: 60,
-                importance: 0,
-                owner_id: char_id,
-                owner_name: "Demo Capsuleer".to_string(),
-                owner_type: "character".to_string(),
-                attendees: vec![char_id],
-            },
-        );
-        let mut resp = ctx.esi_state.calendar_responses.write().unwrap();
-        resp.insert((other_char_id, 5001), "tentative".to_string());
-        resp.insert((char_id, 5002), "accepted".to_string());
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.corporations.insert(
+                98_000_001,
+                CorporationRecord {
+                    corporation_id: 98_000_001,
+                    name: "Star Fleet Corp".to_string(),
+                    ticker: "SFC".to_string(),
+                    ceo_id: char_id,
+                    members: HashSet::from([char_id, other_char_id]),
+                    ..Default::default()
+                },
+            );
+            if let Some(c) = snap.characters.get_mut(&char_id) {
+                c.corporation_id = 98_000_001;
+            }
+            if let Some(c) = snap.characters.get_mut(&other_char_id) {
+                c.corporation_id = 98_000_001;
+            }
+            let ft1 = (1_704_067_200i64 + 11_644_473_600) * 10_000_000;
+            snap.calendar_events.insert(
+                5001,
+                eve_db::CalendarEventRecord {
+                    event_id: 5001,
+                    owner_id: 98_000_001,
+                    creator_id: char_id,
+                    event_date_time: ft1,
+                    duration: 120,
+                    importance: 1,
+                    title: "Alliance Structure Timer".to_string(),
+                    description: "Formup with logistics wing".to_string(),
+                    scope: "Corporation".to_string(),
+                    responses: HashMap::from([(other_char_id, 5)]),
+                    is_deleted: false,
+                },
+            );
+            let ft2 = (1_704_153_600i64 + 11_644_473_600) * 10_000_000;
+            snap.calendar_events.insert(
+                5002,
+                eve_db::CalendarEventRecord {
+                    event_id: 5002,
+                    owner_id: char_id,
+                    creator_id: char_id,
+                    event_date_time: ft2,
+                    duration: 60,
+                    importance: 0,
+                    title: "Mining Op".to_string(),
+                    description: "Moon extraction belt".to_string(),
+                    scope: "Personal".to_string(),
+                    responses: HashMap::from([(char_id, 4)]),
+                    is_deleted: false,
+                },
+            );
+        });
+        eve_server::services::fleet_social::hydrate_social_state_from_db(&ctx);
+        ctx.esi_state.calendar_events.write().unwrap().clear();
+        ctx.esi_state.calendar_responses.write().unwrap().clear();
     }
 
     // 3. GET /v1/characters/{character_id}/calendar/ + from_event filter + ETag/304
