@@ -1190,6 +1190,14 @@ async fn test_e2e_crimewatch_kill_rights_gain_and_sell() {
     for _ in 0..10 {
         let _ = lowsec_handle.step_manual(1.0).await;
     }
+    let _ = rpc(
+        &ctx,
+        &mut sess_crim_low,
+        "dogmaIM",
+        "Deactivate",
+        &[PyRep::Integer(gun_id)],
+    )
+    .await;
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&victim_id).unwrap().active_ship_id = low_vic_pod;
     });
