@@ -175,8 +175,19 @@ pub fn handle(
         ("charUnboundMgr", "CancelCharacterDeletePrepare") => Some(cancel(ctx, user_id, args)),
         ("charUnboundMgr", "DeleteCharacter") => Some(delete(ctx, session, user_id, args)),
         ("charUnboundMgr", "GetQAStarterSystemIDs") => {
+            let primary_sys = session
+                .solar_system_id
+                .or_else(|| {
+                    session.character_id.and_then(|cid| {
+                        ctx.db.with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+                    })
+                })
+                .or_else(|| {
+                    ctx.db.get_characters_for_user(user_id).first().map(|c| c.solar_system_id)
+                })
+                .unwrap_or(30000142);
             Some(Ok(PyRep::List(vec![
-                PyRep::Integer(30000142),
+                PyRep::Integer(primary_sys as i64),
                 PyRep::Integer(30000144),
                 PyRep::Integer(30002187),
                 PyRep::Integer(30002510),

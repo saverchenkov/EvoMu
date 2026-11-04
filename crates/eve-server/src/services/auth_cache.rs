@@ -1197,7 +1197,7 @@ pub async fn handle(
                 };
                 let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
-                }).unwrap_or((30000142, 0));
+                }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
 
                 let mass = npc_type.mass.max(1.0);
                 let radius = npc_type.radius.max(1.0);
@@ -1259,7 +1259,7 @@ pub async fn handle(
                 }
                 let (old_sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
-                }).unwrap_or((30000142, 0));
+                }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
 
                 let updated_ch = match ctx.db.set_character_solar_system(cid, dest_sys_id, &ctx.sde) {
                     Ok(c) => c,
@@ -1309,7 +1309,7 @@ pub async fn handle(
             } else if cmd == "/heal" || cmd.starts_with("/heal ") {
                 let (sys_id, ship_id) = ctx.db.with_snapshot(|snap| {
                     snap.characters.get(&cid).map(|c| (c.solar_system_id, c.active_ship_id))
-                }).unwrap_or((30000142, 0));
+                }).or_else(|| session.solar_system_id.map(|s| (s, 0))).unwrap_or((0, 0));
 
                 if ship_id > 0 {
                     let handle = ctx.systems.get_or_spawn(sys_id);
