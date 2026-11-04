@@ -540,6 +540,15 @@ pub async fn handle_npcs_drones(
                     if !ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 18) {
                         return Err(BridgeRpcError { code: "NotADrone".into(), message: format!("Item {did} (type {}) is not a drone", it.type_id) });
                     }
+                    if matches!(it.type_id, 41030 | 43681 | 41031 | 43682 | 90621 | 90622) {
+                        let ship_type = snap.items.get(&ship_id).map(|s| s.type_id).unwrap_or(0);
+                        if ship_type != 28352 {
+                            return Err(BridgeRpcError {
+                                code: "InvalidShipForExcavator".into(),
+                                message: "Excavator mining drones can only be operated by a Rorqual (28352)".into(),
+                            });
+                        }
+                    }
                     recs.push(it);
                 }
                 Ok(recs)
@@ -660,6 +669,10 @@ pub async fn handle_npcs_drones(
                     cs.armor_hp = mut_ar;
                     cs.max_armor_hp = mut_ar;
                 }
+                let is_excavator = matches!(rec.type_id, 41030 | 43681 | 41031 | 43682 | 90621 | 90622);
+                let mass = if is_excavator { 10_000_000.0 } else { sde_t.map(|t| t.mass).filter(|&m| m > 0.0).unwrap_or(10_000.0) };
+                let inertia = if is_excavator { 2.8 } else { sde_t.and_then(|t| t.default_attributes.get(&70).copied()).unwrap_or(0.5).clamp(0.1, 5.0) };
+                let radius = if is_excavator { 50.0 } else { sde_t.map(|t| t.radius).filter(|&r| r > 0.0).unwrap_or(10.0) };
                 let _ = sys_handle
                     .spawn_ball_with_combat(
                         Ball {
@@ -668,9 +681,9 @@ pub async fn handle_npcs_drones(
                             position: d_pos,
                             velocity: DVec3::ZERO,
                             max_velocity: max_vel,
-                            inertia: 0.5,
-                            mass: 10_000.0,
-                            radius: 10.0,
+                            inertia,
+                            mass,
+                            radius,
                             speed_fraction: if is_sentry { 0.0 } else { 1.0 },
                             mode: MovementMode::Stop,
                         },

@@ -27,6 +27,113 @@ pub fn police_ship_type_for_faction(faction_id: u32) -> u32 {
     }
 }
 
+/// Resolves the authentic Empire Navy archetype name for a given faction (`feat:npc.navy-npc`).
+pub fn navy_archetype_for_faction(faction_id: u32) -> &'static str {
+    match faction_id {
+        500_001 => "CaldariNavy",
+        500_002 => "MinmatarNavy",
+        500_003 => "AmarrNavy",
+        500_004 => "GallenteNavy",
+        _ => "Navy",
+    }
+}
+
+/// Configures authentic faction EWAR, warp disruption, and scaled DPS on an Empire Navy NPC entity (`feat:npc.navy-npc`).
+pub fn configure_navy_combat_properties(
+    npc: &mut crate::services::combat_crimewatch::ExtendedNpcEntity,
+    faction_id: u32,
+    target_id: i64,
+    sys_sec: f64,
+    standing_deficit: f64,
+) {
+    npc.faction_id = faction_id;
+    if target_id != 0 {
+        npc.target_id = Some(target_id);
+        npc.aggression_threat.insert(target_id, 800.0);
+        npc.threat_table.insert(target_id, 800.0);
+    }
+    npc.optimal_range = 25_000.0;
+    npc.orbit_range = 7_500.0;
+
+    let sec_scaling = (1.0 + (1.0 - sys_sec.clamp(0.0, 1.0)) * 0.5).max(1.0);
+    let standing_scaling = (1.0 + (standing_deficit.max(0.0) / 5.0) * 0.5).max(1.0);
+    let dps_mult = sec_scaling * standing_scaling;
+    let base_dps = 240.0 * dps_mult;
+
+    match faction_id {
+        500_001 => {
+            // Caldari State Navy: Kinetic/Thermal missiles, ECM/Damp, long warp scrambler
+            npc.archetype = "CaldariNavy".to_string();
+            npc.damage_vector = DamageVector {
+                kinetic: base_dps * 0.70,
+                thermal: base_dps * 0.30,
+                em: 0.0,
+                explosive: 0.0,
+            };
+            npc.scram_strength = 2.0;
+            npc.scram_range = 24_000.0;
+            npc.web_speed_factor = -40.0;
+            npc.web_range = 15_000.0;
+        }
+        500_002 => {
+            // Minmatar Republic Fleet: Explosive/Kinetic projectiles, authentic heavy Webifier (-65%), warp scrambler
+            npc.archetype = "MinmatarNavy".to_string();
+            npc.damage_vector = DamageVector {
+                explosive: base_dps * 0.70,
+                kinetic: base_dps * 0.30,
+                em: 0.0,
+                thermal: 0.0,
+            };
+            npc.scram_strength = 2.0;
+            npc.scram_range = 15_000.0;
+            npc.web_speed_factor = -65.0;
+            npc.web_range = 15_000.0;
+        }
+        500_003 => {
+            // Amarr Imperial Navy: EM/Thermal lasers, Energy Neutralizer (neut_amount: 250), warp scrambler
+            npc.archetype = "AmarrNavy".to_string();
+            npc.damage_vector = DamageVector {
+                em: base_dps * 0.65,
+                thermal: base_dps * 0.35,
+                kinetic: 0.0,
+                explosive: 0.0,
+            };
+            npc.scram_strength = 2.0;
+            npc.scram_range = 15_000.0;
+            npc.neut_amount = 250.0;
+            npc.web_speed_factor = -35.0;
+            npc.web_range = 15_000.0;
+        }
+        500_004 => {
+            // Gallente Federal Navy: Thermal/Kinetic blasters, authentic heavy Scrambler (str: 3.0), stasis webifier
+            npc.archetype = "GallenteNavy".to_string();
+            npc.damage_vector = DamageVector {
+                thermal: base_dps * 0.60,
+                kinetic: base_dps * 0.40,
+                em: 0.0,
+                explosive: 0.0,
+            };
+            npc.scram_strength = 3.0;
+            npc.scram_range = 15_000.0;
+            npc.web_speed_factor = -50.0;
+            npc.web_range = 15_000.0;
+        }
+        _ => {
+            npc.archetype = "Navy".to_string();
+            npc.damage_vector = DamageVector {
+                em: base_dps * 0.25,
+                thermal: base_dps * 0.25,
+                kinetic: base_dps * 0.25,
+                explosive: base_dps * 0.25,
+            };
+            npc.scram_strength = 2.0;
+            npc.scram_range = 15_000.0;
+            npc.web_speed_factor = -50.0;
+            npc.web_range = 15_000.0;
+        }
+    }
+}
+
 /// Evaluates whether an outlaw ship in highsec is refused docking permissions (`feat:npc.navy-npc`).
 pub fn is_outlaw_ship_docking_refused(
     ctx: &ServerContext,
@@ -47,18 +154,32 @@ pub fn is_outlaw_ship_docking_refused(
     {
         return false;
     }
-    let (char_sec, is_capsule) = ctx.db.with_snapshot(|snap| {
-        let sec = snap.characters.get(&char_id).map(|c| c.security_status).unwrap_or(0.0);
+    let sys_faction = ctx
+        .sde
+        .solar_systems
+        .get(&solar_system_id)
+        .and_then(|sys| {
+            sys.stations
+                .iter()
+                .find_map(|st| st.owner_faction_id.filter(|&f| f > 0).map(|f| f as u32))
+                .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id.filter(|&f| f > 0)))
+                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id.filter(|&f| f > 0)))
+        })
+        .unwrap_or(500_001);
+    let (char_sec, is_capsule, faction_standing) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id);
+        let sec = ch.map(|c| c.security_status).unwrap_or(0.0);
+        let st = ch.and_then(|c| c.standings.get(&(sys_faction as i64)).copied()).unwrap_or(0.0);
         let is_pod = snap.items.get(&ship_id).map(|i| {
             i.type_id == 670 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
         }).unwrap_or(false);
-        (sec, is_pod)
+        (sec, is_pod, st)
     });
     if is_capsule {
         return false; // Capsules are allowed to dock
     }
     let threshold = faction_police_sec_threshold(sys_sec).unwrap_or(-5.0);
-    char_sec <= threshold || char_sec <= -5.0
+    char_sec <= threshold || char_sec <= -5.0 || faction_standing <= -5.0
 }
 
 /// Checks the ballpark for outlaw pilots (sec status <= -5.0) in high-sec ships and spawns Faction Police (`feat:npc.navy-npc`).
@@ -84,11 +205,11 @@ pub async fn check_and_spawn_faction_police(
         .solar_systems
         .get(&solar_system_id)
         .and_then(|sys| {
-            ctx.sde
-                .constellations
-                .get(&sys.constellation_id)
-                .and_then(|c| c.faction_id)
-                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
+            sys.stations
+                .iter()
+                .find_map(|st| st.owner_faction_id.filter(|&f| f > 0).map(|f| f as u32))
+                .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id.filter(|&f| f > 0)))
+                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id.filter(|&f| f > 0)))
         })
         .unwrap_or(500_001);
     let police_type = police_ship_type_for_faction(sys_faction);
@@ -118,9 +239,12 @@ pub async fn check_and_spawn_faction_police(
             snap.characters
                 .values()
                 .find(|c| c.active_ship_id == bid && c.solar_system_id == solar_system_id && c.station_id.is_none())
-                .map(|c| (c.character_id, c.security_status))
+                .map(|c| {
+                    let st = c.standings.get(&(sys_faction as i64)).copied().unwrap_or(0.0);
+                    (c.character_id, c.security_status, st)
+                })
         });
-        let Some((_char_id, sec_status)) = owner_char_opt else { continue; };
+        let Some((_char_id, sec_status, standing_to_faction)) = owner_char_opt else { continue; };
 
         // High-sec customs contraband scan & enforcement (`feat:ships.blockade-runner-cargo-scan-immunity`, `feat:attributes.booster-highsec-contraband`):
         // Blockade Runners (group 1202, cargoScanResistance == 100%) are immune to player cargo scanners,
@@ -128,75 +252,119 @@ pub async fn check_and_spawn_faction_police(
         let detected = scan_and_enforce_highsec_contraband(ctx, solar_system_id, bid);
         let has_contraband = !detected.is_empty();
 
-        // Only engage outlaws below threshold or <= -5.0, or ships carrying contraband
-        if !has_contraband && sec_status > threshold && sec_status > -5.0 {
+        let is_outlaw = sec_status <= threshold || sec_status <= -5.0;
+        let is_hostile_navy = standing_to_faction <= -5.0 && matches!(sys_faction, 500_001..=500_004);
+
+        if !has_contraband && !is_outlaw && !is_hostile_navy {
             continue;
         }
 
-        // Check if Faction Police already targets this ship on grid
-        let already_targeted = with_mut_combat_runtime(ctx, |rt| {
-            rt.npc_entities.values().any(|n| {
-                n.archetype == "FactionPolice"
-                    && n.solar_system_id == solar_system_id
-                    && (n.target_id == Some(bid) || n.aggression_threat.contains_key(&bid))
-            })
-        });
-        if already_targeted {
-            continue;
-        }
-
-        // Break gate cloak on outlaw
-        let _ = handle.break_gate_cloak(bid).await;
-
-        // Spawn Faction Police NPC ship on grid 3,000m from target
-        let police_pos = ball.position + DVec3::new(3_000.0, 0.0, 0.0);
-        let police_ball_id = spawn_specialized_npc_entity(
-            ctx,
-            solar_system_id,
-            police_type,
-            "FactionPolice",
-            sys_faction,
-            police_pos,
-        )
-        .await;
-
-        // Configure police combat properties and lock target
-        with_mut_combat_runtime(ctx, |rt| {
-            if let Some(npc) = rt.npc_entities.get_mut(&police_ball_id) {
-                npc.faction_id = sys_faction;
-                npc.target_id = Some(bid);
-                npc.aggression_threat.insert(bid, 500.0);
-                npc.threat_table.insert(bid, 500.0);
-                npc.optimal_range = 25_000.0;
-                npc.orbit_range = 5_000.0;
-                npc.damage_vector = DamageVector {
-                    em: 50.0,
-                    thermal: 50.0,
-                    kinetic: 50.0,
-                    explosive: 50.0,
-                };
-                npc.web_speed_factor = -50.0;
-                npc.web_range = 15_000.0;
-                npc.scram_strength = 2.0;
-                npc.scram_range = 15_000.0;
+        // 1. Navy response to negative faction standing (<= -5.0) in high-sec empire systems:
+        if is_hostile_navy {
+            let navy_arch = navy_archetype_for_faction(sys_faction);
+            let navy_already_targeted = with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.values().any(|n| {
+                    (n.archetype == navy_arch || n.archetype == "Navy")
+                        && n.solar_system_id == solar_system_id
+                        && (n.target_id == Some(bid) || n.aggression_threat.contains_key(&bid))
+                })
+            });
+            if !navy_already_targeted {
+                let _ = handle.break_gate_cloak(bid).await;
+                let (cruiser_tid, _) = navy_patrol_ship_types_for_faction(sys_faction);
+                let navy_pos = ball.position + DVec3::new(3_200.0, 0.0, 0.0);
+                let navy_ball_id = spawn_specialized_npc_entity(
+                    ctx,
+                    solar_system_id,
+                    cruiser_tid,
+                    navy_arch,
+                    sys_faction,
+                    navy_pos,
+                )
+                .await;
+                with_mut_combat_runtime(ctx, |rt| {
+                    if let Some(npc) = rt.npc_entities.get_mut(&navy_ball_id) {
+                        configure_navy_combat_properties(
+                            npc,
+                            sys_faction,
+                            bid,
+                            sys_sec,
+                            -standing_to_faction - 5.0,
+                        );
+                    }
+                });
+                let _ = handle
+                    .add_target_lock(
+                        navy_ball_id,
+                        eve_destiny::TargetLock {
+                            target_id: bid,
+                            lock_time_ms: 800.0,
+                            remaining_lock_ms: 0.0,
+                            locked: true,
+                            max_range_m: Some(60_000.0),
+                        },
+                    )
+                    .await;
+                spawned_police.push(navy_ball_id);
             }
-        });
+        }
 
-        // Add ballpark lock
-        let _ = handle
-            .add_target_lock(
-                police_ball_id,
-                eve_destiny::TargetLock {
-                    target_id: bid,
-                    lock_time_ms: 1_000.0,
-                    remaining_lock_ms: 0.0,
-                    locked: true,
-                    max_range_m: Some(50_000.0),
-                },
-            )
-            .await;
-
-        spawned_police.push(police_ball_id);
+        // 2. Faction Police response to outlaw security status or contraband:
+        if is_outlaw || has_contraband {
+            let already_targeted = with_mut_combat_runtime(ctx, |rt| {
+                rt.npc_entities.values().any(|n| {
+                    n.archetype == "FactionPolice"
+                        && n.solar_system_id == solar_system_id
+                        && (n.target_id == Some(bid) || n.aggression_threat.contains_key(&bid))
+                })
+            });
+            if !already_targeted {
+                let _ = handle.break_gate_cloak(bid).await;
+                let police_pos = ball.position + DVec3::new(3_000.0, 0.0, 0.0);
+                let police_ball_id = spawn_specialized_npc_entity(
+                    ctx,
+                    solar_system_id,
+                    police_type,
+                    "FactionPolice",
+                    sys_faction,
+                    police_pos,
+                )
+                .await;
+                with_mut_combat_runtime(ctx, |rt| {
+                    if let Some(npc) = rt.npc_entities.get_mut(&police_ball_id) {
+                        npc.faction_id = sys_faction;
+                        npc.target_id = Some(bid);
+                        npc.aggression_threat.insert(bid, 500.0);
+                        npc.threat_table.insert(bid, 500.0);
+                        npc.optimal_range = 25_000.0;
+                        npc.orbit_range = 5_000.0;
+                        npc.damage_vector = DamageVector {
+                            em: 50.0,
+                            thermal: 50.0,
+                            kinetic: 50.0,
+                            explosive: 50.0,
+                        };
+                        npc.web_speed_factor = -50.0;
+                        npc.web_range = 15_000.0;
+                        npc.scram_strength = 2.0;
+                        npc.scram_range = 15_000.0;
+                    }
+                });
+                let _ = handle
+                    .add_target_lock(
+                        police_ball_id,
+                        eve_destiny::TargetLock {
+                            target_id: bid,
+                            lock_time_ms: 1_000.0,
+                            remaining_lock_ms: 0.0,
+                            locked: true,
+                            max_range_m: Some(50_000.0),
+                        },
+                    )
+                    .await;
+                spawned_police.push(police_ball_id);
+            }
+        }
     }
 
     spawned_police
@@ -230,11 +398,11 @@ pub fn scan_and_enforce_highsec_contraband(
         .solar_systems
         .get(&solar_system_id)
         .and_then(|sys| {
-            ctx.sde
-                .constellations
-                .get(&sys.constellation_id)
-                .and_then(|c| c.faction_id)
-                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id))
+            sys.stations
+                .iter()
+                .find_map(|st| st.owner_faction_id.filter(|&f| f > 0).map(|f| f as u32))
+                .or_else(|| ctx.sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id.filter(|&f| f > 0)))
+                .or_else(|| ctx.sde.regions.get(&sys.region_id).and_then(|r| r.faction_id.filter(|&f| f > 0)))
         })
         .unwrap_or(500_001);
     let char_id = ctx.db.with_snapshot(|snap| {
@@ -442,7 +610,7 @@ pub async fn step_empire_navy_patrols(
     let already_present = with_mut_combat_runtime(ctx, |rt| {
         rt.npc_entities
             .values()
-            .any(|n| n.archetype == "Navy" && n.solar_system_id == solar_system_id)
+            .any(|n| (n.archetype == "Navy" || n.archetype.ends_with("Navy")) && n.solar_system_id == solar_system_id)
     });
     if already_present {
         return Vec::new();
@@ -481,6 +649,7 @@ pub async fn step_empire_navy_patrols(
 
     let (cruiser_tid, frigate_tid) = navy_patrol_ship_types_for_faction(sys_faction);
     let mut spawned = Vec::new();
+    let sys_sec = ctx.sde.solar_systems.get(&solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
     for (idx, tid) in [cruiser_tid, frigate_tid].into_iter().enumerate() {
         let pos = anchor_pos + DVec3::new(2_500.0 + (idx as f64) * 800.0, 0.0, 500.0);
         let bid = spawn_specialized_npc_entity(
@@ -493,6 +662,12 @@ pub async fn step_empire_navy_patrols(
         )
         .await;
         if bid > 0 {
+            with_mut_combat_runtime(ctx, |rt| {
+                if let Some(npc) = rt.npc_entities.get_mut(&bid) {
+                    configure_navy_combat_properties(npc, sys_faction, 0, sys_sec, 0.0);
+                    npc.archetype = "Navy".to_string();
+                }
+            });
             spawned.push(bid);
         }
     }

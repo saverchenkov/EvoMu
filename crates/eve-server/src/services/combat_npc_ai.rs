@@ -182,6 +182,7 @@ pub async fn spawn_specialized_npc_entity(
             || matches!(
                 archetype_hint,
                 "FactionPolice" | "Police" | "Sleeper" | "CounterInsurgencySentry" | "Navy"
+                | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
             ))
     {
         archetype_hint
@@ -516,11 +517,13 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 let is_insurgency_pirate = npc.archetype == "InsurgencyPirateRoamer";
                 let is_insurgency_enforcer = npc.archetype == "InsurgencyEnforcer";
                 let is_ci_sentry = npc.archetype == "CounterInsurgencySentry" || npc.type_id == 79_507;
-                let is_navy = matches!(npc.archetype.as_str(), "Navy")
-                    || (matches!(npc.faction_id, 500001..=500004)
-                        && !is_ci_sentry
-                        && !is_insurgency_enforcer
-                        && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
+                let is_navy = matches!(
+                    npc.archetype.as_str(),
+                    "Navy" | "CaldariNavy" | "MinmatarNavy" | "AmarrNavy" | "GallenteNavy"
+                ) || (matches!(npc.faction_id, 500001..=500004)
+                    && !is_ci_sentry
+                    && !is_insurgency_enforcer
+                    && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
                 let is_pirate = matches!(
                     npc.archetype.as_str(),
                     "BeltRat" | "Pirate" | "Officer" | "CloneSoldier" | "MorduCommander"
@@ -1039,6 +1042,10 @@ pub async fn destroy_specialized_npc_with_hint(
         30495 // Sleeper Large Intermediate Wreck (`attr 901 = -15.0`)
     } else if archetype == "Drifter" {
         37531 // Drifter Response Battleship Wreck (`attr 901 = -20.0`)
+    } else if archetype == "Hauler" {
+        npc_type_id
+            .and_then(|tid| ctx.sde.wrecks.get(&tid).copied())
+            .unwrap_or(26557)
     } else {
         26473 // Cruiser Wreck
     };
@@ -1134,21 +1141,12 @@ pub async fn destroy_specialized_npc_with_hint(
         }
         "Hauler" => {
             if let Some(ref conv) = convoy_opt {
-                if !dropped_types.contains(&conv.cargo_type_id) {
-                    dropped_types.push(conv.cargo_type_id);
-                }
+                if !dropped_types.contains(&conv.cargo_type_id) { dropped_types.push(conv.cargo_type_id); }
             } else if let Some((custom_tid, _)) = custom_loot {
-                if !dropped_types.contains(&custom_tid) {
-                    dropped_types.push(custom_tid);
-                }
-            } else {
-                for min_name in &["Tritanium", "Pyerite"] {
-                    if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == *min_name) {
-                        if !dropped_types.contains(&tid) {
-                            dropped_types.push(tid);
-                        }
-                    }
-                }
+                if !dropped_types.contains(&custom_tid) { dropped_types.push(custom_tid); }
+            }
+            for tid in [34u32, 35, 36, 3828] {
+                if !dropped_types.contains(&tid) { dropped_types.push(tid); }
             }
         }
         "RogueDrone" => {

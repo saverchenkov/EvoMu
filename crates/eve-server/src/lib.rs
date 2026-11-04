@@ -9,6 +9,7 @@ pub mod esi;
 pub mod flight_recorder;
 pub mod formulas;
 pub mod living_world;
+pub mod living_world_haulers;
 pub mod log_ring_buffer;
 pub mod quasar_gateway;
 pub mod quasar_grpc;

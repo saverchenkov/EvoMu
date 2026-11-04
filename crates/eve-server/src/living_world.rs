@@ -10,6 +10,10 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "living_world_haulers.rs"]
+pub mod living_world_haulers;
+pub use living_world_haulers::*;
+
 use crate::system_actor::SystemRegistry;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
@@ -61,10 +65,10 @@ pub enum ConvoyStepStatus {
 }
 
 pub struct LivingWorldDirector {
-    convoys: RwLock<HashMap<i64, LivingWorldConvoy>>,
-    routes: RwLock<HashMap<i64, ConvoyRouteState>>,
-    hauler_cooldowns: RwLock<HashMap<SolarSystemId, std::time::Instant>>,
-    mining_last_step: RwLock<HashMap<i64, u64>>,
+    pub(crate) convoys: RwLock<HashMap<i64, LivingWorldConvoy>>,
+    pub(crate) routes: RwLock<HashMap<i64, ConvoyRouteState>>,
+    pub(crate) hauler_cooldowns: RwLock<HashMap<SolarSystemId, std::time::Instant>>,
+    pub(crate) mining_last_step: RwLock<HashMap<i64, u64>>,
 }
 
 impl Default for LivingWorldDirector {
@@ -935,165 +939,7 @@ impl LivingWorldDirector {
         db: &WorldRepository,
         sde: &eve_sde::SdeRegistry,
     ) -> Result<ConvoyStepStatus, String> {
-        enum StepAction {
-            Destroyed,
-            AlreadyDocked,
-            Traverse {
-                system_id: SolarSystemId,
-            },
-            Jump {
-                prev_sys: SolarSystemId,
-                next_sys: SolarSystemId,
-                lod_level: u8,
-                ship_type_id: u32,
-            },
-            Dock {
-                destination_station_id: i64,
-                destination_system_id: SolarSystemId,
-                lod_level: u8,
-            },
-        }
-
-        let action = {
-            let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
-            let c = convoys
-                .get_mut(&convoy_id)
-                .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;
-            if c.destroyed {
-                StepAction::Destroyed
-            } else {
-                let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
-                let r = routes.entry(convoy_id).or_insert_with(|| ConvoyRouteState {
-                    route: vec![c.origin_system_id, c.destination_system_id],
-                    route_index: 0,
-                    docked: false,
-                    last_hop_unix: 0,
-                });
-
-                if r.docked {
-                    StepAction::AlreadyDocked
-                } else {
-                    let now_unix = db.clock().now_unix_secs();
-                    // DERIVED: hauler in-system transit duration
-                    let prev_sys = if r.route_index > 0 {
-                        Some(r.route[r.route_index - 1])
-                    } else {
-                        None
-                    };
-                    let next_sys = if r.route_index + 1 < r.route.len() {
-                        Some(r.route[r.route_index + 1])
-                    } else {
-                        None
-                    };
-                    let transit_duration_secs = Self::compute_hauler_transit_duration_secs(
-                        sde,
-                        c.ship_type_id,
-                        c.current_system_id,
-                        prev_sys,
-                        next_sys,
-                        c.destination_station_id,
-                    );
-
-                    if r.last_hop_unix == 0 {
-                        r.last_hop_unix = now_unix;
-                        StepAction::Traverse {
-                            system_id: c.current_system_id,
-                        }
-                    } else if now_unix.saturating_sub(r.last_hop_unix) < transit_duration_secs {
-                        StepAction::Traverse {
-                            system_id: c.current_system_id,
-                        }
-                    } else {
-                        r.last_hop_unix = now_unix;
-                        let prev_sys = c.current_system_id;
-                        if r.route_index + 1 < r.route.len() {
-                            r.route_index += 1;
-                            let next_sys = r.route[r.route_index];
-                            c.current_system_id = next_sys;
-                            StepAction::Jump {
-                                prev_sys,
-                                next_sys,
-                                lod_level: c.lod_level,
-                                ship_type_id: c.ship_type_id,
-                            }
-                        } else {
-                            r.docked = true;
-                            let lod = c.lod_level;
-                            if lod == 2 {
-                                c.lod_level = 1;
-                            }
-                            StepAction::Dock {
-                                destination_station_id: c.destination_station_id,
-                                destination_system_id: c.current_system_id,
-                                lod_level: lod,
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        match action {
-            StepAction::Destroyed => Ok(ConvoyStepStatus::Destroyed),
-            StepAction::AlreadyDocked => Ok(ConvoyStepStatus::AlreadyDocked),
-            StepAction::Traverse { system_id } => {
-                Ok(ConvoyStepStatus::TraversingSystem { system_id })
-            }
-            StepAction::Jump {
-                prev_sys,
-                next_sys,
-                lod_level,
-                ship_type_id,
-            } => {
-                if lod_level == 2 {
-                    let old_handle = systems.get_or_spawn(prev_sys);
-                    let _ = old_handle.remove_ball(convoy_id).await;
-
-                    let new_handle = systems.get_or_spawn(next_sys);
-                    let gate_pos = sde
-                        .stargates()
-                        .values()
-                        .filter(|g| g.from_solar_system_id == next_sys && g.to_solar_system_id == prev_sys)
-                        .min_by_key(|g| g.stargate_id)
-                        .map(|g| g.position)
-                        .or_else(|| {
-                            sde.stargates()
-                                .values()
-                                .filter(|g| g.from_solar_system_id == next_sys)
-                                .min_by_key(|g| g.stargate_id)
-                                .map(|g| g.position)
-                        })
-                        .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
-
-                    let (ball, combat) = sde_ball_and_combat(
-                        sde,
-                        convoy_id,
-                        ship_type_id,
-                        gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
-                    );
-                    let _ = new_handle.spawn_ball_with_combat(ball, combat).await;
-                }
-
-                Ok(ConvoyStepStatus::JumpedGate {
-                    from_system: prev_sys,
-                    to_system: next_sys,
-                })
-            }
-            StepAction::Dock {
-                destination_station_id,
-                destination_system_id,
-                lod_level,
-            } => {
-                if lod_level == 2 {
-                    let handle = systems.get_or_spawn(destination_system_id);
-                    let _ = handle.remove_ball(convoy_id).await;
-                }
-                Ok(ConvoyStepStatus::DockedAtDestination {
-                    station_id: destination_station_id,
-                    system_id: destination_system_id,
-                })
-            }
-        }
+        crate::living_world_haulers::step_hauler_convoy_internal(self, convoy_id, systems, db, sde).await
     }
 
     /// Ensures at least one `MiningOp` exists in `solar_system_id` (`feat:npc.mining-op-npc`).
@@ -1173,16 +1019,11 @@ impl LivingWorldDirector {
                 }
             }
         }
-        let next_sys = sde
-            .stargates()
-            .values()
-            .filter(|g| g.from_solar_system_id == solar_system_id)
-            .min_by_key(|g| g.stargate_id)
-            .map(|g| g.to_solar_system_id)
-            .unwrap_or(30_000_144);
+        let route = crate::living_world_haulers::compute_trade_route(sde, solar_system_id);
+        let dest_sys = *route.last().unwrap_or(&solar_system_id);
         let dest_station_id = sde
             .solar_systems
-            .get(&next_sys)
+            .get(&dest_sys)
             .and_then(|sys| sys.stations.iter().min_by_key(|st| st.station_id).map(|st| st.station_id))
             .unwrap_or(60_003_760);
         let hauler_tid = hauler_type_for_system(sde, solar_system_id);
@@ -1214,7 +1055,7 @@ impl LivingWorldDirector {
                     ship_type_id: hauler_tid,
                     origin_system_id: solar_system_id,
                     current_system_id: solar_system_id,
-                    destination_system_id: next_sys,
+                    destination_system_id: dest_sys,
                     destination_station_id: dest_station_id,
                     cargo_type_id,
                     cargo_quantity,
@@ -1223,7 +1064,7 @@ impl LivingWorldDirector {
                 },
             );
         }
-        self.set_convoy_route(convoy_id, vec![solar_system_id, next_sys]);
+        self.set_convoy_route(convoy_id, route);
         convoy_id
     }
 
