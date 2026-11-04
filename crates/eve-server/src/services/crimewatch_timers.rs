@@ -235,18 +235,18 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
     for (ev, mut a) in updates {
         let code_fn = |a: &mut Vec<PyRep>, def: i64| (a.pop().unwrap_or(PyRep::None), a.pop().and_then(|v| v.as_i64()).unwrap_or(def));
         match ev {
-            "OnWeaponsTimerUpdate" => { let (exp, c) = code_fn(&mut a, 100); crate::services::notify_emitters_b30::emit_weapons_timer_update(ctx, char_id, c, exp); }
-            "OnPvpTimerUpdate" => { let (exp, c) = code_fn(&mut a, 200); crate::services::notify_emitters_b30::emit_pvp_timer_update(ctx, char_id, c, exp); }
-            "OnCriminalTimerUpdate" => { let (exp, c) = code_fn(&mut a, 300); crate::services::notify_emitters_b30::emit_criminal_timer_update(ctx, char_id, c, exp); }
+            "OnWeaponsTimerUpdate" => { let (exp, c) = code_fn(&mut a, 100); crate::services::notify_emitters_crimewatch_fw::emit_weapons_timer_update(ctx, char_id, c, exp); }
+            "OnPvpTimerUpdate" => { let (exp, c) = code_fn(&mut a, 200); crate::services::notify_emitters_crimewatch_fw::emit_pvp_timer_update(ctx, char_id, c, exp); }
+            "OnCriminalTimerUpdate" => { let (exp, c) = code_fn(&mut a, 300); crate::services::notify_emitters_crimewatch_fw::emit_criminal_timer_update(ctx, char_id, c, exp); }
             _ => { ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a); }
         }
     }
     if let Some(sys_id) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id)) {
         if let Some((new_idles, new_suspects, new_criminals)) = crim_transition {
-            crate::services::notify_emitters_b30::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
+            crate::services::notify_emitters_crimewatch_fw::emit_system_criminal_flag_updates(ctx, sys_id, &new_idles, &new_suspects, &new_criminals);
         }
         if let Some((new_idles, new_naughty)) = dis_transition {
-            crate::services::notify_emitters_batch6::emit_system_disapproval_flag_updates(ctx, sys_id, &new_idles, &new_naughty);
+            crate::services::notify_emitters_combat_ess_progression::emit_system_disapproval_flag_updates(ctx, sys_id, &new_idles, &new_naughty);
         }
     }
 }
@@ -255,7 +255,7 @@ pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, no
 pub fn update_system_security_status(ctx: &ServerContext, sys_id: u32, new_sec: f64) {
     let old_sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.0);
     let delta = new_sec - old_sec;
-    crate::services::notify_emitters_batch6::emit_security_modified(ctx, sys_id, delta, new_sec);
+    crate::services::notify_emitters_combat_ess_progression::emit_security_modified(ctx, sys_id, delta, new_sec);
 }
 
 /// Evaluates whether an active Weapons Timer (60s), PvP Timer (15m), or High-Sec Criminal Timer blocks
@@ -864,7 +864,7 @@ pub async fn handle_crimewatch(
                         "eventSecStatusGmRollback" => 386_i64,
                         _ => 380_i64,
                     };
-                    let event_date = crate::sp6_lifecycle::unix_to_filetime(t.timestamp_unix);
+                    let event_date = crate::session_cluster_lifecycle::unix_to_filetime(t.timestamp_unix);
                     vec![
                         PyRep::Integer(event_date),
                         PyRep::Integer(event_type_id),
@@ -1056,7 +1056,7 @@ pub async fn handle_crimewatch(
 }
 
 pub(crate) fn is_war_interference_assistance(ctx: &ServerContext, helper_char_id: i64, beneficiary_char_id: i64, now_unix: u64) -> bool {
-    if !crate::sp6_lifecycle::has_active_pvp_timer(ctx, beneficiary_char_id, now_unix) {
+    if !crate::session_cluster_lifecycle::has_active_pvp_timer(ctx, beneficiary_char_id, now_unix) {
         return false;
     }
     ctx.db.with_snapshot(|snap| {
@@ -1094,7 +1094,7 @@ pub fn evaluate_and_record_pvp_aggression(
             snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
                 .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
         };
-        let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
+        let anchored = snap.session_cluster_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
         let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
         let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
         let secure = ctx.sde.types.get(&it_tid).is_some_and(|t| matches!(t.group_id, 340 | 448));
@@ -1141,7 +1141,7 @@ pub fn evaluate_and_record_pvp_aggression(
                 st.suspect_flag_until_unix = 0;
             }
         }
-        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, attacker_char_id, vcid, now_unix);
+        crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, attacker_char_id, vcid, now_unix);
         let le_created = with_mut_combat_runtime(ctx, |rt| {
             if v_suspect_or_crim || rt.has_limited_engagement_with(attacker_char_id, vcid, now_unix) {
                 rt.add_limited_engagement(attacker_char_id, vcid, now_unix);
@@ -1158,7 +1158,7 @@ pub fn evaluate_and_record_pvp_aggression(
             record_illegal_pvp_penalties_if_new(ctx, attacker_char_id, vcid, sys_id, sys_sec, is_pod_target, is_new_agg, now_unix);
         }
     } else {
-        crate::sp6_lifecycle::record_npc_aggression_timer(ctx, attacker_char_id, now_unix);
+        crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, attacker_char_id, now_unix);
     }
     Ok(())
 }

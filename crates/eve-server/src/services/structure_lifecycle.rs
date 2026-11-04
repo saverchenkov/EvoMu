@@ -690,7 +690,7 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     let wreck_type_id = ctx.sde.wrecks.get(&st.type_id).copied().unwrap_or(26557);
     snap.next_entity_id += 1;
     let wreck_id = snap.next_entity_id;
-    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wreck_id, now, false);
+    crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, wreck_id, now, false);
     snap.items.insert(wreck_id, InventoryItemRecord {
         item_id: wreck_id, type_id: wreck_type_id, owner_id: st.owner_corp_id,
         location_id: i64::from(st.solar_system_id), flag: InventoryFlag::None,

@@ -504,7 +504,7 @@ pub(crate) async fn handle_abyssal_end_gate_activation(
             }
         });
 
-    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+    crate::session_cluster_lifecycle::clear_abyssal_session(ctx, char_id);
     abyss_handle.try_remove_ball(ship_id);
     for &npc_id in &r3_npcs {
         abyss_handle.try_remove_ball(npc_id);
@@ -627,7 +627,7 @@ pub(crate) async fn handle_void_space_player_jump(
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
     validate_allowed_ship_hull(ctx, ship_id)?;
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
+    crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let _content_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -750,7 +750,7 @@ pub(crate) async fn handle_void_space_player_jump(
     crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
         reg.void_space_sessions.insert(char_id, void_session);
     });
-    crate::sp6_lifecycle::register_abyssal_session(
+    crate::session_cluster_lifecycle::register_abyssal_session(
         ctx,
         char_id,
         ship_id,
@@ -760,7 +760,7 @@ pub(crate) async fn handle_void_space_player_jump(
         now_unix.saturating_add(1_200),
     );
 
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys);
     origin_handle.try_remove_ball(ship_id);
 
     // Server-validated target ID (filament or gate) is used as effective_content_id;
@@ -954,7 +954,7 @@ pub(crate) async fn handle_void_space_end_gate_activation(
     crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
         reg.void_space_sessions.remove(&char_id);
     });
-    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+    crate::session_cluster_lifecycle::clear_abyssal_session(ctx, char_id);
     void_handle.try_remove_ball(ship_id);
 
     let origin_sys = vs.origin_solar_system_id;

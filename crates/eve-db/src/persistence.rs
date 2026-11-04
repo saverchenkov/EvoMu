@@ -177,7 +177,7 @@ impl WorldStateWalDelta {
             && old.combat_crimewatch_state == new.combat_crimewatch_state
             && old.zarzakh_gate_locks == new.zarzakh_gate_locks
             && old.structure_docking_acl_denied == new.structure_docking_acl_denied
-            && old.sp6_lifecycle == new.sp6_lifecycle
+            && old.session_cluster_lifecycle == new.session_cluster_lifecycle
             && old.bookmark_subfolder_parents == new.bookmark_subfolder_parents
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]

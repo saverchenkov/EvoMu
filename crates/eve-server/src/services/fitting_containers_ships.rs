@@ -890,7 +890,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("invbroker", "SetPassword") | ("invbroker", "ALSCConfigSet") | ("invbroker", "ConfigureALSC") => {
-            Some(crate::services::notify_emitters_b30::handle_set_password(ctx, session, bound_entry, method, args, kwargs).await)
+            Some(crate::services::notify_emitters_crimewatch_fw::handle_set_password(ctx, session, bound_entry, method, args, kwargs).await)
         }
 
         ("invbroker", "ALSCConfigGet") => {

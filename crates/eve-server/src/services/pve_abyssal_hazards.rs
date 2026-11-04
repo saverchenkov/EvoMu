@@ -369,7 +369,7 @@ pub async fn validate_and_consume_abyssal_filaments(
         ));
     }
 
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
+    crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
 
     let sys_handle = ctx.systems.get_or_spawn(cur_sys);
     if let Ok(Some(cs)) = sys_handle.get_combat_state(ship_id).await {
@@ -387,7 +387,7 @@ pub async fn validate_and_consume_abyssal_filaments(
         DVec3::from_array(p)
     };
 
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+    crate::services::pve_rnd_storyline_sites::check_ess_intrusion_bubble_restriction(
         ctx, cur_sys, ship_id, "filament",
     )
     .await?;

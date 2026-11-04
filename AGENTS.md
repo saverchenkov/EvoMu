@@ -103,9 +103,12 @@
 - **No mock bypasses on live RPCs:** When testing service RPC handlers or network flows, test real message dispatch and response serialization rather than shallow mock stubs that bypass database/ballpark state updates. Handlers must exercise genuine state mutations and validate client permissions.
 - Pre-flight also lists the rows newly closed since the last review, with their acceptance text. Re-check that every clause is really tested before claiming them.
 
-## Code layout
-- Keep files under about 1,500 lines: integration tests in `crates/eve-server/tests/it/` (one binary), `eve-db` split by domain, `eve-server/src/router/` split into dispatch, binding and session, game logic in `services/*.rs` by domain.
-- Split a file that outgrows this in a separate, behaviour-neutral change (task tag `S-REFACTOR`): keep every test name and `// parity:` tag, and show identical pre-flight numbers before and after.
+## Code layout & semantic file organization
+- **Group by semantic domain, never by plan batches or arbitrary line-count parts:**
+  - Organize production modules (`crates/eve-server/src/services/*.rs`, `crates/eve-db/src/sqlite_store/*.rs`, `crates/eve-server/src/router/`) and integration tests (`crates/eve-server/tests/it/*.rs`) strictly by **semantic domain and gameplay behavior** (e.g., `mining_moon_ledgers.rs`, `sovereignty_equinox_gameplay.rs`, `fw_warzone_insurgency.rs`, `structures_upwell.rs`).
+  - **Never leak plan/batch/wave/remediation artifacts into file, module, or test names:** Do NOT name files, modules, or tests with `_part1`/`_part2`/`_part3`, `batch2..10`, `b2..b42`, `w14..w75`, `r4..r8`, `fake_remediation`, `remediation`, `remediated`, `closure`, `sp6`/`sp7`, or `d6`.
+  - **Behavior-focused test framing:** Integration tests must describe the **gameplay or protocol behavior under test** rather than "fake remediation" or "anti-fake" checks.
+  - **Semantic cohesion over artificial file-size caps:** If a single semantic domain or test suite shares a common denominator and exceeds 1,500 lines, keep it together in its semantic module rather than breaking it into `_part2`, `_part3`, or `batchN` files. Only split a file when there is a genuine, distinct semantic sub-domain boundary.
 
 ## Code style and conventions
 - Follow [CODE_STYLE.md](CODE_STYLE.md). All code must adhere to:

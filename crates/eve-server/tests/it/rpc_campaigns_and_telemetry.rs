@@ -17,7 +17,7 @@ use eve_server::services::campaigns_and_milestones::{
 };
 use eve_db::InventoryFlag;
 
-use super::common;
+use crate::common;
 
 const PILOT_1: i64 = 90_000_001;
 

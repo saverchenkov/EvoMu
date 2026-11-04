@@ -23,7 +23,7 @@ pub(crate) async fn handle_module_cycles(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(ctx, char_id, "SAFE_LOGOFF_ABORT_MODULE");
+            let _ = crate::session_cluster_lifecycle::maybe_abort_safe_logoff_on_action(ctx, char_id, "SAFE_LOGOFF_ABORT_MODULE");
             let raw_module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
             let target_id_opt = args.get(2).and_then(|a| a.as_i64())
@@ -203,7 +203,7 @@ pub(crate) async fn handle_module_cycles(
                 );
             }
 
-            if let Err(e) = crate::services::pve_open_feats_b36::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
+            if let Err(e) = crate::services::pve_rnd_storyline_sites::check_ess_module_activation_allowed(ctx, sys_id, ship_id, mod_type, &effect_name).await {
                 return Some(Err(e));
             }
             if mod_type.group_id == 330 {

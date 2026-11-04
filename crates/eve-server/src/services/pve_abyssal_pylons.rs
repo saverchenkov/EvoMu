@@ -277,7 +277,7 @@ pub fn destroy_pod_and_respawn_faction_corvette_in_snap(
                         .unwrap_or(0)
                 };
                 let sys_id = snap
-                    .sp6_lifecycle
+                    .session_cluster_lifecycle
                     .abyssal_sessions
                     .get(&cid)
                     .map(|s| s.origin_system_id)
@@ -807,7 +807,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
             let mut final_cleanup: Option<(SolarSystemId, Vec<i64>, Vec<i64>)> = None;
             if let Some(db) = db_opt {
                 let now_u = db.clock().now_unix_secs();
-                crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
+                crate::session_cluster_lifecycle::with_mut_sp6_state(db, |st, snap| {
                     let cid = snap
                         .items
                         .get(&bid)
@@ -943,7 +943,7 @@ pub fn step_abyssal_hazards_and_pylons_in_ballpark(
         }
         let (cap_id, owner_cid) = if let Some(db) = db_opt {
             let now_u = db.clock().now_unix_secs();
-            crate::sp6_lifecycle::with_mut_sp6_state(db, |st, snap| {
+            crate::session_cluster_lifecycle::with_mut_sp6_state(db, |st, snap| {
                 let cid = snap
                     .items
                     .get(&bid)

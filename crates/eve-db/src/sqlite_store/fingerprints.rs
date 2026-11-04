@@ -654,10 +654,10 @@ pub struct TableFingerprints {
     pub skill_history: HashMap<i64, u64>,
     pub character_doll_info: HashMap<i64, u64>,
     pub ledger: super::ledger_store::LedgerFingerprints,
-    pub d6: super::d6_store::D6Fingerprints,
-    pub d6_social: super::d6_social_store::D6SocialFingerprints,
-    pub d6_corp_crimewatch: super::d6_corp_crimewatch_store::D6CorpCrimewatchFingerprints,
-    pub d6_batch4: super::d6_batch4_store::D6Batch4Fingerprints,
+    pub d6: super::notes_lp_sequence_store::D6Fingerprints,
+    pub d6_social: super::social_store::D6SocialFingerprints,
+    pub d6_corp_crimewatch: super::corp_crimewatch_store::D6CorpCrimewatchFingerprints,
+    pub d6_batch4: super::industry_market_pve_store::D6Batch4Fingerprints,
 }
 
 /// Synchronizes only modified/inserted/deleted rows from `snap` into `tx` and updates `fp`,
@@ -796,11 +796,11 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
         fp.character_doll_info.insert(cid, fp_json(v));
     }
     fp.ledger = super::ledger_store::compute_ledger_fingerprints(snap);
-    fp.d6 = super::d6_store::compute_d6_fingerprints(snap);
-    fp.d6_social = super::d6_social_store::compute_d6_social_fp(snap);
+    fp.d6 = super::notes_lp_sequence_store::compute_d6_fingerprints(snap);
+    fp.d6_social = super::social_store::compute_d6_social_fp(snap);
     fp.d6_corp_crimewatch =
-        super::d6_corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints(snap);
-    fp.d6_batch4 = super::d6_batch4_store::compute_d6_batch4_fingerprints(snap);
+        super::corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints(snap);
+    fp.d6_batch4 = super::industry_market_pve_store::compute_d6_batch4_fingerprints(snap);
     fp
 }
 

@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 let _ = eve_server::services::mining_cycle::process_mining_cycles(&tick_ctx).await;
-                eve_server::sp6_lifecycle::tick_background_cluster(&tick_ctx).await;
+                eve_server::session_cluster_lifecycle::tick_background_cluster(&tick_ctx).await;
             }
         });
     }
@@ -474,7 +474,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
         // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
         if ctx.db.release_online_lock(uid, session.session_id) {
             if let Some(cid) = session.character_id {
-                let _ = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
+                let _ = eve_server::session_cluster_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
                 eve_server::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
             }
         }

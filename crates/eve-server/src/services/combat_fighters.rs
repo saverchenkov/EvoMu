@@ -777,7 +777,7 @@ pub async fn handle_fighters(
                         it.location_id = sys_id as i64;
                         it.flag = eve_db::InventoryFlag::None;
                     }
-                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, fighter_item_id, ball_id);
+                    crate::session_cluster_lifecycle::record_drone_ball_meta_in_snap(snap, fighter_item_id, ball_id);
                     snap.item_positions.insert(fighter_item_id, ball_pos);
                     snap.item_positions.insert(ball_id, ball_pos);
                 });

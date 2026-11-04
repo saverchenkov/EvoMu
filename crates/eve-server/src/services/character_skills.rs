@@ -275,7 +275,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             .iter()
             .map(|&(tid, lvl, prev, sp)| (tid, prev, lvl, sp))
             .collect();
-        super::notify_emitters_batch3::emit_logon_skills_trained(
+        super::notify_emitters_character_services::emit_logon_skills_trained(
             ctx,
             char_id,
             &trained_details,

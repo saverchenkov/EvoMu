@@ -638,7 +638,7 @@ pub async fn handle_npcs_drones(
                     } else {
                         rec.item_id
                     };
-                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, actual_item_id, bid);
+                    crate::session_cluster_lifecycle::record_drone_ball_meta_in_snap(snap, actual_item_id, bid);
                     snap.item_positions.insert(actual_item_id, [d_pos.x, d_pos.y, d_pos.z]);
                     snap.item_positions.insert(bid, [d_pos.x, d_pos.y, d_pos.z]);
                     (bid, actual_item_id)
@@ -738,7 +738,7 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdReturnBay") => {
-            Some(crate::sp6_lifecycle::handle_cmd_return_bay(ctx, session, args, kwargs).await)
+            Some(crate::session_cluster_lifecycle::handle_cmd_return_bay(ctx, session, args, kwargs).await)
         }
 
         ("entity", "CmdReturnHome") | ("entity", "CmdReturnAndOrbit") => {
@@ -825,7 +825,7 @@ pub async fn handle_npcs_drones(
                     PyRep::Integer(char_id), PyRep::None,
                 ];
                 ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
-                crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
+                crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 0, None);
                 count += 1;
                 with_mut_combat_runtime(ctx, |rt| {
                     rt.active_drones_in_space.insert(d.ball_id, d);
@@ -950,7 +950,7 @@ pub async fn handle_npcs_drones(
                     PyRep::Integer(char_id), PyRep::Integer(target_id),
                 ];
                 ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args);
-                crate::services::notify_emitters_batch3_space::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
+                crate::services::notify_emitters_space_dungeons::emit_drone_activity_change(ctx, char_id, d.ball_id, 1, Some("attack"));
 
                 let next_ready = with_combat_runtime(ctx, |rt| {
                     rt.drone_next_ready_unix.get(&d.ball_id).copied().unwrap_or(0)
@@ -1043,9 +1043,9 @@ pub async fn handle_npcs_drones(
                 });
                 if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
-                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                    crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                 } else {
-                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                    crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
                 }
             }
 
@@ -1142,7 +1142,7 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdAbandonDrone") => {
-            Some(crate::sp6_lifecycle::handle_cmd_abandon_drone(ctx, session, args, kwargs).await)
+            Some(crate::session_cluster_lifecycle::handle_cmd_abandon_drone(ctx, session, args, kwargs).await)
         }
 
         ("ship", "ScoopToDroneBay") | ("ship", "ScoopDrone") => {
@@ -1196,7 +1196,7 @@ pub async fn handle_npcs_drones(
                         it.location_id == sys_id as i64
                             && (it.item_id == drone_ball_id
                                 || snap
-                                    .sp6_lifecycle
+                                    .session_cluster_lifecycle
                                     .space_object_meta
                                     .get(&it.item_id)
                                     .and_then(|m| m.drone_ball_id)
@@ -1229,7 +1229,7 @@ pub async fn handle_npcs_drones(
                 }
                 let is_abandoned_meta = drone_st_opt.as_ref().is_some_and(|d| d.is_abandoned)
                     || snap
-                        .sp6_lifecycle
+                        .session_cluster_lifecycle
                         .space_object_meta
                         .get(&it.item_id)
                         .is_some_and(|m| m.drone_ball_id.is_some());
@@ -1293,7 +1293,7 @@ pub async fn handle_npcs_drones(
         }
 
         ("entity", "CmdReconnectToDrones") => {
-            Some(crate::sp6_lifecycle::handle_cmd_reconnect_to_drones(ctx, session, args, kwargs).await)
+            Some(crate::session_cluster_lifecycle::handle_cmd_reconnect_to_drones(ctx, session, args, kwargs).await)
         }
 
         ("entity", "CmdSalvage") => {

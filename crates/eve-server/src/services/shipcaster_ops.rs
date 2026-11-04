@@ -786,7 +786,7 @@ pub(crate) async fn execute_shipcaster_jump(
         );
     }
 
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, origin_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(
         ctx, char_id, ship_id,
     );

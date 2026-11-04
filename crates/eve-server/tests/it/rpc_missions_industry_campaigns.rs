@@ -13,7 +13,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
 
-use super::common;
+use crate::common;
 
 const PILOT_1: i64 = 90_000_001;
 

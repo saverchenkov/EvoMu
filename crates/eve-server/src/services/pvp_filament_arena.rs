@@ -400,7 +400,7 @@ pub fn step_proving_grounds_arena_hazards_in_ballpark(
     let mut respawned_pilots: Vec<(i64, i64, i64, u32, i64)> = Vec::new();
     let mut concluded_matches: Vec<(i64, Vec<i64>)> = Vec::new();
 
-    crate::sp6_lifecycle::with_mut_sp6_state(db, |sp6, snap| {
+    crate::session_cluster_lifecycle::with_mut_sp6_state(db, |sp6, snap| {
         let mut store = load_pvp_store(snap);
         if store.active_matches.is_empty() {
             return;
@@ -793,7 +793,7 @@ pub async fn spawn_matched_arena_instance(
                 )]),
             ],
         );
-        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+        crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(
             ctx,
             pid,
             p_ship_id,
@@ -977,7 +977,7 @@ pub async fn handle_pvp_end_gate_activation(
     session.solar_system_id = Some(osys);
     crate::services::map_service::record_solar_system_visit(ctx, char_id, osys);
     let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, cur_ship, 32_000_001);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, cur_ship, 32_000_001);
     arena.try_remove_ball(cur_ship);
     if let Some(gid) = cleanup_gate_id.filter(|&g| g > 70_001) {
         arena.try_remove_ball(gid);
@@ -989,7 +989,7 @@ pub async fn handle_pvp_end_gate_activation(
             st.weapon_timer_until_unix = 0;
         }
     }
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+    crate::session_cluster_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
         st.pvp_timers_until.remove(&char_id);
         st.weapon_timers_until.remove(&char_id);
     });

@@ -456,7 +456,7 @@ async fn test_feat_character_paperdoll_titles_emergency_warp_and_energy() {
         ch.structure_id = None;
     });
 
-    let disc_entry = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
+    let disc_entry = eve_server::session_cluster_lifecycle::handle_character_logoff_or_disconnect(&ctx, char_id)
         .await
         .expect("handle_character_logoff_or_disconnect must produce DisconnectedShipEntry");
     assert!(disc_entry.emergency_warp_dest.is_some(), "disconnect in space without timers triggers emergency warp");
@@ -466,7 +466,7 @@ async fn test_feat_character_paperdoll_titles_emergency_warp_and_energy() {
     let diff = disc_entry.remove_at_unix.saturating_sub(ctx.now_unix()) + 1;
     ctx.advance_time_seconds(diff);
 
-    let is_removed = eve_server::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+    let is_removed = eve_server::session_cluster_lifecycle::with_sp6_state(&ctx.db, |st| {
         st.disconnected_ships.get(&char_id).map(|d| d.removed_from_space).unwrap_or(true)
     });
     assert!(is_removed, "ship must be marked removed from space after logoff timer expires");

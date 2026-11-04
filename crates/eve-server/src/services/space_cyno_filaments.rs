@@ -284,7 +284,7 @@ async fn handle_wormhole_jump(
         }
     };
 
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let updated_ch = ctx
@@ -377,7 +377,7 @@ async fn handle_random_jump_filament(
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() });
     };
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, old_sys)?;
+    crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, old_sys)?;
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
     let Some((cur_tick, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
@@ -413,7 +413,7 @@ async fn handle_random_jump_filament(
     }
 
     let caller_pos = current_ball.position;
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+    crate::services::pve_rnd_storyline_sites::check_ess_intrusion_bubble_restriction(
         ctx, old_sys, ship_id, "filament",
     )
     .await?;
@@ -545,7 +545,7 @@ async fn handle_random_jump_filament(
             let m_trig = ctx.db.with_snapshot(|snap| snap.characters.get(&mate_id).and_then(|c| c.standings.get(&500_026).copied()).unwrap_or(0.0));
             if m_trig < 6.0 { continue; }
         }
-        if crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, mate_id, m_ship_id, old_sys).is_err() { continue; }
+        if crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(ctx, mate_id, m_ship_id, old_sys).is_err() { continue; }
         if crate::services::space_destiny::check_session_change_timer_active(ctx, mate_id, now_unix, Some((old_sys, cur_tick))).is_some() { continue; }
         if old_handle.is_ball_scrambled(m_ship_id).await.unwrap_or(false) { continue; }
         if old_handle.get_combat_state(m_ship_id).await.ok().flatten().is_some_and(|cs| cs.is_cloaked) { continue; }
@@ -578,10 +578,10 @@ async fn handle_random_jump_filament(
     })?;
     let (old_const, old_reg) = ctx.sde.solar_systems.get(&old_sys).map(|s| (s.constellation_id, s.region_id)).unwrap_or((0, 0));
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
-    let pvp_until = now_unix.saturating_add(crate::sp6_lifecycle::PVP_TIMER_SECS);
+    let pvp_until = now_unix.saturating_add(crate::session_cluster_lifecycle::PVP_TIMER_SECS);
     for (j_idx, (p_char, p_ship, mut b)) in jumpers.into_iter().enumerate() {
         let prev_cs = old_handle.get_combat_state(p_ship).await.ok().flatten();
-        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
+        crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, p_char, p_ship, old_sys);
         let _ = old_handle.remove_ball(p_ship).await;
         crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, p_char, p_ship);
         ctx.sync_character_local_chat(p_char, Some(old_sys), dest_sys_id);
@@ -621,7 +621,7 @@ async fn handle_random_jump_filament(
             let pilot_cw = cw.get_or_create(p_char);
             pilot_cw.pvp_timer_until_unix = pilot_cw.pvp_timer_until_unix.max(pvp_until);
         }
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+        crate::session_cluster_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
             st.pvp_timers_until.insert(p_char, pvp_until);
         });
         crate::services::combat_crimewatch::emit_crimewatch_timer_notifications(ctx, p_char, now_unix);
@@ -848,7 +848,7 @@ async fn handle_cmd_jump_to_structure_beacon(
     });
 
     let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
@@ -1268,7 +1268,7 @@ async fn handle_cmd_beacon_jump_fleet(ctx: &ServerContext, session: &mut Session
     });
 
     let prev_cs = cur_sys_handle.get_combat_state(ship_id).await.ok().flatten();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, cur_sys_id);
     let _ = cur_sys_handle.remove_ball(ship_id).await;
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);

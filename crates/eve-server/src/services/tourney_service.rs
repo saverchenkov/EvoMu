@@ -60,7 +60,7 @@ pub async fn handle(
             });
             if r.is_ok() {
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
-                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
                         ctx, rs, bs, st, &r_ids, &b_ids, &refs,
                     );
                 }
@@ -183,7 +183,7 @@ pub async fn handle(
                     let gid = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
                     let is_wreck = gid == 186 || it.type_id == 26557;
                     let is_unanchored_can = matches!(gid, 12 | 340 | 448 | 649)
-                        && !snap.sp6_lifecycle.space_object_meta.get(&it.item_id).is_some_and(|meta| meta.anchor_completed || meta.anchor_start_unix.is_some());
+                        && !snap.session_cluster_lifecycle.space_object_meta.get(&it.item_id).is_some_and(|meta| meta.anchor_completed || meta.anchor_start_unix.is_some());
                     if !is_wreck && !is_unanchored_can { return false; }
                     let Some(pos) = ball_positions.get(&it.item_id).copied()
                         .or_else(|| snap.item_positions.get(&it.item_id).map(|&[x, y, z]| DVec3::new(x, y, z)))
@@ -493,7 +493,7 @@ pub async fn handle(
                     for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
                 }
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
-                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
                         ctx, rs, bs, st, &r_ids, &b_ids, &refs,
                     );
                 }
@@ -799,7 +799,7 @@ pub async fn handle(
             });
             if r.is_ok() {
                 if let Some((rs, bs, st, r_ids, b_ids, refs)) = notify_info {
-                    crate::services::notify_emitters_batch10::emit_tournament_match_state_change(
+                    crate::services::notify_emitters_tournaments_anomalies::emit_tournament_match_state_change(
                         ctx, rs, bs, st, &r_ids, &b_ids, &refs,
                     );
                 }
@@ -928,7 +928,7 @@ pub async fn handle(
                         ],
                     );
                     if old_sys != match_sys as u32 || old_st.is_some() {
-                        crate::services::notify_emitters_batch10::emit_enter_tournament_system(ctx, cid);
+                        crate::services::notify_emitters_tournaments_anomalies::emit_enter_tournament_system(ctx, cid);
                     }
                 }
             }

@@ -108,7 +108,7 @@ async fn resolve_ship_hp_ratios(ctx: &ServerContext, target_char_id: i64) -> (Op
             if let Some(sc) = s_chg { cs.shield_hp = sc.clamp(0.0, cs.max_shield_hp); }
             if let Some(ad) = a_dmg { cs.armor_hp = (cs.max_armor_hp - ad).clamp(0.0, cs.max_armor_hp); }
             if let Some(hd) = h_dmg { cs.structure_hp = (cs.max_structure_hp - hd).clamp(0.0, cs.max_structure_hp); }
-            crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(ctx, ship_id, &mut cs);
+            crate::session_cluster_lifecycle::apply_persisted_hp_to_combat_state(ctx, ship_id, &mut cs);
             let sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
             let ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
             let hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);

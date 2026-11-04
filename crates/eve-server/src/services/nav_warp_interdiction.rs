@@ -248,7 +248,7 @@ pub(crate) async fn validate_pre_warp_common(
         ship_id,
     )
     .await?;
-    crate::services::pve_open_feats_b36::check_ess_intrusion_bubble_restriction(
+    crate::services::pve_rnd_storyline_sites::check_ess_intrusion_bubble_restriction(
         ctx, sys_id, ship_id, "warp",
     )
     .await?;
@@ -291,7 +291,7 @@ pub(crate) async fn on_warp_initiated_hooks(
     sys_id: u32,
 ) {
     let _ = sys_handle.stop_non_warp_module_cycles(ship_id).await;
-    crate::sp6_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
+    crate::session_cluster_lifecycle::abandon_drones_on_warp_sync(ctx, char_id, ship_id, sys_id);
 }
 
 fn rollback_warp_vector_reservation(
@@ -556,7 +556,7 @@ pub async fn handle_use_warp_vector(
         rollback_warp_vector_reservation(ctx, char_id, target_id, prev_item, prev_cd_until);
         return Err(e);
     }
-    if let Err(e) = crate::services::pve_open_feats_b36::check_ess_warp_destination_allowed(
+    if let Err(e) = crate::services::pve_rnd_storyline_sites::check_ess_warp_destination_allowed(
         ctx,
         sys_id,
         dest_pos,

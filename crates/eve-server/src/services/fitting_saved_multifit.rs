@@ -186,8 +186,8 @@ pub(crate) async fn handle_ships_and_services(
                         ("fraction", PyRep::Real(rec.level_fraction)),
                         ("costISK", PyRep::Real(cost)),
                         ("payoutISK", PyRep::Real(payout)),
-                        ("startDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(rec.start_unix))),
-                        ("endDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(rec.end_unix))),
+                        ("startDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(rec.start_unix))),
+                        ("endDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(rec.end_unix))),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -264,8 +264,8 @@ pub(crate) async fn handle_ships_and_services(
                         ("fraction", PyRep::Real(c.level_fraction)),
                         ("costISK", PyRep::Real(c.cost_isk)),
                         ("payoutISK", PyRep::Real(c.payout_isk)),
-                        ("startDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.start_unix))),
-                        ("endDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.end_unix))),
+                        ("startDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(c.start_unix))),
+                        ("endDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(c.end_unix))),
                     ])));
                 }
             }
@@ -343,8 +343,8 @@ pub(crate) async fn handle_ships_and_services(
                             ("fraction", PyRep::Real(c.level_fraction)),
                             ("costISK", PyRep::Real(c.cost_isk)),
                             ("payoutISK", PyRep::Real(c.payout_isk)),
-                            ("startDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.start_unix))),
-                            ("endDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.end_unix))),
+                            ("startDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(c.start_unix))),
+                            ("endDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(c.end_unix))),
                         ])
                     })
                     .collect::<Vec<_>>()
@@ -1044,7 +1044,7 @@ pub(crate) async fn handle_ships_and_services(
                         .get(&ship_type_id)
                         .is_some_and(|t| matches!(t.group_id, 29 | 237))
                     {
-                        crate::services::notify_emitters_batch9::emit_pod_or_corvette_assembly(
+                        crate::services::notify_emitters_skills_trade_godma::emit_pod_or_corvette_assembly(
                             ctx,
                             char_id,
                             assembled_id,

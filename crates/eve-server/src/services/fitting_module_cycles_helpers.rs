@@ -360,7 +360,7 @@ pub(crate) fn handle_unload_ammo(
         Ok(())
     })?;
 
-    crate::services::notify_emitters_batch8::emit_bank_ammo_changed_if_grouped(
+    crate::services::notify_emitters_seasons_tactical::emit_bank_ammo_changed_if_grouped(
         ctx,
         char_id,
         ship_id,
@@ -613,7 +613,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
         let jam_duration_s = if duration_s > 0.0 { duration_s } else { 20.0 };
         if roll < jam_chance && jam_chance > 0.0 {
             let _ = sys.apply_ecm_jam(target_id, jam_duration_s).await;
-            crate::services::notify_emitters_batch3_space::emit_ecm_jam_landed(
+            crate::services::notify_emitters_space_dungeons::emit_ecm_jam_landed(
                 ctx,
                 sys_id,
                 char_id,
@@ -779,7 +779,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             .await
             .unwrap_or_default();
         for &jid in &jammed_ids {
-            crate::services::notify_emitters_batch3_space::emit_ecm_jam_landed(
+            crate::services::notify_emitters_space_dungeons::emit_ecm_jam_landed(
                 ctx,
                 sys_id,
                 char_id,
@@ -810,7 +810,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             }
         }
         for &v_char in &legal_pvp_victims {
-            crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+            crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                 ctx, char_id, v_char, now_unix,
             );
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -820,7 +820,7 @@ pub(crate) async fn handle_ecm_or_burst_jammer_activation(
             cw.get_or_create(v_char).pvp_timer_until_unix = now_unix.saturating_add(900);
         }
         for &v_char in &unprovoked_neutral_victims {
-            crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+            crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                 ctx, char_id, v_char, now_unix,
             );
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
@@ -860,7 +860,7 @@ pub(crate) async fn run_pre_notify_instant_module_effects(
     duration_s: f64,
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
-    crate::services::notify_emitters_batch3_space::emit_module_activation_godma_notifications(
+    crate::services::notify_emitters_space_dungeons::emit_module_activation_godma_notifications(
         ctx,
         char_id,
         ship_id,
@@ -952,7 +952,7 @@ async fn deactivate_repeating_cycle_after_action(
     effect_name: &str,
 ) {
     let _ = sys.remove_module_cycle(ship_id, module_id).await;
-    let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+    let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
         ctx,
         owner_char_id.unwrap_or(0),
         Some(sys.solar_system_id),
@@ -1099,7 +1099,7 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                         "charid",
                         vec![dmg_dict.clone()],
                     );
-                    crate::services::notify_emitters_b36::emit_combat_message(
+                    crate::services::notify_emitters_combat_ess_progression::emit_combat_message(
                         ctx,
                         attacker_char_id,
                         if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
@@ -1122,7 +1122,7 @@ pub(crate) async fn execute_pending_cycle_actions(ctx: &ServerContext, sys_id: u
                             })
                     });
                     if let Some(victim_char_id) = victim_char_opt {
-                        crate::services::notify_emitters_b36::emit_combat_message(
+                        crate::services::notify_emitters_combat_ess_progression::emit_combat_message(
                             ctx,
                             victim_char_id,
                             if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },
@@ -1272,7 +1272,7 @@ pub(crate) async fn evaluate_module_cycle_aggression_or_assistance(
                         snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
                             .or_else(|| snap.items.get(&target_id).and_then(|it| snap.characters.contains_key(&it.owner_id).then_some(it.owner_id)))
                     };
-                    let anchored = snap.sp6_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
+                    let anchored = snap.session_cluster_lifecycle.space_object_meta.get(&target_id).is_some_and(|m| m.anchor_start_unix.is_some());
                     let it_tid = snap.items.get(&target_id).map(|i| i.type_id).unwrap_or(0);
                     let is_mobile = crate::services::mobile_deployables::is_mobile_structure(&ctx.sde, it_tid);
                     (vcid, (it_tid == 23 && !anchored) || is_mobile)
@@ -1364,7 +1364,7 @@ pub(crate) async fn try_handle_mercden_remote_shield_repair(
     }
     let rep_hp = mod_type.default_attributes.get(&68).copied().unwrap_or(1_500.0);
     let (pct, enabled) = crate::services::sov_gameplay::apply_mercenary_den_shield_repair(ctx, sys_id, ship_id, target_id, rep_hp).await?;
-    crate::services::notify_emitters_batch3_space::emit_module_activation_godma_notifications(
+    crate::services::notify_emitters_space_dungeons::emit_module_activation_godma_notifications(
         ctx, char_id, ship_id, module_id, m.type_id, "shieldRepair", 5.0, Some(target_id),
     );
     Ok(Some(PyRep::keyval([

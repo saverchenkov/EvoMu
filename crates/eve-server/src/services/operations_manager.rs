@@ -841,7 +841,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             emit_operation_reward_notifications(ctx, char_id, &rw_outcome);
-            crate::services::notify_emitters_batch8_ops::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
+            crate::services::notify_emitters_operations_nodegraph::emit_operation_task_skipped(ctx, char_id, &op_defs, cat_id, op_id, task_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnOperationTaskCompleted",
@@ -1069,7 +1069,7 @@ pub fn handle(
                     now,
                 );
                 if had_active {
-                    crate::services::notify_emitters_batch10::emit_progression_left(ctx, char_id);
+                    crate::services::notify_emitters_tournaments_anomalies::emit_progression_left(ctx, char_id);
                 }
                 return Some(Ok(PyRep::Bool(true)));
             }

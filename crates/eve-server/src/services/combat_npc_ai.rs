@@ -826,7 +826,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 .find(|c| c.active_ship_id == target_id)
                 .map(|c| c.character_id)
         }) {
-            crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, ctx.now_unix());
+            crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, target_char_id, ctx.now_unix());
         }
 
         with_mut_combat_ephemeral(ctx, |rt| {
@@ -1241,7 +1241,7 @@ pub async fn destroy_specialized_npc_with_hint(
     let wreck_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let wid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
+        crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
         snap.items.insert(
             wid,
             InventoryItemRecord {

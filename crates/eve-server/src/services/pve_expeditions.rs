@@ -224,7 +224,7 @@ fn register_and_emit_expedition_signature(
 ) {
     let sig_id = expedition_sig_id(entry.instance_id, entry.step_index);
     let scan_strength = dungeon_scan_strength(&ctx.sde, entry.expedition_dungeon_id);
-    crate::services::notify_emitters_batch3_space::emit_cosmic_signature_added(
+    crate::services::notify_emitters_space_dungeons::emit_cosmic_signature_added(
         ctx,
         entry.destination_solar_system_id,
         &sig_id,
@@ -238,7 +238,7 @@ fn register_and_emit_expedition_signature(
             }
         }
     });
-    crate::services::notify_emitters_batch10::emit_dungeon_instance_added(
+    crate::services::notify_emitters_tournaments_anomalies::emit_dungeon_instance_added(
         ctx,
         entry.destination_solar_system_id,
         entry.instance_id,
@@ -272,7 +272,7 @@ pub async fn create_escalation_expedition(
         false,
     )
     .await;
-    crate::services::notify_emitters_batch3_space::emit_escalation_created_or_advanced(
+    crate::services::notify_emitters_space_dungeons::emit_escalation_created_or_advanced(
         ctx,
         char_id,
         entry.instance_id,
@@ -450,14 +450,14 @@ pub async fn advance_expedition_step(
                 }
             }
         });
-        crate::services::notify_emitters_batch10::emit_dungeon_instance_removed(
+        crate::services::notify_emitters_tournaments_anomalies::emit_dungeon_instance_removed(
             ctx,
             prev_sys,
             instance_id,
             &old_sig_id,
             i64::from(prev_did),
         );
-        crate::services::notify_emitters_batch3_space::emit_escalation_created_or_advanced(
+        crate::services::notify_emitters_space_dungeons::emit_escalation_created_or_advanced(
             ctx,
             char_id,
             entry.instance_id,
@@ -771,7 +771,7 @@ pub async fn validate_and_advance_pve_site_room(
             let life = if ls == 0 { 86_400 } else { ls };
             let exp_ft = ((cu.saturating_add(life) as i64) + 11_644_473_600) * 10_000_000;
             let fallback_room_id = i64::from(did.max(1)) * 100 + i64::from(cw);
-            crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications(
+            crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications(
                 ctx,
                 char_id,
                 sys_id,
@@ -830,7 +830,7 @@ pub fn enter_combat_anomaly_site(
     };
     let exp_ft = ((site.created_unix.saturating_add(life) as i64) + 11_644_473_600) * 10_000_000;
     let fallback_room_id = i64::from(site.dungeon_id.max(1)) * 100 + i64::from(site.current_wave);
-    crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications(
+    crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications(
         ctx,
         char_id,
         sys_id,

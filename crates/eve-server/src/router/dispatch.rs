@@ -680,7 +680,7 @@ impl ServerContext {
                     services::industry_pi::sync_character_pi_colonies_on_login(self, cid);
                     services::nav_warp_interdiction::sync_waypoints_on_login(self, cid);
                     if let Some(st_id) = session.station_id {
-                        services::notify_emitters_batch5::emit_char_station_notification(self, cid, st_id, true);
+                        services::notify_emitters_combat_ess_progression::emit_char_station_notification(self, cid, st_id, true);
                     }
                 }
             }
@@ -1257,7 +1257,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         return;
     }
     crate::services::mining_sites::spawn_seeded_site_entities(ctx, sys_id, newly_spawned, guard_waves).await;
-    crate::services::mining_b33::maybe_spawn_phased_asteroid_field(ctx, sys_id).await;
+    crate::services::mining_phased_fields::maybe_spawn_phased_asteroid_field(ctx, sys_id).await;
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ pub async fn handle_weapons(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+            let _ = crate::session_cluster_lifecycle::maybe_abort_safe_logoff_on_action(
                 ctx,
                 char_id,
                 "SAFE_LOGOFF_ABORT_MODULE",
@@ -344,11 +344,11 @@ pub async fn handle_weapons(
                         .write()
                         .unwrap_or_else(|e| e.into_inner())
                         .trigger_weapon_timer(char_id, now_unix);
-                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                    crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                         ctx, char_id, vcid, now_unix,
                     );
                 } else {
-                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                    crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
                 }
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
@@ -1054,7 +1054,7 @@ pub async fn handle_weapons(
                                         ctx, char_id, vcid, sys_id, sys_sec, is_arc_pod, now_unix,
                                     );
                                 }
-                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                                crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                                     ctx, char_id, vcid, now_unix,
                                 );
                                 had_secondary_pvp_hit = true;
@@ -1180,7 +1180,7 @@ pub async fn handle_weapons(
                 let (is_anchored_container, is_secure_container, is_unanchored_jetcan) =
                     ctx.db.with_snapshot(|snap| {
                         let anchored = snap
-                            .sp6_lifecycle
+                            .session_cluster_lifecycle
                             .space_object_meta
                             .get(&resolved_target_id)
                             .is_some_and(|m| m.anchor_start_unix.is_some())
@@ -1233,7 +1233,7 @@ pub async fn handle_weapons(
                         st.suspect_flag_until_unix = 0;
                     }
                 }
-                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                     ctx,
                     char_id,
                     victim_char_id,
@@ -1297,7 +1297,7 @@ pub async fn handle_weapons(
                     .pvp_timer_until_unix = now_unix.saturating_add(900);
             } else {
                 // Attacking an NPC sets the 5-minute (300s) NPC timer (`feat:crimewatch.npc-timers`)
-                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
             }
 
             // Handle target destruction: 50% Loot Fairy wreck drop, DetailedKillmail with 15-min assist window & SHA-1 hash, and Pod Corpse / Implant destruction

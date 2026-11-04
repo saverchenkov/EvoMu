@@ -199,7 +199,7 @@ pub async fn handle(
                         .insert("macho_global_config".into(), json);
                 });
             }
-            crate::services::notify_emitters_batch3::emit_global_config_updated(ctx, &key, &val);
+            crate::services::notify_emitters_character_services::emit_global_config_updated(ctx, &key, &val);
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -326,7 +326,7 @@ pub async fn handle(
             }
 
             if let Some(prev_cid) = session.character_id {
-                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, prev_cid)
+                let _ = crate::session_cluster_lifecycle::handle_character_logoff_or_disconnect(ctx, prev_cid)
                     .await;
                 crate::services::character_skills::notify_watchlist_presence(ctx, prev_cid, false);
                 crate::services::fleet_social::fleet_social_notify::on_character_logout(
@@ -354,7 +354,7 @@ pub async fn handle(
             ) {
                 if let Some(disp_cid) = displaced.character_id {
                     let _ =
-                        crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, disp_cid)
+                        crate::session_cluster_lifecycle::handle_character_logoff_or_disconnect(ctx, disp_cid)
                             .await;
                     crate::services::character_skills::notify_watchlist_presence(
                         ctx, disp_cid, false,
@@ -500,7 +500,7 @@ pub async fn handle(
                         if prev.session_id != session.session_id {
                             if let Some(prev_cid) = prev.character_id {
                                 let _ =
-                                    crate::sp6_lifecycle::handle_character_logoff_or_disconnect(
+                                    crate::session_cluster_lifecycle::handle_character_logoff_or_disconnect(
                                         ctx, prev_cid,
                                     )
                                     .await;

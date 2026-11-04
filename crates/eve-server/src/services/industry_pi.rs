@@ -764,7 +764,7 @@ pub(crate) fn emit_industry_job(
             })
         });
         if let Some(sys_id) = fac_sys {
-            crate::services::notify_emitters_batch10::emit_system_activity_updated(ctx, sys_id);
+            crate::services::notify_emitters_tournaments_anomalies::emit_system_activity_updated(ctx, sys_id);
         }
     }
 }
@@ -998,17 +998,17 @@ pub(crate) fn handle_industry_job_queries(
                 snap.next_entity_id += 1;
                 let monitor_id = snap.next_entity_id;
                 let mut monitors =
-                    crate::services::notify_emitters_batch3::load_industry_material_monitors(snap);
+                    crate::services::notify_emitters_character_services::load_industry_material_monitors(snap);
                 monitors.insert(
                     monitor_id,
-                    crate::services::notify_emitters_batch3::IndustryMaterialMonitorSub {
+                    crate::services::notify_emitters_character_services::IndustryMaterialMonitorSub {
                         char_id,
                         owner_id,
                         location_id,
                         flag_id,
                     },
                 );
-                crate::services::notify_emitters_batch3::save_industry_material_monitors(
+                crate::services::notify_emitters_character_services::save_industry_material_monitors(
                     snap, &monitors,
                 );
                 if let Some(jid) = job_arg
@@ -1068,7 +1068,7 @@ pub(crate) fn handle_industry_job_queries(
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut monitors = crate::services::notify_emitters_batch3::load_industry_material_monitors(snap);
+                let mut monitors = crate::services::notify_emitters_character_services::load_industry_material_monitors(snap);
                 if let Some(sub) = monitors.get(&job_id) {
                     if sub.char_id != char_id && !session.has_gm_role() {
                         return Err(BridgeRpcError {
@@ -1077,7 +1077,7 @@ pub(crate) fn handle_industry_job_queries(
                         });
                     }
                     monitors.remove(&job_id);
-                    crate::services::notify_emitters_batch3::save_industry_material_monitors(snap, &monitors);
+                    crate::services::notify_emitters_character_services::save_industry_material_monitors(snap, &monitors);
                     return Ok(PyRep::Bool(true));
                 }
                 let Some(j) = snap.industry_jobs.get(&job_id) else {

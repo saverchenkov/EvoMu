@@ -1024,7 +1024,7 @@ pub fn inject_skillpoints(
         };
 
         if is_daily {
-            crate::services::notify_emitters_batch9::clear_alpha_avail_notified(snap, char_id);
+            crate::services::notify_emitters_skills_trade_godma::clear_alpha_avail_notified(snap, char_id);
         }
         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
             ch_mut.free_skill_points += y;
@@ -1045,7 +1045,7 @@ pub fn inject_skillpoints(
             vec![PyRep::Integer(1)],
         );
         if rem_non_dim <= 0 {
-            crate::services::notify_emitters_batch9::emit_non_diminishing_injections_removed(ctx, char_id);
+            crate::services::notify_emitters_skills_trade_godma::emit_non_diminishing_injections_removed(ctx, char_id);
         }
     }
 

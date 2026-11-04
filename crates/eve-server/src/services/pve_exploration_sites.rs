@@ -113,7 +113,7 @@ pub async fn materialize_spewed_cans_core(
     let now_unix = db.clock().now_unix_secs();
     db.with_mut_snapshot(|snap| {
         for can in cans {
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can.can_item_id, now_unix, false);
+            crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, can.can_item_id, now_unix, false);
             snap.items.insert(
                 can.can_item_id,
                 InventoryItemRecord {
@@ -256,7 +256,7 @@ pub async fn spawn_ded_overseer_wreck_core(
     let wreck_id = db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let wid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
+        crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
         snap.items.insert(
             wid,
             InventoryItemRecord {
@@ -462,7 +462,7 @@ pub async fn drop_sleeper_wreck_core(
     let wreck_id = db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let wid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
+        crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
         snap.items.insert(
             wid,
             InventoryItemRecord {

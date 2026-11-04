@@ -896,10 +896,10 @@ pub fn handle(
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
         ("localizationServer", "GetAllTextChanges") => Some(
-            crate::services::notify_emitters_batch9_part2::handle_get_all_text_changes(ctx, session, args),
+            crate::services::notify_emitters_skills_trade_godma::handle_get_all_text_changes(ctx, session, args),
         ),
         ("localizationServer", "UpdateLocalizationQAWrap") => Some(
-            crate::services::notify_emitters_batch9_part2::handle_update_localization_qa_wrap(ctx, session, args),
+            crate::services::notify_emitters_skills_trade_godma::handle_update_localization_qa_wrap(ctx, session, args),
         ),
         ("localizationServer", "ReloadFSDPickle") => {
             if let Err(e) = ServerContext::require_auth(session) {

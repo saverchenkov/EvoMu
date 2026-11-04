@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use crate::services::notify_emitters_batch3_space::emit_dungeon_progression_notifications;
+use crate::services::notify_emitters_space_dungeons::emit_dungeon_progression_notifications;
 use crate::services::pve_dungeon_runtime::{
     apply_dungeon_trigger_actions, dist3, has_dungeon_runtime_store,
     materialize_dungeon_room_entities, unix_to_filetime_ticks, with_dungeon_runtime_store,
@@ -204,7 +204,7 @@ pub async fn try_activate_dungeon_runtime_gate(
     );
     if target_room_idx > 0 {
         if let Some(last_tid) = last_completed_task_id {
-            crate::services::notify_emitters_b36::emit_progression_advanced(
+            crate::services::notify_emitters_combat_ess_progression::emit_progression_advanced(
                 ctx,
                 char_id,
                 room_obj_id,
@@ -1175,14 +1175,14 @@ pub fn dispatch_dungeon_notify_actions(
     progression_events: &[(i64, i64)],
 ) {
     for &(task_id, objective_id) in progression_events {
-        crate::services::notify_emitters_b36::emit_progression_task_completed_with_db(
+        crate::services::notify_emitters_combat_ess_progression::emit_progression_task_completed_with_db(
             db,
             pending_notifications,
             notify_tx,
             char_id,
             task_id,
         );
-        crate::services::notify_emitters_b36::emit_progression_advanced_with_db(
+        crate::services::notify_emitters_combat_ess_progression::emit_progression_advanced_with_db(
             db,
             pending_notifications,
             notify_tx,

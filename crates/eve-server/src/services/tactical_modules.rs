@@ -562,7 +562,7 @@ pub async fn activate_auto_targeting_system(
         if dist > max_range {
             continue;
         }
-        if super::mining_b33::is_auto_target_hostile_ball(ctx, sys, char_id, ship_id, b, &fleet_members, &active_aggressors).await {
+        if super::mining_phased_fields::is_auto_target_hostile_ball(ctx, sys, char_id, ship_id, b, &fleet_members, &active_aggressors).await {
             let sig = sys
                 .get_combat_state(b.id)
                 .await
@@ -1148,7 +1148,7 @@ pub async fn activate_command_burst(
     });
 
     if clone_grade == 0 { return Err(BridgeRpcError { code: "OmegaRequiredForCommandBurst".into(), message: "Alpha clones cannot activate Command Burst modules".into() }); }
-    super::mining_b33::ensure_command_burst_hull_allowed(&ctx.sde, mod_type, ship_type_id)?;
+    super::mining_phased_fields::ensure_command_burst_hull_allowed(&ctx.sde, mod_type, ship_type_id)?;
     let max_active_allowed = 2 + cmd_rig_bonus;
     if active_burst_count >= max_active_allowed { return Err(BridgeRpcError { code: "MaxGroupActiveExceeded".into(), message: format!("Cannot activate more than {max_active_allowed} Command Burst module(s) without additional Command Processor rigs") }); }
 
@@ -1293,7 +1293,7 @@ pub async fn activate_command_burst(
                 let st = cw.get_or_create(member_char_id);
                 (st.is_criminal(now_unix_burst), st.is_suspect(now_unix_burst))
             };
-            let has_unshared_le = crate::sp6_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
+            let has_unshared_le = crate::session_cluster_lifecycle::has_active_pvp_timer(ctx, member_char_id, now_unix_burst)
                 && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
                     let hle = rt.limited_engagements.get(&char_id);
                     rt.limited_engagements.get(&member_char_id).is_some_and(|m| {
@@ -1359,7 +1359,7 @@ pub async fn activate_command_burst(
         ctx.invalidate_ship_fitting(member_sid);
         ctx.notify(NotificationTarget::Character(member_cid), "OnDbuffUpdated", "charid", vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())]);
     }
-    crate::services::notify_emitters_batch3_space::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());
+    crate::services::notify_emitters_space_dungeons::emit_fleet_boosted(ctx, char_id, mod_type.type_id, affected_ships.len());
 
     Ok(PyRep::keyval([
         ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)), ("chargeTypeID", PyRep::Integer(c_tid as i64)),

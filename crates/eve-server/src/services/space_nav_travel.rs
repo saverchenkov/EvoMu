@@ -326,7 +326,7 @@ pub(crate) async fn handle_cmd_goto_point(
     let handle = ctx.systems.get_or_spawn(sys_id);
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
-    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
         .goto_point(ship_id, DVec3::new(x, y, z))
         .await
@@ -714,7 +714,7 @@ pub(crate) async fn handle_cmd_goto_direction(
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
         .await
@@ -766,7 +766,7 @@ pub(crate) async fn handle_cmd_stop(
             code: "DestinyCommandFailed".into(),
             message: e,
         })?;
-    crate::services::notify_emitters_batch3_space::emit_destiny_updates(
+    crate::services::notify_emitters_space_dungeons::emit_destiny_updates(
         ctx,
         char_id,
         vec![PyRep::Tuple(vec![
@@ -831,7 +831,7 @@ pub(crate) async fn handle_cmd_set_speed_fraction(
     }
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     if fraction > 0.0 {
-        let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+        let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     }
     handle
         .set_speed_fraction(ship_id, fraction.clamp(0.0, 1.0))
@@ -916,7 +916,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let res = handle
         .set_movement_mode(ship_id, mode)
         .await
@@ -1019,7 +1019,7 @@ pub(crate) async fn handle_cmd_align_to(
     ensure_ship_not_immobilized(ctx, &handle, ship_id).await?;
     ensure_not_mjd_spooling(&handle, ship_id).await?;
     super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let _ = crate::services::notify_emitters_batch8::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
+    let _ = crate::services::notify_emitters_seasons_tactical::break_gate_cloak_and_notify(ctx, &handle, char_id, ship_id).await;
     let _ = handle.set_speed_fraction(ship_id, 1.0).await;
     let res = handle
         .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
@@ -1194,7 +1194,7 @@ pub(crate) async fn sync_ship_cloak_and_mjfg_from_fitting(
     if cloak_now != cloak_before {
         emit_cloak_transition(ctx, sys_id, ship_id, cloak_now).await;
         if cloak_before && !cloak_now && in_abyssal && active_cloak.is_some() {
-            crate::services::notify_emitters_b23::emit_cloak_module_force_deactivated(
+            crate::services::notify_emitters_dungeon_triggers::emit_cloak_module_force_deactivated(
                 ctx,
                 char_id,
                 "AbyssalDeadspaceCloakBlocked",

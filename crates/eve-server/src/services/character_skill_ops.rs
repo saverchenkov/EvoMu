@@ -91,7 +91,7 @@ pub fn migrate_obsolete_skills_for_character(
         Ok((to_refund, total_sp, new_free_sp)) if !to_refund.is_empty() => {
             let removed_pairs: Vec<(u32, u8)> = to_refund.iter().map(|&(sk, _)| (sk, 0u8)).collect();
             super::jump_clone_names::emit_server_skills_removed(ctx, char_id, &removed_pairs);
-            super::notify_emitters_batch9::emit_skill_forced_refresh(ctx, char_id);
+            super::notify_emitters_skills_trade_godma::emit_skill_forced_refresh(ctx, char_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnFreeSkillPointsChanged",
@@ -625,7 +625,7 @@ pub async fn post_inventory_fitting_hook(
                     .filter(|i| {
                         i.location_id == sys_id as i64
                             && i.flag == eve_db::InventoryFlag::None
-                            && !snap.sp6_lifecycle.space_object_meta.contains_key(&i.item_id)
+                            && !snap.session_cluster_lifecycle.space_object_meta.contains_key(&i.item_id)
                             && ctx
                                 .sde
                                 .types
@@ -635,7 +635,7 @@ pub async fn post_inventory_fitting_hook(
                     .map(|i| (i.item_id, i.type_id))
                     .collect();
                 for &(iid, _) in &candidates {
-                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                    crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
                         snap, iid, now_unix, false,
                     );
                 }
@@ -675,7 +675,7 @@ pub async fn post_inventory_fitting_hook(
             if !valid_ids.is_empty() {
                 ctx.db.with_mut_snapshot(|snap| {
                     for cid in valid_ids {
-                        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&cid) {
+                        if let Some(meta) = snap.session_cluster_lifecycle.space_object_meta.get_mut(&cid) {
                             if meta.anchor_start_unix.is_some() {
                                 meta.anchor_start_unix = Some(now_unix);
                                 meta.created_unix = Some(now_unix);

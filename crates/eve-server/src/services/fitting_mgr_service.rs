@@ -456,7 +456,7 @@ pub(crate) async fn handle_fitting_mgr(
             match save_res {
                 Ok(saved_ids) => {
                     if is_community_fitting_owner(owner_id) {
-                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                        crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -648,7 +648,7 @@ pub(crate) async fn handle_fitting_mgr(
             match res {
                 Ok(owner_id) => {
                     if is_community_fitting_owner(owner_id) {
-                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                        crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -723,7 +723,7 @@ pub(crate) async fn handle_fitting_mgr(
                 let deleted_list: Vec<PyRep> = deleted_ids.iter().copied().map(PyRep::Integer).collect();
                 if !deleted_list.is_empty() {
                     if is_community_fitting_owner(target_owner) {
-                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                        crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -786,7 +786,7 @@ pub(crate) async fn handle_fitting_mgr(
                     .unwrap();
                 if deleted {
                     if is_community_fitting_owner(target_owner) {
-                        crate::services::notify_emitters_batch3::emit_community_fittings_updated(ctx);
+                        crate::services::notify_emitters_character_services::emit_community_fittings_updated(ctx);
                     }
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),

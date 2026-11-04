@@ -215,7 +215,7 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert!(ctx.drain_notifications_for_char(PILOT1).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"));
 
     // Verify AddFolder + UpdateFolder + CreateSubfolder + UpdateSubfolder persist across SQLite reload
-    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_folder_crud_reload");
+    let ctx_reloaded = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "agb_folder_crud_reload");
     let mut sess1_re = login_select(&ctx_reloaded, PILOT1, 7111).await;
     let finfo_re = rpc(&ctx_reloaded, &mut sess1_re, "accessGroupBookmarkMgr", "GetFolderInfo", &[PyRep::Integer(folder_id)]).await;
     assert_eq!(finfo_re.dict_get("folderName"), Some(&PyRep::String("Fleet Staging Tactical".into())));
@@ -549,7 +549,7 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let PyRep::Tuple(p2_inactive_parts) = &p2_bms_inactive else { panic!() };
     let PyRep::List(p2_inact_list) = &p2_inactive_parts[1] else { panic!() };
     assert!(!p2_inact_list.iter().any(|b| b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))));
-    let ctx_inact_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_known_inactive_reload");
+    let ctx_inact_re = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "agb_known_inactive_reload");
     assert_eq!(ctx_inact_re.db.with_snapshot(|s| s.bookmark_folder_known_by.get(&(folder_id, PILOT2)).copied()), Some(false));
 
     // Setting True restores the folder bookmarks and persists across SQLite reload
@@ -561,7 +561,7 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let PyRep::Tuple(p2_active_parts) = &p2_bms_active else { panic!() };
     let PyRep::List(p2_act_list) = &p2_active_parts[1] else { panic!() };
     assert!(p2_act_list.iter().any(|b| b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))));
-    let ctx_act_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_known_active_reload");
+    let ctx_act_re = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "agb_known_active_reload");
     let mut sess2_re = login_select(&ctx_act_re, PILOT2, 7212).await;
     sess2_re.corporation_id = Some(CORP_ID);
     let p2_re_bms = rpc(&ctx_act_re, &mut sess2_re, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
@@ -629,7 +629,7 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let exp_create = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "BookmarkStaticLocation", &[PyRep::Integer(ship_id), PyRep::Integer(folder_id), PyRep::String("Temp 3h Safe".into()), PyRep::String("3h".into()), PyRep::Integer(3)]).await;
     let PyRep::Tuple(exp_parts) = &exp_create else { panic!() };
     let temp_bm_id = exp_parts[0].as_i64().unwrap();
-    let ctx_exp_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_temp_bm_expiry_reload");
+    let ctx_exp_re = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "agb_temp_bm_expiry_reload");
     common::pin_clock(&ctx_exp_re);
     assert!(ctx_exp_re.db.with_snapshot(|s| s.bookmark_expiries.get(&temp_bm_id).copied()).unwrap_or(0) > 0, "expiry_unix must survive SQLite reload");
     let mut sess1_exp_re = login_select(&ctx_exp_re, PILOT1, 7219).await;

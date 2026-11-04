@@ -134,3 +134,16 @@ To eliminate deadlocks (specifically ABBA lock inversions between the async syst
    - Never split a financial transfer into two independent database commits (e.g., debiting wallet in transaction A, then crediting pool in transaction B).
 2. **No Unpersisted Side-Stores:**
    - Gameplay state must never live in isolated process-global statics (`OnceLock`, `Mutex`, `LazyLock`) that diverge from SQLite or vanish on server restart. All state must reside in `WorldStateSnapshot` with corresponding SQLite migrations.
+
+---
+
+## 7. File & Module Organization (Semantic Grouping Over Plan Batches)
+
+1. **No Plan, Batch, or Part Artifacts in File/Module/Test Names:**
+   - **Never** name source files, modules, or test functions after implementation batches (`batch9`, `b22`, `b36`, `w34`, `r8`), phase codes (`sp6`, `d6`, `p6`, `c7`), audit vocabulary (`fake_remediation`, `remediation`, `remediated`, `closure`), or line-limit splits (`_part2`, `_part3`, `_b`, `_c`).
+   - Plan batches and audit passes are ephemeral project-management details that have no meaning in code and hurt readability.
+2. **Fold by Common Semantic Denominator (Exceeding Line Counts When Needed):**
+   - Group production handlers and integration tests by their EVE Online domain (`mining_*`, `combat_*`, `dogma_*`, `structures_*`, `sovereignty_*`, `fw_*`, `economy_*`, `industry_*`, `pi_*`, `pve_*`, `abyssal_*`, `wormhole_*`, `quasar_*`, `esi_*`, `notify_*`, `rpc_*`).
+   - If tests or handlers share a semantic domain and cannot be subdivided into genuinely distinct domain concepts, keep them in a single file even if it exceeds 1,500 lines rather than splitting into `_part2`, `_part3`, etc.
+3. **Behavior-Driven Test Naming & Documentation:**
+   - Frame integration tests around the **system behavior, protocol contract, or game mechanic** being verified (e.g., `test_esi_calendar_rpc_and_http_persistence`, `test_upwell_docking_acl_and_hull_matrix`), never around "protecting against fakes" or "remediating fake DONE rows".

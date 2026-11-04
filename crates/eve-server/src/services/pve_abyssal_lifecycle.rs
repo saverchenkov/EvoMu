@@ -127,7 +127,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     });
 
     let eff_pocket_sys = pocket_cleanup.as_ref().map(|c| c.0).unwrap_or(abyssal_sys);
-    crate::services::notify_emitters_batch10::emit_space_white_out_start(ctx, char_id, eff_pocket_sys);
+    crate::services::notify_emitters_tournaments_anomalies::emit_space_white_out_start(ctx, char_id, eff_pocket_sys);
     let handle = ctx.systems.get_or_spawn(eff_pocket_sys);
     handle.try_remove_ball(ship_id);
     if let Some((_, origin_sys, any_other_alive, ref trace_ids, ref markers, ref caches, ref env_balls, ref npcs)) =
@@ -166,7 +166,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot_at(
     });
 
     let (home_sys_id, _home_station_id, _corvette_id, cleared_zarzakh_gate) =
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+        crate::session_cluster_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
             st.abyssal_sessions.remove(&char_id);
             if let Some((_, _, false, _, _, ref caches, _, _)) = pocket_cleanup {
                 for &cid in caches {
@@ -351,7 +351,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
 
     for (cid, sid, abyss_sys, origin_sys, origin_pos, saved_attrs, tier) in &evacuated {
         restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
-        crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
+        crate::session_cluster_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
         let abyss_handle = ctx.systems.get_or_spawn(*abyss_sys);
         abyss_handle.try_remove_ball(*sid);
@@ -508,7 +508,7 @@ pub fn evacuate_void_space_session_sync(
     with_pve_special_reg(ctx, |reg| {
         reg.void_space_sessions.remove(&char_id);
     });
-    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+    crate::session_cluster_lifecycle::clear_abyssal_session(ctx, char_id);
 
     let origin_sys = vs.origin_solar_system_id;
     let exit_pos = [
@@ -591,7 +591,7 @@ pub fn evacuate_void_space_session_sync(
             )]),
         ],
     );
-    crate::services::notify_emitters_batch10::emit_space_white_out_start(
+    crate::services::notify_emitters_tournaments_anomalies::emit_space_white_out_start(
         ctx,
         char_id,
         VOID_SPACE_SYSTEM_ID,
@@ -651,7 +651,7 @@ pub fn reconcile_abyssal_login(
     let has_sp6_only = with_pve_special_reg(ctx, |reg| {
         !reg.abyssal_pockets.contains_key(&char_id)
             && !reg.void_space_sessions.contains_key(&char_id)
-    }) && crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+    }) && crate::session_cluster_lifecycle::with_sp6_state(&ctx.db, |st| {
         st.abyssal_sessions.contains_key(&char_id)
     });
     if has_sp6_only {

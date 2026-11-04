@@ -426,7 +426,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     if let Some(d) = displaced {
                                         if d.session_id != session_id {
                                             if let Some(disp_cid) = d.character_id {
-                                                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(
+                                                let _ = crate::session_cluster_lifecycle::handle_character_logoff_or_disconnect(
                                                     &ctx, disp_cid,
                                                 )
                                                 .await;
@@ -824,7 +824,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 }
             }
             if let Some(cid) = session.character_id {
-                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
+                let _ = crate::session_cluster_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
                 crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
                 crate::services::fleet_social::fleet_social_notify::on_character_logout(&ctx, cid);
                 crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(&ctx, cid);

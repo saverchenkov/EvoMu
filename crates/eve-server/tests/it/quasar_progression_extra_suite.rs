@@ -611,7 +611,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     });
 
     // Persist to SQLite and reopen a second ServerContext
-    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "quasar_blobs");
+    let ctx_reloaded = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "quasar_blobs");
 
     // Verify all quasar_state_blobs are present in SQLite
     ctx_reloaded.db.with_snapshot(|s| {

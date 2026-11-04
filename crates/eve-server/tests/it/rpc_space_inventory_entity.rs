@@ -15,7 +15,7 @@ use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 
-use super::common;
+use crate::common;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     with_combat_runtime, with_mut_combat_runtime, ExtendedNpcEntity,

@@ -634,14 +634,14 @@ impl ServerContext {
                 ),
                 ..eve_destiny::CombatState::default()
             };
-            crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
+            crate::session_cluster_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
             return cs;
         }
         let mut cs = self.build_type_combat_state(type_id);
         cs.rng_state = eve_destiny::CombatState::seed_rng_from_u64(
             (ship_id as u64) ^ (char_id as u64).rotate_left(17) ^ (u64::from(type_id) << 32),
         );
-        crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
+        crate::session_cluster_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
         cs
     }
 
@@ -894,7 +894,7 @@ impl ServerContext {
                     Arc::clone(&active_ewar_starts),
                     Arc::clone(&tactical_state),
                 );
-                let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
                     &step_ctx,
                     char_id,
                     solar_system_id,

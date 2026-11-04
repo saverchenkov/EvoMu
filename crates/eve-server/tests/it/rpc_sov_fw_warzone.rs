@@ -579,7 +579,7 @@ async fn test_fw_warzone_solarsystem_states_and_queries() {
         other => panic!("Expected List for keys, got {other:?}"),
     }
 
-    // 6. P1-02 Remediation: verify entity type isolation when searching bounties by ID
+    // 6. P1-02 behavioral verification: verify entity type isolation when searching bounties by ID
     with_mut_combat_runtime(&ctx, |rt| {
         rt.player_bounty_pool.insert(CHAR_ID, 5_000_000.0);
         rt.player_bounty_pool.insert(CORP_ID, 25_000_000.0);

@@ -348,7 +348,7 @@ async fn apply_standup_hit(
         {
             return None;
         }
-        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, gunner_char_id, vcid, now_unix);
+        crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, gunner_char_id, vcid, now_unix);
         let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
         cw.get_or_create(gunner_char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
         cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -389,7 +389,7 @@ async fn apply_standup_hit(
         }
     }
     if victim_char_opt.is_none() && (applied > 0.0 || neut_amt > 0.0) {
-        crate::sp6_lifecycle::record_npc_aggression_timer(ctx, gunner_char_id, now_unix);
+        crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, gunner_char_id, now_unix);
     }
     Some((applied, destroyed))
 }

@@ -987,7 +987,7 @@ pub fn handle_industry_jobs(
             match res {
                 Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta, eff_in_flag, in_cid)) => {
                     emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
-                    crate::services::notify_emitters_batch3::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
+                    crate::services::notify_emitters_character_services::emit_industry_materials_consumed(ctx, char_id, job_id, station_id, docked_id, cost_meta.owner_id, cost_meta.use_corp, eff_in_flag, in_cid, &cost_meta.consumed_materials);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)), ("ownerID", PyRep::Integer(cost_meta.owner_id)),
                         ("blueprintID", PyRep::Integer(bp_iid)), ("blueprintItemID", PyRep::Integer(bp_iid)),

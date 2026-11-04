@@ -464,7 +464,7 @@ pub(super) fn handle_corps(
                     let change = PyRep::Dict(change_entries);
                     ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
                     if let Some((_, new_aw)) = allow_war_changed {
-                        crate::services::notify_emitters_batch9::emit_allow_war_updated(ctx, corp_id, new_aw);
+                        crate::services::notify_emitters_skills_trade_godma::emit_allow_war_updated(ctx, corp_id, new_aw);
                     }
                     Some(Ok(PyRep::keyval([
                         ("corporationID", PyRep::Integer(corp_id)), ("description", PyRep::String(desc)),
@@ -1078,7 +1078,7 @@ pub(super) fn handle_corps(
                                 ("toCharacterIDs", PyRep::List(vec![PyRep::Integer(applicant_id)])),
                                 ("toCorpOrAllianceID", PyRep::Integer(corp_id)),
                                 ("subject", PyRep::String(subj)),
-                                ("sentDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now_unix))),
+                                ("sentDate", PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(now_unix))),
                             ]);
                             ctx.notify(
                                 NotificationTarget::Character(applicant_id),

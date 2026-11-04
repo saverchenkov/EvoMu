@@ -891,7 +891,7 @@ impl NpcSpawnManager {
         }
 
         let res = ctx.db.try_with_mut_snapshot(|snap| {
-            crate::services::pve_open_feats_b36::credit_ballpark_npc_bounty_with_ess_split(
+            crate::services::pve_rnd_storyline_sites::credit_ballpark_npc_bounty_with_ess_split(
                 &ctx.sde,
                 snap,
                 sys_id,
@@ -923,7 +923,7 @@ impl NpcSpawnManager {
                 // Spawn physical NPC wreck item (26557)
                 snap.next_entity_id += 1;
                 let wreck_id = snap.next_entity_id;
-                crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
                     snap, wreck_id, now_unix, true,
                 );
                 snap.items.insert(

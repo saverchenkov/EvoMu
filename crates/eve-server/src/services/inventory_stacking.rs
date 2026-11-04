@@ -821,7 +821,7 @@ pub(crate) async fn handle_multi_add(
     let moved: Vec<i64> = moved.into_iter().map(|(id, _, _)| id).collect();
     let mut source_ships = HashSet::new();
     for &(old_loc, item_id, _) in &fitted_unfit_ids {
-        let _ = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+        let _ = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
             ctx,
             char_id,
             session.solar_system_id,
@@ -1323,8 +1323,8 @@ pub async fn despawn_empty_jetcan_if_needed(
             .remove(&cont_id)
             .and_then(|c| u32::try_from(c.location_id).ok());
         snap.item_positions.remove(&cont_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&cont_id);
-        snap.sp6_lifecycle.ship_combat_hp.remove(&cont_id);
+        snap.session_cluster_lifecycle.space_object_meta.remove(&cont_id);
+        snap.session_cluster_lifecycle.ship_combat_hp.remove(&cont_id);
         Some(sys_id.or(loc_sys))
     });
     let Some(sys_opt) = resolved_sys_opt else {

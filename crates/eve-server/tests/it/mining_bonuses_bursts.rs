@@ -857,7 +857,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     let next_tick = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
         rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
     });
-    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick).await;
+    eve_server::session_cluster_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick).await;
     let has_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 346)
     });
@@ -890,7 +890,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     let next_tick_cargo = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
         rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
     });
-    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_cargo).await;
+    eve_server::session_cluster_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_cargo).await;
     let has_cargo_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
@@ -948,7 +948,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     let next_tick_high = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
         rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
     });
-    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_high).await;
+    eve_server::session_cluster_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_high).await;
     let has_ore_748 = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 748)
     });
@@ -1107,7 +1107,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     let next_tick_exc_ore = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
         rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
     });
-    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ore).await;
+    eve_server::session_cluster_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ore).await;
     let has_exc_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 6_682)
     });
@@ -1130,7 +1130,7 @@ async fn test_mn09_mining_drones_and_excavators() {
     let next_tick_exc_ice = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
         rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
     });
-    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ice).await;
+    eve_server::session_cluster_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ice).await;
     let has_exc_ice = p.ctx.db.with_snapshot(|snap| {
         snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 16262 && it.quantity == 1)
     });

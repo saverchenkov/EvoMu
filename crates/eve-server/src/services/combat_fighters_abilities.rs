@@ -577,7 +577,7 @@ async fn activate_single_fighter_ability(
 
         if let Some(victim_char_id) = victim_char_opt {
             if victim_char_id != char_id {
-                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                     ctx,
                     char_id,
                     victim_char_id,
@@ -947,7 +947,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
                                 now_unix,
                             );
                             if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
-                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                                crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                                     ctx, char_id, vcid, now_unix,
                                 );
                                 let is_legal = ctx.db.with_snapshot(|snap| {

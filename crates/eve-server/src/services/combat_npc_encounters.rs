@@ -525,7 +525,7 @@ pub fn flush_npc_bounty_tick(
                     .ess_main_bank
                     .checked_add(main_cents)
                     .unwrap_or(st.ess_main_bank);
-                crate::services::pve_open_feats_b36::record_ess_main_bank_contribution(
+                crate::services::pve_rnd_storyline_sites::record_ess_main_bank_contribution(
                     st,
                     char_id,
                     main_cents.0,
@@ -868,7 +868,7 @@ pub async fn finalize_cycle_destroyed_npcs(ctx: &ServerContext, solar_system_id:
         let wreck_id = ctx.db.with_mut_snapshot(|snap| {
             snap.next_entity_id += 1;
             let wid = snap.next_entity_id;
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
+            crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
             snap.items.insert(
                 wid,
                 eve_db::InventoryItemRecord {

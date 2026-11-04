@@ -728,7 +728,7 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError::user_error("NoSolarSystem")));
             };
             let cur_ship_for_check = session.ship_id.unwrap_or(0);
-            if let Err(e) = crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
+            if let Err(e) = crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(
                 ctx,
                 char_id,
                 cur_ship_for_check,
@@ -787,7 +787,7 @@ pub async fn handle(
                 None
             });
             if let Some(e) = pre_err {
-                crate::services::notify_emitters_batch10::emit_pvp_matchmaking_failure(
+                crate::services::notify_emitters_tournaments_anomalies::emit_pvp_matchmaking_failure(
                     ctx,
                     char_id,
                     vec![e.code.clone()],
@@ -847,7 +847,7 @@ pub async fn handle(
                         message: "All fleet members must be undocked in the same solar system to queue".into(),
                     }));
                 }
-                if let Err(e) = crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
+                if let Err(e) = crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(
                     ctx, mcid, mship, msys,
                 ) {
                     return Some(Err(e));
@@ -912,7 +912,7 @@ pub async fn handle(
             let ready_opponents: HashSet<i64> = queued_candidates
                 .into_iter()
                 .filter(|&(cid, ship_id, sys_id)| {
-                    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(
+                    crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(
                         ctx, cid, ship_id, sys_id,
                     )
                     .is_ok()
@@ -1219,14 +1219,14 @@ pub async fn handle(
                 Ok(Some((mid, end_gate_id, arena_offset, teams, participants))) => {
                     let char_ids: Vec<i64> = participants.iter().map(|(c, _, _)| *c).collect();
                     for &cid in &char_ids {
-                        crate::services::notify_emitters_batch3_space::emit_pvp_match_found_and_expiry(ctx, cid, ctx.now_unix().saturating_add(900));
+                        crate::services::notify_emitters_space_dungeons::emit_pvp_match_found_and_expiry(ctx, cid, ctx.now_unix().saturating_add(900));
                     }
                     spawn_matched_arena_instance(ctx, session, mid, end_gate_id, arena_offset, teams, participants).await;
                     Some(Ok(PyRep::Integer(5)))
                 }
                 Ok(None) => Some(Ok(PyRep::Integer(30))),
                 Err(e) => {
-                    crate::services::notify_emitters_batch3_space::emit_pvp_matchmaking_failure(ctx, char_id, 1);
+                    crate::services::notify_emitters_space_dungeons::emit_pvp_matchmaking_failure(ctx, char_id, 1);
                     Some(Err(e))
                 }
             }

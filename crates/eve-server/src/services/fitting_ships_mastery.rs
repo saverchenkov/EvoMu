@@ -1158,7 +1158,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     snap.items.remove(&item_id);
                     snap.item_custom_names.remove(&item_id);
                     snap.item_positions.remove(&item_id);
-                    snap.sp6_lifecycle.space_object_meta.remove(&item_id);
+                    snap.session_cluster_lifecycle.space_object_meta.remove(&item_id);
                     if (30_000_000..=50_000_000).contains(&old_location_id) {
                         balls_to_remove.push((old_location_id as u32, item_id));
                     }
@@ -1178,7 +1178,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         if let Some(jetcan) = snap.items.remove(&old_location_id) {
                             snap.item_custom_names.remove(&old_location_id);
                             snap.item_positions.remove(&old_location_id);
-                            snap.sp6_lifecycle.space_object_meta.remove(&old_location_id);
+                            snap.session_cluster_lifecycle.space_object_meta.remove(&old_location_id);
                             balls_to_remove.push((jetcan.location_id as u32, old_location_id));
                         }
                     }
@@ -1292,11 +1292,11 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
         }
 
         ("ship", "SafeLogoff") => {
-            Some(crate::sp6_lifecycle::handle_safe_logoff(ctx, session).await)
+            Some(crate::session_cluster_lifecycle::handle_safe_logoff(ctx, session).await)
         }
 
         ("ship", "AbortSafeLogoff") => Some(
-            crate::sp6_lifecycle::handle_abort_safe_logoff(
+            crate::session_cluster_lifecycle::handle_abort_safe_logoff(
                 ctx,
                 session,
                 "SAFE_LOGOFF_ABORT_GENERIC",

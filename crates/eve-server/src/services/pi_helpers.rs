@@ -1061,7 +1061,7 @@ pub fn consume_pi_import_commodities(
                 );
             let in_customs_or_hangar = (it.location_id == planet_id
                 || snap
-                    .sp6_lifecycle
+                    .session_cluster_lifecycle
                     .space_object_meta
                     .get(&it.location_id)
                     .and_then(|m| m.planet_id)

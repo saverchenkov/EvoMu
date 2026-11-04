@@ -229,7 +229,7 @@ pub async fn drop_site_loot_into_space_core(
     let container_id = db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let cid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, cid, now_unix, false);
+        crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, cid, now_unix, false);
         snap.items.insert(
             cid,
             InventoryItemRecord {

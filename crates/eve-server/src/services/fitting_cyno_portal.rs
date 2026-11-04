@@ -843,9 +843,9 @@ pub async fn relocate_ship(
         "OnJumpTimersUpdated",
         "charid",
         vec![
-            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + cd_secs)),
-            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now + fat_secs)),
-            PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(now)),
+            PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(now + cd_secs)),
+            PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(now + fat_secs)),
+            PyRep::Integer(crate::session_cluster_lifecycle::unix_to_filetime(now)),
             PyRep::Bool(true),
         ],
     );
@@ -858,7 +858,7 @@ pub async fn relocate_ship(
     }
     let from = ctx.systems.get_or_spawn(from_sys);
     let old = from.remove_ball(ship_id).await;
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, from_sys);
     crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let type_id = old.as_ref().map(|b| b.type_id).unwrap_or_else(|| {
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
@@ -1149,7 +1149,7 @@ pub(super) async fn resolve_fleet_beacon(
                     return false;
                 }
             }
-            if let Some(meta) = s.sp6_lifecycle.space_object_meta.get(&it.item_id) {
+            if let Some(meta) = s.session_cluster_lifecycle.space_object_meta.get(&it.item_id) {
                 if !meta.anchor_completed && meta.anchor_start_unix.is_some() {
                     return false;
                 }

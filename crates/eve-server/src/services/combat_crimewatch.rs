@@ -740,7 +740,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
         armor_ratio,
         hull_ratio,
     );
-    super::notify_emitters_b36::emit_combat_message(
+    super::notify_emitters_combat_ess_progression::emit_combat_message(
         ctx,
         attacker_char_id,
         if applied_dmg > 0.0 { "AttackHit" } else { "AttackMiss" },
@@ -767,7 +767,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
     });
     if let Some(vic_id) = resolved_victim {
         if vic_id != attacker_char_id {
-            super::notify_emitters_batch5::emit_damage_state_change(
+            super::notify_emitters_combat_ess_progression::emit_damage_state_change(
                 ctx,
                 vic_id,
                 target_ball_id,
@@ -785,7 +785,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
         );
     }
     if let Some(vic_id) = resolved_victim.filter(|&v| v != attacker_char_id) {
-        super::notify_emitters_b36::emit_combat_message(
+        super::notify_emitters_combat_ess_progression::emit_combat_message(
             ctx,
             vic_id,
             if applied_dmg > 0.0 { "AttackedBy" } else { "AttackMissBy" },

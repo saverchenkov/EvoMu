@@ -528,7 +528,7 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(res) = crate::services::notify_emitters_batch8::handle_select_season_clear_if_none_or_zero(ctx, char_id, args.first()) {
+            if let Some(res) = crate::services::notify_emitters_seasons_tactical::handle_select_season_clear_if_none_or_zero(ctx, char_id, args.first()) {
                 return Some(res);
             }
             let Some(season_id) = args.first().and_then(|a| a.as_i64()) else {

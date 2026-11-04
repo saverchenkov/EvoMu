@@ -54,7 +54,7 @@ pub fn step_dynamic_bounty_multiplier(
         (prev, st.dbs_multiplier)
     });
     if (rate - old_rate).abs() > 1e-9 {
-        crate::services::notify_emitters_batch6::emit_system_dynamic_bounty_state_changed(
+        crate::services::notify_emitters_combat_ess_progression::emit_system_dynamic_bounty_state_changed(
             ctx,
             solar_system_id as i64,
             rate,
@@ -1084,7 +1084,7 @@ pub async fn handle_legacy_and_ess(
                             .ess_main_bank
                             .checked_add(main_cents)
                             .unwrap_or(st.ess_main_bank);
-                        crate::services::pve_open_feats_b36::record_ess_main_bank_contribution(
+                        crate::services::pve_rnd_storyline_sites::record_ess_main_bank_contribution(
                             st,
                             char_id,
                             main_cents.0,
@@ -1150,7 +1150,7 @@ pub async fn handle_legacy_and_ess(
                 }
                 snap.next_entity_id += 1;
                 let wreck_id = snap.next_entity_id;
-                crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
                     snap,
                     wreck_id,
                     ctx.now_unix(),

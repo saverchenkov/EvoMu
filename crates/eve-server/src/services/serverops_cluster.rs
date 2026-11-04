@@ -806,7 +806,7 @@ pub fn execute_daily_maintenance_jobs(ctx: &ServerContext) -> HashMap<String, i6
         0
     };
     let (npc_wrecks_cleaned, mission_npcs_respawned) =
-        crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
+        crate::session_cluster_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
     let wormhole_sites_despawned =
         super::wormhole_pve_escalations::process_wormhole_sites_on_downtime(ctx);
 

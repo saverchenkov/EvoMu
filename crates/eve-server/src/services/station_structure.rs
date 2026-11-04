@@ -488,7 +488,7 @@ pub async fn handle(
                     .await;
             }
             let _ = sys_handle.push_set_state(ship.item_id).await;
-            crate::services::notify_emitters_batch8::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
+            crate::services::notify_emitters_seasons_tactical::emit_restoring_invuln_updated(ctx, char_id, ship.item_id, 300_000_000);
 
             session.station_id = None;
             session.structure_id = None;
@@ -791,7 +791,7 @@ pub async fn handle(
                         );
                     }
                     let prev_sys = session.solar_system_id.unwrap_or(0);
-                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, prev_sys);
+                    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, prev_sys);
                     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                         rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
                     });
@@ -977,7 +977,7 @@ pub async fn handle(
                 }));
             }
             let already_anchored = ctx.db.with_snapshot(|snap| {
-                if snap.sp6_lifecycle.space_object_meta.get(&item_id).is_some_and(|m| m.anchor_start_unix.is_some() || m.anchor_completed) {
+                if snap.session_cluster_lifecycle.space_object_meta.get(&item_id).is_some_and(|m| m.anchor_start_unix.is_some() || m.anchor_completed) {
                     return true;
                 }
                 let st = crate::services::mobile_deployables::read_deployable_state_snap(snap);
@@ -1174,7 +1174,7 @@ pub async fn handle(
                     it.flag = InventoryFlag::Hangar;
                     it.singleton = true;
                 }
-                crate::sp6_lifecycle::record_anchor_meta_in_snap(
+                crate::session_cluster_lifecycle::record_anchor_meta_in_snap(
                     snap,
                     item_id,
                     now_unix,
@@ -1260,8 +1260,8 @@ pub async fn handle(
             }
 
             if item_type.group_id == crate::services::mobile_deployables::GROUP_MOBILE_CYNO_BEACON {
-                let fid = session.fleet_id.or_else(|| crate::services::notify_emitters_batch8::char_fleet_id(ctx, char_id));
-                crate::services::notify_emitters_batch3_space::emit_fleet_jump_beacon_deployable_change(ctx, fid, item_id, sys_id, char_id, true);
+                let fid = session.fleet_id.or_else(|| crate::services::notify_emitters_seasons_tactical::char_fleet_id(ctx, char_id));
+                crate::services::notify_emitters_space_dungeons::emit_fleet_jump_beacon_deployable_change(ctx, fid, item_id, sys_id, char_id, true);
             }
 
             let despawn_unix = if let Some(exp) = crate::services::mobile_deployables::read_deployable_state(ctx)
@@ -1272,9 +1272,9 @@ pub async fn handle(
             {
                 exp
             } else if is_secure_container {
-                now_unix.saturating_add(crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS)
+                now_unix.saturating_add(crate::session_cluster_lifecycle::SECURE_CONTAINER_DECAY_SECS)
             } else if is_warp_disruptor {
-                now_unix.saturating_add(crate::sp6_lifecycle::sde_mobile_warp_disruptor_decay_secs(
+                now_unix.saturating_add(crate::session_cluster_lifecycle::sde_mobile_warp_disruptor_decay_secs(
                     &ctx.sde,
                     item.type_id,
                 ))

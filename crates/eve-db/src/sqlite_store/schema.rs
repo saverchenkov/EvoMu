@@ -447,10 +447,10 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
         let _ = conn.execute(&format!("ALTER TABLE bookmarks ADD COLUMN {col}"), []);
     }
     super::ledger_store::apply_ledger_migration(conn)?;
-    super::d6_store::apply_d6_migration(conn)?;
-    super::d6_social_store::apply_d6_social_migration(conn)?;
-    super::d6_corp_crimewatch_store::apply_d6_corp_crimewatch_migration(conn)?;
-    super::d6_batch4_store::apply_d6_batch4_migration(conn)?;
+    super::notes_lp_sequence_store::apply_d6_migration(conn)?;
+    super::social_store::apply_d6_social_migration(conn)?;
+    super::corp_crimewatch_store::apply_d6_corp_crimewatch_migration(conn)?;
+    super::industry_market_pve_store::apply_d6_batch4_migration(conn)?;
     Ok(())
 }
 

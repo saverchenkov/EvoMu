@@ -552,7 +552,7 @@ async fn quasar_skills_plans_extractors_and_implants() {
     assert_ne!(plan_uuid, first_plan_uuid);
 
     // Verify SQLite reload preserves next_seq so newly created skill plans never collide with existing UUIDs
-    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "skill_plans_seq");
+    let ctx_reloaded = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "skill_plans_seq");
     let after_reload_create = quasar_rpc(&ctx_reloaded, &mut sess, "eve_public.character.skill.plan.CreateRequest", create_val).await;
     assert_eq!(after_reload_create.status_code, STATUS_OK);
     let reload_wm = WireMessage::decode(&after_reload_create.payload.unwrap().value).unwrap();

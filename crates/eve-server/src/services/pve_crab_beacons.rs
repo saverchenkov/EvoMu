@@ -635,7 +635,7 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
                 },
             );
             snap.item_positions.insert(can_id, pos_arr);
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now, true);
+            crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now, true);
             for iid in remaining_loot {
                 if let Some(it) = snap.items.get_mut(&iid) {
                     it.location_id = can_id;
@@ -650,7 +650,7 @@ fn self_destruct_crab_beacon(ctx: &ServerContext, beacon_id: i64) {
         };
         snap.items.remove(&beacon_id);
         snap.item_positions.remove(&beacon_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&beacon_id);
+        snap.session_cluster_lifecycle.space_object_meta.remove(&beacon_id);
         crate::services::mobile_deployables::write_deployable_state_snap(snap, |st| {
             st.deployables.remove(&beacon_id);
         });

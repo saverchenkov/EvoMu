@@ -715,7 +715,7 @@ pub async fn handle(
                     message: format!("Container {item_id} not found or has no expiry"),
                 }));
             };
-            let expiry_ft = crate::sp6_lifecycle::unix_to_filetime(exp);
+            let expiry_ft = crate::session_cluster_lifecycle::unix_to_filetime(exp);
             Some(Ok(PyRep::Integer(expiry_ft)))
         }
         ("beyonce", "GetFleetLocationAndInfo") => {
@@ -972,9 +972,9 @@ async fn handle_cmd_unanchor(
         }
     });
 
-    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, session.fleet_id, target_id);
+    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, session.fleet_id, target_id);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get_mut(&target_id) {
+        if let Some(meta) = snap.session_cluster_lifecycle.space_object_meta.get_mut(&target_id) {
             meta.anchor_start_unix = None;
             meta.anchor_completed = false;
         }

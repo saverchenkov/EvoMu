@@ -245,7 +245,7 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         set_facwar_bunker_vulnerable(ctx, sys_id, occupier_fac, true);
     }
 
-    crate::services::notify_emitters_b30::emit_victory_point_state_updated(
+    crate::services::notify_emitters_crimewatch_fw::emit_victory_point_state_updated(
         ctx,
         sys_id,
         new_vp,
@@ -410,7 +410,7 @@ pub fn complete_fw_dungeon_and_objective(
 
 /// Records an LP donation to a warzone solar system hub and emits `OnSolarSystemLPChange`.
 pub fn donate_solar_system_lp(ctx: &ServerContext, sys_id: u32, old_points: i64, new_points: i64) {
-    crate::services::notify_emitters_b30::emit_solar_system_lp_change(
+    crate::services::notify_emitters_crimewatch_fw::emit_solar_system_lp_change(
         ctx,
         sys_id,
         old_points,

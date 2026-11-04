@@ -1044,9 +1044,9 @@ fn handle_macho_net(
                 state.shutdown_graceful = Some(graceful);
             }
             if timeout_seconds <= 0 {
-                crate::services::notify_emitters_batch3::emit_cluster_shutdown_cancelled(ctx, &shutdown_reason);
+                crate::services::notify_emitters_character_services::emit_cluster_shutdown_cancelled(ctx, &shutdown_reason);
             } else if !shutdown_reason.trim().is_empty() {
-                crate::services::notify_emitters_batch9_part2::emit_server_message_broadcast(
+                crate::services::notify_emitters_skills_trade_godma::emit_server_message_broadcast(
                     ctx,
                     &shutdown_reason,
                 );

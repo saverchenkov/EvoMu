@@ -362,7 +362,7 @@ impl SystemRegistry {
                     downtime_utc_atomic.load(std::sync::atomic::Ordering::Relaxed),
                 );
             }
-            let pending = crate::sp6_lifecycle::populate_persisted_space_objects(
+            let pending = crate::session_cluster_lifecycle::populate_persisted_space_objects(
                 &mut initial_ballpark,
                 solar_system_id,
                 sde,
@@ -941,7 +941,7 @@ impl SystemRegistry {
                                         );
                                     }
                                     if let (Some(db), Some(cs)) = (&db_opt, ballpark.combat_states.get(&ball_id)) {
-                                        crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
+                                        crate::session_cluster_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, cs);
                                     }
                                     sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                     if let Some(ball_snap) = ball_opt {
@@ -1072,7 +1072,7 @@ impl SystemRegistry {
                                     }
                                 }
                                 if let Some(db) = &db_opt {
-                                    crate::sp6_lifecycle::persist_ship_combat_hp_batch_in_db(
+                                    crate::session_cluster_lifecycle::persist_ship_combat_hp_batch_in_db(
                                         db,
                                         ballpark.combat_states.iter().filter_map(|(&bid, cs)| {
                                             if !ballpark.is_static_ball(bid)
@@ -1157,7 +1157,7 @@ impl SystemRegistry {
                                 cs.capacitor = cs.max_capacitor;
                                 let cloned = cs.clone();
                                 if let Some(db) = &db_opt {
-                                    crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
+                                    crate::session_cluster_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &cloned);
                                 }
                                 let _ = reply.send(Ok(cloned));
                             }
@@ -1165,7 +1165,7 @@ impl SystemRegistry {
                                 base_scramble_strengths.insert(ball_id, combat_state.warp_scramble_strength);
                                 base_core_strengths.insert(ball_id, combat_state.warp_core_strength);
                                 if let Some(db) = &db_opt {
-                                    crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &combat_state);
+                                    crate::session_cluster_lifecycle::persist_ship_combat_hp_in_db(db, ball_id, &combat_state);
                                 }
                                 ballpark.combat_states.insert(ball_id, combat_state);
                                 let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();

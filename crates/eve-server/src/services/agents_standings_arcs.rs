@@ -569,7 +569,7 @@ pub fn handle_special_dialogue_action(
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (req_field_skill, skill_lvl) =
-                    crate::services::pve_open_feats_b36::validate_rnd_research_access(
+                    crate::services::pve_rnd_storyline_sites::validate_rnd_research_access(
                         ctx,
                         session.station_id,
                         sys_id,
@@ -578,7 +578,7 @@ pub fn handle_special_dialogue_action(
                         agent_info,
                         requested_field_skill,
                     )?;
-                let rp_per_day = crate::services::pve_open_feats_b36::compute_rnd_rp_per_day(
+                let rp_per_day = crate::services::pve_rnd_storyline_sites::compute_rnd_rp_per_day(
                     ctx,
                     snap,
                     char_id,
@@ -638,7 +638,7 @@ pub fn handle_special_dialogue_action(
         }
 
         // 14 = agentDialogueButtonBuyDatacores (feat:pve.research-agents)
-        14 => Some(crate::services::notify_emitters_batch9::handle_rnd_buy_datacores(
+        14 => Some(crate::services::notify_emitters_skills_trade_godma::handle_rnd_buy_datacores(
             ctx, session, char_id, agent_id, sys_id, args,
         )),
 

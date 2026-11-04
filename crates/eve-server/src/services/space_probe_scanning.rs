@@ -1355,7 +1355,7 @@ pub fn tick_probe_warp_end(ctx: &ServerContext) {
         }
     }
     for (char_id, pid) in due_warps {
-        crate::services::notify_emitters_batch10::emit_probe_warp_end(ctx, char_id, pid);
+        crate::services::notify_emitters_tournaments_anomalies::emit_probe_warp_end(ctx, char_id, pid);
         let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnProbeStateChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(PROBE_STATE_SCANNING as i64)]);
     }
     let due_scans = ctx.db.with_mut_snapshot(|snap| {

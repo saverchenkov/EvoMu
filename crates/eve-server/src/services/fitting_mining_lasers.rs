@@ -115,7 +115,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                     return Some(Err(BridgeRpcError { code: "DogmaDeactivateFailed".into(), message: e.to_string() }));
                 }
             }
-            let affected_ewar_ships = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+            let affected_ewar_ships = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
                 ctx,
                 char_id,
                 session.solar_system_id,

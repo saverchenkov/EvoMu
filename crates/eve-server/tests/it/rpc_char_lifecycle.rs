@@ -1,4 +1,4 @@
-//! Integration tests for character lifecycle charMgr queries (BF-04 remediation).
+//! Integration tests for character lifecycle charMgr queries (BF-04 behavioral verification).
 
 use std::collections::HashMap;
 use eve_machonet::SessionState;
@@ -246,7 +246,7 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
         snap.characters.get(&90_000_001).unwrap().activity_status.clone()
     });
     assert_eq!(status_val, Some("online".into()));
-    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "char_activity_status_reload");
+    let ctx_reloaded = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "char_activity_status_reload");
     let reloaded_status = ctx_reloaded.db.with_snapshot(|snap| {
         snap.characters.get(&90_000_001).unwrap().activity_status.clone()
     });

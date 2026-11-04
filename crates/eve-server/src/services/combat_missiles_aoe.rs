@@ -54,8 +54,8 @@ pub(crate) async fn cleanup_destroyed_non_ship_ball(
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.remove(&ball_id).is_some() {
             snap.item_positions.remove(&ball_id);
-            snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
-            snap.sp6_lifecycle.ship_combat_hp.remove(&ball_id);
+            snap.session_cluster_lifecycle.space_object_meta.remove(&ball_id);
+            snap.session_cluster_lifecycle.ship_combat_hp.remove(&ball_id);
             let mut to_visit = vec![ball_id];
             let mut all_descendants = Vec::new();
             while let Some(parent_id) = to_visit.pop() {
@@ -247,14 +247,14 @@ pub async fn step_missiles_and_breachers(
                 let now_unix = ctx.now_unix();
                 if applied > 0.0 {
                     if let Some(vcid) = victim_char_opt.filter(|&v| v != mstate.attacker_char_id) {
-                        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                        crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                             ctx,
                             mstate.attacker_char_id,
                             vcid,
                             now_unix,
                         );
                     } else if mstate.attacker_char_id > 0 {
-                        crate::sp6_lifecycle::record_npc_aggression_timer(ctx, mstate.attacker_char_id, now_unix);
+                        crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, mstate.attacker_char_id, now_unix);
                     }
                     super::combat_npc_ai::record_npc_threat_event(ctx, mstate.target_ball_id, mstate.attacker_ship_id, applied, false, false);
                 }
@@ -688,7 +688,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                             if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
                                 record_killmail_assist_action(ctx, vcid, char_id, attacker_ball.type_id, m.type_id, applied, false, now_unix);
                                 if applied > 0.0 {
-                                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                                    crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                                     let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                                     cw.get_or_create(char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
                                     cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -937,7 +937,7 @@ pub async fn activate_aoe_or_defender_module_with_cap(
                                             false,
                                             now_unix,
                                         );
-                                        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                                        crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                                         {
                                             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
                                             cw.get_or_create(char_id).pvp_timer_until_unix = now_unix.saturating_add(900);
@@ -1252,9 +1252,9 @@ pub async fn activate_missile_or_breacher_launcher(
                 });
                 if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
-                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                    crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
                 } else {
-                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                    crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
                 }
                 let defer_impact = is_fof_missile && has_explicit_target;
                 if defer_impact {

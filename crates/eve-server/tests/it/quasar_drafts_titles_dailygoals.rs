@@ -524,7 +524,7 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     // ========================================================================
     // 4. Persistence across Server Reload
     // ========================================================================
-    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "quasar_dg_cfg");
+    let ctx_reloaded = crate::session_logoff_and_cluster_tick::persist_and_reopen_sqlite(&ctx, "quasar_dg_cfg");
     let reloaded_goals = ctx_reloaded.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001);
     let reloaded_custom = reloaded_goals.iter().find(|g| g.uuid == custom_uuid).expect("custom goal preserved across reload");
     assert!(reloaded_custom.completed, "Completed state must survive SQLite reload");

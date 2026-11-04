@@ -81,7 +81,7 @@ pub fn execute_death_pipeline_sync_inner(
         Ok::<_, String>((ship.type_id, base, ship.insured_payout_isk))
     })?;
 
-    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(
+    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(
         ctx,
         victim_char_id,
         Some(sys_id),
@@ -104,7 +104,7 @@ pub fn execute_death_pipeline_sync_inner(
                 .collect()
         })
         .unwrap_or_default();
-    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+    crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(
         ctx,
         victim_char_id,
         victim_ship_id,
@@ -206,7 +206,7 @@ pub fn execute_death_pipeline_sync_inner(
         snap.next_entity_id += 1;
         let wreck_id = snap.next_entity_id;
 
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+        crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
             snap, wreck_id, now_unix, is_criminal,
         );
         snap.items.insert(
@@ -734,10 +734,10 @@ pub fn execute_death_pipeline_sync_inner(
         );
     });
 
-    crate::services::notify_emitters_batch6::emit_kill_notification(ctx, victim_char_id);
-    crate::services::notify_emitters_batch6::emit_kill_notification(ctx, attacker_char_id);
+    crate::services::notify_emitters_combat_ess_progression::emit_kill_notification(ctx, victim_char_id);
+    crate::services::notify_emitters_combat_ess_progression::emit_kill_notification(ctx, attacker_char_id);
     if !is_pod {
-        crate::services::notify_emitters_b30::emit_ship_death(ctx, victim_char_id);
+        crate::services::notify_emitters_crimewatch_fw::emit_ship_death(ctx, victim_char_id);
     }
 
     if is_pod {
@@ -746,9 +746,9 @@ pub fn execute_death_pipeline_sync_inner(
             None,
             victim_char_id,
         );
-        crate::services::notify_emitters_batch6::emit_pod_death(ctx, victim_char_id);
-        crate::services::notify_emitters_batch6::emit_player_pod_death(ctx, victim_char_id);
-        crate::services::notify_emitters_batch6::emit_pod_killed(ctx, victim_char_id, victim_ship_id);
+        crate::services::notify_emitters_combat_ess_progression::emit_pod_death(ctx, victim_char_id);
+        crate::services::notify_emitters_combat_ess_progression::emit_player_pod_death(ctx, victim_char_id);
+        crate::services::notify_emitters_combat_ess_progression::emit_pod_killed(ctx, victim_char_id, victim_ship_id);
         let cleared_zarzakh_gate = ctx.db.with_mut_snapshot(|snap| {
             snap.zarzakh_gate_locks
                 .remove(&victim_char_id)
@@ -770,7 +770,7 @@ pub fn execute_death_pipeline_sync_inner(
         let _ = ctx
             .db
             .respawn_character_at_home_station(victim_char_id, victim_ship_id, &ctx.sde);
-        crate::services::notify_emitters_batch6::emit_player_pod_respawn(ctx, victim_char_id);
+        crate::services::notify_emitters_combat_ess_progression::emit_player_pod_respawn(ctx, victim_char_id);
     }
 
     crate::services::combat_crimewatch::combat_wrecks_killmails::register_container_lifetime(
@@ -783,7 +783,7 @@ pub fn execute_death_pipeline_sync_inner(
         is_criminal,
     );
 
-    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+    crate::session_cluster_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
         if is_pod {
             st.disconnected_ships.remove(&victim_char_id);
         } else if let Some(cid) = ejected_cap_id {
@@ -796,7 +796,7 @@ pub fn execute_death_pipeline_sync_inner(
         }
     });
 
-    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, None, victim_ship_id);
+    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, None, victim_ship_id);
     sys_handle.try_remove_ball(victim_ship_id);
     let (wreck_grp, wreck_cat) = if is_pod {
         ctx.sde

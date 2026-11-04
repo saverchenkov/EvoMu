@@ -19,7 +19,7 @@ pub mod agents_missions_helpers;
 pub use agents_missions_helpers::*;
 
 use crate::router::{NotificationTarget, ServerContext};
-use crate::services::notify_emitters_batch3::emit_agent_mission_dialogue;
+use crate::services::notify_emitters_character_services::emit_agent_mission_dialogue;
 use eve_db::{
     ActiveMissionRecord, InventoryFlag, InventoryItemRecord, IskCents, StandingTransactionRecord,
     WalletJournalEntry,
@@ -762,8 +762,8 @@ pub async fn handle(
                                 m.spawned_npc_ball_ids = ball_ids;
                             }
                             let wave_tids: Vec<u32> = spawned_npcs.iter().map(|&(_, tid)| tid).collect();
-                            snap.sp6_lifecycle.mission_initial_npc_counts.insert(format!("{char_id}:{mission_id}"), count as u32);
-                            snap.sp6_lifecycle.mission_initial_npc_types.insert(format!("{char_id}:{mission_id}"), wave_tids);
+                            snap.session_cluster_lifecycle.mission_initial_npc_counts.insert(format!("{char_id}:{mission_id}"), count as u32);
+                            snap.session_cluster_lifecycle.mission_initial_npc_types.insert(format!("{char_id}:{mission_id}"), wave_tids);
                         }
                         if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
                             meta.accepted_at_unix = Some(now);
@@ -1163,14 +1163,14 @@ pub async fn handle(
 
                         let is_rnd = ctx.sde.agents.get(&m_agent_id).is_some_and(is_rnd_agent);
                         if is_rnd {
-                            crate::services::pve_open_feats_b36::record_agent_mission_completed(snap, char_id, m_agent_id);
+                            crate::services::pve_rnd_storyline_sites::record_agent_mission_completed(snap, char_id, m_agent_id);
                             let ag_lvl = ctx.sde.agents.get(&m_agent_id).map_or(1, |a| a.level);
                             let mut research = load_rnd_research_entries(snap, char_id);
                             if let Some(re) = research.iter_mut().find(|r| r.agent_id == m_agent_id) {
                                 let elapsed_days = (now.saturating_sub(re.started_unix) as f64) / 86_400.0;
                                 re.initial_points += re.points_per_day * elapsed_days + re.points_per_day;
                                 let sk_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&re.research_type_id)).map_or(1, |s| s.level);
-                                re.points_per_day = re.points_per_day.max(crate::services::pve_open_feats_b36::compute_rnd_rp_per_day(ctx, snap, char_id, m_agent_id, ag_lvl, sk_lvl));
+                                re.points_per_day = re.points_per_day.max(crate::services::pve_rnd_storyline_sites::compute_rnd_rp_per_day(ctx, snap, char_id, m_agent_id, ag_lvl, sk_lvl));
                                 re.started_unix = now;
                             }
                             save_rnd_research_entries(snap, char_id, &research);
@@ -1202,8 +1202,8 @@ pub async fn handle(
                         let mut resolved_storyline_agent_id = storyline_agent_id;
                         let mut resolved_storyline_level = ctx.sde.agents.get(&m_agent_id).map_or(1, |a| a.level.clamp(1, 5));
                         let (t, storyline) = if (!is_storyline && tmpl.has_standing_rewards) || is_rnd || is_epic_arc {
-                            let sl_opt = ctx.sde.agents.get(&m_agent_id).and_then(|ca| crate::services::pve_open_feats_b36::record_mission_completion_and_resolve_storyline(ctx, snap, char_id, ca));
-                            let qualifies = ctx.sde.agents.get(&m_agent_id).is_some_and(|ca| crate::services::pve_open_feats_b36::is_storyline_qualifying_agent_type(ca.agent_type_id)) && !crate::services::pve_open_feats_b36::is_interbus_or_militia_corp(&ctx.sde, corp_id);
+                            let sl_opt = ctx.sde.agents.get(&m_agent_id).and_then(|ca| crate::services::pve_rnd_storyline_sites::record_mission_completion_and_resolve_storyline(ctx, snap, char_id, ca));
+                            let qualifies = ctx.sde.agents.get(&m_agent_id).is_some_and(|ca| crate::services::pve_rnd_storyline_sites::is_storyline_qualifying_agent_type(ca.agent_type_id)) && !crate::services::pve_rnd_storyline_sites::is_interbus_or_militia_corp(&ctx.sde, corp_id);
                             let t = if !qualifies {
                                 snap.mission_tally.get(&char_id).copied().unwrap_or(0)
                             } else {
@@ -1216,7 +1216,7 @@ pub async fn handle(
                         };
                         if storyline {
                             let storyline_agent_id = resolved_storyline_agent_id;
-                            if let Some(storyline_tmpl) = crate::services::pve_open_feats_b36::select_storyline_mission_for_level(
+                            if let Some(storyline_tmpl) = crate::services::pve_rnd_storyline_sites::select_storyline_mission_for_level(
                                 &ctx.sde,
                                 &snap.active_missions,
                                 char_id,

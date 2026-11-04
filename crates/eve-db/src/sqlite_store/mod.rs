@@ -1,9 +1,9 @@
 //! `sqlite_store` — Durable SQLite schema migrations, row-level change tracking, and transactional persistence (`D-3`).
 
-pub mod d6_batch4_store;
-pub mod d6_corp_crimewatch_store;
-pub mod d6_social_store;
-pub mod d6_store;
+pub mod industry_market_pve_store;
+pub mod corp_crimewatch_store;
+pub mod social_store;
+pub mod notes_lp_sequence_store;
 pub mod fingerprints;
 pub mod ledger_store;
 pub mod load;

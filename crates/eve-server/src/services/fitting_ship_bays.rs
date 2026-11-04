@@ -181,7 +181,7 @@ pub(crate) async fn board_stored_ship(
         } else if let Some(old_id) = prev_ship_id {
             if !prev_is_capsule {
                 crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, old_id);
-                crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, old_id, sys_id);
+                crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, old_id, sys_id);
                 let meta_opt = {
                     let mut bp = sys.ballpark.write().unwrap_or_else(|e| e.into_inner());
                     if let Some(meta) = bp.ball_slim_meta.get_mut(&old_id) {
@@ -383,7 +383,7 @@ pub(crate) async fn ship_jettison(
         }
         snap.next_entity_id += 1;
         let jid = snap.next_entity_id;
-        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+        crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
             snap, jid, now_unix, is_crim,
         );
         snap.items.insert(
@@ -561,8 +561,8 @@ pub(crate) async fn ship_drop(
                 if (t.group_id == 361 || disallow_in_empire) && sys_sec > 0.0 {
                     return Err(err("UserError", format!("Item {} cannot be deployed in empire space (system security {sys_sec:.2} > 0.0)", t.name)));
                 }
-                if t.type_id == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR
-                    && !crate::services::mining_b33::is_low_or_null_kspace(ctx, sys_id)
+                if t.type_id == crate::services::mining_phased_fields::TYPE_MOBILE_PHASE_ANCHOR
+                    && !crate::services::mining_phased_fields::is_low_or_null_kspace(ctx, sys_id)
                 {
                     return Err(err("CannotDeployInHighSec", "Mobile Phase Anchor can only be deployed in low-sec or null-sec K-space"));
                 }
@@ -663,8 +663,8 @@ pub(crate) async fn ship_drop(
                 },
             )
             .await;
-        if tid == crate::services::mining_b33::TYPE_MOBILE_PHASE_ANCHOR {
-            crate::services::mining_b33::on_mobile_phase_anchor_deployed(ctx, sys_id, launched_id).await;
+        if tid == crate::services::mining_phased_fields::TYPE_MOBILE_PHASE_ANCHOR {
+            crate::services::mining_phased_fields::on_mobile_phase_anchor_deployed(ctx, sys_id, launched_id).await;
         }
     }
     let mut map: HashMap<i64, Vec<PyRep>> = ctor_map;
@@ -1142,7 +1142,7 @@ pub(crate) async fn ship_scoop_and_store(
         if !crate::services::mobile_deployables::can_deployable_be_scooped(it_grp) {
             return Err(err("CannotScoop", "This mobile deployable cannot be scooped"));
         }
-        if let Some(meta) = snap.sp6_lifecycle.space_object_meta.get(&item_id) {
+        if let Some(meta) = snap.session_cluster_lifecycle.space_object_meta.get(&item_id) {
             if meta.anchor_start_unix.is_some() || meta.anchor_completed {
                 return Err(err("CannotScoopAnchored", "Cannot scoop an anchored or anchoring object"));
             }
@@ -1351,13 +1351,13 @@ pub(crate) async fn ship_scoop_and_store(
             it_mut.owner_id = char_id;
         }
         snap.item_positions.remove(&item_id);
-        snap.sp6_lifecycle.space_object_meta.remove(&item_id);
+        snap.session_cluster_lifecycle.space_object_meta.remove(&item_id);
         Ok((to_transfer, false))
     })?;
     if let Ok(Some(cs)) = sys.get_combat_state(item_id).await {
         crate::services::mobile_deployables::record_scooped_deployable_damage(ctx, item_id, &cs);
     }
-    crate::services::notify_emitters_batch8::on_deployable_deactivated(ctx, session.fleet_id, item_id);
+    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(ctx, session.fleet_id, item_id);
     crate::services::mobile_deployables::write_deployable_state(ctx, |st| {
         st.deployables.remove(&item_id);
     });

@@ -226,7 +226,7 @@ async fn test_filaments_and_pochven_navigation_mechanics() {
     let void_sys = void_jump_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
     assert_eq!(void_sys, 32_000_002, "Void space destination system 32000002");
     assert_eq!(sess.solar_system_id, Some(32_000_002));
-    eve_server::sp6_lifecycle::clear_abyssal_session(&ctx, char_id);
+    eve_server::session_cluster_lifecycle::clear_abyssal_session(&ctx, char_id);
 
     ctx.advance_secs(15);
 

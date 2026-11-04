@@ -249,9 +249,9 @@ impl ServerContext {
                 let ctx = ServerContext::from_step_components(instance_id, sys, db, sde, rng, fit, pend, ntx, ce, gw, inv_roll, cd_map, af_map, pe, pes, aes, tac);
                 for (tid, killer_opt) in destroyed_balls {
                     crate::services::fw_gameplay::on_space_entity_destroyed(&ctx, sys_id, killer_opt, tid, 0).await;
-                    crate::services::notify_emitters_batch8::on_deployable_deactivated(&ctx, None, tid);
+                    crate::services::notify_emitters_seasons_tactical::on_deployable_deactivated(&ctx, None, tid);
                     crate::services::shipcaster_ops::on_landing_pad_ball_destroyed(&ctx, tid).await;
-                    let _ = crate::services::notify_emitters_batch3_space::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
+                    let _ = crate::services::notify_emitters_space_dungeons::flush_ship_all_ewar_sync(&ctx, 0, Some(sys_id), tid);
                     let _ = crate::services::wormhole_pve_escalations::on_decloaked_relay_attacked_sync(&ctx, sys_id, tid);
                     if let Some((vcid, acid, pos)) = ctx.db.with_snapshot(|s| {
                         let vc = s.characters.values().find(|c| c.active_ship_id == tid)?;
@@ -357,7 +357,7 @@ impl ServerContext {
             }
         });
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
-        crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
+        crate::session_cluster_lifecycle::seed_persisted_abandoned_drones(&ctx);
         crate::services::quasar_cosmetics_live::install_macho_notify_sink(&ctx);
         ctx.wire_module_deactivation_hook();
         ctx
@@ -709,7 +709,7 @@ impl ServerContext {
                 .insert("__server_now_unix".into(), cur_unix.to_string());
         });
         if secs > 0 {
-            crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
+            crate::session_cluster_lifecycle::on_advance_secs(self, prev_unix, secs);
             crate::services::pve_special_sites::on_server_clock_advanced(self, secs);
             crate::services::mining_advanced::tick_all_metenox_moon_drills(
                 self,
@@ -741,7 +741,7 @@ impl ServerContext {
                             && item.flag == eve_db::InventoryFlag::None
                             && (30_000_000..=33_000_000).contains(&item.location_id)
                             && snap
-                                .sp6_lifecycle
+                                .session_cluster_lifecycle
                                 .space_object_meta
                                 .get(&item.item_id)
                                 .and_then(|m| m.created_unix)
@@ -752,7 +752,7 @@ impl ServerContext {
 
                 for (jetcan_id, sys_id) in expired_jetcans {
                     snap.items.remove(&jetcan_id);
-                    snap.sp6_lifecycle.space_object_meta.remove(&jetcan_id);
+                    snap.session_cluster_lifecycle.space_object_meta.remove(&jetcan_id);
                     snap.items.retain(|_, item| item.location_id != jetcan_id);
                     balls_to_remove.push((sys_id, jetcan_id));
                 }

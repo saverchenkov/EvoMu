@@ -386,7 +386,7 @@ impl PublicGatewayRouter {
         crate::services::quasar_inventory_asset::register_inventory_asset_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         crate::services::quasar_assetholding_entitlements::register_assetholding_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
         crate::services::quasar_economy_planetary_industry::register_economy_planetary_industry_handlers(&router, Arc::clone(&db), Arc::clone(&sde), Arc::clone(desc));
-        crate::services::quasar_b34_services::register_handlers(
+        crate::services::quasar_dailygoal_lp_bounty::register_handlers(
             &router,
             Arc::clone(&db),
             Arc::clone(&sde),
@@ -453,12 +453,12 @@ impl PublicGatewayRouter {
         crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db), Arc::clone(&self.progression));
 
         // 8. Batch 2 Quasar handlers
-        crate::services::quasar_b2_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_structure_system_gateway::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
         // 9. Batch 29 Quasar Domain & Space/Tag/Tale/Dungeon Services
-        crate::services::quasar_b29_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_admin_orchestrator::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
 
         // 10. Batch 22 Quasar closure handlers
-        crate::services::quasar_b22_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_cosmetics_thirdparty::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.

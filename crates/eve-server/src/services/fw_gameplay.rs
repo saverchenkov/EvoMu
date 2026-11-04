@@ -937,7 +937,7 @@ pub async fn tick_fw_gameplay(ctx: &ServerContext, now_unix: u64) {
                 false
             }
         });
-        crate::services::notify_emitters_batch3_space::emit_fw_capture_changed(
+        crate::services::notify_emitters_space_dungeons::emit_fw_capture_changed(
             ctx,
             sys_id,
             gid,

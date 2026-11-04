@@ -11,7 +11,7 @@
 pub mod accounts;
 pub mod characters;
 pub mod clock;
-pub mod d6_types;
+pub mod durable_domain_types;
 pub mod fw_seed;
 pub mod inventory;
 pub mod ledger;
@@ -37,7 +37,7 @@ pub use snapshot_ext::{
     LpRewardLogEntry, MailingListRecord, MarketDailySummary, MarketHistoryDayRecord,
     SocialContactRecord, StarbaseDetailSettings,
 };
-pub use d6_types::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent};
+pub use durable_domain_types::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry, PersistedFwStatEvent};
 pub use types::*;
 
 use serde::{Deserialize, Serialize};

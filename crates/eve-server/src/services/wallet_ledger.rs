@@ -370,7 +370,7 @@ fn deposit_plex(
         Ok(v) => v,
         Err(e) => {
             if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
-                super::notify_emitters_missing::emit_plex_deposit_failed(ctx, char_id, &e.code, reference);
+                super::notify_emitters_skills_trade_godma::emit_plex_deposit_failed(ctx, char_id, &e.code, reference);
             }
             return Err(e);
         }
@@ -582,7 +582,7 @@ fn withdraw_plex(
             Ok(v) => v,
             Err(e) => {
                 if let Some(reference) = kwargs.get("reference").or_else(|| args.get(3)).cloned() {
-                    super::notify_emitters_missing::emit_plex_withdraw_failed(ctx, char_id, &e.code, reference);
+                    super::notify_emitters_skills_trade_godma::emit_plex_withdraw_failed(ctx, char_id, &e.code, reference);
                 }
                 return Err(e);
             }

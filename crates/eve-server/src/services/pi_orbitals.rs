@@ -771,7 +771,7 @@ pub fn handle_pi_orbitals(
                         );
                         snap.item_positions.insert(canister_id, launch_pos);
                         let meta = snap
-                            .sp6_lifecycle
+                            .session_cluster_lifecycle
                             .space_object_meta
                             .entry(canister_id)
                             .or_default();
@@ -853,7 +853,7 @@ pub fn handle_pi_orbitals(
                         if it.owner_id != char_id {
                             return None;
                         }
-                        let meta = snap.sp6_lifecycle.space_object_meta.get(&it.item_id);
+                        let meta = snap.session_cluster_lifecycle.space_object_meta.get(&it.item_id);
                         let launch_planet = meta
                             .and_then(|m| m.planet_id)
                             .or_else(|| (40_000_000..50_000_000).contains(&it.location_id).then_some(it.location_id))?;
@@ -935,7 +935,7 @@ pub fn handle_pi_orbitals(
                     });
                 }
                 let launch_planet_opt = snap
-                    .sp6_lifecycle
+                    .session_cluster_lifecycle
                     .space_object_meta
                     .get(&launch_id)
                     .and_then(|m| m.planet_id)
@@ -959,7 +959,7 @@ pub fn handle_pi_orbitals(
                     .then_some(it.location_id as u32);
                 snap.items.remove(&launch_id);
                 snap.item_positions.remove(&launch_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&launch_id);
+                snap.session_cluster_lifecycle.space_object_meta.remove(&launch_id);
                 snap.items.retain(|_, child| child.location_id != launch_id);
                 Ok(sys_id_opt)
             });

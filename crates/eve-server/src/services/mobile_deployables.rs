@@ -636,7 +636,7 @@ pub fn step_mobile_deployables_in_actor(
                 }
                 snap.items.remove(&eid);
                 snap.item_positions.remove(&eid);
-                snap.sp6_lifecycle.space_object_meta.remove(&eid);
+                snap.session_cluster_lifecycle.space_object_meta.remove(&eid);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&eid);
                     st.observatory_pings_done.remove(&eid);
@@ -662,7 +662,7 @@ pub fn step_mobile_deployables_in_actor(
                 }
             }
         });
-        for meta in snap.sp6_lifecycle.space_object_meta.values_mut() {
+        for meta in snap.session_cluster_lifecycle.space_object_meta.values_mut() {
             if !meta.anchor_completed {
                 if let Some(start) = meta.anchor_start_unix {
                     let delay = meta.anchoring_delay_secs as u64;
@@ -959,7 +959,7 @@ pub fn handle_ball_damage_in_actor(
                         },
                     );
                     snap.item_positions.insert(can_id, pos_arr);
-                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
+                    crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
 
                     for (iid, _) in hold_items {
                         let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
@@ -976,7 +976,7 @@ pub fn handle_ball_damage_in_actor(
                 }
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                snap.session_cluster_lifecycle.space_object_meta.remove(&ball_id);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&ball_id);
                 });
@@ -1013,7 +1013,7 @@ pub fn handle_ball_damage_in_actor(
                         },
                     );
                     snap.item_positions.insert(can_id, pos_arr);
-                    crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
+                    crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(snap, can_id, now_unix, false);
 
                     for (iid, _) in hold_items {
                         let roll = ((now_unix ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32) as f64 / 4294967296.0;
@@ -1030,7 +1030,7 @@ pub fn handle_ball_damage_in_actor(
                 }
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                snap.session_cluster_lifecycle.space_object_meta.remove(&ball_id);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&ball_id);
                 });
@@ -1048,7 +1048,7 @@ pub fn handle_ball_damage_in_actor(
             db.with_mut_snapshot(|snap| {
                 snap.items.remove(&ball_id);
                 snap.item_positions.remove(&ball_id);
-                snap.sp6_lifecycle.space_object_meta.remove(&ball_id);
+                snap.session_cluster_lifecycle.space_object_meta.remove(&ball_id);
                 write_deployable_state_snap(snap, |st| {
                     st.deployables.remove(&ball_id);
                 });

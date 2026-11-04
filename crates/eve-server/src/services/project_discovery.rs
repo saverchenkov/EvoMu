@@ -803,13 +803,13 @@ pub fn handle_project_discovery(
                     if let Some(bal) = new_bal {
                         let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
                     }
-                    crate::services::notify_emitters_batch9::emit_player_state_updated(
+                    crate::services::notify_emitters_skills_trade_godma::emit_player_state_updated(
                         ctx,
                         char_id,
                         player_state_rep,
                     );
                     if ak_gain > 0 {
-                        crate::services::notify_emitters_batch10::emit_analysis_kredits_change(ctx, char_id);
+                        crate::services::notify_emitters_tournaments_anomalies::emit_analysis_kredits_change(ctx, char_id);
                     }
                     let xp_args = vec![PyRep::Real(total_xp)];
                     session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());

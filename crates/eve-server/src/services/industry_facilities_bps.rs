@@ -1291,7 +1291,7 @@ pub fn handle_industry_facilities_bps(
             });
             match res {
                 Ok((sys_id, kv)) => {
-                    crate::services::notify_emitters_batch3::emit_facilities_updated(
+                    crate::services::notify_emitters_character_services::emit_facilities_updated(
                         ctx,
                         Some(sys_id),
                         char_id,

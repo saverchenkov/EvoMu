@@ -439,7 +439,7 @@ pub(crate) async fn handle_dogma_im(
                     let sys = ctx.systems.get_or_spawn(sys_id);
                     let _ = sys.remove_module_cycle(loc, item_id).await;
                 }
-                let affected_ewar = crate::services::notify_emitters_batch3_space::flush_module_profile_and_ewar_end(
+                let affected_ewar = crate::services::notify_emitters_space_dungeons::flush_module_profile_and_ewar_end(
                     ctx,
                     char_id,
                     session.solar_system_id,
@@ -472,7 +472,7 @@ pub(crate) async fn handle_dogma_im(
             };
             let _ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             Some(
-                crate::services::notify_emitters_batch9_part2::handle_dogma_set_module_online(
+                crate::services::notify_emitters_skills_trade_godma::handle_dogma_set_module_online(
                     ctx, session, args,
                 )
                 .await,
@@ -481,7 +481,7 @@ pub(crate) async fn handle_dogma_im(
 
         ("dogmaIM", "TakeModuleOffline") => {
             Some(
-                crate::services::notify_emitters_batch9_part2::handle_dogma_take_module_offline(
+                crate::services::notify_emitters_skills_trade_godma::handle_dogma_take_module_offline(
                     ctx, session, args,
                 )
                 .await,
@@ -1018,7 +1018,7 @@ pub(crate) async fn handle_dogma_im(
             }))
         }
 
-        ("dogmaIM", "LoadAmmo") => Some(crate::services::notify_emitters_batch8::handle_load_ammo(ctx, session, args)),
+        ("dogmaIM", "LoadAmmo") => Some(crate::services::notify_emitters_seasons_tactical::handle_load_ammo(ctx, session, args)),
 
         ("dogmaIM", "UnloadAmmo") => Some(handle_unload_ammo(ctx, session, args)),
 

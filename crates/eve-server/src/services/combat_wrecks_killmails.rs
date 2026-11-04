@@ -423,13 +423,13 @@ pub fn register_container_lifetime(
     let lifetime_secs = if type_id == 23 {
         JETCAN_DECAY_LIFETIME_SECS
     } else if ctx.sde.types.get(&type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
-        crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS
+        crate::session_cluster_lifecycle::SECURE_CONTAINER_DECAY_SECS
     } else {
         WRECK_DECAY_LIFETIME_SECS
     };
     ctx.db.with_mut_snapshot(|snap| {
         if snap.items.contains_key(&item_id) {
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+            crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
                 snap,
                 item_id,
                 created_unix,
@@ -491,12 +491,12 @@ pub async fn step_wreck_and_jetcan_decay(
                 .unwrap_or(0);
             if group_id == 361 {
                 if let Some(start_u) = snap
-                    .sp6_lifecycle
+                    .session_cluster_lifecycle
                     .space_object_meta
                     .get(&item.item_id)
                     .and_then(|m| m.anchor_start_unix.or(m.created_unix))
                 {
-                    let decay_secs = crate::sp6_lifecycle::sde_mobile_warp_disruptor_decay_secs(
+                    let decay_secs = crate::session_cluster_lifecycle::sde_mobile_warp_disruptor_decay_secs(
                         &ctx.sde,
                         item.type_id,
                     );
@@ -524,8 +524,8 @@ pub async fn step_wreck_and_jetcan_decay(
             for &iid in &expired {
                 snap.items.remove(&iid);
                 snap.item_positions.remove(&iid);
-                snap.sp6_lifecycle.space_object_meta.remove(&iid);
-                snap.sp6_lifecycle.ship_combat_hp.remove(&iid);
+                snap.session_cluster_lifecycle.space_object_meta.remove(&iid);
+                snap.session_cluster_lifecycle.ship_combat_hp.remove(&iid);
                 let children: Vec<i64> = snap
                     .items
                     .values()
@@ -654,7 +654,7 @@ pub async fn handle_wrecks_killmails(
                         },
                     );
                 });
-                crate::sp6_lifecycle::register_self_destruct_countdown(
+                crate::session_cluster_lifecycle::register_self_destruct_countdown(
                     ctx,
                     ship_id,
                     char_id,
@@ -677,7 +677,7 @@ pub async fn handle_wrecks_killmails(
             with_mut_combat_runtime(ctx, |rt| {
                 rt.self_destruct_countdowns.remove(&ship_id);
             });
-            let _ = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
+            let _ = crate::session_cluster_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let pos = sys_handle
@@ -825,7 +825,7 @@ pub async fn handle_wrecks_killmails(
             let aborted_rt = with_mut_combat_runtime(ctx, |rt| {
                 rt.self_destruct_countdowns.remove(&ship_id).is_some()
             });
-            let aborted_sp6 = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
+            let aborted_sp6 = crate::session_cluster_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
             let aborted = aborted_rt || aborted_sp6;
             Some(Ok(PyRep::keyval([
                 ("shipID", PyRep::Integer(ship_id)),

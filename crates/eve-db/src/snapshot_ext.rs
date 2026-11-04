@@ -1,6 +1,6 @@
 //! `WorldStateSnapshot` container and dynamic world/ESI event and campaign records (`ESI-3`).
 
-pub use crate::d6_types::*;
+pub use crate::durable_domain_types::*;
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
@@ -834,7 +834,7 @@ pub struct WorldStateSnapshot {
     #[serde(default)]
     pub structure_docking_acl_denied: HashMap<i64, HashSet<i64>>,
     #[serde(default)]
-    pub sp6_lifecycle: Sp6PersistedState,
+    pub session_cluster_lifecycle: Sp6PersistedState,
 }
 
 pub use crate::{

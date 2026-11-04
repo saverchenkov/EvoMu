@@ -299,7 +299,7 @@ pub async fn handle_ship_or_npc_destruction(
         if !is_pod_target && !is_abyssal_npc_or_cache {
             snap.next_entity_id += 1;
             generated_wreck_id = snap.next_entity_id;
-            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+            crate::session_cluster_lifecycle::record_wreck_or_container_meta_in_snap(
                 snap,
                 generated_wreck_id,
                 now_unix,
@@ -562,8 +562,8 @@ pub async fn handle_ship_or_npc_destruction(
         }
         if let Some(vcid) = victim_char_opt {
             let vship_id = target_ball_id;
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
-            crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+            crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
+            crate::session_cluster_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
                 st.disconnected_ships.remove(&vcid);
             });
             let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, 670);
@@ -606,8 +606,8 @@ pub async fn handle_ship_or_npc_destruction(
         }
     } else if let Some(vcid) = victim_char_opt {
         let vship_id = target_ball_id;
-        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
-        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+        crate::session_cluster_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
+        crate::session_cluster_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
             st.disconnected_ships.remove(&vcid);
         });
         fw_ins_payout_isk = crate::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
@@ -1251,14 +1251,14 @@ pub async fn step_system_entropic_spools(
                         now_unix.saturating_add(900);
                     cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
                 }
-                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                crate::session_cluster_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
                     ctx,
                     state.attacker_char_id,
                     vcid,
                     now_unix,
                 );
             } else {
-                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, state.attacker_char_id, now_unix);
+                crate::session_cluster_lifecycle::record_npc_aggression_timer(ctx, state.attacker_char_id, now_unix);
             }
 
             if destroyed && !is_upwell {

@@ -872,7 +872,7 @@ pub async fn enter_abyssal_pocket_with_trace(
             );
             (pid, r1_npcs, r1_cache, false, false, now, collapse, goffset)
         });
-    crate::sp6_lifecycle::register_abyssal_session(
+    crate::session_cluster_lifecycle::register_abyssal_session(
         ctx, char_id, ship_id, abyssal_sys_id, origin_sys, started_at, collapse_at,
     );
     if !already_spawned {
@@ -926,7 +926,7 @@ pub async fn handle_abyssal_entrance_deployment(
     let cur_sys = session
         .solar_system_id
         .ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
-    crate::sp6_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
+    crate::session_cluster_lifecycle::require_ship_ready_for_filament_jump(ctx, char_id, ship_id, cur_sys)?;
     let Some(filament_arg) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
         return Err(rpc_err(
             "MissingRequiredArgument",
