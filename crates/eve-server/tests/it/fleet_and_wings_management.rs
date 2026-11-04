@@ -10,6 +10,7 @@ pub(crate) mod fleet_tactical_movement {
 // - `feat:fleet.watchlist-broadcast-tracking`
 // - `feat:fleet.broadcast-scope-and-filter`
 // - `feat:fleet.takes-fleet-warp-toggle`
+// - `feat:fleet.target-tagging`
 
 
 use std::collections::HashMap;
@@ -264,14 +265,16 @@ async fn test_fleet_movement_optins_formations_and_setups() {
 }
 
 #[tokio::test]
-async fn test_fleet_tactical_broadcasts_watchlist_and_tagging() {
+async fn test_tactical_fleet_join_watchlist_and_broadcasts() {
     // parity: feat:fleet.join-requests
     // parity: feat:fleet.watchlist-broadcast-tracking
     // parity: feat:fleet.broadcast-scope-and-filter
+    // parity: feat:fleet.target-tagging
     eve_testkit::attest(&[
         "feat:fleet.join-requests",
         "feat:fleet.watchlist-broadcast-tracking",
         "feat:fleet.broadcast-scope-and-filter",
+        "feat:fleet.target-tagging",
     ]);
 
     let ctx = ServerContext::new();
