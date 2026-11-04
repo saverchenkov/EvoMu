@@ -2945,3 +2945,1851 @@ async fn test_incursion_hq_sites_5171_and_5175_have_disjoint_npc_ball_ids() {
     });
 }
 }
+
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod pve_crab_and_storms_ext {
+    use super::*;
+
+// Part 2 negative/regression integration tests for CRAB Beacon Exploits
+// (`11019` subcapital rejection, simultaneous double-link refusal, non-compounding
+// dogma resonance bonus/restore, Rogue Drone scan-jamming) and Overlapping Metaliminal
+// Storms with Cross-Instance Isolation (`feat:pve.crab-link-activation`,
+// `feat:pve.crab-ceq-signal-interference`, `feat:pve.metaliminal-storm-movement`).
+
+
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::inventory_fitting::fitting_containers_ships::validate_single_item_can_be_opened;
+use eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs;
+use eve_server::services::pve_crab_beacons::{
+    tick_all_crab_beacons, CrabBeaconPhase, CRAB_LINK_DURATION_SECS, CRAB_LOOT_EXCLUSIVE_SECS,
+    CRAB_SCAN_DURATION_SECS, TYPE_CRAB_BEACON,
+};
+use eve_server::services::pve_metaliminal_storms::{
+    compute_storm_footprint, sync_metaliminal_storm_effects_and_sites,
+};
+use eve_server::services::pve_special_sites::{
+    with_pve_special_reg, AbyssalWeatherKind, RoamingStormRecord,
+};
+use glam::DVec3;
+use std::collections::HashMap;
+
+const PILOT_1: i64 = 90_000_001;
+const LOWSEC_SYS: u32 = 30_002_904; // Tama (Low-sec 0.28)
+const TYPE_ARCHON: u32 = 23_757; // Carrier
+const TYPE_COCKROACH: u32 = 11_019; // Subcapital QA frigate (must NOT bypass capital check)
+const TYPE_EM_SHIELD_AMP_I: u32 = 1_808; // Passive EM Shield Amplifier I (T1)
+
+async fn setup_pilot(
+    ctx: &ServerContext,
+    sess_id: u64,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    pos: DVec3,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(sess_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            11_584,
+            TrainedSkillRecord {
+                type_id: 11_584,
+                level: 3,
+                skill_points: 40_000.0,
+            },
+        );
+        snap.skills.entry(char_id).or_default().insert(
+            3_425,
+            TrainedSkillRecord {
+                type_id: 3_425,
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2;
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_id, pos.to_array());
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_200_000_000.0,
+                radius: 450.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, ship_type_id),
+            ctx.build_ship_slim_meta(char_id, ship_type_id),
+        )
+        .await;
+    sess
+}
+
+// ============================================================================
+// 1. CRAB Exploit Guards: 11019 Subcap, Simultaneous Link, Dogma Resonance & Drone Jam
+// ============================================================================
+#[tokio::test]
+async fn test_crab_negative_exploits_subcap_11019_double_link_resonance_and_drone_jam() {
+    // parity: feat:pve.crab-link-activation, feat:pve.crab-ceq-signal-interference
+    eve_testkit::attest(&[
+        "feat:pve.crab-link-activation",
+        "feat:pve.crab-ceq-signal-interference",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let pos = DVec3::new(320_000_000.0, 20_000_000.0, 120_000_000.0);
+
+    // 1. Subcapital type_id 11019 (Cockroach) must be rejected with IneligibleShipForCrabLink
+    let roach_id = 731_001_001i64;
+    let mut sess_roach = setup_pilot(&ctx, 8501, PILOT_1, roach_id, TYPE_COCKROACH, LOWSEC_SYS, pos).await;
+    let b1 = 731_100_001i64;
+    let b2 = 731_100_002i64;
+    for bid in [b1, b2] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                bid,
+                InventoryItemRecord {
+                    item_id: bid,
+                    type_id: TYPE_CRAB_BEACON,
+                    owner_id: PILOT_1,
+                    location_id: roach_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        ctx.dispatch_rpc(&mut sess_roach, "posMgr", None, "AnchorStructure", &[PyRep::Integer(bid)], &kw, None)
+            .await
+            .expect("Anchor CRAB");
+    }
+
+    let roach_err = ctx
+        .dispatch_rpc(
+            &mut sess_roach,
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(b1),
+                PyRep::String("linkWithShip".into()),
+                PyRep::String("InitiateLink".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("11019 Cockroach must not bypass CRAB capital ship restriction");
+    assert_eq!(roach_err.code, "IneligibleShipForCrabLink");
+
+    // 2. Carrier links b1; attempting to link b2 while already linked to b1 fails with ShipAlreadyLinkedToCrab
+    //    WITHOUT consuming CEQ or increasing signal interference!
+    let carrier_id = 731_001_002i64;
+    let mut sess_cap = setup_pilot(&ctx, 8502, PILOT_1, carrier_id, TYPE_ARCHON, LOWSEC_SYS, pos).await;
+    let sys_handle = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    let clean_base_res = sys_handle.get_combat_state(carrier_id).await.unwrap().unwrap().shield_resonance;
+
+    let link1 = ctx
+        .dispatch_rpc(
+            &mut sess_cap,
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(b1),
+                PyRep::String("linkWithShip".into()),
+                PyRep::String("InitiateLink".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Carrier links b1");
+    assert_eq!(link1.dict_get("ceqRemaining").and_then(|v| v.as_i64()), Some(70));
+
+    let double_err = ctx
+        .dispatch_rpc(
+            &mut sess_cap,
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(b2),
+                PyRep::String("linkWithShip".into()),
+                PyRep::String("InitiateLink".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Already-linked carrier cannot simultaneously link a 2nd CRAB");
+    assert_eq!(double_err.code, "ShipAlreadyLinkedToCrab");
+    let ceq_after_reject = ctx
+        .dispatch_rpc(&mut sess_cap, "characterEnergyMgr", None, "GetMyEnergyState", &[], &kw, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        ceq_after_reject.dict_get("currentEnergy").and_then(|v| v.as_i64()),
+        Some(70),
+        "Rejected double-link must not deduct CEQ"
+    );
+
+    // 3. Fit a passive shield resistance module DURING the active link; when the 4-minute link ends,
+    //    clear_crab_link_ship_effects must rebuild dogma resonances (preserving the fitted module)
+    //    rather than overwriting with pre-link snapshot resonances or compounding 0.90!
+    let amp_id = 731_009_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            amp_id,
+            InventoryItemRecord {
+                item_id: amp_id,
+                type_id: TYPE_EM_SHIELD_AMP_I,
+                owner_id: PILOT_1,
+                location_id: carrier_id,
+                flag: InventoryFlag::MedSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.module_online_states.insert(amp_id, true);
+    });
+    ctx.invalidate_ship_fitting(carrier_id);
+    let expected_post_fit_em_res = ctx.build_ship_combat_state(PILOT_1, carrier_id, TYPE_ARCHON).shield_resonance[0];
+    assert!(
+        expected_post_fit_em_res < clean_base_res[0],
+        "Fitted EM Shield Amplifier lowers EM damage resonance"
+    );
+
+    ctx.advance_secs(CRAB_LINK_DURATION_SECS);
+    let post_unlink_res = sys_handle.get_combat_state(carrier_id).await.unwrap().unwrap().shield_resonance;
+    assert!(
+        (post_unlink_res[0] - expected_post_fit_em_res).abs() < 1e-6,
+        "Unlinking must restore current dogma-fitted EM resonance ({expected_post_fit_em_res}), got {}",
+        post_unlink_res[0]
+    );
+
+    // 4. Rogue Drone Jamming: advance 10m (600s) + extra 300s WITHOUT killing Rogue Drones ->
+    //    CRAB beacon stays in Scanning phase (`CrabScanInProgress`), and ONLY transitions to
+    //    LootRestricted with a full 120s deployer window once all 3 Rogue Drone waves are killed!
+    ctx.advance_secs(CRAB_SCAN_DURATION_SECS + 300);
+    let (phase_jammed, waves_jammed, live_drones) = with_pve_special_reg(&ctx, |reg| {
+        let b = &reg.crab_beacons[&b1];
+        (b.phase, b.waves_spawned, b.wave_npc_ball_ids.clone())
+    });
+    assert_eq!(waves_jammed, 3);
+    assert!(!live_drones.is_empty());
+    assert_eq!(
+        phase_jammed,
+        CrabBeaconPhase::Scanning,
+        "CRAB scan must remain paused while Rogue Drone waves are alive"
+    );
+    assert_eq!(
+        validate_single_item_can_be_opened(&ctx, PILOT_1, b1).await.unwrap_err().code,
+        "CrabScanInProgress"
+    );
+
+    for bid in live_drones {
+        let _ = sys_handle
+            .apply_damage_with_attacker(
+                bid,
+                DamageVector {
+                    em: 1.0e6,
+                    thermal: 1.0e6,
+                    kinetic: 1.0e6,
+                    explosive: 1.0e6,
+                },
+                Some(PILOT_1),
+            )
+            .await;
+    }
+    tick_all_crab_beacons(&ctx);
+    let (phase_cleared, sd_at) = with_pve_special_reg(&ctx, |reg| {
+        let b = &reg.crab_beacons[&b1];
+        (b.phase, b.self_destruct_at_sec)
+    });
+    assert_eq!(phase_cleared, CrabBeaconPhase::LootRestricted);
+    assert_eq!(sd_at, ctx.now_unix() + CRAB_LOOT_EXCLUSIVE_SECS);
+    assert!(validate_single_item_can_be_opened(&ctx, PILOT_1, b1).await.is_ok());
+}
+
+// ============================================================================
+// 2. Overlapping Storms Stack Both Weather Modifiers & Isolate Per-ServerContext
+// ============================================================================
+#[tokio::test]
+async fn test_overlapping_storms_stack_effects_without_cross_context_leakage() {
+    // parity: feat:pve.metaliminal-storm-movement
+    eve_testkit::attest(&["feat:pve.metaliminal-storm-movement"]);
+
+    let ctx1 = ServerContext::new();
+    let ctx2 = ServerContext::new();
+    crate::common::pin_clock(&ctx1);
+    crate::common::pin_clock(&ctx2);
+
+    let overlap_sys = 30_000_208_u32;
+    let ship_id = 731_050_001_i64;
+    let _sess1 = setup_pilot(&ctx1, 8510, PILOT_1, ship_id, 587, overlap_sys, DVec3::ZERO).await;
+    let _sess2 = setup_pilot(&ctx2, 8511, PILOT_1, ship_id, 587, overlap_sys, DVec3::ZERO).await;
+
+    let (core_a, periph_a) = compute_storm_footprint(&ctx1, overlap_sys);
+    let (core_b, periph_b) = compute_storm_footprint(&ctx1, overlap_sys);
+    with_pve_special_reg(&ctx1, |reg| {
+        reg.roaming_storms = vec![
+            RoamingStormRecord {
+                storm_id: 201,
+                weather: AbyssalWeatherKind::Electrical,
+                center_solar_system_id: overlap_sys,
+                strong_core_systems: core_a,
+                weak_periphery_systems: periph_a,
+                step_count: 0,
+                next_move_at_sec: u64::MAX,
+                recent_centers: vec![overlap_sys],
+            },
+            RoamingStormRecord {
+                storm_id: 202,
+                weather: AbyssalWeatherKind::Firestorm,
+                center_solar_system_id: overlap_sys,
+                strong_core_systems: core_b,
+                weak_periphery_systems: periph_b,
+                step_count: 0,
+                next_move_at_sec: u64::MAX,
+                recent_centers: vec![overlap_sys],
+            },
+        ];
+    });
+    sync_metaliminal_storm_effects_and_sites(&ctx1);
+
+    // Electrical lowers capacitor recharge time (attr 55: *0.50); Firestorm boosts armor HP (attr 265: *1.50)
+    let mut attrs1 = HashMap::from([(55_u16, 100.0), (265_u16, 1_000.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx1, ship_id, &mut attrs1);
+    assert!((attrs1[&55] - 50.0).abs() < 1e-6, "Electrical storm modifier applied");
+    assert!((attrs1[&265] - 1_500.0).abs() < 1e-6, "Firestorm modifier stacked simultaneously");
+
+    // Separate ServerContext ctx2 in the same solar system has NO storm beacons and must stay unaffected
+    let mut attrs2 = HashMap::from([(55_u16, 100.0), (265_u16, 1_000.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx2, ship_id, &mut attrs2);
+    assert_eq!(attrs2[&55], 100.0, "Storm effects in ctx1 must not leak into ctx2");
+    assert_eq!(attrs2[&265], 1_000.0, "Storm effects in ctx1 must not leak into ctx2");
+}
+
+// ============================================================================
+// 3. Electrical Storm Hacking Virus Coherence Bonus (+25 Core / +10 Periphery)
+// ============================================================================
+#[tokio::test]
+async fn test_electrical_storm_grants_hacking_virus_coherence_per_context() {
+    // parity: feat:pve.metaliminal-storms, feat:pve.hacking-node-types
+    eve_testkit::attest(&["feat:pve.metaliminal-storms", "feat:pve.hacking-node-types"]);
+
+    let ctx1 = ServerContext::new();
+    let ctx2 = ServerContext::new();
+    crate::common::pin_clock(&ctx1);
+    crate::common::pin_clock(&ctx2);
+
+    let center_sys = 30_000_208_u32;
+    let (core_sys_list, periph_sys_list) = compute_storm_footprint(&ctx1, center_sys);
+    let periph_sys = periph_sys_list
+        .iter()
+        .copied()
+        .find(|s| !core_sys_list.contains(s))
+        .expect("distinct periphery system");
+
+    let ship_core = 731_060_001_i64;
+    let mut sess_core = setup_pilot(&ctx1, 8520, PILOT_1, ship_core, 587, center_sys, DVec3::ZERO).await;
+    let sess_iso = setup_pilot(&ctx2, 8522, PILOT_1, ship_core, 587, center_sys, DVec3::ZERO).await;
+
+    for (ctx, char_id, ship_id, mod_id) in [
+        (&ctx1, PILOT_1, ship_core, 731_060_101_i64),
+        (&ctx2, PILOT_1, ship_core, 731_060_103_i64),
+    ] {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(char_id).or_default().insert(
+                21718,
+                eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 },
+            );
+            snap.items.insert(
+                mod_id,
+                InventoryItemRecord {
+                    item_id: mod_id,
+                    type_id: 22175, // Data Analyzer I (40 base coherence, 20 strength)
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: InventoryFlag::MedSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+
+    let (base_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx1, &sess_core, PILOT_1, false,
+    )
+    .expect("baseline analyzer stats");
+    assert_eq!(base_coh, 90, "Baseline Data Analyzer I + Hacking V coherence = 90");
+
+    with_pve_special_reg(&ctx1, |reg| {
+        reg.roaming_storms = vec![RoamingStormRecord {
+            storm_id: 301,
+            weather: AbyssalWeatherKind::Electrical,
+            center_solar_system_id: center_sys,
+            strong_core_systems: core_sys_list,
+            weak_periphery_systems: periph_sys_list,
+            step_count: 0,
+            next_move_at_sec: u64::MAX,
+            recent_centers: vec![center_sys],
+        }];
+    });
+    sync_metaliminal_storm_effects_and_sites(&ctx1);
+
+    let (core_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx1, &sess_core, PILOT_1, false,
+    )
+    .expect("core storm analyzer stats");
+    let (iso_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx2, &sess_iso, PILOT_1, false,
+    )
+    .expect("isolated context analyzer stats");
+
+    assert_eq!(core_coh, 115, "Strong Electrical Storm core grants +25 virus coherence (90 -> 115)");
+    assert_eq!(iso_coh, 90, "Electrical Storm in ctx1 must not leak coherence bonus into ctx2");
+
+    // Move pilot in ctx1 into the weak storm periphery system and verify +10 coherence bonus.
+    sess_core.solar_system_id = Some(periph_sys);
+    ctx1.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.solar_system_id = periph_sys;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_core) {
+            ship.location_id = i64::from(periph_sys);
+        }
+    });
+    let (periph_coh, _, _, _) = eve_server::services::pve_hacking_board::resolve_fitted_analyzer_virus_stats(
+        &ctx1, &sess_core, PILOT_1, false,
+    )
+    .expect("periphery storm analyzer stats");
+    assert_eq!(periph_coh, 100, "Weak Electrical Storm periphery grants +10 virus coherence (90 -> 100)");
+}
+
+}
+
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod pve_deadspace_and_dungeons_ext {
+    use super::*;
+
+// Integration tests for Naturally Seeded Deadspace Pocket Rules, Data-Driven MWD
+// Disallowance, and Multi-Room Dungeon Triggers (`OnApproach`, `OnKill`, `OnLoot`, `CompleteDungeon`)
+// using the `DERIVED` 2-room placeholder template until real SDE room/trigger data is imported.
+
+
+use eve_db::service_roles::ROLE_GM_DEFAULT;
+use eve_db::{BookmarkRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::pve_exploration::{
+    ensure_system_pve_sites_seeded, with_pve_exploration_reg,
+};
+use glam::DVec3;
+use std::collections::HashMap;
+
+const PILOT_1: i64 = 90_000_001;
+const JITA_SYS: u32 = 30_000_142;
+const TYPE_RIFTER: u32 = 587;
+const TYPE_MWD_5MN: u32 = 434;
+const TYPE_AB_1MN: u32 = 439;
+const WARP_DISRUPTED_ERR: &str = "NaturalPhenomenaDisruptingWarp";
+
+fn make_item(
+    item_id: i64,
+    type_id: u32,
+    owner_id: i64,
+    location_id: i64,
+    flag: InventoryFlag,
+    quantity: i32,
+    singleton: bool,
+) -> InventoryItemRecord {
+    InventoryItemRecord {
+        item_id,
+        type_id,
+        owner_id,
+        location_id,
+        flag,
+        quantity,
+        singleton,
+        ..Default::default()
+    }
+}
+
+async fn setup_space_pilot(
+    ctx: &ServerContext,
+    sess_id: u64,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    pos: DVec3,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(sess_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            make_item(ship_id, ship_type_id, char_id, i64::from(sys_id), InventoryFlag::None, 1, true),
+        );
+        snap.item_positions.insert(ship_id, pos.to_array());
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 365.0,
+                inertia: 1.0,
+                mass: 1_200_000.0,
+                radius: 40.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, ship_type_id),
+            ctx.build_ship_slim_meta(char_id, ship_type_id),
+        )
+        .await;
+    sess
+}
+
+async fn step_until_warp_landed(ctx: &ServerContext, sess: &mut SessionState, sys_id: u32, ship_id: i64) {
+    let kw = HashMap::new();
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    for _ in 0..120 {
+        let _ = sys_handle.step_manual(1.0).await;
+        if let Ok(Some((_, b))) = sys_handle.get_ball_snapshot(ship_id).await {
+            if matches!(b.mode, MovementMode::Stop) {
+                break;
+            }
+        }
+    }
+    ctx.dispatch_rpc(sess, "beyonce", None, "UpdateStateRequest", &[], &kw, None)
+        .await
+        .expect("UpdateStateRequest after warp");
+}
+
+// ============================================================================
+// 1. Naturally Seeded Deadspace Pocket Rules & Data-Driven MWD Restriction
+// ============================================================================
+#[tokio::test]
+async fn test_deadspace_pocket_rules_and_mwd_restriction() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let ship_id = 750_003_001i64;
+    let mwd_id = 750_003_010i64;
+    let ab_id = 750_003_011i64;
+    let mut sess = setup_space_pilot(&ctx, 9203, PILOT_1, ship_id, TYPE_RIFTER, JITA_SYS, DVec3::ZERO).await;
+
+    // Fit 5MN MWD (434) and 1MN Afterburner (439) + propulsion skills (only MWD online initially due to maxGroupOnline = 1)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(mwd_id, make_item(mwd_id, TYPE_MWD_5MN, PILOT_1, ship_id, InventoryFlag::MedSlot0, 1, true));
+        snap.items.insert(ab_id, make_item(ab_id, TYPE_AB_1MN, PILOT_1, ship_id, InventoryFlag::MedSlot1, 1, true));
+        snap.module_online_states.insert(mwd_id, true);
+        snap.module_online_states.insert(ab_id, false);
+        let sk = snap.skills.entry(PILOT_1).or_default();
+        for sid in [3413_u32, 3426, 3449, 3450, 3454, 3455] {
+            sk.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 1. Seed system exploration sites naturally -> discovers DSG-30000142 (SDE dungeon 98: Guristas Scout Outpost)
+    ensure_system_pve_sites_seeded(&ctx, JITA_SYS).await;
+    let (dsg_pos, dsg_inst_id, dsg_did) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&JITA_SYS]
+            .iter()
+            .find(|s| s.site_id == "DSG-30000142" && s.site_category == "Deadspace")
+            .expect("Naturally seeded DSG-30000142 deadspace combat signature");
+        (s.position, s.expedition_instance_id.expect("runtime dungeon instance"), s.dungeon_id)
+    });
+    assert_eq!(dsg_did, 98, "Caldari high-sec deadspace signature must use SDE Guristas Scout Outpost (98)");
+
+    // Scan DSG-30000142 to 100% via scanMgr.RequestScans and warp to it via beyonce.CmdWarpToStuff
+    let probes: Vec<PyRep> = (0..8)
+        .map(|_| PyRep::List(vec![PyRep::Real(dsg_pos[0]), PyRep::Real(dsg_pos[1]), PyRep::Real(dsg_pos[2])]))
+        .collect();
+    ctx.dispatch_rpc(
+        &mut sess,
+        "scanMgr",
+        None,
+        "RequestScans",
+        &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("RequestScans pinpoints DSG-30000142");
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        None,
+        "CmdWarpToStuff",
+        &[PyRep::String("scan".into()), PyRep::String("DSG-30000142".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Warp to scanned DSG-30000142 entry gate");
+    step_until_warp_landed(&ctx, &mut sess, JITA_SYS, ship_id).await;
+
+    let inst = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, dsg_inst_id).unwrap();
+    let entry_gate_id = inst.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::List(rooms) = inst.dict_get("rooms").unwrap() else { panic!("Expected rooms") };
+    let room1_id = rooms[0].dict_get("roomID").and_then(|v| v.as_i64()).unwrap();
+    let room2_id = rooms[1].dict_get("roomID").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::Tuple(r2_pos_py) = rooms[1].dict_get("position").unwrap() else { panic!() };
+    let r2_pos = [
+        r2_pos_py[0].as_f64().unwrap(),
+        r2_pos_py[1].as_f64().unwrap(),
+        r2_pos_py[2].as_f64().unwrap(),
+    ];
+
+    // 2. Direct warp into gated Room 1 (by roomID) or gated Room 2 (by bookmark) is refused
+    let warp_r1_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("dungeon".into()), PyRep::Integer(room1_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Direct warp into gated Room 1 must fail");
+    assert_eq!(warp_r1_err.code, WARP_DISRUPTED_ERR);
+
+    let bm_id = 880_001_001i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            bm_id,
+            BookmarkRecord {
+                bookmark_id: bm_id,
+                owner_id: PILOT_1,
+                label: "Inner Room Bookmark".into(),
+                solar_system_id: JITA_SYS,
+                x: r2_pos[0],
+                y: r2_pos[1],
+                z: r2_pos[2],
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+    let warp_bm_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[PyRep::String("bookmark".into()), PyRep::Integer(bm_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Direct bookmark warp into gated Room 2 must fail");
+    assert_eq!(warp_bm_err.code, WARP_DISRUPTED_ERR);
+
+    // 3. Activate entry acceleration gate from warp landing spot -> lands in Room 1; MWD disallowed in deadspace pocket unless overridden
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
+    let eg_pos = sys_handle.get_ball_snapshot(entry_gate_id).await.unwrap().unwrap().1.position;
+    let ship_landed_pos = sys_handle.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position;
+    assert!(ship_landed_pos.distance(eg_pos) <= 2_500.0, "Warp lands within 2.5km of entry gate");
+
+    let gate1_res = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)], &kw, None)
+        .await
+        .expect("Activate entry acceleration gate");
+    assert_eq!(gate1_res.dict_get("disallowMWD"), Some(&PyRep::Bool(true)));
+
+    let r1_mwd_err = ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect_err("MWD disallowed in deadspace Room 1 by default");
+    assert_eq!(r1_mwd_err.code, "ModuleNotAllowedInDeadspace");
+
+    // Clear Room 1 guards to unlock the Room 1 -> Room 2 gate, approach gate via CmdFollowBall, and enter Room 2
+    let PyRep::List(r1_npcs) = gate1_res.dict_get("npcBallIDs").unwrap() else { panic!() };
+    for nid in r1_npcs {
+        let _ = sys_handle
+            .apply_damage_with_attacker(
+                nid.as_i64().unwrap(),
+                DamageVector { em: 1.0e6, thermal: 1.0e6, kinetic: 1.0e6, explosive: 1.0e6 },
+                Some(PILOT_1),
+            )
+            .await;
+    }
+    let r1_gate_id = gate1_res.dict_get("nextGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let beyonce_oid = ctx.bind_object(&sess, "beyonce", i64::from(JITA_SYS)).unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None)
+        .await
+        .unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(r1_gate_id), PyRep::Real(500.0)], &kw, None)
+        .await
+        .expect("CmdFollowBall to Room 1 -> Room 2 gate");
+    for _ in 0..60 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let gate2_res = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(r1_gate_id)], &kw, None)
+        .await
+        .expect("Activate Room 1 -> Room 2 gate");
+    assert_eq!(gate2_res.dict_get("disallowMWD"), Some(&PyRep::Bool(true)));
+
+    // 4. In inner Room 2 (disallowMWD == true from SDE archetype 51): MWD refused, Afterburner allowed
+    let mwd_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("MWD must be refused in MWD-disallowed deadspace room");
+    assert_eq!(mwd_err.code, "ModuleNotAllowedInDeadspace");
+
+    // 4b. Editing dungeon/room MWD flag dynamically changes live MWD outcome in Room 2
+    eve_server::services::pve_dungeon_editor::set_dungeon_disallow_mwd(&ctx, 98, false);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("MWD must be allowed in Room 2 after setting disallowMWD = false");
+    let _ = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Deactivate",
+            &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into())],
+            &kw,
+            None,
+        )
+        .await;
+    eve_server::services::pve_dungeon_editor::set_dungeon_disallow_mwd(&ctx, 98, true);
+    let dyn_mwd_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(mwd_id), PyRep::String("moduleBonusMicrowarpdrive".into()), PyRep::None, PyRep::Integer(1)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("MWD must be refused again after setting disallowMWD = true");
+    assert_eq!(dyn_mwd_err.code, "ModuleNotAllowedInDeadspace");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mwd_id, false);
+        snap.module_online_states.insert(ab_id, true);
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+
+    ctx.dispatch_rpc(
+        &mut sess,
+        "dogmaIM",
+        None,
+        "Activate",
+        &[PyRep::Integer(ab_id), PyRep::String("moduleBonusAfterburner".into()), PyRep::None, PyRep::Integer(1)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Afterburner must remain allowed in MWD-disallowed deadspace room");
+
+    // 5. Data-driven dungeon editor flags persist in world state
+    sess.role |= ROLE_GM_DEFAULT;
+    let mut edit_room_kw = HashMap::new();
+    edit_room_kw.insert("disallowMWD".into(), PyRep::Bool(true));
+    let created_room = ctx
+        .dispatch_rpc(&mut sess, "dungeon", None, "EditRoom", &[PyRep::Integer(98), PyRep::String("Restricted Core".into())], &edit_room_kw, None)
+        .await
+        .expect("dungeon.EditRoom with disallowMWD");
+    let created_room_id = created_room.dict_get("roomID").and_then(|v| v.as_i64()).unwrap();
+    assert!(eve_server::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(&ctx, 98, Some(created_room_id)));
+    eve_server::services::pve_dungeon_editor::set_dungeon_disallow_mwd(&ctx, 98, true);
+    assert!(eve_server::services::pve_dungeon_editor::is_dungeon_or_room_mwd_disallowed(&ctx, 98, Some(room2_id)));
+}
+
+// ============================================================================
+// 2. SDE-Seeded Multi-Room Dungeon System: Approach/Kill/Loot Triggers & Despawn
+// ============================================================================
+#[tokio::test]
+async fn test_dungeon_system_rooms_triggers_and_despawn_on_completion() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let ship_id = 750_004_001i64;
+    let mut sess = setup_space_pilot(&ctx, 9204, PILOT_1, ship_id, TYPE_RIFTER, JITA_SYS, DVec3::ZERO).await;
+
+    // 1. Discover naturally seeded DSG-30000142, scan via RequestScans, warp via CmdWarpToStuff, enter Room 1
+    ensure_system_pve_sites_seeded(&ctx, JITA_SYS).await;
+    let (dsg_pos, inst_id) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&JITA_SYS]
+            .iter()
+            .find(|s| s.site_id == "DSG-30000142")
+            .unwrap();
+        (s.position, s.expedition_instance_id.unwrap())
+    });
+    let probes: Vec<PyRep> = (0..8)
+        .map(|_| PyRep::List(vec![PyRep::Real(dsg_pos[0]), PyRep::Real(dsg_pos[1]), PyRep::Real(dsg_pos[2])]))
+        .collect();
+    ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)], &kw, None)
+        .await
+        .unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("scan".into()), PyRep::String("DSG-30000142".into())], &kw, None)
+        .await
+        .unwrap();
+    step_until_warp_landed(&ctx, &mut sess, JITA_SYS, ship_id).await;
+
+    let init_state = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, inst_id).unwrap();
+    let entry_gate_id = init_state.dict_get("entryGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let gate1_res = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(entry_gate_id)], &kw, None)
+        .await
+        .expect("Enter Room 1 via entry gate");
+
+    let r1_gate_id = gate1_res.dict_get("nextGateBallID").and_then(|v| v.as_i64()).unwrap();
+    let PyRep::List(r1_objs) = gate1_res.dict_get("objectBallIDs").unwrap() else { panic!() };
+    let r1_beacon_id = r1_objs[0].as_i64().unwrap();
+    let PyRep::List(r1_npcs) = gate1_res.dict_get("npcBallIDs").unwrap() else { panic!() };
+    assert_eq!(r1_npcs.len(), 2, "Group 1 spawns 2 SDE Guristas frigate guards immediately");
+    let g1_npc_ids: Vec<i64> = r1_npcs.iter().map(|v| v.as_i64().unwrap()).collect();
+
+    let sys_handle = ctx.systems.get_or_spawn(JITA_SYS);
+    let (_, g1_ball) = sys_handle.get_ball_snapshot(g1_npc_ids[0]).await.unwrap().unwrap();
+    assert_ne!(g1_ball.type_id, 10_043, "Dungeon NPCs must come from SDE faction spawn groups, not hardcoded 10043");
+
+    let beyonce_oid = ctx.bind_object(&sess, "beyonce", i64::from(JITA_SYS)).unwrap();
+    let ship_inv_oid = ctx.bind_object(&sess, "invbroker", ship_id).unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None)
+        .await
+        .unwrap();
+
+    // 2. Approach Room 1->2 gate first: locked gate refuses activation with GateLocked
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(r1_gate_id), PyRep::Real(500.0)], &kw, None)
+        .await
+        .unwrap();
+    for _ in 0..60 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let locked_err = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(r1_gate_id)], &kw, None)
+        .await
+        .expect_err("Locked gate must refuse activation before Group 1 is cleared");
+    assert_eq!(locked_err.code, "GateLocked");
+
+    // 3. Approach Deadspace Relay Beacon via client CmdFollowBall + UpdateStateRequest -> OnApproach spawns Group 2 cruiser!
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(r1_beacon_id), PyRep::Real(500.0)], &kw, None)
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "UpdateStateRequest", &[], &kw, None)
+        .await
+        .unwrap();
+
+    let after_approach = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, inst_id).unwrap();
+    let PyRep::List(rooms_app) = after_approach.dict_get("rooms").unwrap() else { panic!() };
+    let PyRep::List(r1_npcs_after) = rooms_app[0].dict_get("npcBallIDs").unwrap() else { panic!() };
+    assert_eq!(r1_npcs_after.len(), 3, "OnApproach trigger must spawn Group 2 reinforcement NPC");
+    let r1_reinf_id = r1_npcs_after[2].as_i64().unwrap();
+
+    // 4. Destroy Group 1 guards -> OnKill unlocks Room 1->2 gate (leaving Group 2 alive to verify despawn later)
+    for nid in g1_npc_ids {
+        let _ = sys_handle
+            .apply_damage_with_attacker(
+                nid,
+                DamageVector { em: 1.0e6, thermal: 1.0e6, kinetic: 1.0e6, explosive: 1.0e6 },
+                Some(PILOT_1),
+            )
+            .await;
+    }
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(r1_gate_id), PyRep::Real(500.0)], &kw, None)
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    let enter_r2 = ctx
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(r1_gate_id)], &kw, None)
+        .await
+        .expect("Unlocked gate enters Room 2");
+
+    let PyRep::List(r2_objs) = enter_r2.dict_get("objectBallIDs").unwrap() else { panic!() };
+    let strongbox_id = r2_objs[0].as_i64().unwrap();
+    let PyRep::List(r2_npcs) = enter_r2.dict_get("npcBallIDs").unwrap() else { panic!() };
+    let r2_boss_id = r2_npcs[0].as_i64().unwrap();
+
+    // 5. Approach & loot Overseer Strongbox via invbroker.LootAll -> OnLoot spawns Group 2 ambush defender!
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdSetSpeedFraction", &[PyRep::Real(1.0)], &kw, None)
+        .await
+        .unwrap();
+    ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(strongbox_id), PyRep::Real(500.0)], &kw, None)
+        .await
+        .unwrap();
+    for _ in 0..55 {
+        let _ = sys_handle.step_manual(1.0).await;
+    }
+    ctx.dispatch_rpc(&mut sess, "invbroker", Some(ship_inv_oid), "LootAll", &[PyRep::Integer(strongbox_id)], &kw, None)
+        .await
+        .expect("LootAll on Overseer Strongbox");
+
+    let after_loot = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, inst_id).unwrap();
+    let PyRep::List(rooms_loot) = after_loot.dict_get("rooms").unwrap() else { panic!() };
+    let PyRep::List(r2_npcs_after_loot) = rooms_loot[1].dict_get("npcBallIDs").unwrap() else { panic!() };
+    assert_eq!(r2_npcs_after_loot.len(), 2, "OnLoot trigger must spawn Room 2 ambush NPC");
+    let r2_ambush_id = r2_npcs_after_loot[1].as_i64().unwrap();
+
+    // 6. Destroy Room 2 Overseer commander -> OnKill fires CompleteDungeon, despawns all entities & collapses signature!
+    let _ = sys_handle
+        .apply_damage_with_attacker(
+            r2_boss_id,
+            DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 },
+            Some(PILOT_1),
+        )
+        .await;
+
+    let final_state = eve_server::services::pve_dungeon_runtime::get_dungeon_instance_state(&ctx, inst_id).unwrap();
+    assert_eq!(final_state.dict_get("completed"), Some(&PyRep::Bool(true)));
+    assert_eq!(final_state.dict_get("despawned"), Some(&PyRep::Bool(true)));
+    assert!(sys_handle.get_ball_snapshot(entry_gate_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(r1_beacon_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(r1_gate_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(r1_reinf_id).await.unwrap().is_none());
+    assert!(sys_handle.get_ball_snapshot(r2_ambush_id).await.unwrap().is_none());
+    assert!(
+        with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system[&JITA_SYS]
+                .iter()
+                .find(|s| s.site_id == "DSG-30000142")
+                .unwrap()
+                .cleared
+        }),
+        "Completing deadspace dungeon must mark DSG-30000142 cleared"
+    );
+}
+
+}
+
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod pve_incursions_triglavian_ext {
+    use super::*;
+
+// Authentic Incursion System, Payouts, Mothership Finale, Drifter Hives & Triglavian Sites.
+// Remediated integration tests for Phase 8 / PVE milestones.
+
+use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::pve_incursion_sites::{
+    get_incursion_effects_for_system, on_incursion_boss_destroyed,
+};
+use eve_server::services::pve_special_sites::{
+    ensure_special_sites_spawned, get_drifter_hive_for_system, with_pve_special_reg,
+};
+use glam::DVec3;
+use std::collections::HashMap;
+
+async fn create_in_space_session(
+    ctx: &ServerContext,
+    session_id: u64,
+    char_id: i64,
+    solar_system_id: u32,
+    ship_id: i64,
+    ship_type_id: u32,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(session_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    sess.solar_system_id = Some(solar_system_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let p1_template = snap.characters[&90_000_001].clone();
+        let ch = snap.characters.entry(char_id).or_insert_with(|| p1_template);
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = solar_system_id;
+        ch.active_ship_id = ship_id;
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: solar_system_id as i64,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    sess
+}
+
+// ============================================================================
+// 1. Constellation System Effects, Encounters & taleMgr World Event RPCs
+// ============================================================================
+#[tokio::test]
+async fn test_pve_incursion_constellation_system_effects_and_tales() {
+    // parity: feat:pve.incursion-system
+    eve_testkit::attest(&["feat:pve.incursion-system"]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+
+    let (target_cid, hq_sys_id, staging_sys_id) = with_pve_special_reg(&ctx, |reg| {
+        let (cid, inc) = reg.incursions.iter().next().unwrap();
+        (*cid, inc.hq_solar_system_id, inc.staging_solar_system_id)
+    });
+    let mut sess = create_in_space_session(&ctx, 8201, 90_000_001, hq_sys_id, 710_002_001, 587).await;
+
+    // 1. V24 World Event RPCs via taleMgr
+    let tales_rep = ctx
+        .dispatch_rpc(&mut sess, "taleMgr", None, "GetGlobalWorldEventTales", &[], &kw, None)
+        .await
+        .expect("GetGlobalWorldEventTales");
+    let PyRep::List(tales) = tales_rep else { panic!("Expected List of tales") };
+    assert!(!tales.is_empty(), "Active incursion tales must be returned");
+
+    let tale = tales
+        .iter()
+        .find(|t| t.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(target_cid as i64))
+        .expect("Target incursion tale must exist");
+    assert_eq!(tale.dict_get("templateID").and_then(|v| v.as_i64()), Some(5158));
+    assert_eq!(tale.dict_get("influence").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(tale.dict_get("state").and_then(|v| v.as_str()), Some("Establishing"));
+    assert_eq!(tale.dict_get("managerSolarSystemID").and_then(|v| v.as_i64()), Some(staging_sys_id as i64));
+    assert_eq!(tale.dict_get("hasFinalEncounter").and_then(|v| v.as_bool()), Some(false));
+
+    // Verify sceneTypesByLocationID mapping has staging and HQ
+    let PyRep::Dict(scene_map) = tale.dict_get("sceneTypesByLocationID").expect("sceneTypesByLocationID") else { panic!("Expected Dict") };
+    assert!(scene_map.iter().any(|(k, v)| k.as_i64() == Some(staging_sys_id as i64) && v.as_str() == Some("incursionStaging")));
+    assert!(scene_map.iter().any(|(k, v)| k.as_i64() == Some(hq_sys_id as i64) && v.as_str() == Some("incursionHeavyInfestation")));
+
+    // Verify sites list in tale contains staging, vanguard, assault, headquarters, mothership
+    let PyRep::List(sites) = tale.dict_get("sites").expect("sites list") else { panic!("Expected List of sites") };
+    assert!(sites.iter().any(|s| s.dict_get("tier").and_then(|v| v.as_str()) == Some("Staging")));
+    assert!(sites.iter().any(|s| s.dict_get("tier").and_then(|v| v.as_str()) == Some("Vanguard")));
+    assert!(sites.iter().any(|s| s.dict_get("tier").and_then(|v| v.as_str()) == Some("Assault")));
+    assert!(sites.iter().any(|s| s.dict_get("tier").and_then(|v| v.as_str()) == Some("Headquarters")));
+    let ms_site = sites.iter().find(|s| s.dict_get("tier").and_then(|v| v.as_str()) == Some("Mothership")).expect("Mothership site");
+    assert_eq!(ms_site.dict_get("available").and_then(|v| v.as_bool()), Some(false), "Mothership locked at 1.0 influence");
+
+    // 2. taleMgr.get_active_tales_by_template
+    let active_tales = ctx
+        .dispatch_rpc(&mut sess, "taleMgr", None, "get_active_tales_by_template", &[PyRep::Integer(5158)], &kw, None)
+        .await
+        .expect("get_active_tales_by_template");
+    let PyRep::List(active_list) = active_tales else { panic!("Expected List") };
+    assert!(!active_list.is_empty(), "Active tales list by template must not be empty");
+
+    // 3. Sansha Encounter Compositions & Site Distribution
+    with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        assert_eq!(inc.sites.len(), 8, "Constellation must seed staging, 2 vanguard, 2 assault, 2 HQ, mothership");
+        for site in &inc.sites {
+            assert!(site.boss_type_id > 0, "Site must have authentic Sansha boss type ID");
+            assert!(!site.escort_spawns.is_empty(), "Site must have Sansha escort spawns");
+        }
+    });
+
+    // 4. Incursion System Effects & Dogma Attributes
+    let eff = get_incursion_effects_for_system(&ctx, hq_sys_id).expect("incursion effects");
+    assert_eq!(eff.influence, 1.0);
+    assert!(eff.cyno_jammed);
+    assert_eq!(eff.shield_penalty, 0.50);
+    assert_eq!(eff.damage_penalty, 0.50);
+
+    let mut ship_attrs = HashMap::from([(263, 1000.0), (265, 1000.0), (482, 1000.0), (64, 1.0)]);
+    eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, 710_002_001, &mut ship_attrs);
+    assert_eq!(ship_attrs[&263], 500.0, "50% shield penalty at 1.0 influence");
+    assert_eq!(ship_attrs[&265], 500.0, "50% armor penalty at 1.0 influence");
+    assert_eq!(ship_attrs[&482], 500.0, "50% capacitor penalty at 1.0 influence");
+    assert_eq!(ship_attrs[&64], 0.5, "50% damage penalty at 1.0 influence");
+
+    // 5. Incursion client RPC contracts & rejection of non-catalog RPCs
+    let lp_log = ctx
+        .dispatch_rpc(&mut sess, "incursion", None, "GetIncursionLPLog", &[], &kw, None)
+        .await
+        .expect("GetIncursionLPLog");
+    assert_eq!(lp_log, PyRep::List(vec![]));
+
+    let update_lp = ctx
+        .dispatch_rpc(&mut sess, "incursion", None, "UpdateIncursionLPLog", &[PyRep::String("INC-SYS-5158".into())], &kw, None)
+        .await
+        .expect("UpdateIncursionLPLog");
+    assert_eq!(update_lp, PyRep::None);
+
+    for non_client_rpc in ["GetIncursionSystemEffects", "GetAllIncursionSites"] {
+        let err = ctx
+            .dispatch_rpc(&mut sess, "incursion", None, non_client_rpc, &[PyRep::Integer(hq_sys_id as i64)], &kw, None)
+            .await
+            .expect_err("non-client RPC must fail");
+        assert_eq!(err.code, "UnimplementedRPC");
+    }
+}
+
+// ============================================================================
+// 2. Site Payouts Scaled by Fleet Size & Constellation Influence
+// ============================================================================
+#[tokio::test]
+async fn test_pve_incursion_multiwave_fleet_payout_and_influence() {
+    // parity: feat:pve.incursion-payout
+    eve_testkit::attest(&["feat:pve.incursion-payout"]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+
+    let (target_cid, vg_sys_id) = with_pve_special_reg(&ctx, |reg| {
+        let (cid, inc) = reg.incursions.iter().next().unwrap();
+        (*cid, inc.vanguard_solar_system_ids[0])
+    });
+
+    let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        let site = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+        (site.boss_npc_ball_id, site.site_id.clone(), site.position)
+    });
+
+    let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
+    let mut sess = create_in_space_session(&ctx, 8202, 90_000_001, vg_sys_id, 710_002_002, 587).await;
+    vg_sys.set_ball_position(710_002_002, site_pos).await;
+
+    // 5-pilot fleet (optimal size 5 for Vanguard)
+    let pids = [90_000_001, 90_000_002, 90_000_003, 90_000_004, 90_000_005];
+    ctx.db.with_mut_snapshot(|snap| {
+        let p1_template = snap.characters[&90_000_001].clone();
+        for &pid in &pids {
+            let ch = snap.characters.entry(pid).or_insert_with(|| p1_template.clone());
+            ch.character_id = pid;
+            ch.solar_system_id = vg_sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.fleet_id = Some(941_001);
+            ch.active_ship_id = 710_000_000 + pid;
+        }
+        snap.fleets.insert(941_001, FleetRecord {
+            fleet_id: 941_001,
+            boss_id: 90_000_001,
+            members: pids.to_vec(),
+            ..Default::default()
+        });
+    });
+
+    for &pid in &pids {
+        let ship_id = 710_000_000 + pid;
+        let _ = vg_sys.spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: site_pos + DVec3::new((pid % 500) as f64, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        }).await;
+    }
+
+    let p_inits: HashMap<i64, (i64, i64)> = pids
+        .iter()
+        .map(|&pid| {
+            (
+                pid,
+                (
+                    ctx.db.with_snapshot(|s| s.characters[&pid].balance.0),
+                    ctx.db.with_snapshot(|s| s.characters[&pid].loyalty_points.get(&1_000_125).copied().unwrap_or(0)),
+                ),
+            )
+        })
+        .collect();
+
+    // Kill boss in space with attacker attribution after clearing escort waves
+    crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
+    let (_, dead, _) = vg_sys.apply_damage_with_attacker(
+        boss_bid,
+        DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
+        Some(90_000_001),
+    ).await.unwrap().unwrap();
+    assert!(dead, "Boss ball must be destroyed");
+
+    // Influence was 1.0; delta for Vanguard is 0.05 -> new influence is 0.95
+    // influence_scale = (1.0 - 0.95 * 0.50) = 0.525.
+    // 5 pilots in Vanguard -> fleet_scale = 1.0. Total scale = 0.525.
+    // base_isk = 10,395,000 -> isk = 5,457,375 ISK. base_lp = 1,400 -> lp = 735 LP.
+    for &pid in &pids {
+        let (bal, lp) = ctx.db.with_snapshot(|s| (s.characters[&pid].balance.0, s.characters[&pid].loyalty_points.get(&1_000_125).copied().unwrap_or(0)));
+        assert_eq!(bal - p_inits[&pid].0, 5_457_375 * 100, "All fleet members must receive identical payout");
+        assert_eq!(lp - p_inits[&pid].1, 735, "All fleet members must receive identical LP");
+    }
+
+    let journal = ctx.db.with_snapshot(|s| s.wallet_journal.clone());
+    assert!(journal.iter().any(|j| j.character_id == 90_000_001 && j.entry_type == "CorporateRewardPayout"));
+
+    let logs_rep = ctx.dispatch_rpc(&mut sess, "incursion", None, "GetIncursionLPLog", &[], &kw, None).await.expect("GetIncursionLPLog");
+    let PyRep::List(logs) = logs_rep else { panic!("Expected List") };
+    assert!(!logs.is_empty());
+    assert_eq!(logs[0].dict_get("iskEarned").and_then(|v| v.as_i64()), Some(5_457_375));
+
+    // Next wave boss respawned once escort waves clear
+    let next_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &site_id).await;
+    assert!(vg_sys.get_ball_snapshot(next_boss_bid).await.unwrap().is_some());
+
+    // Double payout race concurrency protection
+    let (res1, res2) = tokio::join!(
+        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_001), None, vg_sys_id, &site_id, None),
+        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_001), None, vg_sys_id, &site_id, None),
+    );
+    assert_eq!([res1.is_ok(), res2.is_ok()].into_iter().filter(|&x| x).count(), 0, "Boss is alive in space, manual trigger without boss death fails");
+}
+
+// ============================================================================
+// 3. Kundalini Manifest Mothership Finale & Incursion Conclusion
+// ============================================================================
+#[tokio::test]
+async fn test_pve_incursion_mothership_hq_unlock_and_conclusion() {
+    // parity: feat:pve.incursion-mothership
+    eve_testkit::attest(&["feat:pve.incursion-mothership"]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (target_cid, hq_sys_id) = with_pve_special_reg(&ctx, |reg| {
+        let (cid, inc) = reg.incursions.iter().next().unwrap();
+        (*cid, inc.hq_solar_system_id)
+    });
+    let _sess = create_in_space_session(&ctx, 8203, 90_000_001, hq_sys_id, 710_002_003, 587).await;
+    let hq_sys = ctx.systems.get_or_spawn(hq_sys_id);
+
+    // Initial check: Mothership site locked at 1.0 influence
+    let ms_boss_bid_init = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Mothership").unwrap().boss_npc_ball_id
+    });
+    assert!(hq_sys.get_ball_snapshot(ms_boss_bid_init).await.unwrap().is_none());
+
+    let lock_attempt = on_incursion_boss_destroyed(&ctx, hq_sys_id, ms_boss_bid_init, Some(90_000_001)).await;
+    assert_eq!(lock_attempt.unwrap().unwrap_err().code, "MothershipSiteLocked");
+
+    // Complete HQ site waves to bring influence from 1.0 down to 0.0
+    let (hq_site_id, hq_pos) = with_pve_special_reg(&ctx, |reg| {
+        let s = reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Headquarters").unwrap();
+        (s.site_id.clone(), s.position)
+    });
+    hq_sys.set_ball_position(710_002_003, hq_pos).await;
+
+    for _wave in 0..4 {
+        let hq_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &hq_site_id).await;
+        assert!(hq_sys.get_ball_snapshot(hq_boss_bid).await.unwrap().is_some());
+        let (_, dead, _) = hq_sys.apply_damage_with_attacker(
+            hq_boss_bid,
+            DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
+            Some(90_000_001),
+        ).await.unwrap().unwrap();
+        assert!(dead);
+    }
+
+    // Mothership unlocks and spawns
+    let (inf_after_hq, ms_spawned, ms_site_id, ms_boss_bid, ms_pos) = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
+        (inc.influence, inc.mothership_spawned, ms.site_id.clone(), ms.boss_npc_ball_id, ms.position)
+    });
+    assert_eq!(inf_after_hq, 0.0);
+    assert!(ms_spawned);
+
+    // Verify The Kundalini Manifest ball exists in space with type_id 2192
+    let ms_ball_snap = hq_sys.get_ball_snapshot(ms_boss_bid).await.unwrap().expect("Kundalini Manifest spawned");
+    assert_eq!(ms_ball_snap.1.type_id, 2192);
+
+    let escort_bids = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Mothership").unwrap()
+            .escort_spawns.iter().map(|e| (e.npc_ball_id, e.type_id)).collect::<Vec<_>>()
+    });
+    assert!(!escort_bids.is_empty());
+    for (e_bid, e_tid) in &escort_bids {
+        let e_snap = hq_sys.get_ball_snapshot(*e_bid).await.unwrap().expect("Escort ball spawned");
+        assert_eq!(e_snap.1.type_id, *e_tid);
+    }
+
+    // Kill The Kundalini Manifest in space after clearing escorts
+    crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &ms_site_id).await;
+    hq_sys.set_ball_position(710_002_003, ms_pos).await;
+    let pre_ms_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    let (_, ms_dead, _) = hq_sys.apply_damage_with_attacker(
+        ms_boss_bid,
+        DamageVector { em: 100_000.0, thermal: 100_000.0, kinetic: 100_000.0, explosive: 100_000.0 },
+        Some(90_000_001),
+    ).await.unwrap().unwrap();
+    assert!(ms_dead);
+
+    // Verify conclusion (enters Withdrawing on timer after mothership dies)
+    let (final_state, ms_defeated) = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        (inc.state.clone(), inc.mothership_defeated)
+    });
+    assert_eq!(final_state, "Withdrawing");
+    assert!(ms_defeated);
+
+    // Escorts removed from space
+    for (e_bid, _) in escort_bids {
+        assert!(hq_sys.get_ball_snapshot(e_bid).await.unwrap().is_none());
+    }
+
+    // Payout disbursed
+    let post_ms_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    assert_eq!((post_ms_bal - pre_ms_bal) / 100, 12_600_000);
+
+    // Penalties withdrawn
+    assert!(get_incursion_effects_for_system(&ctx, hq_sys_id).is_none());
+}
+
+// ============================================================================
+// 4. Drifter Hives Multi-room Progression & Authentic Loot
+// ============================================================================
+#[tokio::test]
+async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
+    // parity: feat:pve.drifter-hives
+    eve_testkit::attest(&["feat:pve.drifter-hives"]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+
+    // Verify 5 Drifter Hives initialized across wormhole systems 31_000_001..=31_000_005
+    let expected_elements = [
+        (31_000_001, 34_557, "Barbican Hive"),
+        (31_000_002, 34_558, "Vidette Hive"),
+        (31_000_003, 34_559, "Conflux Hive"),
+        (31_000_004, 34_560, "Redoubt Hive"),
+        (31_000_005, 34_556, "Sentinel Hive"),
+    ];
+
+    for &(sys_id, elem_tid, name) in &expected_elements {
+        let hive = get_drifter_hive_for_system(&ctx, sys_id).expect("hive must exist");
+        assert_eq!(hive.dungeon_name, name);
+        assert_eq!(hive.element_type_id, elem_tid);
+        assert_eq!(hive.total_rooms, 3);
+        assert_eq!(hive.rooms.len(), 3);
+        assert_eq!(hive.current_room, 1);
+        assert!(!hive.cleared);
+
+        // Verify authentic SDE NPC types in rooms: Cruisers (47958/47959), Battleships (47956/47957), Warden (37473)
+        assert!(hive.rooms[0].npc_type_ids.contains(&47958) || hive.rooms[0].npc_type_ids.contains(&47959));
+        assert!(hive.rooms[1].npc_type_ids.contains(&47956) || hive.rooms[1].npc_type_ids.contains(&47957));
+        assert!(hive.rooms[2].npc_type_ids.contains(&37473));
+    }
+
+    // Step-by-step room progression in Barbican Hive (31_000_001)
+    let char_id = 90_000_001;
+    let mut sess = create_in_space_session(&ctx, 8204, char_id, 31_000_001, 710_002_004, 587).await;
+    let wh_sys = ctx.systems.get_or_spawn(31_000_001);
+    let hive_init = get_drifter_hive_for_system(&ctx, 31_000_001).unwrap();
+
+    // Destroy Room 1 cruisers
+    for &npc_bid in &hive_init.rooms[0].npc_ball_ids {
+        let _ = wh_sys.apply_damage_with_attacker(
+            npc_bid,
+            DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
+            Some(char_id),
+        ).await;
+    }
+
+    // Room 1 wave clearance in space naturally advances progression to Room 2
+    let hive_after_r1 = get_drifter_hive_for_system(&ctx, 31_000_001).unwrap();
+    assert_eq!(hive_after_r1.current_room, 2);
+    assert!(hive_after_r1.rooms[0].cleared);
+    assert!(!hive_after_r1.rooms[1].cleared);
+
+    // Verify Room 2 battleships were automatically spawned into space
+    for &npc_bid in &hive_after_r1.rooms[1].npc_ball_ids {
+        let snap = wh_sys.get_ball_snapshot(npc_bid).await.unwrap();
+        assert!(snap.is_some(), "Room 2 battleship must be automatically spawned");
+    }
+
+    // Acceleration gate (client RPC keeper.EnterNextDungeonRoom) refuses to jump while Room 2 wave is alive
+    let gate_blocked = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(31_000_001)], &kw, None).await;
+    assert!(gate_blocked.is_err(), "Acceleration gate must be gated by Room 2 wave-clear");
+    assert_eq!(get_drifter_hive_for_system(&ctx, 31_000_001).unwrap().current_room, 2);
+
+    // Destroy Room 2 battleships in space
+    for &npc_bid in &hive_after_r1.rooms[1].npc_ball_ids {
+        let _ = wh_sys.apply_damage_with_attacker(
+            npc_bid,
+            DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
+            Some(char_id),
+        ).await;
+    }
+
+    // Room 2 wave clearance in space naturally advances progression to Room 3
+    let hive_after_r2 = get_drifter_hive_for_system(&ctx, 31_000_001).unwrap();
+    assert_eq!(hive_after_r2.current_room, 3);
+    assert!(hive_after_r2.rooms[1].cleared);
+    assert!(!hive_after_r2.rooms[2].cleared);
+
+    // Verify Artemis Tyrannos Warden was automatically spawned into space
+    let warden_bid = hive_init.warden_npc_ball_id;
+    let warden_snap = wh_sys.get_ball_snapshot(warden_bid).await.unwrap();
+    assert!(warden_snap.is_some(), "Artemis Tyrannos Warden must be automatically spawned");
+
+    // Artemis Tyrannos Warden space destruction in final room
+    let (_, warden_dead, _) = wh_sys.apply_damage_with_attacker(
+        warden_bid,
+        DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
+        Some(char_id),
+    ).await.unwrap().unwrap();
+    assert!(warden_dead, "Artemis Tyrannos Warden destroyed");
+
+    // Hive state completed and final room marked cleared
+    let hive_final = get_drifter_hive_for_system(&ctx, 31_000_001).unwrap();
+    assert!(hive_final.cleared, "Hive must be marked cleared");
+    assert_eq!(hive_final.current_room, 3);
+    assert!(hive_final.rooms[2].cleared);
+
+    // Acceleration gate on a hive cleared by the in-space warden kill rejects re-completion (no double loot)
+    let gate_done = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(31_000_001)], &kw, None).await;
+    assert!(gate_done.is_err(), "Cleared hive must reject further gate activation");
+
+    // Verify authentic loot deposited: Barbican Element (34557) & Sleeper Data Library (30745)
+    let has_element = ctx.db.with_snapshot(|s| {
+        s.items.values().any(|i| i.type_id == 34_557 && i.owner_id == char_id)
+    });
+    let has_blue_loot = ctx.db.with_snapshot(|s| {
+        s.items.values().any(|i| i.type_id == 30_745 && i.owner_id == char_id)
+    });
+    assert!(has_element, "Barbican Element (34557) must be awarded");
+    assert!(has_blue_loot, "Sleeper Data Library (30745) must be awarded");
+
+    // GetTriglavianSiteInstances returns clean empty list in wormhole systems
+    let trig_wh = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances");
+    let PyRep::Dict(trig_wh_dict) = trig_wh else { panic!("Expected Dict") };
+    let PyRep::Dict(trig_wh_dng) = &trig_wh_dict[0].1 else { panic!("Expected inner Dict") };
+    assert!(trig_wh_dng.is_empty(), "Drifter Hive must not overload Triglavian site instances");
+}
+
+// ============================================================================
+// 5. Triglavian Sites & Minor Victory Systems
+// ============================================================================
+#[tokio::test]
+async fn test_pve_triglavian_sites_and_minor_victory_systems() {
+    // parity: feat:pve.triglavian-sites, rpc:map.GetEdencomFortressSystems, rpc:map.GetEdencomMinorVictorySystems
+    // parity: rpc:map.GetTriglavianMinorVictorySystems, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
+    eve_testkit::attest(&[
+        "feat:pve.triglavian-sites",
+        "rpc:map.GetEdencomFortressSystems",
+        "rpc:map.GetEdencomMinorVictorySystems",
+        "rpc:map.GetTriglavianMinorVictorySystems",
+        "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances",
+    ]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+    let char_id = 90_000_001;
+    let mut sess = create_in_space_session(&ctx, 8205, char_id, 30_000_142, 710_002_005, 587).await;
+
+    // 1. Permanent Chapter 3 invasion systems
+    let fort_sys = ctx.dispatch_rpc(&mut sess, "map", None, "GetEdencomFortressSystems", &[], &kw, None).await.expect("GetEdencomFortressSystems");
+    let PyRep::List(f_list) = fort_sys else { panic!("Expected List") };
+    assert_eq!(f_list.len(), 53, "All 53 authentic Fortress systems returned");
+    assert!(f_list.contains(&PyRep::Integer(30_002_253)), "Arshat is a Fortress system");
+
+    let eden_vic = ctx.dispatch_rpc(&mut sess, "map", None, "GetEdencomMinorVictorySystems", &[], &kw, None).await.expect("GetEdencomMinorVictorySystems");
+    let PyRep::List(e_list) = eden_vic else { panic!("Expected List") };
+    assert_eq!(e_list.len(), 84, "All 84 authentic EDENCOM Minor Victory systems returned");
+    assert!(e_list.contains(&PyRep::Integer(30_002_048)) && e_list.contains(&PyRep::Integer(30_003_074)));
+
+    let vic_systems = ctx.dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None).await.expect("GetTriglavianMinorVictorySystems");
+    let PyRep::List(v_list) = vic_systems else { panic!("Expected List") };
+    assert_eq!(v_list.len(), 28, "All 28 authentic Triglavian Minor Victory systems returned");
+    assert!(v_list.contains(&PyRep::Integer(30_003_076)), "Gammel is seeded as permanent Triglavian Minor Victory system");
+    assert!(with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.keys().all(|&s| ctx.sde.solar_systems.get(&s).map(|ss| ss.region_id) != Some(10_000_070))));
+    assert!(!with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.contains_key(&30_002_253)), "Fortress systems have no invasion sites");
+
+    // 2. Pure read query in Jita (30000142) returns empty without fabricating sites
+    let jita_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances in Jita");
+    let PyRep::Dict(j_dict) = jita_trig else { panic!("Expected Dict") };
+    let PyRep::Dict(j_dng) = &j_dict[0].1 else { panic!("Expected inner Dict") };
+    assert!(j_dng.is_empty(), "Jita must not fabricate Triglavian sites");
+
+    // 3. EDENCOM minor victory system Bei (30002048) contains authentic EDENCOM sites & ships
+    let bei_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_002_048)], &kw, None).await.expect("GetTriglavianSiteInstances in Bei");
+    let PyRep::Dict(b_dict) = bei_trig else { panic!("Expected Dict") };
+    let PyRep::Dict(b_dng) = &b_dict[0].1 else { panic!("Expected inner Dict") };
+    assert_eq!(b_dng.len(), 2, "Bei must contain 2 EDENCOM site instances");
+    with_pve_special_reg(&ctx, |reg| {
+        let site = &reg.triglavian_sites[&30_002_048][0];
+        assert_eq!(site.boss_type_id, 52_963, "Boss must be Republic Fleet Tempest (cat 11)");
+        assert!(site.escort_type_ids.contains(&52_961)); // Republic Fleet Hurricane
+        assert!(site.escort_type_ids.contains(&52_957)); // Republic Fleet Claw
+    });
+
+    // 4. Triglavian minor victory system Gammel (30003076) contains authentic Triglavian sites & ships
+    let gammel_sys = ctx.systems.get_or_spawn(30_003_076);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = 30_003_076; }
+    });
+    sess.solar_system_id = Some(30_003_076);
+
+    let gammel_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances in Gammel");
+    let PyRep::Dict(g_dict) = gammel_trig else { panic!("Expected Dict") };
+    let PyRep::Dict(g_dng) = &g_dict[0].1 else { panic!("Expected inner Dict") };
+    assert_eq!(g_dng.len(), 2, "Gammel must contain 2 Triglavian site instances");
+
+    let (boss_bid, beacon_bid, esc_bid) = with_pve_special_reg(&ctx, |reg| {
+        let site = &reg.triglavian_sites[&30_003_076][0];
+        assert_eq!(site.boss_type_id, 48_122, "Boss must be authentic Striking Leshak");
+        assert!(site.escort_type_ids.contains(&48_086)); // Ghosting Damavik
+        assert!(site.escort_type_ids.contains(&48_092)); // Striking Damavik
+        let esc = reg.triglavian_sites[&30_003_076][1].escort_ball_ids[0];
+        (site.boss_npc_ball_id, site.beacon_ball_id, esc)
+    });
+
+    // Verify boss and beacon are automatically spawned in space with CombatState
+    let boss_snap = gammel_sys.get_ball_snapshot(boss_bid).await.unwrap();
+    assert!(boss_snap.is_some(), "Boss must be automatically spawned in space");
+    let boss_cs = gammel_sys.get_combat_state(boss_bid).await.unwrap();
+    assert!(boss_cs.is_some() && boss_cs.unwrap().max_structure_hp > 0.0, "Boss has CombatState");
+    let beacon_snap = gammel_sys.get_ball_snapshot(beacon_bid).await.unwrap();
+    assert!(beacon_snap.is_some(), "Beacon must be automatically spawned in space");
+    let gammel_balls = gammel_sys.list_balls().await.unwrap();
+    assert!(!gammel_balls.iter().any(|b| b.type_id == 10_962 && b.position.length() == 0.0), "No sentinel marker ball");
+    assert!(gammel_sys.get_ball_snapshot(esc_bid).await.unwrap().is_some(), "Escort must be spawned before destruction");
+    let (_, esc_dead, _) = gammel_sys.apply_damage(esc_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await.unwrap().unwrap();
+    assert!(esc_dead, "Escort must be destroyed by lethal damage");
+    let _ = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await;
+    assert!(gammel_sys.get_ball_snapshot(esc_bid).await.unwrap().is_none(), "Destroyed escort must not be re-spawned");
+
+    let pre_bal = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
+
+    // Destroy Triglavian Leshak boss in space with killer attribution (automatically spawned)
+    let (_, dead, _) = gammel_sys.apply_damage_with_attacker(
+        boss_bid,
+        DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
+        Some(char_id),
+    ).await.unwrap().unwrap();
+    assert!(dead, "Triglavian boss destroyed");
+
+    // Verify site completion reflected in cache query (completed instance removed)
+    let trig_after = ctx
+        .dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None)
+        .await
+        .expect("GetTriglavianSiteInstances after boss kill");
+    let PyRep::Dict(after_dict) = trig_after else { panic!("Expected Dict") };
+    let PyRep::Dict(after_dng) = &after_dict[0].1 else { panic!("Expected inner Dict") };
+    assert_eq!(after_dng.len(), 1, "Completed site instance removed from active instances");
+
+    // Verify rewards: ISK payout, Sealed Survey Database (48121) cargo drop, and dual standings change
+    let post_bal = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
+    assert!(post_bal > pre_bal, "Pilot must receive ISK bounty for Triglavian site completion");
+
+    let has_survey_db = ctx.db.with_snapshot(|s| {
+        s.items.values().any(|i| i.type_id == 48_121 && i.owner_id == char_id)
+    });
+    assert!(has_survey_db, "Sealed Survey Database (48121) cargo drop must be awarded");
+
+    let (trig_standing, edencom_standing) = ctx.db.with_snapshot(|snap| {
+        let ch = &snap.characters[&char_id];
+        (ch.standings.get(&500_026).copied().unwrap_or(0.0), ch.standings.get(&500_027).copied().unwrap_or(0.0))
+    });
+    assert!(edencom_standing > 0.0, "EDENCOM standing must increase (+0.15)");
+    assert!(trig_standing < 0.0, "Triglavian standing must decrease (-0.15)");
+}
+
+#[tokio::test]
+async fn test_p1_track_d_regressions_issues_12_55_56_57() {
+    let ctx1 = ServerContext::new();
+    let ctx2 = ServerContext::new();
+    let kw = HashMap::new();
+
+    // 1. Issue #55: ServerContext-scoped tactical and session-change timer state isolation
+    eve_server::services::space_destiny::record_session_change_timer(&ctx1, 90_000_001, ctx1.now_unix_secs(), 30_000_142, 1, "jump");
+    assert!(eve_server::services::space_destiny::get_session_change_timer(&ctx1, 90_000_001).is_some());
+    assert!(eve_server::services::space_destiny::get_session_change_timer(&ctx2, 90_000_001).is_none());
+
+    ctx1.tactical_state
+        .write()
+        .unwrap()
+        .lance_caster_lock_until
+        .insert((ctx1.instance_id as usize, 750_000_101), ctx1.now_unix_secs() + 300);
+    assert!(eve_server::services::tactical_modules::check_ship_navigation_lock(&ctx1, 750_000_101, "warp").is_err());
+    assert!(eve_server::services::tactical_modules::check_ship_navigation_lock(&ctx2, 750_000_101, "warp").is_ok());
+
+    // 2. Issue #56: Probe scan system scoping, coordinate/destination redaction below 1.0, and per-character scan progress
+    ctx1.db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.user_id = 1;
+        }
+    });
+    let mut sess_a = create_in_space_session(&ctx1, 9501, 90_000_001, 30_000_142, 750_000_201, 587).await;
+
+    // Cross-system scan query rejected
+    let remote_err = ctx1
+        .dispatch_rpc(&mut sess_a, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_002_187)], &kw, None)
+        .await
+        .expect_err("Remote solar system scan query must be denied");
+    assert_eq!(remote_err.code, "AccessDenied");
+
+    // Seed an unscanned signature (strength 0.0) with a destination system
+    let now_u = ctx1.now_unix();
+    ctx1.db.with_mut_snapshot(|snap| {
+        snap.cosmic_signatures.entry(30_000_142).or_default().push(eve_db::CosmicSignatureRecord {
+            signature_id: "SEC-56".into(),
+            solar_system_id: 30_000_142,
+            sig_group: "Wormhole".into(),
+            type_name: "Unstable Wormhole".into(),
+            signal_strength: 0.0,
+            position: [123_456.0, 234_567.0, 345_678.0],
+            wormhole_type_id: Some(30_643),
+            destination_system_id: Some(31_000_005),
+            remaining_mass_kg: 2_000_000_000.0,
+            max_mass_kg: 2_000_000_000.0,
+            max_jump_mass_kg: 300_000_000.0,
+            created_unix: now_u,
+            lifetime_seconds: 86_400,
+            collapsed: false,
+        });
+    });
+
+    // Unscanned signature redacts coordinates, group, type, and destinationSystemID
+    let scan_unscanned = ctx1
+        .dispatch_rpc(&mut sess_a, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .expect("GetSystemScanMgr");
+    let Some(PyRep::List(sigs_a0)) = scan_unscanned.dict_get("signatures") else { panic!("signatures list") };
+    let sec_sig_a0 = sigs_a0.iter().find(|s| s.dict_get("signatureID") == Some(&PyRep::String("SEC-56".into()))).expect("SEC-56");
+    assert_eq!(sec_sig_a0.dict_get("x"), Some(&PyRep::None));
+    assert_eq!(sec_sig_a0.dict_get("destinationSystemID"), Some(&PyRep::None));
+    assert_eq!(sec_sig_a0.dict_get("group"), Some(&PyRep::String("Unknown".into())));
+
+    // Record 100% scan progress for Pilot A only; Pilot B still sees 0.0 and redacted coordinates
+    ctx1.record_character_scan_progress(90_000_001, 30_000_142, "SEC-56", 1.0);
+    let scan_a1 = ctx1
+        .dispatch_rpc(&mut sess_a, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .unwrap();
+    let Some(PyRep::List(sigs_a1)) = scan_a1.dict_get("signatures") else { panic!() };
+    let sec_sig_a1 = sigs_a1.iter().find(|s| s.dict_get("signatureID") == Some(&PyRep::String("SEC-56".into()))).unwrap();
+    assert_eq!(sec_sig_a1.dict_get("x"), Some(&PyRep::Real(123_456.0)));
+    assert_eq!(sec_sig_a1.dict_get("destinationSystemID"), Some(&PyRep::Integer(31_000_005)));
+
+    let mut sess_b = create_in_space_session(&ctx1, 9502, 90_000_002, 30_000_142, 750_000_202, 587).await;
+    let scan_b1 = ctx1
+        .dispatch_rpc(&mut sess_b, "scanMgr", None, "GetSystemScanMgr", &[PyRep::Integer(30_000_142)], &kw, None)
+        .await
+        .unwrap();
+    let Some(PyRep::List(sigs_b1)) = scan_b1.dict_get("signatures") else { panic!() };
+    let sec_sig_b1 = sigs_b1.iter().find(|s| s.dict_get("signatureID") == Some(&PyRep::String("SEC-56".into()))).unwrap();
+    assert_eq!(sec_sig_b1.dict_get("x"), Some(&PyRep::None));
+    assert_eq!(sec_sig_b1.dict_get("destinationSystemID"), Some(&PyRep::None));
+
+    // 3. Issue #57: Drifter Hive NPCs have SDE-derived CombatState (> default 450/450/350 HP)
+    ensure_special_sites_spawned(&ctx1).await;
+    let hive = get_drifter_hive_for_system(&ctx1, 31_000_001).expect("Barbican hive");
+    let wh_sys = ctx1.systems.get_or_spawn(31_000_001);
+    let first_npc_bid = hive.rooms[0].npc_ball_ids[0];
+    let npc_cs = wh_sys.get_combat_state(first_npc_bid).await.unwrap().expect("Drifter NPC must have CombatState");
+    assert!(npc_cs.max_shield_hp >= 600.0 && npc_cs.max_armor_hp >= 600.0 && npc_cs.max_structure_hp >= 600.0);
+
+    // Homefront completion ignores spoofed fleet_count when solo
+    let hf_inst_id = with_pve_special_reg(&ctx1, |reg| {
+        let s = &reg.homefront_sites[&30_000_142][0];
+        (s.instance_id, s.boss_npc_ball_id, s.base_pilot_isk, s.optimal_fleet_size)
+    });
+    let jita_sys = ctx1.systems.get_or_spawn(30_000_142);
+    jita_sys.try_remove_ball(hf_inst_id.1);
+    let hf_done = eve_server::services::pve_special_sites::complete_special_dungeon_instance(
+        &ctx1,
+        &mut sess_b,
+        hf_inst_id.0,
+        hf_inst_id.3, // spoofed optimal fleet size while solo
+    )
+    .await
+    .expect("complete_special_dungeon_instance");
+    let expected_solo_isk = ((hf_inst_id.2 as f64) * (1.0 / (hf_inst_id.3 as f64))).round() as i64;
+    assert_eq!(hf_done.dict_get("rewardPaidIsk"), Some(&PyRep::Integer(expected_solo_isk)));
+}
+
+}

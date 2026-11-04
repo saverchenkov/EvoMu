@@ -50,8 +50,6 @@ mod destiny_events_emission;
 mod dogma_capital_heat_crystals;
 mod dogma_combat;
 mod dogma_combat_ewar;
-mod combat_ewar_repairs_closure_part2;
-mod combat_repairs_smartbomb_closure_part2;
 mod combat_ewar_logistics;
 mod combat_repairs_smartbombs;
 mod dogma_ewar_disruptors;
@@ -79,7 +77,6 @@ mod economy_quasar_esi_r4_regressions;
 mod economy_quasar_r5_regressions;
 mod esi;
 mod esi_corp_alliance;
-mod esi_corp_market_industry_closure;
 mod esi_fittings_war_killmails;
 mod esi_corp_governance;
 mod esi_fleets;
@@ -141,14 +138,8 @@ mod planetary_interaction_complete;
 mod pi_planet_mgr_rpc;
 
 mod pve_agency_events_complete;
-mod pve_agent_missions_remediation;
 mod pve_exploration_complete;
-mod pve_exploration_complete_part2;
-mod pve_exploration_remediation;
 mod pve_incursions_complete;
-mod pve_incursions_triglavian_remediated;
-mod pve_crab_and_storms_closure_part2;
-mod pve_deadspace_and_dungeons_closure;
 mod pve_escalations_and_dungeon_notifs;
 mod pve_mining_sites;
 mod pve_missions_dungeons_extended;
@@ -170,7 +161,6 @@ mod quasar_cosmetics_skinr_state;
 mod quasar_fw_occupancy;
 mod quasar_sov_equinox_hub;
 mod quasar_sov_pirate_insurgency;
-mod quasar_sov_pirate_remediation;
 mod sovereignty_mercenary_dens;
 mod fw_warzone_insurgency;
 mod sovereignty_equinox_gameplay;
@@ -276,10 +266,7 @@ mod access_group_bookmarks_suite;
 mod mail_and_mailing_lists_suite;
 mod space_travel_shipcaster_suite;
 mod ship_operations_and_insurance_contracts;
-mod ship_operations_and_insurance_contracts_part2;
 mod rpc_calendar_ops;
-mod rpc_calendar_remediation;
-mod rpc_fleet_remediation;
 mod quasar_store_vault_suite;
 mod quasar_workforce_relays_and_ai_chat;
 mod remediated_fake_done_tests;
@@ -297,17 +284,13 @@ mod pi_planet_mgr_rpc_part2;
 mod pi_planet_mgr_rpc_part3;
 mod rpc_shipcaster_complete;
 mod rpc_lp_store_mgr_complete;
-mod lp_store_closure;
 mod rpc_mail_mgr_complete;
 mod rpc_mailing_lists_complete;
 mod remediated_storms_and_homefront;
-mod market_price_history_remediation;
 mod npc_encounters_remediation;
 mod quasar_goal_tale_notices;
 mod quasar_cosmetics_live_state;
 mod quasar_cosmetics_market_state;
-mod quasar_cosmetics_seasons_closure_part1;
-mod rpc_missing_batch1;
 mod character_skill_features_t12;
 mod structure_acl_and_features_complete;
 mod structure_profiles_directory_defense;
@@ -319,15 +302,19 @@ mod skills_injectors_and_attributes;
 mod fw_parity_complete;
 mod pve_parity_complete;
 mod plan_char_dogma_social_esi;
-mod plan_c7_crimewatch_closure_part2;
+#[allow(unused_imports)]
 pub(crate) use crimewatch_hostility as plan_c7_crimewatch_closure;
+#[allow(unused_imports)]
 pub(crate) use combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2;
+#[allow(unused_imports)]
 pub(crate) use abyssal_deadspace as abyssal_deadspace_closure;
+#[allow(unused_imports)]
 pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
+#[allow(unused_imports)]
 pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
+#[allow(unused_imports)]
 pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
 mod plan_c3_c4_combat_closure;
-mod plan_social_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
 mod fleet_tactical_movement_closure;
@@ -335,30 +322,19 @@ mod crimewatch_hostility;
 mod combat_r4_regressions;
 mod combat_r5_regressions;
 mod structures_mining_r4_regressions;
-mod crimewatch_drones_closure;
-mod crimewatch_drones_closure_part2;
-mod structures_mining_r4_regressions_part2;
 mod ess_reserve_main_concurrency;
 mod mining_structures_sov_r5_regressions;
 mod skills_fitting_corp_r5_regressions;
-mod combat_fighters_insurance_bounties_part2;
-mod combat_npc_crimewatch_part2;
-mod combat_weapons_wrecks_part2;
 mod notify_econ_char_emission_part2;
 mod regressions_r7;
 mod plan_navigation_jump_cloak_closure;
 mod plan_navigation_jump_cloak_closure_part2;
-mod plan_navigation_warp_zarzakh_closure;
 mod pochven_zarzakh_filaments_suite;
 mod abyssal_weather_clouds_suite;
 mod zarzakh_fulcrum_mechanics_suite;
-mod plan_upwell_structures_closure;
-mod plan_upwell_structures_closure_part2;
-mod plan_upwell_structures_closure_part3;
 mod pochven_anchoring_restrictions_suite;
 mod seasons_and_campaigns;
 mod notify_real_emitters_batch3;
-mod pve_mining_sites_part2;
 mod notify_real_emitters_batch5;
 mod notify_real_emitters_batch6;
 mod zarzakh_gate_lock;
@@ -381,15 +357,6 @@ mod notify_real_emitters_batch10_part5;
 mod notify_b23_closure;
 mod client_bug_reporting_suite;
 mod pi_and_evermarks_remediation;
-mod quasar_daily_goals_remediation;
-mod quasar_q3_q9_closure;
-mod quasar_q5_q6_closure;
-mod quasar_b34_closure;
-mod esi_market_industry_pi_part2;
-mod esi_market_industry_pi_part3;
-mod esi_market_industry_pi_part4;
-mod esi_p6_closure;
-mod esi_p6_closure_part2;
 mod quasar_daily_goals_progress;
 mod quasar_store_catalog_and_career_goals;
 mod quasar_corporation_goals_and_freelance;
@@ -422,15 +389,7 @@ mod open_feats_b35_d;
 mod quasar_sov_workforce_transit;
 mod quasar_faction_payment_schedule;
 mod capital_combat_and_escalation;
-mod economy_industry_lookup_sov_closure;
-mod economy_market_lookup_social_closure;
-mod economy_market_lookup_social_closure_part2;
-mod capital_combat_sp7_closure;
-mod capital_combat_sp7_closure_part2;
-mod capital_combat_sp7_closure_part3;
-mod capital_combat_sp7_closure_part4;
 mod economy_market_lookup_social;
-mod plan_w31_closure;
 mod open_feats_and_rpcs_b8;
 mod open_feats_and_rpcs_b8_part2;
 mod open_feats_b36;
@@ -460,7 +419,6 @@ mod open_feats_ships_pve_b5;
 mod open_feats_and_rpcs_batch2_part2;
 mod quasar_ship_unlocks_and_stargates;
 mod notify_p7_sp1_sp2_closure;
-mod esi_fw_and_social_closure;
 mod open_feats_and_rpcs_b30;
 mod open_feats_and_rpcs_b30_part2;
 mod notify_b30_closure;
@@ -572,8 +530,6 @@ mod gameplay_services_and_rpcs;
 mod rpc_services_remaining;
 
 #[allow(unused_imports)]
-pub(crate) use abyssal_deadspace as abyssal_deadspace_closure;
-#[allow(unused_imports)]
 pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
 #[allow(unused_imports)]
 pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
@@ -582,20 +538,7 @@ pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
 #[allow(unused_imports)]
 pub(crate) use crimewatch_hostility as crimewatch_closure;
 #[allow(unused_imports)]
-pub(crate) use crimewatch_hostility as plan_c7_crimewatch_closure;
-#[allow(unused_imports)]
-pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
-#[allow(unused_imports)]
-pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
-#[allow(unused_imports)]
-pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-#[allow(unused_imports)]
-#[allow(unused_imports)]
 pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
-#[allow(unused_imports)]
-pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
 #[allow(unused_imports)]
 pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
 #[allow(unused_imports)]
@@ -605,32 +548,6 @@ pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
 #[allow(unused_imports)]
 pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
 
-#[allow(unused_imports)]
-pub(crate) use self::abyssal_deadspace as abyssal_deadspace_closure;
-#[allow(unused_imports)]
-pub(crate) use self::combat_ewar_logistics as combat_ewar_repairs_closure;
-#[allow(unused_imports)]
-pub(crate) use self::combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
-#[allow(unused_imports)]
-pub(crate) use self::npc_spawns_pve as npc_spawns_pve_closure;
-#[allow(unused_imports)]
-pub(crate) use self::fw_warzone_insurgency as fw_warzone_insurgency_closure;
-#[allow(unused_imports)]
-pub(crate) use self::sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
-#[allow(unused_imports)]
-pub(crate) use self::crimewatch_hostility as plan_c7_crimewatch_closure;
-pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
-#[allow(unused_imports)]
-pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
-#[allow(unused_imports)]
-pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
-#[allow(unused_imports)]
 pub(crate) use {
     abyssal_deadspace as abyssal_deadspace_closure,
     abyssal_pochven_void as abyssal_pochven_void_closure,
@@ -646,3 +563,4 @@ pub(crate) use {
     wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure,
     zarzakh_gate_lock as zarzakh_gate_lock_closure,
 };
+mod social_and_contacts_complete;

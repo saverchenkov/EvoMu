@@ -5066,3 +5066,1774 @@ async fn test_r_struct_ctrl_ship_bypass_01_saved_ship_locks_and_flex_pod_fallbac
 }
 
 }
+
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod plan_upwell_structures_ops_a {
+    use super::*;
+
+// Upwell Structure Lifecycle, Asset Safety, Reinforcement, Repair & Hack Reveal
+// parity tests (`plan_upwell_structures_closure.rs`).
+
+use crate::esi_routes::issue_token_with_scopes;
+use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::esi::{EsiHttpRequest, EsiRouter};
+use eve_server::router::ServerContext;
+use eve_server::services::station_structure::structure_lifecycle as life;
+use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
+use glam::DVec3;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+const OWNER: i64 = 90_000_001; const HACKER: i64 = 90_000_002; const BYSTANDER: i64 = 90_000_003; const RIVAL_CORP: i64 = 98_999_999;
+const JITA: u32 = 30_000_144; const RANCER: u32 = 30_002_718; const HED_GP: u32 = 30_001_161;
+
+fn prepare_siege(ctx: &ServerContext, id: i64, charge_dmg_em: f64) -> i64 {
+    ctx.db.with_mut_snapshot(|snap| {
+        let my_corp = snap.characters.get(&OWNER).map(|c| c.corporation_id).expect("corp");
+        if let Some(s) = snap.structures.get_mut(&id) { s.owner_corp_id = RIVAL_CORP; }
+        snap.wars.insert(77, eve_db::WarRecord { war_id: 77, aggressor_corp_id: my_corp, defender_corp_id: RIVAL_CORP, mutual: true, started_unix: 0, active: true });
+        if let Some(w) = snap.items.get_mut(&100_000_005) {
+            w.location_id = 100_000_001; w.flag = InventoryFlag::HiSlot0; w.singleton = true;
+            if charge_dmg_em > 0.0 { w.dynamic_attributes.insert(64, 5_000.0); } else { w.dynamic_attributes.remove(&64); }
+        }
+        let old_ammo: Vec<i64> = snap.items.values().filter(|i| i.location_id == 100_000_001 && i.flag == InventoryFlag::HiSlot0 && i.item_id != 100_000_005).map(|i| i.item_id).collect();
+        for aid in old_ammo { snap.items.remove(&aid); }
+    });
+    let ammo_id = grant(ctx, OWNER, 100_000_001, 185, InventoryFlag::HiSlot0, 10_000);
+    ctx.invalidate_ship_fitting(100_000_001);
+    ammo_id
+}
+
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
+}
+fn kv_i64(rep: &PyRep, key: &str) -> i64 { rep.dict_get(key).and_then(|v| v.as_i64()).unwrap_or(0) }
+fn kv_str(rep: &PyRep, key: &str) -> String { rep.dict_get(key).and_then(|v| v.as_str()).unwrap_or("").to_string() }
+
+async fn fire_weapon(ctx: &ServerContext, sess: &mut SessionState, target_id: i64) -> Result<PyRep, BridgeRpcError> {
+    let (sys_id, ship_id) = (sess.solar_system_id.expect("sys"), sess.ship_id.expect("ship"));
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if !sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) {
+        rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await?;
+        let _ = sys.step_manual(12.0).await;
+    }
+    rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into()), PyRep::Integer(target_id)]).await
+}
+
+fn grant(ctx: &ServerContext, owner: i64, location: i64, type_id: u32, flag: InventoryFlag, qty: i32) -> i64 {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(id, InventoryItemRecord { item_id: id, type_id, owner_id: owner, location_id: location, flag, quantity: qty, singleton: qty == 1, version: 1, ..Default::default() });
+        id
+    })
+}
+
+fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
+    ctx.sde.types.get(&type_id).and_then(|t| t.default_attributes.get(&attr_id).copied()).unwrap_or_else(|| panic!("SDE type {type_id} lacks attribute {attr_id}"))
+}
+
+fn new_test_ctx() -> Arc<ServerContext> {
+    let ctx = Arc::new(ServerContext::new());
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx
+}
+
+async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = perim_station;
+            }
+        }
+    });
+    let mut sess = SessionState::new(sess_id);
+    rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
+    ctx.advance_secs(12);
+    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Closure Corp".into()), PyRep::String("UPWL".into())]).await.expect("AddCorporation");
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
+    rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    sess
+}
+
+async fn move_ship(ctx: &ServerContext, sess: &SessionState, pos: DVec3) {
+    assert!(ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys")).set_ball_position(sess.ship_id.expect("ship"), pos).await);
+}
+
+fn open_space(ctx: &ServerContext, sys_id: u32, k: f64) -> DVec3 {
+    let base = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+    base + DVec3::new(0.0, 5.0e9 + k * 3.0e9, 0.0)
+}
+
+async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name: &str) -> Result<PyRep, BridgeRpcError> {
+    let ship = sess.ship_id.expect("ship");
+    grant(ctx, OWNER, ship, type_id, InventoryFlag::Cargo, 1);
+    rpc(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(type_id)), PyRep::String(name.into())]).await
+}
+
+async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
+    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
+}
+
+async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name: &str) -> i64 {
+    let id = kv_i64(&anchor(ctx, sess, type_id, name).await.expect("Anchor"), "structureID");
+    ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
+    let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
+    rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
+    let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
+    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_ONLINING);
+    ctx.advance_virtual_clock(life::ONLINING_SECS);
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_SHIELD_VULNERABLE);
+    id
+}
+
+#[tokio::test]
+async fn test_upwell_lifecycle_asset_safety_abandoned_and_leave_space() {
+    // parity: feat:lifecycle.asset_safety-auto_delivery, feat:structures.asset-safety-recovery-delay-and-fee, feat:lifecycle.structure-abandoned_destroyed, feat:lifecycle.structure-leave_space
+    eve_testkit::attest(&[
+        "feat:lifecycle.asset_safety-auto_delivery", "feat:structures.asset-safety-recovery-delay-and-fee",
+        "feat:lifecycle.structure-abandoned_destroyed", "feat:lifecycle.structure-leave_space",
+    ]);
+
+    let ctx = new_test_ctx();
+    let mut sess = pilot_in_space(&ctx, 7101).await;
+
+    // 1. Security band mapping & same-system Euclidean AU distance for nearest_npc_station_from_pos.
+    let mut jita_stations: Vec<_> = ctx.sde.stations.values().filter(|s| s.solar_system_id == JITA).collect();
+    jita_stations.sort_by_key(|s| s.station_id);
+    let (st1, st2) = (jita_stations[0], jita_stations[1]);
+    assert_eq!(life::nearest_npc_station_from_pos(&ctx, JITA, st1.position + DVec3::new(1000.0, 0.0, 0.0)), Some(st1.station_id));
+    assert_eq!(life::nearest_npc_station_from_pos(&ctx, JITA, st2.position + DVec3::new(1000.0, 0.0, 0.0)), Some(st2.station_id));
+    let pos_jita = open_space(&ctx, JITA, 1.0);
+    let st_high = life::nearest_npc_station_from_pos(&ctx, JITA, pos_jita).expect("high-sec station");
+    assert_eq!(ctx.sde.stations.get(&st_high).expect("station").solar_system_id, JITA);
+    let st_low = life::nearest_npc_station_from_pos(&ctx, RANCER, DVec3::ZERO).expect("low-sec station");
+    assert!((0.0..0.45).contains(&ctx.sde.solar_systems.get(&ctx.sde.stations.get(&st_low).unwrap().solar_system_id).unwrap().security_status));
+    let st_null = life::nearest_npc_station_from_pos(&ctx, HED_GP, DVec3::ZERO).expect("null-sec -> low-sec station");
+    assert!((0.0..0.45).contains(&ctx.sde.solar_systems.get(&ctx.sde.stations.get(&st_null).unwrap().solar_system_id).unwrap().security_status));
+
+    // 2. Anchor two Astrahus structures in Jita: one source, one same-system delivery destination.
+    move_ship(&ctx, &sess, pos_jita).await;
+    let src_id = online_structure(&ctx, &mut sess, 35832, "Safety Source Astrahus").await;
+    let item_5d = grant(&ctx, OWNER, src_id, 34, InventoryFlag::Hangar, 10_000);
+    assert_eq!(rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect_err("docked in target").code, "CannotAssetSafetyWhileDockedInTargetStructure");
+
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    move_ship(&ctx, &sess, open_space(&ctx, JITA, 2.0)).await;
+    let dst_id = online_structure(&ctx, &mut sess, 35832, "Safety Dest Astrahus").await;
+
+    // 3. Manual MovePersonalAssetsToSafety & MoveCorpAssetsToSafety (skipping boarded ship).
+    let wrap_5d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect("MovePersonalAssetsToSafety"), "wrapID");
+    assert!(wrap_5d > 0);
+
+    let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&OWNER).unwrap().corporation_id);
+    let boarded_corp_ship = grant(&ctx, corp_id, src_id, 606, InventoryFlag::CorpSAG1, 1);
+    let unboarded_corp_ore = grant(&ctx, corp_id, src_id, 34, InventoryFlag::CorpSAG1, 2_500);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut mate = snap.characters.get(&OWNER).unwrap().clone();
+        mate.character_id = HACKER; mate.user_id = 2; mate.active_ship_id = boarded_corp_ship;
+        snap.characters.insert(HACKER, mate);
+    });
+    let corp_wrap_live = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect("MoveCorpAssetsToSafety"), "wrapID");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&boarded_corp_ship).map(|i| i.location_id), Some(src_id));
+        assert_eq!(snap.items.get(&unboarded_corp_ore).map(|i| i.location_id), Some(corp_wrap_live));
+    });
+
+    // Wormhole manual asset safety rejected; Faction Fortizar (47512) never becomes Abandoned.
+    let (wh_sys_id, wh_manual_st) = (31_000_001u32, 990_000_099i64);
+    let wh_hangar_p = grant(&ctx, OWNER, wh_manual_st, 34, InventoryFlag::Hangar, 100);
+    let wh_hangar_c = grant(&ctx, corp_id, wh_manual_st, 34, InventoryFlag::CorpSAG1, 100);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(wh_manual_st, UpwellStructureRecord {
+            structure_id: wh_manual_st, owner_corp_id: corp_id, type_id: 35832, solar_system_id: wh_sys_id,
+            name: "WH Manual Safety".into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+            shield_hp: 10_000.0, armor_hp: 10_000.0, hull_hp: 10_000.0, fuel_blocks: 1_000, reinforced_until_unix: 0,
+            last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None, quantum_core_installed: true,
+        });
+        let ffort_id = 990_000_088i64;
+        snap.structures.insert(ffort_id, UpwellStructureRecord {
+            structure_id: ffort_id, owner_corp_id: corp_id, type_id: 47512, solar_system_id: JITA,
+            name: "Moreau Fortizar".into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+            shield_hp: 10_125_000.0, armor_hp: 8_100_000.0, hull_hp: 32_400_000.0, fuel_blocks: 0, reinforced_until_unix: 0,
+            last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None, quantum_core_installed: true,
+        });
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(ffort_id).or_default().low_power_since_unix = Some(1);
+        assert_eq!(life::power_state(&ctx, snap, &ext, snap.structures.get(&ffort_id).unwrap(), ctx.now_unix()), life::PowerState::LowPower);
+        save_ext_state(snap, &ext);
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(wh_sys_id)), PyRep::Integer(wh_manual_st)]).await.expect_err("wh personal").code, "AssetSafetyUnavailableInWormhole");
+    assert_eq!(rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(wh_sys_id)), PyRep::Integer(wh_manual_st)]).await.expect_err("wh corp").code, "AssetSafetyUnavailableInWormhole");
+
+    // Wormhole destruction drops hangar contents as space loot; NO Asset Safety wrap created (feat:structures.asset-safety-recovery-delay-and-fee).
+    let wh_disposal = ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        life::destroy_structure(&ctx, snap, &mut ext, wh_manual_st, OWNER, ctx.now_unix())
+    });
+    assert!(wh_disposal.asset_safety_wrap_ids.is_empty(), "Wormhole destruction must create zero Asset Safety wraps");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&wh_hangar_p).map(|i| i.location_id), Some(i64::from(wh_sys_id)), "Personal items drop directly in wormhole space");
+        assert_eq!(snap.items.get(&wh_hangar_c).map(|i| i.location_id), Some(i64::from(wh_sys_id)), "Corp items drop directly in wormhole space");
+    });
+
+    // Before 5 days: rejected; at 6 days (< 20 days): same-system structure delivery charges 0.5%.
+    ctx.advance_virtual_clock(4 * 86_400);
+    assert_eq!(rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_5d), PyRep::Integer(dst_id)]).await.expect_err("early").code, "AssetSafetyCooldownActive");
+    ctx.advance_virtual_clock(2 * 86_400);
+    let est_val = ctx.sde.types.get(&34).unwrap().base_price * 10_000.0;
+    let deliv_5d = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_5d), PyRep::Integer(dst_id)]).await.expect("deliver 5d");
+    assert!((deliv_5d.dict_get("feePaidISK").and_then(|v| v.as_f64()).unwrap_or(-1.0) - est_val * 0.005).abs() < 1.0);
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&item_5d).map(|i| (i.location_id, i.flag)), Some((dst_id, InventoryFlag::Deliveries))));
+
+    // 4. Lazy 20-day auto-delivery triggered directly via ESI GET /characters/{id}/assets/ & GET /corporations/{id}/assets/ (with NO prior structure RPC!).
+    // Destroying a structure in stationless null-sec (HED-GP) triggers cross-system auto-delivery to the nearest lowsec NPC station (st_null) at 15% fee.
+    let (null_sys_id, null_st_id) = (HED_GP, 990_000_077i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(null_st_id, UpwellStructureRecord {
+            structure_id: null_st_id, owner_corp_id: corp_id, type_id: 35832, solar_system_id: null_sys_id,
+            name: "Null Safety Source".into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+            shield_hp: 10_000.0, armor_hp: 10_000.0, hull_hp: 10_000.0, fuel_blocks: 100, reinforced_until_unix: 0,
+            last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None, quantum_core_installed: true,
+        });
+    });
+    let item_20d = grant(&ctx, OWNER, null_st_id, 34, InventoryFlag::Hangar, 20_000);
+    let wrap_20d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(null_st_id)]).await.expect("wrap 20d"), "wrapID");
+    let corp_item_20d = grant(&ctx, corp_id, null_st_id, 34, InventoryFlag::CorpSAG1, 10_000);
+    ctx.db.with_mut_snapshot(|snap| { if let Some(m) = snap.characters.get_mut(&HACKER) { m.active_ship_id = 0; } });
+    let corp_wrap_20d = kv_i64(&rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(null_sys_id)), PyRep::Integer(null_st_id)]).await.expect("corp wrap 20d"), "wrapID");
+
+    ctx.advance_virtual_clock(life::ASSET_SAFETY_AUTO_DELIVERY_SECS + 10);
+    let esi_router = EsiRouter::new(Arc::clone(&ctx));
+    let token = issue_token_with_scopes(&ctx, OWNER, vec!["esi-assets.read_assets.v1".into(), "esi-assets.read_corporation_assets.v1".into()]);
+    let char_resp = esi_router.handle_request(&EsiHttpRequest::new("GET", format!("/v5/characters/{OWNER}/assets/")).with_bearer_token(&token));
+    assert_eq!(char_resp.status_code, 200);
+    let char_json: Value = serde_json::from_slice(&char_resp.body).unwrap();
+    assert!(char_json.as_array().unwrap().iter().any(|a| a["item_id"].as_i64() == Some(wrap_20d) && a["location_id"].as_i64() == Some(st_null)), "ESI character assets must lazily auto-deliver 20d wrap to nearest NPC station");
+    let corp_resp = esi_router.handle_request(&EsiHttpRequest::new("GET", format!("/v5/corporations/{corp_id}/assets/")).with_bearer_token(&token));
+    assert_eq!(corp_resp.status_code, 200);
+    let corp_json: Value = serde_json::from_slice(&corp_resp.body).unwrap();
+    assert!(corp_json.as_array().unwrap().iter().any(|a| a["item_id"].as_i64() == Some(corp_wrap_20d) && a["location_id"].as_i64() == Some(st_null)), "ESI corporation assets must lazily auto-deliver 20d corp wrap to nearest NPC station");
+
+    let est_val_20d = ctx.sde.types.get(&34).unwrap().base_price * 20_000.0;
+    let deliv_20d = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(wrap_20d), PyRep::Integer(st_null)]).await.expect("retrieve 20d");
+    assert!((deliv_20d.dict_get("feePaidISK").and_then(|v| v.as_f64()).unwrap_or(-1.0) - est_val_20d * 0.15).abs() < 1.0);
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.items.get(&item_20d).map(|i| (i.location_id, i.flag)), Some((st_null, InventoryFlag::Deliveries))));
+
+    // Corporate asset safety retrieval debits corp wallet division 1 and records BOTH wallet_journal and corp_wallet_journals.
+    ctx.db.with_mut_snapshot(|snap| snap.corporations.get_mut(&corp_id).unwrap().set_division_balance(1, eve_db::IskCents::from_f64_isk(50_000_000.0)));
+    let corp_deliv = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(corp_wrap_20d), PyRep::Integer(st_null)]).await.expect("retrieve corp 20d");
+    let corp_fee = corp_deliv.dict_get("feePaidISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!(corp_fee > 0.0);
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&corp_item_20d).map(|i| i.location_id), Some(st_null));
+        let cj = snap.corp_wallet_journals.get(&(corp_id, 1)).expect("corp_wallet_journals division 1");
+        assert!(cj.iter().any(|e| e.ref_type == "AssetSafetyRecoveryTax" && (e.amount + corp_fee).abs() < 1e-2));
+    });
+
+    // 5. Unanchor completion (leave_space): wraps SpecializedFuelBay items into corp Asset Safety, removes structure ball, spawns packaged structure & dropped core balls, emits notifications.
+    let dst_ship = sess.ship_id.unwrap();
+    let dst_fb = grant(&ctx, OWNER, dst_ship, 4247, InventoryFlag::Cargo, 250);
+    let dst_oz = grant(&ctx, OWNER, dst_ship, 16273, InventoryFlag::Cargo, 400);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(dst_fb), PyRep::Integer(dst_id), PyRep::Integer(133), PyRep::Integer(250)]).await.expect("dst fuel blocks");
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(dst_oz), PyRep::Integer(dst_id), PyRep::Integer(133), PyRep::Integer(400)]).await.expect("dst ozone");
+    assert_eq!(observe(&ctx, &mut sess, dst_id).await.unwrap().fuel_blocks, 250, "Ozone must not inflate fuel_blocks");
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    let _ = ctx.drain_notifications_for_char(OWNER);
+    rpc(&ctx, &mut sess, "structureDeployment", "Unanchor", &[PyRep::Integer(dst_id)]).await.expect("Unanchor");
+    assert!(!ctx.drain_notifications_for_char(OWNER).iter().any(|n| n.event == "OnStructureRemoved"));
+    ctx.advance_virtual_clock(7 * 86_400 + 5);
+    assert!(observe(&ctx, &mut sess, dst_id).await.is_none());
+    let unanchor_notifs = ctx.drain_notifications_for_char(OWNER);
+    assert!(unanchor_notifs.iter().any(|n| n.event == "OnStructureRemoved") && unanchor_notifs.iter().any(|n| n.event == "OnStructureRemovedFromSpace"));
+    let jita_sys = ctx.systems.get_or_spawn(JITA);
+    assert!(jita_sys.get_ball_snapshot(dst_id).await.unwrap().is_none());
+    ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        let dst_wrap = ext.asset_safety_wraps.values().find(|w| w.is_corp && w.source_structure_id == dst_id).expect("dst unanchor corp wrap");
+        assert!(dst_wrap.item_ids.iter().any(|id| snap.items.get(id).is_some_and(|i| i.type_id == 4247 && i.quantity == 250)), "Unanchor must wrap remaining Fuel Blocks into corp Asset Safety");
+        assert!(dst_wrap.item_ids.iter().any(|id| snap.items.get(id).is_some_and(|i| i.type_id == 16273 && i.quantity == 400)), "Unanchor must wrap Liquid Ozone into corp Asset Safety");
+    });
+
+    // 6. Abandoned K-space structure destruction via live weapon combat across all 3 layers (Shield -> Armor -> Hull -> Destroyed), dropping SpecializedFuelBay fuel & reagents in space.
+    ctx.advance_virtual_clock(life::ABANDON_AFTER_LOW_POWER_SECS + 60);
+    let _ = observe(&ctx, &mut sess, src_id).await;
+    move_ship(&ctx, &sess, pos_jita + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    let src_fb_in = grant(&ctx, OWNER, dst_ship, 4247, InventoryFlag::Cargo, 180);
+    let src_gas_in = grant(&ctx, OWNER, dst_ship, 81143, InventoryFlag::Cargo, 320);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(src_fb_in), PyRep::Integer(src_id), PyRep::Integer(133), PyRep::Integer(180)]).await.expect("src fuel blocks");
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(src_gas_in), PyRep::Integer(src_id), PyRep::Integer(133), PyRep::Integer(320)]).await.expect("src magmatic gas");
+    let abandoned_hangar = grant(&ctx, OWNER, src_id, 35, InventoryFlag::Hangar, 7_777);
+    let abandoned_rig = grant(&ctx, OWNER, src_id, 37146, InventoryFlag::RigSlot0, 1);
+    let abandoned_hi = grant(&ctx, OWNER, src_id, 3170, InventoryFlag::HiSlot0, 1);
+    prepare_siege(&ctx, src_id, 200_000.0);
+    ctx.db.with_mut_snapshot(|snap| {
+        let s = snap.structures.get_mut(&src_id).unwrap();
+        s.shield_hp = 10.0; s.armor_hp = 10.0; s.hull_hp = 10.0;
+    });
+    fire_weapon(&ctx, &mut sess, src_id).await.expect("abandoned shield -> armor");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&src_id].state.clone()), life::STATE_ARMOR_VULNERABLE);
+    fire_weapon(&ctx, &mut sess, src_id).await.expect("abandoned armor -> hull");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&src_id].state.clone()), life::STATE_HULL_VULNERABLE);
+    fire_weapon(&ctx, &mut sess, src_id).await.expect("abandoned hull -> destroyed");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&src_id].state.clone()), life::STATE_DESTROYED);
+    assert!(jita_sys.get_ball_snapshot(src_id).await.unwrap().is_none());
+    assert!(jita_sys.get_ball_snapshot(abandoned_hangar).await.unwrap().is_some());
+    assert!(jita_sys.get_ball_snapshot(abandoned_hi).await.unwrap().is_some());
+    let (dropped_fb_id, dropped_gas_id) = ctx.db.with_snapshot(|snap| {
+        let ext = load_ext_state(snap);
+        assert!(!ext.asset_safety_wraps.values().any(|w| w.source_structure_id == src_id && w.item_ids.contains(&abandoned_hangar)));
+        assert!(!snap.items.contains_key(&abandoned_rig));
+        assert_eq!(snap.items.get(&abandoned_hangar).map(|i| i.location_id), Some(i64::from(JITA)));
+        let fb = snap.items.values().find(|i| i.location_id == i64::from(JITA) && i.type_id == 4247 && i.quantity == 180).expect("dropped fuel blocks").item_id;
+        let gas = snap.items.values().find(|i| i.location_id == i64::from(JITA) && i.type_id == 81143 && i.quantity == 320).expect("dropped magmatic gas").item_id;
+        (fb, gas)
+    });
+    assert!(jita_sys.get_ball_snapshot(dropped_fb_id).await.unwrap().is_some());
+    assert!(jita_sys.get_ball_snapshot(dropped_gas_id).await.unwrap().is_some());
+
+    // Destroyed structure rejects management, control, boarding, and manual asset safety RPCs.
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&src_id).unwrap().owner_corp_id = corp_id);
+    assert_eq!(rpc(&ctx, &mut sess, "structureAssetSafety", "MovePersonalAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect_err("destroyed safety").code, "StructureDestroyed");
+    assert_eq!(rpc(&ctx, &mut sess, "structureAssetSafety", "MoveCorpAssetsToSafety", &[PyRep::Integer(i64::from(JITA)), PyRep::Integer(src_id)]).await.expect_err("destroyed corp safety").code, "StructureDestroyed");
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(src_id)]).await.expect_err("destroyed take control").code, "StructureDestroyed");
+    assert_eq!(rpc(&ctx, &mut sess, "structureControl", "BoardStructure", &[PyRep::Integer(src_id)]).await.expect_err("destroyed board").code, "StructureDestroyed");
+    assert_eq!(rpc(&ctx, &mut sess, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(src_id), PyRep::String("Dead".into())]).await.expect_err("destroyed desc").code, "StructureDestroyed");
+
+    // 7. Lowsec transit recovery charges 15% fee.
+    let lowsec_st = ctx.sde.stations.values().find(|s| ctx.sde.solar_systems.get(&s.solar_system_id).is_some_and(|sy| sy.security_status < 0.45 && sy.security_status > 0.0)).map(|s| s.station_id).unwrap();
+    let lowsec_wrap_id = grant(&ctx, OWNER, lowsec_st, 34, InventoryFlag::Hangar, 10_000);
+    let lowsec_val = ctx.sde.types.get(&34).unwrap().base_price * 10_000.0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.asset_safety_wraps.insert(lowsec_wrap_id, eve_server::services::station_structure::structure_upwell_ops::AssetSafetyWrapRecord {
+            wrap_id: lowsec_wrap_id, owner_id: OWNER, is_corp: false, source_structure_id: src_id, source_structure_name: "Source".into(),
+            solar_system_id: JITA, created_unix: ctx.now_unix(), deliverable_after_unix: 0, delivered_to_id: None, estimated_value_isk: lowsec_val,
+            item_ids: vec![lowsec_wrap_id], nearest_npc_station_id: Some(lowsec_st), auto_delivered: false, retrieval_fee_paid: false,
+        });
+        save_ext_state(snap, &ext);
+    });
+    let lowsec_deliv = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(lowsec_wrap_id), PyRep::Integer(lowsec_st)]).await.expect("lowsec transit");
+    assert!((lowsec_deliv.dict_get("feePaidISK").and_then(|v| v.as_f64()).unwrap_or(-1.0) - lowsec_val * 0.15).abs() < 1.0);
+}
+
+#[tokio::test]
+async fn test_upwell_reinforcement_durations_exit_hack_and_repair() {
+    // parity: feat:structures.armor-reinforce-durations, feat:structures.hull-reinforce-durations, feat:structures.reinforce-exit-time-rules, feat:structures.reinforce-hour-hack-reveal, feat:structures.repair-timer-pause-threshold, feat:structures.vulnerability-repair-window
+    eve_testkit::attest(&[
+        "feat:structures.armor-reinforce-durations", "feat:structures.hull-reinforce-durations",
+        "feat:structures.reinforce-exit-time-rules", "feat:structures.reinforce-hour-hack-reveal",
+        "feat:structures.repair-timer-pause-threshold", "feat:structures.vulnerability-repair-window",
+    ]);
+
+    let ctx = new_test_ctx();
+    let mut sess = pilot_in_space(&ctx, 7103).await;
+    let pos4 = open_space(&ctx, JITA, 4.0);
+    move_ship(&ctx, &sess, pos4).await;
+    let st_id = online_structure(&ctx, &mut sess, 35832, "Reinforce Test Astrahus").await;
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    move_ship(&ctx, &sess, pos4 + DVec3::new(60_000.0, 0.0, 0.0)).await;
+
+    // 1. Armor & Hull reinforcement duration tables & jitter window rules.
+    use life::{armor_reinforcement_secs as a_secs, hull_reinforcement_secs as h_secs, HullClass::*, PowerState::*, SpaceClass::*};
+    assert_eq!(a_secs(Medium, HighSec, FullPower), Some(108 * 3600)); assert_eq!(a_secs(Medium, LowNullSec, FullPower), Some(84 * 3600)); assert_eq!(a_secs(Medium, Wormhole, FullPower), Some(60 * 3600));
+    assert_eq!(a_secs(Medium, WarHq, FullPower), Some(24 * 3600)); assert_eq!(a_secs(Large, HighSec, FullPower), Some(24 * 3600)); assert_eq!(a_secs(XLarge, LowNullSec, FullPower), Some(24 * 3600));
+    assert_eq!(a_secs(Large, HighSec, LowPower), None); assert_eq!(a_secs(Flex, LowNullSec, FullPower), None); assert_eq!(a_secs(Medium, HighSec, Abandoned), None);
+    assert_eq!(h_secs(Medium, HighSec, FullPower), None); assert_eq!(h_secs(Large, HighSec, FullPower), Some(108 * 3600)); assert_eq!(h_secs(Large, LowNullSec, FullPower), Some(60 * 3600));
+    assert_eq!(h_secs(XLarge, Wormhole, FullPower), Some(36 * 3600)); assert_eq!(h_secs(XLarge, WarHq, FullPower), Some(24 * 3600)); assert_eq!(h_secs(Flex, LowNullSec, FullPower), Some(1800)); assert_eq!(h_secs(Large, HighSec, Abandoned), None);
+    assert_eq!(life::reinforce_jitter_window_secs(Medium, true), 5_400); assert_eq!(life::reinforce_jitter_window_secs(Large, true), 10_800);
+    assert_eq!(life::REPAIR_HULL_SECS, 30 * 60, "HullVulnerable repair window must be 30 minutes (1800s)");
+
+    // 2. Post-resist repair timer pause threshold (10% of layer damage cap) & 15m shield / 30m hull repair (including Abandoned structures) via live dogmaIM.Activate.
+    // Astrahus shield pause threshold = 500 DPS, EM resonance = 0.8 (20% resist), 200mm AutoCannon II cycle = 1.875s / dmg_mult:
+    prepare_siege(&ctx, st_id, 0.0);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("light hit");
+    let rep_after_light = ctx.db.with_snapshot(|s| load_ext_state(s).lifecycle.get(&st_id).and_then(|l| l.repair_until_unix)).expect("repair timer started");
+    ctx.advance_virtual_clock(5);
+    prepare_siege(&ctx, st_id, 20_000.0);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("qualifying heavy hit");
+    let rep_after_heavy = ctx.db.with_snapshot(|s| load_ext_state(s).lifecycle.get(&st_id).and_then(|l| l.repair_until_unix)).expect("repair timer paused");
+    assert!(rep_after_heavy > rep_after_light, "qualifying post-resist DPS must advance repair_until_unix");
+    ctx.advance_virtual_clock(life::REPAIR_SHIELD_ARMOR_SECS + 30);
+    let prof = life::structure_profile(&ctx, 35832).unwrap();
+    assert!((observe(&ctx, &mut sess, st_id).await.unwrap().shield_hp - prof.shield_hp).abs() < 1.0);
+
+    // Abandoned structure also pauses its repair timer on qualifying DPS and heals after uncontested 30m hull window:
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().low_power_since_unix = Some(1);
+        save_ext_state(snap, &ext);
+        let s = snap.structures.get_mut(&st_id).unwrap();
+        s.shield_hp = 10.0; s.armor_hp = 10.0; s.hull_hp = 50_000.0;
+    });
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("abandoned shield -> armor");
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("abandoned armor -> hull");
+    let ab_hull_rep0 = ctx.db.with_snapshot(|s| load_ext_state(s).lifecycle.get(&st_id).and_then(|l| l.repair_until_unix)).expect("abandoned hull repair timer");
+    ctx.advance_virtual_clock(10);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("pause abandoned hull repair timer");
+    let ab_hull_rep1 = ctx.db.with_snapshot(|s| load_ext_state(s).lifecycle.get(&st_id).and_then(|l| l.repair_until_unix)).unwrap();
+    assert!(ab_hull_rep1 > ab_hull_rep0, "Abandoned HullVulnerable repair timer must pause on qualifying DPS");
+    ctx.advance_virtual_clock(life::REPAIR_HULL_SECS + 5);
+    let ab_healed = observe(&ctx, &mut sess, st_id).await.unwrap();
+    assert_eq!(ab_healed.state, life::STATE_SHIELD_VULNERABLE, "Abandoned HullVulnerable heals after 30m");
+    assert!((ab_healed.hull_hp - prof.hull_hp).abs() < 1.0, "Abandoned structure hull fully restored");
+    assert!((ab_healed.armor_hp - prof.armor_hp).abs() < 1.0, "Abandoned structure armor fully restored");
+    assert!((ab_healed.shield_hp - prof.shield_hp).abs() < 1.0, "Abandoned structure shield fully restored");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().low_power_since_unix = None;
+        save_ext_state(snap, &ext);
+    });
+
+    // 3. Multi-timer High-Sec FullPower Fortizar (1.0d + 4.5d anchored to shield_fight_started_unix) + 30-minute HullVulnerable repair window via live RPCs.
+    let my_corp = ctx.db.with_snapshot(|snap| snap.characters.get(&OWNER).unwrap().corporation_id);
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp);
+    let pos_fort = open_space(&ctx, JITA, 6.0);
+    move_ship(&ctx, &sess, pos_fort).await;
+    let fort_id = online_structure(&ctx, &mut sess, 35833, "MultiTimer Fortizar").await;
+    let ship_id = sess.ship_id.unwrap();
+    let fuel_item = grant(&ctx, OWNER, ship_id, 4247, InventoryFlag::Cargo, 25_000);
+    let svc_item = grant(&ctx, OWNER, ship_id, 35894, InventoryFlag::Cargo, 1);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(fuel_item), PyRep::Integer(fort_id), PyRep::Integer(133), PyRep::Integer(25_000)]).await.expect("fuel fort");
+    let mut kw_on = HashMap::new();
+    kw_on.insert("online".into(), PyRep::Bool(true));
+    ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(svc_item), PyRep::Integer(fort_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)], &kw_on, None).await.expect("online service");
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock fort");
+    move_ship(&ctx, &sess, pos_fort).await;
+
+    // Align clock to exact 00:00 UTC with reinforce_hour = 18 so armor unjittered exit = t0 + 42h (18:00 Day 1)
+    // and multi-timer hull unjittered exit = next_reinforce_exit(t0 + (24 + 108)*3600, 18) = t0 + 138h (18:00 Day 5, NOT Day 6!).
+    let cur = ctx.now_unix();
+    let next_midnight = ((cur / 86_400) + 1) * 86_400;
+    ctx.advance_virtual_clock(next_midnight - cur);
+    let t0 = ctx.now_unix();
+    let fort_prof = life::structure_profile(&ctx, 35833).unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_vulnerability_windows.insert(fort_id, (18, 3));
+        let s = snap.structures.get_mut(&fort_id).unwrap();
+        s.shield_hp = 10.0; s.armor_hp = 50_000.0; s.hull_hp = fort_prof.hull_hp;
+    });
+    prepare_siege(&ctx, fort_id, 20_000.0);
+    fire_weapon(&ctx, &mut sess, fort_id).await.expect("strip fort shield");
+    let info_ar = rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.expect("info ar");
+    assert_eq!(kv_str(&info_ar, "state"), life::STATE_ARMOR_REINFORCED);
+    let ar_exit = observe(&ctx, &mut sess, fort_id).await.unwrap().reinforced_until_unix;
+    let exp_ar_base = t0 + 42 * 3_600;
+    assert!((ar_exit as i64 - exp_ar_base as i64).abs() <= 10_800, "Fortizar armor exit within ±3h of Day 1 18:00");
+
+    // Advance into ArmorVulnerable, pause armor repair timer with qualifying damage, then strip armor -> HullReinforced.
+    ctx.advance_virtual_clock((ar_exit + 5).saturating_sub(ctx.now_unix()));
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_ARMOR_VULNERABLE);
+    fire_weapon(&ctx, &mut sess, fort_id).await.expect("pause armor repair timer");
+    ctx.advance_virtual_clock(15);
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&fort_id).unwrap().armor_hp = 10.0);
+    fire_weapon(&ctx, &mut sess, fort_id).await.expect("strip fort armor");
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_HULL_REINFORCED);
+    let hu_exit = observe(&ctx, &mut sess, fort_id).await.unwrap().reinforced_until_unix;
+    let exp_hu_base = life::next_reinforce_exit(t0 + (24 + 108) * 3_600, 18);
+    assert_eq!(exp_hu_base, t0 + 138 * 3_600);
+    assert!((hu_exit as i64 - exp_hu_base as i64).abs() <= 10_800, "Multi-timer hull exit must anchor to t0 + 24h + 108h (Day 5 18:00), not armor exit + 108h");
+
+    // Advance into HullVulnerable and verify exact 30-minute (1800s) repair window via GetStructureInfo.
+    ctx.advance_virtual_clock(hu_exit.saturating_sub(ctx.now_unix()));
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_HULL_VULNERABLE);
+    ctx.advance_virtual_clock(1_799);
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_HULL_VULNERABLE, "at 1799s structure must still be in HullVulnerable");
+    ctx.advance_virtual_clock(1);
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(fort_id)]).await.unwrap(), "state"), life::STATE_SHIELD_VULNERABLE, "at 1800s HullVulnerable 30m repair completes to ShieldVulnerable");
+    let healed_fort = observe(&ctx, &mut sess, fort_id).await.unwrap();
+    assert!(healed_fort.shield_hp >= fort_prof.shield_hp && (healed_fort.armor_hp - fort_prof.armor_hp).abs() < 1.0 && (healed_fort.hull_hp - fort_prof.hull_hp).abs() < 1.0);
+
+    // 4. FLEX negative-jitter clamp: Pharolux Cyno Beacon (35840) requires Sov Nullsec + online Sov Hub upgrade, and never gets reinforced_until_unix <= now.
+    let flex_day = ((ctx.now_unix() / 86_400) + 1) * 86_400;
+    let target_t = flex_day + 17 * 3_600 + 35 * 60;
+    ctx.advance_virtual_clock(target_t - ctx.now_unix());
+    sess.solar_system_id = Some(RANCER);
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER);
+    let rancer_pos = open_space(&ctx, RANCER, 1.0);
+    let rancer_sys = ctx.systems.get_or_spawn(RANCER);
+    let _ = rancer_sys.spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: rancer_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
+    assert_eq!(anchor(&ctx, &mut sess, 35840, "Rancer Flex Beacon").await.expect_err("lowsec flex rejected").code, "CannotAnchorFlexOutsideSovNull");
+    ctx.db.with_mut_snapshot(|snap| snap.items.retain(|_, it| !(it.location_id == ship_id && it.type_id == 35840 && it.flag == InventoryFlag::Cargo)));
+
+    sess.solar_system_id = Some(HED_GP);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&OWNER).unwrap().solar_system_id = HED_GP;
+        let my_corp = snap.characters.get(&OWNER).unwrap().corporation_id;
+        let ally_id = 99_001_161;
+        snap.corporations.get_mut(&my_corp).unwrap().alliance_id = Some(ally_id);
+        snap.system_states.entry(HED_GP).or_insert_with(|| eve_db::SystemDynamicState { solar_system_id: HED_GP, ..Default::default() }).sov_alliance_id = Some(ally_id);
+        let hub_id = 880_001_161;
+        snap.structures.insert(hub_id, UpwellStructureRecord {
+            structure_id: hub_id, type_id: 32458, owner_corp_id: my_corp, solar_system_id: HED_GP,
+            name: "HED-GP Sov Hub".into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+            quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 100_000.0, armor_hp: 100_000.0, hull_hp: 100_000.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+        let upg_id = 880_001_162;
+        snap.items.insert(upg_id, InventoryItemRecord { item_id: upg_id, type_id: 81615, owner_id: my_corp, location_id: hub_id, flag: InventoryFlag::ServiceSlot0, quantity: 1, singleton: true, version: 1, ..Default::default() });
+        snap.module_online_states.insert(upg_id, true);
+        snap.sov_runtime.sov_hubs.insert(
+            hub_id,
+            eve_db::PersistedSovHubData {
+                hub_id,
+                upgrades: vec![eve_db::PersistedHubUpgrade { type_id: 81615, online: true, low_power: false }],
+                ..Default::default()
+            },
+        );
+    });
+    let hed_pos = open_space(&ctx, HED_GP, 1.0);
+    let hed_sys = ctx.systems.get_or_spawn(HED_GP);
+    let _ = hed_sys.spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: hed_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
+    let flex_id = kv_i64(&anchor(&ctx, &mut sess, 35840, "HED-GP Flex Beacon").await.expect("anchor flex"), "structureID");
+    move_ship(&ctx, &sess, hed_pos + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_vulnerability_windows.insert(flex_id, (18, 3));
+        let f = snap.structures.get_mut(&flex_id).unwrap();
+        f.state = life::STATE_SHIELD_VULNERABLE.into(); f.quantum_core_installed = true; f.fuel_blocks = 2_000;
+        f.shield_hp = 10.0; f.armor_hp = 10.0; f.hull_hp = 50_000.0; f.reinforced_until_unix = 0;
+    });
+    let flex_svc = grant(&ctx, OWNER, flex_id, 35894, InventoryFlag::ServiceSlot0, 1);
+    ctx.db.with_mut_snapshot(|snap| snap.module_online_states.insert(flex_svc, true));
+    prepare_siege(&ctx, flex_id, 20_000.0);
+    let flex_now = ctx.now_unix();
+    fire_weapon(&ctx, &mut sess, flex_id).await.expect("flex shield -> armor");
+    fire_weapon(&ctx, &mut sess, flex_id).await.expect("flex armor -> hull reinforced");
+    let flex_st = observe(&ctx, &mut sess, flex_id).await.unwrap();
+    assert_eq!(flex_st.state, life::STATE_HULL_REINFORCED);
+    assert!(flex_st.reinforced_until_unix > flex_now, "FLEX negative jitter must never place reinforced_until_unix in the past");
+
+    // Return session to JITA for section 5 Data Analyzer hack reveal test.
+    sess.solar_system_id = Some(JITA);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&OWNER).unwrap().solar_system_id = JITA;
+        snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp;
+        snap.structure_vulnerability_windows.insert(st_id, (21, 3));
+        let mut ext = load_ext_state(snap);
+        ext.pending_reinforce_schedule.insert(st_id, (14, 2, 1_850_000_000));
+        let prof_rec = ext.access_profiles.entry(st_id).or_default();
+        prof_rec.corp_only = false;
+        prof_rec.allowed_characters.extend([HACKER, BYSTANDER]);
+        save_ext_state(snap, &ext);
+    });
+    let owner_info = rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("owner info");
+    assert_eq!(owner_info.dict_get("reinforceHour"), Some(&PyRep::Integer(21)));
+    assert_eq!(owner_info.dict_get("nextReinforceHour"), Some(&PyRep::Integer(14)));
+
+    let mut hacker_sess = SessionState::new(7104);
+    hacker_sess.user_id = Some(2); hacker_sess.character_id = Some(HACKER); hacker_sess.corporation_id = Some(1000009); hacker_sess.solar_system_id = Some(JITA);
+    let hacker_ship = grant(&ctx, HACKER, i64::from(JITA), 606, InventoryFlag::None, 1);
+    hacker_sess.ship_id = Some(hacker_ship);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&OWNER).unwrap().clone();
+        ch.character_id = HACKER; ch.user_id = 2; ch.name = "Structure Hacker".into(); ch.corporation_id = 1000009; ch.solar_system_id = JITA; ch.station_id = None; ch.structure_id = None; ch.active_ship_id = hacker_ship;
+        snap.characters.insert(HACKER, ch);
+        let mut cb = snap.characters.get(&OWNER).unwrap().clone();
+        cb.character_id = BYSTANDER; cb.user_id = 3; cb.name = "Structure Bystander".into(); cb.corporation_id = 1000009; cb.solar_system_id = JITA; cb.station_id = None; cb.structure_id = None;
+        snap.characters.insert(BYSTANDER, cb);
+        snap.skills.entry(HACKER).or_default().insert(21718, eve_db::TrainedSkillRecord { type_id: 21718, level: 5, skill_points: 256_000.0 });
+    });
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(2, 7104, Some(HACKER), None, true, ctx.now_unix());
+    let _ = ctx.db.acquire_online_lock_with_computer_hash(3, 7105, Some(BYSTANDER), None, true, ctx.now_unix());
+    let st_pos = DVec3::from_array(observe(&ctx, &mut sess, st_id).await.unwrap().position);
+    let jita_sys = ctx.systems.get_or_spawn(JITA);
+    let _ = jita_sys.spawn_ball(eve_destiny::Ball { id: hacker_ship, type_id: 606, position: st_pos + DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }).await;
+    let _ = jita_sys.spawn_ball(eve_destiny::Ball { id: st_id, type_id: 35832, position: st_pos, velocity: DVec3::ZERO, radius: 1_000.0, mass: 1.0e9, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 0.0, inertia: 1.0 }).await;
+
+    move_ship(&ctx, &sess, st_pos + DVec3::new(900.0, 0.0, 0.0)).await;
+    let owner_data_mod = grant(&ctx, OWNER, sess.ship_id.unwrap(), 22175, InventoryFlag::MedSlot0, 1);
+    assert_eq!(rpc(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect_err("self hack").code, "CannotHackOwnStructure");
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&owner_data_mod); });
+
+    let pre_info = rpc(&ctx, &mut hacker_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("pre info");
+    assert_eq!(pre_info.dict_get("reinforceHour"), Some(&PyRep::None));
+    let relic_mod = grant(&ctx, HACKER, hacker_ship, 22177, InventoryFlag::MedSlot0, 1);
+    assert!(matches!(rpc(&ctx, &mut hacker_sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect_err("relic").code.as_str(), "AnalyzerModuleRequired" | "UserError"));
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&relic_mod); });
+
+    let _data_mod = grant(&ctx, HACKER, hacker_ship, 22175, InventoryFlag::MedSlot0, 1);
+    async fn run_structure_hack(ctx: &ServerContext, sess: &mut SessionState, st_id: i64) -> PyRep {
+        assert_eq!(kv_str(&rpc(ctx, sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(st_id)]).await.expect("start hack"), "status"), "InProgress");
+        for _pass in 0..8 {
+            for tile in 1..24 {
+                for _ in 0..5 {
+                    if let Ok(step) = rpc(ctx, sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(st_id), PyRep::Integer(tile)]).await {
+                        if kv_str(&step, "status") == "Won" { return step; }
+                    } else { break; }
+                }
+            }
+        }
+        panic!("Data Analyzer hack must complete with Won");
+    }
+    let won = run_structure_hack(&ctx, &mut hacker_sess, st_id).await;
+    assert_eq!(won.dict_get("reinforceHour"), Some(&PyRep::Integer(21)));
+    assert_eq!(won.dict_get("nextReinforceHour"), Some(&PyRep::Integer(14)));
+
+    let hacker_evts = ctx.drain_notifications_for_char(HACKER);
+    let PyRep::Tuple(hack_tuple) = &hacker_evts.iter().find(|n| n.event == "OnStructureHacked").expect("OnStructureHacked").args[1] else { panic!("tuple") };
+    assert_eq!(hack_tuple, &[PyRep::Integer(3), PyRep::Integer(21), PyRep::Integer(2), PyRep::Integer(14), PyRep::Integer(1_850_000_000)]);
+
+    ctx.db.with_mut_snapshot(|snap| { let mut ext = load_ext_state(snap); ext.pending_reinforce_schedule.remove(&st_id); save_ext_state(snap, &ext); });
+    let _ = run_structure_hack(&ctx, &mut hacker_sess, st_id).await;
+    let hacker_evts2 = ctx.drain_notifications_for_char(HACKER);
+    let PyRep::Tuple(nopending_tuple) = &hacker_evts2.iter().find(|n| n.event == "OnStructureHacked").unwrap().args[1] else { panic!("tuple") };
+    assert_eq!(nopending_tuple, &[PyRep::Integer(3), PyRep::Integer(21), PyRep::None, PyRep::None, PyRep::None]);
+
+    let mut bystander_sess = SessionState::new(7105);
+    bystander_sess.user_id = Some(3); bystander_sess.character_id = Some(BYSTANDER); bystander_sess.corporation_id = Some(1000009); bystander_sess.solar_system_id = Some(JITA);
+    let bystander_info = rpc(&ctx, &mut bystander_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("bystander info");
+    assert_eq!(bystander_info.dict_get("reinforceHour"), Some(&PyRep::None));
+    rpc(&ctx, &mut sess, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(st_id), PyRep::Integer(19), PyRep::Integer(4)]).await.expect("update schedule");
+    assert!(!ctx.drain_notifications_for_char(BYSTANDER).iter().any(|n| n.event == "OnStructureHacked"));
+}
+
+}
+
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod plan_upwell_structures_ops_b {
+    use super::*;
+
+// Upwell Structure Clone Bay, Service Modules, Repairshop, Access Profiles, Directory,
+// Fitting & Hull Types parity tests (`plan_upwell_structures_closure_part2.rs`).
+
+use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_sde::attr_ids;
+use eve_server::router::ServerContext;
+use eve_server::services::station_structure::structure_lifecycle as life;
+use glam::DVec3;
+use std::collections::HashMap;
+
+const OWNER: i64 = 90_000_001;
+const GUEST: i64 = 90_000_002;
+const OUTSIDER: i64 = 90_000_003;
+const CORP_GRUNT: i64 = 90_000_004;
+const JITA: u32 = 30_000_144;
+const JITA_44: i64 = 60_000_358;
+
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
+}
+
+async fn inv_add(ctx: &ServerContext, sess: &mut SessionState, item_id: i64, target_loc: i64, flag: InventoryFlag, online: bool) -> Result<PyRep, BridgeRpcError> {
+    let mut kw = HashMap::new();
+    kw.insert("online".into(), PyRep::Bool(online));
+    ctx.dispatch_rpc(sess, "invbroker", None, "Add", &[PyRep::Integer(item_id), PyRep::Integer(target_loc), PyRep::Integer(flag as i64)], &kw, None).await
+}
+
+fn kv_i64(rep: &PyRep, key: &str) -> i64 { rep.dict_get(key).and_then(|v| v.as_i64()).unwrap_or(0) }
+fn kv_str(rep: &PyRep, key: &str) -> String { rep.dict_get(key).and_then(|v| v.as_str()).unwrap_or("").to_string() }
+fn kv_bool(rep: &PyRep, key: &str) -> bool { rep.dict_get(key).and_then(|v| v.as_bool()).unwrap_or(false) }
+
+fn grant(ctx: &ServerContext, owner: i64, location: i64, type_id: u32, flag: InventoryFlag, qty: i32) -> i64 {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(id, InventoryItemRecord { item_id: id, type_id, owner_id: owner, location_id: location, flag, quantity: qty, singleton: qty == 1, version: 1, ..Default::default() });
+        id
+    })
+}
+
+fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
+    ctx.sde.types.get(&type_id).and_then(|t| t.default_attributes.get(&attr_id).copied()).unwrap_or_else(|| panic!("SDE type {type_id} lacks attribute {attr_id}"))
+}
+
+fn new_test_ctx() -> ServerContext {
+    let ctx = ServerContext::new();
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx
+}
+
+async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(JITA_44);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = JITA_44;
+            }
+        }
+    });
+    let mut sess = SessionState::new(sess_id);
+    rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
+    ctx.advance_secs(12);
+    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Services Corp".into()), PyRep::String("USVC".into())]).await.expect("AddCorporation");
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
+    rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    sess
+}
+
+async fn move_ship(ctx: &ServerContext, sess: &SessionState, pos: DVec3) {
+    assert!(ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys")).set_ball_position(sess.ship_id.expect("ship"), pos).await);
+}
+
+fn open_space(ctx: &ServerContext, sys_id: u32, k: f64) -> DVec3 {
+    let base = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+    base + DVec3::new(0.0, 5.0e9 + k * 3.0e9, 0.0)
+}
+
+async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name: &str) -> Result<PyRep, BridgeRpcError> {
+    let ship = sess.ship_id.expect("ship");
+    grant(ctx, OWNER, ship, type_id, InventoryFlag::Cargo, 1);
+    rpc(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(type_id)), PyRep::String(name.into())]).await
+}
+
+async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
+    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
+}
+
+async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name: &str) -> i64 {
+    let id = kv_i64(&anchor(ctx, sess, type_id, name).await.expect("Anchor"), "structureID");
+    ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
+    let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
+    rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
+    let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
+    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_ONLINING);
+    ctx.advance_virtual_clock(life::ONLINING_SECS);
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_SHIELD_VULNERABLE);
+    id
+}
+
+#[tokio::test]
+async fn test_upwell_services_clone_bay_modules_and_repairshop() {
+    // parity: feat:structures.service-clone-bay, feat:structures.service-modules, feat:structures.repairshop-service-quotes-and-restoration
+    eve_testkit::attest(&[
+        "feat:structures.service-clone-bay",
+        "feat:structures.service-modules",
+        "feat:structures.repairshop-service-quotes-and-restoration",
+    ]);
+
+    let ctx = new_test_ctx();
+    let mut sess = pilot_in_space(&ctx, 7203).await;
+    let st_pos = open_space(&ctx, JITA, 2.0);
+    move_ship(&ctx, &sess, st_pos).await;
+    let st_id = online_structure(&ctx, &mut sess, 35832, "Services Astrahus").await;
+    let ship_id = sess.ship_id.unwrap();
+
+    // 1. Service module fitting via live invbroker.Add RPC, fuel-gated activation via invbroker.Add (flag 133), and 1-arg OnStructureServiceChanged.
+    let clone_mod = grant(&ctx, OWNER, ship_id, 35894, InventoryFlag::Cargo, 1);
+    let fit_res = inv_add(&ctx, &mut sess, clone_mod, st_id, InventoryFlag::ServiceSlot0, false).await.expect("FitModule via invbroker.Add");
+    assert!(!kv_bool(&fit_res, "online"));
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(clone_mod)]).await.expect_err("no fuel").code, "InsufficientStructureFuelToOnline");
+
+    let online_fuel = (attr(&ctx, 35894, life::ATTR_SERVICE_FUEL_ONLINE) * 0.75).round() as i32;
+    let hourly_fuel = (attr(&ctx, 35894, life::ATTR_SERVICE_FUEL_PER_HOUR) * 0.75).round() as i32;
+    let short_fuel = grant(&ctx, OWNER, ship_id, 4247, InventoryFlag::Cargo, online_fuel - 1);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(short_fuel), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(i64::from(online_fuel - 1))]).await.expect("short fuel");
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(clone_mod)]).await.expect_err("539 < 540").code, "InsufficientStructureFuelToOnline");
+    let fuel_item = grant(&ctx, OWNER, ship_id, 4247, InventoryFlag::Cargo, 1 + hourly_fuel * 2);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(fuel_item), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(i64::from(1 + hourly_fuel * 2))]).await.expect("Fuel bay via invbroker.Add");
+    let _ = ctx.drain_notifications_for_char(OWNER);
+    let on_res = rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(clone_mod)]).await.expect("OnlineModule");
+    assert!(kv_bool(&on_res, "online"));
+    assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().fuel_blocks, (hourly_fuel * 2) as u32, "SetModuleOnline must deduct 540 startup fuel blocks");
+    let reproc_mod = grant(&ctx, OWNER, ship_id, 35899, InventoryFlag::Cargo, 1);
+    inv_add(&ctx, &mut sess, reproc_mod, st_id, InventoryFlag::ServiceSlot1, false).await.expect("fit reproc");
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(reproc_mod)]).await.expect_err("16 < 2160").code, "InsufficientStructureFuelToOnline");
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.expect("has service"), PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(OWNER).into_iter().any(|n| n.event == "OnStructureServiceChanged" && n.args == vec![PyRep::Integer(st_id)]), "OnStructureServiceChanged must emit exact 1-arg [structure_id]");
+
+    // 2. Clone Bay: jump clone + medical home station + live pod-death respawn into Upwell Clone Bay structure!
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(OWNER).or_default().insert(24242, eve_db::TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 });
+    });
+    assert!(kv_i64(&rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStructure", &[]).await.expect("InstallCloneInStructure"), "jumpCloneID") > 0);
+    assert_eq!(rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(st_id)]).await.expect("SetHomeStation").as_i64(), Some(st_id));
+
+    // Leave ship in structure hangar, undock in capsule, self-destruct capsule in space -> respawns INSIDE st_id!
+    rpc(&ctx, &mut sess, "ship", "LeaveShip", &[]).await.expect("LeaveShip in structure");
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock capsule");
+    rpc(&ctx, &mut sess, "ship", "SelfDestruct", &[]).await.expect("Start self-destruct");
+    ctx.advance_virtual_clock(125);
+    assert_eq!(rpc(&ctx, &mut sess, "charMgr", "GetHomeStation", &[]).await.expect("Sync session after pod self-destruct").as_i64(), Some(st_id));
+    assert_eq!(sess.structure_id, Some(st_id), "Pod death with online Clone Bay must respawn pilot inside structure");
+    assert_eq!(sess.station_id, None);
+    ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&OWNER).unwrap();
+        assert_eq!((ch.structure_id, ch.station_id, ch.home_station_id), (Some(st_id), None, st_id));
+        assert_eq!(snap.items.get(&ch.active_ship_id).map(|i| i.location_id), Some(st_id));
+    });
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await.expect("Re-board ship in structure");
+
+    // Advance 100 hours so fuel runs dry; Clone Bay goes offline, structure drops to LowPower, and pod death falls back to starter school NPC station!
+    ctx.advance_virtual_clock(100 * 3_600);
+    let st_low = observe(&ctx, &mut sess, st_id).await.unwrap();
+    assert!(st_low.fuel_blocks < hourly_fuel as u32);
+    assert!(matches!(rpc(&ctx, &mut sess, "jumpCloneSvc", "InstallCloneInStructure", &[]).await.expect_err("offline jc").code.as_str(), "NoCloneBayService" | "CloneBayServiceOffline"));
+    assert_eq!(rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", &[PyRep::Integer(st_id)]).await.expect_err("offline home").code, "CloneBayServiceOffline");
+    assert_eq!(rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(st_id), PyRep::Integer(2)]).await.expect("svc off"), PyRep::Bool(false));
+
+    rpc(&ctx, &mut sess, "ship", "LeaveShip", &[]).await.expect("LeaveShip for offline pod test");
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock capsule offline");
+    rpc(&ctx, &mut sess, "ship", "SelfDestruct", &[]).await.expect("Start self-destruct 2");
+    ctx.advance_virtual_clock(125);
+    let _ = rpc(&ctx, &mut sess, "charMgr", "GetHomeStation", &[]).await.expect("Sync session after offline Clone Bay self-destruct");
+    assert_eq!(sess.structure_id, None, "Offline Clone Bay must not respawn pilot inside structure");
+    let fallback_station = sess.station_id.expect("Fallback starter school NPC station");
+    assert!(fallback_station < 1_000_000_000_000);
+    ctx.db.with_snapshot(|snap| assert_eq!(snap.characters.get(&OWNER).unwrap().home_station_id, fallback_station, "home_station_id reset to starter school station"));
+
+    // Return pilot to st_id and re-board ship_id for repairSvc tests.
+    let pod_after = sess.ship_id.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        let ch = snap.characters.get_mut(&OWNER).unwrap();
+        ch.station_id = None; ch.structure_id = Some(st_id); ch.solar_system_id = JITA;
+        snap.items.get_mut(&pod_after).unwrap().location_id = st_id;
+    });
+    sess.station_id = None; sess.structure_id = Some(st_id); sess.solar_system_id = Some(JITA);
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut sess, "ship", "Board", &[PyRep::Integer(ship_id)]).await.expect("Board ship_id");
+
+    // 3. repairSvc: LowPower/Abandoned/NoCore/ACL gates, undocked hangar rejection, container rejection, CorpSAG role gate, 100% owner-corp tax, and free 0% repair!
+    let mod_id = grant(&ctx, OWNER, ship_id, 3170, InventoryFlag::HiSlot0, 1);
+    let drone_id = grant(&ctx, OWNER, ship_id, 2454, InventoryFlag::DroneBay, 1);
+    let owner_corp_id = ctx.db.with_snapshot(|snap| snap.structures.get(&st_id).unwrap().owner_corp_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.entry(st_id).or_default().service_settings.insert(13, 500);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        snap.characters.get_mut(&OWNER).unwrap().balance = eve_db::IskCents::from_f64_isk(50_000_000.0);
+        snap.corporations.get_mut(&owner_corp_id).unwrap().set_division_balance(1, eve_db::IskCents::from_f64_isk(1_000_000.0));
+        let sh = snap.items.get_mut(&ship_id).unwrap();
+        sh.location_id = st_id;
+        sh.dynamic_attributes.insert(attr_ids::DAMAGE, 50.0);
+        sh.dynamic_attributes.insert(attr_ids::ARMOR_DAMAGE, 100.0);
+        snap.items.get_mut(&mod_id).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 20.0);
+        snap.items.get_mut(&drone_id).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 15.0);
+        snap.items.get_mut(&drone_id).unwrap().dynamic_attributes.insert(attr_ids::ARMOR_DAMAGE, 25.0);
+    });
+
+    // While st_id is LowPower (unfueled, with Quantum Core installed), Repair Shop remains available!
+    let lp_quotes = rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("low power quote succeeds with core");
+    assert!(matches!(lp_quotes, PyRep::Dict(ref d) if !d.is_empty()), "LowPower structure with Quantum Core must provide Repair Shop quotes");
+
+    // NaN/negative budget, Abandoned, and QuantumCoreRequired rejections.
+    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Real(f64::NAN)]).await.expect_err("NaN").code, "InvalidArgument");
+    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Real(-5.0)]).await.expect_err("neg").code, "InvalidArgument");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().low_power_since_unix = Some(1);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect_err("abandoned").code, "StructureAbandoned");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.lifecycle.entry(st_id).or_default().low_power_since_unix = None;
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        snap.structures.get_mut(&st_id).unwrap().quantum_core_installed = false;
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect_err("no core").code, "QuantumCoreRequired");
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&st_id).unwrap().quantum_core_installed = true);
+
+    // Refuel st_id and re-online clone_mod so st_id is FullPower!
+    let refuel_item = grant(&ctx, OWNER, ship_id, 4247, InventoryFlag::Cargo, 5_000);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(refuel_item), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(5_000)]).await.expect("refuel");
+    rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(clone_mod)]).await.expect("re-online clone bay");
+
+    // ACL-blocked outsider, undocked hangar item, container-nested item, and restricted CorpSAG2 without role are all rejected.
+    let out_ship = grant(&ctx, OUTSIDER, st_id, 606, InventoryFlag::Hangar, 1);
+    let mut out_sess = SessionState::new(7209);
+    out_sess.user_id = Some(3); out_sess.character_id = Some(OUTSIDER); out_sess.corporation_id = Some(1000009); out_sess.solar_system_id = Some(JITA); out_sess.structure_id = Some(st_id); out_sess.ship_id = Some(out_ship);
+    let box_id = grant(&ctx, OWNER, st_id, 17366, InventoryFlag::Hangar, 1);
+    let boxed_mod = grant(&ctx, OWNER, box_id, 3170, InventoryFlag::Cargo, 1);
+    let corp_div2_mod = grant(&ctx, owner_corp_id, st_id, 3170, InventoryFlag::CorpSAG2, 1);
+    let mut grunt_rep_sess = SessionState::new(7210);
+    grunt_rep_sess.user_id = Some(4); grunt_rep_sess.character_id = Some(CORP_GRUNT); grunt_rep_sess.corporation_id = Some(owner_corp_id); grunt_rep_sess.solar_system_id = Some(JITA); grunt_rep_sess.structure_id = Some(st_id); grunt_rep_sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&OWNER).unwrap().clone();
+        ch.character_id = OUTSIDER; ch.corporation_id = 1000009; ch.active_ship_id = out_ship;
+        snap.characters.insert(OUTSIDER, ch);
+        let mut cg = snap.characters.get(&OWNER).unwrap().clone();
+        cg.character_id = CORP_GRUNT; cg.corporation_id = owner_corp_id; cg.structure_id = Some(st_id);
+        snap.characters.insert(CORP_GRUNT, cg);
+        snap.corporations.get_mut(&owner_corp_id).unwrap().members.insert(CORP_GRUNT);
+        snap.structure_docking_acl_denied.entry(st_id).or_default().insert(OUTSIDER);
+        for iid in [out_ship, boxed_mod, corp_div2_mod] {
+            snap.items.get_mut(&iid).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 10.0);
+        }
+    });
+    assert_eq!(rpc(&ctx, &mut out_sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(out_ship)])]).await.expect_err("acl blocked").code, "StructureRepairAccessDenied");
+    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(boxed_mod)])]).await.expect_err("inside container").code, "ItemInsideContainer");
+    assert_eq!(rpc(&ctx, &mut grunt_rep_sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(corp_div2_mod)])]).await.expect_err("corp role denied").code, "CorpRoleDenied");
+    let hangar_mod = grant(&ctx, OWNER, st_id, 3170, InventoryFlag::Hangar, 1);
+    ctx.db.with_mut_snapshot(|snap| { snap.items.get_mut(&hangar_mod).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 10.0); });
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock to test tethered hangar repair rejection");
+    move_ship(&ctx, &sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&st_id].position)) + DVec3::new(500.0, 0.0, 0.0)).await;
+    let _ = ctx.systems.get_or_spawn(JITA).step_manual(1.0).await;
+    if let Ok(mut bp) = ctx.systems.get_or_spawn(JITA).ballpark.write() { bp.combat_states.entry(ship_id).or_default().is_tethered = true; }
+    assert_eq!(rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(hangar_mod)])]).await.expect_err("undocked hangar repair").code, "NotDockedInStructure");
+    ctx.advance_secs(12);
+    rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect("Re-dock after tethered hangar check");
+    ctx.db.with_mut_snapshot(|snap| {
+        let sh = snap.items.get_mut(&ship_id).unwrap();
+        sh.dynamic_attributes.insert(attr_ids::DAMAGE, 50.0);
+        sh.dynamic_attributes.insert(attr_ids::ARMOR_DAMAGE, 100.0);
+    });
+
+    // At 5% structure repair tax: baseCost is 0.0, totalRepairCost == serviceCharge > 0.0, and 100% of paid ISK credits owner corp division 1!
+    let quotes = rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("GetRepairQuotes");
+    let PyRep::Dict(q_entries) = quotes else { panic!("expected dict") };
+    let (_, PyRep::List(q_rows)) = &q_entries[0] else { panic!("expected quote list") };
+    for iid in [ship_id, mod_id, drone_id] {
+        assert!(q_rows.iter().any(|r| kv_i64(r, "itemID") == iid && r.dict_get("baseCost").and_then(|v| v.as_f64()) == Some(0.0) && r.dict_get("totalRepairCost").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0));
+    }
+    let expected_tax_isk: f64 = q_rows.iter().filter_map(|r| r.dict_get("serviceCharge").and_then(|v| v.as_f64())).sum();
+    assert!(expected_tax_isk > 0.0);
+
+    let jita_sys = ctx.systems.get_or_spawn(JITA);
+    if let Ok(mut bp) = jita_sys.ballpark.write() {
+        let cs = bp.combat_states.entry(ship_id).or_insert_with(eve_destiny::CombatState::default);
+        cs.max_shield_hp = 500.0; cs.shield_hp = 50.0;
+    }
+    let rep_res = rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("RepairItemsInStructure");
+    let paid = rep_res.dict_get("totalCostISK").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    assert!((paid - expected_tax_isk).abs() < 1e-2, "Upwell repair must charge only the structure owner tax");
+    ctx.db.with_snapshot(|snap| {
+        for iid in [ship_id, mod_id, drone_id] {
+            let it = snap.items.get(&iid).unwrap();
+            assert!(!it.dynamic_attributes.contains_key(&attr_ids::DAMAGE) && !it.dynamic_attributes.contains_key(&attr_ids::ARMOR_DAMAGE));
+        }
+        assert!((snap.characters.get(&OWNER).unwrap().balance.to_wire_f64() - (50_000_000.0 - paid)).abs() < 1e-2);
+        let corp = snap.corporations.get(&owner_corp_id).unwrap();
+        assert!((corp.division_balance(1).to_wire_f64() - (1_000_000.0 + paid)).abs() < 1e-2, "100% of structure repair fee credited to owner corp");
+        let cj = snap.corp_wallet_journals.get(&(owner_corp_id, 1)).expect("corp div 1 journal");
+        assert!(cj.iter().any(|e| e.ref_type == "RepairBill" && (e.amount - paid).abs() < 1e-2));
+    });
+
+    // At 0% structure repair tax: Upwell repair quote AND repair execution are completely FREE (0.0 ISK)!
+    let corp_bal_before_zero = ctx.db.with_snapshot(|snap| snap.corporations.get(&owner_corp_id).unwrap().division_balance(1).to_wire_f64());
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.access_profiles.entry(st_id).or_default().service_settings.insert(13, 0);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        snap.items.get_mut(&ship_id).unwrap().dynamic_attributes.insert(attr_ids::DAMAGE, 30.0);
+        snap.characters.get_mut(&OWNER).unwrap().balance = eve_db::IskCents::from_f64_isk(40_000_000.0);
+    });
+    let base_quotes = rpc(&ctx, &mut sess, "repairSvc", "GetRepairQuotes", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("0% quotes");
+    let PyRep::Dict(bq_entries) = base_quotes else { panic!("expected dict") };
+    let (_, PyRep::List(bq_rows)) = &bq_entries[0] else { panic!("expected list") };
+    assert_eq!(bq_rows[0].dict_get("totalRepairCost").and_then(|v| v.as_f64()), Some(0.0), "0% tax Upwell repair quote is 0.0 ISK");
+    let free_rep = rpc(&ctx, &mut sess, "repairSvc", "RepairItemsInStructure", &[PyRep::List(vec![PyRep::Integer(ship_id)])]).await.expect("0% repair");
+    assert_eq!(free_rep.dict_get("totalCostISK").and_then(|v| v.as_f64()), Some(0.0), "0% tax Upwell repair costs 0.0 ISK");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.get(&ship_id).unwrap().dynamic_attributes.contains_key(&attr_ids::DAMAGE));
+        assert!((snap.characters.get(&OWNER).unwrap().balance.to_wire_f64() - 40_000_000.0).abs() < 1e-4);
+        assert!((snap.corporations.get(&owner_corp_id).unwrap().division_balance(1).to_wire_f64() - corp_bal_before_zero).abs() < 1e-4);
+    });
+}
+
+#[tokio::test]
+async fn test_upwell_profiles_directory_fitting_and_types() {
+    // parity: feat:structures.structure-fitting, feat:structures.structure-types
+    eve_testkit::attest(&[
+        "feat:structures.structure-fitting",
+        "feat:structures.structure-types",
+    ]);
+
+    let ctx = new_test_ctx();
+    let mut sess = pilot_in_space(&ctx, 7204).await;
+
+    // 1. Structure types & SDE profiles across Citadels, Engineering Complexes, Refineries, FLEX, Faction Fortizars, and Palatine Keepstar.
+    for (tid, name, exp_sh, exp_ar, exp_hu, hi, med, low, svc, rig) in [
+        (35832u32, "Astrahus", 3600000.0, 1800000.0, 1800000.0, 4, 4, 3, 3, 3),
+        (35833, "Fortizar", 6750000.0, 5400000.0, 21600000.0, 6, 5, 4, 5, 3),
+        (35834, "Keepstar", 33750000.0, 27000000.0, 108000000.0, 8, 6, 5, 7, 3),
+        (35825, "Raitaru", 2400000.0, 1200000.0, 1200000.0, 3, 2, 1, 3, 3),
+        (35826, "Azbel", 4500000.0, 3600000.0, 14400000.0, 4, 3, 2, 5, 3),
+        (35827, "Sotiyo", 22500000.0, 18000000.0, 72000000.0, 6, 4, 3, 6, 3),
+        (35835, "Athanor", 2400000.0, 1200000.0, 1200000.0, 3, 3, 1, 3, 3),
+        (35836, "Tatara", 4500000.0, 3600000.0, 14400000.0, 5, 4, 3, 5, 3),
+    ] {
+        let p = life::structure_profile(&ctx, tid).unwrap_or_else(|| panic!("missing profile for {name}"));
+        assert_eq!((p.shield_hp, p.armor_hp, p.hull_hp), (exp_sh, exp_ar, exp_hu));
+        assert_eq!((p.high_slots, p.mid_slots, p.low_slots, p.service_slots, p.rig_slots), (hi, med, low, svc, rig));
+    }
+    for tid in [35840, 35841, 37534] {
+        assert_eq!(life::structure_profile(&ctx, tid).unwrap().hull_class, life::HullClass::Flex);
+    }
+    assert!(life::structure_profile(&ctx, 35834).unwrap().disallow_in_highsec);
+    let raitaru_p = life::structure_profile(&ctx, 35825).unwrap();
+    assert!(raitaru_p.eng_time_bonus_pct != 0.0 && raitaru_p.eng_mat_bonus_pct != 0.0);
+    for fid in 47512..=47516 {
+        let fp = life::structure_profile(&ctx, fid).expect("faction fortizar");
+        assert_eq!((fp.hull_class, fp.high_slots, fp.rig_slots), (life::HullClass::Large, 7, 3));
+        assert!(fp.fuel_bonus_pct < 0.0 && (7..=8).contains(&fp.service_slots));
+    }
+    let palatine = life::structure_profile(&ctx, 40340).expect("palatine");
+    assert_eq!((palatine.hull_class, palatine.fuel_bonus_pct, palatine.service_slots), (life::HullClass::XLarge, -25.0, 8));
+    assert_eq!((life::structure_profile(&ctx, 35835).unwrap().refining_yield_bonus, life::structure_profile(&ctx, 35836).unwrap().refining_yield_bonus), (2.0, 5.5));
+
+    move_ship(&ctx, &sess, open_space(&ctx, JITA, 5.0)).await;
+    assert_eq!(anchor(&ctx, &mut sess, 35834, "Jita Keepstar").await.expect_err("hs keepstar").code, "CannotAnchorInHighSec");
+    assert!(matches!(anchor(&ctx, &mut sess, 35840, "Jita Pharolux").await.expect_err("hs pharolux").code.as_str(), "CannotAnchorInHighSec" | "CannotAnchorCynoBeaconInHighSec" | "CannotAnchorFlexOutsideSovNull"));
+
+    // 2. Live invbroker.Add fitting, rig destruction on unfit, authorization, and state/HP locks.
+    let st_id = online_structure(&ctx, &mut sess, 35832, "Fitting & Profiles Astrahus").await;
+    let ship_id = sess.ship_id.unwrap();
+    let owner_corp = ctx.db.with_snapshot(|snap| snap.structures.get(&st_id).unwrap().owner_corp_id);
+
+    let siege_mod = grant(&ctx, OWNER, ship_id, 4292, InventoryFlag::Cargo, 1);
+    assert_eq!(inv_add(&ctx, &mut sess, siege_mod, st_id, InventoryFlag::HiSlot0, false).await.expect_err("siege mod").code, "ModuleCannotFitStructureType");
+
+    let rig_id = grant(&ctx, OWNER, ship_id, 37146, InventoryFlag::Cargo, 1);
+    inv_add(&ctx, &mut sess, rig_id, st_id, InventoryFlag::RigSlot0, false).await.expect("fit rig");
+    assert_eq!(inv_add(&ctx, &mut sess, rig_id, st_id, InventoryFlag::RigSlot1, false).await.expect_err("move rig").code, "CannotMoveFittedRig");
+    assert!(kv_bool(&inv_add(&ctx, &mut sess, rig_id, st_id, InventoryFlag::Hangar, false).await.expect("unfit rig"), "destroyed"));
+    ctx.db.with_snapshot(|snap| assert!(!snap.items.contains_key(&rig_id)));
+
+    let high_mod = grant(&ctx, OWNER, ship_id, 35922, InventoryFlag::Cargo, 1);
+    let mid_mod = grant(&ctx, OWNER, ship_id, 35947, InventoryFlag::Cargo, 1);
+    let low_mod = grant(&ctx, OWNER, ship_id, 35959, InventoryFlag::Cargo, 1);
+    let guarded_rig = grant(&ctx, OWNER, ship_id, 37146, InventoryFlag::Cargo, 1);
+    inv_add(&ctx, &mut sess, high_mod, st_id, InventoryFlag::HiSlot0, false).await.expect("fit high");
+    inv_add(&ctx, &mut sess, mid_mod, st_id, InventoryFlag::MedSlot0, false).await.expect("fit mid");
+    inv_add(&ctx, &mut sess, low_mod, st_id, InventoryFlag::LoSlot0, false).await.expect("fit low");
+    inv_add(&ctx, &mut sess, guarded_rig, st_id, InventoryFlag::RigSlot0, false).await.expect("fit guarded rig");
+
+    let mut guest_sess = SessionState::new(7205);
+    guest_sess.user_id = Some(2); guest_sess.character_id = Some(GUEST); guest_sess.corporation_id = Some(1000009); guest_sess.solar_system_id = Some(JITA);
+    let mut outsider_sess = SessionState::new(7206);
+    outsider_sess.user_id = Some(3); outsider_sess.character_id = Some(OUTSIDER); outsider_sess.corporation_id = Some(1000009); outsider_sess.solar_system_id = Some(JITA); outsider_sess.station_id = Some(JITA_44);
+    let mut grunt_sess = SessionState::new(7207);
+    grunt_sess.user_id = Some(4); grunt_sess.character_id = Some(CORP_GRUNT); grunt_sess.corporation_id = Some(owner_corp); grunt_sess.solar_system_id = Some(JITA); grunt_sess.structure_id = Some(st_id); grunt_sess.corp_role = 0;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch_g = snap.characters.get(&OWNER).cloned().unwrap();
+        ch_g.character_id = GUEST; ch_g.corporation_id = 1000009; snap.characters.insert(GUEST, ch_g);
+        let mut ch_o = snap.characters.get(&OWNER).cloned().unwrap();
+        ch_o.character_id = OUTSIDER; ch_o.corporation_id = 1000009; ch_o.station_id = Some(JITA_44); ch_o.structure_id = None; snap.characters.insert(OUTSIDER, ch_o);
+        let mut ch_m = snap.characters.get(&OWNER).cloned().unwrap();
+        ch_m.character_id = CORP_GRUNT; ch_m.corporation_id = owner_corp; ch_m.structure_id = Some(st_id); snap.characters.insert(CORP_GRUNT, ch_m);
+        snap.corporations.get_mut(&owner_corp).unwrap().members.insert(CORP_GRUNT);
+    });
+
+    let owner_ship_rig = grant(&ctx, OWNER, ship_id, 31358, InventoryFlag::RigSlot0, 1);
+    assert_eq!(inv_add(&ctx, &mut outsider_sess, owner_ship_rig, JITA_44, InventoryFlag::Hangar, false).await.expect_err("foreign ship rig").code, "ItemOwnershipViolation");
+    assert_eq!(inv_add(&ctx, &mut outsider_sess, guarded_rig, JITA_44, InventoryFlag::Hangar, false).await.expect_err("outsider struct rig").code, "StructureOwnershipViolation");
+    assert_eq!(inv_add(&ctx, &mut grunt_sess, guarded_rig, st_id, InventoryFlag::Hangar, false).await.expect_err("grunt struct rig").code, "InsufficientCorpRoles");
+
+    let extra_high = grant(&ctx, OWNER, ship_id, 35922, InventoryFlag::Cargo, 1);
+    let fut = ctx.now_unix() + 100_000;
+    ctx.db.with_mut_snapshot(|snap| { let s = snap.structures.get_mut(&st_id).unwrap(); s.state = life::STATE_ARMOR_REINFORCED.into(); s.reinforced_until_unix = fut; });
+    assert_eq!(inv_add(&ctx, &mut sess, extra_high, st_id, InventoryFlag::HiSlot1, false).await.expect_err("armor refit").code, "StructureFittingLockedInState");
+    assert_eq!(inv_add(&ctx, &mut sess, guarded_rig, st_id, InventoryFlag::Hangar, false).await.expect_err("armor rig unfit").code, "StructureFittingLockedInState");
+    ctx.db.with_mut_snapshot(|snap| { let s = snap.structures.get_mut(&st_id).unwrap(); s.state = life::STATE_HULL_REINFORCED.into(); s.reinforced_until_unix = fut; });
+    assert_eq!(inv_add(&ctx, &mut sess, extra_high, st_id, InventoryFlag::HiSlot1, false).await.expect_err("hull refit").code, "StructureFittingLockedInState");
+    ctx.db.with_mut_snapshot(|snap| { let s = snap.structures.get_mut(&st_id).unwrap(); s.state = life::STATE_SHIELD_VULNERABLE.into(); s.reinforced_until_unix = 0; s.shield_hp = 100.0; });
+    let svc_mod = grant(&ctx, OWNER, ship_id, 35894, InventoryFlag::Cargo, 1);
+    assert_eq!(inv_add(&ctx, &mut sess, svc_mod, st_id, InventoryFlag::ServiceSlot0, false).await.expect_err("damaged refit").code, "StructureDamagedCannotRefit");
+    assert_eq!(inv_add(&ctx, &mut sess, guarded_rig, st_id, InventoryFlag::Hangar, false).await.expect_err("damaged rig unfit").code, "StructureDamagedCannotRefit");
+
+    let max_sh = life::structure_profile(&ctx, 35832).unwrap().shield_hp;
+    ctx.db.with_mut_snapshot(|snap| { snap.structures.get_mut(&st_id).unwrap().shield_hp = max_sh; });
+    let fit_fuel = grant(&ctx, OWNER, ship_id, 4247, InventoryFlag::Cargo, 5_000);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(fit_fuel), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(5_000)]).await.expect("fuel via invbroker.Add");
+    inv_add(&ctx, &mut sess, svc_mod, st_id, InventoryFlag::ServiceSlot0, true).await.expect("fit & online service via invbroker.Add");
+
+    ctx.advance_virtual_clock(3_600);
+    assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().fuel_blocks, 4_452);
+
+    // 3. Access groups, structure profiles (via structureSettings), and Structure Directory ACL & fuelBlocks masking.
+    let group_id = rpc(&ctx, &mut sess, "ownerGroupManager", "Create", &[PyRep::String("Allied Pilots".into()), PyRep::String("ACL group".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "groupID"))).unwrap();
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(GUEST)])]).await.expect("AddMembers");
+    let profile_id = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Public Market Profile".into()), PyRep::String("Taxed market".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "profileID"))).unwrap();
+    rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles");
+    let settings_payload = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(0), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(group_id), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(19), PyRep::Integer(OUTSIDER), PyRep::Integer(-1)]),
+        PyRep::Tuple(vec![PyRep::Integer(23), PyRep::Real(0.025)]),
+    ]);
+    rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id), settings_payload]).await.expect("SaveProfileSettings");
+    ctx.advance_virtual_clock(305);
+
+    assert!((rpc(&ctx, &mut guest_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.unwrap().as_f64().unwrap() - 0.025).abs() < 1e-6);
+    assert_eq!(rpc(&ctx, &mut outsider_sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(st_id), PyRep::Integer(10)]).await.unwrap(), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::Integer(4_452)));
+    assert_eq!(rpc(&ctx, &mut grunt_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));
+    assert_eq!(rpc(&ctx, &mut guest_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.unwrap().dict_get("fuelBlocks"), Some(&PyRep::None));
+
+    outsider_sess.solar_system_id = Some(30_002_718); outsider_sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.solar_system_id = 30_002_718; c.station_id = None; });
+    assert_eq!(rpc(&ctx, &mut outsider_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect_err("remote blocked").code, "StructureAccessDenied");
+    outsider_sess.solar_system_id = Some(JITA); outsider_sess.station_id = Some(JITA_44);
+    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.solar_system_id = JITA; c.station_id = Some(JITA_44); });
+    let local_blocked = rpc(&ctx, &mut outsider_sess, "structureDirectory", "GetStructureInfo", &[PyRep::Integer(st_id)]).await.expect("in-system blocked");
+    assert_eq!(local_blocked.dict_get("services"), Some(&PyRep::Dict(vec![])));
+
+    let PyRep::Dict(g_map) = rpc(&ctx, &mut guest_sess, "structureDirectory", "GetStructures", &[]).await.unwrap() else { panic!("dict") };
+    let entry = g_map.iter().find(|(k, _)| k.as_i64() == Some(st_id)).map(|(_, v)| v).expect("entry");
+    assert_eq!(kv_str(entry, "powerState"), "FullPower");
+    assert_eq!(entry.dict_get("fuelBlocks"), Some(&PyRep::None));
+    let PyRep::Dict(o_map) = rpc(&ctx, &mut outsider_sess, "structureDirectory", "GetStructures", &[]).await.unwrap() else { panic!("dict") };
+    assert!(!o_map.iter().any(|(k, _)| k.as_i64() == Some(st_id)));
+
+    // 4. Delayed profile application (300s) + defense ACL (setting ID 17) + V24 3-arg OnSessionChanged verification.
+    let profile_id_2 = rpc(&ctx, &mut sess, "structureSettings", "CreateProfile", &[PyRep::String("Profile 2".into()), PyRep::String("Second".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "profileID"))).unwrap();
+    rpc(&ctx, &mut sess, "structureSettings", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(st_id)]), PyRep::Integer(profile_id_2)]).await.expect("ChangeProfiles 2");
+    ctx.advance_virtual_clock(305);
+    let _ = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(st_id), PyRep::Integer(1)]).await.unwrap();
+    let def_group_id = rpc(&ctx, &mut sess, "ownerGroupManager", "Create", &[PyRep::String("Gunners".into()), PyRep::String("Defense ACL".into())]).await.map(|r| r.as_i64().unwrap_or_else(|| kv_i64(&r, "groupID"))).unwrap();
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(def_group_id), PyRep::List(vec![PyRep::Integer(OUTSIDER)])]).await.unwrap();
+    let profile_rows = PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group_id), PyRep::Integer(1)]),
+        PyRep::Tuple(vec![PyRep::Integer(17), PyRep::Integer(def_group_id), PyRep::Integer(1)]),
+    ]);
+    rpc(&ctx, &mut sess, "structureSettings", "SaveProfileSettings", &[PyRep::Integer(profile_id_2), profile_rows]).await.unwrap();
+    ctx.advance_virtual_clock(305);
+    guest_sess.structure_id = Some(st_id);
+    assert_eq!(rpc(&ctx, &mut guest_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect_err("docking guest denied").code, "DefenseAccessDenied");
+    outsider_sess.structure_id = Some(st_id); outsider_sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| { let c = snap.characters.get_mut(&OUTSIDER).unwrap(); c.station_id = None; c.structure_id = Some(st_id); });
+    assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.is_ok());
+    assert!(rpc(&ctx, &mut outsider_sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.is_ok());
+
+    sess.structure_id = Some(st_id);
+    let _ = ctx.drain_notifications_for_char(OWNER);
+    let prev_ship = sess.ship_id.unwrap();
+    rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(st_id)]).await.expect("Owner TakeControl");
+    let take_evts = ctx.drain_notifications_for_char(OWNER);
+    let sc_take = take_evts.iter().find(|n| n.event == "OnSessionChanged").expect("OnSessionChanged on TakeControl");
+    assert_eq!(sc_take.args.len(), 3, "OnSessionChanged must use exact 3-arg V24 shape (isRemote, sess, changes)");
+    assert_eq!(sc_take.args[0], PyRep::Bool(false));
+    assert_eq!(sc_take.args[2], PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::Integer(prev_ship), PyRep::Integer(st_id)]))]));
+
+    rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(st_id)]).await.expect("Owner ReleaseControl");
+    let rel_evts = ctx.drain_notifications_for_char(OWNER);
+    let sc_rel = rel_evts.iter().find(|n| n.event == "OnSessionChanged").expect("OnSessionChanged on ReleaseControl");
+    assert_eq!(sc_rel.args.len(), 3);
+    assert_eq!(sc_rel.args[2], PyRep::Dict(vec![(PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::Integer(st_id), PyRep::Integer(prev_ship)]))]));
+
+    // 5. Reinforce change delay per security band & full shield/armor gate.
+    assert_eq!(eve_server::services::station_structure::structure_upwell_ops::reinforce_change_delay_secs(&ctx, JITA), 30 * 86_400);
+    assert_eq!(eve_server::services::station_structure::structure_upwell_ops::reinforce_change_delay_secs(&ctx, 30_000_157), 7 * 86_400);
+
+    // 6. Symmetric SpecializedFuelBay (flag 133) role/item enforcement across Add & MultiAdd, JettisonStructureFuel type preservation, and Ansiblex Liquid Ozone via invbroker.Add.
+    let guest_ship = grant(&ctx, GUEST, st_id, 606, InventoryFlag::Hangar, 1);
+    let grunt_ship = grant(&ctx, CORP_GRUNT, st_id, 606, InventoryFlag::Hangar, 1);
+    guest_sess.ship_id = Some(guest_ship); guest_sess.station_id = None; guest_sess.structure_id = Some(st_id);
+    grunt_sess.ship_id = Some(grunt_ship); grunt_sess.station_id = None; grunt_sess.structure_id = Some(st_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        let cg = snap.characters.get_mut(&GUEST).unwrap(); cg.station_id = None; cg.structure_id = Some(st_id); cg.active_ship_id = guest_ship;
+        let cm = snap.characters.get_mut(&CORP_GRUNT).unwrap(); cm.station_id = None; cm.structure_id = Some(st_id); cm.active_ship_id = grunt_ship;
+    });
+    let guest_fb = grant(&ctx, GUEST, guest_ship, 4247, InventoryFlag::Cargo, 100);
+    let grunt_fb = grant(&ctx, CORP_GRUNT, grunt_ship, 4247, InventoryFlag::Cargo, 100);
+    assert_eq!(rpc(&ctx, &mut guest_sess, "invbroker", "Add", &[PyRep::Integer(guest_fb), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(100)]).await.expect_err("guest Add").code, "StructureOwnershipViolation");
+    assert_eq!(rpc(&ctx, &mut guest_sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(guest_fb)]), PyRep::Integer(st_id), PyRep::Integer(133)]).await.expect_err("guest MultiAdd").code, "StructureOwnershipViolation");
+    assert_eq!(rpc(&ctx, &mut grunt_sess, "invbroker", "Add", &[PyRep::Integer(grunt_fb), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(100)]).await.expect_err("grunt Add").code, "CorpRoleDenied");
+    assert_eq!(rpc(&ctx, &mut grunt_sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(grunt_fb)]), PyRep::Integer(st_id), PyRep::Integer(133)]).await.expect_err("grunt MultiAdd").code, "CorpRoleDenied");
+    let bay_fb_id = ctx.db.with_snapshot(|s| s.items.values().find(|i| i.location_id == st_id && i.flag == InventoryFlag::SpecializedFuelBay && i.type_id == 4247).unwrap().item_id);
+    assert_eq!(rpc(&ctx, &mut grunt_sess, "invbroker", "Add", &[PyRep::Integer(bay_fb_id), PyRep::Integer(grunt_ship), PyRep::Integer(5), PyRep::Integer(10)]).await.expect_err("grunt withdraw Add").code, "CorpRoleDenied");
+    assert_eq!(rpc(&ctx, &mut grunt_sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(bay_fb_id)]), PyRep::Integer(grunt_ship), PyRep::Integer(5)]).await.expect_err("grunt withdraw MultiAdd").code, "CorpRoleDenied");
+
+    let heavy_water = grant(&ctx, OWNER, ship_id, 16272, InventoryFlag::Cargo, 100);
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(heavy_water), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(100)]).await.expect_err("heavy water Add").code, "InvalidInventoryFlag");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(heavy_water)]), PyRep::Integer(st_id), PyRep::Integer(133)]).await.expect_err("heavy water MultiAdd").code, "InvalidInventoryFlag");
+
+    let oz_item = grant(&ctx, OWNER, ship_id, 16273, InventoryFlag::Cargo, 700);
+    let gas_item = grant(&ctx, OWNER, ship_id, 81143, InventoryFlag::Cargo, 300);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(oz_item), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(700)]).await.expect("ozone Add");
+    rpc(&ctx, &mut sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(gas_item)]), PyRep::Integer(st_id), PyRep::Integer(133)]).await.expect("gas MultiAdd");
+    assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().fuel_blocks, 4_452, "Ozone and reagents must never inflate fuel_blocks");
+    let jet_gas = rpc(&ctx, &mut sess, "structure", "JettisonStructureFuel", &[PyRep::Integer(st_id), PyRep::List(vec![PyRep::Integer(gas_item)])]).await.expect("jettison gas");
+    let jet_oz = rpc(&ctx, &mut sess, "structure", "JettisonStructureFuel", &[PyRep::Integer(st_id), PyRep::Integer(16273), PyRep::Integer(100)]).await.expect("jettison ozone");
+    let (gas_cid, oz_cid) = (kv_i64(&jet_gas, "containerID"), kv_i64(&jet_oz, "containerID"));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.values().any(|i| i.location_id == gas_cid && i.type_id == 81143 && i.quantity == 300), "Jettisoned reagent must preserve type_id 81143");
+        assert!(snap.items.values().any(|i| i.location_id == oz_cid && i.type_id == 16273 && i.quantity == 100), "Jettisoned ozone must preserve type_id 16273");
+        assert_eq!(snap.structures[&st_id].fuel_blocks, 4_452);
+    });
+
+    // Ansiblex Jump Bridge fueled via live invbroker.Add from in-space ship consumes Liquid Ozone on CmdJumpThroughStructureStargate.
+    let (jb_src, jb_dst, src_sys, dst_sys) = (995_000_001i64, 995_000_002i64, 30_004_712u32, 30_004_713u32);
+    ctx.db.with_mut_snapshot(|snap| {
+        for (jid, sys_id, nm) in [(jb_src, src_sys, "HED-GP Ansiblex"), (jb_dst, dst_sys, "Rancer Ansiblex")] {
+            snap.structures.insert(jid, UpwellStructureRecord {
+                structure_id: jid, owner_corp_id: owner_corp, type_id: 35841, solar_system_id: sys_id,
+                name: nm.into(), state: life::STATE_SHIELD_VULNERABLE.into(), position: [0.0, 0.0, 0.0],
+                shield_hp: 500_000.0, armor_hp: 500_000.0, hull_hp: 500_000.0, fuel_blocks: 1_000, reinforced_until_unix: 0,
+                last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None, quantum_core_installed: true,
+            });
+        }
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.jump_bridge_links.insert(jb_src, jb_dst);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        let ch = snap.characters.get_mut(&OWNER).unwrap();
+        ch.station_id = None; ch.structure_id = None; ch.solar_system_id = src_sys;
+        snap.items.get_mut(&ship_id).unwrap().location_id = i64::from(src_sys);
+    });
+    sess.station_id = None; sess.structure_id = None; sess.solar_system_id = Some(src_sys);
+    let _ = ctx.systems.get_or_spawn(src_sys).spawn_ball_with_combat(eve_destiny::Ball { id: ship_id, type_id: 587, position: DVec3::new(1_000.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1.0e6, mode: eve_destiny::MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
+    ctx.advance_secs(12);
+    assert_eq!(rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(jb_src)]).await.expect_err("no ozone").code, "InsufficientLiquidOzone");
+    let jb_oz = grant(&ctx, OWNER, ship_id, 16273, InventoryFlag::Cargo, 600);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(jb_oz), PyRep::Integer(jb_src), PyRep::Integer(133), PyRep::Integer(600)]).await.expect("in-space ozone Add");
+    let jb_res = rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(jb_src)]).await.expect("jump through Ansiblex");
+    assert_eq!(kv_i64(&jb_res, "solarSystemID"), i64::from(dst_sys));
+    ctx.db.with_snapshot(|snap| {
+        let rem_oz: i32 = snap.items.values().filter(|i| i.location_id == jb_src && i.flag == InventoryFlag::SpecializedFuelBay && i.type_id == 16273).map(|i| i.quantity).sum();
+        assert_eq!(rem_oz, 547, "Ansiblex jump must deduct mass-based Liquid Ozone loaded via invbroker.Add");
+    });
+}
+
+}
+
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod plan_upwell_structures_ops_c {
+    use super::*;
+
+// Upwell Structure Anchoring, Quantum Core, Pochven, Palatine Keepstar, Tethering & Docking Lock
+// parity tests (`plan_upwell_structures_closure_part3.rs`).
+
+use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use eve_server::services::space_destiny::space_nav_travel::sync_tether;
+use eve_server::services::station_structure::structure_lifecycle as life;
+use glam::DVec3;
+use std::collections::HashMap;
+
+const OWNER: i64 = 90_000_001;
+const OUTSIDER: i64 = 90_000_003;
+const RIVAL_CORP: i64 = 98_999_999;
+const JITA: u32 = 30_000_144;
+const RANCER: u32 = 30_002_718;
+const KINO_POCHVEN: u32 = 30_000_157;
+
+fn prepare_siege(ctx: &ServerContext, id: i64, charge_dmg_em: f64) {
+    ctx.db.with_mut_snapshot(|snap| {
+        let my_corp = snap.characters.get(&OWNER).map(|c| c.corporation_id).expect("corp");
+        if let Some(s) = snap.structures.get_mut(&id) {
+            s.owner_corp_id = RIVAL_CORP;
+        }
+        snap.wars.insert(
+            77,
+            eve_db::WarRecord {
+                war_id: 77,
+                aggressor_corp_id: my_corp,
+                defender_corp_id: RIVAL_CORP,
+                mutual: true,
+                started_unix: 0,
+                active: true,
+            },
+        );
+        if let Some(w) = snap.items.get_mut(&100_000_005) {
+            w.location_id = 100_000_001;
+            w.flag = InventoryFlag::HiSlot0;
+            w.singleton = true;
+            if charge_dmg_em > 0.0 {
+                w.dynamic_attributes.insert(64, 5_000.0);
+            } else {
+                w.dynamic_attributes.remove(&64);
+            }
+        }
+        let old_ammo: Vec<i64> = snap.items.values().filter(|i| i.location_id == 100_000_001 && i.flag == InventoryFlag::HiSlot0 && i.item_id != 100_000_005).map(|i| i.item_id).collect();
+        for aid in old_ammo { snap.items.remove(&aid); }
+    });
+    let _ = grant(ctx, OWNER, 100_000_001, 185, InventoryFlag::HiSlot0, 10_000);
+    ctx.invalidate_ship_fitting(100_000_001);
+}
+
+async fn fire_weapon(ctx: &ServerContext, sess: &mut SessionState, target_id: i64) -> Result<PyRep, BridgeRpcError> {
+    let (sys_id, ship_id) = (sess.solar_system_id.expect("sys"), sess.ship_id.expect("ship"));
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    if !sys.get_target_locks(ship_id).await.unwrap_or_default().iter().any(|l| l.target_id == target_id && l.locked) {
+        rpc(ctx, sess, "dogmaIM", "AddTarget", &[PyRep::Integer(target_id)]).await?;
+        let _ = sys.step_manual(12.0).await;
+    }
+    rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into()), PyRep::Integer(target_id)]).await
+}
+
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
+}
+
+fn kv_i64(rep: &PyRep, key: &str) -> i64 { rep.dict_get(key).and_then(|v| v.as_i64()).unwrap_or(0) }
+fn kv_str(rep: &PyRep, key: &str) -> String { rep.dict_get(key).and_then(|v| v.as_str()).unwrap_or("").to_string() }
+
+fn grant(ctx: &ServerContext, owner: i64, location: i64, type_id: u32, flag: InventoryFlag, qty: i32) -> i64 {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(id, InventoryItemRecord { item_id: id, type_id, owner_id: owner, location_id: location, flag, quantity: qty, singleton: qty == 1, version: 1, ..Default::default() });
+        id
+    })
+}
+
+fn attr(ctx: &ServerContext, type_id: u32, attr_id: u16) -> f64 {
+    ctx.sde.types.get(&type_id).and_then(|t| t.default_attributes.get(&attr_id).copied()).unwrap_or_else(|| panic!("SDE type {type_id} lacks attribute {attr_id}"))
+}
+
+fn new_test_ctx() -> ServerContext {
+    let ctx = ServerContext::new();
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    ctx
+}
+
+async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
+    let perim_station = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).map(|s| s.station_id).expect("Perimeter station");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&OWNER) {
+            let ship_id = ch.active_ship_id;
+            ch.solar_system_id = JITA;
+            ch.station_id = Some(perim_station);
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = perim_station;
+            }
+        }
+    });
+    let mut sess = SessionState::new(sess_id);
+    rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
+    rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
+    ctx.advance_secs(12);
+    rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Part3 Corp".into()), PyRep::String("UPW3".into())]).await.expect("AddCorporation");
+    ctx.advance_virtual_clock(7 * 86_400 + 12);
+    rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+    sess
+}
+
+async fn move_ship(ctx: &ServerContext, sess: &SessionState, pos: DVec3) {
+    assert!(ctx.systems.get_or_spawn(sess.solar_system_id.expect("sys")).set_ball_position(sess.ship_id.expect("ship"), pos).await);
+}
+
+fn open_space(ctx: &ServerContext, sys_id: u32, k: f64) -> DVec3 {
+    let base = ctx.sde.stations.values().find(|s| s.solar_system_id == sys_id).map(|s| s.position).unwrap_or(DVec3::ZERO);
+    base + DVec3::new(0.0, 5.0e9 + k * 3.0e9, 0.0)
+}
+
+async fn anchor(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name: &str) -> Result<PyRep, BridgeRpcError> {
+    let ship = sess.ship_id.expect("ship");
+    grant(ctx, OWNER, ship, type_id, InventoryFlag::Cargo, 1);
+    rpc(ctx, sess, "structureDeployment", "Anchor", &[PyRep::Integer(i64::from(type_id)), PyRep::String(name.into())]).await
+}
+
+async fn observe(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Option<UpwellStructureRecord> {
+    let _ = rpc(ctx, sess, "structureGuests", "GetGuests", &[PyRep::Integer(id)]).await;
+    ctx.db.with_snapshot(|snap| snap.structures.get(&id).cloned())
+}
+
+async fn online_structure(ctx: &ServerContext, sess: &mut SessionState, type_id: u32, name: &str) -> i64 {
+    let id = kv_i64(&anchor(ctx, sess, type_id, name).await.expect("Anchor"), "structureID");
+    ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_NO_CORE);
+    let core = attr(ctx, type_id, life::ATTR_REQUIRES_DEED_TYPE) as u32;
+    move_ship(ctx, sess, DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&id].position))).await;
+    rpc(ctx, sess, "structureDocking", "Dock", &[PyRep::Integer(id)]).await.expect("Dock");
+    let core_item = grant(ctx, OWNER, sess.ship_id.expect("ship"), core, InventoryFlag::Cargo, 1);
+    rpc(ctx, sess, "invbroker", "Add", &[PyRep::Integer(core_item), PyRep::Integer(id), PyRep::Integer(172)]).await.expect("move core");
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_ONLINING);
+    ctx.advance_virtual_clock(life::ONLINING_SECS);
+    assert_eq!(observe(ctx, sess, id).await.expect("st").state, life::STATE_SHIELD_VULNERABLE);
+    id
+}
+
+#[tokio::test]
+async fn test_upwell_anchoring_quantum_core_pochven_and_palatine() {
+    // parity: feat:structures.anchoring-onlining-phases, feat:structures.quantum-core-gate, feat:structures.pochven-anchoring-restrictions, feat:structures.upwell-palatine-keepstar-limit
+    eve_testkit::attest(&[
+        "feat:structures.anchoring-onlining-phases",
+        "feat:structures.quantum-core-gate",
+        "feat:structures.pochven-anchoring-restrictions",
+        "feat:structures.upwell-palatine-keepstar-limit",
+    ]);
+
+    let ctx = new_test_ctx();
+    let mut sess = pilot_in_space(&ctx, 7102).await;
+    let my_corp = ctx.db.with_snapshot(|snap| snap.characters.get(&OWNER).unwrap().corporation_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(OWNER).or_default().insert(3416, eve_db::TrainedSkillRecord { type_id: 3416, level: 5, skill_points: 256_000.0 });
+    });
+
+    // 1. Minimum 1,000 km anchoring distance check + 4-phase anchoring/quantum-core/onlining progression via live weapon RPCs.
+    let station_pos = ctx.sde.stations.values().find(|s| s.solar_system_id == JITA).unwrap().position;
+    move_ship(&ctx, &sess, station_pos + DVec3::new(500_000.0, 0.0, 0.0)).await;
+    assert_eq!(anchor(&ctx, &mut sess, 35832, "Too Close").await.expect_err("too close").code, "TooCloseToStructureOrStation");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, it| !(it.location_id == sess.ship_id.unwrap() && it.type_id == 35832 && it.flag == InventoryFlag::Cargo));
+    });
+
+    let pos3 = open_space(&ctx, JITA, 3.0);
+    move_ship(&ctx, &sess, pos3).await;
+    let st_id = kv_i64(&anchor(&ctx, &mut sess, 35832, "Phased Astrahus").await.expect("Anchor"), "structureID");
+    let st_anchored = observe(&ctx, &mut sess, st_id).await.unwrap();
+    move_ship(&ctx, &sess, DVec3::from_array(st_anchored.position)).await;
+    assert_eq!((st_anchored.state.as_str(), st_anchored.shield_hp, st_anchored.armor_hp), (life::STATE_ANCHOR_VULNERABLE, 0.0, 0.0));
+    let prof_hp = life::structure_profile(&ctx, 35832).unwrap();
+
+    // Pre-NoCore docking rejected on BOTH structureDocking.Dock and beyonce.CmdDock:
+    assert_eq!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect_err("dock AnchorVulnerable").code, "StructureNotDockable");
+    assert_eq!(rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(st_id)]).await.expect_err("cmddock AnchorVulnerable").code, "StructureNotDockable");
+
+    // AnchorVulnerable pause under qualifying live weapon fire and timerless destruction:
+    let t_init = st_anchored.reinforced_until_unix;
+    prepare_siege(&ctx, st_id, 0.0);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("sub-threshold anchor hit");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&st_id].reinforced_until_unix), t_init, "sub-threshold hit does not pause anchoring");
+    prepare_siege(&ctx, st_id, 20_000.0);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("qualifying anchor hit");
+    assert!(ctx.db.with_snapshot(|s| s.structures[&st_id].reinforced_until_unix) > t_init, "qualifying weapon DPS pauses AnchorVulnerable timer");
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp);
+
+    let pos4 = open_space(&ctx, JITA, 4.0);
+    move_ship(&ctx, &sess, pos4).await;
+    let doomed_id = kv_i64(&anchor(&ctx, &mut sess, 35832, "Doomed Anchor").await.expect("anchor doomed"), "structureID");
+    move_ship(&ctx, &sess, pos4 + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&doomed_id).unwrap().hull_hp = 10.0);
+    prepare_siege(&ctx, doomed_id, 20_000.0);
+    fire_weapon(&ctx, &mut sess, doomed_id).await.expect("destroy in AnchorVulnerable");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&doomed_id].state.clone()), life::STATE_DESTROYED);
+
+    move_ship(&ctx, &sess, pos3 + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + 30);
+    assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().state, life::STATE_ANCHORING);
+    assert_eq!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect_err("dock Anchoring").code, "StructureNotDockable");
+    assert_eq!(rpc(&ctx, &mut sess, "beyonce", "CmdDock", &[PyRep::Integer(st_id)]).await.expect_err("cmddock Anchoring").code, "StructureNotDockable");
+    prepare_siege(&ctx, st_id, 20_000.0);
+    assert_eq!(fire_weapon(&ctx, &mut sess, st_id).await.expect_err("invuln during Anchoring").code, "StructureReinforcedInvulnerable");
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp);
+
+    ctx.advance_virtual_clock(life::ANCHORING_SECS);
+    let st_nocore = observe(&ctx, &mut sess, st_id).await.unwrap();
+    assert_eq!(st_nocore.state, life::STATE_NO_CORE);
+    assert!(!st_nocore.quantum_core_installed);
+
+    // Quantum core gate: onlining a service module AND docked ship fitting while quantum_core_installed == false or Onlining are blocked.
+    for (hull, core) in [(35832, 56201), (35835, 56202), (35825, 56203), (35833, 56204), (35836, 56205), (35826, 56206), (35834, 56207), (35827, 56208)] {
+        assert_eq!(life::structure_profile(&ctx, hull).and_then(|p| p.core_type_id), Some(core));
+    }
+    ctx.advance_virtual_clock(65);
+    move_ship(&ctx, &sess, DVec3::from_array(st_nocore.position) + DVec3::new(500.0, 0.0, 0.0)).await;
+    rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect("Dock");
+    let active_ship = sess.ship_id.unwrap();
+    let ship_mod_cargo = grant(&ctx, OWNER, active_ship, 10039, InventoryFlag::Cargo, 1);
+    let ship_mod_fit = grant(&ctx, OWNER, active_ship, 10039, InventoryFlag::MedSlot0, 1);
+    let _hangar_mod = grant(&ctx, OWNER, st_id, 10039, InventoryFlag::Hangar, 1);
+    ctx.db.with_mut_snapshot(|snap| {
+        let ship_tid = snap.items[&active_ship].type_id;
+        snap.saved_fittings.insert(9001, eve_db::SavedFittingRecord {
+            fitting_id: 9001, owner_id: OWNER, ship_type_id: ship_tid,
+            name: "NoCore Test Fit".into(), description: String::new(),
+            items: vec![(10039, InventoryFlag::MedSlot1, 1)],
+        });
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(ship_mod_cargo), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::MedSlot1 as i64)]).await.expect_err("ship fit NoCore").code, "QuantumCoreRequired");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(ship_mod_fit), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect_err("ship unfit NoCore").code, "QuantumCoreRequired");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "MultiAdd", &[PyRep::List(vec![PyRep::Integer(ship_mod_fit)]), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect_err("multiadd unfit NoCore").code, "QuantumCoreRequired");
+    assert_eq!(rpc(&ctx, &mut sess, "ship", "FitShips", &[PyRep::List(vec![PyRep::Integer(active_ship)]), PyRep::Integer(9001)]).await.expect_err("FitShips NoCore").code, "QuantumCoreRequired");
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "StripFitting", &[PyRep::Integer(active_ship)]).await.expect_err("StripFitting NoCore").code, "QuantumCoreRequired");
+
+    let clone_bay_mod = grant(&ctx, OWNER, active_ship, 35894, InventoryFlag::Cargo, 1);
+    let st_fuel = grant(&ctx, OWNER, active_ship, 4247, InventoryFlag::Cargo, 5_000);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(st_fuel), PyRep::Integer(st_id), PyRep::Integer(133), PyRep::Integer(5_000)]).await.expect("fuel");
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(clone_bay_mod), PyRep::Integer(st_id), PyRep::Integer(InventoryFlag::ServiceSlot0 as i64)]).await.expect_err("no fit in NoCore").code, "StructureFittingLockedInState");
+    ctx.db.with_mut_snapshot(|snap| {
+        let m = snap.items.get_mut(&clone_bay_mod).unwrap();
+        m.owner_id = my_corp; m.location_id = st_id; m.flag = InventoryFlag::ServiceSlot0;
+        snap.module_online_states.insert(clone_bay_mod, false);
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(clone_bay_mod)]).await.expect_err("no core").code, "QuantumCoreRequired");
+
+    // Negative 1: wrong core type (56202) into StructureDeedBay (172) fails with InvalidItemType
+    let wrong_core = grant(&ctx, OWNER, active_ship, 56202, InventoryFlag::Cargo, 1);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(wrong_core), PyRep::Integer(st_id), PyRep::Integer(172)]).await.expect_err("wrong core type").code,
+        "InvalidItemType"
+    );
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&wrong_core); });
+
+    // Negative 2: moving quantum core (56201) to Hangar (flag 4) leaves structure in NoCore and core is NOT consumed
+    let hangar_core = grant(&ctx, OWNER, active_ship, 56201, InventoryFlag::Cargo, 1);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(hangar_core), PyRep::Integer(st_id), PyRep::Integer(4)]).await.expect("add core to hangar");
+    assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().state, life::STATE_NO_CORE);
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&hangar_core).expect("hangar core item must exist");
+        assert_eq!(it.flag, InventoryFlag::Hangar);
+        assert_eq!(it.quantity, 1);
+    });
+
+    // Positive: matching core (56201) deposited into StructureDeedBay (172) enters Onlining (15m) where ship fitting remains blocked.
+    let right_core = grant(&ctx, OWNER, active_ship, 56201, InventoryFlag::Cargo, 1);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(right_core), PyRep::Integer(st_id), PyRep::Integer(172)]).await.expect("add right core");
+    assert_eq!(observe(&ctx, &mut sess, st_id).await.unwrap().state, life::STATE_ONLINING);
+    assert_eq!(rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(ship_mod_cargo), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::MedSlot1 as i64)]).await.expect_err("ship fit Onlining").code, "QuantumCoreRequired");
+    assert_eq!(rpc(&ctx, &mut sess, "ship", "FitShips", &[PyRep::List(vec![PyRep::Integer(active_ship)]), PyRep::Integer(9001)]).await.expect_err("FitShips Onlining").code, "QuantumCoreRequired");
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "StripFitting", &[PyRep::Integer(active_ship)]).await.expect_err("StripFitting Onlining").code, "QuantumCoreRequired");
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock for onlining combat check");
+
+    // Qualifying weapon fire during Onlining pauses timer & damages hull; destroying during Onlining is timerless and drops quantum core ball!
+    let t_on0 = ctx.db.with_snapshot(|s| s.structures[&st_id].reinforced_until_unix);
+    prepare_siege(&ctx, st_id, 20_000.0);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("onlining qualifying hit");
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(snap.structures[&st_id].reinforced_until_unix > t_on0);
+        assert!(snap.structures[&st_id].hull_hp < prof_hp.hull_hp);
+        snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp;
+    });
+
+    let pos5 = open_space(&ctx, JITA, 5.0);
+    move_ship(&ctx, &sess, pos5).await;
+    let doomed_on = kv_i64(&anchor(&ctx, &mut sess, 35832, "Doomed Onlining").await.expect("anchor doomed on"), "structureID");
+    move_ship(&ctx, &sess, pos5 + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS + life::ANCHORING_SECS);
+    let _ = observe(&ctx, &mut sess, doomed_on).await;
+    ctx.advance_virtual_clock(65);
+    rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(doomed_on)]).await.expect("Dock doomed on");
+    let core_doomed = grant(&ctx, OWNER, sess.ship_id.unwrap(), 56201, InventoryFlag::Cargo, 1);
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(core_doomed), PyRep::Integer(doomed_on), PyRep::Integer(172)]).await.expect("core doomed");
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock doomed");
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&doomed_on).unwrap().hull_hp = 10.0);
+    prepare_siege(&ctx, doomed_on, 20_000.0);
+    fire_weapon(&ctx, &mut sess, doomed_on).await.expect("destroy during Onlining");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&doomed_on].state.clone()), life::STATE_DESTROYED);
+    let (wreck_id, dropped_core_id) = ctx.db.with_snapshot(|snap| {
+        let p = snap.structures[&doomed_on].position;
+        let wreck = snap.items.values().find(|i| {
+            i.location_id == JITA as i64
+                && snap.item_positions.get(&i.item_id) == Some(&p)
+                && (i.type_id == 26557 || ctx.sde.wrecks.values().any(|&w| w == i.type_id))
+        }).expect("structure wreck container");
+        let core = snap.items.values().find(|i| i.type_id == 56201 && i.location_id == wreck.item_id).expect("dropped core item inside wreck");
+        (wreck.item_id, core.item_id)
+    });
+    assert!(ctx.systems.get_or_spawn(JITA).get_ball_snapshot(wreck_id).await.unwrap().is_some(), "structure wreck ball spawned in space");
+    assert!(ctx.systems.get_or_spawn(JITA).get_ball_snapshot(dropped_core_id).await.unwrap().is_none(), "core inside wreck has no independent space ball");
+
+    ctx.advance_virtual_clock(life::ONLINING_SECS + 65);
+    move_ship(&ctx, &sess, pos3 + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    let st_online = observe(&ctx, &mut sess, st_id).await.unwrap();
+    assert_eq!(st_online.state, life::STATE_SHIELD_VULNERABLE);
+    assert!((st_online.hull_hp - prof_hp.hull_hp).abs() < 1.0 && st_online.quantum_core_installed);
+    rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(st_id)]).await.expect("Dock online");
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(ship_mod_cargo), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::MedSlot1 as i64)]).await.expect("ship fit online with core");
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(ship_mod_fit), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect("ship unfit online with core");
+    rpc(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(ship_mod_cargo), PyRep::Integer(active_ship), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect("restore ship_mod_cargo");
+    rpc(&ctx, &mut sess, "dogmaIM", "SetModuleOnline", &[PyRep::Integer(st_id), PyRep::Integer(clone_bay_mod)]).await.expect("online service with core");
+
+    // High-Sec alliance-level war precheck (active alliance war permitted; un-warmed non-mutual war rejected):
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock for alliance war check");
+    move_ship(&ctx, &sess, pos3 + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    let (ally_a, ally_b) = (99_100_001i64, 99_100_002i64);
+    prepare_siege(&ctx, st_id, 0.0);
+    let now_war = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.clear();
+        snap.corporations.get_mut(&my_corp).unwrap().alliance_id = Some(ally_a);
+        let mut rcorp = snap.corporations.get(&my_corp).unwrap().clone();
+        rcorp.corporation_id = RIVAL_CORP; rcorp.alliance_id = Some(ally_b);
+        snap.corporations.insert(RIVAL_CORP, rcorp);
+        snap.characters.get_mut(&OWNER).unwrap().alliance_id = Some(ally_a);
+        snap.wars.insert(88, eve_db::WarRecord { war_id: 88, aggressor_corp_id: ally_a, defender_corp_id: ally_b, mutual: false, started_unix: now_war, active: true });
+    });
+    assert_eq!(fire_weapon(&ctx, &mut sess, st_id).await.expect_err("24h warmup").code, "IllegalHighSecStructureAttack");
+    ctx.db.with_mut_snapshot(|snap| snap.wars.get_mut(&88).unwrap().started_unix = 0);
+    fire_weapon(&ctx, &mut sess, st_id).await.expect("active High-Sec alliance war permitted");
+    ctx.db.with_mut_snapshot(|snap| {
+        assert!(eve_server::services::structure_acl_defense_rules::are_corps_at_war_in_snap(snap, my_corp, RIVAL_CORP, ctx.now_unix()));
+        let mut ds = eve_server::services::structure_acl_defense_rules::load_defense_settings(snap, st_id);
+        ds.auto_defense_enabled = true;
+        eve_server::services::structure_acl_defense_rules::save_defense_settings(snap, &ds);
+        assert!(eve_server::services::structure_acl_defense_rules::evaluate_auto_defense_target(&ctx, snap, st_id, OWNER));
+        snap.structures.get_mut(&st_id).unwrap().owner_corp_id = my_corp;
+    });
+
+    // 2. Pochven anchoring restrictions: Upwell structures & POS towers rejected; Mobile Depot allowed; Customs Office gated by >= 1.5 Triglavian standing.
+    sess.solar_system_id = Some(KINO_POCHVEN);
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = KINO_POCHVEN);
+    let poch_ship = sess.ship_id.unwrap();
+    let planet_pos = DVec3::new(27660817438.0, -327544042.0, 66850617032.0);
+    let ship_pos = planet_pos + DVec3::new(10_000_000.0, 0.0, 0.0);
+    let _ = ctx.systems.get_or_spawn(KINO_POCHVEN).spawn_ball(Ball { id: poch_ship, type_id: 606, position: ship_pos, velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }).await;
+    assert!(matches!(anchor(&ctx, &mut sess, 35832, "Pochven Citadel").await.expect_err("pochven upwell").code.as_str(), "AnchoringDisallowedInPochven" | "CannotAnchorInPochven"));
+
+    let pos_tower = grant(&ctx, OWNER, poch_ship, 12235, InventoryFlag::Cargo, 1);
+    let pos_err = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(pos_tower), PyRep::Tuple(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)])]).await.expect_err("pochven pos");
+    assert!(matches!(pos_err.code.as_str(), "AnchoringRestrictedInPochven" | "StarbaseRemoved"));
+
+    let mobile_depot = grant(&ctx, OWNER, poch_ship, 33474, InventoryFlag::Cargo, 1);
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(mobile_depot), PyRep::Tuple(vec![PyRep::Real(ship_pos.x), PyRep::Real(ship_pos.y), PyRep::Real(ship_pos.z)])]).await.expect("pochven depot"), "state"), "Anchoring");
+
+    let gantry_item = grant(&ctx, OWNER, poch_ship, 3962, InventoryFlag::Cargo, 1);
+    assert_eq!(rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_item)]).await.expect_err("low trig standing").code, "InsufficientTriglavianStanding");
+    ctx.db.with_mut_snapshot(|snap| { snap.characters.get_mut(&OWNER).unwrap().standings.insert(500_026, 2.0); });
+    assert_eq!(kv_str(&rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(gantry_item)]).await.expect("high trig standing"), "state"), "Anchored");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(999_888, eve_db::UpwellStructureRecord {
+            structure_id: 999_888, owner_corp_id: 1000009, solar_system_id: KINO_POCHVEN, type_id: 35832,
+            state: life::STATE_SHIELD_VULNERABLE.into(), reinforced_until_unix: 0, shield_hp: 10_000.0, armor_hp: 10_000.0, hull_hp: 10_000.0,
+            quantum_core_installed: true, fuel_blocks: 1_000, position: [0.0, 0.0, 0.0], name: "Pochven Legacy".into(), last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
+        });
+    });
+    assert!(life::is_operational(&observe(&ctx, &mut sess, 999_888).await.unwrap().state));
+
+    // 3. Upwell Palatine Keepstar (40340) cluster-wide limit of 1 active (replaced via live combat destruction!).
+    sess.solar_system_id = Some(RANCER);
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().solar_system_id = RANCER);
+    let rancer_sys = ctx.systems.get_or_spawn(RANCER);
+    let _ = rancer_sys.spawn_ball_with_combat(Ball { id: poch_ship, type_id: 587, position: open_space(&ctx, RANCER, 1.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(587)).await;
+    let pal1 = kv_i64(&anchor(&ctx, &mut sess, 40340, "Palatine One").await.expect("first Palatine"), "structureID");
+    move_ship(&ctx, &sess, open_space(&ctx, RANCER, 2.0)).await;
+    assert_eq!(anchor(&ctx, &mut sess, 40340, "Palatine Two").await.expect_err("second Palatine").code, "PalatineKeepstarLimitReached");
+
+    move_ship(&ctx, &sess, open_space(&ctx, RANCER, 1.0) + DVec3::new(60_000.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&pal1).unwrap().hull_hp = 10.0);
+    prepare_siege(&ctx, pal1, 20_000.0);
+    fire_weapon(&ctx, &mut sess, pal1).await.expect("destroy Palatine One in AnchorVulnerable");
+    assert_eq!(ctx.db.with_snapshot(|s| s.structures[&pal1].state.clone()), life::STATE_DESTROYED);
+    move_ship(&ctx, &sess, open_space(&ctx, RANCER, 2.0)).await;
+    assert!(anchor(&ctx, &mut sess, 40340, "Palatine Replacement").await.is_ok());
+}
+
+#[tokio::test]
+async fn test_upwell_tethering_eligibility_restrictions_and_docking_lock() {
+    // parity: feat:structures.tether-eligibility-and-restrictions, feat:structures.tethering-docking-lock
+    eve_testkit::attest(&[
+        "feat:structures.tether-eligibility-and-restrictions",
+        "feat:structures.tethering-docking-lock",
+    ]);
+
+    let ctx = new_test_ctx();
+    let mut sess = pilot_in_space(&ctx, 7201).await;
+    let st_pos = open_space(&ctx, JITA, 1.0);
+    move_ship(&ctx, &sess, st_pos).await;
+    let astra_id = online_structure(&ctx, &mut sess, 35832, "Tether Astrahus").await;
+    let st_pos = DVec3::from_array(ctx.db.with_snapshot(|s| s.structures[&astra_id].position));
+    rpc(&ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
+
+    let ship_id = sess.ship_id.unwrap();
+    let jita_sys = ctx.systems.get_or_spawn(JITA);
+    move_ship(&ctx, &sess, st_pos + DVec3::new(1_500.0, 0.0, 0.0)).await;
+
+    {
+        let mut cs = jita_sys.get_combat_state(ship_id).await.unwrap().unwrap();
+        cs.shield_hp = cs.max_shield_hp * 0.4; cs.armor_hp = cs.max_armor_hp * 0.4;
+        cs.structure_hp = cs.max_structure_hp * 0.4; cs.capacitor = cs.max_capacitor * 0.4;
+        let _ = jita_sys.set_combat_state(ship_id, cs).await;
+    }
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    let cs_tethered = jita_sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    assert!(cs_tethered.is_tethered && cs_tethered.shield_hp > cs_tethered.max_shield_hp * 0.6);
+
+    let hp_before = cs_tethered.shield_hp;
+    let _ = jita_sys.apply_damage(ship_id, DamageVector { em: 5_000.0, thermal: 5_000.0, kinetic: 5_000.0, explosive: 5_000.0 }).await;
+    assert!((jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().shield_hp - hp_before).abs() < 1e-3);
+
+    let unpiloted_ship = grant(&ctx, OUTSIDER, i64::from(JITA), 606, InventoryFlag::None, 1);
+    let _ = jita_sys.spawn_ball_with_combat(Ball { id: unpiloted_ship, type_id: 606, position: st_pos + DVec3::new(1_200.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 40.0, mass: 1_000_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 300.0, inertia: 1.0 }, ctx.build_type_combat_state(606)).await;
+    sync_tether(&ctx, 0, JITA, unpiloted_ship).await;
+    assert!(!jita_sys.get_combat_state(unpiloted_ship).await.unwrap().unwrap().is_tethered);
+
+    let pod_id = grant(&ctx, OWNER, i64::from(JITA), 670, InventoryFlag::None, 1);
+    let _ = jita_sys.spawn_ball_with_combat(Ball { id: pod_id, type_id: 670, position: st_pos + DVec3::new(800.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 10.0, mass: 10_000.0, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 500.0, inertia: 1.0 }, ctx.build_type_combat_state(670)).await;
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().active_ship_id = pod_id);
+    sync_tether(&ctx, OWNER, JITA, pod_id).await;
+    assert!(jita_sys.get_combat_state(pod_id).await.unwrap().unwrap().is_tethered);
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().active_ship_id = ship_id);
+
+    let mut attacker_sess = SessionState::new(7202);
+    attacker_sess.user_id = Some(3); attacker_sess.character_id = Some(OUTSIDER); attacker_sess.corporation_id = Some(1000009); attacker_sess.solar_system_id = Some(JITA); attacker_sess.ship_id = Some(unpiloted_ship);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters.get(&OWNER).unwrap().clone();
+        ch.character_id = OUTSIDER; ch.user_id = 3; ch.name = "Attacker".into(); ch.corporation_id = 1000009; ch.solar_system_id = JITA; ch.active_ship_id = unpiloted_ship;
+        snap.characters.insert(OUTSIDER, ch);
+        snap.structure_docking_acl_denied.entry(astra_id).or_default().insert(OUTSIDER);
+    });
+    sync_tether(&ctx, OUTSIDER, JITA, unpiloted_ship).await;
+    assert!(!jita_sys.get_combat_state(unpiloted_ship).await.unwrap().unwrap().is_tethered);
+    assert!(matches!(rpc(&ctx, &mut attacker_sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.expect_err("acl dock").code.as_str(), "ShipNotDockableAtStructure" | "DockingPermissionDenied" | "StructureDockingAccessDenied"));
+    assert_eq!(rpc(&ctx, &mut attacker_sess, "dogmaIM", "AddTarget", &[PyRep::Integer(ship_id)]).await.expect_err("tethered lock").code, "TargetInvulnerable");
+
+    let sb_mod = grant(&ctx, OWNER, ship_id, 4266, InventoryFlag::HiSlot0, 1);
+    ctx.invalidate_ship_fitting(ship_id);
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(sb_mod), PyRep::String("empWave".into())]).await.expect_err("sb tethered").code, "CantActivateWhileTethered");
+    let ore_item = grant(&ctx, OWNER, ship_id, 1230, InventoryFlag::SpecializedOreHold, 1_000);
+    assert_eq!(rpc(&ctx, &mut sess, "inSpaceCompressionMgr", "CompressItemInSpace", &[PyRep::Integer(ore_item)]).await.expect_err("compress tethered").code, "CannotCompressWhileTethered");
+
+    rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(unpiloted_ship)]).await.expect("lock target");
+    assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    let _ = jita_sys.clear_target_locks(ship_id).await;
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+
+    ctx.active_fighters.write().unwrap().insert(999_001, eve_server::router::context::ActiveFighterSquadron {
+        ball_id: 999_001, item_id: 999_001, type_id: 23055, owner_char_id: OWNER, parent_ship_id: ship_id, tube_index: 0, squadron_size: 9, target_id: None, mwd_active: false, is_abandoned: false,
+    });
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    ctx.active_fighters.write().unwrap().get_mut(&999_001).unwrap().is_abandoned = true;
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    ctx.active_fighters.write().unwrap().clear();
+
+    for mod_tid in [4292u32, 21096] {
+        let m = grant(&ctx, OWNER, ship_id, mod_tid, InventoryFlag::HiSlot1, 1);
+        ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.insert(m); });
+        sync_tether(&ctx, OWNER, JITA, ship_id).await;
+        assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+        ctx.db.with_mut_snapshot(|snap| { snap.module_active_states.remove(&m); });
+    }
+
+    let mut scram_cs = jita_sys.get_combat_state(ship_id).await.unwrap().unwrap();
+    scram_cs.warp_core_strength = 2; scram_cs.warp_scramble_strength = 1;
+    let _ = jita_sys.set_combat_state(ship_id, scram_cs.clone()).await;
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    scram_cs.warp_scramble_strength = 3;
+    let _ = jita_sys.set_combat_state(ship_id, scram_cs.clone()).await;
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    assert_eq!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.expect_err("scram dock").code, "ShipWarpScrambled");
+    scram_cs.warp_scramble_strength = 0; scram_cs.warp_core_strength = 0;
+    let _ = jita_sys.set_combat_state(ship_id, scram_cs).await;
+
+    ctx.crimewatch.write().unwrap().trigger_weapon_timer(OWNER, ctx.now_unix());
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    assert_eq!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.expect_err("weapons timer dock").code, "WeaponsTimerActive");
+    ctx.advance_virtual_clock(65);
+
+    ctx.crimewatch.write().unwrap().get_or_create(OWNER).pvp_timer_until_unix = ctx.now_unix() + 900;
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    ctx.crimewatch.write().unwrap().get_or_create(OWNER).pvp_timer_until_unix = 0;
+
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().jump_cooldown_until_unix = ctx.now_unix() + 600);
+    sync_tether(&ctx, OWNER, JITA, ship_id).await;
+    assert!(!jita_sys.get_combat_state(ship_id).await.unwrap().unwrap().is_tethered);
+    ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&OWNER).unwrap().jump_cooldown_until_unix = 0);
+
+    ctx.db.with_mut_snapshot(|snap| snap.items.get_mut(&ship_id).unwrap().type_id = 11567);
+    let _ = jita_sys.spawn_ball_with_combat(Ball { id: ship_id, type_id: 11567, position: st_pos + DVec3::new(1_500.0, 0.0, 0.0), velocity: DVec3::ZERO, radius: 400.0, mass: 1.0e9, mode: MovementMode::Stop, speed_fraction: 0.0, max_velocity: 100.0, inertia: 1.0 }, ctx.build_type_combat_state(11567)).await;
+    assert!(matches!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.expect_err("titan in astrahus").code.as_str(), "ShipTooLargeForStructure" | "ShipNotDockableAtStructure"));
+    ctx.db.with_mut_snapshot(|snap| snap.structures.get_mut(&astra_id).unwrap().type_id = 35834);
+    assert!(rpc(&ctx, &mut sess, "structureDocking", "Dock", &[PyRep::Integer(astra_id)]).await.is_ok());
+}
+
+}

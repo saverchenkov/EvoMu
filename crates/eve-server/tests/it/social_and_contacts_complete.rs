@@ -1,5 +1,5 @@
-//! Integration tests closing canonical plan rows SO-1 and SO-7
-//! and their blocking lifecycle and social features.
+//! Integration tests for social and contacts complete suite.
+
 
 #![forbid(unsafe_code)]
 
