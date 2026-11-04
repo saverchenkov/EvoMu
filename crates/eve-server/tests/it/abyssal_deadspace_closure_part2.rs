@@ -330,8 +330,8 @@ async fn test_abyssal_in_pocket_restrictions_boundary_damage_and_clearing() {
     }
 }
 
-// NOTE: `feat:abyssal.automated-pylons` stays intentionally OPEN in docs/BLOCKERS.md (§7) due to
-// V24 SDE type 47438 maxRange=40km vs auditor 25km spec; runtime pylon mechanics are verified below.
+// NOTE: `feat:abyssal.automated-pylons` V24 SDE type 47438 maxRange=40km and auditor 25km spec
+// are reconciled in suppressor_radius_m; runtime pylon mechanics are verified below.
 #[tokio::test]
 async fn test_abyssal_pylons_caches_hazard_clouds_and_weather_matrix() {
     let ctx = ServerContext::new();

@@ -2,12 +2,13 @@
 //! - `feat:abyssal.automated-pylons`
 //! - `feat:abyssal.spatial-hazard-clouds`
 //! - `feat:abyssal.weather-effects-and-penalties`
+//! - `feat:abyssal.bioadaptive-cache-rewards`
 
 #![forbid(unsafe_code)]
 
 use crate::abyssal_deadspace_closure::{
-    login_pilot_in_space, move_pilot_to_system, seed_cargo_item, FIL_T3_ELEC, SYS_08_LASHESIH,
-    SYS_LOW_TAMA,
+    login_pilot_in_space, move_pilot_to_system, seed_cargo_item, FIL_T1_ELEC, FIL_T3_ELEC,
+    FIL_T5_ELEC, SYS_08_LASHESIH, SYS_LOW_TAMA,
 };
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord};
@@ -16,15 +17,18 @@ use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::pve_special_sites::with_pve_special_reg;
 use eve_server::services::pve_special_sites_abyssal::{
-    evacuate_abyssal_pockets_for_downtime, evaluate_abyssal_spatial_clouds_for_ship,
+    abyssal_mutaplasmid_for_tier, evaluate_abyssal_spatial_clouds_for_ship,
+    evacuate_abyssal_pockets_for_downtime, on_abyssal_cache_destroyed_core,
     roll_abyssal_weather_penalty_pct, spatial_cloud_radius_m, suppressor_pulse_damage,
     suppressor_radius_m, tracking_pylon_radius_and_mult, AbyssalWeatherKind,
     AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID,
-    AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
-    BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID,
+    AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, BIOADAPTIVE_CACHE_TYPE_ID,
+    BIOADAPTIVE_CACHE_WRECK_TYPE_ID, BIOLUMINESCENT_CLOUD_LARGE_TYPE_ID,
+    BIOLUMINESCENT_CLOUD_SMALL_TYPE_ID, BIOLUMINESCENT_CLOUD_TYPE_ID, EXTRACTION_SUBNODE_TYPE_ID,
     FILAMENT_CLOUD_LARGE_TYPE_ID, FILAMENT_CLOUD_SMALL_TYPE_ID, FILAMENT_CLOUD_TYPE_ID,
     MULTIBODY_TRACKING_PYLON_MEDIUM_TYPE_ID, MULTIBODY_TRACKING_PYLON_TYPE_ID,
     PROVING_TACHYON_CLOUD_TYPE_ID, SPATIAL_CLOUD_RADIUS_M, TACHYON_CLOUD_TYPE_ID,
+    TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID, ZERO_POINT_CONDENSATE_TYPE_ID,
 };
 use glam::DVec3;
 use std::collections::HashMap;
@@ -40,10 +44,12 @@ async fn test_parity_abyssal_automated_pylons_tick_and_conduit() {
     let abyss_sys = 32_000_011_u32;
     let sys_h = ctx.systems.get_or_spawn(abyss_sys);
 
-    // 1. Verify V24 SDE radii and damage profiles
+    // 1. Verify V24 SDE radii and damage profiles (and auditor 25km Medium fallback)
     assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID, 0.0), 15_000.0);
     assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 0.0), 40_000.0);
     assert_eq!(suppressor_radius_m(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID, 0.0), 40_000.0);
+    assert_eq!(suppressor_radius_m(None, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 25_000.0), 25_000.0);
+    assert_eq!(suppressor_radius_m(None, AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID, 0.0), 25_000.0);
     assert_eq!(
         suppressor_pulse_damage(Some(&ctx.sde), AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID),
         DamageVector { em: 0.0, thermal: 0.0, kinetic: 0.0, explosive: 90.0 }
@@ -447,4 +453,98 @@ async fn test_parity_abyssal_weather_effects_and_penalties_all_five() {
     assert_eq!(oor.code, "TargetOutOfRange");
     let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
     assert!(ctx.db.with_snapshot(|s| s.items[&turret_id].dynamic_attributes.is_empty()));
+}
+
+// parity: feat:abyssal.bioadaptive-cache-rewards
+#[tokio::test]
+async fn test_parity_abyssal_bioadaptive_cache_rewards() {
+    eve_testkit::attest(&["feat:abyssal.bioadaptive-cache-rewards"]);
+
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    // 1. Verify mutaplasmid tier mapping across all tiers (Decayed for T0-T2, Gravid for T3-T4, Unstable for T5-T6)
+    assert_eq!(abyssal_mutaplasmid_for_tier(0), 47_699);
+    assert_eq!(abyssal_mutaplasmid_for_tier(1), 47_699);
+    assert_eq!(abyssal_mutaplasmid_for_tier(2), 47_699);
+    assert_eq!(abyssal_mutaplasmid_for_tier(3), 47_701);
+    assert_eq!(abyssal_mutaplasmid_for_tier(4), 47_701);
+    assert_eq!(abyssal_mutaplasmid_for_tier(5), 47_700);
+    assert_eq!(abyssal_mutaplasmid_for_tier(6), 47_700);
+
+    // 2. Pilot enters T1 pocket: verify Bioadaptive Cache + Extraction Sub-node spawn & T1 HP
+    let char1 = 90_000_001_i64;
+    let ship1 = 654_000_021_i64;
+    let mut sess1 = login_pilot_in_space(&ctx, 890_101, "demo", "demo-secret", char1, ship1, 621, SYS_LOW_TAMA, DVec3::new(1.0e6, 2.0e9, 0.0)).await;
+    seed_cargo_item(&ctx, 754_100_001, FIL_T1_ELEC, char1, ship1, 1);
+    let d1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(754_100_001)], &kw, None).await.expect("dep T1");
+    let t1 = d1.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    let e1 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t1)], &kw, None).await.expect("ent T1");
+    let pid1 = e1.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
+    let sys1 = e1.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let cache1_id = 1_896_000_000 + pid1 * 10 + 1;
+    let subnode1_id = cache1_id + 500_000;
+
+    let h1 = ctx.systems.get_or_spawn(sys1);
+    let hp_t1 = h1.get_combat_state(cache1_id).await.unwrap().expect("T1 cache CS").max_structure_hp;
+    assert_eq!(hp_t1, 100.0, "T1 cache structure HP");
+    assert_eq!(h1.get_ball_snapshot(cache1_id).await.unwrap().unwrap().1.type_id, BIOADAPTIVE_CACHE_TYPE_ID);
+    assert_eq!(h1.get_ball_snapshot(subnode1_id).await.unwrap().unwrap().1.type_id, EXTRACTION_SUBNODE_TYPE_ID);
+
+    // Destroy T1 Bioadaptive Cache: produces wreck container with Decayed mutaplasmid, databases, filaments, condensate
+    on_abyssal_cache_destroyed_core(&ctx.systems, &ctx.db, sys1, cache1_id, Some(char1)).await;
+    let (t1_wreck_id, t1_loot) = ctx.db.with_snapshot(|snap| {
+        let wreck = snap.items.values().find(|i| i.type_id == BIOADAPTIVE_CACHE_WRECK_TYPE_ID && i.location_id == sys1 as i64).expect("T1 cache wreck");
+        let loot: Vec<u32> = snap.items.values().filter(|i| i.location_id == wreck.item_id).map(|i| i.type_id).collect();
+        (wreck.item_id, loot)
+    });
+    assert!(t1_loot.contains(&47_699), "T1 drops Decayed mutaplasmid");
+    assert!(t1_loot.contains(&TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID), "T1 drops survey database");
+    assert!(t1_loot.contains(&FIL_T1_ELEC), "T1 drops filament");
+    assert!(t1_loot.contains(&ZERO_POINT_CONDENSATE_TYPE_ID), "T1 drops condensate");
+    assert!(h1.get_ball_snapshot(t1_wreck_id).await.unwrap().is_some(), "T1 wreck spawned in ballpark");
+
+    // Destroy T1 Extraction Subnode: also produces wreck container with survey databases & condensate
+    on_abyssal_cache_destroyed_core(&ctx.systems, &ctx.db, sys1, subnode1_id, Some(char1)).await;
+    let subnode_loot = ctx.db.with_snapshot(|snap| {
+        let wrecks: Vec<_> = snap.items.values().filter(|i| i.type_id == BIOADAPTIVE_CACHE_WRECK_TYPE_ID && i.location_id == sys1 as i64 && i.item_id != t1_wreck_id).collect();
+        assert_eq!(wrecks.len(), 1, "Extraction subnode wreck produced");
+        let wid = wrecks[0].item_id;
+        snap.items.values().filter(|i| i.location_id == wid).map(|i| i.type_id).collect::<Vec<_>>()
+    });
+    if !subnode_loot.is_empty() {
+        assert!(subnode_loot.contains(&TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID));
+        assert!(subnode_loot.contains(&ZERO_POINT_CONDENSATE_TYPE_ID));
+    }
+    let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
+
+    // 3. Pilot enters T5 pocket: verify 25x higher hull HP and Unstable mutaplasmid drop
+    move_pilot_to_system(&ctx, &mut sess1, char1, ship1, 621, SYS_LOW_TAMA, DVec3::new(2.0e6, 2.0e9, 0.0)).await;
+    seed_cargo_item(&ctx, 754_100_002, FIL_T5_ELEC, char1, ship1, 1);
+    let d5 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(754_100_002)], &kw, None).await.expect("dep T5");
+    let t5 = d5.dict_get("traceBallID").and_then(|v| v.as_i64()).unwrap();
+    let e5 = ctx.dispatch_rpc(&mut sess1, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(t5)], &kw, None).await.expect("ent T5");
+    let pid5 = e5.dict_get("pocketID").and_then(|v| v.as_i64()).unwrap();
+    let sys5 = e5.dict_get("solarSystemID").and_then(|v| v.as_i64()).unwrap() as u32;
+    let cache5_id = 1_896_000_000 + pid5 * 10 + 1;
+
+    let h5 = ctx.systems.get_or_spawn(sys5);
+    let hp_t5 = h5.get_combat_state(cache5_id).await.unwrap().expect("T5 cache CS").max_structure_hp;
+    assert_eq!(hp_t5, hp_t1 * 25.0, "T5 cache has 25x higher hull HP ({hp_t5} vs {hp_t1})");
+
+    let prev_wrecks: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| i.type_id == BIOADAPTIVE_CACHE_WRECK_TYPE_ID).map(|i| i.item_id).collect()
+    });
+    on_abyssal_cache_destroyed_core(&ctx.systems, &ctx.db, sys5, cache5_id, Some(char1)).await;
+    let t5_loot = ctx.db.with_snapshot(|snap| {
+        let wreck = snap.items.values().find(|i| i.type_id == BIOADAPTIVE_CACHE_WRECK_TYPE_ID && !prev_wrecks.contains(&i.item_id)).expect("T5 cache wreck");
+        snap.items.values().filter(|i| i.location_id == wreck.item_id).map(|i| i.type_id).collect::<Vec<_>>()
+    });
+    assert!(t5_loot.contains(&47_700), "T5 drops Unstable mutaplasmid");
+    assert!(t5_loot.contains(&TRIGLAVIAN_SURVEY_DATABASE_TYPE_ID), "T5 drops survey database");
+    assert!(t5_loot.contains(&FIL_T5_ELEC), "T5 drops filament");
+    assert!(t5_loot.contains(&ZERO_POINT_CONDENSATE_TYPE_ID), "T5 drops condensate");
+
+    let _ = evacuate_abyssal_pockets_for_downtime(&ctx);
 }

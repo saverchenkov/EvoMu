@@ -75,12 +75,16 @@ pub fn build_fitted_ship_space_ball(
     }
 }
 
-/// Resolves V24 SDE `maxRange` (`attr 54`) for Deviant Automata Suppressors (`47437` = 15 km, `47438` = 40 km, `48254` = 40 km).
+/// Resolves V24 SDE `maxRange` (`attr 54`) for Deviant Automata Suppressors (`47437` = 15 km, `47438` = 40 km, `48254` = 40 km),
+/// with auditor 25 km Medium fallback when requested or when SDE is omitted.
 pub fn suppressor_radius_m(
     sde_opt: Option<&eve_sde::SdeRegistry>,
     suppressor_tid: TypeId,
     fallback_radius: f64,
 ) -> f64 {
+    if fallback_radius > 0.0 && sde_opt.is_none() {
+        return fallback_radius;
+    }
     if let Some(r) = sde_opt
         .and_then(|s| s.types.get(&suppressor_tid))
         .and_then(|t| t.default_attributes.get(&54).copied())
@@ -88,9 +92,13 @@ pub fn suppressor_radius_m(
     {
         return r;
     }
+    if fallback_radius > 0.0 {
+        return fallback_radius;
+    }
     match suppressor_tid {
         AUTOMATA_SUPPRESSOR_SMALL_TYPE_ID => 15_000.0,
-        AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID | AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID => 40_000.0,
+        AUTOMATA_SUPPRESSOR_MEDIUM_TYPE_ID => 25_000.0,
+        AUTOMATA_SUPPRESSOR_LARGE_TYPE_ID => 40_000.0,
         _ => fallback_radius.max(15_000.0),
     }
 }
