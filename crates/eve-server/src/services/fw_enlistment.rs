@@ -294,6 +294,13 @@ fn remove_direct(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRe
         }
         ch.version += 1;
         snap.fw_runtime.direct_enlisted_chars.remove(&char_id);
+        if let Some(st) = snap.fw_character_stats.get_mut(&char_id) {
+            st.faction_id = corp_fac;
+            if corp_fac.is_none() {
+                st.enlisted_on_unix = None;
+                st.current_rank = 0;
+            }
+        }
         let released = if let Some((old_cid, new_cid)) = new_corp_opt {
             crate::services::fleet_social::fleet_social_corps::record_corp_join_in_snap_pub(
                 snap,

@@ -483,6 +483,10 @@ pub(crate) async fn regenerate_unattended_command_nodes(ctx: &ServerContext, now
                 active_targets.contains(nid)
                     || snap.sov_runtime.entosis_capture_progress.contains_key(nid)
             });
+            if snap.structures.get(&hub_id).is_some_and(|st| now_unix < st.reinforced_until_unix) {
+                snap.sov_runtime.command_node_regen_last_unix.insert(hub_id, now_unix);
+                continue;
+            }
             let last_ts = snap
                 .sov_runtime
                 .command_node_regen_last_unix
@@ -655,10 +659,67 @@ pub(crate) async fn spawn_command_node_balls(ctx: &ServerContext, spawned: Vec<(
     }
 }
 
+pub(crate) fn init_hub_campaign_scores_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    hub_id: i64,
+    hub_sys_id: u32,
+) {
+    let def_key = snap
+        .system_states
+        .get(&hub_sys_id)
+        .and_then(|s| s.sov_alliance_id)
+        .or_else(|| snap.structures.get(&hub_id).map(|s| -s.owner_corp_id.max(1)))
+        .unwrap_or(0);
+    snap.sov_runtime
+        .command_node_scores
+        .entry(hub_id)
+        .or_insert_with(|| vec![(def_key, crate::services::sov_gameplay::SOV_COMMAND_NODE_INITIAL_PROGRESS)]);
+    snap.sov_campaign_scores
+        .entry(hub_id)
+        .or_insert(eve_db::SovCampaignScoreRecord {
+            structure_id: hub_id,
+            attackers_score: 1.0 - crate::services::sov_gameplay::SOV_COMMAND_NODE_INITIAL_PROGRESS,
+            defender_score: crate::services::sov_gameplay::SOV_COMMAND_NODE_INITIAL_PROGRESS,
+        });
+}
+
+pub(crate) fn refresh_system_adm_vulnerability_windows_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    solar_system_id: u32,
+) {
+    let hubs: Vec<(i64, u32)> = snap
+        .structures
+        .values()
+        .filter(|st| st.solar_system_id == solar_system_id && st.state != "Destroyed")
+        .filter_map(|st| {
+            let &(sv, ev) = snap
+                .sov_runtime
+                .adm_vulnerability_windows
+                .get(&st.structure_id)?;
+            if sv == 0 && ev == 0 {
+                return None;
+            }
+            let dur_s = (ev + 86_400 - (sv % 86_400)) % 86_400;
+            let center_hour = (((sv + dur_s / 2 + 1_800) % 86_400) / 3_600) as u32;
+            Some((st.structure_id, center_hour))
+        })
+        .collect();
+    for (hid, center_hour) in hubs {
+        let _ = crate::services::sov_gameplay::apply_adm_scaled_vulnerability_window_in_snap(
+            snap,
+            hid,
+            center_hour,
+        );
+    }
+}
+
 pub(crate) async fn spawn_command_nodes_for_hub(ctx: &ServerContext, hub_id: i64, hub_sys_id: u32) {
     let const_systems = constellation_systems_for_hub(ctx, hub_sys_id);
     let now_unix = ctx.now_unix();
     let spawned: Vec<(i64, u32, [f64; 3])> = ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&hub_id) {
+            st.state = "CommandNodeEvent".into();
+        }
         let mut out = Vec::new();
         for idx in 0..4usize {
             let n_sys = const_systems[idx % const_systems.len()];

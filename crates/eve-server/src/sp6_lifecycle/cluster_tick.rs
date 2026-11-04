@@ -1232,6 +1232,7 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     });
     crate::services::space_destiny::expire_and_respawn_wormholes_in_cluster(ctx, now_unix).await;
     crate::services::space_destiny::expire_all_overdue_probes(ctx, now_unix).await;
+    let _ = crate::services::station_structure::structure_lifecycle::sync_all_structures(ctx);
     crate::services::sov_gameplay::tick_sov_gameplay(ctx, now_unix).await;
     crate::services::fw_gameplay::tick_fw_gameplay(ctx, now_unix).await;
     crate::services::combat_npc_encounters::tick_overdue_npc_bounty_payouts(ctx, now_unix);

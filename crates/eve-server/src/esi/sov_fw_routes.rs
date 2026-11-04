@@ -117,6 +117,7 @@ pub fn dispatch_sov_route(
         // (e.g. during a command-node event), as ESI does.
         ("GET", "/sovereignty/structures") => {
             let sov_types = sov_structure_type_ids(&ctx.sde);
+            let now = ctx.now_unix();
             Some(ctx.db.with_snapshot(|snap| {
                 let mut structs: Vec<_> = snap
                     .structures
@@ -144,13 +145,42 @@ pub fn dispatch_sov_route(
                             )
                         })
                         .unwrap_or(1.0);
-                    let window = if st.state == "CommandNodeEvent" {
+                    let active_nodes = snap
+                        .sov_runtime
+                        .command_nodes
+                        .values()
+                        .any(|&(hid, _, _)| hid == st.structure_id);
+                    let window = if st.state == "CommandNodeEvent"
+                        || st.state == "Onlining"
+                        || active_nodes
+                    {
                         None
+                    } else if let Some(&(sv, ev)) = snap
+                        .sov_runtime
+                        .adm_vulnerability_windows
+                        .get(&st.structure_id)
+                        .filter(|&&(sv, ev)| sv != 0 || ev != 0)
+                    {
+                        let day_start = now - (now % 86_400);
+                        let s_mod = sv % 86_400;
+                        let e_mod = ev % 86_400;
+                        let (mut start_u, mut end_u) = if ev > sv {
+                            (day_start + s_mod, day_start + e_mod)
+                        } else if (now % 86_400) < e_mod && day_start >= 86_400 {
+                            (day_start - 86_400 + s_mod, day_start + e_mod)
+                        } else {
+                            (day_start + s_mod, day_start + 86_400 + e_mod)
+                        };
+                        if end_u <= now {
+                            start_u += 86_400;
+                            end_u += 86_400;
+                        }
+                        Some((start_u, end_u))
                     } else {
                         snap.structure_vulnerability_windows
                             .get(&st.structure_id)
                             .copied()
-                            .filter(|&(v_start, v_end)| v_start > 0 && v_end > v_start)
+                            .filter(|&(v_start, v_end)| v_start > 24 && v_end > v_start)
                     };
                     let mut entry = json!({
                         "alliance_id": aid,

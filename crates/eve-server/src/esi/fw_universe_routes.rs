@@ -316,7 +316,56 @@ fn find_sde_station(sde: &SdeRegistry, station_id: i64) -> Option<(u32, &Station
     None
 }
 
-fn char_fw_stats(snap: &WorldStateSnapshot, char_id: i64) -> (FwWindowedStat, FwWindowedStat) {
+fn char_fw_stats(
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    now_unix: u64,
+) -> (FwWindowedStat, FwWindowedStat) {
+    let has_live = snap
+        .fw_runtime
+        .stat_events
+        .iter()
+        .any(|e| e.character_id == char_id)
+        || snap.fw_runtime.historical_char_totals.contains_key(&char_id);
+    if has_live {
+        let (hist_k, hist_v) = snap
+            .fw_runtime
+            .historical_char_totals
+            .get(&char_id)
+            .copied()
+            .unwrap_or((0, 0));
+        let (mut ky, mut klw, mut kt, mut vy, mut vlw, mut vt) = (0, 0, hist_k, 0, 0, hist_v);
+        for ev in snap
+            .fw_runtime
+            .stat_events
+            .iter()
+            .filter(|e| e.character_id == char_id)
+        {
+            let age = now_unix.saturating_sub(ev.timestamp_unix);
+            kt += ev.kills;
+            vt += ev.victory_points;
+            if age < 7 * 86_400 {
+                klw += ev.kills;
+                vlw += ev.victory_points;
+            }
+            if age < 86_400 {
+                ky += ev.kills;
+                vy += ev.victory_points;
+            }
+        }
+        return (
+            FwWindowedStat {
+                yesterday: ky,
+                last_week: klw,
+                total: kt,
+            },
+            FwWindowedStat {
+                yesterday: vy,
+                last_week: vlw,
+                total: vt,
+            },
+        );
+    }
     if let Some(st) = snap.fw_character_stats.get(&char_id) {
         return (st.kills.clone(), st.victory_points.clone());
     }
@@ -826,7 +875,7 @@ pub fn dispatch_fw_universe_route(
                     for &cid in snap.characters.keys() {
                         if char_fw_faction(snap, cid) == Some(fid) {
                             pilots += 1;
-                            let (ck, cv) = char_fw_stats(snap, cid);
+                            let (ck, cv) = char_fw_stats(snap, cid, now);
                             kills.yesterday += ck.yesterday;
                             kills.last_week += ck.last_week;
                             kills.total += ck.total;
@@ -898,7 +947,7 @@ pub fn dispatch_fw_universe_route(
                         let mut acc = FwWindowedStat::default();
                         for &cid in snap.characters.keys() {
                             if char_fw_faction(snap, cid) == Some(fid) {
-                                let (ck, _) = char_fw_stats(snap, cid);
+                                let (ck, _) = char_fw_stats(snap, cid, now);
                                 acc.yesterday += ck.yesterday;
                                 acc.last_week += ck.last_week;
                                 acc.total += ck.total;
@@ -915,7 +964,7 @@ pub fn dispatch_fw_universe_route(
                         let mut acc = FwWindowedStat::default();
                         for &cid in snap.characters.keys() {
                             if char_fw_faction(snap, cid) == Some(fid) {
-                                let (_, cv) = char_fw_stats(snap, cid);
+                                let (_, cv) = char_fw_stats(snap, cid, now);
                                 acc.yesterday += cv.yesterday;
                                 acc.last_week += cv.last_week;
                                 acc.total += cv.total;
@@ -939,13 +988,13 @@ pub fn dispatch_fw_universe_route(
             let kills = rank_entries(
                 snap.characters.keys().copied(),
                 "character_id",
-                |cid| char_fw_stats(snap, cid).0,
+                |cid| char_fw_stats(snap, cid, now).0,
                 Some(10),
             );
             let victory_points = rank_entries(
                 snap.characters.keys().copied(),
                 "character_id",
-                |cid| char_fw_stats(snap, cid).1,
+                |cid| char_fw_stats(snap, cid, now).1,
                 Some(10),
             );
             RouteExecutionResult::ok_json(
@@ -965,10 +1014,12 @@ pub fn dispatch_fw_universe_route(
                     let mut acc = FwWindowedStat::default();
                     if let Some(corp) = snap.corporations.get(&corp_id) {
                         for &mid in &corp.members {
-                            let (ck, _) = char_fw_stats(snap, mid);
-                            acc.yesterday += ck.yesterday;
-                            acc.last_week += ck.last_week;
-                            acc.total += ck.total;
+                            if snap.characters.get(&mid).is_none_or(|c| c.corporation_id == corp_id) {
+                                let (ck, _) = char_fw_stats(snap, mid, now);
+                                acc.yesterday += ck.yesterday;
+                                acc.last_week += ck.last_week;
+                                acc.total += ck.total;
+                            }
                         }
                     }
                     acc
@@ -982,10 +1033,12 @@ pub fn dispatch_fw_universe_route(
                     let mut acc = FwWindowedStat::default();
                     if let Some(corp) = snap.corporations.get(&corp_id) {
                         for &mid in &corp.members {
-                            let (_, cv) = char_fw_stats(snap, mid);
-                            acc.yesterday += cv.yesterday;
-                            acc.last_week += cv.last_week;
-                            acc.total += cv.total;
+                            if snap.characters.get(&mid).is_none_or(|c| c.corporation_id == corp_id) {
+                                let (_, cv) = char_fw_stats(snap, mid, now);
+                                acc.yesterday += cv.yesterday;
+                                acc.last_week += cv.last_week;
+                                acc.total += cv.total;
+                            }
                         }
                     }
                     acc
@@ -1015,7 +1068,7 @@ pub fn dispatch_fw_universe_route(
                 };
                 let fid_opt = char_fw_faction(snap, char_id);
                 let rec = snap.fw_character_stats.get(&char_id);
-                let (kills, vp) = char_fw_stats(snap, char_id);
+                let (kills, vp) = char_fw_stats(snap, char_id, now);
                 let current_rank = rec.map(|r| r.current_rank).unwrap_or(0);
                 let highest_rank = rec.map(|r| r.highest_rank).unwrap_or(0);
                 let mut obj = json!({
@@ -1034,7 +1087,12 @@ pub fn dispatch_fw_universe_route(
                 });
                 if let Some(fid) = fid_opt {
                     obj["faction_id"] = json!(fid);
-                    if let Some(enlisted_unix) = rec.and_then(|r| r.enlisted_on_unix) {
+                    let enlisted_opt = rec.and_then(|r| r.enlisted_on_unix).or_else(|| {
+                        snap.characters
+                            .get(&char_id)
+                            .and_then(|c| snap.fw_corp_enlisted_on.get(&c.corporation_id).copied())
+                    });
+                    if let Some(enlisted_unix) = enlisted_opt {
                         obj["enlisted_on"] = json!(format_iso8601_utc(enlisted_unix));
                     }
                 }
@@ -1058,7 +1116,12 @@ pub fn dispatch_fw_universe_route(
                 let mut kills = FwWindowedStat::default();
                 let mut vp = FwWindowedStat::default();
                 let mut corp_faction = snap.fw_runtime.corp_war_factions.get(&corp_id).copied();
-                let mut member_ids: Vec<i64> = corp.members.iter().copied().collect();
+                let mut member_ids: Vec<i64> = corp
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|mid| snap.characters.get(mid).is_none_or(|c| c.corporation_id == corp_id))
+                    .collect();
                 member_ids.sort_unstable();
                 for mid in member_ids {
                     if let Some(fid) = char_fw_faction(snap, mid) {
@@ -1069,7 +1132,7 @@ pub fn dispatch_fw_universe_route(
                             corp_faction = Some(fid);
                         }
                     }
-                    let (ck, cv) = char_fw_stats(snap, mid);
+                    let (ck, cv) = char_fw_stats(snap, mid, now);
                     kills.yesterday += ck.yesterday;
                     kills.last_week += ck.last_week;
                     kills.total += ck.total;

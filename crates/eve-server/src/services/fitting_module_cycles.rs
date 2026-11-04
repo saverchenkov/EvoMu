@@ -603,8 +603,11 @@ pub(crate) async fn handle_module_cycles(
             }
 
             {
-                let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
                 let in_actor_cycle = sys.has_module_cycle(ship_id, module_id).await;
+                if is_weapon && !ctx.is_module_in_reactivation_delay(ship_id, module_id) && !in_actor_cycle {
+                    ctx.db.with_mut_snapshot(|s| { s.module_active_states.remove(&module_id); });
+                }
+                let in_db_active = ctx.db.with_snapshot(|s| s.module_active_states.contains(&module_id));
                 let mut m_effective_state = m.state;
                 if !in_db_active
                     && !in_actor_cycle

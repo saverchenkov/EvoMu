@@ -486,13 +486,19 @@ async fn tick_entosis_captures(ctx: &ServerContext, now_unix: u64) {
         remove_ship_entosis_link(ctx, ship_id);
 
         if is_hub {
-            ctx.db.with_mut_snapshot(|snap| {
+            let has_schedule = ctx.db.with_mut_snapshot(|snap| {
                 snap.sov_runtime.entosis_capture_progress.remove(&target_id);
                 if let Some(st) = snap.structures.get_mut(&target_id) {
                     st.state = "HullReinforced".into();
                     st.reinforced_until_unix = now_unix + 48 * 3_600;
                 }
+                crate::services::sov_warzone_dynamic::init_hub_campaign_scores_in_snap(snap, target_id, sys_id);
+                snap.sov_runtime.adm_vulnerability_windows.contains_key(&target_id)
+                    || snap.structure_vulnerability_windows.contains_key(&target_id)
             });
+            if !has_schedule {
+                crate::services::sov_warzone_dynamic::spawn_command_nodes_for_hub(ctx, target_id, sys_id).await;
+            }
             emit_sov_structures_updated(ctx, sys_id, &[target_id]);
             ctx.notify(
                 NotificationTarget::SolarSystem(sys_id),
@@ -747,6 +753,7 @@ pub fn record_sov_system_activity(
         st.industrial_index = ind;
         let next = (st.military_index, st.industrial_index, st.strategic_index);
         if next != prev {
+            crate::services::sov_warzone_dynamic::refresh_system_adm_vulnerability_windows_in_snap(snap, solar_system_id);
             Some((next.0, next.1, next.2, calculate_adm(next.0, next.1, next.2)))
         } else {
             None
@@ -1221,14 +1228,18 @@ pub async fn tick_sov_gameplay(ctx: &ServerContext, now_unix: u64) {
             }
         }
 
+        for &(usys, _, _, _, _) in &strat_updates {
+            crate::services::sov_warzone_dynamic::refresh_system_adm_vulnerability_windows_in_snap(snap, usys);
+        }
+
+        let sov_types = crate::esi::sov_fw_routes::sov_structure_type_ids(&ctx.sde);
         let hubs_ready_for_nodes: Vec<(i64, u32)> = snap
             .structures
             .values()
             .filter(|st| {
-                st.type_id == TYPE_SOVEREIGNTY_HUB
+                (st.type_id == TYPE_SOVEREIGNTY_HUB || sov_types.contains(&st.type_id))
                     && st.state == "HullReinforced"
                     && now_unix >= st.reinforced_until_unix
-                    && !snap.sov_campaign_scores.contains_key(&st.structure_id)
                     && !snap.sov_runtime.command_nodes.values().any(|&(hid, _, _)| hid == st.structure_id)
             })
             .map(|st| (st.structure_id, st.solar_system_id))

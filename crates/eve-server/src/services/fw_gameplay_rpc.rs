@@ -393,16 +393,49 @@ pub fn donate_lp_to_fw_ihub(
     Ok((new_lp, tier, reduction, reduction))
 }
 
-fn set_corp_militia_faction(snap: &mut eve_db::WorldStateSnapshot, cid: i64, fac: Option<i64>) {
+fn set_corp_militia_faction(
+    snap: &mut eve_db::WorldStateSnapshot,
+    cid: i64,
+    fac: Option<i64>,
+    now_unix: u64,
+) {
     if let Some(f) = fac {
         snap.fw_runtime.corp_war_factions.insert(cid, f);
     } else {
         snap.fw_runtime.corp_war_factions.remove(&cid);
     }
     let direct_map = snap.fw_runtime.direct_enlisted_chars.clone();
+    let mut member_factions = Vec::new();
     for ch in snap.characters.values_mut() {
         if ch.corporation_id == cid {
-            ch.war_faction_id = fac.or_else(|| direct_map.get(&ch.character_id).copied());
+            let eff = fac.or_else(|| direct_map.get(&ch.character_id).copied());
+            ch.war_faction_id = eff;
+            member_factions.push((ch.character_id, eff));
+        }
+    }
+    for (mid, eff) in member_factions {
+        if let Some(f) = eff {
+            let rec = snap.fw_character_stats.entry(mid).or_insert_with(|| {
+                eve_db::snapshot_ext::FwCharacterStatsRecord {
+                    character_id: mid,
+                    faction_id: Some(f),
+                    enlisted_on_unix: Some(now_unix),
+                    current_rank: 1,
+                    highest_rank: 1,
+                    kills: Default::default(),
+                    victory_points: Default::default(),
+                }
+            });
+            rec.faction_id = Some(f);
+            if rec.enlisted_on_unix.is_none() {
+                rec.enlisted_on_unix = Some(now_unix);
+            }
+            rec.current_rank = rec.current_rank.max(1);
+            rec.highest_rank = rec.highest_rank.max(rec.current_rank);
+        } else if let Some(rec) = snap.fw_character_stats.get_mut(&mid) {
+            rec.faction_id = None;
+            rec.enlisted_on_unix = None;
+            rec.current_rank = 0;
         }
     }
 }
@@ -721,7 +754,7 @@ pub async fn handle(
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 snap.fw_corp_enlisted_on.insert(cid, now);
-                set_corp_militia_faction(snap, cid, Some(fac));
+                set_corp_militia_faction(snap, cid, Some(fac), now);
             });
             session.war_faction_id = Some(fac);
             crate::services::notify_emitters_character_services::emit_campaign_enrollment_changed(ctx, char_id);
@@ -768,7 +801,7 @@ pub async fn handle(
             }
             let new_char_fac = ctx.db.with_mut_snapshot(|snap| {
                 snap.fw_corp_enlisted_on.remove(&cid);
-                set_corp_militia_faction(snap, cid, None);
+                set_corp_militia_faction(snap, cid, None, now);
                 snap.characters.get(&char_id).and_then(|c| c.war_faction_id)
             });
             session.war_faction_id = new_char_fac;
@@ -845,7 +878,7 @@ pub async fn handle(
                 }
                 for mc in member_corps {
                     snap.fw_corp_enlisted_on.insert(mc, now);
-                    set_corp_militia_faction(snap, mc, Some(fac));
+                    set_corp_militia_faction(snap, mc, Some(fac), now);
                 }
                 Ok(())
             });
@@ -905,7 +938,7 @@ pub async fn handle(
                 }
                 for mc in member_corps {
                     snap.fw_corp_enlisted_on.remove(&mc);
-                    set_corp_militia_faction(snap, mc, None);
+                    set_corp_militia_faction(snap, mc, None, now);
                 }
                 Ok(snap.characters.get(&char_id).and_then(|c| c.war_faction_id))
             });

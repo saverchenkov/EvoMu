@@ -213,7 +213,7 @@ pub(super) fn handle_add_corporation(
 
         snap.next_entity_id += 1;
         let cid = snap.allocate_corporation_id();
-        if let Some(old_corp) = snap.corporations.get_mut(&old_corp_id) {
+        for old_corp in snap.corporations.values_mut() {
             old_corp.members.remove(&char_id);
             old_corp.member_roles.remove(&char_id);
         }

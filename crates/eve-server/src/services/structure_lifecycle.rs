@@ -1087,6 +1087,14 @@ pub fn sync_all_structures(ctx: &ServerContext) -> Vec<(i64, DisposalOutcome)> {
     }
     for (sys_id, aid, corp_id, hub_id) in sov_claims {
         let _ = crate::services::sov_services::claim_system_sovereignty(ctx, sys_id, aid, corp_id, hub_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            if !snap.sov_runtime.adm_vulnerability_windows.contains_key(&hub_id) {
+                let hr = snap.structure_vulnerability_windows.get(&hub_id).copied()
+                    .filter(|&(h, d)| h < 24 && d < 7).map(|(h, _)| h as u32)
+                    .unwrap_or(((now / 3_600) % 24) as u32);
+                let _ = crate::services::sov_gameplay::apply_adm_scaled_vulnerability_window_in_snap(snap, hub_id, hr);
+            }
+        });
     }
     gone
 }
