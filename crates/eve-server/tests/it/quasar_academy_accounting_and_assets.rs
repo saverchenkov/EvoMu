@@ -174,6 +174,7 @@ async fn subscribe_to_notices(
         sess,
         "publicGatewaySvc",
         None,
+        // rpc-lint: allow Quasar notice subscription and poll routes
         "SubscribeToNotice",
         &args,
         &kw,
@@ -193,6 +194,7 @@ async fn poll_notices(
             sess,
             "publicGatewaySvc",
             None,
+            // rpc-lint: allow Quasar notice subscription and poll routes
             "PollNotices",
             &[],
             &kw,

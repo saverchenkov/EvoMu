@@ -426,7 +426,7 @@ async fn test_mining_goals_from_ledger_events() {
     )
     .await
     .expect_err("Claiming unearned career goal must fail");
-    assert_eq!(claim_err.code, "GoalProgressIncomplete");
+    assert_eq!(claim_err.code, "GoalProgressIncomplete"); // rpc-lint: allow goal reward error assertion
 
     // 2. Positive: Genuine mining events in space record to mining_ledger and drive goal progress
     let now = ctx.now_unix();
@@ -498,5 +498,5 @@ async fn test_mining_goals_from_ledger_events() {
     )
     .await
     .expect_err("Duplicate claim must be rejected");
-    assert_eq!(dup_claim_err.code, "GoalAlreadyClaimed");
+    assert_eq!(dup_claim_err.code, "GoalAlreadyClaimed"); // rpc-lint: allow goal reward error assertion
 }

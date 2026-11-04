@@ -162,6 +162,7 @@ async fn attack(ctx: &ServerContext, sess: &mut SessionState, id: i64) -> Result
         let _ = sys.step_manual(12.0).await;
     }
     let act = rpc(ctx, sess, "dogmaIM", "Activate", &[PyRep::Integer(100_000_005), PyRep::String("projectileFired".into()), PyRep::Integer(id)]).await?;
+    ctx.advance_virtual_clock(10);
     Ok(ctx.db.with_snapshot(|s| {
         let st = s.structures.get(&id).expect("structure");
         let core_tid = ctx.sde.types.get(&st.type_id).and_then(|t| t.default_attributes.get(&life::ATTR_REQUIRES_DEED_TYPE)).map(|v| *v as u32).unwrap_or(0);
@@ -233,8 +234,9 @@ async fn test_structure_deployment_quantum_core_types_and_rename() {
     let st = observe(&ctx, &mut sess, id).await.expect("structure");
     assert!(!st.quantum_core_installed);
     assert_eq!((st.shield_hp, st.armor_hp, st.hull_hp), (0.0, 0.0, attr(&ctx, 35832, life::ATTR_HP)));
-    let overlap = anchor(&ctx, &mut sess, 35832, "Overlap").await.expect_err("overlap");
-    assert_eq!(overlap.code, "TooCloseToStructureOrStation");
+    // rpc-lint: allow structure name string
+    let collision_res = anchor(&ctx, &mut sess, 35832, "CollisionStructure").await.expect_err("collision");
+    assert_eq!(collision_res.code, "TooCloseToStructureOrStation");
 
     // 4. 15m vulnerability -> 24h Anchoring -> NoCore
     ctx.advance_virtual_clock(life::ANCHOR_VULNERABLE_SECS);

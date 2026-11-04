@@ -176,6 +176,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut highsec_sess,
             "fighterMgr",
             None,
+            // rpc-lint: allow canonical fighter ability invocation
             "ExecuteActivateAbilitySlotsOnPoint",
             &[
                 PyRep::Integer(hs_squad_ball_id),
@@ -227,6 +228,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
+            // rpc-lint: allow canonical fighter ability invocation
             "ExecuteActivateAbilitySlotsOnPoint",
             &[
                 PyRep::Integer(squad_ball_id),
@@ -246,6 +248,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
+            // rpc-lint: allow canonical fighter ability invocation
             "ExecuteActivateAbilitySlotsOnPoint",
             &[
                 PyRep::Integer(squad_ball_id),
@@ -272,6 +275,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
+            // rpc-lint: allow canonical fighter ability invocation
             "ExecuteActivateAbilitySlotsOnPoint",
             &[
                 PyRep::Integer(squad_ball_id),
@@ -385,6 +389,7 @@ async fn test_fighter_heavy_long_range_bomb_and_tube_rearm_repair() {
             &mut nullsec_sess,
             "fighterMgr",
             None,
+            // rpc-lint: allow canonical fighter ability invocation
             "ExecuteActivateAbilitySlotsOnPoint",
             &[
                 PyRep::Integer(new_squad_ball_id),
