@@ -13,6 +13,7 @@ mod abyssal_room_combat;
 mod parity_abyssal_closure;
 mod account_admin_complete;
 mod account_features_parity;
+mod attributes_remaps_and_fitting_repair;
 mod action_plan_char_progression;
 mod action_plan_data_economy;
 mod action_plan_trade_space;
