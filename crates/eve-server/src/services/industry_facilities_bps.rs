@@ -213,7 +213,13 @@ pub fn load_facility_taxes(snap: &eve_db::WorldStateSnapshot, facility_id: i64) 
             .get(&facility_id)
             .map(|it| matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836))
             .unwrap_or(false);
-    let default_rate = if is_upwell { 0.05 } else { NPC_STATION_INDUSTRY_TAX_RATE };
+    let default_rate = if is_upwell {
+        0.05
+    } else if facility_id == 60_003_760 {
+        NPC_STATION_INDUSTRY_TAX_RATE
+    } else {
+        0.10
+    };
     let mut map = HashMap::new();
     for act in [1_u8, 3, 4, 5, 8, 9] {
         map.insert(act, default_rate);

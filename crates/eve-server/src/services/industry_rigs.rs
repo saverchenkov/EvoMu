@@ -268,15 +268,46 @@ pub fn resolve_facility_modifiers_and_system(
     None
 }
 
+static SDE_ADJUSTED_PRICES: std::sync::RwLock<Option<std::collections::HashMap<eve_sde::TypeId, f64>>> =
+    std::sync::RwLock::new(None);
+
+/// Overrides or sets market adjusted prices cache (`feat:industry.eiv-adjusted-prices`).
+pub fn set_sde_adjusted_prices(prices: std::collections::HashMap<eve_sde::TypeId, f64>) {
+    *SDE_ADJUSTED_PRICES.write().unwrap() = Some(prices);
+}
+
+/// Sets an individual type's adjusted price in the cache (`feat:industry.eiv-adjusted-prices`).
+pub fn set_sde_adjusted_price(type_id: eve_sde::TypeId, price: f64) {
+    let mut guard = SDE_ADJUSTED_PRICES.write().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.insert(type_id, price);
+}
+
+/// Clears cached market adjusted prices (`feat:industry.eiv-adjusted-prices`).
+pub fn clear_sde_adjusted_prices() {
+    *SDE_ADJUSTED_PRICES.write().unwrap() = None;
+}
+
 /// Resolves a material's adjusted price for EIV calculation (`feat:industry.eiv-adjusted-prices`):
-/// 1. 28-day clamped EMA over `snap.market_history` for `type_id` (matching `/markets/prices/`).
-/// 2. SDE `base_price` fallback (or `10.0` if unset).
+/// 1. Cached adjusted prices from `sde_adjusted_prices` / market price cache.
+/// 2. 28-day clamped EMA over `snap.market_history` for `type_id` (matching `/markets/prices/`).
+/// 3. SDE `base_price` fallback (or `10.0` if unset).
 pub fn resolve_material_adjusted_price(
     ctx: &ServerContext,
     snap: Option<&eve_db::WorldStateSnapshot>,
     type_id: eve_sde::TypeId,
 ) -> f64 {
-    if let Some(s) = snap {
+    if let Ok(guard) = SDE_ADJUSTED_PRICES.read() {
+        if let Some(map) = guard.as_ref() {
+            if let Some(&price) = map.get(&type_id) {
+                if price > 0.0 {
+                    return price;
+                }
+            }
+        }
+    }
+
+    let calc_rolling = |s: &eve_db::WorldStateSnapshot| -> Option<f64> {
         let mut days: Vec<&eve_db::MarketHistoryDayRecord> = s
             .market_history
             .iter()
@@ -293,9 +324,19 @@ pub fn resolve_material_adjusted_price(
                 rolling_adj = (rolling_adj * 27.0 + clamped) / 28.0;
             }
             if rolling_adj > 0.0 {
-                return rolling_adj;
+                return Some(rolling_adj);
             }
         }
+        None
+    };
+
+    let maybe_price = match snap {
+        Some(s) => calc_rolling(s),
+        None => ctx.db.with_snapshot(calc_rolling),
+    };
+
+    if let Some(price) = maybe_price {
+        return price;
     }
 
     ctx.sde
