@@ -656,7 +656,7 @@ pub fn handle_special_dialogue_action(
             if !agent_info.is_locator {
                 return Some(Err(BridgeRpcError { code: "AgentHasNoLocatorService".into(), message: format!("Agent {agent_id} does not offer Locator services") }));
             }
-            let caller_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let caller_sys = session.solar_system_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))).unwrap_or(0);
             if agent_info.solar_system_id != Some(caller_sys)
                 || (session.station_id.is_some()
                     && agent_info.station_id.is_some()
