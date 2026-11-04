@@ -77,18 +77,11 @@ mod journeys_fleet_and_structures;
 mod journeys_store_and_operations;
 mod contracts_blueprints_and_plastic_wrap;
 mod economy_contracts;
-mod economy_contracts_market_closure;
-mod economy_contracts_market_closure_part2;
+mod economy_contracts_and_market;
 mod economy_industry_pi;
 mod economy_industry_pi_extended;
-mod economy_industry_pi_extended_part2;
-mod economy_industry_pi_extended_part2b;
-mod economy_industry_pi_extended_part3;
 mod economy_market;
-mod economy_market_part2;
-mod economy_market_part3;
 mod economy_market_industry;
-mod economy_market_industry_part2;
 mod economy_quasar_esi_r4_regressions;
 mod economy_quasar_r5_regressions;
 mod esi;
@@ -242,7 +235,6 @@ mod system;
 mod time_control;
 mod wallet_ledger_complete;
 mod wallet_serverops_complete;
-mod wallet_bills_trade_raffle_part2;
 mod serverops_cluster_complete;
 mod mining_cycle_engine;
 mod mining_bonuses_bursts;
@@ -457,6 +449,11 @@ mod capital_combat_and_escalation;
 mod economy_industry_lookup_sov_closure;
 mod economy_market_lookup_social_closure;
 mod economy_market_lookup_social_closure_part2;
+mod capital_combat_sp7_closure;
+mod capital_combat_sp7_closure_part2;
+mod capital_combat_sp7_closure_part3;
+mod capital_combat_sp7_closure_part4;
+mod economy_market_lookup_social;
 mod plan_w31_closure;
 mod open_feats_and_rpcs_b8;
 mod open_feats_and_rpcs_b8_part2;
@@ -665,3 +662,19 @@ pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
 pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
 #[allow(unused_imports)]
 pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
+#[allow(unused_imports)]
+pub(crate) use {
+    abyssal_deadspace as abyssal_deadspace_closure,
+    abyssal_pochven_void as abyssal_pochven_void_closure,
+    combat_ewar_logistics as combat_ewar_repairs_closure,
+    combat_repairs_smartbombs as combat_repairs_smartbomb_closure,
+    crimewatch_hostility as plan_c7_crimewatch_closure,
+    fw_warzone_insurgency as fw_warzone_insurgency_closure,
+    npc_spawns_pve as npc_spawns_pve_closure,
+    pochven_wormholes_travel as pochven_wormholes_travel_closure,
+    sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure,
+    wormhole_pve_escalations as wormhole_pve_escalations_closure,
+    wormhole_special_systems as wormhole_special_systems_closure,
+    wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure,
+    zarzakh_gate_lock as zarzakh_gate_lock_closure,
+};
