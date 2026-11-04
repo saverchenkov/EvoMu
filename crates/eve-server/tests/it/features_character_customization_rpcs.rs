@@ -1034,7 +1034,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     sess.user_id = Some(952_430);
     sess.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
 
-    // 1. R-B23-01: SKINR InitiateRequest rejects empty payload and debits whole PLEX (17 PLEX for Tier 1, not 1,700)
+    // 1. R-B23-01: SKINR InitiateRequest rejects empty payload and debits whole PLEX (25 PLEX for Tier 1, not 2,500)
     let empty_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -1065,9 +1065,9 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     .await;
     assert_eq!(init_rsp.status_code, STATUS_OK);
     let plex_after = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
-    assert_eq!(plex_after, 83, "Tier 1 SKINR sequencing must debit 17 whole PLEX (100 - 17 = 83)");
+    assert_eq!(plex_after, 75, "Tier 1 SKINR sequencing must debit 25 whole PLEX (100 - 25 = 75)");
 
-    // With skill 81044 level 5 (10% price discount): 1700 * 90 / 100 = 1530 cents -> 16 whole PLEX
+    // Sequencing PLEX cost is not skill-discounted (Ship_SKINR.md:54), remaining constant at 25 PLEX
     ctx.db.with_mut_snapshot(|s| {
         s.skills.entry(cid as i64).or_default().insert(
             81044,
@@ -1083,7 +1083,7 @@ async fn test_b23_skinr_plex_pricing_and_sec_office_tag_remediation() {
     .await;
     assert_eq!(init_rsp2.status_code, STATUS_OK);
     let plex_after2 = ctx.db.with_snapshot(|s| s.characters[&(cid as i64)].plex_balance);
-    assert_eq!(plex_after2, 67, "10% discounted Tier 1 SKINR sequencing must debit 16 whole PLEX (83 - 16 = 67)");
+    assert_eq!(plex_after2, 50, "Tier 1 SKINR sequencing must debit 25 whole PLEX (75 - 25 = 50)");
 
     // 2. R-B23-04: ApplyTagsForSecStatus rejects High-Sec Jita & qty <= 0, accepts SDE 33141 at Security Office, charges ISK, records journal, crosses 0.0, and preserves excess tags
     let kw = HashMap::new();
