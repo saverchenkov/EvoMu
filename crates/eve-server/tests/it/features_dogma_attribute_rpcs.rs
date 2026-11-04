@@ -207,7 +207,7 @@ async fn test_raffle_qa_seed_db2_callproc_and_debug_exec() {
         &mut gm_sess,
         "debug",
         "Exec",
-        &[PyRep::String("status_check".into())],
+        &[PyRep::String("status".into())],
     )
     .await
     .expect_err("debug.Exec fail-closed");
