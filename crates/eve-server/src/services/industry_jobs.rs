@@ -201,9 +201,14 @@ pub fn handle_industry_jobs(
                     .characters
                     .get(&char_id)
                     .is_some_and(|ch| ch.clone_grade <= 1);
+                let fallback_sys = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.solar_system_id)
+                    .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
                 let (fac_type_id, _, fac_sys_id, _, mat_mod, time_mod, _) =
                     resolve_facility_modifiers_and_system(ctx, snap, station_id).unwrap_or((
-                        1529, 1000035, 30000142, 10000002, 1.0, 1.0, 1.0,
+                        1529, 1000035, fallback_sys, 10000002, 1.0, 1.0, 1.0,
                     ));
                 if activity_id == 9 {
                     if !matches!(fac_type_id, 35835 | 35836) {

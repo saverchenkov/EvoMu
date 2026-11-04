@@ -427,9 +427,12 @@ pub fn compute_industry_job_costs_for_char(
     let eiv_per_run = compute_blueprint_eiv_per_run_with_snap(ctx, Some(snap), bp, activity_id);
     let activity_eiv_factor = if matches!(activity_id, 3 | 4 | 5 | 8) { 0.02 } else { 1.0 };
     let total_eiv = eiv_per_run * (runs as f64) * activity_eiv_factor;
+    let fallback_sys = char_id
+        .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
+        .unwrap_or_else(|| ctx.sde.solar_systems.keys().copied().next().unwrap_or(0));
     let (_, _, sys_id, _, _, _, structure_cost_modifier) =
         resolve_facility_modifiers_and_system(ctx, snap, facility_id).unwrap_or((
-            1529, 1000035, 30000142, 10000002, 1.0, 1.0, 1.0,
+            1529, 1000035, fallback_sys, 10000002, 1.0, 1.0, 1.0,
         ));
     let system_cost_index = compute_canonical_system_cost_index(ctx, snap, sys_id, activity_id);
     let base_job_cost_isk =
