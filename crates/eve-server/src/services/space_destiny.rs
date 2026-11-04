@@ -244,18 +244,15 @@ fn record_session_change_timer_with_invuln(
                 PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
             ));
         }
+        let in_space = station_id.is_none() && structure_id.is_none();
         if station_id.is_some() || reason == "dock" || reason == "undock" {
-            entries.push((
-                PyRep::String("stationid".into()),
-                PyRep::Tuple(vec![PyRep::None, station_id.map(PyRep::Integer).unwrap_or(PyRep::None)]),
-            ));
-            entries.push((
-                PyRep::String("solarsystemid".into()),
-                PyRep::Tuple(vec![
-                    station_id.map(|_| PyRep::Integer(i64::from(system_id))).unwrap_or(PyRep::None),
-                    if station_id.is_some() || structure_id.is_some() { PyRep::None } else { PyRep::Integer(i64::from(system_id)) },
-                ]),
-            ));
+            entries.push((PyRep::String("stationid".into()), PyRep::Tuple(vec![PyRep::None, station_id.map(PyRep::Integer).unwrap_or(PyRep::None)])));
+            entries.push((PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![
+                station_id.map(|_| PyRep::Integer(i64::from(system_id))).unwrap_or(PyRep::None),
+                if station_id.is_some() || structure_id.is_some() { PyRep::None } else { PyRep::Integer(i64::from(system_id)) },
+            ])));
+        } else if in_space && system_id != 0 && !matches!(reason, "set_account_key" | "corp_change" | "ship_loss") {
+            entries.push((PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))])));
         }
         if let Some(st_id) = structure_id {
             entries.push((PyRep::String("structureid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(st_id)])));
@@ -263,7 +260,6 @@ fn record_session_change_timer_with_invuln(
         if let Some(sid) = ship_id {
             entries.push((PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(sid)])));
         }
-        let in_space = station_id.is_none() && structure_id.is_none();
         let sess = PyRep::keyval([
             ("charid", PyRep::Integer(char_id)),
             ("userid", user_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
@@ -916,7 +912,9 @@ pub(crate) async fn handle_update_state_request(
             .await;
         }
     }
-    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+    let is_client_initiated_active_warp = matches!(ship_ball.mode, MovementMode::Warp { .. })
+        && ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&ship_id);
+    if is_client_initiated_active_warp {
         return Ok(PyRep::None);
     }
     if ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("dungeon_runtime_store")) {

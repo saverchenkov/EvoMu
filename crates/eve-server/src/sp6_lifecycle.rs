@@ -883,6 +883,8 @@ pub async fn handle_character_logoff_or_disconnect(
         || is_point_scrambled
         || (sys_sec >= 0.45 && crim_until > now_unix);
 
+    ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
+
     // Emergency warp is prohibited while warp-scrambled, in Abyssal space, as a highsec criminal,
     // or under an active Weapons timer (`feat:account.logout`, `plan:SP-6`).
     let emergency_warp_dest = if !is_scrambled && weap_until <= now_unix {
@@ -1045,6 +1047,7 @@ pub fn reconnect_character_in_space_sync(
             ))
         })?;
 
+    ctx.active_warps.lock().unwrap_or_else(|e| e.into_inner()).remove(&ship_id);
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let (group_id, category_id, mass, radius, max_vel, inertia, warp_speed) =
         sde_ship_physics(&ctx.sde, ship_type_id);
@@ -1054,6 +1057,8 @@ pub fn reconnect_character_in_space_sync(
     // If the ship emergency-warped off grid, automatically initiate a return warp back to the pre-disconnect grid spot.
     if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
         if let Ok(mut bp) = sys_handle.ballpark.write() {
+            bp.observer_events.remove(&ship_id);
+            bp.queue_set_state(ship_id);
             if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
                 cs.is_emergency_warping = false;
             }
@@ -1089,42 +1094,28 @@ pub fn reconnect_character_in_space_sync(
     sys_handle.try_remove_ball(ship_id);
 
     let cs = ctx.build_ship_combat_state(char_id, ship_id, ship_type_id);
-    let initial_mode = if let Some(orig_arr) = pre_warp_pos_opt {
-        let orig_pos = DVec3::from_array(orig_arr);
-        if final_pos.distance(orig_pos) > 10_000.0 {
-            MovementMode::new_warp(final_pos, orig_pos, warp_speed)
-        } else {
-            MovementMode::Stop
-        }
-    } else {
-        MovementMode::Stop
-    };
 
     sys_handle.try_spawn_ball_with_meta(
         Ball {
-            id: ship_id,
-            type_id: ship_type_id,
-            position: final_pos,
-            velocity: DVec3::ZERO,
-            max_velocity: max_vel,
-            inertia,
-            mass,
-            radius,
-            speed_fraction: 0.0,
-            mode: initial_mode,
+            id: ship_id, type_id: ship_type_id, position: final_pos, velocity: DVec3::ZERO,
+            max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop,
         },
         cs,
         SlimItemMeta {
-            group_id,
-            category_id,
-            owner_id: char_id,
-            char_id: Some(char_id),
-            corp_id,
-            alliance_id,
-            security_status: sec_status,
-            is_cloaked: false, ..Default::default()
+            group_id, category_id, owner_id: char_id, char_id: Some(char_id),
+            corp_id, alliance_id, security_status: sec_status, is_cloaked: false, ..Default::default()
         },
     );
+    if let Ok(mut bp) = sys_handle.ballpark.write() {
+        bp.observer_events.remove(&ship_id);
+        bp.queue_set_state(ship_id);
+        if let Some(orig_arr) = pre_warp_pos_opt {
+            let orig_pos = DVec3::from_array(orig_arr);
+            if final_pos.distance(orig_pos) > 10_000.0 {
+                let _ = bp.set_mode(ship_id, MovementMode::new_warp(final_pos, orig_pos, warp_speed));
+            }
+        }
+    }
 
     Some((sys_id, ship_id, final_pos))
 }
@@ -1371,29 +1362,16 @@ pub async fn handle_cmd_reconnect_to_drones(
 
     for &(bid, _, tid) in &reconnected {
         let _ = sys_handle
-            .emit_destiny_event(
-                bid,
-                eve_destiny::DestinyEvent::OnDroneStateChange {
-                    drone_id: bid,
-                    owner_id: char_id,
-                    controller_id: ship_id,
-                    activity_state: 0,
-                    type_id: tid,
-                    controller_owner_id: char_id,
-                    target_id: None,
-                },
-            )
+            .emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id: bid, owner_id: char_id, controller_id: ship_id,
+                activity_state: 0, type_id: tid, controller_owner_id: char_id, target_id: None,
+            })
             .await;
     }
 
     let errors_py: Vec<(PyRep, PyRep)> = errors
         .into_iter()
-        .map(|(k, v)| {
-            (
-                PyRep::String(k),
-                PyRep::List(v.into_iter().map(PyRep::Integer).collect()),
-            )
-        })
+        .map(|(k, v)| (PyRep::String(k), PyRep::List(v.into_iter().map(PyRep::Integer).collect())))
         .collect();
     Ok(PyRep::Dict(errors_py))
 }

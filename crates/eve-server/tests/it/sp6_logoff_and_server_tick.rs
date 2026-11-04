@@ -483,6 +483,17 @@ async fn test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewal_and_re
         .expect("UpdateStateRequest on reconnect");
 
     let sys_handle2 = ctx2.systems.get_or_spawn(sys_id);
+    let (_tick2, reconnect_evs, _pyrep2) = sys_handle2
+        .drain_observer_updates(ship_id)
+        .await
+        .expect("drain observer updates on reconnect");
+    assert!(
+        reconnect_evs.iter().any(|e| matches!(
+            e,
+            eve_destiny::DestinyEvent::SetState { observer_ball_id } if *observer_ball_id == ship_id
+        )),
+        "In-space reconnect must emit SetState even when ship is in return-warp: got {reconnect_evs:?}"
+    );
     let all_balls = sys_handle2.list_balls().await.unwrap();
     let matching_ship_balls: Vec<_> = all_balls.iter().filter(|b| b.id == ship_id).collect();
     assert_eq!(matching_ship_balls.len(), 1);

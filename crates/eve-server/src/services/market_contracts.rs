@@ -234,12 +234,15 @@ pub fn handle(
                 let ( npc_count, swept_list ) = ctx.db.with_mut_snapshot(|snap| {
                     // 1. Replenish depleted NPC seeded orders (`feat:market.npc-seeded-orders`)
                     let npc_meta = MarketOrderMeta { range: 32767, duration: 365, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None };
-                    let npc_ids: Vec<i64> = snap.market_orders.values().filter(|o| o.is_npc).map(|o| o.order_id).collect();
+                    let npc_ids: Vec<i64> = snap
+                        .market_orders
+                        .values()
+                        .filter(|o| o.is_npc && o.vol_remaining < o.vol_entered)
+                        .map(|o| o.order_id)
+                        .collect();
                     for oid in npc_ids {
                         if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
-                            if o_mut.vol_remaining < o_mut.vol_entered {
-                                o_mut.vol_remaining = o_mut.vol_entered.max(10_000);
-                            }
+                            o_mut.vol_remaining = o_mut.vol_entered.max(10_000);
                         }
                         save_market_order_meta(snap, oid, npc_meta);
                     }

@@ -40,7 +40,7 @@ DEFAULT_CLIENT_APP = os.path.expanduser(
     "~/Library/Application Support/EVE Online/SharedCache/tq/EVE.app"
 )
 ERROR_LINE_RE = re.compile(
-    r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b"
+    r"UnimplementedRPC|panicked at|Traceback \(most recent|\bEXCEPTION\b|SendClientStackTraceAlert|client exception report saved"
 )
 
 
@@ -71,12 +71,13 @@ def find_server_binary(explicit_bin=None):
     if os.environ.get("CARGO_TARGET_DIR"):
         candidates.append(os.path.join(os.environ["CARGO_TARGET_DIR"], "debug", "eve-server"))
     candidates.extend([
-        os.path.join(REPO_ROOT, ".evomu-reviews", "target", "debug", "eve-server"),
         os.path.join(REPO_ROOT, "target", "debug", "eve-server"),
+        os.path.join(REPO_ROOT, ".evomu-reviews", "target", "debug", "eve-server"),
     ])
-    for c in candidates:
-        if os.path.exists(c) and os.access(c, os.X_OK):
-            return c
+    existing = [c for c in candidates if os.path.exists(c) and os.access(c, os.X_OK)]
+    if existing:
+        existing.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return existing[0]
     return None
 
 
@@ -117,7 +118,7 @@ class HarnessSM(object):
 
     def ScatterEvent(self, event_name, *args):
         self.events.append((event_name, args))
-        self.logger.info("ScatterEvent %s args=%r" % (event_name, args))
+        self.logger.info("ScatterEvent %s args=%.600r" % (event_name, args))
 
 
 def _destiny_update_contains_ball(update_entry, target_ball_id):
@@ -130,13 +131,20 @@ def _destiny_update_contains_ball(update_entry, target_ball_id):
     action_name, action_args = body[0], body[1]
     if action_name == "SetState":
         kv = action_args[0] if (isinstance(action_args, (tuple, list)) and len(action_args) > 0) else action_args
+        ego = getattr(kv, "ego", None) or (kv.get("ego") if isinstance(kv, dict) else None)
+        if ego == target_ball_id:
+            return True
         slims = getattr(kv, "slims", None) or (kv.get("slims") if isinstance(kv, dict) else None) or []
         for slim in slims:
-            item_id = getattr(slim, "itemID", None) or (slim.get("itemID") if isinstance(slim, dict) else None)
+            item_id = getattr(slim, "itemID", None) or (
+                (slim.get("itemID") or (slim.get("args", {}).get("itemID") if isinstance(slim.get("args"), dict) else None))
+                if isinstance(slim, dict)
+                else None
+            )
             if item_id == target_ball_id:
                 return True
         dmg = getattr(kv, "damageState", None) or (kv.get("damageState") if isinstance(kv, dict) else None) or {}
-        if isinstance(dmg, dict) and target_ball_id in dmg:
+        if isinstance(dmg, dict) and (target_ball_id in dmg or str(target_ball_id) in dmg):
             return True
     elif action_name in ("AddBalls2", "AddBalls"):
         chunk = action_args[0] if (isinstance(action_args, (tuple, list)) and len(action_args) > 0) else action_args
@@ -176,7 +184,7 @@ def _pids_matching(pattern):
     return set(int(p) for p in out.split() if p.isdigit() and int(p) != os.getpid())
 
 
-def launch_real_client(client_app, host, macho_port, login, log_path):
+def launch_real_client(client_app, host, macho_port, login, log_path, auto_select_char=0):
     """Starts the unmodified V24.01 client pointed at EvoMu via its own command-line switches.
 
     `utillib.GetServerName/GetServerPort` honour `/server:` and `/port:`; `GetLoginCredentials`
@@ -187,7 +195,7 @@ def launch_real_client(client_app, host, macho_port, login, log_path):
         client_executable(client_app),
         "/server:%s" % host,
         "/port:%d" % macho_port,
-        "/autoSelectCharacter:0",
+        "/autoSelectCharacter:%d" % int(auto_select_char),
     ]
     if login:
         cmd.append("/login:%s" % login)
@@ -293,6 +301,46 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         client1_ship_id = int(client1_ship_id)
         log1.info("Resolved Client 1 shipID: %d" % client1_ship_id)
 
+        # Exercise V24.01 post-login / character-selection startup RPCs fired by real EVE.app
+        startup_rpcs_ok = True
+        for svc_name, method_name, rpc_args in [
+            ("machoNet", "GetTime", ()),
+            ("config", "GetMultiOwnersEx", ([int(char1_id)],)),
+            ("config", "GetMultiLocationsEx", ([30000142, 60003760],)),
+            ("config", "GetBlackListedPlanets", ()),
+            ("config", "GetAverageMarketPrices", ()),
+            ("config", "GetOldStationData", ()),
+            ("invbroker", "GetItemDescriptor", ()),
+            ("air_npe", "is_air_npe_enabled", ()),
+            ("charUnboundMgr", "GetCharacterSelectionData", ()),
+            ("charUnboundMgr", "GetCohortsForUser", ()),
+            ("charUnboundMgr", "GetCharOmegaDowngradeStatus", ()),
+            ("userSvc", "GetRedeemTokens", ()),
+            ("map", "GetSecurityModifiedSystems", ()),
+            ("populationCap", "GetCharacterLoadSlot", (int(char1_id),)),
+            ("charMgr", "GetCharacterSettings", ()),
+            ("charMgr", "GetPaperdollState", ()),
+            ("structureDirectory", "GetMyDockableStructures", (30000142,)),
+            ("skillMgr2", "GetAttributes", ()),
+            ("skillMgr2", "GetFreeSkillPoints", ()),
+            ("operationsManager", "can_character_play_the_tutorial", ()),
+            ("seasonManager", "get_season_data_for_character", ()),
+            ("XmppChatMgr", "GetDeprecatedPrefsFallback", ()),
+            ("onlineStatus", "GetInitialState", ()),
+            ("scanMgr", "SignalTrackerRegister", ()),
+            ("insurgencySolarsystem", "GetAllVisibleCampaigns", ()),
+            ("essMgr", "GetDataForClientSolarSystem", (30000142,)),
+            ("dynamicBountyMgr", "GetOutputForClientSolarSystem", (30000142,)),
+            ("fwWarzoneSolarsystem", "GetLocalOccupationState", (30000142,)),
+        ]:
+            try:
+                res = getattr(sm1.RemoteSvc(svc_name), method_name)(*rpc_args)
+                log1.info("startup RPC %s.%s -> %s" % (svc_name, method_name, type(res).__name__))
+            except Exception as exc:
+                startup_rpcs_ok = False
+                log1.info("startup RPC %s.%s FAILED: %r" % (svc_name, method_name, exc))
+                raise
+
         # Second client logs in concurrently with a distinct account ("other" / "other-secret")
         auth2 = sm2.RemoteSvc("authentication")
         login2 = auth2.Login("other", "other-secret")
@@ -319,15 +367,14 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             sm2.RemoteSvc("timeControl").AdvanceClock(12)
             b2_nav, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
             b2_nav.CmdWarpToStuff("item", 60003760)
-            for _ in range(4):
-                sm2.RemoteSvc("timeControl").AdvanceClock(7)
+            sm2.RemoteSvc("timeControl").AdvanceClock(28)
             sm2.RemoteSvc("stationSvc").Dock(60003760)
         except Exception as exc:
             log2.info("optional /tr 30000142 skipped: %r" % (exc,))
 
         outcomes["launch_login"] = {
-            "bridge_verified": True,
-            "evidence": "Client 1 (char %d) and Client 2 (char %d) authenticated and selected characters over TCP port %d"
+            "bridge_verified": bool(startup_rpcs_ok),
+            "evidence": "Client 1 (char %d) and Client 2 (char %d) authenticated, selected characters, and verified 28 V24.01 post-login startup RPCs over TCP port %d"
             % (int(char1_id), int(char2_id), bridge_port),
         }
         outcomes["create_character"] = {
@@ -564,11 +611,6 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         destiny_updates1 = [ev for ev in sm1.events if ev[0] == "DoDestinyUpdate"]
         log1.info("Client 1 recorded %d DoDestinyUpdate events" % len(destiny_updates1))
 
-        outcomes["undock_navigate"] = {
-            "bridge_verified": bool(formations and align1 is not None and speed1 is not None and stop1 is not None and len(destiny_updates1) > 0),
-            "evidence": "Client 1 undocked ship %d into 30000142, aligned to celestial 40009077, accelerated to max velocity, stopped via CmdStop, and received %d DoDestinyUpdate packet(s)"
-            % (client1_ship_id, len(destiny_updates1)),
-        }
         outcomes["multiplayer_presence"] = {
             "bridge_verified": len(observed_client1_events) > 0,
             "evidence": "Client 2 undocked into Jita (30000142) and verified Client 1 ship %d presence across %d destiny payload(s) (%d total DoDestinyUpdate packets)"
@@ -579,8 +621,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         warp1 = beyonce1.CmdWarpToStuff("item", 40009082)
         log1.info("beyonce1.CmdWarpToStuff(40009082) -> %r" % (warp1,))
         time.sleep(0.2)
-        for _ in range(4):
-            sm1.RemoteSvc("timeControl").AdvanceClock(7)
+        sm1.RemoteSvc("timeControl").AdvanceClock(28)
         stop_warp = beyonce1.CmdStop()
         log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
 
@@ -602,6 +643,54 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         abyssal_beyonce, _ = sm1.RemoteSvc("beyonce").MachoBindObject(abyssal_sys, None)
         abyssal_beyonce.UpdateStateRequest()
         log1.info("Bound to destination beyonce in %d and called UpdateStateRequest" % int(abyssal_sys))
+
+        # Verify in-space disconnect + reconnect (`SelectCharacterID` -> `beyonce.MachoBindObject` WITHOUT
+        # `UpdateStateRequest`, matching V24.01 `Michelle.AddBallpark` -> `Park.InitializeRemoteBallpark`)
+        # delivers `SetState` via `DoDestinyUpdate` even when the ship entered emergency warp on disconnect.
+        b1.close()
+        time.sleep(0.1)
+        sm1.events.clear()
+        b1 = evomu_bridge.install_service_manager_hook(sm1, host=host, port=bridge_port)
+        sm1.RemoteSvc("authentication").Login("demo", "demo-secret")
+        sel1_reconn = sm1.RemoteSvc("charUnboundMgr").SelectCharacterID(char1_id)
+        log1.info("In-space reconnect SelectCharacterID(%d) -> %r" % (int(char1_id), sel1_reconn))
+        beyonce1_reconn, _ = sm1.RemoteSvc("beyonce").MachoBindObject(abyssal_sys, None)
+        time.sleep(0.2)
+        reconnect_set_state = False
+        for ev in sm1.events:
+            if ev[0] == "DoDestinyUpdate" and len(ev) > 1:
+                for arg in ev[1]:
+                    entries = arg if isinstance(arg, list) else [arg]
+                    for entry in entries:
+                        if (
+                            isinstance(entry, (tuple, list))
+                            and len(entry) >= 2
+                            and isinstance(entry[1], (tuple, list))
+                            and len(entry[1]) >= 2
+                            and entry[1][0] == "SetState"
+                            and _destiny_update_contains_ball(entry, client1_ship_id)
+                        ):
+                            reconnect_set_state = True
+        log1.info("In-space reconnect beyonce.MachoBindObject SetState verified=%r" % (reconnect_set_state,))
+        if not reconnect_set_state:
+            raise RuntimeError(
+                "In-space reconnect beyonce.MachoBindObject failed to emit SetState for ship %d (causes V24.01 CharSelectCreateToSpaceTransition black screen)"
+                % client1_ship_id
+            )
+        beyonce1_reconn.CmdStop()
+
+        outcomes["undock_navigate"] = {
+            "bridge_verified": bool(
+                formations
+                and align1 is not None
+                and speed1 is not None
+                and stop1 is not None
+                and len(destiny_updates1) > 0
+                and reconnect_set_state
+            ),
+            "evidence": "Client 1 undocked ship %d into 30000142, aligned to celestial 40009077, accelerated to max velocity, stopped via CmdStop, received %d DoDestinyUpdate packet(s), and verified in-space disconnect+reconnect SetState delivery via beyonce.MachoBindObject"
+            % (client1_ship_id, len(destiny_updates1)),
+        }
 
         outcomes["wormholes_filaments"] = {
             "bridge_verified": bool(warp1 is not None and fil_res and abyssal_sys > 30000000 and abyssal_sys != 30000142 and abyssal_session_changed),
@@ -648,6 +737,7 @@ def main():
         help="Exit 0 when two-client bridge orchestration and log-hygiene checks pass (used by T-6 integration tests)",
     )
     ap.add_argument("--client-login", default="demo:demo-secret", help="Passed to the client as /login:<user>:<pw>")
+    ap.add_argument("--auto-select-character", type=int, default=0, help="Character ID for /autoSelectCharacter:<id> when launching real client")
     ap.add_argument("--client-wait", type=float, default=90.0, help="Seconds to let the real client run")
     args = ap.parse_args()
     signal.signal(signal.SIGTERM, _raise_exit)
@@ -724,7 +814,12 @@ def main():
 
         if args.launch_real_client and macho_port and os.path.exists(client_executable(args.client_app)):
             client_proc = launch_real_client(
-                args.client_app, args.host, macho_port, args.client_login, real_client_log
+                args.client_app,
+                args.host,
+                macho_port,
+                args.client_login,
+                real_client_log,
+                auto_select_char=args.auto_select_character,
             )
             time.sleep(args.client_wait)
             kill_real_client(client_proc, args.client_app)

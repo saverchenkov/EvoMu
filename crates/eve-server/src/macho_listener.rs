@@ -587,14 +587,6 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             && session.structure_id.is_none()
                         {
                             ballpark_ready = true;
-                            if service == "beyonce" && method == "MachoBindObject" {
-                                let _ = crate::services::space_destiny::handle_update_state_request(
-                                    &ctx,
-                                    &session,
-                                    None,
-                                )
-                                .await;
-                            }
                         }
 
                         let rsp_pkt = match rpc_res {
