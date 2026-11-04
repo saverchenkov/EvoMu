@@ -616,4 +616,5 @@ mod parity_quasar_three_closure;
 mod parity_crimewatch_closure;
 mod parity_discovery_planet_closure;
 mod parity_fighters_lifecycle_closure;
+mod parity_quasar_achievement_remediation;
 
