@@ -1,6 +1,14 @@
-//! Parity remediation integration tests for ESI Alliance Contacts:
-//! - `GET /alliances/{alliance_id}/contacts`
-//! - `GET /alliances/{alliance_id}/contacts/labels`
+//! ESI characters and contacts parity suite.
+
+#![forbid(unsafe_code)]
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod esi_contacts_ops_ext {
+    use super::*;
+
+// Parity remediation integration tests for ESI Alliance Contacts:
+// - `GET /alliances/{alliance_id}/contacts`
+// - `GET /alliances/{alliance_id}/contacts/labels`
 
 use crate::common;
 use eve_db::{AllianceRecord, CorporationRecord, WorldRepository};
@@ -526,4 +534,6 @@ async fn test_parity_remediation_alliance_contacts_and_labels() {
             && l["label_name"] == json!("Hostile Standings")));
 
     let _ = std::fs::remove_file(&db_path);
+}
+
 }

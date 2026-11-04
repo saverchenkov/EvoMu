@@ -1,6 +1,13 @@
-//! Integration tests closing remaining `destiny`, `sde`, `quasar`, and `plan` parity rows.
+//! Character progression, skills, and attributes parity suite.
 
 #![forbid(unsafe_code)]
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod char_progression_misc_ext {
+    use super::*;
+
+// Integration tests closing remaining `destiny`, `sde`, `quasar`, and `plan` parity rows.
+
 
 use std::collections::HashMap;
 
@@ -130,9 +137,9 @@ fn extract_destiny_actions(updates: &PyRep) -> Vec<(String, Vec<PyRep>)> {
         .collect()
 }
 
-// parity: destiny:OnDroneActivityChange
 #[tokio::test]
 async fn test_parity_misc_destiny_on_drone_activity_change() {
+    // parity: destiny:OnDroneActivityChange
     eve_testkit::attest(&["destiny:OnDroneActivityChange"]);
     let ctx = new_ctx();
     let mut sess = authed_demo_session(&ctx, 8100).await;
@@ -277,9 +284,9 @@ async fn test_parity_misc_destiny_on_drone_activity_change() {
     );
 }
 
-// parity: sde:res:/localizationfsd/localization_fsd_it.pickle
 #[test]
 fn test_parity_misc_sde_localization_fsd_it_pickle() {
+    // parity: sde:res:/localizationfsd/localization_fsd_it.pickle
     eve_testkit::attest(&["sde:res:/localizationfsd/localization_fsd_it.pickle"]);
     assert_eq!(normalize_localization_fsd_lang("it"), Some("it"));
     assert_eq!(normalize_localization_fsd_lang("it-IT,it;q=0.9"), Some("it"));
@@ -300,9 +307,9 @@ fn test_parity_misc_sde_localization_fsd_it_pickle() {
     );
 }
 
-// parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
 #[tokio::test]
 async fn test_parity_misc_quasar_sovereignty_resource_star_requests() {
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj
     let ctx = new_ctx();
     let mut sess = authed_demo_session(&ctx, 8101).await;
 
@@ -573,4 +580,6 @@ async fn test_parity_misc_plan_t10_and_t11_client_oracle_and_destiny_diff() {
     ballpark.step(1.0);
     let moved = ballpark.balls.get(&ball_id).expect("moved ball");
     assert!(moved.position.x > start_x + 50.0, "expected forward X displacement");
+}
+
 }

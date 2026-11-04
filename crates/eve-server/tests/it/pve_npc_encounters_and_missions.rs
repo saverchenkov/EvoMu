@@ -1,10 +1,18 @@
-//! Integration Tests for Remediated NPC & Crimewatch Encounter Mechanics.
-//!
-//! Covers:
-//! - `feat:npc.navy-npc`: Faction police response to outlaw pilots in high-sec, pod safety, and docking refusal.
-//! - `feat:npc.npc-standings-aggression`: Standing-based aggression for Empire Navy vs Pirate Belt Rats.
-//! - `feat:npc.npc-hauler`: Multi-system living-world convoy stargate route traversal and authentic cargo drops.
-//! - `feat:npc.npc-spawn-encounter`: Real damage destruction hook triggering authentic multi-wave progression to site completion.
+//! PVE NPC encounters and missions parity suite.
+
+#![forbid(unsafe_code)]
+
+#[allow(unused_imports, dead_code, unused_variables, unused_mut)]
+mod npc_encounters_ext {
+    use super::*;
+
+// Integration Tests for Remediated NPC & Crimewatch Encounter Mechanics.
+//
+// Covers:
+// - `feat:npc.navy-npc`: Faction police response to outlaw pilots in high-sec, pod safety, and docking refusal.
+// - `feat:npc.npc-standings-aggression`: Standing-based aggression for Empire Navy vs Pirate Belt Rats.
+// - `feat:npc.npc-hauler`: Multi-system living-world convoy stargate route traversal and authentic cargo drops.
+// - `feat:npc.npc-spawn-encounter`: Real damage destruction hook triggering authentic multi-wave progression to site completion.
 
 use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, DamageVector, MovementMode};
@@ -606,4 +614,6 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
         let enc = rt.encounter_waves.get(&encounter_id).expect("Encounter director");
         assert!(enc.completed, "Site must be marked completed when final wave is eliminated");
     });
+}
+
 }

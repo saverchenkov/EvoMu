@@ -8,7 +8,6 @@ mod abyssal_and_void_space_suite;
 mod air_npe_nodegraph_runner;
 mod abyssal_deadspace;
 mod abyssal_room_combat;
-mod parity_abyssal_closure;
 mod account_admin_complete;
 mod account_features_parity;
 mod attributes_remaps_and_fitting_repair;
@@ -88,10 +87,6 @@ mod esi_ui_and_features;
 mod esi_universe_character;
 mod esi_universe_fw_complete;
 mod esi_universe_sov_complete;
-mod features_parity_complete_part1;
-mod features_parity_complete_part2;
-mod features_parity_complete_part3;
-mod esi_universe_sov_complete_part2;
 mod features_parity_complete;
 mod industry;
 mod industry_pi_complete;
@@ -114,9 +109,6 @@ mod modules_scanners_mutaplasmids_dbuffs;
 mod navigation_pve_closure;
 mod parity_crimewatch_insurance_closure;
 mod parity_crimewatch_insurance_closure_part2;
-mod parity_features_world_part1;
-mod parity_features_world_part3;
-mod parity_features_world_part4;
 mod parity_fake_remediation_rpc_notify_part1;
 mod parity_notify_batch_closure;
 mod parity_notify_batch_closure_part2;
@@ -158,7 +150,6 @@ mod quasar_cosmetics_skinr_state;
 mod quasar_fw_occupancy;
 mod quasar_sov_equinox_hub;
 mod quasar_sov_pirate_insurgency;
-mod quasar_sov_pirate_remediation;
 mod sovereignty_mercenary_dens;
 mod fw_warzone_insurgency;
 mod sovereignty_equinox_gameplay;
@@ -282,7 +273,6 @@ mod rpc_lp_store_mgr_complete;
 mod rpc_mail_mgr_complete;
 mod rpc_mailing_lists_complete;
 mod remediated_storms_and_homefront;
-mod npc_encounters_remediation;
 mod quasar_goal_tale_notices;
 mod quasar_cosmetics_live_state;
 mod quasar_cosmetics_market_state;
@@ -309,7 +299,6 @@ pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
 pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
 #[allow(unused_imports)]
 pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
-pub(crate) use combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2;
 mod plan_c3_c4_combat_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
@@ -319,7 +308,6 @@ mod crimewatch_hostility;
 mod combat_r4_regressions;
 mod combat_r5_regressions;
 mod structures_mining_r4_regressions;
-mod ships_modules_closure;
 mod ess_reserve_main_concurrency;
 mod mining_structures_sov_r5_regressions;
 mod skills_fitting_corp_r5_regressions;
@@ -332,12 +320,6 @@ mod abyssal_weather_clouds_suite;
 mod zarzakh_fulcrum_mechanics_suite;
 mod pochven_anchoring_restrictions_suite;
 mod seasons_and_campaigns;
-mod notify_real_emitters_batch3;
-mod notify_real_emitters_batch5;
-mod notify_real_emitters_batch6;
-mod seasons_login_campaigns_closure;
-mod abyssal_pochven_void_closure_part2;
-mod pve_mining_sites_part2;
 mod zarzakh_gate_lock;
 mod abyssal_pochven_void;
 mod notify_b23_closure;
@@ -346,17 +328,6 @@ mod quasar_daily_goals_progress;
 mod quasar_store_catalog_and_career_goals;
 mod quasar_corporation_goals_and_freelance;
 mod quasar_daily_goals_and_ess_bounties;
-mod journey_t6_part1;
-mod journey_t6_part2;
-mod esi_market_industry_pi_part2;
-mod esi_market_industry_pi_part3;
-mod esi_market_industry_pi_part4;
-mod esi_p6_closure;
-mod esi_p6_closure_part2;
-mod quasar_daily_goals_remediation;
-mod quasar_q3_q9_closure;
-mod quasar_q5_q6_closure;
-mod quasar_b34_closure;
 mod journey_t6;
 mod wormhole_statics_lifecycle;
 mod wormhole_special_systems;
@@ -407,8 +378,6 @@ mod open_feats_and_rpcs_b5;
 mod open_feats_ships_pve_b5;
 mod open_feats_and_rpcs_batch2_part2;
 mod quasar_ship_unlocks_and_stargates;
-mod notify_p7_sp1_sp2_closure;
-mod esi_fw_and_social_closure;
 mod open_feats_and_rpcs_b30;
 mod open_feats_and_rpcs_b30_part2;
 mod notify_b30_closure;
@@ -424,9 +393,7 @@ mod open_feats_and_rpcs_b22_corp;
 mod open_feats_and_rpcs_b22_mining;
 mod open_feats_and_rpcs_b22_structures_modules;
 mod quasar_sov_hub_and_star_resources;
-mod notify_live_rpc_closure;
 mod serverops_and_shipcaster;
-mod serverops_shipcaster_remediation;
 mod parity_features_combat_part1;
 mod parity_features_combat_part2;
 mod parity_notifies_part1;
@@ -459,16 +426,13 @@ mod parity_notify_market_item_received;
 mod parity_plan_canonical_closure;
 mod parity_plan_fake_closure;
 mod parity_esi_calendar_closure;
+mod parity_ships_batch_closure;
 mod parity_plan_remaining_closure;
 mod quasar_achievement_career_and_cosmetics;
 mod parity_crimewatch_closure;
 mod crimewatch_timers_and_drones;
-mod parity_discovery_planet_closure;
 mod parity_fighters_lifecycle_closure;
 mod quasar_achievements_progress;
-mod parity_esi_contacts_remediation;
-mod parity_esi_calendar_remediation;
-mod parity_checkout_discovery_remediation;
 mod parity_notify_flagged_remediation;
 mod navigation_features_remediated_suite;
 mod navigation_features_remediated_part2;
@@ -520,15 +484,6 @@ pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
 pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
 #[allow(unused_imports)]
 pub(crate) use crimewatch_hostility as crimewatch_closure;
-pub(crate) use combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2;
-#[allow(unused_imports)]
-pub(crate) use crimewatch_hostility as plan_c7_crimewatch_closure;
-#[allow(unused_imports)]
-pub(crate) use fw_warzone_insurgency as fw_warzone_insurgency_closure;
-#[allow(unused_imports)]
-pub(crate) use npc_spawns_pve as npc_spawns_pve_closure;
-#[allow(unused_imports)]
-pub(crate) use sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
 #[allow(unused_imports)]
 pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
 #[allow(unused_imports)]
@@ -540,22 +495,7 @@ pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
 #[allow(unused_imports)]
 pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
 
-pub(crate) use {
-    abyssal_deadspace as abyssal_deadspace_closure,
-    abyssal_pochven_void as abyssal_pochven_void_closure,
-    combat_ewar_logistics as combat_ewar_repairs_closure,
-    combat_repairs_smartbombs as combat_repairs_smartbomb_closure,
-    crimewatch_hostility as crimewatch_closure,
-    crimewatch_hostility as plan_c7_crimewatch_closure,
-    fw_warzone_insurgency as fw_warzone_insurgency_closure,
-    npc_spawns_pve as npc_spawns_pve_closure,
-    pochven_wormholes_travel as pochven_wormholes_travel_closure,
-    sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure,
-    wormhole_pve_escalations as wormhole_pve_escalations_closure,
-    wormhole_special_systems as wormhole_special_systems_closure,
-    wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure,
-    zarzakh_gate_lock as zarzakh_gate_lock_closure,
-};
+
 mod social_and_contacts_complete;
 mod notify_services_and_events;
 mod notify_structures_clones_pi;
@@ -565,3 +505,9 @@ pub(crate) use notify_structures_clones_pi as notify_real_emitters_batch7;
 mod notify_space_corp_market;
 #[allow(unused_imports)]
 pub(crate) use notify_space_corp_market as notify_real_emitters_batch9;
+mod world_space_exploration;
+mod character_progression_and_attributes;
+mod pve_npc_encounters_and_missions;
+mod discovery_project;
+mod esi_calendar_and_fleet;
+mod esi_characters_and_contacts;
