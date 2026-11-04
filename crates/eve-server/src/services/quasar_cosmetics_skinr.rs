@@ -1047,6 +1047,8 @@ fn handle_title_def_get_latest(
     dyn_msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
     if dyn_msg.get(1).is_none() && any_type_url.starts_with("type.evetech.net/") && std::env::var("EVOMU_CDN_BASE_URL").ok().filter(|s| !s.trim().is_empty()).is_none() {
+        let fb = crate::services::quasar_achievements::empty_root_table_flatbuffer();
+        crate::services::quasar_achievements::ensure_client_flatbuffer_storage_seeded("character_titles", "24.1.1", &fb);
         return Ok(GoogleAny { type_url: String::new(), value: Vec::new() });
     }
     let lang = sub(dyn_msg, 3).and_then(|l| str_of(l, 1)).filter(|s| !s.is_empty()).unwrap_or_else(|| "en-us".to_string());

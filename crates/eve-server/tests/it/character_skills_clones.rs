@@ -1278,7 +1278,7 @@ async fn test_skills_alpha_cap_direct_purchase_omega_sp_and_history() {
     });
     let bal_before = ctx.db.get_character(char_id).unwrap().balance.to_f64_isk();
     let buy_skill = ctx.dispatch_rpc(&mut sess, "skillMgr2", None, "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(3386)])], &kw, None).await.expect("Direct purchase of NPC-seeded skill 3386 from any location");
-    assert_eq!(buy_skill.dict_get("totalCostISK"), Some(&PyRep::Real(130_000.0)));
+    assert_eq!(buy_skill, PyRep::List(vec![PyRep::Integer(3386)]));
     let bal_after = ctx.db.get_character(char_id).unwrap().balance.to_f64_isk();
     assert!((bal_before - bal_after - 130_000.0).abs() < 1e-2, "Must charge 130% of NPC price (130,000 ISK)");
     assert_eq!(ctx.db.with_snapshot(|s| s.skills[&char_id][&3386].level), 0);

@@ -318,7 +318,7 @@ async fn test_add_balls_on_grid_entry_and_add_balls2_for_resident() {
     assert_eq!(c.i32() as i64, tick, "WARP_Struct.effectStamp");
     assert_eq!(c.i64(), -4_616_189_618_054_758_400);
     assert_eq!(c.i64(), 4_669_471_951_536_783_360);
-    assert_eq!(c.i32(), (warp_speed_au_s * 10.0) as i32, "speed = AU/s * 10");
+    assert_eq!(c.i64(), (warp_speed_au_s * 10.0) as i64, "speed = AU/s * 10 (i64 in V24 _destiny.so)");
     assert_eq!(c.1, state.len());
 }
 

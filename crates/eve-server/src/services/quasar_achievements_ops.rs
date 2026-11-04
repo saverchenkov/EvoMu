@@ -515,6 +515,8 @@ pub fn register_achievement_handlers(
                     .filter(|s| !s.trim().is_empty())
                     .is_none()
             {
+                let fb = super::quasar_achievements::empty_achievement_flatbuffer();
+                super::quasar_achievements::ensure_client_flatbuffer_storage_seeded("achievements", "24.1.60", &fb);
                 return Ok(GoogleAny {
                     type_url: String::new(),
                     value: Vec::new(),

@@ -340,13 +340,17 @@ impl BugIncidentBundle {
             .get_history(session.session_id, now_millis, 20);
         let server_logs_before = global_log_ring().snapshot_recent(40);
 
+        let trace_str: String = trace.into();
+        let stack_key_str: String = stack_key.into();
+        let effective_stack_hash = disambiguate_uthread_stack_hash(stack_hash, &stack_key_str, &trace_str);
+
         Self {
             incident_id,
             timestamp: iso_time,
             timestamp_millis: now_millis,
-            stack_hash,
-            stack_key: stack_key.into(),
-            trace: trace.into(),
+            stack_hash: effective_stack_hash,
+            stack_key: stack_key_str,
+            trace: trace_str,
             report_source: "exception".to_string(),
             manual_report: None,
             session: sess_snap,
@@ -459,6 +463,32 @@ fn fnv1a_i64(input: &str) -> i64 {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash as i64
+}
+
+/// Disambiguates generic `uthread2` / `MollycoddledUthread` wrapper stack hashes (such as `-1040548311`)
+/// by mixing in the `Formatted exception info:` summary line and leaf `Thrown at:` frame so unrelated
+/// tasklet exceptions do not collide on the same GitHub issue.
+fn disambiguate_uthread_stack_hash(stack_hash: i64, stack_key: &str, trace: &str) -> i64 {
+    if !stack_key.contains("MollycoddledUthread") && !trace.contains("MollycoddledUthread") {
+        return stack_hash;
+    }
+    let formatted_line = trace
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Formatted exception info:"))
+        .unwrap_or("");
+    let thrown_leaf = trace
+        .lines()
+        .map(str::trim)
+        .skip_while(|l| !l.starts_with("Thrown at:"))
+        .take_while(|l| !l.starts_with("Formatted exception info:") && !l.starts_with("EXCEPTION END"))
+        .filter(|l| l.starts_with("<pre>"))
+        .last()
+        .unwrap_or("");
+    if formatted_line.is_empty() && thrown_leaf.is_empty() {
+        return stack_hash;
+    }
+    fnv1a_i64(&format!("{stack_hash}:{thrown_leaf}:{formatted_line}"))
 }
 
 fn parse_char_id_from_session_info(desc: &str) -> Option<i64> {

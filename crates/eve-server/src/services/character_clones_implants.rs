@@ -1303,6 +1303,53 @@ pub fn handle_clones_and_sheet(
             }
         }
 
+        ("charMgr", "ListStations") | ("charUnboundMgr", "ListStations") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rows = ctx.db.with_snapshot(|snap| {
+                let mut counts_by_station: std::collections::BTreeMap<i64, (i64, i64)> =
+                    std::collections::BTreeMap::new();
+                for item in snap.items.values() {
+                    if item.owner_id != char_id {
+                        continue;
+                    }
+                    let loc_id = item.location_id;
+                    let solar_system_id = if (60_000_000..=69_999_999).contains(&loc_id) {
+                        ctx.sde
+                            .stations
+                            .get(&loc_id)
+                            .map(|st| i64::from(st.solar_system_id))
+                    } else if loc_id >= 1_000_000_000_000 {
+                        snap.structures
+                            .get(&loc_id)
+                            .map(|st| i64::from(st.solar_system_id))
+                    } else {
+                        None
+                    };
+                    if let Some(sys_id) = solar_system_id {
+                        let entry = counts_by_station.entry(loc_id).or_insert((sys_id, 0));
+                        entry.1 += 1;
+                    }
+                }
+                counts_by_station
+                    .into_iter()
+                    .map(|(station_id, (solar_system_id, item_count))| {
+                        vec![
+                            PyRep::Integer(station_id),
+                            PyRep::Integer(solar_system_id),
+                            PyRep::Integer(item_count),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::rowset(
+                vec!["stationID", "solarSystemID", "itemCount"],
+                rows,
+            )))
+        }
+
         // =========================================================================
         // CH-4: Contacts, Blocklist, Labels, & Online Status (`charMgr`, `onlineStatus`)
         // =========================================================================

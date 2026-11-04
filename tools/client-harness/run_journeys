@@ -383,30 +383,45 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % int(created_char_id),
         }
 
-        # Journey 3: station_ui (hangar inventory, ship dogma attributes, wallet balance, skills)
+        # Journey 3: station_ui (hangar inventory, ship dogma attributes, wallet balance, skills, assets stations, direct skill purchase)
         _, inv_list = sm1.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         _, ship_attrs = sm1.RemoteSvc("dogmaIM").MachoBindObject(
             client1_ship_id, ("GetShipAttributes", (), {})
         )
         bal = sm1.RemoteSvc("account").GetCashBalance(0)
         skills = sm1.RemoteSvc("skillMgr2").GetSkills()
+        stations_list = sm1.RemoteSvc("charMgr").ListStations()
+        assert stations_list is not None and len(stations_list) > 0, "charMgr.ListStations must return station asset summary rows"
+        for st_col in ("stationID", "solarSystemID", "itemCount"):
+            assert hasattr(stations_list[0], st_col), "charMgr.ListStations row missing %s" % st_col
+        purchased_seq = []
+        purchased_res = sm1.RemoteSvc("skillMgr2").PurchaseSkills([3300])
+        purchased_seq.extend(purchased_res)
+        assert 3300 in purchased_seq, "skillMgr2.PurchaseSkills must return an iterable sequence of purchased skill typeIDs"
+        time.sleep(0.1)
+        skill_chg_evs = [ev for ev in sm1.events if ev[0] == "OnServerSkillsChanged"]
+        assert skill_chg_evs and len(skill_chg_evs[-1][1]) == 3, "OnServerSkillsChanged must pass 3 positional arguments (skillInfos, event, timeStamp)"
         log1.info(
-            "station_ui inv_count=%d ship_attrs=%d balance=%r skills=%d"
-            % (len(inv_list), len(ship_attrs), bal, len(skills))
+            "station_ui inv_count=%d ship_attrs=%d balance=%r skills=%d stations=%d"
+            % (len(inv_list), len(ship_attrs), bal, len(skills), len(stations_list))
         )
         outcomes["station_ui"] = {
             "bridge_verified": True,
-            "evidence": "Docked station services returned %d items, %d dogma attributes, balance=%r, %d trained skills"
-            % (len(inv_list), len(ship_attrs), bal, len(skills)),
+            "evidence": "Docked station services returned %d items, %d dogma attributes, balance=%r, %d trained skills, %d asset stations, and verified PurchaseSkills + 3-arg OnServerSkillsChanged"
+            % (len(inv_list), len(ship_attrs), bal, len(skills), len(stations_list)),
         }
 
-        # Cosmetics store queries while docked
+        # Cosmetics store & VGS storeManager queries while docked
         cosmetics = sm1.RemoteSvc("shipCosmeticsMgr").GetEnabledCosmetics()
         skins = sm1.RemoteSvc("shipCosmeticsMgr").GetLicencedSkins()
-        log1.info("shipCosmeticsMgr: cosmetics=%r skins=%r" % (cosmetics, skins))
+        vgs_cats = sm1.RemoteSvc("storeManager").get_categories()
+        vgs_prods = sm1.RemoteSvc("storeManager").get_products()
+        vgs_offers = sm1.RemoteSvc("storeManager").get_offers()
+        assert isinstance(vgs_cats, list) and isinstance(vgs_prods, list) and isinstance(vgs_offers, list)
+        log1.info("shipCosmeticsMgr: cosmetics=%r skins=%r vgs_cats=%d" % (cosmetics, skins, len(vgs_cats)))
         outcomes["cosmetics_store"] = {
-            "bridge_verified": cosmetics is not None and skins is not None,
-            "evidence": "Client 1 queried cosmetics store services (GetEnabledCosmetics, GetLicencedSkins)",
+            "bridge_verified": cosmetics is not None and skins is not None and vgs_cats is not None,
+            "evidence": "Client 1 queried cosmetics & VGS storeManager services (GetEnabledCosmetics, GetLicencedSkins, get_categories/get_products/get_offers)",
         }
 
         # AIR daily goals & career progression

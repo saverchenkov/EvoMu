@@ -232,13 +232,13 @@ async fn test_skillbook_market_buy_inject_and_remote_purchase() {
     assert!(buyer.station_id.is_none());
     let bal_before = ctx.db.get_character(buyer_cid).unwrap().balance.to_f64_isk();
     let direct_rep = rpc(&ctx, &mut buyer, "skillMgr2", "PurchaseSkills", &[PyRep::List(vec![PyRep::Integer(26_252)])]).await.expect("Remote PurchaseSkills in space");
-    let cost = direct_rep.dict_get("totalCostISK").and_then(|v| v.as_f64()).expect("totalCostISK");
+    assert_eq!(direct_rep, PyRep::List(vec![PyRep::Integer(26_252)]), "PurchaseSkills must return sequence of purchased skill typeIDs");
     let expected_npc_ask = ctx.db.with_snapshot(|s| {
         s.market_orders.values().filter(|o| o.is_npc && !o.is_bid && o.type_id == 26_252).map(|o| o.price.to_f64_isk()).fold(f64::INFINITY, f64::min)
     });
-    assert!((cost - expected_npc_ask * 1.30).abs() < 1e-2, "Remote PurchaseSkills must charge 130% of NPC sell price");
     let bal_after = ctx.db.get_character(buyer_cid).unwrap().balance.to_f64_isk();
-    assert!((bal_before - bal_after - cost).abs() < 1e-2);
+    let cost = bal_before - bal_after;
+    assert!((cost - expected_npc_ask * 1.30).abs() < 1e-2, "Remote PurchaseSkills must charge 130% of NPC sell price");
     assert_eq!(ctx.db.with_snapshot(|s| s.skills[&buyer_cid][&26_252].level), 0);
 
     let unseeded_skill_tid = ctx.db.with_snapshot(|s| {

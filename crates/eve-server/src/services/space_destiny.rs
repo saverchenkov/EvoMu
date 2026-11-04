@@ -919,6 +919,11 @@ pub(crate) async fn handle_update_state_request(
     if is_client_initiated_active_warp {
         return Ok(PyRep::None);
     }
+    if matches!(ship_ball.mode, MovementMode::Warp { .. }) {
+        // Emergency logoff return-warp from a prior disconnected session has no entry in `active_warps`;
+        // stop the ship at its current coordinates before pushing `SetState` on reconnect.
+        let _ = handle.set_movement_mode(ship_id, MovementMode::Stop).await;
+    }
     if ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("dungeon_runtime_store")) {
         let _ = crate::services::pve_dungeon_runtime::check_dungeon_triggers(ctx, char_id, sys_id, ship_id).await;
     }

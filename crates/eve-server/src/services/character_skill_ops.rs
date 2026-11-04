@@ -179,10 +179,10 @@ pub fn purchase_skills_direct_for_char(
                 .get(&char_id)
                 .is_some_and(|m| m.contains_key(&sk_id))
             {
-                return Err(BridgeRpcError {
-                    code: "SkillAlreadyTrained".into(),
-                    message: format!("Skill {sk_id} is already injected"),
-                });
+                // Idempotent if already injected (e.g., retry after prior purchase): 0 ISK charged,
+                // still included in `purchased` and `OnServerSkillsChanged` to heal client state.
+                costs.push((sk_id, 0));
+                continue;
             }
             if st.base_price <= 0.0 {
                 return Err(BridgeRpcError {
@@ -227,32 +227,36 @@ pub fn purchase_skills_direct_for_char(
         let hist = snap.skill_history.entry(char_id).or_default();
         let mut bought = Vec::new();
         for (sk_id, cost_c) in costs {
-            skills_map.insert(
-                sk_id,
-                eve_db::TrainedSkillRecord {
-                    type_id: sk_id,
-                    level: 0,
-                    skill_points: 0.0,
-                },
-            );
-            hist.push(SkillHistoryEntry {
-                log_date_ft: now_ft,
-                event_type_id: 36,
-                skill_type_id: sk_id,
-                skill_level: 0,
-                absolute_points: 0.0,
-            });
-            snap.next_entity_id += 1;
-            let jid = snap.next_entity_id;
-            snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                entry_id: jid,
-                character_id: char_id,
-                entry_type: "skill_purchase".into(),
-                amount: eve_db::IskCents(-cost_c),
-                balance_after: eve_db::IskCents(new_bal),
-                reason: format!("Direct skill purchase and injection (type {sk_id})"),
-            });
-            snap.wallet_journal_timestamps.insert(jid, now_unix);
+            if !skills_map.contains_key(&sk_id) {
+                skills_map.insert(
+                    sk_id,
+                    eve_db::TrainedSkillRecord {
+                        type_id: sk_id,
+                        level: 0,
+                        skill_points: 0.0,
+                    },
+                );
+                hist.push(SkillHistoryEntry {
+                    log_date_ft: now_ft,
+                    event_type_id: 36,
+                    skill_type_id: sk_id,
+                    skill_level: 0,
+                    absolute_points: 0.0,
+                });
+            }
+            if cost_c > 0 {
+                snap.next_entity_id += 1;
+                let jid = snap.next_entity_id;
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id: jid,
+                    character_id: char_id,
+                    entry_type: "skill_purchase".into(),
+                    amount: eve_db::IskCents(-cost_c),
+                    balance_after: eve_db::IskCents(new_bal),
+                    reason: format!("Direct skill purchase and injection (type {sk_id})"),
+                });
+                snap.wallet_journal_timestamps.insert(jid, now_unix);
+            }
             bought.push(sk_id);
         }
         Ok((bought, total_cost, new_bal))
@@ -268,24 +272,11 @@ pub fn purchase_skills_direct_for_char(
             PyRep::Real(eve_db::IskCents(new_bal_cents).to_f64_isk()),
         ],
     );
-    let changes: Vec<(PyRep, PyRep)> = purchased
-        .iter()
-        .map(|&sk_id| {
-            (
-                PyRep::Integer(sk_id as i64),
-                PyRep::keyval([
-                    ("typeID", PyRep::Integer(sk_id as i64)),
-                    ("skillLevel", PyRep::Integer(0)),
-                    ("skillPoints", PyRep::Real(0.0)),
-                ]),
-            )
-        })
-        .collect();
-    ctx.notify(
-        NotificationTarget::Character(char_id),
-        "OnServerSkillsChanged",
-        "charid",
-        vec![PyRep::Dict(changes)],
+    super::jump_clone_names::emit_server_skills_changed(
+        ctx,
+        char_id,
+        &purchased,
+        Some("skillMgr2.PurchaseSkills"),
     );
     Ok((purchased, total_cost_cents, new_bal_cents))
 }
@@ -315,16 +306,17 @@ fn purchase_skills_direct(
             _ => {}
         }
     }
-    let (purchased, total_cost_cents, new_bal_cents) =
+    let (purchased, _total_cost_cents, _new_bal_cents) =
         purchase_skills_direct_for_char(ctx, char_id, &skill_ids)?;
-    Ok(PyRep::keyval([
-        (
-            "purchasedSkillTypeIDs",
-            PyRep::List(purchased.into_iter().map(|id| PyRep::Integer(id as i64)).collect()),
-        ),
-        ("totalCostISK", PyRep::Real(eve_db::IskCents(total_cost_cents).to_f64_isk())),
-        ("newBalanceISK", PyRep::Real(eve_db::IskCents(new_bal_cents).to_f64_isk())),
-    ]))
+    // V24 client (`characterskills/client/purchase.py:67`):
+    // `skills_purchased = sm.GetService('skills').PurchaseSkills(skill_type_ids)`
+    // `self.skills_purchased.extend(skills_purchased)` expects a sequence of purchased skill typeIDs.
+    Ok(PyRep::List(
+        purchased
+            .into_iter()
+            .map(|id| PyRep::Integer(id as i64))
+            .collect(),
+    ))
 }
 
 /// Tuesday 11:00 UTC downtime weekly window ID (`feat:skills.omega-weekly-free-sp`).
