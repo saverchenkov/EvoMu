@@ -657,3 +657,4 @@ mod navigation_flight_and_docking;
 mod corporation_membership_and_titles;
 mod structures_defenses_weapons_and_safety;
 mod quasar_npc_through_pvp;
+mod quasar_dogma_through_fulfillment;

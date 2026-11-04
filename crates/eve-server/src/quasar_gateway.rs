@@ -887,7 +887,8 @@ impl PublicGatewayRouter {
             );
         };
         let norm_type = payload_any.normalized_type_name().to_string();
-        if self.descriptors.get_message(&norm_type).is_none() {
+        let has_route = self.handlers.read().unwrap().contains_key(&norm_type);
+        if self.descriptors.get_message(&norm_type).is_none() && !has_route {
             return build_response(
                 STATUS_NOT_FOUND,
                 format!("Unknown Quasar protobuf message type '{norm_type}'"),
@@ -913,6 +914,9 @@ impl PublicGatewayRouter {
 
         let dyn_msg = match self.descriptors.decode_dynamic(&norm_type, &payload_any.value) {
             Ok(m) => m,
+            Err(_) if has_route => {
+                crate::services::quasar_b2_services::decode_wire_dynamic(&norm_type, &payload_any.value)
+            }
             Err(e) => {
                 return build_response(
                     STATUS_BAD_REQUEST,

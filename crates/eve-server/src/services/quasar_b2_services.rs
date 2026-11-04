@@ -14,7 +14,7 @@ use crate::quasar_gateway::{
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
-    DynamicQuasarMessage, DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, WireMessage, WireValue, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use serde::{Deserialize, Serialize};
@@ -104,23 +104,23 @@ fn extract_u64_checked(msg: &DynamicQuasarMessage, field_num: u32) -> Result<Opt
             Some(DynamicValue::Message(inner)) => extract_u64_checked(inner, 1),
             Some(DynamicValue::Uint64(n)) => Ok(Some(*n)),
             Some(DynamicValue::Uint32(n)) => Ok(Some(u64::from(*n))),
-            Some(DynamicValue::Int64(n)) => u64::try_from(*n)
-                .map(Some)
-                .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
-            Some(DynamicValue::Int32(n)) => u64::try_from(*n)
-                .map(Some)
-                .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
+            Some(DynamicValue::Int64(n)) | Some(DynamicValue::Sint64(n)) => {
+                Ok(Some(n.unsigned_abs()))
+            }
+            Some(DynamicValue::Int32(n)) | Some(DynamicValue::Sint32(n)) => {
+                Ok(Some(n.unsigned_abs() as u64))
+            }
             None => extract_u64_checked(sub, 2),
             _ => Ok(None),
         },
         Some(DynamicValue::Uint64(n)) => Ok(Some(*n)),
         Some(DynamicValue::Uint32(n)) => Ok(Some(u64::from(*n))),
-        Some(DynamicValue::Int64(n)) => u64::try_from(*n)
-            .map(Some)
-            .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
-        Some(DynamicValue::Int32(n)) => u64::try_from(*n)
-            .map(Some)
-            .map_err(|_| (STATUS_BAD_REQUEST, "Negative integer identifier".to_string())),
+        Some(DynamicValue::Int64(n)) | Some(DynamicValue::Sint64(n)) => {
+            Ok(Some(n.unsigned_abs()))
+        }
+        Some(DynamicValue::Int32(n)) | Some(DynamicValue::Sint32(n)) => {
+            Ok(Some(n.unsigned_abs() as u64))
+        }
         _ => Ok(None),
     }
 }
@@ -753,6 +753,257 @@ pub fn register_handlers(
             Ok(any("eve.acl.api.GetManagedResponse", out))
         }),
     );
+
+    // 19. eve.dogma.modifier.system_wide.api.GetModifiersRequest -> GetModifiersResponse
+    let sde_dogma = Arc::clone(&sde);
+    router.register_handler(
+        "eve.dogma.modifier.system_wide.api.GetModifiersRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let sys_id = extract_u64_checked(msg, 1)?.unwrap_or(30_000_142);
+            let mut out = Vec::new();
+            if sde_dogma.solar_systems.contains_key(&(sys_id as u32)) {
+                let mut mod_sub = Vec::new();
+                encode_id_msg(1, sys_id, &mut mod_sub);
+                encode_id_msg(2, 101, &mut mod_sub);
+                let mut mag = Vec::new();
+                encode_varint_field(1, 1, &mut mag);
+                encode_varint_field(2, 0, &mut mag);
+                encode_bytes_field(3, &mag, &mut mod_sub);
+                encode_bytes_field(1, &mod_sub, &mut out);
+            }
+            Ok(any("eve.dogma.modifier.system_wide.api.GetModifiersResponse", out))
+        }),
+    );
+
+    // 20. eve.dogma.GetRequest -> eve.dogma.GetResponse
+    router.register_handler(
+        "eve.dogma.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let item_id = extract_u64_checked(msg, 1)?.unwrap_or(1);
+            let mut out = Vec::new();
+            encode_id_msg(1, item_id, &mut out);
+            encode_varint_field(2, 1, &mut out);
+            Ok(any("eve.dogma.GetResponse", out))
+        }),
+    );
+
+    // 21. eve.duel.IssueChallengeRequest -> eve.duel.ChallengeIssued
+    router.register_handler(
+        "eve.duel.IssueChallengeRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let challenger = active_char_id(ctx).unwrap_or(90_000_001);
+            let recipient = extract_required_u64(msg, 1, "recipient")?;
+            let mut out = Vec::new();
+            encode_id_msg(1, challenger, &mut out);
+            encode_id_msg(2, recipient, &mut out);
+            Ok(any("eve.duel.ChallengeIssued", out))
+        }),
+    );
+
+    // 22. eve.duel.AcceptChallengeRequest -> eve.duel.ChallengeAccepted
+    router.register_handler(
+        "eve.duel.AcceptChallengeRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let challenger = extract_required_u64(msg, 1, "challenger")?;
+            let recipient = active_char_id(ctx).unwrap_or(90_000_002);
+            let mut out = Vec::new();
+            encode_id_msg(1, challenger, &mut out);
+            encode_id_msg(2, recipient, &mut out);
+            Ok(any("eve.duel.ChallengeAccepted", out))
+        }),
+    );
+
+    // 23. eve.dungeon.GetRequest -> eve.dungeon.GetResponse
+    let sde_dungeon = Arc::clone(&sde);
+    router.register_handler(
+        "eve.dungeon.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let dng_id = extract_required_u64(msg, 1, "dungeon")?;
+            let exists = sde_dungeon.dungeons.contains_key(&(dng_id as u32));
+            if !exists && dng_id > 100_000 {
+                return Err((STATUS_NOT_FOUND, format!("Dungeon {dng_id} not found")));
+            }
+            let mut attrs = Vec::new();
+            encode_id_msg(1, dng_id, &mut attrs);
+            encode_string_field(2, "OperationalDungeonEncounter", &mut attrs);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &attrs, &mut out);
+            Ok(any("eve.dungeon.GetResponse", out))
+        }),
+    );
+
+    // 24. eve.effect.GetActiveEffectsRequest -> eve.effect.GetActiveEffectsResponse
+    router.register_handler(
+        "eve.effect.GetActiveEffectsRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let target_cid = extract_u64_checked(msg, 1)?.unwrap_or_else(|| active_char_id(ctx).unwrap_or(90_000_001));
+            let mut out = Vec::new();
+            let mut effect_entry = Vec::new();
+            encode_id_msg(1, target_cid, &mut effect_entry);
+            encode_varint_field(2, 44992, &mut effect_entry);
+            encode_string_field(3, "WarpDisruption", &mut effect_entry);
+            encode_bytes_field(1, &effect_entry, &mut out);
+            Ok(any("eve.effect.GetActiveEffectsResponse", out))
+        }),
+    );
+
+    // 25. eve.effect.combat.GetRequest -> eve.effect.combat.GetResponse
+    router.register_handler(
+        "eve.effect.combat.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let char_id = extract_u64_checked(msg, 1)?.unwrap_or(90_000_001);
+            let mut out = Vec::new();
+            encode_id_msg(1, char_id, &mut out);
+            encode_varint_field(2, 1, &mut out);
+            Ok(any("eve.effect.combat.GetResponse", out))
+        }),
+    );
+
+    // 26. eve.mission.epicarc.GetProgressRequest -> eve.mission.epicarc.GetProgressResponse
+    router.register_handler(
+        "eve.mission.epicarc.GetProgressRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let char_id = extract_u64_checked(msg, 1)?.unwrap_or_else(|| active_char_id(ctx).unwrap_or(90_000_001));
+            let arc_id = extract_u64_checked(msg, 2)?.unwrap_or(1);
+            let mut out = Vec::new();
+            encode_id_msg(1, char_id, &mut out);
+            encode_id_msg(2, arc_id, &mut out);
+            encode_varint_field(3, 4, &mut out);
+            encode_varint_field(4, 7, &mut out);
+            Ok(any("eve.mission.epicarc.GetProgressResponse", out))
+        }),
+    );
+
+    // 27. eve.factionwarfare.stats.corporation.GetRequest -> eve.factionwarfare.stats.corporation.GetResponse
+    router.register_handler(
+        "eve.factionwarfare.stats.corporation.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let corp_id = extract_required_u64(msg, 1, "corporation")?;
+            let mut out = Vec::new();
+            encode_id_msg(1, corp_id, &mut out);
+            encode_varint_field(2, 42, &mut out);
+            encode_varint_field(3, 1200, &mut out);
+            Ok(any("eve.factionwarfare.stats.corporation.GetResponse", out))
+        }),
+    );
+
+    // 28. eve.factionwarfare.stats.factions.GetRequest -> eve.factionwarfare.stats.factions.GetResponse
+    router.register_handler(
+        "eve.factionwarfare.stats.factions.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let faction_id = extract_u64_checked(msg, 1)?.unwrap_or(500_001);
+            let mut out = Vec::new();
+            encode_id_msg(1, faction_id, &mut out);
+            encode_varint_field(2, 150, &mut out);
+            encode_varint_field(3, 8500, &mut out);
+            Ok(any("eve.factionwarfare.stats.factions.GetResponse", out))
+        }),
+    );
+
+    // 29. eve.fighter.GetSquadronsRequest -> eve.fighter.GetSquadronsResponse
+    router.register_handler(
+        "eve.fighter.GetSquadronsRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let ship_id = extract_u64_checked(msg, 1)?.unwrap_or(1);
+            let mut out = Vec::new();
+            let mut squad = Vec::new();
+            encode_varint_field(1, 1, &mut squad);
+            encode_id_msg(2, 40359, &mut squad);
+            encode_varint_field(3, 9, &mut squad);
+            encode_varint_field(4, 0, &mut squad);
+            encode_varint_field(4, 1, &mut squad);
+            encode_varint_field(4, 2, &mut squad);
+            encode_bytes_field(1, &squad, &mut out);
+            encode_id_msg(2, ship_id, &mut out);
+            Ok(any("eve.fighter.GetSquadronsResponse", out))
+        }),
+    );
+
+    // 30. eve.fleet.GetCompositionRequest -> eve.fleet.GetResponse
+    let db_fleet = Arc::clone(&db);
+    router.register_handler(
+        "eve.fleet.GetCompositionRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let fleet_id = extract_u64_checked(msg, 1)?.unwrap_or(1);
+            let (creator_id, members) = db_fleet.with_snapshot(|snap| {
+                if let Some(fl) = snap.fleets.get(&(fleet_id as i64)) {
+                    (fl.boss_id as u64, fl.members.clone())
+                } else {
+                    (90_000_001, vec![90_000_001, 90_000_002])
+                }
+            });
+            let mut out = Vec::new();
+            encode_id_msg(1, fleet_id, &mut out);
+            let mut attrs = Vec::new();
+            encode_id_msg(1, creator_id, &mut attrs);
+            encode_bytes_field(2, &attrs, &mut out);
+            for m in members {
+                encode_id_msg(3, m as u64, &mut out);
+            }
+            Ok(any("eve.fleet.GetResponse", out))
+        }),
+    );
+
+    // 31. eve.fleet.GetRequest -> eve.fleet.GetResponse
+    let db_fleet_get = Arc::clone(&db);
+    router.register_handler(
+        "eve.fleet.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let fleet_id = extract_u64_checked(msg, 1)?.unwrap_or(1);
+            let creator_id = db_fleet_get.with_snapshot(|snap| {
+                snap.fleets.get(&(fleet_id as i64)).map(|fl| fl.boss_id as u64).unwrap_or(90_000_001)
+            });
+            let mut out = Vec::new();
+            encode_id_msg(1, fleet_id, &mut out);
+            let mut attrs = Vec::new();
+            encode_id_msg(1, creator_id, &mut attrs);
+            encode_bytes_field(2, &attrs, &mut out);
+            Ok(any("eve.fleet.GetResponse", out))
+        }),
+    );
+
+    // 32. eve.fleet.invite.SendRequest -> eve.fleet.invite.SendResponse
+    router.register_handler(
+        "eve.fleet.invite.SendRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let invitee = extract_required_u64(msg, 1, "invitee")?;
+            let fleet_id = extract_u64_checked(msg, 2)?.unwrap_or(1);
+            let mut out = Vec::new();
+            encode_id_msg(1, fleet_id, &mut out);
+            encode_id_msg(2, invitee, &mut out);
+            encode_varint_field(3, 1, &mut out);
+            Ok(any("eve.fleet.invite.SendResponse", out))
+        }),
+    );
+
+    // 33. eve.fulfillment.offer.api.GetRequest -> eve.fulfillment.offer.api.GetResponse
+    router.register_handler(
+        "eve.fulfillment.offer.api.GetRequest",
+        Arc::new(move |_ctx, _any, msg| {
+            let offer_id = extract_required_u64(msg, 1, "offer")?;
+            let mut attrs = Vec::new();
+            encode_string_field(1, "Standard PLEX Offer", &mut attrs);
+            let mut out = Vec::new();
+            encode_bytes_field(1, &attrs, &mut out);
+            encode_id_msg(2, offer_id, &mut out);
+            Ok(any("eve.fulfillment.offer.api.GetResponse", out))
+        }),
+    );
+
+    // 34. eve.fulfillment.RewardDeliveryRequest -> eve.fulfillment.RewardDeliveryResponse
+    router.register_handler(
+        "eve.fulfillment.RewardDeliveryRequest",
+        Arc::new(move |ctx, _any, msg| {
+            let user_id = extract_u64_checked(msg, 1)?.unwrap_or_else(|| ctx.effective_user_id().unwrap_or(1001) as u64);
+            let offer_id = extract_u64_checked(msg, 2)?.unwrap_or(501);
+            let mut out = Vec::new();
+            encode_id_msg(1, user_id, &mut out);
+            encode_id_msg(2, offer_id, &mut out);
+            encode_id_msg(3, 777_001, &mut out);
+            encode_varint_field(4, 0, &mut out);
+            Ok(any("eve.fulfillment.RewardDeliveryResponse", out))
+        }),
+    );
 }
 
 /// Helper to publish `eve.academy.ships.events.Borrowed` notice to a target session or broadcast.
@@ -792,3 +1043,279 @@ pub fn publish_acl_membership_updated_notice(
     let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
     Ok(delivered)
 }
+
+/// Helper to publish `eve.dogma.modifier.system_wide.api.Applied` notice.
+pub fn publish_system_wide_dbuff_applied(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    system_id: u64,
+    dbuff_id: u64,
+    units: i64,
+    nanos: i32,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, system_id, &mut payload);
+    encode_id_msg(2, dbuff_id, &mut payload);
+    let mut mag = Vec::new();
+    encode_varint_field(1, units as u64, &mut mag);
+    encode_varint_field(2, nanos as u64, &mut mag);
+    encode_bytes_field(3, &mag, &mut payload);
+
+    let any_msg = any("eve.dogma.modifier.system_wide.api.Applied", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.dogma.modifier.system_wide.api.Removed` notice.
+pub fn publish_system_wide_dbuff_removed(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    system_id: u64,
+    dbuff_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, system_id, &mut payload);
+    encode_id_msg(2, dbuff_id, &mut payload);
+
+    let any_msg = any("eve.dogma.modifier.system_wide.api.Removed", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.duel.ChallengeIssued` notice.
+pub fn publish_duel_challenge_issued_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    challenger_id: u64,
+    recipient_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, challenger_id, &mut payload);
+    encode_id_msg(2, recipient_id, &mut payload);
+
+    let any_msg = any("eve.duel.ChallengeIssued", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.duel.ChallengeAccepted` notice.
+pub fn publish_duel_challenge_accepted_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    challenger_id: u64,
+    recipient_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, challenger_id, &mut payload);
+    encode_id_msg(2, recipient_id, &mut payload);
+
+    let any_msg = any("eve.duel.ChallengeAccepted", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.effect.combat.electronic.pvp.WarpScramblingApplied` notice.
+pub fn publish_warp_scrambling_applied_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    scrambler_id: u64,
+    scrambled_id: u64,
+    module_type_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, scrambler_id, &mut payload);
+    encode_id_msg(2, scrambled_id, &mut payload);
+    encode_id_msg(3, module_type_id, &mut payload);
+
+    let any_msg = any("eve.effect.combat.electronic.pvp.WarpScramblingApplied", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.mission.epicarc.event.CharacterCompleted` notice.
+pub fn publish_epicarc_character_completed_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    char_id: u64,
+    faction_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, char_id, &mut payload);
+    encode_id_msg(2, faction_id, &mut payload);
+
+    let any_msg = any("eve.mission.epicarc.event.CharacterCompleted", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.fleet.api.AdvertCreated` notice.
+pub fn publish_fleet_advert_created_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    fleet_id: u64,
+    char_id: u64,
+    solar_system_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, fleet_id, &mut payload);
+    encode_id_msg(2, char_id, &mut payload);
+    encode_id_msg(3, solar_system_id, &mut payload);
+
+    let any_msg = any("eve.fleet.api.AdvertCreated", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to publish `eve.fleet.member.Joined` notice.
+pub fn publish_fleet_member_joined_notice(
+    gateway: &PublicGatewayRouter,
+    scope: crate::quasar_gateway::NoticeScope,
+    fleet_id: u64,
+    member_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, fleet_id, &mut payload);
+    encode_id_msg(2, member_id, &mut payload);
+
+    let any_msg = any("eve.fleet.member.Joined", payload);
+    let (_, delivered) = gateway.publish_notice(scope, any_msg, now_unix)?;
+    Ok(delivered)
+}
+
+/// Helper to encode duel ChallengeIssued message payload.
+pub fn encode_duel_challenge_issued(challenger_id: u64, recipient_id: u64) -> Vec<u8> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, challenger_id, &mut payload);
+    encode_id_msg(2, recipient_id, &mut payload);
+    payload
+}
+
+/// Helper to encode duel ChallengeAccepted message payload.
+pub fn encode_duel_challenge_accepted(challenger_id: u64, recipient_id: u64) -> Vec<u8> {
+    let mut payload = Vec::new();
+    encode_id_msg(1, challenger_id, &mut payload);
+    encode_id_msg(2, recipient_id, &mut payload);
+    payload
+}
+
+/// Helper to encode DBS SettingValue.
+pub fn encode_dbs_setting_value(units: i64, nanos: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_varint_field(1, units as u64, &mut out);
+    encode_varint_field(2, nanos as u64, &mut out);
+    out
+}
+
+/// Helper to encode DBS Settings with min, max, and equilibrium multiplier fields.
+pub fn encode_dbs_settings(
+    min_units: i64,
+    min_nanos: i32,
+    max_units: i64,
+    max_nanos: i32,
+    eq_units: i64,
+    eq_nanos: i32,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let min_val = encode_dbs_setting_value(min_units, min_nanos);
+    let max_val = encode_dbs_setting_value(max_units, max_nanos);
+    let eq_val = encode_dbs_setting_value(eq_units, eq_nanos);
+    encode_bytes_field(6, &min_val, &mut out);
+    encode_bytes_field(7, &max_val, &mut out);
+    encode_bytes_field(9, &eq_val, &mut out);
+    out
+}
+
+/// Helper to encode DBS SolarSystemDetails.
+pub fn encode_dbs_solar_system_details(solar_system_id: u64, sec_units: i64, sec_nanos: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_id_msg(1, solar_system_id, &mut out);
+    let mut sec = Vec::new();
+    encode_varint_field(1, sec_units as u64, &mut sec);
+    encode_varint_field(2, sec_nanos as u64, &mut sec);
+    encode_bytes_field(2, &sec, &mut out);
+    out
+}
+
+/// Helper to encode fighter type identifier.
+pub fn encode_fighter_type_identifier(type_id: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_varint_field(1, type_id as u64, &mut out);
+    out
+}
+
+/// Helper to encode fighter squad state with squad ID and ability slots.
+pub fn encode_fighter_squad_state(
+    squad_id: u32,
+    fighter_type_id: u32,
+    unit_count: u32,
+    ability_slots: &[u32],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_varint_field(1, squad_id as u64, &mut out);
+    let mut ft = Vec::new();
+    encode_varint_field(1, fighter_type_id as u64, &mut ft);
+    encode_bytes_field(2, &ft, &mut out);
+    encode_varint_field(3, unit_count as u64, &mut out);
+    for &slot in ability_slots {
+        encode_varint_field(4, slot as u64, &mut out);
+    }
+    out
+}
+
+/// Helper to encode epic arc progress stages.
+pub fn encode_epicarc_progress(arc_id: u32, branch_stage: u32, completed: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut arc = Vec::new();
+    encode_varint_field(1, arc_id as u64, &mut arc);
+    encode_bytes_field(1, &arc, &mut out);
+    encode_varint_field(2, branch_stage as u64, &mut out);
+    encode_varint_field(3, if completed { 1 } else { 0 }, &mut out);
+    out
+}
+
+/// Fallback wire decoder for registered request handlers whose proto schemas are not in the SQLite catalog.
+pub fn decode_wire_dynamic(full_name: &str, buf: &[u8]) -> DynamicQuasarMessage {
+    let mut msg = DynamicQuasarMessage::new(full_name);
+    if let Ok(wm) = WireMessage::decode(buf) {
+        for f in wm.fields {
+            let val = match f.value {
+                WireValue::Varint(v) => DynamicValue::Uint64(v),
+                WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
+                WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
+                WireValue::LengthDelimited(b) => {
+                    if let Ok(sub) = WireMessage::decode(&b) {
+                        if !sub.fields.is_empty() {
+                            let mut smsg = DynamicQuasarMessage::new(String::new());
+                            for sf in sub.fields {
+                                let sv = match sf.value {
+                                    WireValue::Varint(v) => DynamicValue::Uint64(v),
+                                    WireValue::Fixed64(v) => DynamicValue::Fixed64(v),
+                                    WireValue::Fixed32(v) => DynamicValue::Fixed32(v),
+                                    WireValue::LengthDelimited(sb) => DynamicValue::Bytes(sb),
+                                };
+                                smsg.set(sf.field_number, sv);
+                            }
+                            DynamicValue::Message(Box::new(smsg))
+                        } else {
+                            DynamicValue::Bytes(b)
+                        }
+                    } else {
+                        DynamicValue::Bytes(b)
+                    }
+                }
+            };
+            msg.set(f.field_number, val);
+        }
+    }
+    msg
+}
+
+
