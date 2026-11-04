@@ -663,3 +663,4 @@ mod quasar_id_through_loyaltypoints;
 mod quasar_mail_through_notification;
 mod quasar_skills_solarsystems_and_structures;
 mod quasar_vendors_war_and_serverops;
+mod quasar_debug_race_and_ships;

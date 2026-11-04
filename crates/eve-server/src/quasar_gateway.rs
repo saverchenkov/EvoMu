@@ -456,6 +456,7 @@ impl PublicGatewayRouter {
         crate::services::quasar_b29_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_b22_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
         crate::services::quasar_vendors_and_war_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
+        crate::services::quasar_debug_race_ship_services::register_handlers(self, Arc::clone(&db), Arc::clone(&sde));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.
@@ -476,6 +477,9 @@ impl PublicGatewayRouter {
                 | "eve.region.GetRequest"
                 | "eve.region.GetAllRequest"
                 | "eve.region.SearchRequest"
+                | "eve_public.debug.Request"
+                | "eve.quasar.admin.IsAuthorizedRequest"
+                | "eve.race.GetAllRequest"
                 | "eve.faction.SearchRequest"
                 | "eve.faction.api.GetRequest"
                 | "eve.universe.navigation.GetShortestGateJumpCountRequest"

@@ -124,6 +124,7 @@ pub mod quasar_entitlement_ledger;
 pub mod quasar_auth_user;
 pub mod quasar_b22_services;
 pub mod quasar_b29_services;
+pub mod quasar_debug_race_ship_services;
 pub mod quasar_campaign_definitions;
 pub mod quasar_campaign_handlers;
 pub mod quasar_campaign_objective_handlers;

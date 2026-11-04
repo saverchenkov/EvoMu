@@ -247,7 +247,7 @@ pub fn get_identifier_or_int(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> 
     get_int_field(dyn_msg, field_num)
 }
 
-/// Helper to read a string field from a dynamic message.
+/// Helper to read a string field directly or from a nested query/wrapper message.
 pub fn get_string_field(msg: &DynamicQuasarMessage, field_num: u32) -> Option<String> {
     match msg.get(field_num) {
         Some(DynamicValue::String(s)) => Some(s.clone()),
