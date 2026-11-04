@@ -969,9 +969,7 @@ pub(super) fn handle_corp_contacts_and_labels(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, eve_proto::BridgeRpcError>> {
-    use super::fleet_social_persistence::{
-        label_ids_from_mask, label_mask_from_ids, sync_corp_contacts_esi,
-    };
+    use super::fleet_social_persistence::{label_ids_from_mask, label_mask_from_ids};
     use eve_proto::BridgeRpcError;
     if !has_diplomat {
         return Some(Err(BridgeRpcError {
@@ -991,11 +989,15 @@ pub(super) fn handle_corp_contacts_and_labels(
                 ctx.db.try_with_mut_snapshot(|snap| {
                     if method == "AddCorporateContact" {
                         let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                        let is_faction = (500_000..600_000).contains(&contact_id)
+                            || u32::try_from(contact_id)
+                                .is_ok_and(|fid| ctx.sde.factions.contains_key(&fid));
                         let valid_owner = contact_id > 0
                             && (snap.characters.contains_key(&contact_id)
                                 || snap.corporations.contains_key(&contact_id)
                                 || snap.alliances.contains_key(&contact_id)
-                                || ctx.sde.npc_corporations.contains_key(&contact_id));
+                                || ctx.sde.npc_corporations.contains_key(&contact_id)
+                                || is_faction);
                         if !valid_owner {
                             return Err(BridgeRpcError {
                                 code: "OwnerNotFound".into(),
@@ -1008,6 +1010,8 @@ pub(super) fn handle_corp_contacts_and_labels(
                             || ctx.sde.npc_corporations.contains_key(&contact_id)
                         {
                             "corporation"
+                        } else if is_faction {
+                            "faction"
                         } else {
                             "character"
                         };
@@ -1094,7 +1098,6 @@ pub(super) fn handle_corp_contacts_and_labels(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            sync_corp_contacts_esi(ctx, corp_id);
             let mut updates_rep = Vec::new();
             for &(cid, st, mask) in &updated {
                 ctx.notify(
@@ -1145,7 +1148,6 @@ pub(super) fn handle_corp_contacts_and_labels(
             if let Err(e) = res {
                 return Some(Err(e));
             }
-            sync_corp_contacts_esi(ctx, corp_id);
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(lid)),
                 ("deleted", PyRep::Bool(true)),
@@ -1212,7 +1214,6 @@ pub(super) fn handle_corp_contacts_and_labels(
                 Ok(u) => u,
                 Err(e) => return Some(Err(e)),
             };
-            sync_corp_contacts_esi(ctx, corp_id);
             let updates_rep: Vec<PyRep> = updated
                 .into_iter()
                 .map(|(cid, st, mask)| {

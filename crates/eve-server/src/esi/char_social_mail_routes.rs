@@ -319,6 +319,18 @@ pub fn dispatch_char_social_mail_route(
                 Ok(v) => v,
                 Err(e) => return Some(e),
             };
+            let page: usize = match query_params.get("page") {
+                Some(p) => match p.parse::<usize>() {
+                    Ok(v) if v >= 1 => v,
+                    _ => {
+                        return Some(RouteExecutionResult::error(
+                            400,
+                            format!("Invalid page parameter '{p}': must be an integer >= 1"),
+                        ));
+                    }
+                },
+                None => 1,
+            };
             Some(ctx.db.with_snapshot(|snap| {
                 if !snap.corporations.contains_key(&corp_id) {
                     return RouteExecutionResult::error(
@@ -347,7 +359,12 @@ pub fn dispatch_char_social_mail_route(
                         obj
                     })
                     .collect();
-                RouteExecutionResult::ok_json(json!(out), 300)
+                match crate::esi::sample_routes::paginate_slice(&out, page, 1000) {
+                    Ok((page_rows, total_pages)) => {
+                        RouteExecutionResult::ok_paginated_json(json!(page_rows), 300, total_pages)
+                    }
+                    Err(e) => e,
+                }
             }))
         }
 
@@ -817,7 +834,7 @@ pub fn dispatch_char_social_mail_route(
                 let by_id: std::collections::BTreeMap<i64, String> = snap
                     .mailing_lists
                     .values()
-                    .filter(|ml| ml.members.contains_key(&char_id) || ml.owner_id == char_id)
+                    .filter(|ml| ml.members.contains_key(&char_id))
                     .map(|ml| (ml.list_id, ml.name.clone()))
                     .collect();
                 let out: Vec<Value> = by_id

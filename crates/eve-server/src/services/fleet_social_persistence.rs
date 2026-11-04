@@ -104,17 +104,9 @@ pub fn sync_char_contacts_to_db(
             label_ids: e.label_ids,
         })
         .collect();
-    let labels: Vec<(i64, String)> = ctx
-        .esi_state
-        .char_contact_labels
-        .read()
-        .ok()
-        .and_then(|g| g.get(&char_id).cloned())
-        .unwrap_or_default();
     let contacts_for_db = contacts.clone();
     if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
         snap.char_contacts.insert(char_id, contacts_for_db);
-        snap.char_contact_labels.insert(char_id, labels);
         Ok::<_, eve_proto::BridgeRpcError>(())
     }) {
         eve_db::record_last_wal_error(&e.message);
@@ -327,57 +319,27 @@ pub fn is_blocked_by(ctx: &ServerContext, target_char_id: i64, sender_char_id: i
     })
 }
 
-pub(crate) fn sync_corp_contacts_esi(ctx: &ServerContext, corp_id: i64) {
-    let (contacts, labels) = ctx.db.with_snapshot(|snap| {
-        (
-            snap.corp_contacts.get(&corp_id).cloned().unwrap_or_default(),
-            snap.corp_contact_labels
-                .get(&corp_id)
-                .cloned()
-                .unwrap_or_default(),
-        )
-    });
-    if let Ok(mut esi_c) = ctx.esi_state.corp_contacts.write() {
-        esi_c.insert(
-            corp_id,
-            contacts
-                .into_iter()
-                .map(|c| EsiContactEntry {
-                    contact_id: c.contact_id,
-                    contact_type: c.contact_type,
-                    standing: c.standing,
-                    is_watched: c.is_watched,
-                    is_blocked: c.is_blocked,
-                    label_ids: c.label_ids,
-                })
-                .collect(),
-        );
-    }
-    if let Ok(mut esi_l) = ctx.esi_state.corp_contact_labels.write() {
-        esi_l.insert(
-            corp_id,
-            labels.into_iter().map(|(id, name, _)| (id, name)).collect(),
-        );
-    }
-}
-
 pub(crate) fn ensure_social_extras_mailing_lists_seeded(ctx: &ServerContext) {
     let persisted_lists = ctx.db.with_snapshot(|snap| snap.mailing_lists.clone());
     let mut se = ctx.social_extras.lock().unwrap();
+    se.mailing_lists.clear();
     for (&ml_id, ml) in &persisted_lists {
-        se.next_id = se.next_id.max(ml_id + 1);
-        se.mailing_lists.entry(ml_id).or_insert_with(|| MailingListState {
-            list_id: ml.list_id,
-            name: ml.name.clone(),
-            owner_id: ml.owner_id,
-            default_access: ml.default_access,
-            default_role: ml.default_role,
-            cost: ml.cost,
-            members: ml.members.clone(),
-            entity_access: ml.entity_access.clone(),
-            welcome_mail: ml.welcome_mail.clone(),
-            mail_ids: ml.mail_ids.clone(),
-        });
+        se.next_id = se.next_id.max(ml_id);
+        se.mailing_lists.insert(
+            ml_id,
+            MailingListState {
+                list_id: ml.list_id,
+                name: ml.name.clone(),
+                owner_id: ml.owner_id,
+                default_access: ml.default_access,
+                default_role: ml.default_role,
+                cost: ml.cost,
+                members: ml.members.clone(),
+                entity_access: ml.entity_access.clone(),
+                welcome_mail: ml.welcome_mail.clone(),
+                mail_ids: ml.mail_ids.clone(),
+            },
+        );
     }
 }
 
@@ -405,17 +367,6 @@ pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
             })
             .collect()
     };
-    if let Ok(mut esi_lists) = ctx.esi_state.mail_lists.write() {
-        esi_lists.clear();
-        for ml in lists.values() {
-            for &member_id in ml.members.keys() {
-                esi_lists
-                    .entry(member_id)
-                    .or_default()
-                    .push((ml.list_id, ml.name.clone()));
-            }
-        }
-    }
     ctx.db.with_mut_snapshot(|snap| {
         snap.mailing_lists = lists;
     });
@@ -685,12 +636,6 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 esi_cc.insert(id, to_esi(list));
             }
         }
-        if let Ok(mut esi_cl) = ctx.esi_state.char_contact_labels.write() {
-            esi_cl.clear();
-            for (&id, labels) in &snap.char_contact_labels {
-                esi_cl.insert(id, labels.clone());
-            }
-        }
         if let Ok(mut notif_map) = ctx.esi_state.contact_notifications.write() {
             notif_map.clear();
             for (&cid, list) in &snap.char_contact_notifications {
@@ -708,30 +653,6 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
                     });
                 }
                 notif_map.insert(cid, converted);
-            }
-        }
-        if let Ok(mut esi_corpc) = ctx.esi_state.corp_contacts.write() {
-            esi_corpc.clear();
-            for (&id, list) in &snap.corp_contacts {
-                esi_corpc.insert(id, to_esi(list));
-            }
-        }
-        if let Ok(mut esi_corpl) = ctx.esi_state.corp_contact_labels.write() {
-            esi_corpl.clear();
-            for (&id, labels) in &snap.corp_contact_labels {
-                esi_corpl.insert(id, labels.iter().map(|(lid, n, _)| (*lid, n.clone())).collect());
-            }
-        }
-        if let Ok(mut esi_ac) = ctx.esi_state.alliance_contacts.write() {
-            esi_ac.clear();
-            for (&id, list) in &snap.alliance_contacts {
-                esi_ac.insert(id, to_esi(list));
-            }
-        }
-        if let Ok(mut esi_al) = ctx.esi_state.alliance_contact_labels.write() {
-            esi_al.clear();
-            for (&id, labels) in &snap.alliance_contact_labels {
-                esi_al.insert(id, labels.clone());
             }
         }
         if let Ok(mut names) = ctx.esi_state.custom_item_names.write() {
@@ -781,16 +702,6 @@ pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
             }
             meta.labels = lbls.clone();
             ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
-        }
-        if let Ok(mut esi_lists) = ctx.esi_state.mail_lists.write() {
-            for ml in snap.mailing_lists.values() {
-                for &member_id in ml.members.keys() {
-                    let v = esi_lists.entry(member_id).or_default();
-                    if !v.iter().any(|(id, _)| *id == ml.list_id) {
-                        v.push((ml.list_id, ml.name.clone()));
-                    }
-                }
-            }
         }
         if let (Ok(mut esi_evs), Ok(mut esi_resps)) = (
             ctx.esi_state.calendar_events.write(),

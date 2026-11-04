@@ -13,7 +13,7 @@ use super::fleet_social_corps::{handle_insert_vote_case, read_corp_gov, with_cor
 use super::fleet_social_notify::handle_corp_contacts_and_labels;
 use crate::services::space_entity_ops::{handle_corp_bulletins, handle_corp_medals};
 use super::fleet_social_persistence::{
-    eval_vote_case_winner, handle_vote_queries, label_mask_from_ids, sync_corp_contacts_esi,
+    eval_vote_case_winner, handle_vote_queries, label_mask_from_ids,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1279,21 +1279,21 @@ pub(super) fn handle_corp_gov(
             if !has_diplomat {
                 return deny_role("Removing corporate contacts requires Diplomat or Director role");
             }
-            let cid = match args.first() {
-                Some(PyRep::Integer(id)) => *id,
+            let cids: Vec<i64> = match args.first() {
+                Some(PyRep::Integer(id)) => vec![*id],
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-                    items.first().and_then(|v| v.as_i64()).unwrap_or(0)
+                    items.iter().filter_map(|v| v.as_i64()).collect()
                 }
-                _ => 0,
+                _ => Vec::new(),
             };
+            let first_cid = cids.first().copied().unwrap_or(0);
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(list) = snap.corp_contacts.get_mut(&corp_id) {
-                    list.retain(|c| c.contact_id != cid);
+                    list.retain(|c| !cids.contains(&c.contact_id));
                 }
             });
-            sync_corp_contacts_esi(ctx, corp_id);
             Some(Ok(PyRep::keyval([
-                ("contactID", PyRep::Integer(cid)),
+                ("contactID", PyRep::Integer(first_cid)),
                 ("removed", PyRep::Bool(true)),
             ])))
         }
@@ -1351,7 +1351,6 @@ pub(super) fn handle_corp_gov(
                 labels.sort_by_key(|(id, _, _)| *id);
                 (lid, name, color)
             });
-            sync_corp_contacts_esi(ctx, corp_id);
             Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid)), ("name", PyRep::String(name)), ("color", PyRep::Integer(color as i64))])))
         }
 

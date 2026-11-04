@@ -506,17 +506,18 @@ pub fn handle_contacts(
                     }
                 }
             }
-            let mut label_rows = Vec::new();
-            if let Ok(lguard) = ctx.esi_state.char_contact_labels.read() {
-                if let Some(labels) = lguard.get(&char_id) {
-                    for (lid, lname) in labels {
-                        label_rows.push(vec![
-                            PyRep::Integer(*lid),
-                            PyRep::String(lname.clone()),
-                        ]);
-                    }
-                }
-            }
+            let label_rows = ctx.db.with_snapshot(|snap| {
+                let mut labels = snap
+                    .char_contact_labels
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                labels.sort_by_key(|(lid, _)| *lid);
+                labels
+                    .into_iter()
+                    .map(|(lid, lname)| vec![PyRep::Integer(lid), PyRep::String(lname)])
+                    .collect()
+            });
             Some(Ok(PyRep::keyval([
                 (
                     "addresses",
@@ -882,41 +883,30 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            let Some(name) = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
+            let Some(name) = args.first().and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidLabelName".into(),
                     message: "CreateLabel requires a non-empty label name".into(),
                 }));
             };
-            let mut guard = match ctx.esi_state.char_contact_labels.write() {
-                Ok(g) => g,
-                Err(_) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "LockPoisoned".into(),
-                        message: "Contact labels lock poisoned".into(),
-                    }))
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let labels = snap.char_contact_labels.entry(char_id).or_default();
+                let used_mask = labels.iter().fold(0i64, |acc, (lid, _)| acc | *lid);
+                let mut label_id = 1i64;
+                while (used_mask & label_id) != 0 && label_id < (1i64 << 60) {
+                    label_id <<= 1;
                 }
-            };
-            let labels = guard.entry(char_id).or_default();
-            let used_mask = labels.iter().fold(0i64, |acc, (lid, _)| acc | *lid);
-            let mut label_id = 1i64;
-            while (used_mask & label_id) != 0 && label_id < (1i64 << 60) {
-                label_id <<= 1;
+                labels.push((label_id, name.to_string()));
+                labels.sort_by_key(|(lid, _)| *lid);
+                Ok::<i64, BridgeRpcError>(label_id)
+            });
+            match res {
+                Ok(label_id) => Some(Ok(PyRep::Integer(label_id))),
+                Err(e) => {
+                    eve_db::record_last_wal_error(&e.message);
+                    Some(Err(e))
+                }
             }
-            labels.push((label_id, name.to_string()));
-            drop(guard);
-            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
-                return Some(Err(e));
-            }
-            Some(Ok(PyRep::Integer(label_id)))
         }
 
         ("charMgr", "GetLabels") => {
@@ -924,23 +914,26 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
-            let mut dict_entries = Vec::new();
-            if let Ok(guard) = ctx.esi_state.char_contact_labels.read() {
-                if let Some(labels) = guard.get(&char_id) {
-                    for (lid, lname) in labels {
-                        dict_entries.push((
-                            PyRep::Integer(*lid),
+            let dict_entries = ctx.db.with_snapshot(|snap| {
+                let mut labels = snap
+                    .char_contact_labels
+                    .get(&char_id)
+                    .cloned()
+                    .unwrap_or_default();
+                labels.sort_by_key(|(lid, _)| *lid);
+                labels
+                    .into_iter()
+                    .map(|(lid, lname)| {
+                        (
+                            PyRep::Integer(lid),
                             PyRep::keyval([
-                                ("labelID", PyRep::Integer(*lid)),
-                                ("name", PyRep::String(lname.clone())),
+                                ("labelID", PyRep::Integer(lid)),
+                                ("name", PyRep::String(lname)),
                             ]),
-                        ));
-                    }
-                }
-            }
+                        )
+                    })
+                    .collect()
+            });
             Some(Ok(PyRep::Dict(dict_entries)))
         }
 
@@ -949,9 +942,6 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
@@ -969,22 +959,23 @@ pub fn handle_contacts(
                     message: "EditLabel requires a non-empty label name".into(),
                 }));
             };
-            let mut found = false;
-            if let Ok(mut guard) = ctx.esi_state.char_contact_labels.write() {
-                if let Some(labels) = guard.get_mut(&char_id) {
-                    if let Some((_, lname)) = labels.iter_mut().find(|(lid, _)| *lid == label_id) {
-                        *lname = new_name.to_string();
-                        found = true;
-                    }
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let found = snap
+                    .char_contact_labels
+                    .get_mut(&char_id)
+                    .and_then(|labels| labels.iter_mut().find(|(lid, _)| *lid == label_id))
+                    .map(|(_, lname)| *lname = new_name.to_string())
+                    .is_some();
+                if !found {
+                    return Err(BridgeRpcError {
+                        code: "LabelNotFound".into(),
+                        message: format!("Contact label {label_id} not found"),
+                    });
                 }
-            }
-            if !found {
-                return Some(Err(BridgeRpcError {
-                    code: "LabelNotFound".into(),
-                    message: format!("Contact label {label_id} not found"),
-                }));
-            }
-            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
+                Ok(())
+            });
+            if let Err(e) = res {
+                eve_db::record_last_wal_error(&e.message);
                 return Some(Err(e));
             }
             Some(Ok(PyRep::keyval([
@@ -998,23 +989,33 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let _ = ctx
-                .db
-                .with_snapshot(|snap| snap.characters.contains_key(&char_id));
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "DeleteLabel requires labelID".into(),
                 }));
             };
-            let mut removed = false;
-            if let Ok(mut guard) = ctx.esi_state.char_contact_labels.write() {
-                if let Some(labels) = guard.get_mut(&char_id) {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut removed = false;
+                if let Some(labels) = snap.char_contact_labels.get_mut(&char_id) {
                     let before = labels.len();
                     labels.retain(|(lid, _)| *lid != label_id);
                     removed = labels.len() < before;
                 }
-            }
+                if let Some(list) = snap.char_contacts.get_mut(&char_id) {
+                    for entry in list.iter_mut() {
+                        entry.label_ids.retain(|&id| id != label_id);
+                    }
+                }
+                Ok::<bool, BridgeRpcError>(removed)
+            });
+            let removed = match res {
+                Ok(r) => r,
+                Err(e) => {
+                    eve_db::record_last_wal_error(&e.message);
+                    return Some(Err(e));
+                }
+            };
             if let Ok(mut cguard) = ctx.esi_state.char_contacts.write() {
                 if let Some(list) = cguard.get_mut(&char_id) {
                     for entry in list.iter_mut() {
@@ -1022,8 +1023,12 @@ pub fn handle_contacts(
                     }
                 }
             }
-            if let Err(e) = sync_char_contacts_to_db(ctx, char_id) {
-                return Some(Err(e));
+            if let Ok(mut se) = ctx.social_extras.lock() {
+                if let Some(cmap) = se.contacts.get_mut(&char_id) {
+                    for (_, _, mask) in cmap.values_mut() {
+                        *mask &= !(label_id as u64);
+                    }
+                }
             }
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(label_id)),

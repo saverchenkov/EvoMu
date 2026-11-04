@@ -53,15 +53,14 @@ pub use fleet_social_corp_tail::{
 
 pub const AU_IN_METERS: f64 = 149_597_870_700.0;
 
-/// Character IDs currently in mailing list `list_id` (per-`ServerContext` `mailingListsMgr` state).
+/// Character IDs currently in mailing list `list_id` (backed by `WorldStateSnapshot::mailing_lists`).
 pub fn mailing_list_member_ids(ctx: &ServerContext, list_id: i64) -> Vec<i64> {
-    ctx.social_extras
-        .lock()
-        .unwrap()
-        .mailing_lists
-        .get(&list_id)
-        .map(|ml| ml.members.keys().copied().collect())
-        .unwrap_or_default()
+    ctx.db.with_snapshot(|snap| {
+        snap.mailing_lists
+            .get(&list_id)
+            .map(|ml| ml.members.keys().copied().collect())
+            .unwrap_or_default()
+    })
 }
 
 pub fn get_trashed_mails(ctx: &ServerContext) -> std::collections::HashSet<(i64, i64)> {

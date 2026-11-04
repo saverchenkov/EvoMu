@@ -68,8 +68,12 @@ pub struct EsiRuntimeState {
     pub deleted_mails: RwLock<HashSet<(i64, i64)>>,
     pub mail_meta: RwLock<HashMap<(i64, i64), EsiMailMeta>>,
     pub mail_labels: RwLock<HashMap<i64, Vec<EsiMailLabel>>>,
+    /// Legacy empty map retained only for integration test `.clear()` compatibility;
+    /// mailing lists are persisted canonically in `WorldStateSnapshot::mailing_lists`.
     pub mail_lists: RwLock<HashMap<i64, Vec<(i64, String)>>>,
     pub char_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
+    /// Legacy empty maps retained only for integration test `.clear()` compatibility;
+    /// contact labels and corp/alliance contacts live canonically in `WorldStateSnapshot`.
     pub char_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,
     pub corp_contacts: RwLock<HashMap<i64, Vec<EsiContactEntry>>>,
     pub corp_contact_labels: RwLock<HashMap<i64, Vec<(i64, String)>>>,

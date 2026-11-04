@@ -40,36 +40,6 @@ fn label_mask_from_ids(ids: &[i64]) -> u64 {
     ids.iter().fold(0u64, |acc, &id| acc | (id as u64))
 }
 
-fn sync_alliance_contacts_esi(ctx: &ServerContext, aid: i64) {
-    let (contacts, labels) = ctx.db.with_snapshot(|snap| {
-        (
-            snap.alliance_contacts.get(&aid).cloned().unwrap_or_default(),
-            snap.alliance_contact_labels
-                .get(&aid)
-                .cloned()
-                .unwrap_or_default(),
-        )
-    });
-    if let Ok(mut esi_c) = ctx.esi_state.alliance_contacts.write() {
-        esi_c.insert(
-            aid,
-            contacts
-                .into_iter()
-                .map(|c| crate::esi::runtime_state::EsiContactEntry {
-                    contact_id: c.contact_id,
-                    contact_type: c.contact_type,
-                    standing: c.standing,
-                    is_watched: c.is_watched,
-                    is_blocked: c.is_blocked,
-                    label_ids: c.label_ids,
-                })
-                .collect(),
-        );
-    }
-    if let Ok(mut esi_l) = ctx.esi_state.alliance_contact_labels.write() {
-        esi_l.insert(aid, labels);
-    }
-}
 fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let corp_id = session.corporation_id.unwrap_or(0);
@@ -828,7 +798,6 @@ pub async fn handle(
                 list.sort_by_key(|c| c.contact_id);
                 prev
             });
-            sync_alliance_contacts_esi(ctx, aid);
             let (old_st, old_mask) = prev.map_or((PyRep::None, PyRep::None), |(s, m)| (PyRep::Real(s), PyRep::Integer(m as i64)));
             let rel_change = PyRep::Dict(vec![
                 (PyRep::String(("toID").into()), PyRep::Tuple(vec![prev.map_or(PyRep::None, |_| PyRep::Integer(contact_id)), PyRep::Integer(contact_id)])),
@@ -879,7 +848,6 @@ pub async fn handle(
                 }
                 out
             });
-            sync_alliance_contacts_esi(ctx, aid);
             for (cid, prev) in removed_contacts {
                 let old_st = prev.map_or(PyRep::None, |(s, _)| PyRep::Real(s));
                 let rel_change = PyRep::Dict(vec![
@@ -957,7 +925,6 @@ pub async fn handle(
                 labels.sort_by_key(|(id, _)| *id);
                 (lid, name, color)
             });
-            sync_alliance_contacts_esi(ctx, aid);
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(lid)),
                 ("name", PyRep::String(name)),
@@ -994,9 +961,13 @@ pub async fn handle(
         | ("allianceRegistry", "RemoveLabels") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
-            let (lid, contact_ids): (i64, Vec<i64>) = match args.first() {
-                Some(PyRep::List(items) | PyRep::Tuple(items)) => (
+            let (lid, contact_ids): (i64, Vec<i64>) = match (args.first(), args.get(1)) {
+                (Some(PyRep::List(items) | PyRep::Tuple(items)), _) => (
                     args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
+                    items.iter().filter_map(|v| v.as_i64()).collect(),
+                ),
+                (Some(a0), Some(PyRep::List(items) | PyRep::Tuple(items))) => (
+                    a0.as_i64().unwrap_or(1),
                     items.iter().filter_map(|v| v.as_i64()).collect(),
                 ),
                 _ => {
@@ -1045,7 +1016,6 @@ pub async fn handle(
                     contacts.sort_by_key(|c| c.contact_id);
                 }
             });
-            sync_alliance_contacts_esi(ctx, aid);
             Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid))])))
         }
 
