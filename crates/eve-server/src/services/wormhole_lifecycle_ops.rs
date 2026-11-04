@@ -498,7 +498,7 @@ pub fn pick_destination_system_for_target_class_excluding(
         if source_sys_id > 0 {
             source_sys_id
         } else {
-            sde.solar_systems.keys().copied().find(|&id| id < 31_000_000).unwrap_or(30_000_142)
+            sde.solar_systems.keys().copied().find(|&id| id < 31_000_000).unwrap_or(0)
         }
     } else {
         let mix = (source_sys_id as usize)

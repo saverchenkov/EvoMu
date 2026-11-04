@@ -185,7 +185,7 @@ pub fn handle(
                 .or_else(|| {
                     ctx.db.get_characters_for_user(user_id).first().map(|c| c.solar_system_id)
                 })
-                .unwrap_or(30000142);
+                .unwrap_or(0);
             Some(Ok(PyRep::List(vec![
                 PyRep::Integer(primary_sys as i64),
                 PyRep::Integer(30000144),
