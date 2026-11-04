@@ -903,10 +903,12 @@ impl ShipFittingEngine {
                 11..=18 => 2, // Low
                 _ => return Err(format!("Module on flag {} is not in a heat rack", m.flag_id)),
             };
-            let mod_state = self.build_effective_module_state(module_id, m.type_id, true, sde);
-            let heat_dmg = mod_state.get_attribute(1211, sde);
-            let eff_heat_dmg = if heat_dmg > 0.0 { heat_dmg } else { 5.0 };
-            (m.flag_id, r_idx, eff_heat_dmg)
+            let base_heat_dmg = sde
+                .types
+                .get(&m.type_id)
+                .and_then(|t| t.default_attributes.get(&1211).copied())
+                .unwrap_or(5.0);
+            (m.flag_id, r_idx, base_heat_dmg)
         };
 
         // 1. Advance rack heat

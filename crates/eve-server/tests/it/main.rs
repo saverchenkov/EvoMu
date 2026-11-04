@@ -638,6 +638,7 @@ mod structures_upwell_and_acl;
 // mod corporation_governance_and_shares;
 mod exploration_hacking_and_minigame;
 mod wormhole_phenomena_and_lifecycle;
+mod dogma_heat_ewar_and_phenomena;
 
 mod sovereignty_skyhooks_and_mercenary_dens;
 mod npc_navy_haulers_excavators;

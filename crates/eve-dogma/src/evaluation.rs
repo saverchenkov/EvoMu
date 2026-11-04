@@ -855,7 +855,7 @@ impl ShipFittingEngine {
                     }
                     // Active Siege (`6582`) and Bastion (`6658`) grant full EWAR and remote assistance/repair immunity (`feat:dogma.ewar-resistance-attributes`).
                     if is_active && matches!(eid, 6582 | 6658) {
-                        for resist_attr in [2112_u16, 2113, 2114, 2115, 2116, 2135] {
+                        for resist_attr in [2045_u16, 2112, 2113, 2114, 2115, 2116, 2135] {
                             ctx.ship.add_modifier(AttributeModifier {
                                 source_item_id: m.item_id,
                                 effect_id: Some(eid),
