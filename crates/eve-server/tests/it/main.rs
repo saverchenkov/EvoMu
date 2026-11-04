@@ -114,7 +114,7 @@ mod notify_econ_char_emission;
 mod notify_fleet_emission;
 mod notify_mail_emission;
 mod notify_space_sov_fleet_emission;
-mod open_feats_and_rpcs_b33;
+mod features_industry_manufacturing_rpcs;
 mod npc_spawns_pve;
 mod planetary_interaction_complete;
 mod pi_planet_mgr_rpc;
@@ -319,7 +319,7 @@ mod quasar_sov_workforce_transit;
 mod quasar_faction_payment_schedule;
 mod capital_combat_and_escalation;
 mod economy_market_lookup_social;
-mod open_feats_and_rpcs_b8;
+mod features_fitting_dogma_rpcs;
 mod open_feats_b36;
 mod open_feats_and_rpcs_b7;
 mod features_faction_warfare_rpcs;
@@ -330,10 +330,19 @@ mod features_wallet_journal_rpcs;
 mod open_feats_and_rpcs_b34;
 mod features_dogma_attribute_rpcs;
 mod features_ships_and_pve;
+mod features_sovereignty_upwell_rpcs;
+mod open_feats_and_rpcs_b7_fw;
+mod open_feats_and_rpcs_b7_social;
+mod features_fleet_broadcast_rpcs;
+mod open_feats_b42;
+mod open_feats_and_rpcs_b9;
+mod features_station_markets_rpcs;
+mod open_feats_and_rpcs_b5;
+mod open_feats_ships_pve_b5;
 mod quasar_ship_unlocks_and_stargates;
-mod open_feats_and_rpcs_b30;
+mod features_drone_fighters_rpcs;
 mod open_feats_b37;
-mod open_feats_and_rpcs_b23;
+mod features_character_customization_rpcs;
 mod paragon_hub_self_purchase;
 mod features_station_facilities_rpcs;
 mod quasar_orchestrator_and_targeted_offers;
@@ -412,7 +421,7 @@ mod esi_characters_and_contacts;
 mod fleet_operations_and_broadcasts;
 mod features_corp_and_structure_ops;
 #[allow(unused_imports)]
-pub(crate) use open_feats_and_rpcs_b11::part2 as open_feats_and_rpcs_b11_part2;
+pub(crate) use features_fleet_broadcast_rpcs::part2 as open_feats_and_rpcs_b11_part2;
 mod features_industry_exploration;
 
 #[allow(unused_imports)]
@@ -451,6 +460,13 @@ pub(crate) use {
     features_wallet_journal_rpcs as open_feats_and_rpcs_b9,
     features_market_orders_rpcs as open_feats_and_rpcs_b22,
     features_station_facilities_rpcs as open_feats_and_rpcs_b29,
+    features_sovereignty_upwell_rpcs as open_feats_and_rpcs_b7,
+    features_fitting_dogma_rpcs as open_feats_and_rpcs_b8,
+    features_fleet_broadcast_rpcs as open_feats_and_rpcs_b11,
+    features_character_customization_rpcs as open_feats_and_rpcs_b23,
+    features_drone_fighters_rpcs as open_feats_and_rpcs_b30,
+    features_industry_manufacturing_rpcs as open_feats_and_rpcs_b33,
+    features_station_markets_rpcs as open_feats_and_rpcs_b34,
 };
 pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
 #[allow(unused_imports)]
