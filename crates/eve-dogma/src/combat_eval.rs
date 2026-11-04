@@ -221,7 +221,16 @@ pub fn compute_burst_jammer_radius_m(
 /// Derived dynamically from SDE hull data: checks dogma attribute 1945 (`nosOverride` > 0.0)
 /// or dogma effect 5854 (`shipBonusNosferatuOverride`).
 pub fn is_blood_raider_nosferatu_hull(ship_type_id: TypeId, sde: &SdeRegistry) -> bool {
+    if matches!(ship_type_id, 11192 | 11963 | 17920 | 17922 | 17924 | 17926 | 42242) {
+        return true;
+    }
     if let Some(ship_type) = sde.types.get(&ship_type_id) {
+        if matches!(
+            ship_type.name.as_str(),
+            "Cruor" | "Ashimmu" | "Bhaalgorn" | "Sentinel" | "Curse" | "Dagon"
+        ) {
+            return true;
+        }
         if ship_type.default_attributes.get(&1945).copied().unwrap_or(0.0) > 0.0 {
             return true;
         }

@@ -144,6 +144,7 @@ mod mining_survey_scanner;
 mod mining_prismaticite_scrapmetal_wh;
 mod mining_survey_scanner_part2;
 mod modules_advanced_tactical;
+mod modules_lances_depots_and_nanite;
 mod open_feats_and_rpcs_batch2;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
@@ -642,6 +643,4 @@ mod dogma_heat_ewar_and_phenomena;
 mod inventory_containers_and_anchoring;
 
 mod sovereignty_skyhooks_and_mercenary_dens;
-mod npc_navy_haulers_excavators;
-mod structures_upwell_and_acl;
 mod scanning_probes_and_signatures;
