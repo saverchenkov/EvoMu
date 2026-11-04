@@ -673,3 +673,2275 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
         e.notice.payload.as_ref().map(|p| p.type_url.contains("eve_public.pirate.suppression.api.IncreasedNotice")).unwrap_or(false)
     }), "IncreasedNotice published to Quasar gateway");
 }
+
+
+pub(crate) mod pve_data_relic_ded_wormhole_remediated {
+    #[allow(unused_imports)]
+    use super::*;
+
+// Remediation tests for exploration, DED complexes, and J-space Sleeper combat.
+//
+// Parity Tags Tested:
+// - feat:pve.combat-signatures
+// - feat:pve.data-sites
+// - feat:pve.relic-sites
+// - feat:pve.loot-spew
+// - feat:pve.ded-complexes
+// - feat:pve.wormhole-sites
+
+
+use std::collections::HashMap;
+use glam::DVec3;
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::combat_crimewatch::with_mut_combat_runtime;
+use eve_server::services::pve_exploration::{ensure_system_pve_sites_seeded, with_pve_exploration_reg};
+use eve_server::services::pve_exploration_sites::{generate_exploration_container_loot, overseer_effects_for_rating};
+use eve_machonet::SessionState;
+
+const AU: f64 = 149_597_870_700.0;
+const CHAR_ID: i64 = 90_000_001;
+
+async fn place_ship(ctx: &ServerContext, sys: u32, ship_id: i64, type_id: u32, pos: DVec3) {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id, type_id, owner_id: CHAR_ID, location_id: sys as i64,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default()
+        });
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.active_ship_id = ship_id;
+        }
+    });
+    let _ = ctx.systems.get_or_spawn(sys).spawn_ball(Ball {
+        id: ship_id, type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 365.0, inertia: 1.0,
+        mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+}
+
+async fn create_in_space_session(ctx: &ServerContext, session_id: u64, sys: u32, ship_id: i64) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(session_id);
+    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(CHAR_ID)], &kw, None).await.expect("SelectCharacterID");
+    sess.solar_system_id = Some(sys);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = sys;
+        }
+    });
+    place_ship(ctx, sys, ship_id, 587, DVec3::ZERO).await;
+    sess
+}
+
+/// Destroys every active NPC of a site through the production in-space damage pipeline
+/// (`SystemHandle::apply_damage_with_attacker` -> `npc_death_hook`).
+async fn kill_ball(ctx: &ServerContext, sys: u32, bid: i64) {
+    let dmg = DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 };
+    let res = ctx.systems.get_or_spawn(sys).apply_damage_with_attacker(bid, dmg, Some(CHAR_ID)).await;
+    assert!(matches!(res, Ok(Some((_, true, _)))), "NPC ball {bid} must be destroyed by damage: {res:?}");
+}
+
+fn site_state(ctx: &ServerContext, sys: u32, site_id: &str) -> (u8, Vec<i64>, bool, [f64; 3]) {
+    with_pve_exploration_reg(ctx, |reg| {
+        let s = reg.sites_by_system[&sys].iter().find(|s| s.site_id == site_id).expect("site");
+        (s.current_wave, s.active_npc_ball_ids.clone(), s.cleared, s.position)
+    })
+}
+
+async fn kill_site_wave(ctx: &ServerContext, sys: u32, site_id: &str) {
+    for bid in site_state(ctx, sys, site_id).1 {
+        kill_ball(ctx, sys, bid).await;
+    }
+}
+
+async fn activate_gate(ctx: &ServerContext, sess: &mut SessionState, site: &str) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String(site.into())], &HashMap::new(), None).await
+}
+
+fn container_cargo(ctx: &ServerContext, container_id: i64) -> Vec<InventoryItemRecord> {
+    ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|i| i.location_id == container_id && i.flag == InventoryFlag::Cargo).cloned().collect()
+    })
+}
+
+fn probes_dict(ids: &[i64], center: DVec3, range: f64) -> PyRep {
+    let d = range * 0.4;
+    let offs = [DVec3::ZERO, DVec3::X * d, -DVec3::X * d, DVec3::Y * d, -DVec3::Y * d, DVec3::Z * d, -DVec3::Z * d, DVec3::splat(d * 0.5)];
+    PyRep::Dict(ids.iter().enumerate().map(|(i, &pid)| {
+        let p = center + offs[i % offs.len()];
+        (PyRep::Integer(pid), PyRep::keyval([
+            ("pos", PyRep::Tuple(vec![PyRep::Real(p.x), PyRep::Real(p.y), PyRep::Real(p.z)])),
+            ("scanRange", PyRep::Real(range)),
+        ]))
+    }).collect())
+}
+
+fn row_field(rows: &[PyRep], sig_id: &str, key: &str) -> PyRep {
+    rows.iter().find(|r| r.dict_get("signatureID").and_then(|v| v.as_str()) == Some(sig_id))
+        .and_then(|r| r.dict_get(key).cloned())
+        .unwrap_or_else(|| panic!("{sig_id} row missing {key}"))
+}
+
+async fn hack_until_won(ctx: &ServerContext, sess: &mut SessionState, can_id: i64) -> PyRep {
+    let kw = HashMap::new();
+    let sys_id = sess.solar_system_id.unwrap();
+    let ship_id = sess.ship_id.unwrap();
+    let can_pos = with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system.get(&sys_id).and_then(|sites| {
+            sites.iter().find(|s| s.hackable_can_ids.contains(&can_id)).map(|s| s.position)
+        })
+    }).unwrap_or([0.0, 0.0, 0.0]);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(can_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
+    let start = ctx.dispatch_rpc(sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.expect("StartNewGameInstance");
+    assert_eq!(start.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(90), "Analyzer I (40) + Hacking/Archaeology V (+50) = 90 virusCoherence");
+    assert_eq!(start.dict_get("virusStrength").and_then(|v| v.as_i64()), Some(20), "Analyzer I SDE virusStrength (attr 1910) = 20");
+    let core_idx = with_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games[&(CHAR_ID, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
+    });
+    // Non-adjacent unrevealed SystemCore cannot be clicked on turn 1
+    let direct_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(core_idx as i64)], &kw, None).await.expect_err("unrevealed non-adjacent core");
+    assert_eq!(direct_err.code, "TileNotAccessible");
+
+    let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
+    path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
+    for (step_i, &idx) in path.iter().enumerate() {
+        for attempt in 0..5 {
+            let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
+            if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                return r;
+            }
+            let node_coh = r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0);
+            if node_coh <= 0 {
+                break;
+            }
+            if attempt == 0 && step_i + 1 < path.len() {
+                let blocked_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(path[step_i + 1] as i64)], &kw, None).await.expect_err("blocked by undefeated defensive node");
+                assert_eq!(blocked_err.code, "TileNotAccessible");
+            }
+        }
+    }
+    panic!("hack on {can_id} was not won");
+}
+
+/// Asserts won-hack loot exists only inside the spewed in-space cans (once each) and never in the parent can.
+fn assert_spew_loot(ctx: &ServerContext, won: &PyRep, parent_can: i64, sys: u32) -> Vec<u32> {
+    assert!(container_cargo(ctx, parent_can).is_empty(), "Parent container must not duplicate spewed loot");
+    let Some(PyRep::List(spew)) = won.dict_get("spewedContainers") else { panic!("spewedContainers") };
+    assert!(!spew.is_empty(), "Won hack must spew loot cans");
+    let mut types = Vec::new();
+    for c in spew {
+        let can_id = c.dict_get("canItemID").and_then(|v| v.as_i64()).unwrap();
+        let can = ctx.db.with_snapshot(|s| s.items.get(&can_id).cloned()).expect("spewed can is a real item");
+        assert_eq!(can.location_id, sys as i64, "Spewed can must sit in space");
+        let cargo = container_cargo(ctx, can_id);
+        assert_eq!(cargo.len(), 1, "Each spewed can holds exactly one loot stack");
+        assert_eq!(cargo[0].type_id as i64, c.dict_get("lootTypeID").and_then(|v| v.as_i64()).unwrap());
+        types.push(cargo[0].type_id);
+    }
+    types
+}
+
+// ============================================================================
+// 1. Probe-scanned Combat Signatures, SDE Data/Relic Loot & Loot Spew
+// ============================================================================
+#[tokio::test]
+async fn test_pve_data_relic_loot_tables_container_inventory_and_combat_signatures() {
+    // parity: feat:pve.combat-signatures, feat:pve.data-sites, feat:pve.relic-sites, feat:pve.loot-spew
+    eve_testkit::attest(&["feat:pve.combat-signatures", "feat:pve.data-sites", "feat:pve.relic-sites", "feat:pve.loot-spew"]);
+
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let sys = 30_000_142_u32;
+    let ship_id = 710_001_101_i64;
+    let mut sess = create_in_space_session(&ctx, 8201, sys, ship_id).await;
+    ensure_system_pve_sites_seeded(&ctx, sys).await;
+
+    // 1. Launch 8 Core Scanner Probes from a fitted Core Probe Launcher I (`dogmaIM.Activate`)
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(CHAR_ID).or_default();
+        for sid in [3402u32, 3412, 3413, 3426] {
+            skills.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        for (iid, tid, qty) in [(440_101_i64, 17938_u32, 1), (440_102, 30013, 8)] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: tid, owner_id: CHAR_ID, location_id: ship_id, flag: InventoryFlag::HiSlot0,
+                quantity: qty, singleton: qty == 1, ..Default::default()
+            });
+        }
+    });
+    ctx.invalidate_ship_fitting(ship_id);
+    let launch = ctx.dispatch_rpc(&mut sess, "dogmaIM", None, "Activate", &[PyRep::Integer(440_101), PyRep::String("launchScanners".into()), PyRep::None, PyRep::Integer(0)], &kw, None).await.expect("launch probes");
+    let Some(PyRep::List(pids)) = launch.dict_get("probeIDs") else { panic!("probeIDs") };
+    let probe_ids: Vec<i64> = pids.iter().filter_map(|p| p.as_i64()).collect();
+    assert_eq!(probe_ids.len(), 8);
+    let bound = ctx.dispatch_rpc(&mut sess, "scanMgr", None, "GetSystemScanMgr", &[], &kw, None).await.expect("GetSystemScanMgr");
+    let bound_id = bound.dict_get("boundID").and_then(|v| v.as_i64()).unwrap() as u64;
+
+    // 2. scanMgr.RequestScans: probes 40 AU away from DAT-<sys> register zero signal for it
+    let (dat_name, dat_pos) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&sys].iter().find(|s| s.site_id == "DAT-30000142").unwrap();
+        (s.dungeon_name.clone(), DVec3::from_array(s.position))
+    });
+    let far = probes_dict(&probe_ids, dat_pos + DVec3::X * 40.0 * AU, 0.25 * AU);
+    let far_rep = ctx.dispatch_rpc(&mut sess, "scanMgr", Some(bound_id), "RequestScans", &[far], &kw, None).await.expect("far RequestScans");
+    let PyRep::List(far_rows) = far_rep else { panic!("RequestScans rows") };
+    assert_eq!(row_field(&far_rows, "DAT-30000142", "signalStrength").as_f64(), Some(0.0), "Out-of-range probes give no signal");
+    assert_eq!(row_field(&far_rows, "DAT-30000142", "coveringProbes").as_i64(), Some(0));
+
+    // 3. Pinpoint 8-probe formation centred on the signature resolves it to 100% and reveals its SDE dungeon name
+    let mut rows = Vec::new();
+    for _ in 0..4 {
+        let rep = ctx.dispatch_rpc(&mut sess, "scanMgr", Some(bound_id), "RequestScans", &[probes_dict(&probe_ids, dat_pos, 0.25 * AU)], &kw, None).await.expect("pinpoint RequestScans");
+        let PyRep::List(r) = rep else { panic!() };
+        rows = r;
+    }
+    assert_eq!(row_field(&rows, "DAT-30000142", "coveringProbes").as_i64(), Some(8));
+    assert_eq!(row_field(&rows, "DAT-30000142", "signalStrength").as_f64(), Some(1.0));
+    assert_eq!(row_field(&rows, "DAT-30000142", "type").as_str(), Some(dat_name.as_str()));
+
+    // 4. Data can hack: requires fitted Analyzer module (`AnalyzerModuleRequired`), then spews real in-space cans
+    let data_can_id = 1_870_000_000_i64 + (sys as i64 % 100_000) * 100;
+    let no_mod_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None).await.expect_err("unfitted ship must fail");
+    assert_eq!(no_mod_err.code, "AnalyzerModuleRequired");
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(CHAR_ID).or_default();
+        for sid in [21718_u32, 13278] {
+            skills.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        for (iid, tid, flag) in [(440_103_i64, 22175_u32, InventoryFlag::MedSlot0), (440_104, 22177, InventoryFlag::MedSlot1)] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: tid, owner_id: CHAR_ID, location_id: ship_id, flag,
+                quantity: 1, singleton: true, ..Default::default()
+            });
+        }
+    });
+    let won = hack_until_won(&ctx, &mut sess, data_can_id).await;
+    let data_types = assert_spew_loot(&ctx, &won, data_can_id, sys);
+    let grp = |t: &u32| ctx.sde.types.get(t).map(|x| x.group_id).unwrap_or(0);
+    assert!(data_types.iter().any(|t| grp(t) == 333), "Data spew must contain SDE Datacores");
+    assert!(data_types.iter().any(|t| matches!(grp(t), 728..=735 | 1304)), "Data spew must contain SDE Decryptors");
+    let expected: Vec<u32> = generate_exploration_container_loot(&ctx.sde, sys, false).iter().map(|l| l.0).collect();
+    assert_eq!(data_types, expected, "Spewed loot is exactly the SDE-derived loot table");
+    let hack_again = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "HackContainer", &[PyRep::Integer(data_can_id)], &kw, None).await;
+    assert!(hack_again.is_err(), "Non-catalog hackingMgr.HackContainer must not be served");
+
+    // 5. Relic can hack: SDE Salvaged Materials (754); Ancient Salvage (966) only in null-sec / J-space
+    let relic_can_id = 1_871_000_000_i64 + (sys as i64 % 100_000) * 100;
+    let won = hack_until_won(&ctx, &mut sess, relic_can_id).await;
+    let relic_types = assert_spew_loot(&ctx, &won, relic_can_id, sys);
+    assert!(relic_types.iter().all(|t| grp(t) == 754), "High-sec relic spew is SDE Salvaged Materials only");
+    let jspace = generate_exploration_container_loot(&ctx.sde, 31_000_003, true);
+    assert!(jspace.iter().any(|l| grp(&l.0) == 966), "J-space relic loot includes SDE Ancient Salvage");
+    let hs_qty: i64 = generate_exploration_container_loot(&ctx.sde, sys, true).iter().map(|l| l.1).sum();
+    let js_qty: i64 = jspace.iter().filter(|l| grp(&l.0) == 754).map(|l| l.1).sum();
+    assert!(js_qty > hs_qty, "True-sec scaling: J-space salvage {js_qty} must exceed high-sec {hs_qty}");
+
+    // 6. Faction weighting: Guristas (The Forge) and Serpentis regions pick different SDE datacores first
+    let guristas = generate_exploration_container_loot(&ctx.sde, sys, false);
+    let serpentis = generate_exploration_container_loot(&ctx.sde, 30_002_659, false);
+    assert_ne!(guristas[0].0, serpentis[0].0, "Pirate faction must change the weighted datacore selection");
+}
+
+// ============================================================================
+// 2. DED Gates, Overseer Wreck on Overseer Kill; Wormhole Sleeper Waves via NPC Kills
+// ============================================================================
+#[tokio::test]
+async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
+    // parity: feat:pve.ded-complexes, feat:pve.wormhole-sites
+    eve_testkit::attest(&["feat:pve.ded-complexes", "feat:pve.wormhole-sites"]);
+
+    let ctx = ServerContext::new();
+    let sys = 30_000_142_u32;
+    let ship_id = 710_001_102_i64;
+    let mut sess = create_in_space_session(&ctx, 8202, sys, ship_id).await;
+    ensure_system_pve_sites_seeded(&ctx, sys).await;
+    let ded = "DED-30000142-3";
+
+    // 1. Killing room 1 NPCs through the damage pipeline unlocks (but does not auto-advance) the gate
+    kill_site_wave(&ctx, sys, ded).await;
+    let (wave, active, _, ded_pos) = site_state(&ctx, sys, ded);
+    assert_eq!((wave, active.len()), (1, 0), "DED rooms advance only through the acceleration gate");
+
+    // 2. Gate proximity: 0 m origin is far from the gate; within 2,500 m the Rifter passes to room 2
+    let kw = HashMap::new();
+    let r = activate_gate(&ctx, &mut sess, ded).await;
+    assert_eq!(r.expect_err("far from gate").code, "GateOutOfRange");
+    let r = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(ded.into()), PyRep::Bool(true)], &kw, None).await;
+    assert_eq!(r.expect_err("EnterCombatAnomaly far from gate").code, "GateOutOfRange");
+    place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
+    let r = activate_gate(&ctx, &mut sess, ded).await;
+    assert_eq!(r.expect("Rifter at gate").dict_get("currentWave").and_then(|v| v.as_i64()), Some(2));
+
+    // 3. Battleship (Raven 638) rejected by the canonical DED 3/10 hull limit (Frigates & Destroyers only)
+    let raven_id = 710_001_103_i64;
+    place_ship(&ctx, sys, raven_id, 638, DVec3::from_array(ded_pos)).await;
+    sess.ship_id = Some(raven_id);
+    let r = activate_gate(&ctx, &mut sess, ded).await;
+    assert_eq!(r.expect_err("Raven in 3/10").code, "ShipSizeRestricted");
+    let r = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(ded.into()), PyRep::Bool(true)], &kw, None).await;
+    assert_eq!(r.expect_err("EnterCombatAnomaly Raven in 3/10").code, "ShipSizeRestricted");
+    let r = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String(ded.into()), PyRep::Integer(10)], &kw, None).await;
+    assert_eq!(r.expect_err("client rating override ignored").code, "ShipSizeRestricted", "Server-side DED rating cannot be overridden");
+    let ded_dungeon_alias = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded).map(|s| s.dungeon_id.to_string())).unwrap();
+    let r = activate_gate(&ctx, &mut sess, &ded_dungeon_alias).await;
+    assert_eq!(r.expect_err("dungeon-id alias").code, "ShipSizeRestricted", "str(dungeon_id) alias resolves to the DED site and is hull-checked");
+    let cruiser = eve_server::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, 3, 620, 10_000_000.0);
+    assert!(cruiser.is_err(), "Cruisers (Osprey 620) are not allowed in DED 3/10");
+    place_ship(&ctx, sys, ship_id, 587, DVec3::ZERO).await;
+    sess.ship_id = Some(ship_id);
+    let r = activate_gate(&ctx, &mut sess, &ded_dungeon_alias).await;
+    assert_eq!(r.expect_err("alias out of range").code, "GateOutOfRange", "str(dungeon_id) alias is proximity-checked");
+    place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
+
+    // 4. Room 2 kills -> gate -> room 3; killing the final-room overseer spawns the Overseer wreck in space
+    kill_site_wave(&ctx, sys, ded).await;
+    // Integer argument shape: keeper.ActivateAccelerationGate(gate_item_id) on the seeded DED gate ball
+    let gate_ball_id = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded).and_then(|s| s.gate_ball_id)).expect("DED gate ball");
+    assert!(ctx.systems.get_or_spawn(sys).get_ball_snapshot(gate_ball_id).await.unwrap().is_some(), "DED gate ball in space");
+    let r = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(gate_ball_id)], &kw, None).await;
+    assert_eq!(r.expect("gate to room 3").dict_get("currentWave").and_then(|v| v.as_i64()), Some(3));
+    kill_site_wave(&ctx, sys, ded).await;
+    assert!(site_state(&ctx, sys, ded).2, "Overseer kill completes the DED complex");
+    let (ope_tid, ope_name) = overseer_effects_for_rating(&ctx.sde, 3).expect("SDE Overseer's Personal Effects");
+    assert!((19_400..=19_422).contains(&ope_tid) && ope_name.contains("Overseer"));
+    let wreck = ctx.db.with_snapshot(|snap| {
+        snap.items.values().find(|w| w.location_id == sys as i64 && w.type_id == 26473
+            && snap.items.values().any(|i| i.location_id == w.item_id && i.type_id == ope_tid)).map(|w| w.item_id)
+    }).expect("Overseer wreck in space holds the SDE Overseer's Personal Effects");
+    assert!(container_cargo(&ctx, wreck).iter().any(|i| i.type_id == 18658), "Wreck holds the deadspace module");
+    assert!(ctx.systems.get_or_spawn(sys).get_ball_snapshot(wreck).await.unwrap().is_some(), "Wreck ball spawned");
+    assert!(container_cargo(&ctx, ship_id).iter().all(|i| i.type_id != ope_tid), "No loot teleported to ship");
+    let r = activate_gate(&ctx, &mut sess, ded).await;
+    assert_eq!(r.expect_err("cleared").code, "SiteAlreadyCleared");
+
+    // 5. C3 Sleeper site seeded by production `ensure_system_pve_sites_seeded` with zero-bounty Sleepers
+    let c3 = 31_000_885_u32;
+    ensure_system_pve_sites_seeded(&ctx, c3).await;
+    let wh_site = format!("PVE-ANOM-{c3}-1");
+    let (w1, wave1, _, _) = site_state(&ctx, c3, &wh_site);
+    assert_eq!(w1, 1);
+    let (trigger_type, bounty) = with_mut_combat_runtime(&ctx, |rt| {
+        let n = &rt.npc_entities[&wave1[0]];
+        (n.type_id, n.bounty_isk)
+    });
+    assert_eq!((trigger_type, bounty), (30208, 0.0), "Wave trigger is the Awakened Warden with zero bounty");
+
+    // 6. Non-trigger kill drops a Sleeper wreck with SDE Blue Loot (group 880) but does not advance the wave
+    kill_ball(&ctx, c3, wave1[1]).await;
+    assert_eq!(site_state(&ctx, c3, &wh_site).0, 1);
+    let blue = ctx.db.with_snapshot(|snap| {
+        snap.items.values().filter(|w| w.location_id == c3 as i64 && w.type_id == 30495)
+            .any(|w| snap.items.values().any(|i| i.location_id == w.item_id && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 880)))
+    });
+    assert!(blue, "Sleeper wreck must contain SDE Sleeper Components (Blue Loot)");
+
+    // 7. Trigger kill spawns wave 2 automatically; leftovers stay; then clear every wave to finish the site
+    kill_ball(&ctx, c3, wave1[0]).await;
+    let (w2, active2, _, _) = site_state(&ctx, c3, &wh_site);
+    assert_eq!(w2, 2, "Trigger NPC kill advances to wave 2 without any client RPC");
+    assert!(active2.contains(&wave1[2]), "Surviving wave-1 Sleepers remain in the site");
+    for _ in 0..20 {
+        let (_, active, cleared, _) = site_state(&ctx, c3, &wh_site);
+        if cleared {
+            break;
+        }
+        kill_ball(&ctx, c3, active[0]).await;
+    }
+    assert!(site_state(&ctx, c3, &wh_site).2, "All Sleeper waves destroyed -> site cleared");
+    let pending = with_mut_combat_runtime(&ctx, |rt| rt.pending_bounty_ticks.get(&(c3, CHAR_ID)).copied().unwrap_or(0.0));
+    assert_eq!(pending, 0.0, "CONCORD pays no bounty for Sleeper kills");
+}
+}
+
+
+pub(crate) mod pve_crab_and_storms_closure {
+    #[allow(unused_imports)]
+    use super::*;
+
+// Integration tests for CRAB Beacons, Character CEQ, System Signal Interference,
+// and Metaliminal Storm Movement (`feat:pve.crab-link-activation`,
+// `feat:pve.crab-ceq-signal-interference`, `feat:pve.metaliminal-storm-movement`).
+
+
+use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::inventory_fitting::fitting_containers_ships::validate_single_item_can_be_opened;
+use eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs;
+use eve_server::services::pve_crab_beacons::{
+    CrabBeaconPhase, CRAB_LINK_DURATION_SECS, CRAB_LOOT_EXCLUSIVE_SECS, CRAB_SCAN_DURATION_SECS,
+    TYPE_CRAB_BEACON,
+};
+use eve_server::services::pve_metaliminal_storms::{compute_storm_footprint, is_nullsec_storm_system};
+use eve_server::services::pve_special_sites::{
+    advance_pve_special_clock, ensure_special_sites_spawned, with_pve_special_reg,
+    AbyssalWeatherKind, RoamingStormRecord,
+};
+use eve_server::services::space_destiny::space_nav_travel::sync_tether;
+use glam::DVec3;
+use std::collections::{HashMap, HashSet};
+
+const PILOT_1: i64 = 90_000_001;
+const PILOT_2: i64 = 90_000_002;
+const LOWSEC_SYS: u32 = 30_002_904; // Tama (Low-sec 0.28)
+const HIGHSEC_SYS: u32 = 30_000_142; // Jita (High-sec 0.95)
+const WH_SYS: u32 = 31_000_240; // Wormhole J-space (non-shattered C3)
+const TYPE_ARCHON: u32 = 23_757; // Carrier
+const TYPE_RIFTER: u32 = 587; // Frigate
+
+async fn setup_space_pilot(
+    ctx: &ServerContext,
+    sess_id: u64,
+    username: &str,
+    password: &str,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    sys_id: u32,
+    pos: DVec3,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(sess_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String(username.into()), PyRep::String(password.into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(char_id).or_default().insert(
+            11_584,
+            TrainedSkillRecord {
+                type_id: 11_584,
+                level: 3,
+                skill_points: 40_000.0,
+            },
+        );
+        let p1_template = snap.characters[&PILOT_1].clone();
+        let ch = snap.characters.entry(char_id).or_insert_with(|| p1_template);
+        ch.character_id = char_id;
+        ch.clone_grade = 2; // Omega clone so Anchoring III is uncapped
+        ch.solar_system_id = sys_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.active_ship_id = ship_id;
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: i64::from(sys_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_id, pos.to_array());
+    });
+
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys
+        .spawn_ball_with_meta(
+            Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 200.0,
+                inertia: 1.0,
+                mass: 1_200_000_000.0,
+                radius: 450.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, ship_type_id),
+            ctx.build_ship_slim_meta(char_id, ship_type_id),
+        )
+        .await;
+    sess
+}
+
+// 1. CRAB Deployment Restrictions, Capital Link, Drone Waves & Loot Window
+#[tokio::test]
+async fn test_crab_deployment_capital_link_drone_waves_loot_and_self_destruct() {
+    // parity: feat:pve.crab-link-activation
+    eve_testkit::attest(&["feat:pve.crab-link-activation"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let safe_pos = DVec3::new(350_000_000.0, 120_000_000.0, -240_000_000.0);
+
+    // 1. Deployment in High-Sec and Wormhole must fail
+    let mut sess_hs = setup_space_pilot(&ctx, 8301, "demo", "demo-secret", PILOT_1, 730_001_001, TYPE_ARCHON, HIGHSEC_SYS, safe_pos).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            730_100_001,
+            InventoryItemRecord {
+                item_id: 730_100_001,
+                type_id: TYPE_CRAB_BEACON,
+                owner_id: PILOT_1,
+                location_id: 730_001_001,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let hs_err = ctx
+        .dispatch_rpc(&mut sess_hs, "posMgr", None, "AnchorStructure", &[PyRep::Integer(730_100_001)], &kw, None)
+        .await
+        .expect_err("CRAB deploy in High-Sec must fail");
+    assert_eq!(hs_err.code, "CantDeployInHighSec");
+
+    let mut sess_wh = setup_space_pilot(&ctx, 8302, "demo", "demo-secret", PILOT_1, 730_001_002, TYPE_ARCHON, WH_SYS, safe_pos).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            730_100_002,
+            InventoryItemRecord {
+                item_id: 730_100_002,
+                type_id: TYPE_CRAB_BEACON,
+                owner_id: PILOT_1,
+                location_id: 730_001_002,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+    let wh_err = ctx
+        .dispatch_rpc(&mut sess_wh, "posMgr", None, "AnchorStructure", &[PyRep::Integer(730_100_002)], &kw, None)
+        .await
+        .expect_err("CRAB deploy in Wormhole must fail");
+    assert_eq!(wh_err.code, "CantDeployInWormhole");
+
+    // 2. Deployment in Low-Sec succeeds; Subcapital link refused; Capital link succeeds
+    let carrier_id = 730_001_003i64;
+    let subcap_id = 730_001_004i64;
+    let beacon_id = 730_100_003i64;
+    let cloak_mod_id = 730_200_001i64;
+    let mut sess_cap = setup_space_pilot(&ctx, 8303, "demo", "demo-secret", PILOT_1, carrier_id, TYPE_ARCHON, LOWSEC_SYS, safe_pos).await;
+    let mut sess_sub = setup_space_pilot(
+        &ctx,
+        8304,
+        "other",
+        "other-secret",
+        PILOT_2,
+        subcap_id,
+        TYPE_RIFTER,
+        LOWSEC_SYS,
+        safe_pos + DVec3::new(1_200.0, 0.0, 0.0),
+    )
+    .await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            beacon_id,
+            InventoryItemRecord {
+                item_id: beacon_id,
+                type_id: TYPE_CRAB_BEACON,
+                owner_id: PILOT_1,
+                location_id: carrier_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            cloak_mod_id,
+            InventoryItemRecord {
+                item_id: cloak_mod_id,
+                type_id: 11_578, // Prototype Cloaking Device I
+                owner_id: PILOT_1,
+                location_id: carrier_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    ctx.dispatch_rpc(&mut sess_cap, "posMgr", None, "AnchorStructure", &[PyRep::Integer(beacon_id)], &kw, None)
+        .await
+        .expect("Deploy CRAB in Low-Sec");
+
+    // Subcapital link refused
+    let sub_err = ctx
+        .dispatch_rpc(
+            &mut sess_sub,
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(beacon_id),
+                PyRep::String("linkWithShip".into()),
+                PyRep::String("InitiateLink".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Subcapital cannot link to CRAB");
+    assert_eq!(sub_err.code, "IneligibleShipForCrabLink");
+
+    // Anchor a cored Astrahus right at safe_pos so we verify tether before, during, and after CRAB link
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp_id = snap.characters.get(&PILOT_1).map(|c| c.corporation_id).unwrap_or(1_000_009);
+        snap.structures.insert(
+            1_030_000_001,
+            UpwellStructureRecord {
+                structure_id: 1_030_000_001,
+                type_id: 35_832, // Astrahus
+                owner_corp_id: corp_id,
+                solar_system_id: LOWSEC_SYS,
+                name: "Lowsec Staging Astrahus".into(),
+                position: safe_pos.to_array(),
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 500,
+                shield_hp: 100_000.0,
+                armor_hp: 100_000.0,
+                hull_hp: 100_000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0,
+                self_destruct_at_unix: None,
+            },
+        );
+    });
+    let lowsec_handle = ctx.systems.get_or_spawn(LOWSEC_SYS);
+    sync_tether(&ctx, PILOT_1, LOWSEC_SYS, carrier_id).await;
+    assert!(
+        lowsec_handle.get_combat_state(carrier_id).await.unwrap().unwrap().is_tethered,
+        "Carrier tethers at cored friendly Astrahus before CRAB link"
+    );
+
+    // Record baseline carrier shield resonance before link
+    let orig_sh_res = lowsec_handle.get_combat_state(carrier_id).await.unwrap().unwrap().shield_resonance;
+
+    // Capital ship links to CRAB beacon
+    let link_rep = ctx
+        .dispatch_rpc(
+            &mut sess_cap,
+            "beyonce",
+            None,
+            "CallComponentFromClient",
+            &[
+                PyRep::Integer(beacon_id),
+                PyRep::String("linkWithShip".into()),
+                PyRep::String("InitiateLink".into()),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Capital link to CRAB");
+    assert_eq!(link_rep.dict_get("linked").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(link_rep.dict_get("linkDurationSeconds").and_then(|v| v.as_i64()), Some(240));
+    assert_eq!(link_rep.dict_get("resistanceBonusPct").and_then(|v| v.as_f64()), Some(10.0));
+
+    // 3. During the 4-minute link: cannot warp, cloak, or tether, and gets +10% universal resistance bonus
+    let warp_err = ctx
+        .dispatch_rpc(
+            &mut sess_cap,
+            "beyonce",
+            None,
+            "CmdWarpToStuff",
+            &[
+                PyRep::String("point".into()),
+                PyRep::Real(safe_pos.x + 500_000_000.0),
+                PyRep::Real(safe_pos.y),
+                PyRep::Real(safe_pos.z),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Carrier cannot warp while linked to CRAB");
+    assert_eq!(warp_err.code, "CrabLinkActive");
+
+    let cloak_err = ctx
+        .dispatch_rpc(&mut sess_cap, "dogmaIM", None, "Activate", &[PyRep::Integer(cloak_mod_id)], &kw, None)
+        .await
+        .expect_err("Carrier cannot cloak while linked to CRAB");
+    assert_eq!(cloak_err.code, "CrabLinkActive");
+
+    sync_tether(&ctx, PILOT_1, LOWSEC_SYS, carrier_id).await;
+    assert!(
+        !lowsec_handle.get_combat_state(carrier_id).await.unwrap().unwrap().is_tethered,
+        "Carrier cannot tether while linked to CRAB"
+    );
+
+    let linked_cs = lowsec_handle.get_combat_state(carrier_id).await.unwrap().unwrap();
+    assert!(
+        (linked_cs.shield_resonance[0] - orig_sh_res[0] * 0.90).abs() < 1e-6,
+        "10% universal resistance bonus applied during CRAB link"
+    );
+
+    // 4. Advance 4 minutes (240s) -> link ends, resistance reverts, tether restored, 10-minute scan begins & Wave 1 spawns
+    ctx.advance_secs(CRAB_LINK_DURATION_SECS);
+    sync_tether(&ctx, PILOT_1, LOWSEC_SYS, carrier_id).await;
+    let post_link_cs = lowsec_handle.get_combat_state(carrier_id).await.unwrap().unwrap();
+    assert!(post_link_cs.is_tethered, "Carrier can tether again once 4m CRAB link completes");
+    assert!(
+        (post_link_cs.shield_resonance[0] - orig_sh_res[0]).abs() < 1e-6,
+        "Resistance bonus cleared after 4m link completes"
+    );
+    let (phase_w1, waves_w1, drones_w1) = with_pve_special_reg(&ctx, |reg| {
+        let b = &reg.crab_beacons[&beacon_id];
+        (b.phase, b.waves_spawned, b.wave_npc_ball_ids.len())
+    });
+    assert_eq!(phase_w1, CrabBeaconPhase::Scanning);
+    assert_eq!(waves_w1, 1);
+    assert!(!drones_w1.eq(&0), "Wave 1 rogue drones must spawn");
+
+    // Advance through Wave 2 (+200s), Wave 3 (+200s), and scan completion (+200s = 600s total)
+    ctx.advance_secs(200);
+    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].waves_spawned), 2);
+    ctx.advance_secs(200);
+    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].waves_spawned), 3);
+    ctx.advance_secs(CRAB_SCAN_DURATION_SECS - 400);
+    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase), CrabBeaconPhase::Scanning, "Live Rogue Drones jam CRAB completion");
+    for bid in with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].wave_npc_ball_ids.clone()) {
+        let _ = lowsec_handle.remove_ball(bid).await;
+    }
+    eve_server::services::pve_crab_beacons::tick_all_crab_beacons(&ctx);
+    assert_eq!(with_pve_special_reg(&ctx, |reg| reg.crab_beacons[&beacon_id].phase), CrabBeaconPhase::LootRestricted);
+
+    // 5. During 2-minute exclusive loot window: only deployer can open; non-deployer is refused
+    let non_deployer_open = validate_single_item_can_be_opened(&ctx, PILOT_2, beacon_id).await;
+    assert_eq!(non_deployer_open.unwrap_err().code, "LootOwnershipRestricted");
+    assert!(validate_single_item_can_be_opened(&ctx, PILOT_1, beacon_id).await.is_ok());
+
+    // 6. After 2 minutes (120s), beacon self-destructs and drops open-to-all loot container
+    ctx.advance_secs(CRAB_LOOT_EXCLUSIVE_SECS);
+    let (phase_end, open_can_opt) = with_pve_special_reg(&ctx, |reg| {
+        let b = &reg.crab_beacons[&beacon_id];
+        (b.phase, b.open_container_id)
+    });
+    assert_eq!(phase_end, CrabBeaconPhase::SelfDestructed);
+    assert!(lowsec_handle.get_ball_snapshot(beacon_id).await.unwrap().is_none(), "Beacon ball despawned");
+    let open_can_id = open_can_opt.expect("Open loot container spawned on self-destruct");
+    assert!(
+        validate_single_item_can_be_opened(&ctx, PILOT_2, open_can_id).await.is_ok(),
+        "Non-deployer can open loot container after 2m exclusivity expires"
+    );
+}
+
+// ============================================================================
+// 2. Character CEQ Pool & System Signal Interference
+// ============================================================================
+#[tokio::test]
+async fn test_crab_ceq_pool_regeneration_and_system_signal_interference() {
+    // parity: feat:pve.crab-ceq-signal-interference
+    eve_testkit::attest(&["feat:pve.crab-ceq-signal-interference"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+    let base_pos = DVec3::new(400_000_000.0, 50_000_000.0, 100_000_000.0);
+
+    let carrier_id = 730_002_001i64;
+    let mut sess1 = setup_space_pilot(&ctx, 8311, "demo", "demo-secret", PILOT_1, carrier_id, TYPE_ARCHON, LOWSEC_SYS, base_pos).await;
+
+    // 1. Verify initial CEQ is capped at 100
+    let energy0 = ctx
+        .dispatch_rpc(&mut sess1, "characterEnergyMgr", None, "GetMyEnergyState", &[], &kw, None)
+        .await
+        .expect("GetMyEnergyState");
+    assert_eq!(energy0.dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(100));
+    assert_eq!(energy0.dict_get("maxEnergy").and_then(|v| v.as_i64()), Some(100));
+
+    // 2. Link 3 CRAB beacons (3 * 30 = 90 CEQ); 4th activation refused with InsufficientEnergy
+    for idx in 0..4i64 {
+        let bid = 730_110_000 + idx;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                bid,
+                InventoryItemRecord {
+                    item_id: bid,
+                    type_id: TYPE_CRAB_BEACON,
+                    owner_id: PILOT_1,
+                    location_id: carrier_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        ctx.dispatch_rpc(&mut sess1, "posMgr", None, "AnchorStructure", &[PyRep::Integer(bid)], &kw, None)
+            .await
+            .expect("Anchor CRAB");
+        let res = ctx
+            .dispatch_rpc(
+                &mut sess1,
+                "beyonce",
+                None,
+                "CallComponentFromClient",
+                &[
+                    PyRep::Integer(bid),
+                    PyRep::String("linkWithShip".into()),
+                    PyRep::String("InitiateLink".into()),
+                ],
+                &kw,
+                None,
+            )
+            .await;
+        if idx < 3 {
+            assert!(res.is_ok(), "Activation {} within 100 CEQ cap must succeed: {res:?}", idx + 1);
+            ctx.advance_secs(CRAB_LINK_DURATION_SECS);
+        } else {
+            assert_eq!(res.unwrap_err().code, "InsufficientEnergy", "4th CRAB activation must be refused");
+        }
+    }
+
+    ctx.advance_secs(22 * 3_600);
+    let energy_regen = ctx
+        .dispatch_rpc(&mut sess1, "characterEnergyMgr", None, "GetMyEnergyState", &[], &kw, None)
+        .await
+        .expect("GetMyEnergyState after 22h");
+    assert_eq!(energy_regen.dict_get("currentEnergy").and_then(|v| v.as_i64()), Some(100));
+
+    let test_sys = 30_002_905u32; // Kedama (Low-sec)
+    let mut pilots: Vec<(String, i64)> = Vec::new();
+    for idx in 1..=4 {
+        let uname = format!("crabp{idx}");
+        let uid = ctx.db.provision_player_account(&uname, "crab-secret");
+        let cid = ctx
+            .db
+            .create_character(uid, &format!("CRAB Pilot {idx}"), 1, 1, 11, 17, &ctx.sde)
+            .expect("create CRAB pilot")
+            .character_id;
+        pilots.push((uname, cid));
+    }
+    for p_idx in 0..13usize {
+        let (uname, pid) = &pilots[p_idx % pilots.len()];
+        let pid = *pid;
+        let sid = 730_020_000 + (p_idx as i64);
+        let bid = 730_120_000 + (p_idx as i64);
+        let p_pos = base_pos + DVec3::new((p_idx as f64) * 50_000.0, 0.0, 0.0);
+        let mut p_sess = setup_space_pilot(&ctx, 8320 + (p_idx as u64), uname, "crab-secret", pid, sid, TYPE_ARCHON, test_sys, p_pos).await;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                bid,
+                InventoryItemRecord {
+                    item_id: bid,
+                    type_id: TYPE_CRAB_BEACON,
+                    owner_id: pid,
+                    location_id: sid,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        });
+        ctx.dispatch_rpc(&mut p_sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(bid)], &kw, None)
+            .await
+            .expect("Anchor CRAB");
+        let link_res = ctx
+            .dispatch_rpc(
+                &mut p_sess,
+                "beyonce",
+                None,
+                "CallComponentFromClient",
+                &[
+                    PyRep::Integer(bid),
+                    PyRep::String("linkWithShip".into()),
+                    PyRep::String("InitiateLink".into()),
+                ],
+                &kw,
+                None,
+            )
+            .await;
+        if p_idx < 12 {
+            assert!(link_res.is_ok(), "CRAB #{} in system must succeed: {link_res:?}", p_idx + 1);
+        } else {
+            assert_eq!(link_res.unwrap_err().code, "ExcessInterference", "13th CRAB in system must be refused");
+        }
+    }
+
+    let int_full = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "solarsystemInterferenceMgr",
+            None,
+            "GetLocalInterferenceState",
+            &[PyRep::Integer(i64::from(test_sys))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetLocalInterferenceState");
+    assert_eq!(int_full.dict_get("crabActivationsRemaining").and_then(|v| v.as_i64()), Some(0));
+
+    // Advance 25 hours -> interference decays to 0 and 12 activations are available again
+    ctx.advance_secs(25 * 3_600);
+    let int_decayed = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "solarsystemInterferenceMgr",
+            None,
+            "GetLocalInterferenceState",
+            &[PyRep::Integer(i64::from(test_sys))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetLocalInterferenceState after 25h");
+    assert_eq!(int_decayed.dict_get("crabActivationsRemaining").and_then(|v| v.as_i64()), Some(12));
+    assert!((int_decayed.dict_get("interferenceLevel").and_then(|v| v.as_f64()).unwrap_or(1.0)).abs() < 1e-6);
+}
+
+// ============================================================================
+// 3. Metaliminal Storm Core/Periphery, Movement Cadence & Overlapping Storms
+// ============================================================================
+#[tokio::test]
+async fn test_metaliminal_storm_core_periphery_movement_and_overlap() {
+    // parity: feat:pve.metaliminal-storm-movement
+    eve_testkit::attest(&["feat:pve.metaliminal-storm-movement"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (storm_id, center_0, core_0, periph_0, all_core_systems) = with_pve_special_reg(&ctx, |reg| {
+        let all_cores: HashSet<u32> = reg
+            .roaming_storms
+            .iter()
+            .flat_map(|st| st.strong_core_systems.iter().copied())
+            .collect();
+        let s = &reg.roaming_storms[0];
+        (
+            s.storm_id,
+            s.center_solar_system_id,
+            s.strong_core_systems.clone(),
+            s.weak_periphery_systems.clone(),
+            all_cores,
+        )
+    });
+
+    assert!(is_nullsec_storm_system(&ctx.sde, center_0), "Storm center must be null-sec");
+    assert!(core_0.contains(&center_0), "Core contains center system");
+    assert!(core_0.len() > 1, "Core contains center + 1-jump neighbors");
+    let periph_only = periph_0
+        .iter()
+        .copied()
+        .find(|s| !all_core_systems.contains(s))
+        .expect("Periphery system 2-3 jumps away outside all storm cores");
+
+    // 1. Extra storm PvE anomalies spawn ONLY in the core, never in periphery-only systems
+    let core_has_storm_site = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&center_0)
+            .is_some_and(|l| l.iter().any(|a| a.anomaly_id.starts_with("DNG-9042-") || a.anomaly_id.starts_with("DNG-9043-")))
+    });
+    let periph_has_storm_site = ctx.db.with_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .get(&periph_only)
+            .is_some_and(|l| l.iter().any(|a| a.anomaly_id.starts_with("DNG-9042-") || a.anomaly_id.starts_with("DNG-9043-")))
+    });
+    assert!(core_has_storm_site, "Storm core must spawn extra storm PvE sites");
+    assert!(!periph_has_storm_site, "Storm periphery must not spawn extra storm PvE sites");
+
+    // 2. Storm center does NOT move before 24h, moves 1 jump every 24-48h, and avoids retracing
+    advance_pve_special_clock(&ctx, 12 * 3_600);
+    let center_at_12h = with_pve_special_reg(&ctx, |reg| {
+        reg.roaming_storms.iter().find(|s| s.storm_id == storm_id).unwrap().center_solar_system_id
+    });
+    assert_eq!(center_at_12h, center_0, "Storm must not move before 24h");
+
+    advance_pve_special_clock(&ctx, 36 * 3_600); // 48h total
+    let (center_1, recent_1) = with_pve_special_reg(&ctx, |reg| {
+        let s = reg.roaming_storms.iter().find(|s| s.storm_id == storm_id).unwrap();
+        (s.center_solar_system_id, s.recent_centers.clone())
+    });
+    assert_ne!(center_1, center_0, "Storm center must move after 24-48h");
+    assert!(core_0.contains(&center_1), "Storm moves exactly 1 jump to a neighbor in its former core");
+
+    advance_pve_special_clock(&ctx, 48 * 3_600);
+    let center_2 = with_pve_special_reg(&ctx, |reg| {
+        reg.roaming_storms.iter().find(|s| s.storm_id == storm_id).unwrap().center_solar_system_id
+    });
+    assert_ne!(center_2, center_1);
+    assert_ne!(center_2, center_0, "Storm movement must avoid retracing its previous center");
+    assert!(recent_1.contains(&center_0));
+
+    // 3. Overlapping storms apply BOTH effect sets simultaneously
+    let overlap_sys = 30_000_208u32;
+    let ship_id = 730_030_001i64;
+    let _sess = setup_space_pilot(&ctx, 8331, "demo", "demo-secret", PILOT_1, ship_id, TYPE_RIFTER, overlap_sys, DVec3::ZERO).await;
+
+    let (elec_core, elec_periph) = compute_storm_footprint(&ctx, overlap_sys);
+    let (gamma_core, gamma_periph) = compute_storm_footprint(&ctx, overlap_sys);
+    with_pve_special_reg(&ctx, |reg| {
+        reg.roaming_storms = vec![
+            RoamingStormRecord {
+                storm_id: 91,
+                weather: AbyssalWeatherKind::Electrical,
+                center_solar_system_id: overlap_sys,
+                strong_core_systems: elec_core,
+                weak_periphery_systems: elec_periph,
+                step_count: 0,
+                next_move_at_sec: u64::MAX,
+                recent_centers: vec![overlap_sys],
+            },
+            RoamingStormRecord {
+                storm_id: 92,
+                weather: AbyssalWeatherKind::Gamma,
+                center_solar_system_id: overlap_sys,
+                strong_core_systems: gamma_core,
+                weak_periphery_systems: gamma_periph,
+                step_count: 0,
+                next_move_at_sec: u64::MAX,
+                recent_centers: vec![overlap_sys],
+            },
+        ];
+    });
+    eve_server::services::pve_metaliminal_storms::sync_metaliminal_storm_effects_and_sites(&ctx);
+
+    // Electrical boosts capacitor recharge (attr 55: *0.50); Gamma boosts shield HP (attr 263: *1.50)
+    let mut attrs = HashMap::from([(55, 100.0), (263, 1_000.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, ship_id, &mut attrs);
+    assert!(attrs[&55] < 100.0, "Electrical storm effect set applied on overlap");
+    assert!(attrs[&263] > 1_000.0, "Gamma storm effect set applied on overlap");
+}
+}
+
+
+pub(crate) mod pve_incursions_parity_closure {
+    #[allow(unused_imports)]
+    use super::*;
+
+// Integration tests for Sansha Incursion Lifecycle, Site Classes, Influence, System Effects,
+// Fleet Payouts, and World Event Tales (`feat:pve.incursion-payout`, `feat:pve.incursion-spawn-lifecycle`,
+// `feat:pve.incursion-influence`, `feat:pve.incursion-system-effects`, `feat:pve.incursion-site-classes`, `feat:pve.tales`).
+
+
+use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, DamageVector, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::inventory_fitting::fitting_scanners_superweapons::apply_active_dbuffs_and_system_effects_to_ship_attrs;
+use eve_server::services::pve_incursion_lifecycle::{
+    advance_incursion_lifecycles, advance_incursion_wave_on_escort_kill,
+    compute_incursion_system_effects, get_incursion_system_wide_dbuffs, register_world_event_tale,
+    WorldEventTaleRecord, INCURSION_RESPAWN_CADENCE_SEC, INCURSION_WITHDRAWAL_DURATION_SEC,
+};
+use eve_server::services::pve_incursion_sites::{
+    get_incursion_effects_for_system, on_incursion_boss_destroyed,
+};
+use eve_server::services::pve_special_sites::{
+    advance_pve_special_clock, ensure_special_sites_spawned, with_pve_special_reg,
+};
+use glam::DVec3;
+use std::collections::{HashMap, HashSet};
+
+async fn create_in_space_pilot(
+    ctx: &ServerContext,
+    session_id: u64,
+    user: &str,
+    pass: &str,
+    char_id: i64,
+    solar_system_id: u32,
+    ship_id: i64,
+    ship_type_id: u32,
+    pos: DVec3,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(session_id);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String(user.into()), PyRep::String(pass.into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    sess.solar_system_id = Some(solar_system_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let p1_template = snap.characters[&90_000_001].clone();
+        let ch = snap.characters.entry(char_id).or_insert_with(|| p1_template);
+        ch.character_id = char_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        ch.solar_system_id = solar_system_id;
+        ch.active_ship_id = ship_id;
+
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: i64::from(solar_system_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_id, pos.to_array());
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: ship_type_id,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    sess
+}
+
+// ============================================================================
+// 1. Spawn Lifecycle, Constellation Roles, Site Classes & Map RPCs
+// ============================================================================
+#[tokio::test]
+async fn test_incursion_spawn_lifecycle_roles_and_map_rpcs() {
+    // parity: feat:pve.incursion-spawn-lifecycle, feat:pve.incursion-site-classes
+    eve_testkit::attest(&[
+        "feat:pve.incursion-spawn-lifecycle",
+        "feat:pve.incursion-site-classes",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+
+    // 1. Verify eligible constellations with distinct staging/vanguard/assault/HQ roles
+    let (target_cid, staging_sys, vg_sys_list, as_sys_list, hq_sys, vg_site_id, vg_boss_bid, vg_escorts) =
+        with_pve_special_reg(&ctx, |reg| {
+            assert_eq!(reg.incursions.len(), 3, "3 concurrent incursions seeded");
+            let (&cid, inc) = reg.incursions.iter().next().expect("active incursion");
+            assert_ne!(cid, 20_000_020, "Trade hub constellation must not host incursion");
+            let mut role_systems = HashSet::new();
+            assert!(role_systems.insert(inc.staging_solar_system_id));
+            for &s in &inc.vanguard_solar_system_ids {
+                assert!(role_systems.insert(s), "Vanguard system must be distinct");
+            }
+            for &s in &inc.assault_solar_system_ids {
+                assert!(role_systems.insert(s), "Assault system must be distinct");
+            }
+            assert!(role_systems.insert(inc.hq_solar_system_id), "HQ system must be distinct");
+
+            // Verify every site spawns ONLY in a system with the matching role
+            for site in &inc.sites {
+                match site.tier.as_str() {
+                    "Staging" => assert_eq!(site.solar_system_id, inc.staging_solar_system_id),
+                    "Vanguard" => {
+                        assert!(inc.vanguard_solar_system_ids.contains(&site.solar_system_id));
+                        assert_eq!(site.min_pilots, 5);
+                        assert_eq!(site.max_optimal_pilots, 10);
+                    }
+                    "Assault" => {
+                        assert!(inc.assault_solar_system_ids.contains(&site.solar_system_id));
+                        assert_eq!(site.min_pilots, 10);
+                        assert_eq!(site.max_optimal_pilots, 20);
+                    }
+                    "Headquarters" => {
+                        assert_eq!(site.solar_system_id, inc.hq_solar_system_id);
+                        assert_eq!(site.min_pilots, 20);
+                        assert_eq!(site.max_optimal_pilots, 40);
+                    }
+                    "Mothership" => {
+                        assert_eq!(site.solar_system_id, inc.hq_solar_system_id);
+                        assert_eq!(site.min_pilots, 40);
+                        assert_eq!(site.max_optimal_pilots, 80);
+                    }
+                    other => panic!("Unexpected site tier {other}"),
+                }
+            }
+            let vg = inc.sites.iter().find(|s| s.tier == "Vanguard").expect("Vanguard site");
+            let esc_ids: Vec<i64> = vg.escort_spawns.iter().map(|e| e.npc_ball_id).collect();
+            (
+                cid,
+                inc.staging_solar_system_id,
+                inc.vanguard_solar_system_ids.clone(),
+                inc.assault_solar_system_ids.clone(),
+                inc.hq_solar_system_id,
+                vg.site_id.clone(),
+                vg.boss_npc_ball_id,
+                esc_ids,
+            )
+        });
+
+    let mut sess = create_in_space_pilot(
+        &ctx,
+        8201,
+        "demo",
+        "demo-secret",
+        90_000_001,
+        hq_sys,
+        720_001_001,
+        587,
+        DVec3::ZERO,
+    )
+    .await;
+
+    // 2. Verify map.GetSystemsInIncursions and map.GetIncursionGlobalReport reflect live state
+    let sys_rep = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetSystemsInIncursions", &[], &kw, None)
+        .await
+        .expect("GetSystemsInIncursions");
+    let PyRep::List(sys_entries) = &sys_rep else {
+        panic!("Expected List from GetSystemsInIncursions");
+    };
+    assert!(sys_entries.iter().any(|e| {
+        e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(i64::from(staging_sys))
+            && e.dict_get("sceneType").and_then(|v| v.as_i64()) == Some(1)
+            && e.dict_get("templateNameID").and_then(|v| v.as_i64()) == Some(564_035)
+    }));
+    assert!(sys_entries.iter().any(|e| {
+        e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(i64::from(vg_sys_list[0]))
+            && e.dict_get("sceneType").and_then(|v| v.as_i64()) == Some(2)
+    }));
+    assert!(sys_entries.iter().any(|e| {
+        e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(i64::from(as_sys_list[0]))
+            && e.dict_get("sceneType").and_then(|v| v.as_i64()) == Some(3)
+    }));
+    assert!(sys_entries.iter().any(|e| {
+        e.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(i64::from(hq_sys))
+            && e.dict_get("sceneType").and_then(|v| v.as_i64()) == Some(4)
+    }));
+
+    let report_rep = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIncursionGlobalReport", &[], &kw, None)
+        .await
+        .expect("GetIncursionGlobalReport");
+    let PyRep::List(reports) = &report_rep else {
+        panic!("Expected List from GetIncursionGlobalReport");
+    };
+    let rep_row = reports
+        .iter()
+        .find(|r| r.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid)))
+        .expect("target constellation in report");
+    assert_eq!(rep_row.dict_get("state").and_then(|v| v.as_str()), Some("Establishing"));
+    assert_eq!(rep_row.dict_get("influence").and_then(|v| v.as_f64()), Some(1.0));
+    assert_eq!(rep_row.dict_get("hasBoss").and_then(|v| v.as_bool()), Some(false));
+
+    // 3. Verify multi-wave NPC spawning & boss wave gate: boss is NOT spawned in Wave 1 and early completion is rejected
+    let vg_sys_id = vg_sys_list[0];
+    let vg_handle = ctx.systems.get_or_spawn(vg_sys_id);
+    assert!(
+        vg_handle.get_ball_snapshot(vg_boss_bid).await.unwrap().is_none(),
+        "Vanguard boss must NOT spawn in Wave 1 before escort waves are cleared"
+    );
+    let early_err = on_incursion_boss_destroyed(&ctx, vg_sys_id, vg_boss_bid, Some(90_000_001))
+        .await
+        .expect("site matched")
+        .expect_err("early boss kill on Wave 1 must be rejected");
+    assert_eq!(early_err.code, "IncursionSiteNpcsRemaining");
+
+    with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.get_mut(&target_cid).unwrap();
+        let site = inc.sites.iter_mut().find(|s| s.site_id == vg_site_id).unwrap();
+        for esc in &mut site.escort_spawns {
+            esc.destroyed = true;
+        }
+    });
+    assert!(!vg_escorts.is_empty());
+    advance_incursion_wave_on_escort_kill(&ctx.systems, &ctx.db, &ctx.sde, vg_sys_id, &vg_site_id).await;
+    let wave_after = with_pve_special_reg(&ctx, |reg| {
+        reg.incursion_site_waves.get(&vg_site_id).map(|w| w.current_wave).unwrap_or(1)
+    });
+    assert_eq!(wave_after, 2, "Destroying wave 1 escorts must spawn wave 2 reinforcements");
+    assert!(vg_handle.get_ball_snapshot(vg_boss_bid).await.unwrap().is_none(), "Boss still deferred on Wave 2 of 3");
+
+    // 4. Unlock Mothership at low influence, clear its escort fleet, kill it, verify withdrawal timer & respawn cadence
+    let (ms_site_id, ms_boss_bid) = with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.get_mut(&target_cid).unwrap();
+        inc.influence = 0.05;
+        inc.mothership_spawned = true;
+        let ms = inc.sites.iter_mut().find(|s| s.tier == "Mothership").unwrap();
+        ms.locked_until_low_influence = false;
+        (ms.site_id.clone(), ms.boss_npc_ball_id)
+    });
+    crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &ms_site_id).await;
+    let ms_res = on_incursion_boss_destroyed(&ctx, hq_sys, ms_boss_bid, Some(90_000_001))
+        .await
+        .expect("Mothership site matched")
+        .expect("Mothership completion succeeded");
+    assert!(ms_res.incursion_ended);
+    assert!(with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].mothership_defeated));
+
+    let state_after_kill = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].state.clone());
+    assert_eq!(state_after_kill, "Withdrawing", "Mothership death enters Withdrawing state");
+
+    // Advance clock past 24-hour withdrawal duration
+    advance_pve_special_clock(&ctx, INCURSION_WITHDRAWAL_DURATION_SEC + 60);
+    let state_after_withdraw = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].state.clone());
+    assert_eq!(state_after_withdraw, "Ended", "Incursion ends after withdrawal timer expires");
+
+    // Verify ended incursion disappears from map.GetSystemsInIncursions
+    let sys_rep_ended = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetSystemsInIncursions", &[], &kw, None)
+        .await
+        .expect("GetSystemsInIncursions after withdrawal");
+    let PyRep::List(sys_entries_ended) = &sys_rep_ended else {
+        panic!("Expected List");
+    };
+    assert!(
+        !sys_entries_ended
+            .iter()
+            .any(|e| e.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid))),
+        "Ended incursion systems must be removed from GetSystemsInIncursions"
+    );
+    let rep_ended = ctx
+        .dispatch_rpc(&mut sess, "map", None, "GetIncursionGlobalReport", &[], &kw, None)
+        .await
+        .expect("GetIncursionGlobalReport after withdrawal");
+    let PyRep::List(reports_ended) = &rep_ended else {
+        panic!("Expected List");
+    };
+    assert!(
+        !reports_ended
+            .iter()
+            .any(|r| r.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(i64::from(target_cid))),
+        "Ended incursion must be excluded from GetIncursionGlobalReport"
+    );
+
+    // Advance clock past 12-hour respawn cadence -> new incursion spawns
+    advance_pve_special_clock(&ctx, INCURSION_RESPAWN_CADENCE_SEC + 60);
+    let active_count_after_cadence = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions.values().filter(|i| i.state != "Ended").count()
+    });
+    assert_eq!(
+        active_count_after_cadence, 3,
+        "A new incursion must spawn once the 12-hour respawn cadence elapses"
+    );
+}
+
+// ============================================================================
+// 2. Influence Reduction, Regeneration, Mothership Unlock & System DBuffs
+// ============================================================================
+#[tokio::test]
+async fn test_incursion_influence_regen_mothership_unlock_and_system_effects() {
+    // parity: feat:pve.incursion-influence, feat:pve.incursion-system-effects
+    eve_testkit::attest(&[
+        "feat:pve.incursion-influence",
+        "feat:pve.incursion-system-effects",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (target_cid, hq_sys, vg_sys, vg_sid, as_sys, as_sid, hq_sid) =
+        with_pve_special_reg(&ctx, |reg| {
+            let (&cid, inc) = reg.incursions.iter().next().unwrap();
+            assert_eq!(inc.influence, 1.0, "Influence must start at 100% (1.0)");
+            let vg = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+            let ass = inc.sites.iter().find(|s| s.tier == "Assault").unwrap();
+            let hq = inc.sites.iter().find(|s| s.tier == "Headquarters").unwrap();
+            (
+                cid,
+                inc.hq_solar_system_id,
+                vg.solar_system_id,
+                vg.site_id.clone(),
+                ass.solar_system_id,
+                ass.site_id.clone(),
+                hq.site_id.clone(),
+            )
+        });
+
+    let _sess = create_in_space_pilot(
+        &ctx,
+        8202,
+        "demo",
+        "demo-secret",
+        90_000_001,
+        hq_sys,
+        720_001_002,
+        587,
+        DVec3::ZERO,
+    )
+    .await;
+
+    // 1. Verify full Sansha system-wide dbuffs & penalties at 1.0 influence
+    let dbuffs_full = get_incursion_system_wide_dbuffs(&ctx, hq_sys);
+    assert_eq!(dbuffs_full.len(), 2, "Shield & Armor resistance system dbuffs active");
+    assert!((dbuffs_full[0].1 - 50.0).abs() < 1e-6);
+
+    let eff_full = get_incursion_effects_for_system(&ctx, hq_sys).expect("active effects");
+    let comp_full = compute_incursion_system_effects(&ctx, hq_sys).expect("computed effects");
+    assert_eq!(eff_full.bounty_penalty, 0.50);
+    assert_eq!(comp_full.lp_penalty, 0.50);
+
+    let mut attrs_full = HashMap::from([(263, 1000.0), (265, 1000.0), (482, 1000.0), (64, 1.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, 720_001_002, &mut attrs_full);
+    assert_eq!(attrs_full[&263], 500.0);
+    assert_eq!(attrs_full[&64], 0.5);
+
+    // 2. Completing Vanguard (-0.05), Assault (-0.20), and HQ (-0.25) after clearing waves reduces influence by site class
+    let vg_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys, &vg_sid).await;
+    let _ = ctx.systems.get_or_spawn(vg_sys).remove_ball(vg_bid).await;
+    on_incursion_boss_destroyed(&ctx, vg_sys, vg_bid, Some(90_000_001)).await.unwrap().unwrap();
+    let inf_after_vg = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
+    assert!((inf_after_vg - 0.95).abs() < 1e-6, "Vanguard reduces influence by 0.05");
+
+    let as_bid = crate::common::clear_incursion_site_escort_waves(&ctx, as_sys, &as_sid).await;
+    let _ = ctx.systems.get_or_spawn(as_sys).remove_ball(as_bid).await;
+    on_incursion_boss_destroyed(&ctx, as_sys, as_bid, Some(90_000_001)).await.unwrap().unwrap();
+    let inf_after_as = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
+    assert!((inf_after_as - 0.75).abs() < 1e-6, "Assault reduces influence by 0.20");
+
+    let hq_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &hq_sid).await;
+    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(hq_bid).await;
+    on_incursion_boss_destroyed(&ctx, hq_sys, hq_bid, Some(90_000_001)).await.unwrap().unwrap();
+    let inf_after_hq = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
+    assert!((inf_after_hq - 0.50).abs() < 1e-6, "HQ reduces influence by 0.25");
+
+    // 3. Influence regenerates over time (+2% / hour) when sites are not run
+    advance_pve_special_clock(&ctx, 2 * 3_600);
+    advance_incursion_lifecycles(&ctx);
+    let inf_after_regen = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].influence);
+    assert!(
+        (inf_after_regen - 0.54).abs() < 1e-6,
+        "2 hours idle must regenerate +0.04 influence (0.50 -> 0.54), got {inf_after_regen}"
+    );
+
+    // 4. Lower influence to 0.50 -> system effects & dbuffs scale proportionally (25% penalty)
+    with_pve_special_reg(&ctx, |reg| {
+        reg.incursions.get_mut(&target_cid).unwrap().influence = 0.50;
+    });
+    let dbuffs_half = get_incursion_system_wide_dbuffs(&ctx, hq_sys);
+    assert!((dbuffs_half[0].1 - 25.0).abs() < 1e-6, "DBuff scales linearly with influence");
+    let mut attrs_half = HashMap::from([(263, 1000.0), (265, 1000.0), (482, 1000.0), (64, 1.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, 720_001_002, &mut attrs_half);
+    assert_eq!(attrs_half[&263], 750.0, "25% shield penalty at 0.50 influence");
+    assert_eq!(attrs_half[&64], 0.75, "25% damage penalty at 0.50 influence");
+
+    // 5. At 0.08 influence (> 0%), Mothership stays locked; dropping to 0.0 (0%) unlocks Mothership -> Mobilizing
+    let (vg2_sys, vg2_sid, second_hq_sid, ms_sid) = with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.get_mut(&target_cid).unwrap();
+        inc.influence = 0.13;
+        let vg2 = inc.sites.iter().find(|s| s.tier == "Vanguard" && !s.boss_destroyed).unwrap();
+        let hq2 = inc.sites.iter().find(|s| s.tier == "Headquarters" && !s.boss_destroyed).unwrap();
+        let ms = inc.sites.iter().find(|s| s.tier == "Mothership").unwrap();
+        (vg2.solar_system_id, vg2.site_id.clone(), hq2.site_id.clone(), ms.site_id.clone())
+    });
+    let vg2_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg2_sys, &vg2_sid).await;
+    let _ = ctx.systems.get_or_spawn(vg2_sys).remove_ball(vg2_bid).await;
+    on_incursion_boss_destroyed(&ctx, vg2_sys, vg2_bid, Some(90_000_001)).await.unwrap().unwrap();
+    let still_locked_at_008 = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        (inc.influence - 0.08).abs() < 1e-6 && !inc.mothership_spawned && inc.state != "Mobilizing"
+    });
+    assert!(still_locked_at_008, "Mothership must remain locked at 8% (0.08) influence");
+
+    let second_hq_bid = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &second_hq_sid).await;
+    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(second_hq_bid).await;
+    on_incursion_boss_destroyed(&ctx, hq_sys, second_hq_bid, Some(90_000_001)).await.unwrap().unwrap();
+    let ms_unlocked = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        inc.mothership_spawned && inc.influence <= 0.0 && inc.state == "Mobilizing"
+    });
+    assert!(ms_unlocked, "Dropping influence to 0.0 must unlock Mothership site and enter Mobilizing");
+
+    let ms_boss_id = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys, &ms_sid).await;
+    let _ = ctx.systems.get_or_spawn(hq_sys).remove_ball(ms_boss_id).await;
+    on_incursion_boss_destroyed(&ctx, hq_sys, ms_boss_id, Some(90_000_001)).await.unwrap().unwrap();
+    assert!(
+        get_incursion_system_wide_dbuffs(&ctx, hq_sys).is_empty(),
+        "Sansha system dbuffs must be removed on withdrawal"
+    );
+    let mut attrs_after = HashMap::from([(263, 1000.0), (265, 1000.0), (482, 1000.0), (64, 1.0)]);
+    apply_active_dbuffs_and_system_effects_to_ship_attrs(&ctx, 720_001_002, &mut attrs_after);
+    assert_eq!(attrs_after[&263], 1000.0, "Ship shield unaffected after incursion withdrawal");
+    assert_eq!(attrs_after[&64], 1.0, "Ship damage unaffected after incursion withdrawal");
+}
+
+// ============================================================================
+// 3. On-Grid-Only Fleet Payouts & World Event Tales
+// ============================================================================
+#[tokio::test]
+async fn test_incursion_payout_on_grid_only_and_world_event_tales() {
+    // parity: feat:pve.incursion-payout, feat:pve.tales
+    eve_testkit::attest(&["feat:pve.incursion-payout", "feat:pve.tales"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+
+    let (target_cid, vg_sys_id, hq_sys_id, vg_site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
+        let (&cid, inc) = reg.incursions.iter().next().unwrap();
+        let vg = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+        (cid, vg.solar_system_id, inc.hq_solar_system_id, vg.site_id.clone(), vg.position)
+    });
+
+    // Fleet 950_001: Pilot 1 & Pilot 2 on grid at site; Pilot 3 in same system 800 km off-grid; Pilot 4 in HQ system
+    let p1 = 90_000_001;
+    let p2 = 90_000_002;
+    let uid3 = ctx.db.provision_player_account("incp3", "incp3-secret");
+    let p3_offgrid = ctx
+        .db
+        .create_character(uid3, "Incursion Offgrid Pilot", 1, 1, 11, 17, &ctx.sde)
+        .expect("create p3")
+        .character_id;
+    let uid4 = ctx.db.provision_player_account("incp4", "incp4-secret");
+    let p4_other_sys = ctx
+        .db
+        .create_character(uid4, "Incursion Other Sys Pilot", 1, 1, 11, 17, &ctx.sde)
+        .expect("create p4")
+        .character_id;
+
+    let mut sess1 = create_in_space_pilot(&ctx, 8211, "demo", "demo-secret", p1, vg_sys_id, 720_010_001, 587, site_pos).await;
+    let _sess2 = create_in_space_pilot(
+        &ctx,
+        8212,
+        "other",
+        "other-secret",
+        p2,
+        vg_sys_id,
+        720_010_002,
+        587,
+        site_pos + DVec3::new(2_500.0, 0.0, 0.0),
+    )
+    .await;
+    let _sess3 = create_in_space_pilot(
+        &ctx,
+        8213,
+        "incp3",
+        "incp3-secret",
+        p3_offgrid,
+        vg_sys_id,
+        720_010_003,
+        587,
+        site_pos + DVec3::new(800_000.0, 0.0, 0.0),
+    )
+    .await;
+    let _sess4 = create_in_space_pilot(&ctx, 8214, "incp4", "incp4-secret", p4_other_sys, hq_sys_id, 720_010_004, 587, DVec3::ZERO).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let members = vec![p1, p2, p3_offgrid, p4_other_sys];
+        for &pid in &members {
+            if let Some(ch) = snap.characters.get_mut(&pid) {
+                ch.fleet_id = Some(950_001);
+            }
+        }
+        snap.fleets.insert(
+            950_001,
+            FleetRecord {
+                fleet_id: 950_001,
+                boss_id: p1,
+                members,
+                ..Default::default()
+            },
+        );
+    });
+
+    let init_state: HashMap<i64, (i64, i64)> = [p1, p2, p3_offgrid, p4_other_sys]
+        .iter()
+        .map(|&pid| {
+            ctx.db.with_snapshot(|s| {
+                let ch = &s.characters[&pid];
+                (pid, (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0)))
+            })
+        })
+        .collect();
+
+    let vg_boss_bid = crate::common::clear_incursion_site_escort_waves(&ctx, vg_sys_id, &vg_site_id).await;
+    let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
+    let _ = vg_sys
+        .apply_damage_with_attacker(
+            vg_boss_bid,
+            DamageVector {
+                em: 1.0e7,
+                thermal: 1.0e7,
+                kinetic: 1.0e7,
+                explosive: 1.0e7,
+            },
+            Some(p1),
+        )
+        .await
+        .expect("kill vanguard boss");
+    let _ = vg_sys.remove_ball(vg_boss_bid).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if let Some(res) = on_incursion_boss_destroyed(&ctx, vg_sys_id, vg_boss_bid, Some(p1)).await {
+        res.expect("incursion payout succeeded");
+    }
+
+    // Verify ONLY on-grid pilots (p1, p2) were paid ISK + CONCORD LP
+    for &on_grid_pid in &[p1, p2] {
+        let (bal_after, lp_after) = ctx.db.with_snapshot(|s| {
+            let ch = &s.characters[&on_grid_pid];
+            (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0))
+        });
+        assert!(bal_after > init_state[&on_grid_pid].0, "On-grid pilot {on_grid_pid} must receive ISK");
+        assert!(lp_after > init_state[&on_grid_pid].1, "On-grid pilot {on_grid_pid} must receive CONCORD LP");
+    }
+    for &excluded_pid in &[p3_offgrid, p4_other_sys] {
+        let (bal_after, lp_after) = ctx.db.with_snapshot(|s| {
+            let ch = &s.characters[&excluded_pid];
+            (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0))
+        });
+        assert_eq!(bal_after, init_state[&excluded_pid].0, "Off-grid/out-of-system pilot {excluded_pid} must not receive ISK");
+        assert_eq!(lp_after, init_state[&excluded_pid].1, "Off-grid/out-of-system pilot {excluded_pid} must not receive LP");
+    }
+
+    // Verify taleMgr.GetGlobalWorldEventTales & get_active_tales_by_template return active world events + system state
+    let custom_tale_id = register_world_event_tale(
+        &ctx,
+        WorldEventTaleRecord {
+            tale_id: 0,
+            template_id: 5301,
+            template_class_id: "pirateInvasion".into(),
+            solar_system_id: vg_sys_id,
+            constellation_id: target_cid,
+            aggressor_faction_id: 500_010,
+            state: "InvasionContested".into(),
+            influence: 0.65,
+            start_unix: ctx.now_unix().saturating_sub(3_600),
+            end_unix: ctx.now_unix() + 86_400,
+        },
+    );
+
+    let all_tales_rep = ctx
+        .dispatch_rpc(&mut sess1, "taleMgr", None, "GetGlobalWorldEventTales", &[], &kw, None)
+        .await
+        .expect("GetGlobalWorldEventTales");
+    let PyRep::List(all_tales) = &all_tales_rep else {
+        panic!("Expected List");
+    };
+    assert!(all_tales.iter().any(|t| t.dict_get("templateID").and_then(|v| v.as_i64()) == Some(5158)));
+    assert!(all_tales.iter().any(|t| t.dict_get("templateID").and_then(|v| v.as_i64()) == Some(5201)));
+    assert!(all_tales.iter().any(|t| {
+        t.dict_get("taleID").and_then(|v| v.as_i64()) == Some(custom_tale_id)
+            && t.dict_get("systemState").and_then(|v| v.as_str()) == Some("InvasionContested")
+    }));
+
+    let inv_tales_rep = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "taleMgr",
+            None,
+            "get_active_tales_by_template",
+            &[PyRep::Integer(5301)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("get_active_tales_by_template");
+    let PyRep::List(inv_tales) = &inv_tales_rep else {
+        panic!("Expected List");
+    };
+    assert_eq!(inv_tales.len(), 1);
+    assert_eq!(
+        inv_tales[0].dict_get("systemState").and_then(|v| v.as_str()),
+        Some("InvasionContested")
+    );
+}
+}
+
+
+pub(crate) mod pve_incursions_parity_closure_part2 {
+    #[allow(unused_imports)]
+    use super::*;
+
+// Part 2 integration tests for Sansha Incursion SDE Stargate-Graph Topology Roles,
+// Fleet Payout Scaling (Optimal, Over-Cap Diminishing Return, Hard-Cap Zero Cutoff),
+// `incursion.UpdateIncursionLPLog` Reconciliation, and `taleMgr` `PyRep::Dict` Shapes
+// (`feat:pve.incursion-payout`, `feat:pve.incursion-spawn-lifecycle`, `feat:pve.incursion-site-classes`, `feat:pve.tales`).
+
+
+use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_server::router::ServerContext;
+use eve_server::services::pve_incursion_lifecycle::{
+    assign_constellation_system_roles, STORM_TALE_TEMPLATE_ID,
+};
+use eve_server::services::pve_incursion_sites::on_incursion_boss_destroyed;
+use eve_server::services::pve_special_sites::{ensure_special_sites_spawned, with_pve_special_reg};
+use glam::DVec3;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+async fn spawn_fleet_pilot_on_grid(
+    ctx: &ServerContext,
+    idx: usize,
+    solar_system_id: u32,
+    pos: DVec3,
+) -> (i64, SessionState) {
+    let kw = HashMap::new();
+    let uname = format!("incscale_{idx}");
+    let uid = ctx.db.provision_player_account(&uname, "scale-secret");
+    let char_id = ctx
+        .db
+        .create_character(uid, &format!("Incursion Scale Pilot {idx}"), 1, 1, 11, 17, &ctx.sde)
+        .expect("create incursion pilot")
+        .character_id;
+    let ship_id = 721_000_000 + (idx as i64);
+
+    let mut sess = SessionState::new(8400 + (idx as u64));
+    ctx.dispatch_rpc(
+        &mut sess,
+        "authentication",
+        None,
+        "Login",
+        &[PyRep::String(uname.into()), PyRep::String("scale-secret".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Login");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    sess.solar_system_id = Some(solar_system_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = solar_system_id;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: i64::from(solar_system_id),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(ship_id, pos.to_array());
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 365.0,
+            inertia: 1.0,
+            mass: 1_067_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    (char_id, sess)
+}
+
+fn intra_constellation_bfs_distances(
+    ctx: &ServerContext,
+    constellation_id: u32,
+    start_sys: u32,
+) -> HashMap<u32, u32> {
+    let const_set: HashSet<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.constellation_id == constellation_id)
+        .map(|s| s.solar_system_id)
+        .collect();
+    let mut dist = HashMap::new();
+    dist.insert(start_sys, 0_u32);
+    let mut queue = VecDeque::new();
+    queue.push_back(start_sys);
+    for _ in 0..const_set.len() {
+        let Some(cur) = queue.pop_front() else {
+            break;
+        };
+        let d = dist[&cur];
+        for j in ctx.sde.jumps.values() {
+            if j.from_solar_system_id == cur
+                && const_set.contains(&j.to_solar_system_id)
+                && !dist.contains_key(&j.to_solar_system_id)
+            {
+                dist.insert(j.to_solar_system_id, d + 1);
+                queue.push_back(j.to_solar_system_id);
+            }
+        }
+    }
+    dist
+}
+
+// ============================================================================
+// 1. SDE Stargate-Graph Constellation Topology Roles & taleMgr PyRep::Dict Shapes
+// ============================================================================
+#[tokio::test]
+async fn test_incursion_sde_stargate_topology_roles_and_world_event_dict_shapes() {
+    // parity: feat:pve.incursion-spawn-lifecycle, feat:pve.incursion-site-classes, feat:pve.tales
+    eve_testkit::attest(&[
+        "feat:pve.incursion-spawn-lifecycle",
+        "feat:pve.incursion-site-classes",
+        "feat:pve.tales",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    // 1. Verify Kimotoro (20000020) stargate topology role assignment uses real SDE jumps:
+    //    - 30000145 (New Caldari) has 4 external constellation stargates -> Staging
+    //    - 30000141 (Kisogo, sorted index 2!) is a degree-1 dead-end pocket 4 hops from Staging -> HQ
+    let mut kimotoro_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| s.constellation_id == 20_000_020)
+        .map(|s| s.solar_system_id)
+        .collect();
+    kimotoro_systems.sort_unstable();
+    let (staging, vanguard, assault, hq) =
+        assign_constellation_system_roles(&ctx.sde, 20_000_020, &kimotoro_systems);
+    assert_eq!(
+        staging, 30_000_145,
+        "Staging must be border system New Caldari (30000145) with external gates, not sorted-ID first"
+    );
+    assert_eq!(
+        hq, 30_000_141,
+        "HQ must be degree-1 dead-end pocket Kisogo (30000141), not sorted-ID last"
+    );
+    let hops = intra_constellation_bfs_distances(&ctx, 20_000_020, staging);
+    let max_vg_hop = vanguard.iter().map(|s| hops[s]).max().unwrap();
+    let min_as_hop = assault.iter().map(|s| hops[s]).min().unwrap();
+    assert!(
+        max_vg_hop <= min_as_hop && min_as_hop <= hops[&hq],
+        "BFS hop distance ordering Staging -> Vanguard ({max_vg_hop}) <= Assault ({min_as_hop}) <= HQ ({}) must hold",
+        hops[&hq]
+    );
+
+    // Also verify all 3 live seeded incursions satisfy BFS hop ordering over real SDE stargates
+    with_pve_special_reg(&ctx, |reg| {
+        for (&cid, inc) in &reg.incursions {
+            let d = intra_constellation_bfs_distances(&ctx, cid, inc.staging_solar_system_id);
+            let vg_max = inc.vanguard_solar_system_ids.iter().filter_map(|s| d.get(s)).max().copied().unwrap_or(0);
+            let as_min = inc.assault_solar_system_ids.iter().filter_map(|s| d.get(s)).min().copied().unwrap_or(vg_max);
+            let hq_d = d.get(&inc.hq_solar_system_id).copied().unwrap_or(as_min);
+            assert!(
+                vg_max <= as_min && as_min <= hq_d,
+                "Seeded incursion constellation {cid} must follow stargate BFS hop ordering"
+            );
+        }
+    });
+
+    // 2. Verify taleMgr returns subscriptable PyRep::Dict entries (NOT util.KeyVal) including active Metaliminal Storms
+    let kw = HashMap::new();
+    let (_, mut sess) = spawn_fleet_pilot_on_grid(&ctx, 1, 30_000_142, DVec3::ZERO).await;
+    let tales_rep = ctx
+        .dispatch_rpc(&mut sess, "taleMgr", None, "GetGlobalWorldEventTales", &[], &kw, None)
+        .await
+        .expect("GetGlobalWorldEventTales");
+    let PyRep::List(tales) = &tales_rep else {
+        panic!("Expected PyRep::List from GetGlobalWorldEventTales");
+    };
+    assert!(!tales.is_empty());
+    for entry in tales {
+        assert!(
+            matches!(entry, PyRep::Dict(_)),
+            "World event tale entry must be a subscriptable PyRep::Dict, got {entry:?}"
+        );
+    }
+    assert!(
+        tales.iter().any(|t| {
+            t.dict_get("templateID").and_then(|v| v.as_i64()) == Some(STORM_TALE_TEMPLATE_ID)
+                && t.dict_get("templateClassID").and_then(|v| v.as_str()) == Some("metaliminalStorm")
+        }),
+        "GetGlobalWorldEventTales must include active Metaliminal Roaming Storms"
+    );
+
+    let storm_tales_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "taleMgr",
+            None,
+            "get_active_tales_by_template",
+            &[PyRep::Integer(STORM_TALE_TEMPLATE_ID)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("get_active_tales_by_template(5203)");
+    let PyRep::List(storm_tales) = &storm_tales_rep else {
+        panic!("Expected List for storm tales");
+    };
+    assert!(!storm_tales.is_empty(), "Active storm tales must be returned for template 5203");
+}
+
+// ============================================================================
+// 2. Fleet Payout Scaling: Optimal (<=10), Over-Cap (12), Hard-Cap (>15 -> 0), & LP Log Reconciliation
+// ============================================================================
+#[tokio::test]
+async fn test_incursion_fleet_payout_optimal_overcap_and_hard_cap_cutoff() {
+    // parity: feat:pve.incursion-payout
+    eve_testkit::attest(&["feat:pve.incursion-payout"]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+    let kw = HashMap::new();
+
+    // Collect 3 Vanguard sites across the seeded constellations so each fleet-size tier runs cleanly
+    let vg_sites: Vec<(u32, u32, String, i64, DVec3)> = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions
+            .iter()
+            .flat_map(|(&cid, inc)| {
+                inc.sites
+                    .iter()
+                    .filter(|s| s.tier == "Vanguard")
+                    .map(move |s| (cid, s.solar_system_id, s.site_id.clone(), s.boss_npc_ball_id, s.position))
+            })
+            .take(3)
+            .collect()
+    });
+    assert_eq!(vg_sites.len(), 3, "Need 3 Vanguard sites for optimal / overcap / hard-cap tests");
+
+    // Pin constellation influence to 0.05 before each Vanguard site (delta 0.05 -> new_influence 0.0 -> 1.0x influence_scale)
+    // so the comparison across Cases A/B/C strictly isolates fleet-size scaling.
+    // Case A: Optimal fleet (5 on-grid pilots <= 10 optimal) -> full 1.0x payout (10,395,000 ISK, 1,400 LP)
+    let (cid_a, sys_a, site_a, _, pos_a) = vg_sites[0].clone();
+    with_pve_special_reg(&ctx, |reg| reg.incursions.get_mut(&cid_a).unwrap().influence = 0.05);
+    let mut pilots_a = Vec::new();
+    let mut lead_sess = None;
+    for i in 0..5 {
+        let (pid, s) = spawn_fleet_pilot_on_grid(&ctx, 10 + i, sys_a, pos_a + DVec3::new((i as f64) * 500.0, 0.0, 0.0)).await;
+        if lead_sess.is_none() {
+            lead_sess = Some(s);
+        }
+        pilots_a.push(pid);
+    }
+    let mut lead_sess = lead_sess.unwrap();
+    ctx.db.with_mut_snapshot(|snap| {
+        for &pid in &pilots_a {
+            snap.characters.get_mut(&pid).unwrap().fleet_id = Some(960_001);
+        }
+        snap.fleets.insert(
+            960_001,
+            FleetRecord {
+                fleet_id: 960_001,
+                boss_id: pilots_a[0],
+                members: pilots_a.clone(),
+                ..Default::default()
+            },
+        );
+    });
+    let bal_before_a = ctx.db.with_snapshot(|s| s.characters[&pilots_a[0]].balance.0);
+    let boss_a = crate::common::clear_incursion_site_escort_waves(&ctx, sys_a, &site_a).await;
+    let _ = ctx.systems.get_or_spawn(sys_a).remove_ball(boss_a).await;
+    let res_a = on_incursion_boss_destroyed(&ctx, sys_a, boss_a, Some(pilots_a[0]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(res_a.isk_per_pilot, 10_395_000, "Optimal <=10 Vanguard fleet receives 100% ISK");
+    assert_eq!(res_a.concord_lp_per_pilot, 1_400, "Optimal <=10 Vanguard fleet receives 100% CONCORD LP");
+    let bal_after_a = ctx.db.with_snapshot(|s| s.characters[&pilots_a[0]].balance.0);
+    assert_eq!(bal_after_a - bal_before_a, 10_395_000 * 100);
+
+    // Verify incursion.UpdateIncursionLPLog reconciles and returns recorded LP log entries
+    let lp_reconciled = ctx
+        .dispatch_rpc(
+            &mut lead_sess,
+            "incursion",
+            None,
+            "UpdateIncursionLPLog",
+            &[PyRep::Integer(i64::from(cid_a))],
+            &kw,
+            None,
+        )
+        .await
+        .expect("UpdateIncursionLPLog");
+    let PyRep::List(lp_rows) = &lp_reconciled else {
+        panic!("Expected reconciled LP log list, got {lp_reconciled:?}");
+    };
+    assert_eq!(lp_rows.len(), 1, "Caller pilot receives reconciled LP log entry for site");
+    assert_eq!(lp_rows[0].dict_get("fleetSize").and_then(|v| v.as_i64()), Some(5));
+    assert_eq!(lp_rows[0].dict_get("siteID").and_then(|v| v.as_str()), Some(site_a.as_str()));
+
+    // Case B: Over-optimal fleet (12 on-grid pilots: 10 < 12 <= 15 hard cap) -> diminishing return (< 1.0x, > 0)
+    let (cid_b, sys_b, site_b, _, pos_b) = vg_sites[1].clone();
+    with_pve_special_reg(&ctx, |reg| reg.incursions.get_mut(&cid_b).unwrap().influence = 0.05);
+    let mut pilots_b = Vec::new();
+    for i in 0..12 {
+        let (pid, _) = spawn_fleet_pilot_on_grid(&ctx, 30 + i, sys_b, pos_b + DVec3::new((i as f64) * 300.0, 0.0, 0.0)).await;
+        pilots_b.push(pid);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for &pid in &pilots_b {
+            snap.characters.get_mut(&pid).unwrap().fleet_id = Some(960_002);
+        }
+        snap.fleets.insert(
+            960_002,
+            FleetRecord {
+                fleet_id: 960_002,
+                boss_id: pilots_b[0],
+                members: pilots_b.clone(),
+                ..Default::default()
+            },
+        );
+    });
+    let boss_b = crate::common::clear_incursion_site_escort_waves(&ctx, sys_b, &site_b).await;
+    let _ = ctx.systems.get_or_spawn(sys_b).remove_ball(boss_b).await;
+    let res_b = on_incursion_boss_destroyed(&ctx, sys_b, boss_b, Some(pilots_b[0]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        res_b.isk_per_pilot > 0 && res_b.isk_per_pilot < res_a.isk_per_pilot,
+        "12-pilot overcap Vanguard payout ({}) must diminish below optimal ({})",
+        res_b.isk_per_pilot,
+        res_a.isk_per_pilot
+    );
+    assert!(res_b.concord_lp_per_pilot > 0 && res_b.concord_lp_per_pilot < res_a.concord_lp_per_pilot);
+
+    // Case C: Beyond hard-cap fleet (16 on-grid pilots > 15 Vanguard cutoff) -> 0 ISK and 0 CONCORD LP!
+    let (cid_c, sys_c, site_c, _, pos_c) = vg_sites[2].clone();
+    with_pve_special_reg(&ctx, |reg| reg.incursions.get_mut(&cid_c).unwrap().influence = 0.05);
+    let mut pilots_c = Vec::new();
+    for i in 0..16 {
+        let (pid, _) = spawn_fleet_pilot_on_grid(&ctx, 60 + i, sys_c, pos_c + DVec3::new((i as f64) * 250.0, 0.0, 0.0)).await;
+        pilots_c.push(pid);
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        for &pid in &pilots_c {
+            snap.characters.get_mut(&pid).unwrap().fleet_id = Some(960_003);
+        }
+        snap.fleets.insert(
+            960_003,
+            FleetRecord {
+                fleet_id: 960_003,
+                boss_id: pilots_c[0],
+                members: pilots_c.clone(),
+                ..Default::default()
+            },
+        );
+    });
+    let bal_before_c = ctx.db.with_snapshot(|s| s.characters[&pilots_c[0]].balance.0);
+    let lp_before_c = ctx
+        .db
+        .with_snapshot(|s| s.characters[&pilots_c[0]].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
+    let boss_c = crate::common::clear_incursion_site_escort_waves(&ctx, sys_c, &site_c).await;
+    let _ = ctx.systems.get_or_spawn(sys_c).remove_ball(boss_c).await;
+    let res_c = on_incursion_boss_destroyed(&ctx, sys_c, boss_c, Some(pilots_c[0]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(res_c.isk_per_pilot, 0, "Exceeding Vanguard 15-pilot hard cap must pay 0 ISK");
+    assert_eq!(res_c.concord_lp_per_pilot, 0, "Exceeding Vanguard 15-pilot hard cap must pay 0 LP");
+    let (bal_after_c, lp_after_c) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&pilots_c[0]];
+        (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0))
+    });
+    assert_eq!(bal_after_c, bal_before_c, "Hard-capped pilot wallet balance must remain unchanged");
+    assert_eq!(lp_after_c, lp_before_c, "Hard-capped pilot CONCORD LP must remain unchanged");
+}
+
+#[tokio::test]
+async fn test_incursion_boss_killed_before_final_wave_escorts_completes_on_last_escort() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (cid, sys_id, site_id, boss_bid, pos) = with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.values().next().expect("seeded incursion");
+        let site = inc.sites.iter().find(|s| s.tier == "Vanguard").expect("Vanguard site");
+        (inc.constellation_id, site.solar_system_id, site.site_id.clone(), site.boss_npc_ball_id, site.position)
+    });
+    let (pilot_id, _) = spawn_fleet_pilot_on_grid(&ctx, 80, sys_id, pos).await;
+
+    // Advance Wave 1 -> Wave 2 -> Wave 3 (final wave) so boss and final-wave escorts are both active
+    for _ in 0..2 {
+        let escorts: Vec<i64> = with_pve_special_reg(&ctx, |reg| {
+            reg.incursions[&cid]
+                .sites
+                .iter()
+                .find(|s| s.site_id == site_id)
+                .unwrap()
+                .escort_spawns
+                .iter()
+                .filter(|e| !e.destroyed)
+                .map(|e| e.npc_ball_id)
+                .collect()
+        });
+        for eid in escorts {
+            let _ = on_incursion_boss_destroyed(&ctx, sys_id, eid, Some(pilot_id)).await;
+        }
+    }
+
+    let final_escorts: Vec<i64> = with_pve_special_reg(&ctx, |reg| {
+        let w = reg.incursion_site_waves.get(&site_id).unwrap();
+        assert_eq!(w.current_wave, w.total_waves);
+        reg.incursions[&cid]
+            .sites
+            .iter()
+            .find(|s| s.site_id == site_id)
+            .unwrap()
+            .escort_spawns
+            .iter()
+            .filter(|e| !e.destroyed)
+            .map(|e| e.npc_ball_id)
+            .collect()
+    });
+    assert!(!final_escorts.is_empty());
+
+    // Kill boss BEFORE final-wave escorts: must record boss_destroyed=true without soft-locking
+    let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(boss_bid).await;
+    let err = on_incursion_boss_destroyed(&ctx, sys_id, boss_bid, Some(pilot_id))
+        .await
+        .expect("site matched")
+        .expect_err("site must not complete while final-wave escorts remain");
+    assert_eq!(err.code, "IncursionSiteNpcsRemaining");
+
+    let boss_flag = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&cid]
+            .sites
+            .iter()
+            .find(|s| s.site_id == site_id)
+            .unwrap()
+            .boss_destroyed
+    });
+    assert!(boss_flag, "boss_destroyed must be recorded when boss dies on final wave");
+
+    // Killing the remaining final-wave escorts must complete the site on the last escort kill
+    let mut completion = None;
+    for eid in final_escorts {
+        let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(eid).await;
+        if let Some(res) = on_incursion_boss_destroyed(&ctx, sys_id, eid, Some(pilot_id)).await {
+            completion = Some(res.expect("site completion on last escort kill"));
+        }
+    }
+    let done = completion.expect("site must complete when last final-wave escort dies");
+    assert_eq!(done.site_id, site_id);
+}
+
+#[tokio::test]
+async fn test_incursion_hq_sites_5171_and_5175_have_disjoint_npc_ball_ids() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (cid, hq_sys_id, site_5171_id, site_5175_id, pos_5171) = with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.values().next().expect("seeded incursion");
+        let s5171 = inc.sites.iter().find(|s| s.dungeon_id == 5171).expect("HQ site 5171");
+        let s5175 = inc.sites.iter().find(|s| s.dungeon_id == 5175).expect("HQ site 5175");
+        assert_eq!(s5171.solar_system_id, s5175.solar_system_id);
+        (
+            inc.constellation_id,
+            s5171.solar_system_id,
+            s5171.site_id.clone(),
+            s5175.site_id.clone(),
+            s5171.position,
+        )
+    });
+
+    let (pilot_id, _) = spawn_fleet_pilot_on_grid(&ctx, 81, hq_sys_id, pos_5171).await;
+    let boss_5171 = crate::common::clear_incursion_site_escort_waves(&ctx, hq_sys_id, &site_5171_id).await;
+    let _ = ctx.systems.get_or_spawn(hq_sys_id).remove_ball(boss_5171).await;
+    let res_5171 = on_incursion_boss_destroyed(&ctx, hq_sys_id, boss_5171, Some(pilot_id))
+        .await
+        .expect("site 5171 matched")
+        .expect("site 5171 completed");
+    assert_eq!(res_5171.site_id, site_5171_id);
+
+    // Verify site 5175 in the same HQ system was untouched and has completely disjoint NPC ball IDs
+    with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&cid];
+        let s5171 = inc.sites.iter().find(|s| s.site_id == site_5171_id).unwrap();
+        let s5175 = inc.sites.iter().find(|s| s.site_id == site_5175_id).unwrap();
+        assert_eq!(s5171.completed_count, 1);
+        assert_eq!(s5175.completed_count, 0);
+        assert!(!s5175.boss_destroyed);
+        assert!(s5175.escort_spawns.iter().all(|e| !e.destroyed));
+
+        let ids_5171: std::collections::HashSet<i64> = std::iter::once(s5171.boss_npc_ball_id)
+            .chain(s5171.escort_spawns.iter().map(|e| e.npc_ball_id))
+            .collect();
+        let ids_5175: std::collections::HashSet<i64> = std::iter::once(s5175.boss_npc_ball_id)
+            .chain(s5175.escort_spawns.iter().map(|e| e.npc_ball_id))
+            .collect();
+        assert!(ids_5171.is_disjoint(&ids_5175), "HQ sites 5171 and 5175 must have disjoint NPC ball IDs");
+    });
+}
+}

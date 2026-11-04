@@ -18,10 +18,7 @@ mod action_plan_char_progression;
 mod action_plan_data_economy;
 mod action_plan_trade_space;
 mod action_plan_mining;
-mod action_plan_mining_part2;
 mod agents_missions_complete;
-mod agents_missions_complete_part2;
-mod agents_missions_complete_part3;
 mod auth;
 mod auth_persistence;
 mod beyonce_fleet_and_space_rpcs;
@@ -48,7 +45,6 @@ mod combat_fighters_insurance_bounties;
 mod combat_entropic_pvp_atomicity;
 mod combat_npc_crimewatch;
 mod combat_pve;
-mod combat_pve_part2;
 mod combat_sleepers_pochven_zarzakh;
 mod combat_weapons_wrecks;
 mod corp_skills_inventory_r4_regressions;
@@ -171,17 +167,12 @@ mod pi_planet_mgr_rpc;
 
 mod pve_agency_events_complete;
 mod pve_agent_missions_remediation;
-mod pve_data_relic_ded_wormhole_remediated;
 mod pve_exploration_complete;
 mod pve_exploration_complete_part2;
 mod pve_exploration_remediation;
 mod pve_incursions_complete;
-mod pve_incursions_parity_closure;
-mod pve_incursions_parity_closure_part2;
 mod pve_incursions_triglavian_remediated;
-mod pve_crab_and_storms_closure;
 mod pve_crab_and_storms_closure_part2;
-mod pve_hacking_parity_closure;
 mod pve_deadspace_and_dungeons_closure;
 mod pve_escalations_and_dungeon_notifs;
 mod pve_mining_sites;
@@ -391,7 +382,6 @@ mod pve_parity_complete;
 mod plan_char_dogma_social_esi;
 mod plan_c7_crimewatch_closure_part2;
 mod plan_c3_c4_combat_closure;
-mod scanning_exploration_wormholes_closure;
 mod plan_social_closure;
 mod plan_economy_closure;
 mod plan_economy_closure_part2;
@@ -670,3 +660,18 @@ pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
 pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
 #[allow(unused_imports)]
 pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
+
+#[allow(unused_imports)]
+pub(crate) use self::abyssal_deadspace as abyssal_deadspace_closure;
+#[allow(unused_imports)]
+pub(crate) use self::combat_ewar_logistics as combat_ewar_repairs_closure;
+#[allow(unused_imports)]
+pub(crate) use self::combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
+#[allow(unused_imports)]
+pub(crate) use self::npc_spawns_pve as npc_spawns_pve_closure;
+#[allow(unused_imports)]
+pub(crate) use self::fw_warzone_insurgency as fw_warzone_insurgency_closure;
+#[allow(unused_imports)]
+pub(crate) use self::sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure;
+#[allow(unused_imports)]
+pub(crate) use self::crimewatch_hostility as plan_c7_crimewatch_closure;
