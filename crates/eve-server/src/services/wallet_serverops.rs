@@ -537,13 +537,16 @@ pub fn handle(
         }
 
         ("posMgr", "GetConsumptionFactor") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let factor = ctx.db.with_snapshot(|snap| {
+                let char_rec = snap.characters.get(&char_id);
+                let fallback_sys = session.solar_system_id.or_else(|| char_rec.map(|c| c.solar_system_id)).unwrap_or(0);
+                let fallback_corp = session.corporation_id.or_else(|| char_rec.map(|c| c.corporation_id)).unwrap_or(0);
                 let (sys_id, owner_id) = snap.structures.get(&tower_id)
                     .map(|s| (s.solar_system_id, s.owner_corp_id))
                     .or_else(|| snap.items.get(&tower_id).map(|i| (i.location_id as u32, i.owner_id)))
-                    .unwrap_or((session.solar_system_id.unwrap_or(30000142), session.corporation_id.unwrap_or(0)));
+                    .unwrap_or((fallback_sys, fallback_corp));
                 let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
                     owner_id
                 } else {

@@ -1066,13 +1066,24 @@ fn handle_get_structure_map_data(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let sys_id = args
+    let arg_sys = args
         .first()
         .and_then(|v| v.as_i64())
         .and_then(|v| u32::try_from(v).ok())
-        .or(session.solar_system_id)
-        .unwrap_or(30_000_142);
+        .or(session.solar_system_id);
     let rows = ctx.db.with_snapshot(|snap| {
+        let sys_id = arg_sys
+            .or_else(|| {
+                session
+                    .structure_id
+                    .and_then(|sid| snap.structures.get(&sid).map(|st| st.solar_system_id))
+            })
+            .or_else(|| {
+                session
+                    .character_id
+                    .and_then(|cid| snap.characters.get(&cid).map(|c| c.solar_system_id))
+            })
+            .unwrap_or(0);
         snap.structures
             .values()
             .filter(|st| st.solar_system_id == sys_id && st.state != "Destroyed")

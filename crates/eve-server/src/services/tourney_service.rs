@@ -35,7 +35,16 @@ pub async fn handle(
         return None;
     }
 
-    let solarsystem_id = session.solar_system_id.map(|s| s as i64).unwrap_or(30000142);
+    let solarsystem_id = session
+        .solar_system_id
+        .map(|s| s as i64)
+        .or_else(|| {
+            session.character_id.and_then(|cid| {
+                ctx.db
+                    .with_snapshot(|snap| snap.characters.get(&cid).map(|c| c.solar_system_id as i64))
+            })
+        })
+        .unwrap_or(0);
     let now_unix = ctx.now_unix();
 
     let res = match (service, method) {

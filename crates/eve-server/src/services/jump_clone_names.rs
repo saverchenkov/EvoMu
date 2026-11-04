@@ -1004,11 +1004,19 @@ pub(crate) async fn handle_qa_move_me_to(
     let (old_sys_id, ship_id) = ctx
         .db
         .with_snapshot(|snap| {
-            snap.characters
-                .get(&cid)
-                .map(|c| (c.solar_system_id, c.active_ship_id))
+            snap.characters.get(&cid).map(|c| {
+                let sys = if c.solar_system_id != 0 {
+                    c.solar_system_id
+                } else {
+                    c.station_id
+                        .and_then(|sid| ctx.sde.stations.get(&sid))
+                        .map(|st| st.solar_system_id)
+                        .unwrap_or(0)
+                };
+                (sys, c.active_ship_id)
+            })
         })
-        .unwrap_or((30_000_142, 0));
+        .unwrap_or_else(|| (session.solar_system_id.unwrap_or(0), session.ship_id.unwrap_or(0)));
     let updated_ch = match ctx
         .db
         .set_character_solar_system(cid, dest_sys_id, &ctx.sde)
@@ -1021,7 +1029,7 @@ pub(crate) async fn handle_qa_move_me_to(
             })
         }
     };
-    if old_sys_id != dest_sys_id && ship_id > 0 {
+    if old_sys_id > 0 && old_sys_id != dest_sys_id && ship_id > 0 {
         let old_handle = ctx.systems.get_or_spawn(old_sys_id);
         let existing_ball = old_handle.remove_ball(ship_id).await;
         let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
