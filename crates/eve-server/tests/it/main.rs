@@ -648,3 +648,4 @@ mod drones_fighters_and_abilities;
 mod cosmetics_skinr_studio_and_hub;
 mod pve_agent_missions_lifecycle;
 mod industry_costs_taxes_and_capital;
+mod quasar_belts_battlepass_and_campaigns;

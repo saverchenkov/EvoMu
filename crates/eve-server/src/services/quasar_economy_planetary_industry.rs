@@ -9,7 +9,8 @@
 //! - `eve.planet.skyhook.*` (`ChangeOwnerRequest`, `GetReinforcementExitHourRequest`, `GetStateRequest`);
 //! - `eve.planetinteraction.*` (`collector.GetRequest`, `factory.GetRequest`, `schematic.GetRequest`, `storage.GetRequest`);
 //! - `eve.moon.*` (`GetRequest`, `GetMoonsOfPlanetRequest`);
-//! - `eve.asteroidbelt.*` (`GetRequest`, `GetBeltsOfPlanetRequest`).
+//! - `eve.asteroidbelt.*` (`GetRequest`, `GetBeltsOfPlanetRequest`);
+//! - `eve.bloodline.*` (`GetAllRequest`).
 
 #![forbid(unsafe_code)]
 
@@ -150,7 +151,7 @@ fn authorize_corp_financial_access(
 pub fn register_economy_planetary_industry_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
-    _sde: Arc<SdeRegistry>,
+    sde: Arc<SdeRegistry>,
     _descriptors: Arc<QuasarDescriptorRegistry>,
 ) {
     // 1. eve.accounting.character.journal.GetCharacterEntriesRequest
@@ -721,6 +722,41 @@ pub fn register_economy_planetary_industry_handlers(
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.asteroidbelt.GetBeltsOfPlanetResponse"
                 ),
+                value: out,
+            })
+        }),
+    );
+
+    // 22. eve.bloodline.GetAllRequest
+    let sde_bloodlines = Arc::clone(&sde);
+    router.register_handler(
+        "eve.bloodline.GetAllRequest",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            let mut out = Vec::new();
+            let mut bl_ids: Vec<_> = sde_bloodlines.bloodlines.keys().copied().collect();
+            bl_ids.sort_unstable();
+            for id in bl_ids {
+                if let Some(bl) = sde_bloodlines.bloodlines.get(&id) {
+                    let mut bloodline_entry = Vec::new();
+                    encode_identifier(1, id as u64, &mut bloodline_entry);
+                    let mut attrs = Vec::new();
+                    encode_string_field(1, &bl.name, &mut attrs);
+                    encode_string_field(2, &bl.description, &mut attrs);
+                    encode_identifier(3, bl.race_id as u64, &mut attrs);
+                    if let Some(ship_type) = bl.ship_type_id {
+                        encode_identifier(4, ship_type as u64, &mut attrs);
+                    }
+                    encode_varint_field(5, bl.charisma.max(0) as u64, &mut attrs);
+                    encode_varint_field(6, bl.intelligence.max(0) as u64, &mut attrs);
+                    encode_varint_field(7, bl.memory.max(0) as u64, &mut attrs);
+                    encode_varint_field(8, bl.perception.max(0) as u64, &mut attrs);
+                    encode_varint_field(9, bl.willpower.max(0) as u64, &mut attrs);
+                    encode_bytes_field(2, &attrs, &mut bloodline_entry);
+                    encode_bytes_field(1, &bloodline_entry, &mut out);
+                }
+            }
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.bloodline.GetAllResponse"),
                 value: out,
             })
         }),
