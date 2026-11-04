@@ -713,3 +713,79 @@ pub fn handle_corp_gov_tail(
         _ => None,
     }
 }
+
+pub(crate) fn handle_get_my_applications_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    is_old: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let rows = ctx.db.with_snapshot(|snap| {
+        let mut out = Vec::new();
+        for corp in snap.corporations.values() {
+            for app in corp.applications.values() {
+                let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
+                let ok = if is_old { !is_open } else { is_open };
+                if app.character_id == char_id && ok {
+                    out.push(vec![
+                        PyRep::Integer(app.application_id), PyRep::Integer(app.corporation_id),
+                        PyRep::Integer(app.character_id), PyRep::String(app.message.clone()),
+                        PyRep::String(app.status.clone()), PyRep::Integer(app.created_unix as i64),
+                    ]);
+                }
+            }
+        }
+        out
+    });
+    Some(Ok(PyRep::rowset(
+        vec!["applicationID", "corporationID", "characterID", "message", "status", "createdDate"],
+        rows,
+    )))
+}
+
+pub(crate) fn handle_get_corp_applications_rpc(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    is_old: bool,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
+    let res = ctx.db.with_snapshot(|snap| {
+        let Some(corp) = snap.corporations.get(&corp_id) else {
+            return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+        };
+        let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+        if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER) {
+            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into() });
+        }
+        let rows: Vec<Vec<PyRep>> = corp
+            .applications
+            .values()
+            .filter(|app| {
+                let is_open = matches!(app.status.as_str(), "Applied" | "Pending" | "Invited");
+                if is_old { !is_open } else { is_open }
+            })
+            .map(|app| {
+                vec![
+                    PyRep::Integer(app.application_id),
+                    PyRep::Integer(app.character_id),
+                    PyRep::String(app.message.clone()),
+                    PyRep::String(app.status.clone()),
+                    PyRep::Integer(app.created_unix as i64),
+                ]
+            })
+            .collect();
+        Ok(rows)
+    });
+    match res {
+        Ok(rows) => Some(Ok(PyRep::rowset(vec!["applicationID", "characterID", "message", "status", "createdDate"], rows))),
+        Err(e) => Some(Err(e)),
+    }
+}

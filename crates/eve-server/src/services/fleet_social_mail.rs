@@ -1061,13 +1061,19 @@ pub(super) fn handle_mail_and_calendar(
             super::fleet_social_calendar_ops::handle_calendar_get(ctx, session, service, method, args)
         }
 
-        ("calendarMgr", "SendEventResponse")
-        | ("calendarMgr", "UpdateEventParticipants")
-        | ("calendarMgr", "EditPersonalEvent")
+        ("calendarMgr", "SendEventResponse") => {
+            Some(super::handle_calendar_mutate(ctx, session, "SendEventResponse", args))
+        }
+        ("calendarMgr", "UpdateEventParticipants") => {
+            Some(super::handle_calendar_mutate(ctx, session, "UpdateEventParticipants", args))
+        }
+        ("calendarMgr", "EditPersonalEvent")
         | ("calendarMgr", "EditCorporationEvent")
-        | ("calendarMgr", "EditAllianceEvent")
-        | ("calendarMgr", "DeleteEvent") => {
+        | ("calendarMgr", "EditAllianceEvent") => {
             Some(super::handle_calendar_mutate(ctx, session, method, args))
+        }
+        ("calendarMgr", "DeleteEvent") => {
+            Some(super::handle_calendar_mutate(ctx, session, "DeleteEvent", args))
         }
 
         _ => None,

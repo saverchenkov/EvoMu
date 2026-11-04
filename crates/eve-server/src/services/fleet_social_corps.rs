@@ -268,6 +268,21 @@ fn member_row_rep(m: &(i64, String, u64, String, i64, i64, i64, u64)) -> Vec<PyR
     ]
 }
 
+fn handle_get_members_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
+    let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
+    let rows: Vec<Vec<PyRep>> = members.iter().map(member_row_rep).collect();
+    Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
+}
+
 pub(super) fn handle_corps(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -626,17 +641,12 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "GetMembers")
-        | ("corpRegistry", "GetMember")
         | ("corpmgr", "GetMembers")
         | ("corporationSvc", "GetMembers") => {
-            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
-            let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let members = get_corp_member_snapshot(ctx, corp_id, viewer_id, has_director);
-            let rows: Vec<Vec<PyRep>> = members.iter().map(member_row_rep).collect();
-            Some(Ok(PyRep::rowset(MEMBER_COLS.to_vec(), rows)))
+            handle_get_members_rpc(ctx, session, args)
+        }
+        ("corpRegistry", "GetMember") => {
+            handle_get_members_rpc(ctx, session, args)
         }
 
         ("corpRegistry", "GetMembersPaged") => {
@@ -799,69 +809,20 @@ pub(super) fn handle_corps(
 
         ("corpRegistry", "GetApplications")
         | ("corpmgr", "GetApplications")
-        | ("corporationSvc", "GetApplications")
-        | ("corpRegistry", "GetMyApplications")
-        | ("corpRegistry", "GetOldApplications")
-        | ("corpRegistry", "GetMyOldApplications") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let is_old = matches!(method, "GetOldApplications" | "GetMyOldApplications");
-            let status_matches = |status: &str| -> bool {
-                let is_open = matches!(status, "Applied" | "Pending" | "Invited");
-                if is_old { !is_open } else { is_open }
-            };
-            if matches!(method, "GetMyApplications" | "GetMyOldApplications") {
-                let rows = ctx.db.with_snapshot(|snap| {
-                    let mut out = Vec::new();
-                    for corp in snap.corporations.values() {
-                        for app in corp.applications.values() {
-                            if app.character_id == char_id && status_matches(&app.status) {
-                                out.push(vec![
-                                    PyRep::Integer(app.application_id), PyRep::Integer(app.corporation_id),
-                                    PyRep::Integer(app.character_id), PyRep::String(app.message.clone()),
-                                    PyRep::String(app.status.clone()), PyRep::Integer(app.created_unix as i64),
-                                ]);
-                            }
-                        }
-                    }
-                    out
-                });
-                return Some(Ok(PyRep::rowset(
-                    vec!["applicationID", "corporationID", "characterID", "message", "status", "createdDate"],
-                    rows,
-                )));
-            }
-            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
-            let res = ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
-                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
-                };
-                let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER) {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Viewing applications requires Personnel Manager or Director role".into() });
-                }
-                let rows: Vec<Vec<PyRep>> = corp
-                    .applications
-                    .values()
-                    .filter(|app| status_matches(&app.status))
-                    .map(|app| {
-                        vec![
-                            PyRep::Integer(app.application_id),
-                            PyRep::Integer(app.character_id),
-                            PyRep::String(app.message.clone()),
-                            PyRep::String(app.status.clone()),
-                            PyRep::Integer(app.created_unix as i64),
-                        ]
-                    })
-                    .collect();
-                Ok(rows)
-            });
-            match res {
-                Ok(rows) => Some(Ok(PyRep::rowset(vec!["applicationID", "characterID", "message", "status", "createdDate"], rows))),
-                Err(e) => Some(Err(e)),
-            }
+        | ("corporationSvc", "GetApplications") => {
+            super::fleet_social_corp_tail_dispatch::handle_get_corp_applications_rpc(ctx, session, args, false)
+        }
+
+        ("corpRegistry", "GetMyApplications") => {
+            super::fleet_social_corp_tail_dispatch::handle_get_my_applications_rpc(ctx, session, false)
+        }
+
+        ("corpRegistry", "GetOldApplications") => {
+            super::fleet_social_corp_tail_dispatch::handle_get_corp_applications_rpc(ctx, session, args, true)
+        }
+
+        ("corpRegistry", "GetMyOldApplications") => {
+            super::fleet_social_corp_tail_dispatch::handle_get_my_applications_rpc(ctx, session, true)
         }
 
         ("corpRegistry", "UpdateApplicationOffer") => {
