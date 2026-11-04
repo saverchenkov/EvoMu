@@ -197,6 +197,20 @@ pub fn facility_tax_note_id(facility_id: i64) -> i64 {
     -(1_000_000_000_000_i64.saturating_add(facility_id.abs()))
 }
 
+/// Resolves a requested facility ID or falls back to caller's active station/structure from session/DB before Jita fallback.
+pub(crate) fn resolve_caller_facility_id(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    requested: Option<i64>,
+) -> i64 {
+    requested
+        .or(session.station_id)
+        .or(session.structure_id)
+        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id)))
+        .unwrap_or(60_003_760)
+}
+
 /// DERIVED: Default NPC station industry facility tax rate (0.25%), shared with ESI `/industry/facilities` and `InstallJob`.
 pub(crate) const NPC_STATION_INDUSTRY_TAX_RATE: f64 = 0.0025;
 
@@ -724,12 +738,12 @@ pub fn handle_industry_facilities_bps(
                     message: format!("Blueprint type {bp_type_id} not found in SDE"),
                 }));
             };
-            let facility_id = bp_item_opt
-                .as_ref()
-                .map(|i| i.location_id)
-                .or(session.station_id)
-                .or(session.structure_id)
-                .unwrap_or(60_003_760);
+            let facility_id = resolve_caller_facility_id(
+                ctx,
+                session,
+                char_id,
+                bp_item_opt.as_ref().map(|i| i.location_id),
+            );
             let is_reaction = bp.activities.contains_key("reaction")
                 && !bp.activities.contains_key("manufacturing");
             let act_id = if is_reaction { 9 } else { 1 };
@@ -866,7 +880,7 @@ pub fn handle_industry_facilities_bps(
 
         ("facilityManager", "GetFacilities")
         | ("facilityManager", "GetFacilitiesByID") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -914,7 +928,12 @@ pub fn handle_industry_facilities_bps(
                     }
                 }
                 if list.is_empty() {
-                    if let Some(f_rep) = build_facility_pyrep(ctx, snap, 60_003_760) {
+                    let fallback_id = session
+                        .station_id
+                        .or(session.structure_id)
+                        .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id))
+                        .unwrap_or(60_003_760);
+                    if let Some(f_rep) = build_facility_pyrep(ctx, snap, fallback_id) {
                         list.push(f_rep);
                     }
                 }
@@ -937,7 +956,7 @@ pub fn handle_industry_facilities_bps(
                 });
                 return Some(Ok(PyRep::List(locs)));
             }
-            let fid = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id).unwrap_or(60_003_760);
+            let fid = resolve_caller_facility_id(ctx, session, char_id, args.first().and_then(|a| a.as_i64()));
             let owner_filter = args.get(1).and_then(|a| a.as_i64());
             let locs = ctx.db.with_snapshot(|snap| {
                 let sys_id = snap.structures.get(&fid).map(|s| s.solar_system_id)
@@ -968,8 +987,8 @@ pub fn handle_industry_facilities_bps(
         }
 
         ("facilityManager", "GetFacility") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let facility_id = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id).unwrap_or(60_003_760);
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let facility_id = resolve_caller_facility_id(ctx, session, char_id, args.first().and_then(|a| a.as_i64()));
             let res = ctx.db.with_snapshot(|snap| {
                 build_facility_pyrep(ctx, snap, facility_id).ok_or_else(|| BridgeRpcError {
                     code: "FacilityNotFound".into(),
@@ -981,7 +1000,7 @@ pub fn handle_industry_facilities_bps(
 
         ("facilityManager", "GetFacilityTaxes") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let facility_id = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id).unwrap_or(60_003_760);
+            let facility_id = resolve_caller_facility_id(ctx, session, char_id, args.first().and_then(|a| a.as_i64()));
             let now = ctx.now_unix();
             let res = ctx.db.with_snapshot(|snap| {
                 if resolve_facility_modifiers_and_system(ctx, snap, facility_id).is_none() {

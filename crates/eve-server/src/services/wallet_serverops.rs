@@ -258,14 +258,65 @@ pub fn handle(
         return Some(res);
     }
     match (service, method) {
-        // --- Legacy Starbase (`posMgr`) stubs (`feat:removed.pos-towers`) ---
+        // --- Legacy Starbase (`posMgr`) handlers (`feat:removed.pos-towers`, `OF-15`) ---
         ("posMgr", "GetControlTowers") => {
-            // const-ok: legacy POS control towers are superseded by Upwell structures in V24.01
-            Some(Ok(PyRep::List(Vec::new())))
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let corp_id = session.corporation_id.or_else(|| {
+                ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
+            }).unwrap_or(0);
+            let tower_rows: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                if corp_id == 0 {
+                    return Vec::new();
+                }
+                snap.structures
+                    .values()
+                    .filter(|st| st.owner_corp_id == corp_id)
+                    .map(|st| {
+                        PyRep::keyval([
+                            ("structureID", PyRep::Integer(st.structure_id)),
+                            ("typeID", PyRep::Integer(st.type_id as i64)),
+                            ("solarSystemID", PyRep::Integer(st.solar_system_id as i64)),
+                            ("name", PyRep::String(st.name.clone())),
+                            ("state", PyRep::String(st.state.clone())),
+                        ])
+                    })
+                    .collect()
+            });
+            Some(Ok(PyRep::List(tower_rows)))
         }
         ("posMgr", "GetMoonForTower") => {
-            // const-ok: legacy POS moon processes are superseded by Upwell Moon Mining refineries in V24.01
-            Some(Ok(PyRep::None))
+            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let moon_id = ctx.db.with_snapshot(|snap| {
+                if tower_id <= 0 {
+                    return None;
+                }
+                if let Some(st) = snap.structures.get(&tower_id) {
+                    return crate::services::mining_advanced::resolve_structure_moon_id(
+                        &ctx.sde,
+                        st.solar_system_id,
+                        st.position,
+                    );
+                }
+                if let Some(item) = snap.items.get(&tower_id) {
+                    if (40_000_000..=49_999_999).contains(&item.location_id) {
+                        return Some(item.location_id);
+                    }
+                    if let Some(moon_attr) = item.dynamic_attributes.get(&600).copied().or_else(|| item.dynamic_attributes.get(&601).copied()) {
+                        let mid = moon_attr as i64;
+                        if (40_000_000..=49_999_999).contains(&mid) {
+                            return Some(mid);
+                        }
+                    }
+                    if (30_000_000..=33_000_000).contains(&item.location_id) {
+                        return crate::services::mining_advanced::resolve_structure_moon_id(&ctx.sde, item.location_id as u32, [0.0, 0.0, 0.0]);
+                    }
+                }
+                None
+            });
+            Some(Ok(moon_id.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("posMgr", "GetMoonProcessInfoForTower") => {
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -273,12 +324,14 @@ pub fn handle(
             Some(Ok(prov.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("posMgr", "SetSessionCheck") => {
-            // const-ok: session check confirmation
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::Bool(true)))
+            let session_valid = session.character_id == Some(char_id)
+                && session.user_id.is_some()
+                && ctx.db.with_snapshot(|snap| snap.characters.contains_key(&char_id));
+            Some(Ok(PyRep::Bool(session_valid)))
         }
         ("posMgr", "AnchorOrbital") => Some(Err(rpc_err(
             "StarbaseRemoved",
