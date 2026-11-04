@@ -474,16 +474,32 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
         }
 
-        ("ship", "StoreVessel")
-        | ("ship", "ScoopToSMA")
-        | ("ship", "ScoopToFleetHangar")
-        | ("ship", "Scoop")
-        | ("ship", "ScoopToInfrastructureHold")
-        | ("ship", "ScoopToMobileDepotHold") => {
+        ("ship", "StoreVessel") => {
+            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        }
+        ("ship", "ScoopToSMA") => {
+            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        }
+        ("ship", "ScoopToFleetHangar") => {
+            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        }
+        ("ship", "Scoop") => {
+            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        }
+        ("ship", "ScoopToInfrastructureHold") => {
+            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
+        }
+        ("ship", "ScoopToMobileDepotHold") => {
             Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
         }
 
-        ("ship", "GetShipConfiguration") | ("ship", "ConfigureShip") | ("ship", "SetShipPassword") => {
+        ("ship", "GetShipConfiguration") => {
+            Some(ship_configuration(ctx, session, method, args))
+        }
+        ("ship", "ConfigureShip") => {
+            Some(ship_configuration(ctx, session, method, args))
+        }
+        ("ship", "SetShipPassword") => {
             Some(ship_configuration(ctx, session, method, args))
         }
 
