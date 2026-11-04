@@ -659,3 +659,4 @@ mod structures_defenses_weapons_and_safety;
 mod quasar_npc_through_pvp;
 mod quasar_dogma_through_fulfillment;
 mod quasar_cdn_through_deadspace;
+mod quasar_id_through_loyaltypoints;

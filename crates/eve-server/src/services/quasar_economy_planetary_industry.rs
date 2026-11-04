@@ -14,7 +14,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED};
+use crate::quasar_gateway::{
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED,
+};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
@@ -764,6 +766,163 @@ pub fn register_economy_planetary_industry_handlers(
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.bloodline.GetAllResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    // 23. eve.isk.wallet.api.TransferByOwnerRequest
+    let db_isk_xfer = Arc::clone(&db);
+    let isk_notices = Arc::clone(&router.pending_notices);
+    router.register_handler(
+        "eve.isk.wallet.api.TransferByOwnerRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+            let amount = match dyn_msg.get(5) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Int64(i)) => *i,
+                    Some(DynamicValue::Uint64(u)) => *u as i64,
+                    _ => 10_000,
+                },
+                _ => 10_000,
+            };
+            let amount_cents = amount.max(0) * 100;
+            db_isk_xfer.try_with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&caller) {
+                    if ch.balance.0 < amount_cents {
+                        return Err((STATUS_BAD_REQUEST, "Insufficient ISK".into()));
+                    }
+                    ch.balance.0 -= amount_cents;
+                }
+                Ok(())
+            })?;
+            let mut notice_val = Vec::new();
+            encode_varint_field(1, amount.max(0) as u64, &mut notice_val);
+            isk_notices.write().unwrap_or_else(|e| e.into_inner()).push((
+                NoticeScope::Character(caller as u32),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.isk.wallet.api.GrantCommanded"),
+                    value: notice_val,
+                },
+            ));
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.isk.wallet.api.TransferByOwnerResponse"),
+                value: Vec::new(),
+            })
+        }),
+    );
+
+    // 24. eve.localization.message.api.GetLocalizedTextRequest
+    router.register_handler(
+        "eve.localization.message.api.GetLocalizedTextRequest",
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            let seq = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Uint32(n)) => *n as u64,
+                    Some(DynamicValue::Uint64(n)) => *n,
+                    _ => 1,
+                },
+                _ => 1,
+            };
+            let mut out = Vec::new();
+            encode_string_field(1, &format!("LocalizedText#{seq}"), &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.localization.message.api.GetLocalizedTextResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    // 25. eve.localization.cerberus.api.GetLocalizedTextRequest
+    router.register_handler(
+        "eve.localization.cerberus.api.GetLocalizedTextRequest",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            let mut out = Vec::new();
+            encode_string_field(1, "CerberusLocalizedText", &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.localization.cerberus.api.GetLocalizedTextResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    // 26. eve.killmail.Attributes
+    router.register_handler(
+        "eve.killmail.Attributes",
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            let mut out = Vec::new();
+            encode_identifier(1, 1, &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.killmail.Attributes"),
+                value: out,
+            })
+        }),
+    );
+
+    // 27. eve.id.api.GetRequest & GetByUserRequest
+    router.register_handler(
+        "eve.id.api.GetRequest",
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let mut out = Vec::new();
+            let mut attrs = Vec::new();
+            encode_identifier(1, uid, &mut attrs);
+            encode_bytes_field(1, &attrs, &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.id.api.GetResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    router.register_handler(
+        "eve.id.api.GetByUserRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let uid = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Uint32(n)) => *n as u64,
+                    Some(DynamicValue::Uint64(n)) => *n,
+                    _ => ctx.effective_user_id().unwrap_or(1) as u64,
+                },
+                _ => ctx.effective_user_id().unwrap_or(1) as u64,
+            };
+            let mut out = Vec::new();
+            let mut id_val = Vec::new();
+            let uuid_str = format!("usr-{:016x}", uid);
+            encode_bytes_field(1, uuid_str.as_bytes(), &mut id_val);
+            encode_bytes_field(1, &id_val, &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.id.api.GetByUserResponse"),
+                value: out,
+            })
+        }),
+    );
+
+    // 28. eve.id.legacy.api.GetUserRequest
+    let db_id_legacy = Arc::clone(&db);
+    router.register_handler(
+        "eve.id.legacy.api.GetUserRequest",
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let uid = match dyn_msg.get(1) {
+                Some(DynamicValue::Message(m)) => match m.get(1) {
+                    Some(DynamicValue::Uint32(n)) => *n as u64,
+                    Some(DynamicValue::Uint64(n)) => *n,
+                    _ => ctx.effective_user_id().unwrap_or(1) as u64,
+                },
+                _ => ctx.effective_user_id().unwrap_or(1) as u64,
+            };
+            let username = db_id_legacy.with_snapshot(|snap| {
+                snap.accounts.values().find(|a| a.user_id == uid).map(|a| a.username.clone())
+            }).unwrap_or_else(|| format!("pilot_{uid}"));
+            let mut out = Vec::new();
+            encode_string_field(1, &username, &mut out);
+            let mut email = Vec::new();
+            encode_string_field(1, &format!("{username}@ccpgames.test"), &mut email);
+            encode_varint_field(2, 1, &mut email);
+            encode_bytes_field(2, &email, &mut out);
+            encode_varint_field(4, 1, &mut out);
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.id.legacy.api.GetUserResponse"),
                 value: out,
             })
         }),

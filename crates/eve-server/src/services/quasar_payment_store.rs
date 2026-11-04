@@ -876,16 +876,6 @@ fn register_payment_token_and_purchase_handlers(
         }),
     );
 
-    // 13. eve.isk.wallet.api.TransferByOwnerRequest -> TransferByOwnerResponse
-    router.register_handler(
-        "eve.isk.wallet.api.TransferByOwnerRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Err((
-                STATUS_NOT_IMPLEMENTED,
-                "eve.isk.wallet.api.TransferByOwnerRequest is not implemented".into(),
-            ))
-        }),
-    );
 
     // 14. eve_public.payment.purchase.api handlers
     let db_cost = Arc::clone(&db);
