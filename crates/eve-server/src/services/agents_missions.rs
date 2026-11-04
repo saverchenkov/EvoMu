@@ -85,14 +85,12 @@ pub async fn handle(
                 matching_agents
                     .into_iter().map(|a| {
                         let corp_faction = ctx.sde.npc_corporations.get(&a.corporation_id).and_then(|c| c.faction_id).map(|f| f as i64);
-                        let has_access = if a.level <= 1 {
-                            true
-                        } else if let Some(cid) = caller_char {
-                            let req_standing = ((a.level as f64) - 1.0) * 2.0 - 1.0;
+                        let has_access = if let Some(cid) = caller_char {
                             let eff = compute_effective_agent_standing(ctx, snap, cid, a.agent_id, a.corporation_id, corp_faction);
-                            eff >= req_standing
+                            let req = if a.level <= 1 { -2.0 + 1e-6 } else { ((a.level as f64) - 1.0) * 2.0 - 1.0 };
+                            eff >= req
                         } else {
-                            false
+                            a.level <= 1
                         };
                         vec![
                             PyRep::Integer(a.agent_id),
