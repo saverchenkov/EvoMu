@@ -105,7 +105,6 @@ mod modules_advanced_tactical;
 mod modules_lances_depots_and_nanite;
 mod modules_cyno_portal;
 mod modules_scanners_mutaplasmids_dbuffs;
-mod navigation_pve_closure;
 mod parity_crimewatch_insurance_closure;
 mod parity_crimewatch_insurance_closure_part2;
 mod parity_fake_remediation_rpc_notify_part1;
@@ -114,7 +113,6 @@ mod parity_features_world_part3;
 mod parity_features_world_part4;
 mod parity_notify_batch_closure;
 mod parity_notify_batch_closure_part2;
-mod navigation_pve_closure_part2;
 mod notify_contacts_emission;
 mod notify_corp_emission;
 mod notify_corp_emission_alliances;
@@ -308,10 +306,7 @@ mod structures_mining_r4_regressions;
 mod ess_reserve_main_concurrency;
 mod mining_structures_sov_r5_regressions;
 mod skills_fitting_corp_r5_regressions;
-mod notify_econ_char_emission_part2;
 mod regressions_r7;
-mod plan_navigation_jump_cloak_closure;
-mod plan_navigation_jump_cloak_closure_part2;
 mod pochven_zarzakh_filaments_suite;
 mod abyssal_weather_clouds_suite;
 mod zarzakh_fulcrum_mechanics_suite;
@@ -319,7 +314,7 @@ mod pochven_anchoring_restrictions_suite;
 mod seasons_and_campaigns;
 mod zarzakh_gate_lock;
 mod abyssal_pochven_void;
-mod notify_b23_closure;
+mod notify_services_and_events;
 mod client_bug_reporting_suite;
 mod quasar_daily_goals_progress;
 mod quasar_store_catalog_and_career_goals;
@@ -346,6 +341,11 @@ mod economy_market_lookup_social;
 mod open_feats_and_rpcs_b8;
 mod open_feats_b36;
 mod notify_b36_closure;
+mod open_feats_b36_part2;
+mod open_feats_b36_part3;
+mod open_feats_b36_part4;
+mod open_feats_b36_part5;
+mod open_feats_and_rpcs_w34_closure;
 mod open_feats_and_rpcs_b7;
 mod open_feats_and_rpcs_b7_fw;
 mod open_feats_and_rpcs_b7_social;
@@ -362,6 +362,7 @@ mod open_feats_ships_pve_b5;
 mod quasar_ship_unlocks_and_stargates;
 mod open_feats_and_rpcs_b30;
 mod notify_b30_closure;
+mod open_feats_and_rpcs_b30_part2;
 mod open_feats_b37;
 mod open_feats_and_rpcs_b23;
 mod paragon_hub_self_purchase;
@@ -406,8 +407,6 @@ mod crimewatch_timers_and_drones;
 mod parity_fighters_lifecycle_closure;
 mod quasar_achievements_progress;
 mod parity_notify_flagged_remediation;
-mod navigation_features_remediated_suite;
-mod navigation_features_remediated_part2;
 mod parity_pve_dungeons_events_remediation;
 // mod fleets_social_and_command;
 // mod corporation_governance_and_shares;
@@ -444,39 +443,15 @@ mod quasar_vendors_war_and_serverops;
 mod quasar_debug_race_and_ships;
 
 
-// Backward-compatibility aliases for test suites renamed to semantic domain names in 61d4cc02b
 mod gameplay_services_and_rpcs;
 mod rpc_services_remaining;
 
-#[allow(unused_imports)]
-pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
-#[allow(unused_imports)]
-pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
-#[allow(unused_imports)]
-pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
-#[allow(unused_imports)]
-pub(crate) use crimewatch_hostility as crimewatch_closure;
-#[allow(unused_imports)]
-pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
-#[allow(unused_imports)]
-pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
-#[allow(unused_imports)]
-pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
 
 
 mod social_and_contacts_complete;
-mod notify_services_and_events;
 mod notify_structures_clones_pi;
 mod notify_progression_and_activities;
-#[allow(unused_imports)]
-pub(crate) use notify_structures_clones_pi as notify_real_emitters_batch7;
 mod notify_space_corp_market;
-#[allow(unused_imports)]
-pub(crate) use notify_space_corp_market as notify_real_emitters_batch9;
 mod world_space_exploration;
 mod character_progression_and_attributes;
 mod pve_npc_encounters_and_missions;
@@ -488,3 +463,25 @@ mod features_corp_and_structure_ops;
 #[allow(unused_imports)]
 pub(crate) use open_feats_and_rpcs_b11::part2 as open_feats_and_rpcs_b11_part2;
 mod open_feats_batch6;
+
+// Backward-compatibility aliases for test suites renamed to semantic domain names
+#[allow(unused_imports)]
+pub(crate) use {
+    abyssal_deadspace as abyssal_deadspace_closure,
+    abyssal_pochven_void as abyssal_pochven_void_closure,
+    combat_ewar_logistics as combat_ewar_repairs_closure,
+    combat_repairs_smartbombs as combat_repairs_smartbomb_closure,
+    combat_weapons_wrecks::triglavian_entropic_spool_edencom_vorton as combat_weapons_wrecks_part2,
+    crimewatch_hostility as crimewatch_closure,
+    crimewatch_hostility as plan_c7_crimewatch_closure,
+    fw_warzone_insurgency as fw_warzone_insurgency_closure,
+    npc_spawns_pve as npc_spawns_pve_closure,
+    notify_structures_clones_pi as notify_real_emitters_batch7,
+    notify_space_corp_market as notify_real_emitters_batch9,
+    pochven_wormholes_travel as pochven_wormholes_travel_closure,
+    sovereignty_equinox_gameplay as sovereignty_equinox_gameplay_closure,
+    wormhole_pve_escalations as wormhole_pve_escalations_closure,
+    wormhole_special_systems as wormhole_special_systems_closure,
+    wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure,
+    zarzakh_gate_lock as zarzakh_gate_lock_closure,
+};

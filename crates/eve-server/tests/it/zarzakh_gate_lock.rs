@@ -465,7 +465,7 @@ async fn test_zarzakh_gate_lock_clearing_on_pod_death() {
 
 
 #[allow(unused_imports, dead_code, unused_variables, unused_mut)]
-mod navigation_warp_zarzakh_ext {
+pub mod navigation_warp_zarzakh_ext {
     use super::*;
 
 // Integration tests for Space Navigation: Supercap Docking and Zarzakh Capital Gate Ban
@@ -935,3 +935,6 @@ async fn test_space_navigation_warp_landing_supercap_docking_and_zarzakh_gates()
 }
 
 }
+
+#[allow(unused_imports)]
+pub(crate) use navigation_warp_zarzakh_ext as warp_zarzakh_closure;

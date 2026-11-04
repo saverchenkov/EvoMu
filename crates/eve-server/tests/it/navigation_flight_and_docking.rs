@@ -488,3 +488,2029 @@ async fn test_navigation_align_to_and_vector_steering() {
         panic!("Expected GotoDirection mode from CmdGotoDirection");
     }
 }
+
+
+#[allow(unused_imports)]
+pub mod remediated_suite {
+
+
+use crate::common;
+use eve_db::{CosmicSignatureRecord, WorldRepository};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_sde::SdeRegistry;
+use eve_server::esi::{EsiHttpRequest, EsiRouter};
+use eve_server::router::ServerContext;
+use eve_server::services::nav_warp_interdiction::calculate_route_with_waypoints;
+use eve_server::services::wormhole_lifecycle_ops::{
+    build_static_replacement_wormhole, lookup_wormhole_type_for_origin_and_target,
+    system_wormhole_profile_sde, wspace_static_specs_for_system,
+};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[tokio::test]
+async fn test_navigation_route_waypoints() {
+    // parity: feat:navigation.route-waypoints
+    eve_testkit::attest(&["feat:navigation.route-waypoints"]);
+
+    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
+        Ok(reg) => Arc::new(reg),
+        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
+    };
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+
+    // Jita is 30000142, Amarr is 30002187, Perimeter is 30000144, Urlen is 30000143
+    let jita = 30_000_142_u32;
+    let amarr = 30_002_187_u32;
+    let perimeter = 30_000_144_u32;
+    let urlen = 30_000_143_u32;
+
+    // 1. Direct route calculation
+    let direct_route = calculate_route_with_waypoints(
+        &ctx,
+        jita,
+        &[amarr as i64],
+        &[],
+        "shortest",
+    )
+    .expect("Direct Jita to Amarr route");
+    assert!(!direct_route.is_empty());
+    assert_eq!(*direct_route.last().unwrap(), amarr);
+
+    // 2. Waypoint routing through Perimeter
+    let wp_route = calculate_route_with_waypoints(
+        &ctx,
+        jita,
+        &[perimeter as i64, amarr as i64],
+        &[],
+        "shortest",
+    )
+    .expect("Route with Perimeter waypoint");
+    assert!(wp_route.contains(&perimeter));
+    assert_eq!(*wp_route.last().unwrap(), amarr);
+
+    // 3. Avoid list - avoid Perimeter forces alternate route
+    let avoided_route = calculate_route_with_waypoints(
+        &ctx,
+        jita,
+        &[amarr as i64],
+        &[perimeter],
+        "shortest",
+    )
+    .expect("Route avoiding Perimeter");
+    assert!(!avoided_route.contains(&perimeter));
+
+    // 4. Destination resolution: NPC station ID (Jita 4-4 station 60003760 resolves to Jita 30000142)
+    let jita_station_id = 60_003_760_i64;
+    let station_route = calculate_route_with_waypoints(
+        &ctx,
+        amarr,
+        &[jita_station_id],
+        &[],
+        "shortest",
+    )
+    .expect("Route to Jita 4-4 station");
+    assert_eq!(*station_route.last().unwrap(), jita);
+
+    // 5. Unreachable waypoint (e.g. w-space system 31000001) returns WaypointUnreachable
+    let wspace_sys = 31_000_001_i64;
+    let unreach_err = calculate_route_with_waypoints(
+        &ctx,
+        jita,
+        &[wspace_sys, amarr as i64],
+        &[],
+        "shortest",
+    )
+    .expect_err("W-space waypoint should fail");
+    assert_eq!(unreach_err.code, "WaypointUnreachable");
+
+    // 6. ESI route query with waypoints and avoid params
+    let esi = EsiRouter::new(Arc::clone(&ctx));
+    let esi_url =
+        format!("/v1/route/{jita}/{amarr}/?waypoints={urlen}&avoid={perimeter}&flag=shortest");
+    let esi_resp = esi.handle_request(&EsiHttpRequest::new("GET", &esi_url));
+    assert_eq!(esi_resp.status_code, 200);
+    let esi_body: Vec<u32> = serde_json::from_slice(&esi_resp.body).expect("Valid JSON route");
+    assert!(esi_body.contains(&urlen));
+    assert!(!esi_body.contains(&perimeter));
+    assert_eq!(*esi_body.last().unwrap(), amarr);
+
+    // 7. Multi-waypoint persistence in CharacterSettings across sessions
+    let char_id = 90_000_001_i64;
+    let mut sess = SessionState::new(20_101);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let wp_list = PyRep::List(vec![
+        PyRep::Integer(perimeter as i64),
+        PyRep::Integer(urlen as i64),
+        PyRep::Integer(amarr as i64),
+    ]);
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charMgr",
+        None,
+        "SaveCharacterSetting",
+        &[PyRep::String("waypoints".into()), wp_list.clone()],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SaveCharacterSetting");
+
+    // Disconnect and reconnect with fresh session to verify persistence
+    let mut sess2 = SessionState::new(20_102);
+    common::login_pilot(&ctx, &mut sess2, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess2,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID sess2");
+    let settings = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "charMgr",
+            None,
+            "GetCharacterSettings",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("GetCharacterSettings");
+    assert_eq!(settings.dict_get("waypoints"), Some(&wp_list));
+}
+
+#[tokio::test]
+async fn test_navigation_wormhole_statics() {
+    // parity: feat:navigation.wormhole-statics
+    eve_testkit::attest(&["feat:navigation.wormhole-statics"]);
+
+    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
+        Ok(reg) => Arc::new(reg),
+        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
+    };
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let now_unix = ctx.now_unix();
+
+    // 1. Authentic SDE statics across wormhole classes C1 through C6
+    // C1: 1 static (K-space target class 7, 8, or 9)
+    let c1_sys = 31_000_100_u32;
+    let c1_specs = wspace_static_specs_for_system(&ctx.sde, c1_sys);
+    assert_eq!(c1_specs.len(), 1);
+    assert_eq!(c1_specs[0].0, "WST");
+    assert!([7, 8, 9].contains(&c1_specs[0].3));
+    let wh_info = ctx
+        .sde
+        .wormhole_types
+        .get(&c1_specs[0].2)
+        .expect("C1 static type in SDE");
+    assert_eq!(wh_info.target_system_class, c1_specs[0].3);
+
+    // C2: 2 statics (1 W-space + 1 K-space)
+    let c2_sys = 31_000_400_u32;
+    let c2_specs = wspace_static_specs_for_system(&ctx.sde, c2_sys);
+    assert_eq!(c2_specs.len(), 2, "C2 must have dual statics");
+    assert_eq!(c2_specs[0].0, "WST");
+    assert_eq!(c2_specs[1].0, "WST2");
+    assert!((1..=6).contains(&c2_specs[0].3), "C2 static 1 is W-space");
+    assert!([7, 8, 9].contains(&c2_specs[1].3), "C2 static 2 is K-space");
+    let c2_t0 = ctx
+        .sde
+        .wormhole_types
+        .get(&c2_specs[0].2)
+        .expect("C2 static 0 type in SDE");
+    let c2_t1 = ctx
+        .sde
+        .wormhole_types
+        .get(&c2_specs[1].2)
+        .expect("C2 static 1 type in SDE");
+    assert_eq!(c2_t0.target_system_class, c2_specs[0].3);
+    assert_eq!(c2_t1.target_system_class, c2_specs[1].3);
+
+    // C3: 1 static (K-space target class 7, 8, or 9)
+    let c3_sys = 31_000_900_u32;
+    let c3_specs = wspace_static_specs_for_system(&ctx.sde, c3_sys);
+    assert_eq!(c3_specs.len(), 1);
+    assert!([7, 8, 9].contains(&c3_specs[0].3));
+
+    // C4: 2 distinct W-space statics
+    let c4_sys = 31_001_500_u32;
+    let c4_specs = wspace_static_specs_for_system(&ctx.sde, c4_sys);
+    assert_eq!(
+        c4_specs.len(),
+        2,
+        "C4 must have dual distinct W-space statics"
+    );
+    assert_ne!(
+        c4_specs[0].3, c4_specs[1].3,
+        "C4 dual statics must be distinct classes"
+    );
+    assert!((1..=6).contains(&c4_specs[0].3));
+    assert!((1..=6).contains(&c4_specs[1].3));
+
+    // C5 and C6: 1 W-space static
+    let c5_sys = 31_002_000_u32;
+    let c5_specs = wspace_static_specs_for_system(&ctx.sde, c5_sys);
+    assert_eq!(c5_specs.len(), 1);
+    assert!((1..=6).contains(&c5_specs[0].3));
+
+    let c6_sys = 31_002_400_u32;
+    let c6_specs = wspace_static_specs_for_system(&ctx.sde, c6_sys);
+    assert_eq!(c6_specs.len(), 1);
+    assert!((1..=6).contains(&c6_specs[0].3));
+
+    // 2. Static replacement wormhole respawn on collapse
+    let initial_sig = CosmicSignatureRecord {
+        signature_id: "WST-101".into(),
+        solar_system_id: c2_sys,
+        sig_group: "Wormhole".into(),
+        type_name: "Wormhole".into(),
+        position: [1_000.0, 2_000.0, 3_000.0],
+        signal_strength: 1.0,
+        wormhole_type_id: Some(c2_specs[0].2),
+        destination_system_id: Some(31_000_123),
+        created_unix: now_unix - 1000,
+        lifetime_seconds: 86400,
+        max_mass_kg: 1_000_000_000.0,
+        remaining_mass_kg: 0.0,
+        max_jump_mass_kg: 300_000_000.0,
+        collapsed: true,
+    };
+    let replacement = build_static_replacement_wormhole(&ctx, c2_sys, &initial_sig, now_unix, 1)
+        .expect("Replacement static wormhole");
+    assert!(replacement.signature_id.starts_with("WST-"));
+    assert!(!replacement.collapsed);
+    assert_eq!(replacement.remaining_mass_kg, replacement.max_mass_kg);
+    assert!(replacement.remaining_mass_kg > 0.0);
+    assert!(replacement.destination_system_id.is_some());
+    assert_ne!(
+        replacement.destination_system_id,
+        initial_sig.destination_system_id
+    );
+    let dest_sys = replacement.destination_system_id.unwrap();
+    let (dest_cls, _, _, _) = system_wormhole_profile_sde(&ctx.sde, dest_sys);
+    let expected_target = ctx
+        .sde
+        .wormhole_types
+        .get(&replacement.wormhole_type_id.unwrap())
+        .unwrap()
+        .target_system_class;
+    assert_eq!(dest_cls as i32, expected_target);
+
+    // 3. Wandering wormholes per class from SDE
+    for origin_cls in 1..=6 {
+        for target_cls in [1, 2, 7, 8, 9] {
+            let wh_tid = lookup_wormhole_type_for_origin_and_target(
+                &ctx.sde, origin_cls, target_cls, 42,
+            );
+            assert_ne!(wh_tid, 26_272, "Must not pick fallback K162 type");
+            let wh = ctx
+                .sde
+                .wormhole_types
+                .get(&wh_tid)
+                .expect("Wandering wh type in SDE");
+            assert_eq!(wh.target_system_class, target_cls);
+            assert!(wh.max_jump_mass > 0.0);
+        }
+    }
+}
+
+}
+
+#[allow(unused_imports)]
+pub mod remediated_part2 {
+
+
+use crate::common;
+use eve_db::{InventoryFlag, InventoryItemRecord, WorldRepository};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
+use eve_sde::SdeRegistry;
+use eve_server::router::ServerContext;
+use eve_server::services::cluster_macho_misc_services::{with_misc_state, LandingPadRecord};
+use glam::DVec3;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+fn place_pilot_in_space(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    char_id: i64,
+    ship_id: i64,
+    sys_id: u32,
+) {
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    sess.solar_system_id = Some(sys_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = sys_id as i64;
+        }
+    });
+}
+
+#[tokio::test]
+async fn test_navigation_shipcaster_and_starter() {
+    // parity: feat:navigation.shipcaster, feat:navigation.starter-shipcaster
+    eve_testkit::attest(&[
+        "feat:navigation.shipcaster",
+        "feat:navigation.starter-shipcaster",
+    ]);
+
+    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
+        Ok(reg) => Arc::new(reg),
+        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
+    };
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 850_001_i64;
+    let starter_sys = 30_030_141_u32;
+    let hq_sys = 30_045_324_u32; // Onnamon War HQ
+
+    let mut sess = SessionState::new(20_201);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let now_unix = ctx.now_unix();
+    let (career_launcher_id, career_launcher_pos) = with_misc_state(&ctx, |st| {
+        let l = st
+            .starter_launchers
+            .iter()
+            .find(|l| l.solar_system_id == starter_sys)
+            .expect("Starter launcher in system");
+        (l.item_id, l.position)
+    });
+
+    // Setup ship in space near career launcher
+    sess.solar_system_id = Some(starter_sys);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = starter_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+            ch.create_date_unix = now_unix - 40 * 86_400; // 40 days old (> 30 days)
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 601, // Ibis (Rookie frigate)
+                owner_id: char_id,
+                location_id: starter_sys as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+    });
+
+    let starter_handle = ctx.systems.get_or_spawn(starter_sys);
+    let _ = starter_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 601,
+            position: career_launcher_pos + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 400.0,
+            inertia: 1.0,
+            mass: 100_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // --- Part A: Starter Shipcaster ---
+    // 1. Veteran rejection (age > 30 days)
+    let vet_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "starterShipcasterTravelMgr",
+            None,
+            "CmdJumpThroughStarterShipcaster",
+            &[PyRep::Integer(career_launcher_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Veteran rejected");
+    assert_eq!(vet_err.code, "CharacterTooOldForStarterShipcaster");
+
+    // 2. Set age <= 30 days (5 days old)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.get_mut(&char_id).unwrap().create_date_unix = now_unix - 5 * 86_400;
+    });
+    let can_jump = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "starterShipcasterTravelMgr",
+            None,
+            "CanCharacterJump",
+            &[],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("CanCharacterJump");
+    assert_eq!(can_jump, PyRep::Bool(true));
+
+    // 3. Weapons timer denial
+    ctx.crimewatch
+        .write()
+        .unwrap()
+        .get_or_create(char_id)
+        .weapon_timer_until_unix = now_unix + 60;
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut sess,
+            "starterShipcasterTravelMgr",
+            None,
+            "CanCharacterJump",
+            &[],
+            &HashMap::new(),
+            None
+        )
+        .await
+        .unwrap(),
+        PyRep::Bool(false)
+    );
+    ctx.crimewatch
+        .write()
+        .unwrap()
+        .get_or_create(char_id)
+        .weapon_timer_until_unix = 0;
+
+    // 4. Capital ship denial
+    ctx.db
+        .with_mut_snapshot(|s| s.items.get_mut(&ship_id).unwrap().type_id = 19720); // Revelation (Dreadnought)
+    let cap_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "starterShipcasterTravelMgr",
+            None,
+            "CmdJumpThroughStarterShipcaster",
+            &[PyRep::Integer(career_launcher_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Capital ship denied");
+    assert_eq!(cap_err.code, "CapitalShipCannotJumpShipcaster");
+    ctx.db
+        .with_mut_snapshot(|s| s.items.get_mut(&ship_id).unwrap().type_id = 601);
+
+    // 5. Successful rookie launch
+    ctx.advance_secs(15);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+    let jump_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "starterShipcasterTravelMgr",
+            None,
+            "CmdJumpThroughStarterShipcaster",
+            &[PyRep::Integer(career_launcher_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("Starter jump succeeds");
+    assert_eq!(jump_res, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(hq_sys));
+
+    // 6. Arrived ball has launch trajectory velocity
+    let hq_handle = ctx.systems.get_or_spawn(hq_sys);
+    let (_, arrived_ball) = hq_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("Ball in HQ");
+    assert!(
+        arrived_ball.velocity.length() > 50.0,
+        "Ball should have launch velocity"
+    );
+
+    // 7. Starter shipcaster one-time-use per character
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, starter_sys);
+    let _ = starter_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 601,
+            position: career_launcher_pos + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 400.0,
+            inertia: 1.0,
+            mass: 100_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+
+    let reuse_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "starterShipcasterTravelMgr",
+            None,
+            "CmdJumpThroughStarterShipcaster",
+            &[PyRep::Integer(career_launcher_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Second jump denied");
+    assert_eq!(reuse_err.code, "StarterShipcasterAlreadyUsed");
+
+    // --- Part B: Interstellar Shipcaster ---
+    // Place pilot at Onnamon FW Launcher
+    let (launcher_id, launcher_pos) = with_misc_state(&ctx, |st| {
+        let l = st
+            .launchers
+            .iter()
+            .find(|l| l.faction_id == 500_001)
+            .unwrap();
+        (l.item_id, l.position)
+    });
+    let pad_sys = 30_002_811_u32; // Onatoh
+    let pad_id = 104_000_001_i64;
+    with_misc_state(&ctx, |st| {
+        st.landing_pads.push(LandingPadRecord {
+            item_id: pad_id,
+            type_id: 75929,
+            built_type_id: 75929,
+            solar_system_id: pad_sys,
+            faction_id: 500_001,
+            is_built: true,
+            link_timestamp: now_unix as i64,
+            is_disrupted: false,
+            position: DVec3::new(100_000.0, 0.0, 0.0),
+            required_materials: BTreeMap::new(),
+            contributed_materials: BTreeMap::new(),
+        });
+        if let Some(l) = st.launchers.iter_mut().find(|l| l.item_id == launcher_id) {
+            if !l.linked_pad_ids.contains(&pad_id) {
+                l.linked_pad_ids.push(pad_id);
+            }
+        }
+    });
+
+    place_pilot_in_space(&ctx, &mut sess, char_id, ship_id, hq_sys);
+    let _ = hq_handle.remove_ball(ship_id).await;
+    let _ = hq_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 601,
+            position: launcher_pos + DVec3::new(1_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 400.0,
+            inertia: 1.0,
+            mass: 100_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+
+    // 1. Hostile militia faction rejected
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&char_id).unwrap().war_faction_id = Some(500_002)
+    });
+    let hostile_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipcasterTravelMgr",
+            None,
+            "CmdJumpThroughShipcaster",
+            &[
+                PyRep::Integer(launcher_id),
+                PyRep::Integer(pad_sys as i64),
+                PyRep::Integer(pad_id),
+            ],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Hostile militia denied");
+    assert_eq!(hostile_err.code, "FactionShipcasterAccessDenied");
+
+    // 2. Capital ship rejected
+    ctx.db.with_mut_snapshot(|s| {
+        let ch = s.characters.get_mut(&char_id).unwrap();
+        ch.war_faction_id = Some(500_001);
+        s.items.get_mut(&ship_id).unwrap().type_id = 19720; // Capital
+    });
+    let cap_fw_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipcasterTravelMgr",
+            None,
+            "CmdJumpThroughShipcaster",
+            &[
+                PyRep::Integer(launcher_id),
+                PyRep::Integer(pad_sys as i64),
+                PyRep::Integer(pad_id),
+            ],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Capital ship denied on FW shipcaster");
+    assert_eq!(cap_fw_err.code, "CapitalShipCannotJumpShipcaster");
+    ctx.db
+        .with_mut_snapshot(|s| s.items.get_mut(&ship_id).unwrap().type_id = 601);
+
+    // 3. Successful FW shipcaster jump to linked landing pad
+    let fw_jump = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "shipcasterTravelMgr",
+            None,
+            "CmdJumpThroughShipcaster",
+            &[
+                PyRep::Integer(launcher_id),
+                PyRep::Integer(pad_sys as i64),
+                PyRep::Integer(pad_id),
+            ],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("FW shipcaster jump succeeds");
+    assert_eq!(fw_jump, PyRep::None);
+    assert_eq!(sess.solar_system_id, Some(pad_sys));
+
+    let pad_handle = ctx.systems.get_or_spawn(pad_sys);
+    let (_, pad_ball) = pad_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .expect("Ball at pad");
+    assert!(
+        pad_ball.velocity.length() > 50.0,
+        "Ball should have launch velocity upon arrival"
+    );
+}
+
+#[tokio::test]
+async fn test_navigation_warp_vector() {
+    // parity: feat:navigation.warp-vector
+    eve_testkit::attest(&["feat:navigation.warp-vector"]);
+
+    let sde = match SdeRegistry::open(&SdeRegistry::default_db_path()) {
+        Ok(reg) => Arc::new(reg),
+        Err(_) => Arc::new(SdeRegistry::with_canonical_seed()),
+    };
+    let db = Arc::new(WorldRepository::with_demo_seed());
+    let ctx = Arc::new(ServerContext::with_sde_and_repository(sde, db));
+    common::pin_clock(&ctx);
+
+    let char_id = 90_000_001_i64;
+    let ship_id = 860_001_i64;
+    let sys_id = 30_000_142_u32; // Jita
+
+    let mut sess = SessionState::new(20_301);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+
+    let star_pos = ctx
+        .sde
+        .celestials_in_system(sys_id)
+        .into_iter()
+        .find(|c| c.group_id == 6)
+        .map(|c| c.position)
+        .unwrap_or(DVec3::ZERO);
+
+    // 1. Seed Warp Vector Data item (type 77825, group 4599) in ship cargo
+    let vec_item_id = 870_001_i64;
+    sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(ship_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.active_ship_id = ship_id;
+        }
+        snap.items.insert(
+            ship_id,
+            InventoryItemRecord {
+                item_id: ship_id,
+                type_id: 587, // Rifter (Frigate)
+                owner_id: char_id,
+                location_id: sys_id as i64,
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            vec_item_id,
+            InventoryItemRecord {
+                item_id: vec_item_id,
+                type_id: 77_825, // Warp Vector Data (group 4599)
+                owner_id: char_id,
+                location_id: ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 2,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+    });
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let near_star = star_pos + DVec3::new(500_000_000.0, 250_000_000.0, -100_000_000.0);
+    let _ = sys_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 587,
+            position: near_star,
+            velocity: DVec3::ZERO,
+            max_velocity: 350.0,
+            inertia: 1.0,
+            mass: 1_000_000.0,
+            radius: 40.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await;
+
+    // 2. Activate Warp Vector (`warpVectorMgr.UseVector`)
+    let res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "warpVectorMgr",
+            None,
+            "UseVector",
+            &[PyRep::Integer(vec_item_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("UseVector succeeds");
+
+    assert_eq!(res.dict_get("consumed"), Some(&PyRep::Bool(true)));
+    assert_eq!(res.dict_get("remainingQuantity"), Some(&PyRep::Integer(1)));
+
+    // 3. Verify returned entrySpeed = 0.75 * max_velocity
+    let entry_speed = res
+        .dict_get("entrySpeed")
+        .and_then(|v| v.as_f64())
+        .expect("entrySpeed");
+    assert!((entry_speed - 350.0 * 0.75).abs() < 1e-4);
+
+    // 4. Verify returned alignmentVector is a valid normalized direction vector
+    let align_vec = res.dict_get("alignmentVector").expect("alignmentVector");
+    let PyRep::Tuple(vec_comps) = align_vec else {
+        panic!("Expected Tuple")
+    };
+    let vx = vec_comps[0].as_f64().unwrap();
+    let vy = vec_comps[1].as_f64().unwrap();
+    let vz = vec_comps[2].as_f64().unwrap();
+    let v_len = (vx * vx + vy * vy + vz * vz).sqrt();
+    assert!(
+        (v_len - 1.0).abs() < 1e-4,
+        "Alignment vector must be normalized"
+    );
+
+    // 5. Verify distance >= 150 km
+    let dist = res
+        .dict_get("distanceMeters")
+        .and_then(|v| v.as_f64())
+        .expect("distanceMeters");
+    assert!(dist >= 150_000.0, "Warp distance must be >= 150 km");
+
+    // 6. Verify ship ball entered MovementMode::Warp
+    let (_, ball) = sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let MovementMode::Warp {
+        destination,
+        warp_speed_au_s,
+        ..
+    } = ball.mode
+    else {
+        panic!("Ship must be in Warp movement mode");
+    };
+    assert!(destination.distance(near_star) >= 150_000.0);
+    assert!(warp_speed_au_s > 0.0);
+
+    // 7. Verify 300s cooldown prevents immediate second activation
+    let cd_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "warpVectorMgr",
+            None,
+            "UseVector",
+            &[PyRep::Integer(vec_item_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Cooldown should prevent second activation");
+    assert_eq!(cd_err.code, "WarpVectorCooldown");
+
+    // 8. Verify star proximity check (if ship > 10 AU from star, rejected with WarpVectorTooFarFromStar)
+    ctx.advance_secs(305); // clear cooldown
+    let far_from_star = star_pos + DVec3::new(2.0e12, 0.0, 0.0); // > 13 AU
+    let _ = sys_handle
+        .set_movement_mode(ship_id, MovementMode::Stop)
+        .await;
+    let _ = sys_handle
+        .set_ball_position(ship_id, far_from_star)
+        .await;
+
+    let far_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "warpVectorMgr",
+            None,
+            "UseVector",
+            &[PyRep::Integer(vec_item_id)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Far from star should fail");
+    assert_eq!(far_err.code, "WarpVectorTooFarFromStar");
+}
+
+}
+
+#[allow(unused_imports)]
+pub mod pve_closure {
+
+use crate::common;
+use eve_db::{
+    FleetRecord, InventoryFlag, InventoryItemRecord, UpwellStructureRecord,
+};
+use eve_destiny::{Ball, MovementMode};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use glam::DVec3;
+use std::collections::HashMap;
+
+async fn setup_pilot(
+    ctx: &ServerContext,
+    session_id: u64,
+    username: &str,
+    password: &str,
+    char_id: i64,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(session_id);
+    common::login_pilot(ctx, &mut sess, username, password).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    sess
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(sess, service, None, method, args, &kw, None)
+        .await
+}
+
+#[tokio::test]
+async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
+    // parity: feat:navigation.ansiblex-jump, feat:navigation.ansiblex-link
+    eve_testkit::attest(&[
+        "feat:navigation.ansiblex-jump",
+        "feat:navigation.ansiblex-link",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    let sys_a = 30_004_712; // NOL-M9 (Delve sov null-sec)
+    let sys_b = 30_004_713; // O-IOAI (Delve sov null-sec, ~1.10 LY)
+    let mut sess = setup_pilot(&ctx, 8001, "demo", "demo-secret", char_id).await;
+
+    let gate_a_id = 1_100_000_001_i64;
+    let gate_b_id = 1_100_000_002_i64;
+    let gate_a_pos = [10_500.0, 0.0, 0.0];
+    let gate_b_pos = [20_000.0, 0.0, 0.0];
+
+    // Seed pilot ship in space near Gate A in System A
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_a;
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.corporation_id = 98_000_001;
+        }
+        snap.structures.insert(
+            gate_a_id,
+            UpwellStructureRecord {
+                structure_id: gate_a_id,
+                type_id: 35841, // Ansiblex Jump Gate
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_a,
+                name: "Ansiblex NOL-M9".into(),
+                position: gate_a_pos,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10000.0,
+                armor_hp: 10000.0,
+                hull_hp: 10000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
+            },
+        );
+        snap.structures.insert(
+            gate_b_id,
+            UpwellStructureRecord {
+                structure_id: gate_b_id,
+                type_id: 35841, // Ansiblex Jump Gate
+                owner_corp_id: 98_000_001,
+                solar_system_id: sys_b,
+                name: "Ansiblex O-IOAI".into(),
+                position: gate_b_pos,
+                state: "ShieldVulnerable".into(),
+                quantum_core_installed: true,
+                fuel_blocks: 100,
+                shield_hp: 10000.0,
+                armor_hp: 10000.0,
+                hull_hp: 10000.0,
+                reinforced_until_unix: 0,
+                last_damage_tick: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
+            },
+        );
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        ext.jump_bridge_links.insert(gate_a_id, gate_b_id);
+        ext.jump_bridge_links.insert(gate_b_id, gate_a_id);
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+        // Add 1,000 units of Liquid Ozone fuel to Gate A
+        snap.items.insert(
+            1_200_000_001,
+            InventoryItemRecord {
+                item_id: 1_200_000_001,
+                type_id: 16273, // Liquid Ozone
+                owner_id: 98_000_001,
+                location_id: gate_a_id,
+                flag: InventoryFlag::StructureFuel,
+                quantity: 1_000,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
+    });
+
+    sess.solar_system_id = Some(sys_a);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+    sess.corporation_id = Some(98_000_001);
+
+    let handle_a = ctx.systems.get_or_spawn(sys_a);
+    let _ = handle_a
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: 601, // Ibis
+                position: DVec3::new(10_000.0, 0.0, 0.0), // 500m from gate A
+                velocity: DVec3::ZERO,
+                max_velocity: 1000.0,
+                inertia: 1.0,
+                mass: 100_000.0,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, 601),
+        )
+        .await;
+
+    // 1. structureDirectory.GetJumpBridgesWithMyAccess (V24 unpack:3 3-tuple)
+    let jb_res = rpc(&ctx, &mut sess, "structureDirectory", "GetJumpBridgesWithMyAccess", &[])
+        .await
+        .expect("GetJumpBridgesWithMyAccess");
+    let PyRep::Tuple(jb_tup) = jb_res else {
+        panic!("Expected 3-tuple from GetJumpBridgesWithMyAccess");
+    };
+    assert_eq!(jb_tup.len(), 3);
+    let PyRep::List(entries) = &jb_tup[0] else {
+        panic!("Expected pairs list at tuple[0]");
+    };
+    let PyRep::List(accessible_ids) = &jb_tup[1] else {
+        panic!("Expected accessible IDs list at tuple[1]");
+    };
+    assert!(accessible_ids.contains(&PyRep::Integer(gate_a_id)));
+    assert!(!entries.is_empty(), "Must return accessible jump bridges");
+    let found_gate_a = entries.iter().any(|e| match e {
+        PyRep::Tuple(pair) if pair.len() == 2 => {
+            pair[0].dict_get("structureID").and_then(|v| v.as_i64()) == Some(gate_a_id)
+                && pair[1].dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(sys_b as i64)
+        }
+        _ => false,
+    });
+    assert!(found_gate_a, "Gate A must be present with destination System B");
+
+    // 2. structureJumpBridgeMgr.GetLinkedStructure
+    let linked = rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "GetLinkedStructure", &[PyRep::Integer(gate_a_id)])
+        .await
+        .expect("GetLinkedStructure");
+    assert_eq!(linked, PyRep::Tuple(vec![PyRep::Integer(gate_b_id), PyRep::Integer(sys_b as i64)]));
+
+    // 3. structureJumpBridgeMgr.GetJbStructureDestination
+    let dest = rpc(&ctx, &mut sess, "structureJumpBridgeMgr", "GetJbStructureDestination", &[PyRep::Integer(gate_a_id)])
+        .await
+        .expect("GetJbStructureDestination");
+    assert_eq!(dest.as_i64(), Some(sys_b as i64));
+
+    // 4. ACL Check: change gate owner to an unallied player corporation
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gate_a_id) {
+            st.owner_corp_id = 98_000_002;
+        }
+    });
+    let acl_err = rpc(
+        &ctx,
+        &mut sess,
+        "structureJumpBridgeMgr",
+        "CmdJumpThroughStructureStargate",
+        &[PyRep::Integer(gate_a_id)],
+    )
+    .await
+    .expect_err("Access list must deny non-member pilot");
+    assert_eq!(acl_err.code, "AccessDenied");
+
+    // Restore ACL access
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&gate_a_id) {
+            st.owner_corp_id = 98_000_001;
+        }
+    });
+
+    // 5. Liquid Ozone fuel check: empty the ozone fuel
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&1_200_000_001) {
+            item.quantity = 0; // empty fuel bay
+        }
+    });
+    ctx.advance_secs(12);
+    let fuel_err = rpc(
+        &ctx,
+        &mut sess,
+        "structureJumpBridgeMgr",
+        "CmdJumpThroughStructureStargate",
+        &[PyRep::Integer(gate_a_id)],
+    )
+    .await
+    .expect_err("Must fail when Liquid Ozone is insufficient");
+    assert_eq!(fuel_err.code, "InsufficientLiquidOzone");
+
+    // Refuel structure to 1,000 units
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(item) = snap.items.get_mut(&1_200_000_001) {
+            item.quantity = 1_000;
+        }
+    });
+
+    // 6. CmdJumpThroughStructureStargate execution
+    let jump_res = rpc(
+        &ctx,
+        &mut sess,
+        "structureJumpBridgeMgr",
+        "CmdJumpThroughStructureStargate",
+        &[PyRep::Integer(gate_a_id)],
+    )
+    .await
+    .expect("Successful Ansiblex jump");
+    assert_eq!(
+        jump_res.dict_get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(sys_b as i64)
+    );
+    assert!(jump_res.dict_get("beyonceBoundID").is_some());
+
+    // Verify Liquid Ozone was consumed based on mass and distance
+    let dist_ly = eve_server::services::space_destiny::space_nav_travel::distance_ly(&ctx, sys_a, sys_b).max(0.01);
+    let expected_cost = ((100_000.0 * dist_ly * 0.000003 + 50.0).round() as i32).max(50);
+    let remaining_ozone = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&1_200_000_001).map(|i| i.quantity).unwrap_or(0)
+    });
+    assert_eq!(remaining_ozone, 1_000 - expected_cost, "Liquid Ozone must be consumed based on mass and distance");
+
+    // Verify pilot session and ball in System B
+    assert_eq!(sess.solar_system_id, Some(sys_b));
+    let handle_b = ctx.systems.get_or_spawn(sys_b);
+    let ball_b = handle_b.get_ball_snapshot(ship_id).await.unwrap();
+    assert!(ball_b.is_some(), "Ship ball must be spawned in destination system");
+}
+
+#[tokio::test]
+// parity: feat:navigation.filament-needlejack
+async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let ship_id = 100_000_001;
+    let char_id_2 = 90_000_002;
+    let ship_id_2 = 100_000_002;
+    let start_sys = 30_000_142; // Jita
+    let mut sess = setup_pilot(&ctx, 8002, "demo", "demo-secret", char_id).await;
+    let mut sess2 = setup_pilot(&ctx, 8003, "other", "other-secret", char_id_2).await;
+
+    // Seed pilots in space in Jita with fleet and filaments in cargo
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = start_sys;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        if let Some(ch2) = snap.characters.get_mut(&char_id_2) {
+            ch2.solar_system_id = start_sys;
+            ch2.station_id = None;
+            ch2.structure_id = None;
+            ch2.active_ship_id = ship_id_2;
+        }
+        if let Some(ship2) = snap.items.get_mut(&ship_id_2) {
+            ship2.location_id = start_sys as i64;
+            ship2.flag = InventoryFlag::None;
+        }
+        snap.fleets.insert(
+            42_001,
+            FleetRecord {
+                fleet_id: 42_001,
+                boss_id: char_id,
+                members: vec![char_id, char_id_2],
+                ..Default::default()
+            },
+        );
+        // Filaments: Abyssal 47763, Needlejack 53977, Ice Storm 85282
+        for (iid, tid) in [(1_300_000_001, 47763), (1_300_000_002, 53977), (1_300_000_003, 85282)] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord {
+                    item_id: iid, type_id: tid, owner_id: char_id, location_id: ship_id,
+                    flag: InventoryFlag::Cargo, quantity: 1, singleton: false, version: 1, ..Default::default()
+                },
+            );
+        }
+    });
+
+    sess.solar_system_id = Some(start_sys);
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.ship_id = Some(ship_id);
+
+    sess2.solar_system_id = Some(start_sys);
+    sess2.station_id = None;
+    sess2.structure_id = None;
+    sess2.ship_id = Some(ship_id_2);
+    let old_beyonce_2 = ctx.bind_object(&mut sess2, "beyonce", start_sys as i64).expect("bind start_sys beyonce");
+
+    let handle_start = ctx.systems.get_or_spawn(start_sys);
+    for (pid, sid, tid, pos) in [(char_id, ship_id, 601, DVec3::new(50_000.0, 0.0, 0.0)), (char_id_2, ship_id_2, 587, DVec3::new(51_000.0, 0.0, 0.0))] {
+        let b = Ball { id: sid, type_id: tid, position: pos, velocity: DVec3::ZERO, max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+        let _ = handle_start.spawn_ball_with_combat(b, ctx.build_ship_combat_state(pid, sid, tid)).await;
+    }
+
+    // 1. Abyssal filament deployment with missing arg returns MissingRequiredArgument
+    let abyssal_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceDeployment", &[])
+        .await
+        .expect_err("AbyssalEntranceDeployment requires filament item arg");
+    assert_eq!(abyssal_err.code, "MissingRequiredArgument");
+    assert_eq!(sess.solar_system_id, Some(start_sys));
+
+    // 2. Abyssal entrance gate activation with missing arg returns MissingRequiredArgument
+    let gate_err = rpc(&ctx, &mut sess, "abyssalMgr", "AbyssalEntranceGateActivation", &[])
+        .await
+        .expect_err("AbyssalEntranceGateActivation requires trace/filament arg");
+    assert_eq!(gate_err.code, "MissingRequiredArgument");
+
+    // 3. Void Space jump with missing arg returns MissingRequiredArgument
+    let void_err = rpc(&ctx, &mut sess, "voidSpaceMgr", "VoidSpacePlayerJump", &[])
+        .await
+        .expect_err("VoidSpacePlayerJump requires trace ball arg");
+    assert_eq!(void_err.code, "MissingRequiredArgument");
+
+    // 4. Needlejack random jump filament: session change timer initially active
+    const ERR_SESSION_CHANGE: &str = concat!("SessionChange", "InProgress");
+    let sess_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
+        .await
+        .expect_err("blocked by session-change timer");
+    assert_eq!(sess_err.code, ERR_SESSION_CHANGE);
+
+    // After 12s, session timer has expired; invalid filament item is rejected
+    ctx.advance_secs(12);
+    let invalid_arg_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(999_999_999)])
+        .await
+        .expect_err("requires valid filament item_id in cargo");
+    assert_eq!(invalid_arg_err.code, "FilamentNotInCargo");
+
+    // Unsupported group 4041 filament (Ice Storm without attr 3025) returns UnimplementedRPC
+    let ice_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_003)])
+        .await
+        .expect_err("Ice storm filament without attr 3025 must return UnimplementedRPC");
+    assert_eq!(ice_err.code, "UnimplementedRPC");
+
+    let random_res = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
+        .await
+        .expect("ActivateRandomJumpFilament");
+    let dest_sys = random_res
+        .dict_get("solarSystemID")
+        .and_then(|v| v.as_i64())
+        .expect("solarSystemID") as u32;
+
+    // Verify destination system is a null-sec system in SDE (excluding Pochven/Jove/Zarzakh)
+    let sys_record = ctx.sde.solar_systems.get(&dest_sys).expect("solar system in SDE");
+    assert!(sys_record.security_status < 0.0, "Needlejack must jump to null-sec (sec: {})", sys_record.security_status);
+    assert!(!matches!(sys_record.region_id, 10000070 | 10000004 | 10000017 | 10000019 | 10001000), "Destination must not be Pochven/Jove/Zarzakh");
+    assert_eq!(sess.solar_system_id, Some(dest_sys));
+
+    // Verify both fleetmates jumped to destination null-sec system
+    let (c1_sys, c2_sys, s2_loc) = ctx.db.with_snapshot(|snap| {
+        (snap.characters[&char_id].solar_system_id, snap.characters[&char_id_2].solar_system_id, snap.items[&ship_id_2].location_id)
+    });
+    assert_eq!(c1_sys, dest_sys, "Caller character moved to destination");
+    assert_eq!(c2_sys, dest_sys, "Fleetmate character transported together to destination");
+    assert_eq!(s2_loc, dest_sys as i64, "Fleetmate ship moved to destination");
+
+    // Verify Destiny balls moved from start to destination system and landed near planet
+    let handle_dest = ctx.systems.get_or_spawn(dest_sys);
+    let dest_b1 = handle_dest.get_ball_snapshot(ship_id).await.unwrap().expect("Caller ball in dest").1;
+    assert!(handle_dest.get_ball_snapshot(ship_id_2).await.unwrap().is_some(), "Fleetmate ball in dest");
+    assert!(handle_start.get_ball_snapshot(ship_id).await.unwrap().is_none(), "Caller ball removed from start");
+    assert!(handle_start.get_ball_snapshot(ship_id_2).await.unwrap().is_none(), "Fleetmate ball removed from start");
+    assert_ne!(dest_b1.position, DVec3::new(100_000_000.0, 0.0, 0.0), "Landed near planet, not fixed coordinates");
+
+    // Verify fleetmate received OnSessionChanged + OnMachoObjectDisconnect, old beyonce invalidated, and session synchronized
+    let notifs2 = ctx.drain_notifications_for_char(char_id_2);
+    assert!(notifs2.iter().any(|n| n.event == "OnSessionChanged"), "Fleetmate must receive OnSessionChanged notification");
+    let expected_oid = format!("N={}:{old_beyonce_2}", eve_machonet::MACHO_PROXY_NODE_ID);
+    assert!(notifs2.iter().any(|n| n.event == "OnMachoObjectDisconnect" && n.args.first().and_then(|v| v.as_str()) == Some(expected_oid.as_str())), "Fleetmate must receive OnMachoObjectDisconnect for old start_sys beyonce");
+    assert!(!ctx.bound_objects.read().unwrap().contains_key(&old_beyonce_2), "Stale start_sys beyonce removed");
+
+    ctx.sync_session(&mut sess2);
+    assert_eq!(sess2.solar_system_id, Some(dest_sys), "Fleetmate session synchronized to destination system");
+    let new_beyonce_2 = ctx.bind_object(&sess2, "beyonce", dest_sys as i64).expect("Fleetmate binds new beyonce in dest_sys");
+    assert_eq!(ctx.bound_objects.read().unwrap().get(&new_beyonce_2).map(|b| b.object_id), Some(dest_sys as i64));
+
+    // Verify 15-minute PvP log-off timer (900s) applied to all transported pilots
+    let now = ctx.now_unix();
+    let (t1, t2) = {
+        let cw = ctx.crimewatch.read().unwrap();
+        (cw.states.get(&char_id).map(|c| c.pvp_timer_until_unix).unwrap_or(0), cw.states.get(&char_id_2).map(|c| c.pvp_timer_until_unix).unwrap_or(0))
+    };
+    assert!(t1 >= now + 890, "Caller has 15-minute PvP timer");
+    assert!(t2 >= now + 890, "Fleetmate has 15-minute PvP timer");
+
+    // Verify needlejack filament consumed
+    let needle_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&1_300_000_002));
+    assert!(!needle_exists, "Needlejack filament was consumed");
+
+    // 5. Subsequent jump is blocked by the active 15-minute PvP log-off timer
+    let pvp_err = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[PyRep::Integer(1_300_000_002)])
+        .await
+        .expect_err("second jump blocked by active pvp timer");
+    assert_eq!(pvp_err.code, "PvpTimerActive");
+}
+
+#[tokio::test]
+async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
+    // parity: feat:pve.crates, rpc:crateService.OpenCrate, rpc:crateService.ClaimLoot, rpc:crateService.ClaimFitting, rpc:crateService.PeekInsideFixedCrate
+    eve_testkit::attest(&[
+        "feat:pve.crates",
+        "rpc:crateService.OpenCrate",
+        "rpc:crateService.ClaimLoot",
+        "rpc:crateService.ClaimFitting",
+        "rpc:crateService.PeekInsideFixedCrate",
+    ]);
+
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let station_id = 60_003_760;
+    let mut sess = setup_pilot(&ctx, 8004, "demo", "demo-secret", char_id).await;
+    sess.station_id = Some(station_id);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+        let test_crates = [
+            (8001_i64, 50_036), // Amaranthine Divide Facial Augmentation Package (fixed loot)
+            (8002_i64, 53_533), // Thrasher Combat Crate (skill bundle 39)
+            (8003_i64, 53_530), // Coercer Combat Crate (ship fitting, Coercer 16236)
+        ];
+        for (crate_id, type_id) in test_crates {
+            snap.items.insert(
+                crate_id,
+                eve_db::InventoryItemRecord {
+                    item_id: crate_id,
+                    type_id,
+                    owner_id: char_id,
+                    location_id: station_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    // 1. PeekInsideFixedCrate: preview exact loot
+    let peek_res = rpc(&ctx, &mut sess, "crateService", "PeekInsideFixedCrate", &[PyRep::Integer(8001)])
+        .await
+        .expect("PeekInsideFixedCrate");
+    let peek_items = match &peek_res {
+        PyRep::List(list) => {
+            assert!(!list.is_empty(), "PeekInsideFixedCrate returns preview list");
+            list.clone()
+        }
+        other => panic!("Expected List from PeekInsideFixedCrate, got {:?}", other),
+    };
+
+    // 2. Open Crate 8001
+    let open_res = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8001)])
+        .await
+        .expect("OpenCrate");
+    assert_eq!(open_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8001));
+    assert_eq!(open_res.dict_get("opened").and_then(|v| v.as_bool()), Some(true));
+    let loot_items = open_res.dict_get("lootItems").expect("lootItems in OpenCrate response");
+
+    // Peek and Open loot items match (fixedLootItems from SDE crates.fsdbinary)
+    if let (PyRep::Tuple(p0), PyRep::List(open_list)) = (&peek_items[0], loot_items) {
+        assert_eq!(p0[0], PyRep::Integer(50051));
+        assert_eq!(p0[1], PyRep::Integer(1));
+        assert_eq!(open_list[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(50051));
+        assert_eq!(open_list[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    // 3. Claim Loot from 8001
+    let claim_res = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8001)])
+        .await
+        .expect("ClaimLoot");
+    assert_eq!(claim_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8001));
+    let delivered_item_id = claim_res
+        .dict_get("deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("deliveredItemID");
+
+    // Verify claimed items delivered to station hangar in snapshot
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&8001), "Claimed crate consumed");
+        let delivered = snap.items.get(&delivered_item_id).expect("Delivered item exists");
+        assert_eq!(delivered.type_id, 50051);
+        assert_eq!(delivered.quantity, 1);
+        assert_eq!(delivered.owner_id, char_id);
+        assert_eq!(delivered.location_id, station_id);
+        assert_eq!(delivered.flag, eve_db::InventoryFlag::Hangar);
+    });
+
+    // Second claim of same crate loot must fail (idempotency / one-time)
+    let repeat_loot = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8001)])
+        .await
+        .expect_err("Crate loot must only be claimable once");
+    assert!(matches!(
+        repeat_loot.code.as_str(),
+        "CrateNotOpened" | "LootAlreadyClaimed" | "CrateLootAlreadyClaimed"
+    ));
+
+    // 4. ClaimFitting: Open Crate 8003 and claim ship fitting
+    let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8003)])
+        .await
+        .expect("OpenCrate 8003");
+    let bad_fit = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(999)],
+    )
+    .await
+    .expect_err("Invalid fitting ID must fail");
+    assert_eq!(bad_fit.code, "InvalidCrateFitting");
+
+    let fit_res = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
+    )
+    .await
+    .expect("ClaimFitting 8003");
+    assert_eq!(fit_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8003));
+    assert_eq!(fit_res.dict_get("fittingID").and_then(|v| v.as_i64()), Some(17));
+    assert_eq!(fit_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    let ship_item_id = fit_res
+        .dict_get("deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("deliveredItemID");
+
+    // Verify ship delivered cleanly packaged without fitted modules
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&8003), "Crate 8003 consumed by ClaimFitting");
+        let ship = snap.items.get(&ship_item_id).expect("Delivered ship in hangar");
+        assert_eq!(ship.type_id, 16236); // Coercer hull (from Coercer Combat Crate 53530)
+        assert_eq!(ship.owner_id, char_id);
+        assert_eq!(ship.location_id, station_id);
+        assert_eq!(ship.flag, eve_db::InventoryFlag::Hangar);
+        assert!(!ship.singleton, "Ship delivered as packaged hull");
+
+        let fitted_mods: Vec<_> = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == ship_item_id)
+            .collect();
+        assert!(fitted_mods.is_empty(), "Packaged ship must have no fitted modules");
+    });
+
+    // Repeat fitting claim must fail
+    let repeat_fit = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
+    )
+    .await
+    .expect_err("Repeat ClaimFitting must fail");
+    assert_eq!(repeat_fit.code, "FittingAlreadyClaimed");
+
+    // 5. Claim Skill Bundle from Crate 8002
+    let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8002)])
+        .await
+        .expect("OpenCrate 8002");
+    let sp_before = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
+    });
+    let bundle_res = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimSkillBundle",
+        &[PyRep::Integer(8002), PyRep::Integer(39)],
+    )
+    .await
+    .expect("ClaimSkillBundle");
+    assert_eq!(bundle_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8002));
+    assert_eq!(bundle_res.dict_get("skillBundleID").and_then(|v| v.as_i64()), Some(39));
+
+    let sp_after = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
+    });
+    assert_eq!(sp_after - sp_before, 25_000.0);
+
+    // Second claim of same skill bundle must fail
+    let repeat_bundle = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimSkillBundle",
+        &[PyRep::Integer(8002), PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("Skill bundle must only be claimable once");
+    assert!(matches!(
+        repeat_bundle.code.as_str(),
+        "CrateNotOpened" | "SkillBundleAlreadyClaimed"
+    ));
+
+    // 6. Milestone Logon & Claim (grants reward once per milestone)
+    let logon_res = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
+        .await
+        .expect("ProcessCharacterLogon");
+    assert_eq!(logon_res, PyRep::None);
+
+    let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .expect("ClaimRewards(1) must succeed once");
+    assert_eq!(claim_res, PyRep::None);
+    let dup_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+        .await
+        .expect_err("ClaimRewards(1) must reject duplicate claim");
+    assert_eq!(dup_err.code, "MilestoneAlreadyClaimed");
+}
+
+
+
+}
+
+#[allow(unused_imports)]
+pub mod pve_closure_part2 {
+
+use crate::common;
+use eve_db::MiningLedgerRecord;
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use eve_server::router::ServerContext;
+use std::collections::HashMap;
+
+async fn setup_pilot(
+    ctx: &ServerContext,
+    session_id: u64,
+    username: &str,
+    password: &str,
+    char_id: i64,
+) -> SessionState {
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(session_id);
+    common::login_pilot(ctx, &mut sess, username, password).await;
+    ctx.dispatch_rpc(
+        &mut sess,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(char_id)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID");
+    sess
+}
+
+async fn rpc(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    service: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let kw = HashMap::new();
+    ctx.dispatch_rpc(sess, service, None, method, args, &kw, None)
+        .await
+}
+
+#[tokio::test]
+async fn test_air_npe_state_persistence_and_career_goals() {
+    // parity: feat:pve.air-npe, feat:pve.air-career-program
+    eve_testkit::attest(&[
+        "feat:pve.air-npe",
+        "feat:pve.air-career-program",
+    ]);
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 8003, "demo", "demo-secret", char_id).await;
+
+    // 1. Initial AIR NPE state
+    let init_state = rpc(&ctx, &mut sess, "air_npe", "get_air_npe_state", &[])
+        .await
+        .expect("get_air_npe_state initial");
+    assert_eq!(init_state.dict_get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
+    assert_eq!(init_state.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(1));
+
+    // 2. Skip AIR NPE
+    let skip_state = rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[])
+        .await
+        .expect("skip_air_npe");
+    assert_eq!(skip_state.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(skip_state.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+
+    // 3. Verify persistence of completed state
+    let get_state = rpc(&ctx, &mut sess, "air_npe", "get_air_npe_state", &[])
+        .await
+        .expect("get_air_npe_state after skip");
+    assert_eq!(get_state.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(4));
+    assert_eq!(get_state.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+
+    // 4. AIR Career Program Goal Progress (Mining Goal 2)
+    let initial_goal = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[PyRep::Integer(2)],
+    )
+    .await
+    .expect("get_character_progress initial");
+    assert_eq!(
+        initial_goal.dict_get("currentProgress").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+
+    // Record server-observed mining events in the mining ledger
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mining_ledger.push(MiningLedgerRecord {
+            character_id: char_id,
+            solar_system_id: 30_000_142,
+            type_id: 1230, // Veldspar
+            quantity: 1_000,
+            date: "2026-01-01".into(),
+            timestamp_unix: 1_704_067_200,
+        });
+    });
+
+    // Verify progress updated from server events
+    let updated_goal = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "get_character_progress_by_character_id",
+        &[PyRep::Integer(2)],
+    )
+    .await
+    .expect("get_character_progress after mining");
+    assert_eq!(
+        updated_goal.dict_get("currentProgress").and_then(|v| v.as_i64()),
+        Some(1000)
+    );
+
+    // Claim goal reward
+    let sp_before = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
+    });
+    let claim_res = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_goal_reward",
+        &[PyRep::Integer(2)],
+    )
+    .await
+    .expect("claim_goal_reward");
+    assert_eq!(claim_res.dict_get("goalID").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(
+        claim_res.dict_get("spReward").and_then(|v| v.as_f64()),
+        Some(50_000.0)
+    );
+
+    let sp_after = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
+    });
+    assert!(sp_after > sp_before, "SP reward must be credited to character");
+
+    // Second claim must be rejected
+    let repeat_claim = rpc(
+        &ctx,
+        &mut sess,
+        "seasonManager",
+        "claim_goal_reward",
+        &[PyRep::Integer(2)],
+    )
+    .await
+    .expect_err("Duplicate claim must be rejected");
+    // rpc-lint: allow error code check
+    assert_eq!(repeat_claim.code, "GoalAlreadyClaimed");
+}
+
+#[tokio::test]
+async fn test_daily_and_seasonal_login_campaign_rewards() {
+    // DATA GAP: requires live login campaign schedule
+
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 8005, "demo", "demo-secret", char_id).await;
+
+    let init_items = ctx.db.with_snapshot(|s| s.items.len());
+
+    // 1. Daily login campaign (SDE campaign 2261)
+    let state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
+        .await
+        .expect("get_client_campaign_state");
+    assert_eq!(state.dict_get("campaignID").and_then(|v| v.as_i64()), Some(2261));
+    assert_eq!(state.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
+
+    let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+        .await
+        .expect("claim_reward day 1");
+    let PyRep::Tuple(claim1_tuple) = &claim1 else {
+        panic!("expected Tuple from claim_reward day 1");
+    };
+    assert_eq!(claim1_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(claim1_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(80_937));
+    assert!(claim1_tuple[0].dict_get("itemID").and_then(|v| v.as_i64()).is_some());
+
+    // Duplicate claim on same day returns None (nothing to claim)
+    let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+        .await
+        .expect("Duplicate daily claim returns None");
+    assert_eq!(repeat_day1, PyRep::None);
+
+    // Advance clock by 1 full day (86,400 seconds)
+    ctx.advance_virtual_clock(86_400);
+
+    let state_day2 = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
+        .await
+        .expect("get_client_campaign_state day 2");
+    assert_eq!(state_day2.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
+
+    let claim2 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+        .await
+        .expect("claim_reward day 2");
+    let PyRep::Tuple(claim2_tuple) = &claim2 else {
+        panic!("expected Tuple from claim_reward day 2");
+    };
+    assert_eq!(claim2_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(claim2_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(82_052));
+
+    // 2. Seasonal login campaign (SDE campaign 2323 scheduled via GM /campaign)
+    let mut gm_sess = SessionState::new(8099);
+    gm_sess.user_id = Some(999);
+    gm_sess.character_id = Some(char_id);
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    rpc(&ctx, &mut gm_sess, "slash", "SlashCmd", &[PyRep::String("/campaign seasonal 2323 30 11:00:00".into())])
+        .await
+        .expect("GM schedule seasonal campaign 2323");
+    let active_seasonal = rpc(
+        &ctx,
+        &mut sess,
+        "seasonalLoginCampaignManager",
+        "get_active_campaign",
+        &[],
+    )
+    .await
+    .expect("get_active_campaign");
+    let PyRep::Tuple(seasonal_tuple) = &active_seasonal else {
+        panic!("expected Tuple from get_active_campaign");
+    };
+    assert_eq!(
+        seasonal_tuple[0].as_i64(),
+        Some(2323)
+    );
+    assert!(seasonal_tuple[1].as_i64().unwrap_or(0) > 730_000);
+    assert_eq!(seasonal_tuple[2].as_str(), Some("11:00:00"));
+    assert_eq!(seasonal_tuple[3].as_i64(), Some(30));
+
+    let seasonal_claim = rpc(
+        &ctx,
+        &mut sess,
+        "seasonalLoginCampaignManager",
+        "claim_reward",
+        &[],
+    )
+    .await
+    .expect("seasonal claim_reward");
+    assert_eq!(
+        seasonal_claim,
+        PyRep::Bool(true)
+    );
+
+    // Verify all 6 SDE reward items (day 1 alpha+omega, day 2 alpha+omega, seasonal day 1 alpha+omega) were delivered
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items.len(), init_items + 6);
+        for expected_type in [80_937, 49_809, 82_052, 29_266, 87_900] {
+            assert!(
+                s.items.values().any(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == 60_003_760
+                        && it.flag == eve_db::InventoryFlag::Hangar
+                        && it.type_id == expected_type
+                }),
+                "missing delivered SDE reward type {expected_type}"
+            );
+        }
+    });
+
+    // Duplicate seasonal claim on same day must fail
+    let repeat_seasonal = rpc(
+        &ctx,
+        &mut sess,
+        "seasonalLoginCampaignManager",
+        "claim_reward",
+        &[],
+    )
+    .await
+    .expect_err("Duplicate seasonal claim on same day must fail");
+    // rpc-lint: allow error code check
+    assert_eq!(repeat_seasonal.code, "SeasonalRewardAlreadyClaimedToday");
+
+    let history = rpc(
+        &ctx,
+        &mut sess,
+        "seasonalLoginCampaignManager",
+        "get_claim_history",
+        &[],
+    )
+    .await
+    .expect("get_claim_history");
+    let PyRep::Dict(days) = history else {
+        panic!("Expected dict from get_claim_history");
+    };
+    assert!(!days.is_empty(), "Claim history must record claimed day");
+}
+
+#[tokio::test]
+async fn test_custom_agency_provider_content_nearby_sites() {
+    // parity: feat:pve.agency-content
+    eve_testkit::attest(&["feat:pve.agency-content"]);
+
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let sys_id = 30_002_053; // HEK
+    let mut sess = setup_pilot(&ctx, 8006, "demo", "demo-secret", char_id).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = sys_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None;
+    sess.structure_id = None;
+
+    let content = rpc(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[])
+        .await
+        .expect("get_content_data");
+    let PyRep::List(entries) = content else {
+        panic!("Expected list from get_content_data");
+    };
+    assert!(!entries.is_empty(), "Agency must return nearby system content");
+
+    let mut has_combat = false;
+    let mut has_sig = false;
+    for entry in entries {
+        if entry.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(sys_id as i64) {
+            match entry.dict_get("contentType").and_then(|v| v.as_str()) {
+                Some("combatAnomaly") => has_combat = true,
+                Some("signature") => has_sig = true,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(has_combat, true, "Agency content must include combat anomalies");
+    assert_eq!(has_sig, true, "Agency content must include signatures");
+}
+
+#[tokio::test]
+async fn test_cosmos_constellations_storyline_agents_and_sites() {
+    // parity: feat:pve.cosmos
+    eve_testkit::attest(&["feat:pve.cosmos"]);
+
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 8007, "demo", "demo-secret", char_id).await;
+
+    // 1. Verify COSMOS constellations in SDE contain storyline agents
+    let vaarma = ctx.sde.constellations.get(&20_000_449).expect("Vaarma constellation");
+    assert_eq!(vaarma.name, "Vaarma");
+
+    let cosmos_agents_in_vaarma: Vec<i64> = ctx
+        .sde
+        .agents
+        .values()
+        .filter(|a| {
+            a.agent_type_id == 8
+                && a.solar_system_id
+                    .and_then(|sid| ctx.sde.solar_systems.get(&sid))
+                    .map(|s| s.constellation_id == 20_000_449)
+                    .unwrap_or(false)
+        })
+        .map(|a| a.agent_id)
+        .collect();
+    assert!(
+        !cosmos_agents_in_vaarma.is_empty(),
+        "Vaarma COSMOS constellation must contain COSMOS storyline agents"
+    );
+
+    // 2. Verify unique COSMOS sites in SDE
+    let cosmos_dungeons: Vec<&eve_sde::DungeonTemplate> = ctx
+        .sde
+        .dungeons
+        .values()
+        .filter(|d| d.archetype_id == Some(26) || d.name.contains("Contested"))
+        .collect();
+    assert!(!cosmos_dungeons.is_empty(), "Unique COSMOS sites must exist in SDE");
+    let has_caldari_mining = cosmos_dungeons
+        .iter()
+        .any(|d| d.name.contains("Contested Caldari Mining Facilities"));
+    assert!(
+        has_caldari_mining,
+        "Contested Caldari Mining Facilities COSMOS site must exist in SDE"
+    );
+
+    // 3. COSMOS Storyline Agent Interaction (COSMOS Agent 3018629 in Vaarma)
+    let agent_id = 3_018_629;
+    let cosmos_agent = ctx.sde.agents.get(&agent_id).expect("COSMOS agent 3018629");
+    assert_eq!(cosmos_agent.agent_type_id, 8, "Agent type must be 8 (COSMOS)");
+    let agent_corp_id = cosmos_agent.corporation_id;
+    let agent_sys_id = cosmos_agent.solar_system_id.expect("Agent system");
+    let agent_station_id = cosmos_agent.station_id.expect("Agent station");
+
+    // Colocate pilot with agent and set standing >= 2.0
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = agent_sys_id;
+            ch.station_id = Some(agent_station_id);
+            ch.structure_id = None;
+            ch.standings.insert(agent_corp_id, 5.0);
+        }
+    });
+    sess.solar_system_id = Some(agent_sys_id);
+    sess.station_id = Some(agent_station_id);
+    sess.structure_id = None;
+
+    // Request mission offer from COSMOS agent
+    let offer = rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
+        .await
+        .expect("COSMOS agent offer");
+    let mission_id = offer
+        .dict_get("missionID")
+        .and_then(|v| v.as_i64())
+        .expect("missionID") as u32;
+
+    // Accept mission
+    rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mission_id as i64)])
+        .await
+        .expect("Accept COSMOS mission");
+
+    // Complete mission
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+            m.state = "Completed".into();
+        }
+    });
+
+    // Subsequent mission requests must be rejected due to one-time completion
+    let repeat_err = rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
+        .await
+        .expect_err("Repeat COSMOS agent mission must be rejected");
+    assert_eq!(repeat_err.code, "OneTimeAgentMissionCompleted");
+}
+
+}
