@@ -12,6 +12,183 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BountyTargetType {
+    Pilot,
+    Corporation,
+    Alliance,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BountySearchType {
+    Pilot,
+    Corporation,
+    Alliance,
+}
+
+fn handle_get_top_bounties(
+    ctx: &ServerContext,
+    session: &SessionState,
+    target_type: BountyTargetType,
+    is_hunters: bool,
+    _page: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let raw: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
+        let src = if is_hunters {
+            &rt.bounty_hunter_claimed
+        } else {
+            &rt.player_bounty_pool
+        };
+        src.iter()
+            .filter(|(_, &a)| a > 0.0)
+            .map(|(&id, &amt)| (id, amt))
+            .collect()
+    });
+    let mut entries: Vec<(i64, f64)> = ctx.db.with_snapshot(|snap| {
+        let mut agg: HashMap<i64, f64> = HashMap::new();
+        for &(id, amt) in &raw {
+            let include = match target_type {
+                BountyTargetType::Pilot => snap.characters.contains_key(&id),
+                BountyTargetType::Corporation => snap.corporations.contains_key(&id),
+                BountyTargetType::Alliance => snap.alliances.contains_key(&id),
+                BountyTargetType::All => true,
+            };
+            if include {
+                agg.insert(id, amt);
+            }
+        }
+        if matches!(
+            target_type,
+            BountyTargetType::Corporation | BountyTargetType::Alliance
+        ) {
+            let is_corp = target_type == BountyTargetType::Corporation;
+            let direct: std::collections::HashSet<i64> = agg.keys().copied().collect();
+            for &(id, amt) in &raw {
+                if let Some(ch) = snap.characters.get(&id) {
+                    let target = if is_corp {
+                        Some(ch.corporation_id).filter(|c| snap.corporations.contains_key(c))
+                    } else {
+                        ch.alliance_id
+                            .or_else(|| {
+                                snap.corporations
+                                    .get(&ch.corporation_id)
+                                    .and_then(|c| c.alliance_id)
+                            })
+                            .filter(|a| snap.alliances.contains_key(a))
+                    };
+                    if let Some(tid) = target.filter(|t| !direct.contains(t)) {
+                        *agg.entry(tid).or_insert(0.0) += amt;
+                    }
+                }
+            }
+        }
+        agg.into_iter().collect()
+    });
+    entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let rows: Vec<PyRep> = entries
+        .into_iter()
+        .take(50)
+        .map(|(id, amt)| {
+            PyRep::keyval([
+                ("targetID", PyRep::Integer(id)),
+                ("bountyISK", PyRep::Real(amt)),
+            ])
+        })
+        .collect();
+    if is_hunters {
+        let ticks = ctx.now_blueos_filetime_ticks();
+        Ok(PyRep::Tuple(vec![
+            PyRep::List(rows),
+            PyRep::Integer(ticks),
+        ]))
+    } else {
+        Ok(PyRep::List(rows))
+    }
+}
+
+fn handle_search_bounties(
+    ctx: &ServerContext,
+    session: &SessionState,
+    search_type: BountySearchType,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    ServerContext::require_character(session)?;
+    let query_id = args.first().and_then(|a| a.as_i64());
+    let query_str = args
+        .first()
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let matching_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
+        let m = |id: i64, name: &str| {
+            query_id.map_or_else(
+                || query_str.is_empty() || name.to_lowercase().contains(&query_str),
+                |qid| id == qid,
+            )
+        };
+        match search_type {
+            BountySearchType::Alliance => snap
+                .alliances
+                .values()
+                .filter(|a| m(a.alliance_id, &a.name))
+                .map(|a| a.alliance_id)
+                .collect(),
+            BountySearchType::Corporation => snap
+                .corporations
+                .values()
+                .filter(|c| m(c.corporation_id, &c.name))
+                .map(|c| c.corporation_id)
+                .collect(),
+            BountySearchType::Pilot => snap
+                .characters
+                .values()
+                .filter(|c| m(c.character_id, &c.name))
+                .map(|c| c.character_id)
+                .collect(),
+        }
+    });
+    let mut list = with_combat_runtime(ctx, |rt| {
+        rt.player_bounty_pool
+            .iter()
+            .filter(|(&tid, &amt)| amt > 0.0 && matching_ids.contains(&tid))
+            .map(|(&tid, &amt)| (tid, amt))
+            .collect::<Vec<_>>()
+    });
+    list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let rows = ctx.db.with_snapshot(|snap| {
+        list.into_iter()
+            .enumerate()
+            .map(|(idx, (tid, amt))| {
+                let (name, corp_id, alli_id) = if let Some(ch) = snap.characters.get(&tid) {
+                    (
+                        ch.name.clone(),
+                        ch.corporation_id,
+                        ch.alliance_id.unwrap_or(0),
+                    )
+                } else if let Some(c) = snap.corporations.get(&tid) {
+                    (c.name.clone(), tid, c.alliance_id.unwrap_or(0))
+                } else if let Some(a) = snap.alliances.get(&tid) {
+                    (a.name.clone(), 0, tid)
+                } else {
+                    (String::new(), 0, 0)
+                };
+                let obj = PyRep::keyval([
+                    ("targetID", PyRep::Integer(tid)),
+                    ("corporationID", PyRep::Integer(corp_id)),
+                    ("allianceID", PyRep::Integer(alli_id)),
+                    ("bountyISK", PyRep::Real(amt)),
+                    ("bounty", PyRep::Real(amt)),
+                    ("name", PyRep::String(name)),
+                ]);
+                PyRep::Tuple(vec![PyRep::Integer(idx as i64 + 1), obj])
+            })
+            .collect()
+    });
+    Ok(PyRep::List(rows))
+}
+
 /// Dispatches all `bountyProxy` machoNet RPC calls.
 pub fn handle_bounty_proxy(
     ctx: &ServerContext,
@@ -384,87 +561,28 @@ pub fn handle_bounty_proxy(
             Some(Ok(PyRep::List(rows)))
         }
 
-        ("bountyProxy", "SearchBounties")
-        | ("bountyProxy", "SearchCharBounties")
-        | ("bountyProxy", "SearchCorpBounties")
-        | ("bountyProxy", "SearchAllianceBounties") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let query_id = args.first().and_then(|a| a.as_i64());
-            let query_str = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let matching_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
-                let m = |id: i64, name: &str| {
-                    query_id.map_or_else(
-                        || query_str.is_empty() || name.to_lowercase().contains(&query_str),
-                        |qid| id == qid,
-                    )
-                };
-                if method == "SearchAllianceBounties" {
-                    snap.alliances
-                        .values()
-                        .filter(|a| m(a.alliance_id, &a.name))
-                        .map(|a| a.alliance_id)
-                        .collect()
-                } else if method == "SearchCorpBounties" {
-                    snap.corporations
-                        .values()
-                        .filter(|c| m(c.corporation_id, &c.name))
-                        .map(|c| c.corporation_id)
-                        .collect()
-                } else {
-                    snap.characters
-                        .values()
-                        .filter(|c| m(c.character_id, &c.name))
-                        .map(|c| c.character_id)
-                        .collect()
-                }
-            });
-            let mut list = with_combat_runtime(ctx, |rt| {
-                rt.player_bounty_pool
-                    .iter()
-                    .filter(|(&tid, &amt)| amt > 0.0 && matching_ids.contains(&tid))
-                    .map(|(&tid, &amt)| (tid, amt))
-                    .collect::<Vec<_>>()
-            });
-            list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let rows = ctx.db.with_snapshot(|snap| {
-                list.into_iter()
-                    .enumerate()
-                    .map(|(idx, (tid, amt))| {
-                        let (name, corp_id, alli_id) = if let Some(ch) = snap.characters.get(&tid)
-                        {
-                            (
-                                ch.name.clone(),
-                                ch.corporation_id,
-                                ch.alliance_id.unwrap_or(0),
-                            )
-                        } else if let Some(c) = snap.corporations.get(&tid) {
-                            (c.name.clone(), tid, c.alliance_id.unwrap_or(0))
-                        } else if let Some(a) = snap.alliances.get(&tid) {
-                            (a.name.clone(), 0, tid)
-                        } else {
-                            (String::new(), 0, 0)
-                        };
-                        let obj = PyRep::keyval([
-                            ("targetID", PyRep::Integer(tid)),
-                            ("corporationID", PyRep::Integer(corp_id)),
-                            ("allianceID", PyRep::Integer(alli_id)),
-                            ("bountyISK", PyRep::Real(amt)),
-                            ("bounty", PyRep::Real(amt)),
-                            ("name", PyRep::String(name)),
-                        ]);
-                        PyRep::Tuple(vec![PyRep::Integer(idx as i64 + 1), obj])
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::List(rows)))
+        ("bountyProxy", "SearchBounties") | ("bountyProxy", "SearchCharBounties") => {
+            Some(handle_search_bounties(
+                ctx,
+                session,
+                BountySearchType::Pilot,
+                args,
+            ))
         }
+
+        ("bountyProxy", "SearchCorpBounties") => Some(handle_search_bounties(
+            ctx,
+            session,
+            BountySearchType::Corporation,
+            args,
+        )),
+
+        ("bountyProxy", "SearchAllianceBounties") => Some(handle_search_bounties(
+            ctx,
+            session,
+            BountySearchType::Alliance,
+            args,
+        )),
 
         ("bountyProxy", "clear_memoized") => {
             // const-ok: memoized cache invalidation notification returns None
@@ -475,89 +593,81 @@ pub fn handle_bounty_proxy(
             Some(Ok(PyRep::None))
         }
 
-        ("bountyProxy", "GetTopPilotBounties")
-        | ("bountyProxy", "GetTopCorpBounties")
-        | ("bountyProxy", "GetTopAllianceBounties")
-        | ("bountyProxy", "GetTopPilotBountyHunters")
-        | ("bountyProxy", "GetTopCorporationBountyHunters")
-        | ("bountyProxy", "GetTopAllianceBountyHunters")
-        | ("bountyProxy", "GetTopBountyHunters") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let _page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let (is_hunters, is_pilot, is_corp, is_alliance) = (
-                method.contains("Hunter"),
-                method.contains("Pilot"),
-                method.contains("Corp"),
-                method.contains("Alliance"),
-            );
-            let raw: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
-                let src = if is_hunters {
-                    &rt.bounty_hunter_claimed
-                } else {
-                    &rt.player_bounty_pool
-                };
-                src.iter()
-                    .filter(|(_, &a)| a > 0.0)
-                    .map(|(&id, &amt)| (id, amt))
-                    .collect()
-            });
-            let mut entries: Vec<(i64, f64)> = ctx.db.with_snapshot(|snap| {
-                let mut agg: HashMap<i64, f64> = HashMap::new();
-                for &(id, amt) in &raw {
-                    if (is_pilot && snap.characters.contains_key(&id))
-                        || (is_corp && snap.corporations.contains_key(&id))
-                        || (is_alliance && snap.alliances.contains_key(&id))
-                        || (!is_pilot && !is_corp && !is_alliance)
-                    {
-                        agg.insert(id, amt);
-                    }
-                }
-                if is_corp || is_alliance {
-                    let direct: std::collections::HashSet<i64> = agg.keys().copied().collect();
-                    for &(id, amt) in &raw {
-                        if let Some(ch) = snap.characters.get(&id) {
-                            let target = if is_corp {
-                                Some(ch.corporation_id).filter(|c| snap.corporations.contains_key(c))
-                            } else {
-                                ch.alliance_id
-                                    .or_else(|| {
-                                        snap.corporations
-                                            .get(&ch.corporation_id)
-                                            .and_then(|c| c.alliance_id)
-                                    })
-                                    .filter(|a| snap.alliances.contains_key(a))
-                            };
-                            if let Some(tid) = target.filter(|t| !direct.contains(t)) {
-                                *agg.entry(tid).or_insert(0.0) += amt;
-                            }
-                        }
-                    }
-                }
-                agg.into_iter().collect()
-            });
-            entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let rows: Vec<PyRep> = entries
-                .into_iter()
-                .take(50)
-                .map(|(id, amt)| {
-                    PyRep::keyval([
-                        ("targetID", PyRep::Integer(id)),
-                        ("bountyISK", PyRep::Real(amt)),
-                    ])
-                })
-                .collect();
-            if is_hunters {
-                let ticks = ctx.now_blueos_filetime_ticks();
-                Some(Ok(PyRep::Tuple(vec![
-                    PyRep::List(rows),
-                    PyRep::Integer(ticks),
-                ])))
-            } else {
-                Some(Ok(PyRep::List(rows)))
-            }
+        ("bountyProxy", "GetTopPilotBounties") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::Pilot,
+                false,
+                page,
+            ))
+        }
+
+        ("bountyProxy", "GetTopCorpBounties") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::Corporation,
+                false,
+                page,
+            ))
+        }
+
+        ("bountyProxy", "GetTopAllianceBounties") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::Alliance,
+                false,
+                page,
+            ))
+        }
+
+        ("bountyProxy", "GetTopPilotBountyHunters") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::Pilot,
+                true,
+                page,
+            ))
+        }
+
+        ("bountyProxy", "GetTopCorporationBountyHunters") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::Corporation,
+                true,
+                page,
+            ))
+        }
+
+        ("bountyProxy", "GetTopAllianceBountyHunters") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::Alliance,
+                true,
+                page,
+            ))
+        }
+
+        ("bountyProxy", "GetTopBountyHunters") => {
+            let page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            Some(handle_get_top_bounties(
+                ctx,
+                session,
+                BountyTargetType::All,
+                true,
+                page,
+            ))
         }
 
         ("bountyProxy", "GMClearBountyCache") => {
