@@ -802,7 +802,6 @@ async fn test_tether_eligibility_restrictions_and_docking_lock() {
 /// `feat:structures.fulcrum-alignment-services`
 #[tokio::test]
 async fn test_asset_safety_fulcrum_and_reprocessing_rigs() {
-    // parity: feat:structures.fulcrum-alignment-services
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

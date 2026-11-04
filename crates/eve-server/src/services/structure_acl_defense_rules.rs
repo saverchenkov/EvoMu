@@ -1162,6 +1162,7 @@ fn parse_struct_svc_args(session: &SessionState, args: &[PyRep], m: &str) -> Res
 pub(crate) fn handle_character_get_services(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "CharacterGetServices requires structureID"))?;
+    ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
         if !life::is_operational(&st.state) || !ops::evaluate_character_structure_access_in_snap_at(snap, structure_id, char_id, Some(ctx.now_unix())) {
@@ -1186,6 +1187,7 @@ pub(crate) fn handle_character_get_services(ctx: &ServerContext, session: &mut S
 pub(crate) fn handle_character_has_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterHasService")?;
+    ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
         Ok(PyRep::Bool(
             crate::services::structure_profile_services::evaluate_character_service_bps(
@@ -1199,6 +1201,7 @@ pub(crate) fn handle_character_has_service(ctx: &ServerContext, session: &mut Se
 pub(crate) fn handle_character_check_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterCheckService")?;
+    ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
         if !snap.structures.contains_key(&structure_id) {
             return Err(err("StructureNotFound", format!("Structure {structure_id} not found")));
@@ -1217,6 +1220,7 @@ pub(crate) fn handle_character_check_service(ctx: &ServerContext, session: &mut 
 pub(crate) fn handle_character_get_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterGetService")?;
+    ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
         Ok(crate::services::structure_profile_services::evaluate_character_service_bps(
             ctx, snap, structure_id, char_id, service_id, DEFAULT_STRUCTURE_SERVICE_TAX_BPS,
@@ -1228,6 +1232,7 @@ pub(crate) fn handle_character_get_service(ctx: &ServerContext, session: &mut Se
 pub(crate) fn handle_character_has_setting(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let (structure_id, setting_id) = parse_struct_svc_args(session, args, "CharacterHasSetting")?;
+    ops::sync_pending_profiles_in_ctx(ctx);
     ctx.db.with_snapshot(|snap| {
         Ok(PyRep::Bool(crate::services::structure_profile_services::evaluate_character_setting(
             ctx, snap, structure_id, char_id, setting_id,

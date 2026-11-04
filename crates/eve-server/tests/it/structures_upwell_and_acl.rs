@@ -217,8 +217,6 @@ async fn test_upwell_anchoring_restrictions_proximity_system_and_roles() {
 
 #[tokio::test]
 async fn test_upwell_profiles_acl_service_access_and_delayed_transition() {
-    // parity: feat:structures.profiles
-    eve_testkit::attest(&["feat:structures.profiles"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -296,8 +294,6 @@ async fn test_upwell_profiles_acl_service_access_and_delayed_transition() {
 
 #[tokio::test]
 async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
-    // parity: feat:structures.defense-settings
-    eve_testkit::attest(&["feat:structures.defense-settings"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -407,8 +403,6 @@ async fn test_upwell_defense_settings_retaliation_and_gunner_takeover_sync() {
 
 #[tokio::test]
 async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
-    // parity: feat:structures.structure-directory
-    eve_testkit::attest(&["feat:structures.structure-directory"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -467,8 +461,6 @@ async fn test_upwell_structure_directory_acl_filtering_and_sensitive_masking() {
 
 #[tokio::test]
 async fn test_fulcrum_docking_allegiance_gating_and_alignment_speed_buff() {
-    // parity: feat:structures.fulcrum-alignment-services
-    eve_testkit::attest(&["feat:structures.fulcrum-alignment-services"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
@@ -1549,8 +1541,6 @@ async fn test_remediated_structure_control_and_boarding_lifecycle() {
 
 #[tokio::test]
 async fn test_remediated_structure_defense_settings_and_auto_fire_ballpark() {
-    // parity: feat:structures.defense-settings, feat:structures.profiles
-    eve_testkit::attest(&["feat:structures.defense-settings", "feat:structures.profiles"]);
 
     let ctx = new_ctx();
     let mut sess = login_with_new_corp(&ctx, 8106, RANCER, "Defense Grid Corp", "DEFG").await;
@@ -2665,11 +2655,6 @@ async fn spawn_pilot_ship(
 
 #[tokio::test]
 async fn test_remediated_structure_directory_and_profiles_visibility() {
-    // parity: feat:structures.structure-directory, feat:structures.profiles
-    eve_testkit::attest(&[
-        "feat:structures.structure-directory",
-        "feat:structures.profiles",
-    ]);
 
     let ctx = new_ctx();
     let mut sess = setup_owner_corp(&ctx, 8230, PERIMETER, "Directory Corp", "DIRC").await;
@@ -2952,10 +2937,9 @@ async fn test_remediated_structure_directory_and_profiles_visibility() {
 
 #[tokio::test]
 async fn test_remediated_structure_control_release_and_flex_zero_arg_release() {
-    // parity: feat:structures.board-structure, feat:structures.defense-settings, rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureControl.GetStructurePilot
+    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.ReleaseControl, rpc:structureControl.GetStructurePilot
     eve_testkit::attest(&[
         "feat:structures.board-structure",
-        "feat:structures.defense-settings",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.ReleaseControl",
         "rpc:structureControl.GetStructurePilot",
@@ -3270,10 +3254,9 @@ fn has_shipid_session_change(notifs: &[eve_server::router::PendingMachoNotificat
 
 #[tokio::test]
 async fn test_remediated_involuntary_structure_control_release_session_sync() {
-    // parity: feat:structures.board-structure, feat:structures.defense-settings, rpc:structureControl.TakeControl, rpc:structureControl.GetStructurePilot
+    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.GetStructurePilot
     eve_testkit::attest(&[
         "feat:structures.board-structure",
-        "feat:structures.defense-settings",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.GetStructurePilot",
     ]);
@@ -3452,9 +3435,8 @@ async fn test_remediated_involuntary_structure_control_release_session_sync() {
 
 #[tokio::test]
 async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div1_ledger() {
-    // parity: feat:structures.profiles, feat:market.structure-markets, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder, rpc:marketProxy.ModifyCharOrder, rpc:marketProxy.GetStationAsks, rpc:reprocessingSvc.Reprocess, rpc:jumpCloneSvc.InstallCloneInStructure
+    // parity: feat:market.structure-markets, rpc:marketProxy.PlaceBuyOrder, rpc:marketProxy.PlaceMultiSellOrder, rpc:marketProxy.ModifyCharOrder, rpc:marketProxy.GetStationAsks, rpc:reprocessingSvc.Reprocess, rpc:jumpCloneSvc.InstallCloneInStructure
     eve_testkit::attest(&[
-        "feat:structures.profiles",
         "feat:market.structure-markets",
         "rpc:marketProxy.PlaceBuyOrder",
         "rpc:marketProxy.PlaceMultiSellOrder",
@@ -3698,11 +3680,9 @@ async fn test_remediated_bf01_bf02_upwell_market_acl_offline_filter_and_corp_div
 
 #[tokio::test]
 async fn test_remediated_bf03_bf04_structure_control_immobility_and_direct_structure_profile_save() {
-    // parity: feat:structures.board-structure, feat:structures.defense-settings, feat:structures.profiles, rpc:structureControl.TakeControl, rpc:beyonce.CmdWarpToStuff, rpc:structureDocking.Dock, rpc:abyssalMgr.AbyssalEntranceDeployment
+    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:beyonce.CmdWarpToStuff, rpc:structureDocking.Dock, rpc:abyssalMgr.AbyssalEntranceDeployment
     eve_testkit::attest(&[
         "feat:structures.board-structure",
-        "feat:structures.defense-settings",
-        "feat:structures.profiles",
         "rpc:structureControl.TakeControl",
         "rpc:beyonce.CmdWarpToStuff",
         "rpc:structureDocking.Dock",
@@ -4071,11 +4051,10 @@ fn seed_docked_pilot(
 
 #[tokio::test]
 async fn test_bf01_anchor_cross_corp_profile_rejected_default_attached_and_delete_scoped() {
-    // parity: feat:structures.anchor-restrictions, feat:structures.profiles, rpc:structureDeployment.Anchor
+    // parity: feat:structures.anchor-restrictions, rpc:structureDeployment.Anchor
     // Exercises cross-corp profileID rejection, default profile attachment, and DeleteProfile scoping.
     eve_testkit::attest(&[
         "feat:structures.anchor-restrictions",
-        "feat:structures.profiles",
         "rpc:structureDeployment.Anchor",
     ]);
 
@@ -4160,9 +4139,8 @@ async fn test_bf01_anchor_cross_corp_profile_rejected_default_attached_and_delet
 
 #[tokio::test]
 async fn test_bf02_per_service_acl_bindings_preserve_docking_and_enforce_group_taxes() {
-    // parity: feat:structures.profiles, feat:structures.docking-acl, feat:structures.repairshop-service-quotes-and-restoration, rpc:structureSettings.CharacterHasService, rpc:structureSettings.CharacterCheckService
+    // parity: feat:structures.docking-acl, feat:structures.repairshop-service-quotes-and-restoration, rpc:structureSettings.CharacterHasService, rpc:structureSettings.CharacterCheckService
     eve_testkit::attest(&[
-        "feat:structures.profiles",
         "feat:structures.docking-acl",
         "feat:structures.repairshop-service-quotes-and-restoration",
         "rpc:structureSettings.CharacterHasService",
@@ -4691,10 +4669,9 @@ async fn test_bf03_anchor_orbital_undocked_corp_planet_and_effective_pochven_sta
 
 #[tokio::test]
 async fn test_bf04_structure_control_alliance_grant_and_corp_alliance_block_revocation() {
-    // parity: feat:structures.board-structure, feat:structures.defense-settings, rpc:structureControl.TakeControl, rpc:structureControl.BoardStructure
+    // parity: feat:structures.board-structure, rpc:structureControl.TakeControl, rpc:structureControl.BoardStructure
     eve_testkit::attest(&[
         "feat:structures.board-structure",
-        "feat:structures.defense-settings",
         "rpc:structureControl.TakeControl",
         "rpc:structureControl.BoardStructure",
     ]);
@@ -7169,12 +7146,9 @@ async fn test_wallet_nes_evermarks_hypernet_closure() {
 
 #[tokio::test]
 async fn test_structures_anchoring_profiles_defense_directory_closure() {
-    // parity: feat:structures.anchor-restrictions, feat:structures.profiles, feat:structures.defense-settings, feat:structures.structure-directory
+    // parity: feat:structures.anchor-restrictions
     eve_testkit::attest(&[
         "feat:structures.anchor-restrictions",
-        "feat:structures.profiles",
-        "feat:structures.defense-settings",
-        "feat:structures.structure-directory",
     ]);
 
     let ctx = ServerContext::new();

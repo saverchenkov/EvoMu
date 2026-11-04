@@ -171,8 +171,6 @@ async fn test_zarzakh_gate_toll_and_journal() {
 
 #[tokio::test]
 async fn test_fulcrum_docking_and_alignment_services() {
-    // parity: feat:structures.fulcrum-alignment-services
-    eve_testkit::attest(&["feat:structures.fulcrum-alignment-services"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;

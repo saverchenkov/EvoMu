@@ -491,7 +491,6 @@ fn build_structure_dir_entry(
         ("nextReinforceHour", if can_see_pending { pending.map_or(PyRep::None, |(nh, _, _)| PyRep::Integer(nh as i64)) } else { PyRep::None }),
         ("nextReinforceWeekday", if can_see_pending { pending.map_or(PyRep::None, |(_, nd, _)| PyRep::Integer(nd as i64)) } else { PyRep::None }),
         ("applyAfterUnix", if can_see_pending { pending.map_or(PyRep::None, |(_, _, at)| PyRep::Integer(at as i64)) } else { PyRep::None }),
-        ("profileID", if is_corp_manager { ext.structure_profile_id.get(&st.structure_id).copied().map(PyRep::Integer).unwrap_or(PyRep::None) } else { PyRep::None }),
     ])
 }
 
@@ -501,8 +500,7 @@ pub(crate) fn handle_get_structures(ctx: &ServerContext, session: &mut SessionSt
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
-        let mut ext = load_ext_state(snap);
-        structure_upwell_ops::apply_pending_profile_applications(&mut ext, now);
+        let ext = load_ext_state(snap);
         let mut list: Vec<(&eve_db::UpwellStructureRecord, bool)> = snap
             .structures
             .values()
@@ -543,8 +541,7 @@ pub(crate) fn handle_get_structure_info(ctx: &ServerContext, session: &mut Sessi
         if caller_corp != st.owner_corp_id && session.solar_system_id != Some(st.solar_system_id) && !has_acl {
             return Err(err("StructureAccessDenied", format!("Character {char_id} lacks access to structure {structure_id}")));
         }
-        let mut ext = load_ext_state(snap);
-        structure_upwell_ops::apply_pending_profile_applications(&mut ext, now);
+        let ext = load_ext_state(snap);
         Ok(build_structure_dir_entry(ctx, snap, session, &ext, st, now, char_id, caller_corp, has_acl))
     })
 }

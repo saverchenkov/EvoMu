@@ -105,9 +105,8 @@ fn seed_operational_structure(
 
 #[tokio::test]
 async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
-    // parity: feat:structures.profiles, feat:structures.docking-acl
+    // parity: feat:structures.docking-acl
     eve_testkit::attest(&[
-        "feat:structures.profiles",
         "feat:structures.docking-acl",
     ]);
 
@@ -325,8 +324,6 @@ async fn test_structure_profiles_crud_service_acl_and_delayed_change() {
 
 #[tokio::test]
 async fn test_structure_directory_visibility_and_sensitive_masking() {
-    // parity: feat:structures.structure-directory
-    eve_testkit::attest(&["feat:structures.structure-directory"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -425,8 +422,6 @@ async fn test_structure_directory_visibility_and_sensitive_masking() {
 
 #[tokio::test]
 async fn test_structure_auto_defense_retaliation_and_highsec_concord_rules() {
-    // parity: feat:structures.defense-settings
-    eve_testkit::attest(&["feat:structures.defense-settings"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

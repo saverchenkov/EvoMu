@@ -96,6 +96,7 @@ pub fn register_item_delivery_and_definitions(
 ) {
     // 18. DeliverRequest -> DeliverResponse (Item Delivery Contribution Method)
     let state_deliver = Arc::clone(&state);
+    let sde_deliver = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -165,17 +166,65 @@ pub fn register_item_delivery_and_definitions(
                 .max(batch_size)
                 .min(rem_progress);
 
+            // V24 DeliverRequest: 2 = delivery_location {1 station | 2 structure}, 3 = item (sequential id),
+            // 5 = item_location {1 item (container), 2 flag}.
+            let seq_of = |v: Option<&DynamicValue>| -> Option<i64> {
+                match v {
+                    Some(DynamicValue::Message(m)) => match m.get(1) {
+                        Some(DynamicValue::Uint64(u)) => i64::try_from(*u).ok(),
+                        Some(DynamicValue::Int64(i)) => Some(*i),
+                        Some(DynamicValue::Uint32(u)) => Some(i64::from(*u)),
+                        Some(DynamicValue::Int32(i)) => Some(i64::from(*i)),
+                        _ => None,
+                    },
+                    // Identifier sub-messages whose schema is not resolved arrive as raw wire bytes.
+                    Some(DynamicValue::Bytes(b)) => eve_proto::quasar::WireMessage::decode(b)
+                        .ok()?
+                        .fields
+                        .iter()
+                        .find(|f| f.field_number == 1)
+                        .and_then(|f| f.value.as_varint())
+                        .and_then(|v| i64::try_from(v).ok()),
+                    _ => None,
+                }
+            };
+            let delivery_loc = match dyn_msg.get(2) {
+                Some(DynamicValue::Message(dl)) => seq_of(dl.get(1)).or_else(|| seq_of(dl.get(2))),
+                _ => None,
+            };
+            let item_id = seq_of(dyn_msg.get(3));
+            let (item_container, item_flag) = match dyn_msg.get(5) {
+                Some(DynamicValue::Message(l)) => (
+                    seq_of(l.get(1)),
+                    l.get(2).and_then(|f| match f {
+                        DynamicValue::Enum(e) => Some(i64::from(*e)),
+                        DynamicValue::Uint32(u) => Some(i64::from(*u)),
+                        DynamicValue::Int32(i) => Some(i64::from(*i)),
+                        _ => None,
+                    }),
+                ),
+                _ => (None, None),
+            };
+
             let mut delivered_units = 0i64;
             let mut consumed_loc = 0i64;
             let mut found = false;
-            db.with_mut_snapshot(|snap| {
+            let rejection: Option<u32> = db.with_mut_snapshot(|snap| {
                 let Some(char_loc) = snap
                     .characters
                     .get(&(cid as i64))
                     .and_then(|c| c.station_id.or(c.structure_id))
                 else {
-                    return;
+                    return Some(5); // character_not_docked
                 };
+                if let Some(dl) = delivery_loc {
+                    if !sde_deliver.stations.contains_key(&dl) && !snap.structures.contains_key(&dl) {
+                        return Some(3); // delivery_location_does_not_exist
+                    }
+                    if dl != char_loc {
+                        return Some(5); // character_not_docked (at the delivery location)
+                    }
+                }
                 let max_char_rem = snap
                     .alliance_war_state
                     .project_details
@@ -187,34 +236,67 @@ pub fn register_item_delivery_and_definitions(
                     .unwrap_or(i64::MAX);
                 let allowed_qty = req_qty.min(max_char_rem);
                 if allowed_qty < batch_size {
-                    return;
+                    return Some(10); // quantity_too_high
                 }
-                let mut to_remove = None;
-                for item in snap.items.values_mut() {
-                    if item.owner_id == cid as i64
-                        && item.type_id == target_type_id
-                        && item.quantity >= (batch_size as i32)
-                        && item.flag == eve_db::InventoryFlag::Hangar
-                        && item.location_id == char_loc
+                let chosen = if let Some(iid) = item_id {
+                    let Some(item) = snap.items.get(&iid) else {
+                        return Some(8); // item_not_found_at_location
+                    };
+                    if item.owner_id != cid as i64 {
+                        return Some(6); // item_not_owned_by_deliverer
+                    }
+                    if item.type_id != target_type_id {
+                        return Some(9); // invalid_item_type
+                    }
+                    if item_container.is_some_and(|c| c != item.location_id)
+                        || item_flag.is_some_and(|f| f != item.flag as i64)
                     {
-                        let take = ((item.quantity.min(allowed_qty as i32) as i64) / batch_size)
-                            * batch_size;
-                        if take > 0 {
-                            item.quantity -= take as i32;
-                            delivered_units = take;
-                            consumed_loc = char_loc;
-                            found = true;
-                            if item.quantity == 0 {
-                                to_remove = Some(item.item_id);
-                            }
-                            break;
-                        }
+                        return Some(7); // invalid_item_location
+                    }
+                    if item.location_id != char_loc || item.flag != eve_db::InventoryFlag::Hangar {
+                        return Some(8);
+                    }
+                    Some(iid)
+                } else {
+                    snap.items
+                        .values()
+                        .filter(|item| {
+                            item.owner_id == cid as i64
+                                && item.type_id == target_type_id
+                                && item.quantity >= (batch_size as i32)
+                                && item.flag == eve_db::InventoryFlag::Hangar
+                                && item.location_id == char_loc
+                        })
+                        .map(|item| item.item_id)
+                        .min()
+                };
+                let Some(iid) = chosen else {
+                    return None;
+                };
+                let mut remove = false;
+                if let Some(item) = snap.items.get_mut(&iid) {
+                    let take = ((item.quantity.min(allowed_qty as i32) as i64) / batch_size) * batch_size;
+                    if take > 0 {
+                        item.quantity -= take as i32;
+                        delivered_units = take;
+                        consumed_loc = char_loc;
+                        found = true;
+                        remove = item.quantity == 0;
                     }
                 }
-                if let Some(iid) = to_remove {
+                if remove {
                     snap.items.remove(&iid);
                 }
+                None
             });
+            if let Some(variant) = rejection {
+                let mut out = Vec::new();
+                encode_bytes_field(variant, &[], &mut out);
+                return Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.contributionmethod.itemdelivery.api.DeliverResponse"),
+                    value: out,
+                });
+            }
             if !found {
                 let mut fail_bytes = Vec::new();
                 encode_uuid_field(1, &uuid, &mut fail_bytes);

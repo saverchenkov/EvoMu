@@ -28,6 +28,8 @@ const TRITANIUM: u32 = 34;
 const RIFTER: u32 = 587;
 const RIFTER_BPO_ITEM: i64 = 100_000_007;
 const RIFTER_BPO_TYPE: i64 = 691;
+const STARTER_TRITANIUM: i64 = 100_000_008;
+const OTHER_PILOT_GUN: i64 = 100_000_006;
 const PROJECT_API: &str = "eve_public.freelance.project.api";
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> PyRep {
@@ -120,6 +122,26 @@ fn project_id(uuid: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `DeliverRequest` naming the station delivery location, the item and its hangar location explicitly.
+fn deliver_request(uuid: &[u8], station: i64, item: i64, qty: u64) -> Vec<u8> {
+    let seq = |id: i64| {
+        let mut b = Vec::new();
+        encode_varint_field(1, id as u64, &mut b);
+        b
+    };
+    let mut loc = Vec::new();
+    encode_bytes_field(1, &seq(station), &mut loc);
+    let mut item_loc = Vec::new();
+    encode_bytes_field(1, &seq(station), &mut item_loc);
+    encode_varint_field(2, InventoryFlag::Hangar as u64, &mut item_loc);
+    let mut out = project_id(uuid);
+    encode_bytes_field(2, &loc, &mut out);
+    encode_bytes_field(3, &seq(item), &mut out);
+    encode_varint_field(4, qty, &mut out);
+    encode_bytes_field(5, &item_loc, &mut out);
+    out
+}
+
 fn bytes_of(wm: &WireMessage, num: u32) -> Vec<u8> {
     match field(wm, num) {
         Some(WireValue::LengthDelimited(b)) => b.clone(),
@@ -198,9 +220,14 @@ async fn freelance_item_delivery_reward_close_and_pagination_under_player_sessio
 
     // Deliver 400 Tritanium from the Jita 4-4 hangar: they land in the corporation deliveries hangar.
     let hangar_before = item_qty(&ctx, FOUNDER, TRITANIUM, InventoryFlag::Hangar);
-    let mut deliver = project_id(&uuid);
-    encode_varint_field(4, 400, &mut deliver);
-    let delivered = ok(&ctx, &mut sess, "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", deliver).await;
+    let deliver_api = "eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest";
+    // Delivering from a station the pilot is not docked at, or someone else's item, is refused.
+    let other_station = ctx.sde.stations.keys().copied().filter(|&st| st != JITA_44).min().expect("another SDE station");
+    let refused = ok(&ctx, &mut sess, deliver_api, deliver_request(&uuid, other_station, STARTER_TRITANIUM, 400)).await;
+    assert!(has_field(&refused, 5), "DeliverResponse.character_not_docked, got fields {:?}", refused.fields.iter().map(|f| f.field_number).collect::<Vec<_>>());
+    let refused = ok(&ctx, &mut sess, deliver_api, deliver_request(&uuid, JITA_44, OTHER_PILOT_GUN, 1)).await;
+    assert!(has_field(&refused, 6), "DeliverResponse.item_not_owned_by_deliverer");
+    let delivered = ok(&ctx, &mut sess, deliver_api, deliver_request(&uuid, JITA_44, STARTER_TRITANIUM, 400)).await;
     assert_eq!(bytes_of(&sub(&delivered, 1), 1).len(), 18, "DeliverResponse.escrowed.delivery identifier");
     assert_eq!(item_qty(&ctx, FOUNDER, TRITANIUM, InventoryFlag::Hangar), hangar_before - 400);
     assert_eq!(item_qty(&ctx, corp_id, TRITANIUM, InventoryFlag::CorpDeliveries), 400);

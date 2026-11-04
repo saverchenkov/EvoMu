@@ -1068,8 +1068,6 @@ async fn test_station_standing_check_allows_when_no_fsd_entry() {
 
 #[tokio::test]
 async fn test_structure_auto_defense_round_robin_no_volley_multiplication() {
-    // parity: feat:structures.defense-settings
-    eve_testkit::attest(&["feat:structures.defense-settings"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut dir_sess = login(&ctx, 560, "demo", "demo-secret", 90_000_001).await;

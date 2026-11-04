@@ -508,9 +508,7 @@ async fn test_seasonal_login_campaign_active_claim_and_history() {
 }
 
 #[tokio::test]
-// parity: feat:structures.profiles
 async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
-    eve_testkit::attest(&["feat:structures.profiles"]);
     let ctx = new_ctx();
     common::pin_clock(&ctx);
     const CORP_OWNER: i64 = 98_600_001;
@@ -612,9 +610,7 @@ async fn test_structure_profiles_acl_mapping_and_delayed_apply() {
 }
 
 #[tokio::test]
-// parity: feat:structures.structure-directory
 async fn test_structure_directory_accessible_structures_and_services() {
-    eve_testkit::attest(&["feat:structures.structure-directory"]);
     let ctx = new_ctx();
     common::pin_clock(&ctx);
     const CORP_OWNER: i64 = 98_700_001; const CORP_ALLY: i64 = 98_700_002;

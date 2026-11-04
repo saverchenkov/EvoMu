@@ -3520,13 +3520,7 @@ async fn test_parity_remediation_quasar_title_definitions_and_space_cdn() {
 
 #[tokio::test]
 async fn test_parity_remediation_quasar_freelance_projects_and_item_delivery() {
-    // parity: quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/freelance/project/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/project/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/itemdelivery/api/notices_pb2.pyj",
-    ]);
+    // Regression only (seeded); the freelance quasar rows are attested live in quasar_freelance_and_corporation_live.rs.
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

@@ -351,7 +351,6 @@ async fn test_cosmetics_skin_apply_in_space_broadcast_and_persistence() {
 
 #[tokio::test]
 async fn test_structure_directory_accessible_services_and_acl() {
-    // parity: feat:structures.structure-directory
     let ctx = ServerContext::new();
     let mut unauth = SessionState::new(997);
     assert!(

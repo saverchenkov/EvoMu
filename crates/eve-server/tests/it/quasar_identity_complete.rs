@@ -286,9 +286,8 @@ async fn test_q3_user_license_and_subscription() {
 
 #[tokio::test]
 async fn test_q3_entitlements_omega_and_membership() {
-    // parity: feat:quasar.entitlement, quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
     eve_testkit::attest(&[
-        "feat:quasar.entitlement",
         "quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj",
@@ -354,15 +353,13 @@ async fn test_q3_entitlements_omega_and_membership() {
         pre_mem_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        pre_mem_attr.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).unwrap_or(0),
-        0,
-        "Membership before Omega grant must have active == 0"
-    );
-    assert_eq!(
-        pre_mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()),
-        Some(b"alpha".as_slice())
-    );
+    // V24 `eve.membership.AllMembership`: 1 = corporation, 2 = alliance membership, 3 = faction membership
+    // (no clone-state tier; Omega is checked through entitlements and clone grade below).
+    let inner_field1 = |attr: &eve_proto::quasar::WireMessage, num: u32| -> Option<u64> {
+        let b = attr.fields.iter().find(|f| f.field_number == num)?.value.as_bytes()?;
+        eve_proto::quasar::WireMessage::decode(b).ok()?.fields.iter().find(|f| f.field_number == 1)?.value.as_varint()
+    };
+    assert_eq!((inner_field1(&pre_mem_attr, 2), inner_field1(&pre_mem_attr, 3)), (Some(1), Some(1)));
 
     // With GM role (user 1), GrantRequest without user ID grants to caller (user 1), while GrantRequest with sint32 user 101 grants to user 101 only
     ctx.db.with_mut_snapshot(|s| {
@@ -398,7 +395,7 @@ async fn test_q3_entitlements_omega_and_membership() {
     }
     session.role = 0;
 
-    // 2. Verify caller user 1 has 'alliance_tournament_xx' but NOT 'omega' (and remains Alpha), while target user 101 has deduplicated 'omega' and is Omega
+    // 2. Verify caller user 1 has 'alliance_tournament_xx' but NOT 'omega', while target user 101 has deduplicated 'omega' (clone grade 1)
     let get_ent_req = build_public_request(ctx.now_unix(), "eve_public.entitlement.user.api.GetRequest", Vec::new());
     let decode_ent_names = |rep: &PyRep| -> Vec<String> {
         let rsp = extract_response_proto(rep);
@@ -419,8 +416,7 @@ async fn test_q3_entitlements_omega_and_membership() {
     let u1_mem_rep = ctx.dispatch_rpc(&mut session, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(mem_req.encode_proto())], &empty_kw, None).await.expect("membership user 1");
     let u1_mem_wm = eve_proto::quasar::WireMessage::decode(&extract_response_proto(&u1_mem_rep).payload.unwrap().value).unwrap();
     let u1_mem_attr = eve_proto::quasar::WireMessage::decode(u1_mem_wm.fields[0].value.as_bytes().unwrap()).unwrap();
-    assert_eq!(u1_mem_attr.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).unwrap_or(0), 0);
-    assert_eq!(u1_mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()), Some(b"alpha".as_slice()));
+    assert_eq!((inner_field1(&u1_mem_attr, 2), inner_field1(&u1_mem_attr, 3)), (Some(1), Some(1)));
 
     let u101_rep = ctx.dispatch_rpc(&mut sess_101, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(get_ent_req.encode_proto())], &empty_kw, None).await.expect("GetRequest user 101");
     let u101_ents = decode_ent_names(&u101_rep);
@@ -429,8 +425,9 @@ async fn test_q3_entitlements_omega_and_membership() {
     let mem_rep = ctx.dispatch_rpc(&mut sess_101, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(mem_req.encode_proto())], &empty_kw, None).await.expect("membership user 101");
     let mem_wm = eve_proto::quasar::WireMessage::decode(&extract_response_proto(&mem_rep).payload.unwrap().value).unwrap();
     let mem_attr = eve_proto::quasar::WireMessage::decode(mem_wm.fields[0].value.as_bytes().unwrap()).unwrap();
-    assert_eq!(mem_attr.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
-    assert_eq!(mem_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_bytes()), Some(b"omega".as_slice()));
+    let corp_101 = ctx.db.with_snapshot(|s| s.characters[&90_000_101].corporation_id) as u64;
+    assert_eq!(inner_field1(&mem_attr, 1), Some(corp_101), "AllMembership.corporation");
+    assert_eq!(inner_field1(&mem_attr, 2), Some(1));
     assert_eq!(
         ctx.dispatch_rpc(&mut sess_101, "loginRewardFacilities", None, "get_my_clone_grade", &[], &empty_kw, None).await.expect("clone grade post"),
         PyRep::Integer(1)
