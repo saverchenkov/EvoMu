@@ -1166,6 +1166,19 @@ fn parse_channel_system_id(chan_id: &str) -> Option<u32> {
         .and_then(|s| s.parse().ok())
 }
 
+#[inline]
+fn dispatch_char_contacts(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let empty_kw = HashMap::new();
+    crate::services::character_skills::character_contacts::handle_contacts(
+        ctx, session, "charMgr", method, args, &empty_kw,
+    )
+}
+
 fn handle_contacts_notifications_calendar(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1174,17 +1187,19 @@ fn handle_contacts_notifications_calendar(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("charMgr", "GetContactList")
-        | ("charMgr", "AddContact")
-        | ("charMgr", "EditContact")
-        | ("charMgr", "EditContactsRelationshipID")
-        | ("charMgr", "DeleteContacts")
-        | ("charMgr", "BlockOwners")
-        | ("charMgr", "UnblockOwners") => {
-            let empty_kw = HashMap::new();
-            crate::services::character_skills::character_contacts::handle_contacts(
-                ctx, session, "charMgr", method, args, &empty_kw,
-            )
+        // parity: rpc:charMgr.GetContactList
+        ("charMgr", "GetContactList") => dispatch_char_contacts(ctx, session, method, args),
+        // parity: rpc:charMgr.AddContact
+        ("charMgr", "AddContact") => dispatch_char_contacts(ctx, session, method, args),
+        // parity: rpc:charMgr.EditContact, rpc:charMgr.EditContactsRelationshipID
+        ("charMgr", "EditContact") | ("charMgr", "EditContactsRelationshipID") => {
+            dispatch_char_contacts(ctx, session, method, args)
+        }
+        // parity: rpc:charMgr.DeleteContacts
+        ("charMgr", "DeleteContacts") => dispatch_char_contacts(ctx, session, method, args),
+        // parity: rpc:charMgr.BlockOwners, rpc:charMgr.UnblockOwners
+        ("charMgr", "BlockOwners") | ("charMgr", "UnblockOwners") => {
+            dispatch_char_contacts(ctx, session, method, args)
         }
 
         ("charMgr", "GetSettingsInfo") => Some(
