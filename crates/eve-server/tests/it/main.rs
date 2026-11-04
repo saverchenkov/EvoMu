@@ -313,15 +313,7 @@ mod wormhole_statics_lifecycle;
 mod wormhole_special_systems;
 mod pochven_wormholes_travel;
 mod wormhole_pve_escalations;
-mod open_feats_b40;
-mod open_feats_b41;
-mod open_feats_b38;
-mod open_feats_b39;
 mod d6_single_source_of_truth;
-mod open_feats_b35;
-mod open_feats_b35_b;
-mod open_feats_b35_c;
-mod open_feats_b35_d;
 mod quasar_sov_workforce_transit;
 mod quasar_faction_payment_schedule;
 mod capital_combat_and_escalation;
@@ -436,7 +428,6 @@ mod features_corp_and_structure_ops;
 pub(crate) use open_feats_and_rpcs_b11::part2 as open_feats_and_rpcs_b11_part2;
 mod features_industry_exploration;
 
-// Backward-compatibility aliases for test suites renamed to semantic domain names
 #[allow(unused_imports)]
 pub(crate) use {
     abyssal_deadspace as abyssal_deadspace_closure,
@@ -458,3 +449,57 @@ pub(crate) use {
     zarzakh_gate_lock as zarzakh_gate_lock_closure,
     features_industry_exploration as open_feats_batch6,
 };
+pub(crate) use abyssal_pochven_void as abyssal_pochven_void_closure;
+#[allow(unused_imports)]
+pub(crate) use combat_ewar_logistics as combat_ewar_repairs_closure;
+#[allow(unused_imports)]
+pub(crate) use combat_repairs_smartbombs as combat_repairs_smartbomb_closure;
+#[allow(unused_imports)]
+pub(crate) use crimewatch_hostility as crimewatch_closure;
+#[allow(unused_imports)]
+pub(crate) use notify_structures_clones_pi as notify_real_emitters_batch7;
+#[allow(unused_imports)]
+pub(crate) use notify_space_corp_market as notify_real_emitters_batch9;
+#[allow(unused_imports)]
+pub(crate) use pochven_wormholes_travel as pochven_wormholes_travel_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_pve_escalations as wormhole_pve_escalations_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_special_systems as wormhole_special_systems_closure;
+#[allow(unused_imports)]
+pub(crate) use wormhole_statics_lifecycle as wormhole_statics_lifecycle_closure;
+#[allow(unused_imports)]
+pub(crate) use zarzakh_gate_lock as zarzakh_gate_lock_closure;
+mod features_bounties_ess;
+mod features_loyalty_and_lp;
+mod features_dynamic_bounties;
+mod features_ess_main_reserve;
+mod features_daily_challenges;
+mod features_paragon_missions;
+mod features_air_career_goals;
+mod features_structure_reinforcement;
+mod features_freight_and_courier;
+mod features_corporation_projects;
+mod features_homefront_operations;
+#[allow(unused_imports)]
+pub(crate) use features_bounties_ess as open_feats_b35;
+#[allow(unused_imports)]
+pub(crate) use features_loyalty_and_lp as open_feats_b35_b;
+#[allow(unused_imports)]
+pub(crate) use features_dynamic_bounties as open_feats_b35_c;
+#[allow(unused_imports)]
+pub(crate) use features_ess_main_reserve as open_feats_b35_d;
+#[allow(unused_imports)]
+pub(crate) use features_daily_challenges as open_feats_b36;
+#[allow(unused_imports)]
+pub(crate) use features_paragon_missions as open_feats_b37;
+#[allow(unused_imports)]
+pub(crate) use features_air_career_goals as open_feats_b38;
+#[allow(unused_imports)]
+pub(crate) use features_structure_reinforcement as open_feats_b39;
+#[allow(unused_imports)]
+pub(crate) use features_freight_and_courier as open_feats_b40;
+#[allow(unused_imports)]
+pub(crate) use features_corporation_projects as open_feats_b41;
+#[allow(unused_imports)]
+pub(crate) use features_homefront_operations as open_feats_b42;
