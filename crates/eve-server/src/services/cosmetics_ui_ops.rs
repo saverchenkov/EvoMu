@@ -494,31 +494,42 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             Some(Ok(PyRep::Bool(warped)))
         }
         // parity: feat:ui.contextual-offers
-        ("contextualOfferMgr", "TrackOfferBuyPress")
-        | ("contextualOfferMgr", "TrackOfferClosed")
-        | ("contextualOfferMgr", "TrackOfferDelivered")
-        | ("contextualOfferMgr", "TrackOfferPurchased")
-        | ("contextualOfferMgr", "TrackOfferPurchasedSeen")
-        | ("contextualOfferMgr", "TrackOfferSeen") => Some(handle_track_offer(ctx, session, method, args)),
+        ("contextualOfferMgr", "TrackOfferBuyPress") => Some(handle_track_offer(ctx, session, method, args)),
+        // parity: feat:ui.contextual-offers
+        ("contextualOfferMgr", "TrackOfferClosed") => Some(handle_track_offer(ctx, session, method, args)),
+        // parity: feat:ui.contextual-offers
+        ("contextualOfferMgr", "TrackOfferDelivered") => Some(handle_track_offer(ctx, session, method, args)),
+        // parity: feat:ui.contextual-offers
+        ("contextualOfferMgr", "TrackOfferPurchased") => Some(handle_track_offer(ctx, session, method, args)),
+        // parity: feat:ui.contextual-offers
+        ("contextualOfferMgr", "TrackOfferPurchasedSeen") => Some(handle_track_offer(ctx, session, method, args)),
+        // parity: feat:ui.contextual-offers
+        ("contextualOfferMgr", "TrackOfferSeen") => Some(handle_track_offer(ctx, session, method, args)),
         // parity: feat:ui.nes-intro
         ("nes_intro", "get_nes_intro_state") => Some(handle_nes_intro_get(ctx, session)),
         ("nes_intro", "skip_nes_intro") => Some(handle_nes_intro_skip(ctx, session)),
 
-        (
-            "crateService",
-            "OpenCrate"
-            | "ClaimLoot"
-            | "ClaimSkillBundle"
-            | "ClaimFitting"
-            | "ClaimLootFromCrateStack"
-            | "GetCrateLocation"
-            | "PeekInsideFixedCrate",
-        ) => crate::services::notify_emitters_batch9::handle_crate_service(
-            ctx,
-            session,
-            method,
-            args,
-        ),
+        ("crateService", "OpenCrate") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
+        ("crateService", "ClaimLoot") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
+        ("crateService", "ClaimSkillBundle") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
+        ("crateService", "ClaimFitting") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
+        ("crateService", "ClaimLootFromCrateStack") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
+        ("crateService", "GetCrateLocation") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
+        ("crateService", "PeekInsideFixedCrate") => {
+            crate::services::notify_emitters_batch9::handle_crate_service(ctx, session, method, args)
+        }
         _ => None,
     }
 }
